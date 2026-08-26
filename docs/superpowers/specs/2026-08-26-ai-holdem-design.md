@@ -107,7 +107,7 @@ AI와 함께 즐기는 노리밋 텍사스 홀덤. 메인 Claude 세션이 딜�
 - 모든 명령의 공통 stdout envelope: 성공 `{ok:true, stateVersion, events:[...], ...명령별 필드}`, 실패 `{ok:false, code, message}`. exit code: 0 성공 / 1 거부(불법 액션 등) / 2 사용법 오류. **실패 시 상태 파일은 무변경임을 엔진이 보장한다.**
 - `apply`는 `--expect-version <N>` 옵션을 받는다(딜러는 직전 legal의 stateVersion을 전달). 불일치 시 거부하며, 중복 적용·경합을 값싸게 차단한다.
 - 모든 이벤트는 `{seq, visibility, type, ...}` 형태이고 `visibility`는 `public | actor:<playerId> | engine` 3종이다. **딜러는 public 이벤트만 서버에 게시하고, 나레이션도 public 이벤트만 근거로 작성한다** (홀카드·덱 유출 차단).
-- `view --for user` 반환 필드(고정): `{handNo, level, blinds, street, board, pots[], seats[](playerId, name, stack, bet, folded, allIn, isButton), toAct, myCards, legal?, gameOver, result?}`. `legal`은 사용자 차례일 때만 포함되며 `legal` 명령과 동일 숫자 + `decisionId`를 담는다 — UI 액션 바는 이것으로 활성화된다.
+- `view --for user` 반환 필드(고정): `{handNo, level, levelEvery, blinds, street, board, pots[], seats[](playerId, name, stack, bet, folded, allIn, isButton), toAct, myCards, legal?, gameOver, result?}`. `levelEvery`는 UI가 다음 레벨업까지 남은 핸드를 계산하기 위한 공개 설정값이다(순수 추가 필드). `legal`은 사용자 차례일 때만 포함되며 `legal` 명령과 동일 숫자 + `decisionId`를 담는다 — UI 액션 바는 이것으로 활성화된다.
 - 이벤트 type enum(최소): `hand_start, blinds_posted, deal_hole(actor), action, street, showdown, pot_award, level_up, bust, talk, coach, game_over`.
 - 핸드 히스토리는 각 결정 지점마다 `{decisionId, street, potTotal, callAmount, minRaiseTo, maxRaiseTo, 공개 보드, 각자 스택}` 스냅샷을 기록한다(redacted 뷰도 보존) — 코칭의 결정 시점 재구성용.
 

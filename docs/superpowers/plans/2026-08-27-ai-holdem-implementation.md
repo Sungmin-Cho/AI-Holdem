@@ -93,7 +93,7 @@ game/
 - Create: `engine/cards.js`, `test/cards.test.js`
 
 **Interfaces:**
-- Produces: `newDeck() -> string[52]` (고정 순서), `shuffle(deck) -> string[52]` (crypto.randomInt Fisher-Yates, 새 배열), `RANKS`, `SUITS`, `rankValue(card) -> 2..14`
+- Produces: `newDeck() -> string[52]` (고정 순서), `shuffle(deck, rng?) -> string[52]` (crypto.randomInt Fisher-Yates, 새 배열), `RANKS`, `SUITS`, `rankValue(card) -> 2..14`
 
 - [ ] **Step 1 (RED):** `test/cards.test.js`:
 
@@ -214,6 +214,9 @@ test('보드 플레이 동점(스플릿)', () => {
 | 투페어 킥커 | `Ac Ad Kc Kd Qs 2h 3h` vs `Ac Ad Kc Kd Js 2h 3h` | 앞이 승 |
 | 6-7장 중 최적 5장 선택 | `2c 2d 2h 5s 5d 5c Ah` → 풀하우스(555 22 아님 — 555+22? 트리플 둘) | category 6, tb [5,2] |
 | 스트레이트 중복 랭크 | `9c 9d 8h 7s 6c 5d Ah` | category 4, high 9 |
+| 트립스 | `Ac Ad Ah 9s 7d 4c 2h` | category 3 |
+| 원페어 vs 하이카드 | `Ac Ad Kc Qd 9s 7h 4c` vs `Ac Kd Qc Jd 9s 7h 4c` | 앞이 승 |
+| 하이카드 킥커 | `Ac Kd Qc Jd 9s 7h 4c` vs `Ac Kd Qc Jd 8s 7h 4c` | 앞이 승 |
 
 - [ ] **Step 2:** RED 확인 → **Step 3 (GREEN):** 구현(eval5 + 21조합 evaluate7 + compareScore + HAND_NAMES 한국어) → **Step 4:** 전체 통과 → **Step 5:** 커밋 `feat: 7카드 핸드 평가기`.
 
@@ -228,8 +231,9 @@ test('보드 플레이 동점(스플릿)', () => {
 - Produces:
   - `loadState(gameDir) -> state | null`
   - `saveState(gameDir, state)` — `state.stateVersion += 1` 후 temp 파일 + `fs.renameSync`로 원자 커밋
+  - `readHand(gameDir, n) -> record|null`, `writeHandArchive(gameDir, record)` (record.handNo로 파일명), `withMutation` 콜백 계약 — `fn(state) -> {state, response}`를 받아 커밋 후 `{state, response}`를 반환한다. `writeJsonAtomic`은 **엔진 전용**이다(서버는 동일 패턴을 자체 구현 — 엔진 import 금지).
   - `withMutation(gameDir, fn)` — `game/.mutex` 디렉토리를 `fs.mkdirSync`로 획득(획득 실패 시 100ms 간격 최대 3초 재시도, 이후 `{code:'LOCKED'}` throw; mutex 내 `pid` 파일로 죽은 소유자 감지 시 회수). fn 안에서 load→검증→save. fn이 throw하면 저장하지 않는다(상태 무변경 보장).
-  - `writeJsonAtomic(path, obj)` — 아카이브·스냅샷 등 공용
+  - `writeJsonAtomic(path, obj)` — 아카이브·스냅샷 등 엔진 전용(서버는 동일 패턴을 자체 구현)
 - Consumes: 없음 (fs만)
 
 - [ ] **Step 1 (RED):** `test/state.test.js` — 실제 케이스:
@@ -336,7 +340,7 @@ test('동점 스플릿 홀수 칩은 순서 앞 좌석부터', () => {
 **Interfaces:**
 - Produces:
   - `createGame({aiCount, startStack=5000, blinds0=[25,50], levelEvery=8, names}) -> state` — seats: `user` + `p1..pN`, `phase:'idle'`, `handNo:0`, `button` 랜덤 좌석
-  - `blindsForLevel(level) -> [sb, bb]` — 스케줄: 25/50, 50/100, 75/150, 100/200, 150/300, 200/400, 300/600, 400/800, 500/1000, 700/1400, 1000/2000, 이후 ×1.5 반올림(10 단위)
+  - `blindsForLevel(level) -> [sb, bb]` — 스케줄: 25/50, 50/100, 75/150, 100/200, 150/300, 200/400, 300/600, 400/800, 500/1000, 700/1400, 1000/2000, 이후 ×1.5 정수 반올림(`Math.round`). ×1.5 구간 기대값: 1000/2000 다음은 1500/3000 → 2250/4500 → 3375/6750. `--blinds SB/BB`가 기본값(25/50)이 아니면 스케줄 전체를 비율 스케일한다 — `blindsForLevel(level, blinds0)` = 기본표[level]을 (blinds0/25·50) 배율로 정수 반올림. 테스트: blinds0=50/100이면 레벨 1은 100/200.
   - `startHand(state, {deck}) -> {state, events}` — 레벨 = `floor(handNo / levelEvery)` (handNo는 증가 후 1부터; 즉 핸드 1~8 = 레벨 0), 버튼을 다음 생존 좌석으로 이동(dead button 규칙은 생략 — 단순화 결정), SB/BB 포스팅(스택 부족 시 전액 올인 포스팅), 홀카드 딜(`deal_hole` actor 이벤트), 헤즈업 특례(버튼=SB, 프리플랍 버튼 선행동, 포스트플랍 BB 선행동), `phase:'in_hand'`. `deck` 옵션은 테스트 주입용(생략 시 shuffle).
   - state에 `gameOver=true`거나 user 스택 0이면 `{code:'GAME_OVER'}` throw
 
@@ -344,12 +348,29 @@ test('동점 스플릿 홀수 칩은 순서 앞 좌석부터', () => {
 
 **직렬화 규칙:** state는 JSON 왕복 가능해야 하므로 컬렉션은 전부 plain object/array다 — `contribs:{pid:chips}`, `holes:{pid:[c,c]}`, `folded:[pid]`, `allIn:[pid]`. Map/Set은 state에 넣지 않는다(`sidepots.js`의 Map 인자는 호출부인 `hand.js`가 `new Map(Object.entries(...))`로 변환해 전달). 모든 이벤트는 생성 시점부터 `{seq, visibility, type, ...}` 형태다(스펙 §4).
 
+**이벤트 payload 표(전 태스크 공용 계약 — Task 7·8·12·14는 이 표를 소비한다):**
+
+| type | visibility | 필수 필드 |
+|---|---|---|
+| `hand_start` | public | `handNo, level, blinds:[sb,bb], button(playerId)` |
+| `blinds_posted` | public | `sb, bb, posts:[{playerId, amount, allIn}]` |
+| `deal_hole` | `actor:<pid>` | `playerId, cards:[c,c]` |
+| `action` | public | `playerId, action, amount?, allIn?, street` (amount는 raise-to) |
+| `street` | public | `street, board` (전체 보드 배열) |
+| `showdown` | public | `reveals:[{playerId, cards, handName}], mucks:[playerId]` |
+| `pot_award` | public | `potIndex, amount, winners:[{playerId, share}]` |
+| `level_up` | public | `level, sb, bb` |
+| `bust` | public | `playerId` |
+| `game_over` | public | `result, bustedPlayerIds` |
+
+`talk`·`coach`·`narration`은 엔진이 생성하지 않는다 — 딜러 publish 전용 이벤트로 `seq`가 없으며, 순서 정본은 서버 `revision`이다(엔진 seq는 엔진 이벤트만 정렬한다).
+
 - [ ] **Step 1 (RED):** `test/hand-setup.test.js` 실제 케이스:
 
 ```js
 test('레벨업 경계: levelEvery=8이면 9번째 핸드부터 레벨 1', () => {
   let st = createGame({ aiCount: 2, levelEvery: 8 });
-  for (let i = 0; i < 8; i++) { st = startHand(st, { deck: fixedDeck() }).state; st = fastFold(st); }
+  st.handNo = 8; st.phase = 'idle';
   const r = startHand(st, { deck: fixedDeck() });
   assert.equal(r.state.handNo, 9);
   assert.equal(r.state.level, 1);           // 50/100
@@ -358,8 +379,9 @@ test('레벨업 경계: levelEvery=8이면 9번째 핸드부터 레벨 1', () =>
 });
 test('숏스택 블라인드는 전액 올인 포스팅', () => {
   let st = createGame({ aiCount: 2 });
-  st.seats.find(s => s.playerId === 'p1').stack = 30; // BB 예정 좌석에 배치되도록 버튼 조정
-  // (버튼을 명시 세팅해 p1이 BB가 되게 한 후)
+  // 3인, seats [user,p1,p2], 회전 전 st.button=1 → startHand가 다음 생존 좌석 2(p2)로 이동 → SB=user(0), BB=p1(1)
+  st.button = 1;
+  st.seats.find(s => s.playerId === 'p1').stack = 30;
   const r = startHand(st, { deck: fixedDeck() });
   const p1 = r.state.seats.find(s => s.playerId === 'p1');
   assert.equal(p1.stack, 0);
@@ -372,11 +394,15 @@ test('헤즈업: 버튼이 SB이고 프리플랍 선행동', () => {
   const btnSeat = r.state.seats[r.state.button].playerId;
   assert.equal(r.state.hand.contribs[btnSeat], blindsForLevel(0)[0]); // 버튼=SB
   assert.equal(r.state.seats[r.state.hand.toActIdx].playerId, btnSeat);
+  const bbSeat = r.state.seats.find(s => s.playerId !== btnSeat).playerId;
+  let st = applyAction(r.state, btnSeat, 'call').state;
+  st = applyAction(st, bbSeat, 'check').state;
+  assert.equal(st.seats[st.hand.toActIdx].playerId, bbSeat); // 플랍 이후 toAct=BB
 });
 test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /* p2.out=true 세팅 후 startHand → p2 홀카드 없음, 버튼·블라인드가 생존 좌석만 순회 */ });
 ```
 
-(`fixedDeck()`/`fastFold()`는 `test/helpers/fixtures.js`에 구현: 고정 순서 덱 반환, 전원 폴드로 핸드 종료 — fastFold는 Task 6의 applyAction 완성 전까지는 state를 직접 정리하는 임시 헬퍼로 두고 Task 6에서 실제 폴드 경로로 교체한다.)
+(`fixedDeck()`는 `test/helpers/fixtures.js`에 구현: 고정 순서 덱 반환.)
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 핸드 시작·로테이션·블라인드·레벨`.
 
@@ -396,18 +422,68 @@ test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /
 - 규칙 정밀 정의(테스트가 강제):
   - `minRaiseTo = currentBet + lastRaiseSize` (프리플랍 시작 lastRaiseSize=BB)
   - 언더 레이즈 올인(`amount < minRaiseTo`인 올인)은 허용하되 `lastRaiseSize`를 갱신하지 않고, 이미 행동을 마친 플레이어에게 액션을 다시 열지 않는다(그들은 콜/폴드만 가능)
+  - 내 스택이 minRaiseTo 미만이어서 올인 레이즈만 가능한 경우(재오픈 금지와 구별): `canRaise:true`, `minRaiseTo > maxRaiseTo`로 반환되며 유일한 합법 raise amount는 maxRaiseTo다(스펙 §4).
+  - 벳이 없는 스트리트의 첫 벳도 액션 enum상 `raise`(raise-to)로 표현한다 — `bet` 액션은 없다.
   - `decisionId`는 `(handNo, street, actionIndex)`에서 유도 — apply 성공 시에만 actionIndex 증가
 
 - [ ] **Step 1 (RED):** `test/hand-betting.test.js` 실제 케이스:
 
 ```js
+// 공용 셋업: 3인 [user,p1,p2], button=0(user) → SB=p1, BB=p2, 블라인드 25/50, 레벨 0
+// 프리플랍 첫 행동자는 버튼(user). 스택은 각 케이스에 명시.
 test('언더 레이즈 올인은 베팅을 다시 열지 않는다', () => {
-  // 3인: A가 100 레이즈(현재벳 100, lastRaise 50) → B가 130 올인(언더) → C 콜 → A는 레이즈 불가(콜/폴드만)
-  /* 고정 덱·스택으로 상황 구성 후 */
+  // 스택: user 5000, p1 5000, p2 130
+  let st = setup3(5000, 5000, 130);
+  st = applyAction(st, 'user', 'raise', 100).state;   // lastRaise 50 → 다음 min 150
+  st = applyAction(st, 'p1', 'fold').state;
+  st = applyAction(st, 'p2', 'raise', 130).state;      // 언더 레이즈 올인 (150 미만)
   const la = legalFor(st);
-  assert.equal(la.toAct, 'A아이디');
-  assert.equal(la.canRaise, false);
+  assert.equal(la.toAct, 'user');
+  assert.equal(la.canRaise, false);                    // user에게 다시 열리지 않음
   assert.equal(la.callAmount, 30);
+});
+test('minRaiseTo: 프리플랍 연쇄', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'raise', 100).state;    // BB 50 기준 lastRaise 50
+  assert.equal(legalFor(st).minRaiseTo, 150);          // p1 차례
+  st = applyAction(st, 'p1', 'raise', 300).state;      // lastRaise 200
+  assert.equal(legalFor(st).minRaiseTo, 500);          // p2 차례
+});
+test('포스트플랍 벳과 체크-레이즈', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'call', undefined).state; // 콜 50
+  st = applyAction(st, 'p1', 'call').state;              // SB 컴플릿
+  st = applyAction(st, 'p2', 'check').state;             // 플랍으로
+  assert.equal(legalFor(st).street, 'flop');
+  assert.equal(legalFor(st).toAct, 'p1');                // 포스트플랍은 SB부터
+  st = applyAction(st, 'p1', 'check').state;
+  st = applyAction(st, 'p2', 'raise', 100).state;        // 벳 100 (첫 벳도 raise-to로 표현)
+  assert.equal(legalFor(st).minRaiseTo, 200);            // user 차례
+  st = applyAction(st, 'user', 'fold').state;
+  st = applyAction(st, 'p1', 'raise', 300).state;        // 체크-레이즈 합법
+  assert.equal(legalFor(st).toAct, 'p2');
+});
+test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'call').state;
+  st = applyAction(st, 'p1', 'call').state;
+  const r1 = forceDefault(st, 'p2');                     // 미벳 → check
+  assert.equal(r1.events.find(e => e.type === 'action').action, 'check');
+  let st2 = setup3(5000, 5000, 5000);
+  st2 = applyAction(st2, 'user', 'raise', 150).state;
+  const r2 = forceDefault(st2, 'p1');                    // 벳 직면 → fold
+  assert.equal(r2.events.find(e => e.type === 'action').action, 'fold');
+});
+test('숏스택 올인 레이즈: minRaiseTo > maxRaiseTo, canRaise true', () => {
+  // 3인 [user,p1,p2], button=0(user), 블라인드 25/50, 스택 user 5000 / p1 5000 / p2 200
+  // 프리플랍: user(BTN) raise to 150 → p1(SB) 폴드 → p2(BB) 차례
+  // p2의 합법: call 100 또는 올인 레이즈(스택 200 = raise-to 200 < minRaiseTo 250)
+  const la = legalFor(st);
+  assert.equal(la.toAct, 'p2');
+  assert.equal(la.canRaise, true);
+  assert.ok(la.minRaiseTo > la.maxRaiseTo);
+  assert.equal(la.maxRaiseTo, 200);
+  applyAction(st, 'p2', 'raise', 200); // 성공해야 함
 });
 test('legal 재호출은 같은 decisionId (안정성)', () => {
   const a = legalFor(st); const b = legalFor(st);
@@ -423,7 +499,7 @@ test('minRaiseTo 계산', () => { /* 벳 100 → 레이즈는 200 이상; 300 �
 test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => { /* 두 상황 각각 */ });
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 베팅 라운드·legal·apply`. `fastFold` 헬퍼를 실제 applyAction 폴드 경로로 교체.
+- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 베팅 라운드·legal·apply`.
 
 ---
 
@@ -439,8 +515,9 @@ test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => { /* �
   - 전원 올인·콜 완료 → 잔여 보드 자동 런아웃
   - 한 명 남으면 즉시 팟 지급(쇼다운 없음, 홀카드 비공개)
   - 쇼다운: 공개 순서(마지막 베팅 스트리트의 마지막 공격자부터 시계방향, 공격 없으면 버튼 왼쪽부터), 승자 패 필수 공개, 지는 패 머킹(`showdown` 이벤트에 공개/머킹 구분), `pot_award` 이벤트(팟별)
-  - 정산: 스택 반영, `bust` 이벤트, 사용자 0 → `gameOver, result:'lose'`; AI 전원 0 → `result:'win'`; `game_over` 이벤트
-  - **커밋 순서**: 정산된 state 저장이 선행, `game/hands/hand-NNNN.json` 아카이브는 후행 파생(state의 `lastHand`에 전체 기록 보존 — 아카이브 재생성 가능)
+  - 정산: 스택 반영, `bust` 이벤트, 사용자 0 → `gameOver, result:'lose'`; AI 전원 0 → `result:'win'`; `game_over` 이벤트. bust 정산 시 해당 좌석 `out=true`를 설정한다(startHand는 out 좌석을 스킵).
+  - 홀수 칩: `oddChipOrder`는 버튼 왼쪽부터 시계방향의 해당 팟 자격자 순서다.
+  - 핸드가 닫히면 정산 결과 전체를 `state.lastHand`(재생성 가능한 전체 기록: 홀카드·보드·액션·결정 스냅샷·팟 분배·shown/muck)에 남기는 것까지가 `hand.js`의 몫이고, **아카이브 파일 기록과 roll-forward(`rebuildArchive(gameDir)`)는 `cli.js`가 소유한다**(apply 처리: withMutation으로 state 커밋 → 커밋 후 lastHand가 새로 닫혔으면 writeHandArchive).
   - 핸드 히스토리(lastHand)에 결정 스냅샷: 각 액션마다 `{decisionId, playerId, action, amount, street, potTotal, callAmount, minRaiseTo, maxRaiseTo, board, stacks}`
   - 통계 누적: `state.stats[pid] = {hands, vpip, pfr, betsRaises, calls, showdowns, showdownWins, net}`
 
@@ -455,12 +532,11 @@ test('칩 보존: 핸드 전후 총합 불변', () => {
 });
 test('한 명 남으면 쇼다운 없이 지급·홀카드 비공개', () => { /* showdown 이벤트 없음, pot_award만 */ });
 test('올인 런아웃: 프리플랍 올인 콜 → 보드 5장 자동', () => { /* street 이벤트 3회 연속 */ });
-test('쇼다운 공개 순서와 머킹', () => { /* 리버 체크 종료 → 버튼 왼쪽부터; 지는 패 muck 표시 */ });
+test('쇼다운 공개 순서와 머킹', () => { /* 고정 덱과 button을 명시하고 리버 체크 종료 → 버튼 왼쪽부터; 지는 패 muck 표시, reveals/mucks의 playerId 단언 */ });
 test('사용자 버스트 → gameOver lose', () => { /* user 스택 0 정산 → result lose, game_over 이벤트 */ });
 test('동시 버스트: 사용자 생존+AI 전멸 → win', () => {});
-test('아카이브 roll-forward: lastHand로 재생성', () => {
-  /* 정산 후 hands/ 파일 삭제 → 재생성 함수(rebuildArchive) 호출 → 동일 내용 */
-});
+test('bust 좌석은 out=true', () => {});
+test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구성할 수 있다(모듈 수준 비교)', () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 쇼다운·정산·아카이브·게임 종료`.
@@ -474,7 +550,7 @@ test('아카이브 roll-forward: lastHand로 재생성', () => {
 
 **Interfaces:**
 - Produces:
-  - `userView(state) -> {handNo, level, blinds, street, board, pots, seats:[{playerId,name,stack,bet,folded,allIn,isButton}], toAct, myCards, legal?, gameOver, result?}` — `legal`은 toAct==='user'일 때만(legalFor 숫자 + decisionId). **덱·타인 홀카드·아키타입·페르소나 파라미터 절대 미포함.**
+  - `viewFor(state, playerId) -> {...}` (정본 — myCards는 해당 playerId의 홀카드, legal은 그 플레이어 차례일 때만), `userView(state) = viewFor(state,'user')` 래퍼. view에는 `levelEvery`(config 공개값)도 포함한다 — UI 상단바의 '다음 레벨업까지 남은 핸드' 계산용.
   - `redactedHand(state, handNo) -> {...}` — 해당 핸드에서 사용자 관점 공개 정보만(자기 홀카드, 보드, 공개된 쇼다운 패, 액션 시퀀스, 결정 스냅샷)
   - `statsReport(state) -> {perPlayer: {vpip, pfr, af, showdownWin, net, sample}}` — 정의는 스펙 §8 (VPIP: 블라인드 강제 제외 자발적 투입, AF=(벳+레이즈)/콜)
 - Consumes: Task 5~7의 state 구조, `legalFor`
@@ -497,6 +573,8 @@ test('public 이벤트에 금지 정보 없음', () => {
 });
 test('VPIP: BB 체크는 미집계, SB 컴플릿은 집계', () => {});
 test('내 차례일 때만 legal 포함 + decisionId 일치', () => {});
+test('viewFor(p1)은 p1 카드만, user 카드 비노출', () => {});
+test('코치 입력 합성(redactedHand + statsReport JSON)에 상대 홀카드·덱·아키타입 문자열 부재', () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 사용자 뷰·redacted 히스토리·통계`.
@@ -509,7 +587,7 @@ test('내 차례일 때만 legal 포함 + decisionId 일치', () => {});
 - Create: `engine/personas.js`, `test/personas.test.js`
 
 **Interfaces:**
-- Produces: `generatePersonas(n) -> [{playerId:'p1'.., seat, name, agentHandle:'player-p1'.., speech, personality, archetype, bluffFreq, threeBetFreq, tiltProne}]` — archetype ∈ 6종(TAG/LAG/Nit/CallingStation/Maniac/Trickster), 이름은 한국어 풀(≥20개)에서 중복 없이, 수치 파라미터는 아키타입 기준값 ± 랜덤 변주.
+- Produces: `generatePersonas(n) -> [{playerId:'p1'.., seat, name, agentHandle:'player-p1'.., speech, personality, archetype, bluffFreq, threeBetFreq, tiltProne}]` — archetype ∈ 6종(TAG/LAG/Nit/CallingStation/Maniac/Trickster), 이름은 한국어 풀(≥20개)에서 중복 없이, 수치 파라미터는 아키타입 기준값 ± 랜덤 변주. `generatePersonas(n)`은 AI만 생성한다. `players.json` 파일은 init(cli.js)이 기록하며 **user 레코드 `{playerId:'user', seat, name:'나'}`를 포함**한 전 좌석 배열이다(스펙 §6). 스폰 대상 필터는 `playerId`가 `p`로 시작하는 레코드뿐이다(Task 14 스킬 문서에도 동일 문면).
 
 - [ ] **Step 1 (RED):**
 
@@ -522,7 +600,10 @@ test('필드는 닫힌 목록이고 이름 중복 없음', () => {
   assert.equal(ps[0].agentHandle, 'player-p1');
 });
 test('아키타입은 6종 안에서만', () => {});
+test('players.json 형태: user 레코드 포함, AI만 페르소나 필드 보유', () => {});
 ```
+
+(이 테스트는 Task 10 init 통합 테스트로 배치해도 된다.)
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 페르소나 생성`.
 
@@ -537,6 +618,15 @@ test('아키타입은 6종 안에서만', () => {});
 - Produces (사용법: `node engine/cli.js <cmd> [args] [--game-dir game]`):
   - `init --ai <n> [--stack N] [--blinds SB/BB] [--level-every N] [--force]` → createGame + generatePersonas + sessionToken(`crypto.randomBytes(16).toString('hex')`) → `players.json`, state 저장. stdout에 `{ok, sessionToken, port?, players:[{playerId,name}]}` (**페르소나 상세는 stdout에 내지 않는다** — 스타일 비공개; 딜러는 스폰 시 `players.json`을 에이전트 프롬프트 작성에만 사용). lock 존재+서버 생존 시 `{ok:false, code:'ACTIVE_GAME'}`.
   - `new-hand`, `legal`, `apply <pid> <action> [amount] [--expect-version N]`, `apply <pid> --force-default`, `view --for user|<pid>`, `hand <n> [--redacted]`, `stats`, `end --result abort`, `resume-check`(정합 자가검사+roll-forward)
+
+| 명령 | stdout (envelope 공통 필드 외) |
+|---|---|
+| `legal` | `legalFor` 전 필드 그대로 |
+| `apply` / `apply --force-default` | `events`(visibility 포함 전체), `handOver`, `gameOver` (+종료 시 `result`, `bustedPlayerIds`). force-default도 `action` 이벤트(check/fold)를 생성한다 |
+| `view --for <pid|user>` | `viewFor` 결과 |
+| `hand <n> [--redacted]` | 아카이브(`readHand`) 기반 — 과거 핸드 번호 조회 가능 |
+| `resume-check` | `{ok, serverAlive, port, sessionToken, stateVersion, phase, toAct, archiveRepaired}` — lock 판독 + serverPid 생존 확인 + `rebuildArchive` 수행 |
+| `init --force` | 절차: lock 판독 → serverPid 생존이면 SIGTERM·종료 대기(최대 5초) → `game/` 폐기 → 새 init |
   - 공통 envelope: 성공 `{ok:true, stateVersion, events?, ...}` / 실패 `{ok:false, code, message}`, exit 0/1/2. 모든 변경 명령은 `withMutation` 임계구역.
   - 이벤트는 visibility 필터 없이 **전부** 반환하되 각 이벤트에 `visibility` 표시(public 필터링은 딜러 규약 — 스펙 §4).
 - Consumes: Task 3~9 전부.
@@ -552,6 +642,11 @@ test('불법 액션 → ok:false, exit 1, 상태 무변경', () => {});
 test('--expect-version 불일치 → 거부', () => {});
 test('init은 활성 게임에서 ACTIVE_GAME 거부', () => {});
 test('init stdout에 archetype/bluffFreq 미노출', () => {});
+test('과거 핸드 조회: 두 핸드 진행 후 hand 1 --redacted', () => {});
+test('gameOver 후 new-hand 거부', () => {});
+test('아카이브 삭제 후 resume-check가 roll-forward(archiveRepaired true)', () => {});
+test('init --force: 살아 있는 가짜 서버(spawn된 node 대기 프로세스)를 SIGTERM 후 새 게임 생성', () => {});
+test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이동(4인)', () => {});
 ```
 
 (테스트를 위해 `new-hand --deck "As,Kd,..."` 숨은 옵션 지원 — 52장 콤마 목록. README에는 문서화하지 않는다.)
@@ -587,7 +682,8 @@ test('publish → snapshot → SSE after-replay 갭 없음', async () => {
 test('publishId 중복은 같은 revision 반환(로그 중복 없음)', async () => {});
 test('action: decisionId 불일치 409, 일치 시 wait-action이 소비', async () => {});
 test('토큰 없음 401, 바디 65KB 413', async () => {});
-test('서버 재시작: ui-snapshot.json에서 revision·log 복원', async () => {});
+test('타임아웃 설정: server.timeout===0, keepAliveTimeout>=75000, headersTimeout>=80000', async () => {});
+test('서버 재시작: ui-snapshot.json에서 revision·log·coach까지 복원', async () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 중계 웹 서버`.
@@ -627,8 +723,8 @@ function applyMessage(m) { if (m.revision <= revision) return; revision = m.revi
 ```
 
 - [ ] **Step 1:** `dev-drive.js` 작성 — 서버 기동 후 다음 시퀀스 publish: 핸드 시작(4인) → 내 차례(legal 포함 view) → AI 액션 3개+talk → 플랍 → 쇼다운 → coach 노트 → game_over+리뷰. 각 상태 사이 1.5초 대기.
-- [ ] **Step 2:** UI 구현. 액션 바: fold/check/call 버튼 + raise 슬라이더(min=minRaiseTo, max=maxRaiseTo) + 프리셋(최소/½팟/팟/올인 — 팟 프리셋은 `potTotal` 기준 계산, 범위 클램프). `legal.canCheck`면 콜 버튼 숨김, `canRaise:false`면 슬라이더 비활성. 액션 전송: `POST /api/action` {decisionId: view.legal.decisionId, ...} 후 버튼 즉시 비활성(재활성은 다음 view 게시로).
-- [ ] **Step 3:** 검증: `node server/server.js --game-dir /tmp/holdem-ui --port 8899 --token dev` + `node test/helpers/dev-drive.js` 실행, 브라우저(또는 사용 가능한 브라우저 자동화 도구)로 `http://127.0.0.1:8899/?token=dev` 열어 전 시퀀스 확인: 카드 렌더, 차례 하이라이트, 액션 바 활성/비활성, 로그·코치 탭, 리뷰 오버레이, 새로고침 후 상태 복원.
+- [ ] **Step 2:** UI 구현. 액션 바: fold/check/call 버튼 + raise 슬라이더(min=minRaiseTo, max=maxRaiseTo) + 프리셋(최소/½팟/팟/올인 — 팟 프리셋은 `potTotal` 기준 계산, 범위 클램프). `legal.canCheck`면 콜 버튼 숨김, `canRaise:false`면 슬라이더 비활성. `minRaiseTo > maxRaiseTo`인 경우(숏스택 올인만 가능) 슬라이더를 숨기고 '올인(maxRaiseTo)' 버튼만 활성화한다. 액션 전송: `POST /api/action` `{token, decisionId: view.legal.decisionId, action, amount?}` 후 버튼 즉시 비활성(재활성은 다음 view 게시로).
+- [ ] **Step 3:** 검증: `node server/server.js --game-dir /tmp/holdem-ui --port 8899 --token dev` + `node test/helpers/dev-drive.js` 실행, 브라우저(또는 사용 가능한 브라우저 자동화 도구)로 `http://127.0.0.1:8899/?token=dev` 열어 전 시퀀스 확인: 카드 렌더, 차례 하이라이트, 액션 바 활성/비활성, 로그·코치 탭, 리뷰 오버레이, 새로고침 후 상태 복원. 액션 버튼 클릭 → 서버가 slot에 저장하고 다음 view 게시로 버튼 재활성.
 - [ ] **Step 4:** 커밋 `feat: 포커 테이블 웹 UI`.
 
 ---
@@ -640,7 +736,21 @@ function applyMessage(m) { if (m.revision <= revision) return; revision = m.revi
 
 **Interfaces:**
 - Consumes: 엔진 모듈 직접(cli 아님 — 속도), `legalFor/applyAction/startHand`
-- Produces: §14 이월 항목들의 기계 검증
+- Produces: 엔진 불변식의 기계 검증(칩 보존·종료 보장·음수 금지) — §14 중 '사이드팟·베팅 엣지케이스 전수' 항목의 실전 커버리지
+- `startHand(state, {rng})` 옵션을 추가하고(`shuffle(deck, rng)`에 전달), 테스트는 `test/helpers/fixtures.js`의 시드 PRNG(mulberry32 — 아래 코드)를 사용해 3개 시드(1, 2, 3)로 결정적 재현한다.
+
+```js
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// cards.shuffle(deck, rng?)는 rng가 주어지면 crypto 대신 rng() 기반 Fisher-Yates를 쓴다 (Task 1에 반영)
+```
 
 - [ ] **Step 1:** 랜덤 정책 봇(합법 액션 중 가중 랜덤: fold 20%/check-call 50%/raise 30%, 금액은 min~max 균등)으로 **게임 종료까지** 자동 진행하는 시뮬레이터 작성. 3개 시드 × (4인, 9인, 헤즈업) 구성.
 
@@ -684,7 +794,7 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
 - [ ] **Step 1:** `SKILL.md` 작성 — frontmatter(`name: start-game`, `description: AI 홀덤 게임 시작/재개 — 딜러 오케스트레이션`) + 본문에 다음 절차를 **모두** 포함:
   1. **사전 점검**: `node --version`(≥20), 활성 게임 검사(`game/lock.json` + health), 있으면 사용자에게 resume/새 게임 질문.
   2. **시작**: `node engine/cli.js init --ai <n>` → stdout의 sessionToken 확보 → `nohup node server/server.js --game-dir game --port 8877 --token <t> > game/server.log 2>&1 &` (detached) → health 확인 → `open "http://127.0.0.1:8877/?token=<t>"`.
-  3. **에이전트 스폰**: `game/players.json`을 읽고 플레이어마다 명명 에이전트(이름=agentHandle)를 스폰. 스폰 프롬프트 템플릿(전문 포함): 페르소나 카드 전체 + 행동 규약(JSON 한 줄만, decisionId 에코, 캐릭터 유지, talk ≤ 1문장, 스타일 발설 금지).
+  3. **에이전트 스폰**: `game/players.json`을 읽고 `playerId`가 `p`로 시작하는 레코드만 대상으로 플레이어마다 명명 에이전트(이름=agentHandle)를 스폰. 스폰 프롬프트 템플릿(전문 포함): 페르소나 카드 전체 + 행동 규약(JSON 한 줄만, decisionId 에코, 캐릭터 유지, talk ≤ 1문장, 스타일 발설 금지).
   4. **게임 루프**: 스펙 §3 의사코드 그대로 + 딜러 규약: public 이벤트만 publish, publishId 단조 증가, AI 워치독(60초 → 재요청 30초 → `apply <pid> --force-default`), 사용자 apply 거부 시 재게시+재대기, 4b 탈출 조건(handOver/gameOver).
   5. **코칭**: 핸드 종료마다 `hand <n> --redacted` + `stats` + 연습 포커스 + coach-meta(과폴드 코멘트 기사용 여부)를 입력으로 **격리된 1회성 코치 서브에이전트**를 호출(전 패를 본 딜러 컨텍스트가 직접 쓰지 않는다), 출력을 `{handNo, text}`로 publish(재진입 시 마지막 coach handNo 확인으로 중복 방지 — 스펙 §14).
   6. **종료**: gameOver 시 2단계 종합 리뷰(①격리 evaluator: redacted 트레이스+통계 → ②종합자: 결과 확인+스타일 공개) 생성 → review publish + `game/review.md` 저장 → 에이전트 작별·정리.
@@ -703,6 +813,26 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
 3. 시뮬레이션 불변식(칩 보존·종료 보장·음수 금지)이 3구성×3시드에서 통과.
 4. `game/`은 gitignore, 커밋된 코드에 시크릿·절대경로 없음.
 5. 스펙 §11의 모든 테스트 항목이 test/ 어딘가에 실재(누락 시 해당 태스크로 돌아가 보강).
+
+## 부록: 스펙 §11 ↔ 테스트 매핑
+
+| 스펙 §11 항목 | 담당 테스트 파일(및 태스크 번호) |
+|---|---|
+| 핸드 평가기 | `evaluator.test.js`, T2 |
+| 사이드팟 | `sidepots.test.js`, T4 |
+| 버튼·블라인드 로테이션 | `hand-setup.test.js`·`cli.test.js`, T5·T10 |
+| 베팅 규칙 | `hand-betting.test.js`, T6 |
+| 상태 전이 | `hand-showdown.test.js`, T7 |
+| 액션 슬롯 | `server.test.js`, T11 |
+| expect-version·상태 무변경 | `hand-betting.test.js`·`cli.test.js`, T6·T10 |
+| 이벤트 visibility | `views.test.js`, T8 |
+| handOver·gameOver | `hand-showdown.test.js`·`cli.test.js`, T7·T10 |
+| init 거부·resume·정합 자가검사 | `cli.test.js`, T10 |
+| 레벨업 오프바이원 | `hand-setup.test.js`, T5 |
+| 서버 스모크·토큰·스냅샷 복원 | `server.test.js`, T11 |
+| 코칭 격리 입력 | `views.test.js`, T8 |
+
+Task 14 완료 전 이 표의 모든 행이 실재하는지 확인하는 것이 수용 기준 5의 판정 절차다.
 
 ## 명시적 비-태스크 (grok 세션에서 하지 않는 것)
 
