@@ -75,9 +75,15 @@ test('살아있는 소유자의 mutex는 timeout 후 LOCKED', () => {
   fs.mkdirSync(mutex);
   fs.writeFileSync(path.join(mutex, 'pid'), String(process.pid));
   saveState(d, { stateVersion: 0 });
+  const started = Date.now();
   assert.throws(
     () => withMutation(d, s => ({ state: { ...s, stolen: true }, response: null }), fastLock),
     { code: 'LOCKED' },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed >= fastLock.timeoutMs - 20,
+    `LOCKED too soon: ${elapsed}ms`,
   );
   assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
   assert.equal(loadState(d).stolen, undefined);
