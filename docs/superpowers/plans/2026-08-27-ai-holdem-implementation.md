@@ -238,7 +238,7 @@ test('보드 플레이 동점(스플릿)', () => {
   - `writeJsonAtomic(path, obj)` — 아카이브·스냅샷 등 엔진 전용(서버는 동일 패턴을 자체 구현)
 - Consumes: 없음 (fs만)
 
-- [ ] **Step 1 (RED):** `test/state.test.js` — 실제 케이스:
+- [x] **Step 1 (RED):** `test/state.test.js` — 실제 케이스:
 
 ```js
 import { test } from 'node:test';
@@ -273,7 +273,7 @@ test('죽은 소유자의 mutex는 회수되고 커밋이 성공한다', () => {
 test('아카이브 파일명은 4자리 패딩', () => {});
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 원자적 상태 저장과 mutation lock`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 원자적 상태 저장과 mutation lock`.
 
 ---
 
