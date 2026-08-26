@@ -84,11 +84,26 @@ function mutexAsidePath(dir) {
   return `${dir}.${process.pid}.${process.hrtime.bigint()}.stale`;
 }
 
+function inodeKey(dir) {
+  try {
+    const st = fs.statSync(dir, { bigint: true });
+    return { dev: st.dev, ino: st.ino };
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function sameInode(a, b) {
+  return Boolean(a && b && a.dev === b.dev && a.ino === b.ino);
+}
+
 function mutexIdentity(dir) {
   try {
     const st = fs.statSync(dir, { bigint: true });
     const pid = ownerPid(dir);
     const st2 = fs.statSync(dir, { bigint: true });
+    // A replacement between the two stats invalidates the pid we just read.
     if (st2.ino !== st.ino || st2.dev !== st.dev) return null;
     return { dev: st.dev, ino: st.ino, mtimeMs: Number(st.mtimeMs), pid };
   } catch (error) {
@@ -97,13 +112,24 @@ function mutexIdentity(dir) {
   }
 }
 
-function sameMutex(a, b) {
-  return Boolean(a && b && a.dev === b.dev && a.ino === b.ino && a.pid === b.pid);
-}
-
 function isIdentityStale(id) {
   if (id.pid !== null) return !isProcessAlive(id.pid);
   return Date.now() - id.mtimeMs >= MUTEX_STALE_MS;
+}
+
+/**
+ * May the directory now at `moved` be destroyed on the strength of the earlier
+ * judgement `expected`? Only if it is literally the same directory (inode), still
+ * registers the same owner, and is still stale. Anything else — a different inode,
+ * a pid that appeared meanwhile, a pid-less directory younger than the staleness
+ * threshold (i.e. a lock inside its own mkdir→pid-write window) — belongs to
+ * somebody else and must be put back, not deleted.
+ */
+export function isReclaimable(expected, moved) {
+  if (!expected || !moved) return false;
+  if (!sameInode(expected, moved)) return false;
+  if (expected.pid !== moved.pid) return false;
+  return isIdentityStale(moved);
 }
 
 function renameMutexAside(dir) {
@@ -124,11 +150,15 @@ function throwLocked() {
 }
 
 function tryRename(from, to) {
+  // POSIX rename() silently replaces an *empty* destination directory, which would
+  // destroy a contender still inside its own mkdir→pid-write window. Refuse to move
+  // onto an occupied path at all.
+  if (fs.existsSync(to)) return false;
   try {
     fs.renameSync(from, to);
     return true;
   } catch (error) {
-    if (error.code === 'ENOENT') return true;
+    if (error.code === 'ENOENT') return true; // source already gone
     if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') return false;
     throw error;
   }
@@ -145,77 +175,96 @@ export function restoreLiveMutex(aside, dir, deadline, retryMs) {
   }
 }
 
-function isLiveIdentity(id) {
-  return Boolean(id && id.pid !== null && isProcessAlive(id.pid));
+/**
+ * Put back a directory we displaced but were not entitled to. Restoration gets its
+ * own budget past the acquire deadline: whoever took `.mutex` in the meantime will
+ * free it at the end of its critical section. On failure this throws LOCKED with the
+ * displaced lock left intact — we never create a second lock to compensate.
+ */
+function restoreDisplaced(aside, dir, ctx) {
+  restoreLiveMutex(aside, dir, Math.max(ctx.deadline, Date.now() + ctx.timeoutMs), ctx.retryMs);
 }
 
-function reclaimMutex(dir, deadline, retryMs) {
+function reclaimMutex(dir, ctx) {
   const decided = mutexIdentity(dir);
   if (!decided || !isIdentityStale(decided)) return false;
+  // Re-read immediately before the rename. This shrinks — it cannot close — the gap
+  // in which the stale directory is replaced by a live lock: rename(2) has no
+  // if-inode-still-matches form, so displacement always precedes inspection.
+  const expected = mutexIdentity(dir);
+  if (!isReclaimable(decided, expected)) return false;
   const aside = renameMutexAside(dir);
-  if (aside === null) return true;
+  if (aside === null) return true; // already gone: .mutex is free
   const moved = mutexIdentity(aside);
-  if (isLiveIdentity(moved)) {
-    restoreLiveMutex(aside, dir, deadline, retryMs);
-    return false;
+  if (isReclaimable(expected, moved)) {
+    fs.rmSync(aside, { recursive: true, force: true });
+    return true;
   }
-  fs.rmSync(aside, { recursive: true, force: true });
+  restoreDisplaced(aside, dir, ctx);
+  return false;
+}
+
+function undoOwnMutex(dir, mine, ctx) {
+  const aside = renameMutexAside(dir);
+  if (aside === null) return;
+  if (sameInode(mine, inodeKey(aside))) {
+    fs.rmSync(aside, { recursive: true, force: true });
+    return;
+  }
+  restoreDisplaced(aside, dir, ctx);
+}
+
+function tryCreateMutex(dir, ctx) {
+  try {
+    fs.mkdirSync(dir);
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  }
+  // Taken before the pid write: a directory this young and pid-less is never judged
+  // stale, so nobody may displace it and this inode stays proof of our own creation.
+  const mine = inodeKey(dir);
+  try {
+    fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+  } catch (error) {
+    undoOwnMutex(dir, mine, ctx);
+    throw error;
+  }
   return true;
 }
 
-function acquireMutex(gameDir, retryMs, timeoutMs) {
+function acquireMutex(gameDir, ctx) {
   const dir = mutexPath(gameDir);
-  const deadline = Date.now() + timeoutMs;
   for (;;) {
-    try {
-      fs.mkdirSync(dir);
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (reclaimMutex(dir, deadline, retryMs)) continue;
-      if (Date.now() >= deadline) throwLocked();
-      sleepSync(retryMs);
-      continue;
-    }
-    try {
-      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
-    } catch (error) {
-      const aside = renameMutexAside(dir);
-      if (aside !== null) {
-        const moved = mutexIdentity(aside);
-        if (isLiveIdentity(moved) && moved.pid !== process.pid) {
-          restoreLiveMutex(aside, dir, deadline, retryMs);
-        } else {
-          fs.rmSync(aside, { recursive: true, force: true });
-        }
-      }
-      throw error;
-    }
-    return;
+    if (tryCreateMutex(dir, ctx)) return;
+    if (reclaimMutex(dir, ctx) && tryCreateMutex(dir, ctx)) return;
+    if (Date.now() >= ctx.deadline) throwLocked();
+    sleepSync(ctx.retryMs);
   }
 }
 
 function releaseMutex(gameDir) {
   const dir = mutexPath(gameDir);
   const decided = mutexIdentity(dir);
-  if (!decided || decided.pid !== process.pid) return;
+  if (!decided || decided.pid !== process.pid) return; // not ours: never touch it
   const aside = renameMutexAside(dir);
   if (aside === null) return;
   const moved = mutexIdentity(aside);
-  if (!sameMutex(decided, moved) || moved.pid !== process.pid) {
-    if (isLiveIdentity(moved)) {
-      restoreLiveMutex(aside, dir, Date.now() + MUTEX_TIMEOUT_MS, MUTEX_RETRY_MS);
-    } else if (!tryRename(aside, dir)) {
-      throwLocked();
-    }
+  if (sameInode(decided, moved) && moved.pid === process.pid) {
+    fs.rmSync(aside, { recursive: true, force: true });
     return;
   }
-  fs.rmSync(aside, { recursive: true, force: true });
+  restoreDisplaced(aside, dir, {
+    deadline: Date.now() + MUTEX_TIMEOUT_MS,
+    retryMs: MUTEX_RETRY_MS,
+    timeoutMs: MUTEX_TIMEOUT_MS,
+  });
 }
 
 export function withMutation(gameDir, fn, options) {
   const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
   const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
-  acquireMutex(gameDir, retryMs, timeoutMs);
+  acquireMutex(gameDir, { deadline: Date.now() + timeoutMs, retryMs, timeoutMs });
   try {
     const result = fn(loadState(gameDir));
     saveState(gameDir, result.state);
