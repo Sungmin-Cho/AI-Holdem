@@ -37,3 +37,48 @@ test('아카이브 파일명은 4자리 패딩', () => {
   assert.deepEqual(readHand(d, 1), { handNo: 1, foo: 'bar' });
   assert.equal(fs.existsSync(path.join(d, 'hands', 'hand-1.json')), false);
 });
+
+const fastLock = { retryMs: 10, timeoutMs: 80 };
+
+test('빈 pid 파일 mutex는 즉시 강탈되지 않는다', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), '');
+  saveState(d, { stateVersion: 0 });
+  assert.throws(
+    () => withMutation(d, s => ({ state: { ...s, stolen: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.ok(fs.existsSync(mutex));
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), '');
+  assert.equal(loadState(d).stolen, undefined);
+});
+
+test('신선한 pid-없는 mutex는 강탈되지 않는다', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  saveState(d, { stateVersion: 0 });
+  assert.throws(
+    () => withMutation(d, s => ({ state: { ...s, stolen: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.ok(fs.existsSync(mutex));
+  assert.equal(fs.existsSync(path.join(mutex, 'pid')), false);
+  assert.equal(loadState(d).stolen, undefined);
+});
+
+test('살아있는 소유자의 mutex는 timeout 후 LOCKED', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), String(process.pid));
+  saveState(d, { stateVersion: 0 });
+  assert.throws(
+    () => withMutation(d, s => ({ state: { ...s, stolen: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
+  assert.equal(loadState(d).stolen, undefined);
+});
