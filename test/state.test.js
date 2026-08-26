@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { loadState, saveState, withMutation, writeHandArchive, readHand } from '../engine/state.js';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, restoreLiveMutex } from '../engine/state.js';
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
 
@@ -87,4 +87,35 @@ test('살아있는 소유자의 mutex는 timeout 후 LOCKED', () => {
   );
   assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
   assert.equal(loadState(d).stolen, undefined);
+});
+
+test('live lock 복원은 dest가 비면 성공한다', () => {
+  const d = tmpDir();
+  const dest = path.join(d, '.mutex');
+  const aside = path.join(d, '.mutex.aside');
+  fs.mkdirSync(aside);
+  fs.writeFileSync(path.join(aside, 'pid'), String(process.pid));
+  restoreLiveMutex(aside, dest, Date.now() + 1000, fastLock.retryMs);
+  assert.equal(fs.existsSync(aside), false);
+  assert.equal(fs.readFileSync(path.join(dest, 'pid'), 'utf8'), String(process.pid));
+});
+
+test('live lock 복원은 dest 점유 시 재시도 후 LOCKED', () => {
+  const d = tmpDir();
+  const dest = path.join(d, '.mutex');
+  const aside = path.join(d, '.mutex.aside');
+  fs.mkdirSync(aside);
+  fs.writeFileSync(path.join(aside, 'pid'), String(process.pid));
+  fs.mkdirSync(dest);
+  fs.writeFileSync(path.join(dest, 'pid'), '1');
+  const started = Date.now();
+  assert.throws(
+    () => restoreLiveMutex(aside, dest, Date.now() + fastLock.timeoutMs, fastLock.retryMs),
+    { code: 'LOCKED' },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= fastLock.timeoutMs - 20, `LOCKED too soon: ${elapsed}ms`);
+  assert.ok(fs.existsSync(aside));
+  assert.equal(fs.readFileSync(path.join(aside, 'pid'), 'utf8'), String(process.pid));
+  assert.equal(fs.readFileSync(path.join(dest, 'pid'), 'utf8'), '1');
 });

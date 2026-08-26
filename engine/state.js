@@ -117,28 +117,46 @@ function renameMutexAside(dir) {
   return aside;
 }
 
-function restoreMutex(aside, dir) {
+function throwLocked() {
+  const locked = new Error('LOCKED');
+  locked.code = 'LOCKED';
+  throw locked;
+}
+
+function tryRename(from, to) {
   try {
-    fs.renameSync(aside, dir);
+    fs.renameSync(from, to);
+    return true;
   } catch (error) {
-    if (error.code === 'ENOENT') return;
-    const locked = new Error('LOCKED');
-    locked.code = 'LOCKED';
-    throw locked;
+    if (error.code === 'ENOENT') return true;
+    if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') return false;
+    throw error;
   }
 }
 
-function reclaimMutex(dir) {
-  // Steal only the stale mutex identity we observed; a replaced live lock is restored or LOCKED.
+export function restoreLiveMutex(aside, dir, deadline, retryMs) {
+  for (;;) {
+    if (tryRename(aside, dir)) return;
+    if (Date.now() >= deadline) {
+      if (!tryRename(aside, dir)) throwLocked();
+      return;
+    }
+    sleepSync(retryMs);
+  }
+}
+
+function isLiveIdentity(id) {
+  return Boolean(id && id.pid !== null && isProcessAlive(id.pid));
+}
+
+function reclaimMutex(dir, deadline, retryMs) {
   const decided = mutexIdentity(dir);
   if (!decided || !isIdentityStale(decided)) return false;
-  const confirmed = mutexIdentity(dir);
-  if (!sameMutex(decided, confirmed)) return false;
   const aside = renameMutexAside(dir);
   if (aside === null) return true;
   const moved = mutexIdentity(aside);
-  if (!sameMutex(decided, moved) || !isIdentityStale(moved)) {
-    restoreMutex(aside, dir);
+  if (isLiveIdentity(moved)) {
+    restoreLiveMutex(aside, dir, deadline, retryMs);
     return false;
   }
   fs.rmSync(aside, { recursive: true, force: true });
@@ -153,12 +171,8 @@ function acquireMutex(gameDir, retryMs, timeoutMs) {
       fs.mkdirSync(dir);
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      if (reclaimMutex(dir)) continue;
-      if (Date.now() >= deadline) {
-        const locked = new Error('LOCKED');
-        locked.code = 'LOCKED';
-        throw locked;
-      }
+      if (reclaimMutex(dir, deadline, retryMs)) continue;
+      if (Date.now() >= deadline) throwLocked();
       sleepSync(retryMs);
       continue;
     }
@@ -168,10 +182,10 @@ function acquireMutex(gameDir, retryMs, timeoutMs) {
       const aside = renameMutexAside(dir);
       if (aside !== null) {
         const moved = mutexIdentity(aside);
-        if (!moved || moved.pid === null || moved.pid === process.pid) {
-          fs.rmSync(aside, { recursive: true, force: true });
+        if (isLiveIdentity(moved) && moved.pid !== process.pid) {
+          restoreLiveMutex(aside, dir, deadline, retryMs);
         } else {
-          restoreMutex(aside, dir);
+          fs.rmSync(aside, { recursive: true, force: true });
         }
       }
       throw error;
@@ -188,7 +202,11 @@ function releaseMutex(gameDir) {
   if (aside === null) return;
   const moved = mutexIdentity(aside);
   if (!sameMutex(decided, moved) || moved.pid !== process.pid) {
-    restoreMutex(aside, dir);
+    if (isLiveIdentity(moved)) {
+      restoreLiveMutex(aside, dir, Date.now() + MUTEX_TIMEOUT_MS, MUTEX_RETRY_MS);
+    } else if (!tryRename(aside, dir)) {
+      throwLocked();
+    }
     return;
   }
   fs.rmSync(aside, { recursive: true, force: true });
