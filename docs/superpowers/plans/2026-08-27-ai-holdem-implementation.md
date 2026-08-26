@@ -123,9 +123,9 @@ test('rankValue', () => {
 });
 ```
 
-- [ ] **Step 2:** 실행 `node --test test/cards.test.js` → FAIL(모듈 없음) 확인.
-- [ ] **Step 3 (GREEN):** `engine/cards.js` 구현 (crypto.randomInt 기반 Fisher-Yates).
-- [ ] **Step 4:** 테스트 통과 확인 후 커밋 `feat: 카드 덱과 crypto 셔플`.
+- [x] **Step 2:** 실행 `node --test test/cards.test.js` → FAIL(모듈 없음) 확인.
+- [x] **Step 3 (GREEN):** `engine/cards.js` 구현 (crypto.randomInt 기반 Fisher-Yates).
+- [x] **Step 4:** 테스트 통과 확인 후 커밋 `feat: 카드 덱과 crypto 셔플`.
 
 ---
 
