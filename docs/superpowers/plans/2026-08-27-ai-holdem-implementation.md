@@ -311,7 +311,7 @@ export function buildPots(contribs, folded) {
 }
 ```
 
-- [ ] **Step 1 (RED):** 실제 케이스:
+- [x] **Step 1 (RED):** 실제 케이스:
 
 ```js
 test('3-way 올인 사이드팟', () => {
@@ -333,7 +333,7 @@ test('동점 스플릿 홀수 칩은 순서 앞 좌석부터', () => {
 });
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 사이드팟 구성·분배`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 사이드팟 구성·분배`.
 
 ---
 
