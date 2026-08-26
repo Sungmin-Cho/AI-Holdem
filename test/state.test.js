@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, restoreLiveMutex, isReclaimable } from '../engine/state.js';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable } from '../engine/state.js';
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
 
@@ -89,21 +89,10 @@ test('살아있는 소유자의 mutex는 timeout 후 LOCKED', () => {
   assert.equal(loadState(d).stolen, undefined);
 });
 
-test('live lock 복원은 dest가 비면 성공한다', () => {
-  const d = tmpDir();
-  const dest = path.join(d, '.mutex');
-  const aside = path.join(d, '.mutex.aside');
-  fs.mkdirSync(aside);
-  fs.writeFileSync(path.join(aside, 'pid'), String(process.pid));
-  restoreLiveMutex(aside, dest, Date.now() + 1000, fastLock.retryMs);
-  assert.equal(fs.existsSync(aside), false);
-  assert.equal(fs.readFileSync(path.join(dest, 'pid'), 'utf8'), String(process.pid));
-});
-
-test('강탈한 디렉터리는 판정한 그 락일 때만 삭제된다', () => {
+test('stale 디렉터리는 판정한 그 락일 때만 삭제 대상이다', () => {
   const stale = { dev: 1n, ino: 10n, mtimeMs: 0, pid: 999999999 };
   assert.equal(isReclaimable(stale, stale), true);
-  // rename 창에서 생긴 교체본: inode가 다르다
+  // 판정과 재확인 사이에 생긴 교체본: inode가 다르다
   assert.equal(isReclaimable(stale, { dev: 1n, ino: 11n, mtimeMs: Date.now(), pid: null }), false);
   // 같은 inode지만 그 사이 소유자가 자기 pid를 기록했다
   assert.equal(isReclaimable(stale, { dev: 1n, ino: 10n, mtimeMs: Date.now(), pid: process.pid }), false);
@@ -115,20 +104,35 @@ test('강탈한 디렉터리는 판정한 그 락일 때만 삭제된다', () =>
   assert.equal(isReclaimable(null, stale), false);
 });
 
-test('live lock 복원은 빈 dest 디렉터리를 덮어쓰지 않는다', () => {
+test('회수는 rename 부산물 없이 제자리 삭제로만 이루어진다', () => {
   const d = tmpDir();
-  const dest = path.join(d, '.mutex');
-  const aside = path.join(d, '.mutex.aside');
-  fs.mkdirSync(aside);
-  fs.writeFileSync(path.join(aside, 'pid'), String(process.pid));
-  fs.mkdirSync(dest); // 경쟁자의 mkdir→pid 기록 창: 비어 있지만 살아있는 락이다
+  fs.mkdirSync(path.join(d, '.mutex'));
+  fs.writeFileSync(path.join(d, '.mutex', 'pid'), '999999999');
+  saveState(d, { stateVersion: 0 });
+  const r = withMutation(d, s => ({ state: { ...s, ok: true }, response: null }));
+  assert.equal(r.state.ok, true);
+  // 이전 구현은 회수·해제 시 `.mutex.<pid>.<hrtime>.stale` aside를 만들었다.
+  // 살아있는 락을 rename으로 밀어내는 경로가 사라졌음을 잔여물 부재로 고정한다.
+  const leftovers = fs.readdirSync(d).filter(name => name.startsWith('.mutex'));
+  assert.deepEqual(leftovers, []);
+});
+
+test('회수는 비재귀다 — 예상 밖 파일이 있으면 락 디렉터리를 지우지 않는다', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), '999999999');
+  fs.writeFileSync(path.join(mutex, 'extra'), 'x');
+  saveState(d, { stateVersion: 0 });
   assert.throws(
-    () => restoreLiveMutex(aside, dest, Date.now() + fastLock.timeoutMs, fastLock.retryMs),
+    () => withMutation(d, s => ({ state: { ...s, stolen: true }, response: null }), fastLock),
     { code: 'LOCKED' },
   );
-  assert.ok(fs.existsSync(dest));
-  assert.equal(fs.existsSync(path.join(dest, 'pid')), false);
-  assert.equal(fs.readFileSync(path.join(aside, 'pid'), 'utf8'), String(process.pid));
+  // rmdir는 비어 있지 않은 디렉터리를 절대 지우지 않는다(ENOTEMPTY) — pid를 기록한
+  // 살아있는 교체 락이 통째로 쓸려나갈 수 없음을 같은 경로로 고정한다.
+  assert.ok(fs.existsSync(mutex));
+  assert.equal(fs.readFileSync(path.join(mutex, 'extra'), 'utf8'), 'x');
+  assert.equal(loadState(d).stolen, undefined);
 });
 
 test('staleness를 넘긴 pid-없는 mutex는 회수된다', () => {
@@ -142,24 +146,4 @@ test('staleness를 넘긴 pid-없는 mutex는 회수된다', () => {
   assert.equal(r.state.ok, true);
   assert.equal(loadState(d).ok, true);
   assert.equal(fs.existsSync(mutex), false);
-});
-
-test('live lock 복원은 dest 점유 시 재시도 후 LOCKED', () => {
-  const d = tmpDir();
-  const dest = path.join(d, '.mutex');
-  const aside = path.join(d, '.mutex.aside');
-  fs.mkdirSync(aside);
-  fs.writeFileSync(path.join(aside, 'pid'), String(process.pid));
-  fs.mkdirSync(dest);
-  fs.writeFileSync(path.join(dest, 'pid'), '1');
-  const started = Date.now();
-  assert.throws(
-    () => restoreLiveMutex(aside, dest, Date.now() + fastLock.timeoutMs, fastLock.retryMs),
-    { code: 'LOCKED' },
-  );
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed >= fastLock.timeoutMs - 20, `LOCKED too soon: ${elapsed}ms`);
-  assert.ok(fs.existsSync(aside));
-  assert.equal(fs.readFileSync(path.join(aside, 'pid'), 'utf8'), String(process.pid));
-  assert.equal(fs.readFileSync(path.join(dest, 'pid'), 'utf8'), '1');
 });
