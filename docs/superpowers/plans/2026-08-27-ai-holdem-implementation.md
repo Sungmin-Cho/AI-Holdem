@@ -64,7 +64,7 @@ README.md
 **Interfaces:**
 - Produces: `"type":"module"` ESM 환경, `npm test` = `node --test`
 
-- [ ] **Step 1:** `package.json` 작성:
+- [x] **Step 1:** `package.json` 작성:
 
 ```json
 {
@@ -75,7 +75,7 @@ README.md
 }
 ```
 
-- [ ] **Step 2:** `.gitignore` 작성:
+- [x] **Step 2:** `.gitignore` 작성:
 
 ```
 game/
@@ -83,9 +83,9 @@ game/
 .DS_Store
 ```
 
-- [ ] **Step 3:** 디렉토리 생성 `engine/ server/public/ test/helpers/`, `README.md`에 프로젝트 한 줄 설명만.
-- [ ] **Step 4:** 검증: `node --test`가 tests 0으로 exit 0 종료(에러 아님), `node --version` ≥ 20.
-- [ ] **Step 5:** 커밋 `chore: 프로젝트 스캐폴드`.
+- [x] **Step 3:** 디렉토리 생성 `engine/ server/public/ test/helpers/`, `README.md`에 프로젝트 한 줄 설명만.
+- [x] **Step 4:** 검증: `node --test`가 tests 0으로 exit 0 종료(에러 아님), `node --version` ≥ 20.
+- [x] **Step 5:** 커밋 `chore: 프로젝트 스캐폴드`.
 
 ---
 
