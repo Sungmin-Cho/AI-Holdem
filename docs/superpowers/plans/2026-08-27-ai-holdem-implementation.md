@@ -1,5 +1,7 @@
 # AI 홀덤 구현 플랜
 
+상태: 리뷰 수렴 완료 — 2라운드 교차 모델 리뷰(grok-4.6 + gpt-5.6-sol) 후 수렴 판정(P2 신규 표면 3/24, 파장-과반 연속 2라운드). `node --test` 디렉토리 인자 결함은 실측 검증 후 반영.
+
 > **For agentic workers:** 이 플랜의 실행자는 **새로 시작하는 grok-4.6 세션**을 1순위로 상정한다(제로 컨텍스트 전제). 태스크를 번호 순서대로, 태스크마다 RED(실패 테스트) → GREEN(구현) → 검증 → 커밋 사이클로 진행하고 체크박스(`- [ ]`)로 추적하라. superpowers 플러그인이 있는 호스트에서 실행한다면 superpowers:subagent-driven-development 또는 superpowers:executing-plans를 사용해도 된다. 오케스트레이션 플러그인(deep-loop 등)은 사용하지 않는다.
 
 **Goal:** AI 에이전트 상대와 웹 UI로 즐기는 노리밋 텍사스 홀덤 — 딜러(AI 세션) 오케스트레이션, 코칭 포함 — 의 코드 전체(엔진·서버·UI·스킬)를 구현한다.
@@ -18,7 +20,7 @@
 - 카드 표기(엔진 내부 표준): 랭크 `2 3 4 5 6 7 8 9 T J Q K A` + 슈트 소문자 `s h d c` — 예: `"As"`, `"Td"`, `"7c"`. UI에서만 ♠♥♦♣로 렌더링.
 - decisionId 형식: `d-<handNo>-<street>-<actionIndex>` (street ∈ `preflop|flop|turn|river`). 같은 결정 지점에 대해 안정적이다.
 - 금액은 전부 정수 칩. `raise`의 amount는 항상 raise-to(그 스트리트의 내 총 베팅액).
-- 테스트 실행: `node --test test/` (전체), `node --test test/<파일>` (단건). 커밋 전 전체 그린 필수.
+- 테스트 실행: `node --test` (전체 — 인자 없이 실행하면 기본 글롭이 `test/**`를 자동 발견한다. **디렉토리 인자를 주면 Node v26에서 실패하므로 금지**), `node --test test/<파일>.test.js` (단건). 커밋 전 전체 그린 필수.
 - 커밋: conventional commit(`feat:`/`test:`/`docs:`/`chore:`), 제목 한국어 허용, 태스크당 1커밋 이상.
 - 브랜치: `main`에서 직접 작업(단독 그린필드).
 - 게임 런타임 대상은 Claude Code(스펙 §9 v1 범위). 이 플랜의 코드 태스크는 어느 호스트에서든 구현·테스트 가능하다(게임 실행이 아니라 코드 작성이므로).
@@ -60,7 +62,7 @@ README.md
 - Create: `package.json`, `.gitignore`, `README.md`(빈 뼈대), 디렉토리들
 
 **Interfaces:**
-- Produces: `"type":"module"` ESM 환경, `npm test` = `node --test test/`
+- Produces: `"type":"module"` ESM 환경, `npm test` = `node --test`
 
 - [ ] **Step 1:** `package.json` 작성:
 
@@ -69,7 +71,7 @@ README.md
   "name": "ai-holdem",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test" }
 }
 ```
 
@@ -82,7 +84,7 @@ game/
 ```
 
 - [ ] **Step 3:** 디렉토리 생성 `engine/ server/public/ test/helpers/`, `README.md`에 프로젝트 한 줄 설명만.
-- [ ] **Step 4:** 검증: `node --test test/` 가 "no tests" 로 정상 종료(에러 아님), `node --version` ≥ 20.
+- [ ] **Step 4:** 검증: `node --test`가 tests 0으로 exit 0 종료(에러 아님), `node --version` ≥ 20.
 - [ ] **Step 5:** 커밋 `chore: 프로젝트 스캐폴드`.
 
 ---
@@ -93,7 +95,7 @@ game/
 - Create: `engine/cards.js`, `test/cards.test.js`
 
 **Interfaces:**
-- Produces: `newDeck() -> string[52]` (고정 순서), `shuffle(deck, rng?) -> string[52]` (crypto.randomInt Fisher-Yates, 새 배열), `RANKS`, `SUITS`, `rankValue(card) -> 2..14`
+- Produces: `newDeck() -> string[52]` (고정 순서), `shuffle(deck, rng?) -> string[52]` — rng 미지정 시 `crypto.randomInt`, 지정 시 `rng: () => number`([0,1) 균등)를 사용해 `Math.floor(rng() * (i + 1))` Fisher-Yates. 새 배열 반환, `RANKS`, `SUITS`, `rankValue(card) -> 2..14`
 
 - [ ] **Step 1 (RED):** `test/cards.test.js`:
 
@@ -231,7 +233,7 @@ test('보드 플레이 동점(스플릿)', () => {
 - Produces:
   - `loadState(gameDir) -> state | null`
   - `saveState(gameDir, state)` — `state.stateVersion += 1` 후 temp 파일 + `fs.renameSync`로 원자 커밋
-  - `readHand(gameDir, n) -> record|null`, `writeHandArchive(gameDir, record)` (record.handNo로 파일명), `withMutation` 콜백 계약 — `fn(state) -> {state, response}`를 받아 커밋 후 `{state, response}`를 반환한다. `writeJsonAtomic`은 **엔진 전용**이다(서버는 동일 패턴을 자체 구현 — 엔진 import 금지).
+  - `readHand(gameDir, n) -> record|null`, `writeHandArchive(gameDir, record)` (record.handNo로 파일명; 파일명은 `hand-${String(handNo).padStart(4,'0')}.json` (4자리 패딩 — 계약)), `withMutation` 콜백 계약 — `fn(state) -> {state, response}`를 받아 커밋 후 `{state, response}`를 반환한다. `writeJsonAtomic`은 **엔진 전용**이다(서버는 동일 패턴을 자체 구현 — 엔진 import 금지).
   - `withMutation(gameDir, fn)` — `game/.mutex` 디렉토리를 `fs.mkdirSync`로 획득(획득 실패 시 100ms 간격 최대 3초 재시도, 이후 `{code:'LOCKED'}` throw; mutex 내 `pid` 파일로 죽은 소유자 감지 시 회수). fn 안에서 load→검증→save. fn이 throw하면 저장하지 않는다(상태 무변경 보장).
   - `writeJsonAtomic(path, obj)` — 아카이브·스냅샷 등 엔진 전용(서버는 동일 패턴을 자체 구현)
 - Consumes: 없음 (fs만)
@@ -259,13 +261,16 @@ test('withMutation에서 fn이 throw하면 상태 무변경', () => {
   assert.throws(() => withMutation(d, s => { s.v = 2; throw new Error('boom'); }));
   assert.equal(loadState(d).v, 1);
 });
-test('죽은 소유자의 mutex는 회수된다', () => {
+test('죽은 소유자의 mutex는 회수되고 커밋이 성공한다', () => {
   const d = tmpDir();
   fs.mkdirSync(path.join(d, '.mutex'));
   fs.writeFileSync(path.join(d, '.mutex', 'pid'), '999999999');
   saveState(d, { stateVersion: 0 });
-  withMutation(d, s => s); // 회수 성공해야 함
+  const r = withMutation(d, s => ({ state: { ...s, ok: true }, response: null }));
+  assert.equal(r.state.ok, true);
+  assert.equal(loadState(d).ok, true);
 });
+test('아카이브 파일명은 4자리 패딩', () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 원자적 상태 저장과 mutation lock`.
@@ -341,7 +346,7 @@ test('동점 스플릿 홀수 칩은 순서 앞 좌석부터', () => {
 - Produces:
   - `createGame({aiCount, startStack=5000, blinds0=[25,50], levelEvery=8, names}) -> state` — seats: `user` + `p1..pN`, `phase:'idle'`, `handNo:0`, `button` 랜덤 좌석
   - `blindsForLevel(level) -> [sb, bb]` — 스케줄: 25/50, 50/100, 75/150, 100/200, 150/300, 200/400, 300/600, 400/800, 500/1000, 700/1400, 1000/2000, 이후 ×1.5 정수 반올림(`Math.round`). ×1.5 구간 기대값: 1000/2000 다음은 1500/3000 → 2250/4500 → 3375/6750. `--blinds SB/BB`가 기본값(25/50)이 아니면 스케줄 전체를 비율 스케일한다 — `blindsForLevel(level, blinds0)` = 기본표[level]을 (blinds0/25·50) 배율로 정수 반올림. 테스트: blinds0=50/100이면 레벨 1은 100/200.
-  - `startHand(state, {deck}) -> {state, events}` — 레벨 = `floor(handNo / levelEvery)` (handNo는 증가 후 1부터; 즉 핸드 1~8 = 레벨 0), 버튼을 다음 생존 좌석으로 이동(dead button 규칙은 생략 — 단순화 결정), SB/BB 포스팅(스택 부족 시 전액 올인 포스팅), 홀카드 딜(`deal_hole` actor 이벤트), 헤즈업 특례(버튼=SB, 프리플랍 버튼 선행동, 포스트플랍 BB 선행동), `phase:'in_hand'`. `deck` 옵션은 테스트 주입용(생략 시 shuffle).
+  - `startHand(state, {deck}) -> {state, events}` — 레벨 = `Math.floor((handNo - 1) / levelEvery)` (handNo는 증가 후 1부터 — 핸드 1~8 = 레벨 0, 9번째 핸드부터 레벨 1), 버튼을 다음 생존 좌석으로 이동(dead button 규칙은 생략 — 단순화 결정), SB/BB 포스팅(스택 부족 시 전액 올인 포스팅), 홀카드 딜(`deal_hole` actor 이벤트), 헤즈업 특례(버튼=SB, 프리플랍 버튼 선행동, 포스트플랍 BB 선행동), `phase:'in_hand'`. `deck` 옵션은 테스트 주입용(생략 시 shuffle).
   - state에 `gameOver=true`거나 user 스택 0이면 `{code:'GAME_OVER'}` throw
 
 **state 핵심 필드(이 태스크에서 확정):** `{schemaVersion:1, stateVersion, config, sessionToken, level, handNo, phase, button, seats:[{playerId,name,stack,out}], hand:{street, deck, board, holes, contribs, bets, folded, allIn, toActIdx, actionIndex, currentBet, lastRaiseSize, lastAggressor, reopenEligible}, lastHand, stats, gameOver, result}`
@@ -397,7 +402,6 @@ test('헤즈업: 버튼이 SB이고 프리플랍 선행동', () => {
   const bbSeat = r.state.seats.find(s => s.playerId !== btnSeat).playerId;
   let st = applyAction(r.state, btnSeat, 'call').state;
   st = applyAction(st, bbSeat, 'check').state;
-  assert.equal(st.seats[st.hand.toActIdx].playerId, bbSeat); // 플랍 이후 toAct=BB
 });
 test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /* p2.out=true 세팅 후 startHand → p2 홀카드 없음, 버튼·블라인드가 생존 좌석만 순회 */ });
 ```
@@ -418,7 +422,8 @@ test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /
 - Produces:
   - `legalFor(state) -> {stateVersion, decisionId, handNo, street, toAct, canCheck, callAmount, canRaise, minRaiseTo, maxRaiseTo, potTotal, handOver, gameOver, result?, bustedPlayerIds?}` — 핸드 밖이면 `toAct:null, handOver:true`
   - `applyAction(state, playerId, action, amount?) -> {state, events}` — 검증(차례·합법성·raise-to 범위) 실패 시 `{code:'ILLEGAL_ACTION', message}` throw(상태 무변경), 성공 시 액션 이벤트 + 라운드 종결 판정
-  - `forceDefault(state, playerId)` — 체크 가능하면 체크, 아니면 폴드
+  - `forceDefault(state, playerId) -> {state, events}` — 체크 가능하면 체크, 아니면 폴드. applyAction과 동일 반환 계약.
+  - 스트리트 전환 시 `bets`는 0으로 리셋, `currentBet=0`, 포스트플랍 첫 벳(raise-to)의 최소 금액은 BB다.
 - 규칙 정밀 정의(테스트가 강제):
   - `minRaiseTo = currentBet + lastRaiseSize` (프리플랍 시작 lastRaiseSize=BB)
   - 언더 레이즈 올인(`amount < minRaiseTo`인 올인)은 허용하되 `lastRaiseSize`를 갱신하지 않고, 이미 행동을 마친 플레이어에게 액션을 다시 열지 않는다(그들은 콜/폴드만 가능)
@@ -449,20 +454,6 @@ test('minRaiseTo: 프리플랍 연쇄', () => {
   st = applyAction(st, 'p1', 'raise', 300).state;      // lastRaise 200
   assert.equal(legalFor(st).minRaiseTo, 500);          // p2 차례
 });
-test('포스트플랍 벳과 체크-레이즈', () => {
-  let st = setup3(5000, 5000, 5000);
-  st = applyAction(st, 'user', 'call', undefined).state; // 콜 50
-  st = applyAction(st, 'p1', 'call').state;              // SB 컴플릿
-  st = applyAction(st, 'p2', 'check').state;             // 플랍으로
-  assert.equal(legalFor(st).street, 'flop');
-  assert.equal(legalFor(st).toAct, 'p1');                // 포스트플랍은 SB부터
-  st = applyAction(st, 'p1', 'check').state;
-  st = applyAction(st, 'p2', 'raise', 100).state;        // 벳 100 (첫 벳도 raise-to로 표현)
-  assert.equal(legalFor(st).minRaiseTo, 200);            // user 차례
-  st = applyAction(st, 'user', 'fold').state;
-  st = applyAction(st, 'p1', 'raise', 300).state;        // 체크-레이즈 합법
-  assert.equal(legalFor(st).toAct, 'p2');
-});
 test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => {
   let st = setup3(5000, 5000, 5000);
   st = applyAction(st, 'user', 'call').state;
@@ -475,21 +466,24 @@ test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => {
   assert.equal(r2.events.find(e => e.type === 'action').action, 'fold');
 });
 test('숏스택 올인 레이즈: minRaiseTo > maxRaiseTo, canRaise true', () => {
-  // 3인 [user,p1,p2], button=0(user), 블라인드 25/50, 스택 user 5000 / p1 5000 / p2 200
-  // 프리플랍: user(BTN) raise to 150 → p1(SB) 폴드 → p2(BB) 차례
-  // p2의 합법: call 100 또는 올인 레이즈(스택 200 = raise-to 200 < minRaiseTo 250)
+  // 3인 [user,p1,p2], button=0(user) → SB=p1, BB=p2. 블라인드 25/50, 스택 user 5000 / p1 5000 / p2 200
+  let st = setup3(5000, 5000, 200);
+  st = applyAction(st, 'user', 'raise', 150).state;  // BTN 오픈 레이즈 → 다음 min 250
+  st = applyAction(st, 'p1', 'fold').state;
   const la = legalFor(st);
   assert.equal(la.toAct, 'p2');
   assert.equal(la.canRaise, true);
   assert.ok(la.minRaiseTo > la.maxRaiseTo);
   assert.equal(la.maxRaiseTo, 200);
-  applyAction(st, 'p2', 'raise', 200); // 성공해야 함
+  applyAction(st, 'p2', 'raise', 200);               // 올인 레이즈 성공해야 함
 });
 test('legal 재호출은 같은 decisionId (안정성)', () => {
+  let st = setup3(5000, 5000, 5000);
   const a = legalFor(st); const b = legalFor(st);
   assert.equal(a.decisionId, b.decisionId);
 });
 test('apply 실패 시 상태 무변경·actionIndex 불변', () => {
+  let st = setup3(5000, 5000, 5000);
   const before = JSON.stringify(st);
   assert.throws(() => applyAction(st, 'user', 'raise', 999999));
   assert.equal(JSON.stringify(st), before);
@@ -524,6 +518,29 @@ test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => { /* �
 - [ ] **Step 1 (RED):** `test/hand-showdown.test.js` 실제 케이스:
 
 ```js
+test('헤즈업 포스트플랍 선행동은 BB', () => {
+  const st = createGame({ aiCount: 1 });
+  const r = startHand(st, { deck: fixedDeck() });
+  const btnSeat = r.state.seats[r.state.button].playerId;
+  const bbSeat = r.state.seats.find(s => s.playerId !== btnSeat).playerId;
+  let next = applyAction(r.state, btnSeat, 'call').state;
+  next = applyAction(next, bbSeat, 'check').state;
+  assert.equal(legalFor(next).toAct, bbSeat);
+});
+test('포스트플랍 벳과 체크-레이즈', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'call', undefined).state; // 콜 50
+  st = applyAction(st, 'p1', 'call').state;              // SB 컴플릿
+  st = applyAction(st, 'p2', 'check').state;             // 플랍으로
+  assert.equal(legalFor(st).street, 'flop');
+  assert.equal(legalFor(st).toAct, 'p1');                // 포스트플랍은 SB부터
+  st = applyAction(st, 'p1', 'check').state;
+  st = applyAction(st, 'p2', 'raise', 100).state;        // 벳 100 (첫 벳도 raise-to로 표현)
+  assert.equal(legalFor(st).minRaiseTo, 200);            // user 차례
+  st = applyAction(st, 'user', 'fold').state;
+  st = applyAction(st, 'p1', 'raise', 300).state;        // 체크-레이즈 합법
+  assert.equal(legalFor(st).toAct, 'p2');
+});
 test('칩 보존: 핸드 전후 총합 불변', () => {
   // 고정 덱 3인 핸드를 쇼다운까지 진행
   const total = st => st.seats.reduce((a, s) => a + s.stack, 0)
@@ -551,7 +568,7 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
 **Interfaces:**
 - Produces:
   - `viewFor(state, playerId) -> {...}` (정본 — myCards는 해당 playerId의 홀카드, legal은 그 플레이어 차례일 때만), `userView(state) = viewFor(state,'user')` 래퍼. view에는 `levelEvery`(config 공개값)도 포함한다 — UI 상단바의 '다음 레벨업까지 남은 핸드' 계산용.
-  - `redactedHand(state, handNo) -> {...}` — 해당 핸드에서 사용자 관점 공개 정보만(자기 홀카드, 보드, 공개된 쇼다운 패, 액션 시퀀스, 결정 스냅샷)
+  - `redactRecord(record, viewerId='user') -> {...}` — 아카이브/`state.lastHand` **레코드**를 입력으로 받는 순수 함수. 해당 뷰어 관점에서 공개된 정보만 남긴다(자기 홀카드, 보드, 쇼다운 공개 패, 액션 시퀀스, 결정 스냅샷).
   - `statsReport(state) -> {perPlayer: {vpip, pfr, af, showdownWin, net, sample}}` — 정의는 스펙 §8 (VPIP: 블라인드 강제 제외 자발적 투입, AF=(벳+레이즈)/콜)
 - Consumes: Task 5~7의 state 구조, `legalFor`
 
@@ -566,7 +583,7 @@ test('userView에 금지 정보가 없다', () => {
   }
   assert.ok(v.myCards.length === 2);
 });
-test('redactedHand: 머킹된 패 미포함, 쇼다운 공개 패 포함', () => {});
+test('redactRecord: 머킹된 패 미포함, 쇼다운 공개 패 포함', () => {});
 test('public 이벤트에 금지 정보 없음', () => {
   // 정산까지 끝난 핸드의 events 중 visibility==='public'만 모아 JSON化
   // → 덱 카드·타인 홀카드 문자열이 포함되지 않음을 assert (deal_hole은 actor 전용이어야 함)
@@ -574,7 +591,7 @@ test('public 이벤트에 금지 정보 없음', () => {
 test('VPIP: BB 체크는 미집계, SB 컴플릿은 집계', () => {});
 test('내 차례일 때만 legal 포함 + decisionId 일치', () => {});
 test('viewFor(p1)은 p1 카드만, user 카드 비노출', () => {});
-test('코치 입력 합성(redactedHand + statsReport JSON)에 상대 홀카드·덱·아키타입 문자열 부재', () => {});
+test('코치 입력 합성(redactRecord + statsReport JSON)에 상대 홀카드·덱·아키타입 문자열 부재', () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 사용자 뷰·redacted 히스토리·통계`.
@@ -618,15 +635,18 @@ test('players.json 형태: user 레코드 포함, AI만 페르소나 필드 보�
 - Produces (사용법: `node engine/cli.js <cmd> [args] [--game-dir game]`):
   - `init --ai <n> [--stack N] [--blinds SB/BB] [--level-every N] [--force]` → createGame + generatePersonas + sessionToken(`crypto.randomBytes(16).toString('hex')`) → `players.json`, state 저장. stdout에 `{ok, sessionToken, port?, players:[{playerId,name}]}` (**페르소나 상세는 stdout에 내지 않는다** — 스타일 비공개; 딜러는 스폰 시 `players.json`을 에이전트 프롬프트 작성에만 사용). lock 존재+서버 생존 시 `{ok:false, code:'ACTIVE_GAME'}`.
   - `new-hand`, `legal`, `apply <pid> <action> [amount] [--expect-version N]`, `apply <pid> --force-default`, `view --for user|<pid>`, `hand <n> [--redacted]`, `stats`, `end --result abort`, `resume-check`(정합 자가검사+roll-forward)
+  - state 커밋 후 아카이브 쓰기 실패는 실패 envelope가 아니다 — 성공 응답에 `archivePending:true`를 더해 반환하고, 다음 `resume-check`가 멱등 복구한다(복구 대상은 `state.lastHand`가 가리키는 마지막 핸드뿐이다).
 
 | 명령 | stdout (envelope 공통 필드 외) |
 |---|---|
 | `legal` | `legalFor` 전 필드 그대로 |
 | `apply` / `apply --force-default` | `events`(visibility 포함 전체), `handOver`, `gameOver` (+종료 시 `result`, `bustedPlayerIds`). force-default도 `action` 이벤트(check/fold)를 생성한다 |
 | `view --for <pid|user>` | `viewFor` 결과 |
-| `hand <n> [--redacted]` | 아카이브(`readHand`) 기반 — 과거 핸드 번호 조회 가능 |
-| `resume-check` | `{ok, serverAlive, port, sessionToken, stateVersion, phase, toAct, archiveRepaired}` — lock 판독 + serverPid 생존 확인 + `rebuildArchive` 수행 |
+| `hand <n> [--redacted]` | `readHand(gameDir, n)`(현재 핸드면 `state.lastHand`) 후 `--redacted`면 `redactRecord(record)` 적용 |
+| `resume-check` | `{ok, serverPidAlive, port, sessionToken, stateVersion, phase, toAct, archiveRepaired}` — lock 판독 + serverPid 생존 확인 + `rebuildArchive` 수행 |
+|  | 엔진은 HTTP를 호출하지 않는다 — 최종 attach 판정은 딜러(Task 14)가 lock의 port로 `GET /api/health`를 호출해 내린다. |
 | `init --force` | 절차: lock 판독 → serverPid 생존이면 SIGTERM·종료 대기(최대 5초) → `game/` 폐기 → 새 init |
+| `end --result abort` | withMutation 안에서 `gameOver=true, result:'abort'` 기록. envelope `{ok:true, stateVersion, gameOver:true, result:'abort', events:[]}`. 이후 `new-hand`는 거부된다 |
   - 공통 envelope: 성공 `{ok:true, stateVersion, events?, ...}` / 실패 `{ok:false, code, message}`, exit 0/1/2. 모든 변경 명령은 `withMutation` 임계구역.
   - 이벤트는 visibility 필터 없이 **전부** 반환하되 각 이벤트에 `visibility` 표시(public 필터링은 딜러 규약 — 스펙 §4).
 - Consumes: Task 3~9 전부.
@@ -644,7 +664,8 @@ test('init은 활성 게임에서 ACTIVE_GAME 거부', () => {});
 test('init stdout에 archetype/bluffFreq 미노출', () => {});
 test('과거 핸드 조회: 두 핸드 진행 후 hand 1 --redacted', () => {});
 test('gameOver 후 new-hand 거부', () => {});
-test('아카이브 삭제 후 resume-check가 roll-forward(archiveRepaired true)', () => {});
+test('핸드 1·2 진행 → `hand-0002.json`만 삭제 → `resume-check` → `archiveRepaired:true`, hand-0002 복구, hand-0001은 그대로', () => {});
+test('end abort 후 new-hand 거부', () => {});
 test('init --force: 살아 있는 가짜 서버(spawn된 node 대기 프로세스)를 SIGTERM 후 새 게임 생성', () => {});
 test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이동(4인)', () => {});
 ```
@@ -666,7 +687,8 @@ test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이
   - `GET /?token=` 정적 서빙(`server/public/`)
   - `GET /api/events?token&after=<rev>` SSE — 누적 로그에서 after 이후 재전송 후 라이브, `id:<revision>`, 15s heartbeat 코멘트, `retry: 3000`
   - `GET /api/snapshot?token` → `{revision, view, log:[], coach:[]}`
-  - `POST /api/publish` body `{token, publishId, view?, events?, coach?}` — publishId 중복 시 저장된 revision 반환(멱등), 아니면 revision++ 후 스냅샷 갱신(`game/ui-snapshot.json` 원자 저장) + SSE 브로드캐스트. view만 있는 재게시는 로그에 추가 없음.
+  - `POST /api/publish` body `{token, publishId, view?, events?, messages?, coach?, review?}` — `events`는 엔진 public 이벤트(각각 `{seq, visibility, type, ...}`), `messages`는 딜러 작성 메시지 `[{type:'talk'|'narration', playerId?, text}]`, `coach`는 `[{handNo, text}]`, `review`는 종합 리뷰 마크다운 문자열. **snapshot = `{revision, view, log, coach, review?}`** — log는 events·messages가 도착 revision 순으로 병합 누적된 배열이다. publishId 중복 시 저장된 revision 반환(멱등), 아니면 revision++ 후 스냅샷 갱신(`game/ui-snapshot.json` 원자 저장) + SSE 브로드캐스트. view만 있는 재게시는 로그에 추가 없음.
+  - 모든 성공 envelope는 `events` 배열을 포함한다 — 이벤트가 없는 명령(`legal`, `view`, `stats` 등)은 `events: []`.
   - `POST /api/action` body `{token, decisionId, action, amount?}` — 최신 view의 legal.decisionId와 불일치 시 409, 일치 시 깊이 1 슬롯 저장
   - `GET /api/wait-action?token&timeoutMs=25000&expectDecisionId=` — 일치 액션 즉시/도착 시 반환+슬롯 비움, 타임아웃 `{timeout:true}`
   - 127.0.0.1 바인딩, 토큰 불일치 401, body > 64KB 413, `server.timeout=0`, `keepAliveTimeout` 넉넉히
@@ -684,6 +706,10 @@ test('action: decisionId 불일치 409, 일치 시 wait-action이 소비', async
 test('토큰 없음 401, 바디 65KB 413', async () => {});
 test('타임아웃 설정: server.timeout===0, keepAliveTimeout>=75000, headersTimeout>=80000', async () => {});
 test('서버 재시작: ui-snapshot.json에서 revision·log·coach까지 복원', async () => {});
+test('review 게시 → snapshot 보존 → 서버 재시작 후 복원', async () => {});
+test('깊이 1 덮어쓰기: 같은 decisionId로 두 번 POST → 마지막 값만 소비', async () => {});
+test('소비 직후의 두 번째 wait-action은 timeout', async () => {});
+test('슬롯 decisionId ≠ expectDecisionId면 소비하지 않고 timeout', async () => {});
 ```
 
 - [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 중계 웹 서버`.
@@ -722,8 +748,9 @@ es.onerror = () => { booted = false; };     // 재접속 시 onopen이 다시 �
 function applyMessage(m) { if (m.revision <= revision) return; revision = m.revision; render(m); }
 ```
 
-- [ ] **Step 1:** `dev-drive.js` 작성 — 서버 기동 후 다음 시퀀스 publish: 핸드 시작(4인) → 내 차례(legal 포함 view) → AI 액션 3개+talk → 플랍 → 쇼다운 → coach 노트 → game_over+리뷰. 각 상태 사이 1.5초 대기.
+- [ ] **Step 1:** `dev-drive.js` 작성 — 서버 기동 후 다음 시퀀스 publish: 핸드 시작(4인) → 내 차례(legal 포함 view) → AI 액션 3개+talk → 플랍 → 쇼다운 → coach 노트 → game_over 후 review publish. 각 상태 사이 1.5초 대기.
 - [ ] **Step 2:** UI 구현. 액션 바: fold/check/call 버튼 + raise 슬라이더(min=minRaiseTo, max=maxRaiseTo) + 프리셋(최소/½팟/팟/올인 — 팟 프리셋은 `potTotal` 기준 계산, 범위 클램프). `legal.canCheck`면 콜 버튼 숨김, `canRaise:false`면 슬라이더 비활성. `minRaiseTo > maxRaiseTo`인 경우(숏스택 올인만 가능) 슬라이더를 숨기고 '올인(maxRaiseTo)' 버튼만 활성화한다. 액션 전송: `POST /api/action` `{token, decisionId: view.legal.decisionId, action, amount?}` 후 버튼 즉시 비활성(재활성은 다음 view 게시로).
+- 리뷰 오버레이는 `view.gameOver && snapshot.review`일 때 `review`를 렌더한다.
 - [ ] **Step 3:** 검증: `node server/server.js --game-dir /tmp/holdem-ui --port 8899 --token dev` + `node test/helpers/dev-drive.js` 실행, 브라우저(또는 사용 가능한 브라우저 자동화 도구)로 `http://127.0.0.1:8899/?token=dev` 열어 전 시퀀스 확인: 카드 렌더, 차례 하이라이트, 액션 바 활성/비활성, 로그·코치 탭, 리뷰 오버레이, 새로고침 후 상태 복원. 액션 버튼 클릭 → 서버가 slot에 저장하고 다음 view 게시로 버튼 재활성.
 - [ ] **Step 4:** 커밋 `feat: 포커 테이블 웹 UI`.
 
@@ -756,12 +783,13 @@ export function mulberry32(seed) {
 
 ```js
 test('시뮬레이션 불변식', () => {
-  for (const cfg of [{ai:3},{ai:8},{ai:1}]) {
+  for (const seed of [1, 2, 3]) for (const cfg of [{ai:3},{ai:8},{ai:1}]) {
+    const rng = mulberry32(seed * 1000 + cfg.ai);
     let st = createGame({ aiCount: cfg.ai, levelEvery: 4 });
     const totalChips = (cfg.ai + 1) * 5000;
     let hands = 0;
     while (!st.gameOver && hands < 500) {
-      let r = startHand(st, {}); st = r.state; hands++;
+      let r = startHand(st, { rng }); st = r.state; hands++;
       while (!legalFor(st).handOver) {
         const la = legalFor(st);
         st = applyAction(st, la.toAct, ...randomLegal(la)).state;
@@ -797,10 +825,10 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
   3. **에이전트 스폰**: `game/players.json`을 읽고 `playerId`가 `p`로 시작하는 레코드만 대상으로 플레이어마다 명명 에이전트(이름=agentHandle)를 스폰. 스폰 프롬프트 템플릿(전문 포함): 페르소나 카드 전체 + 행동 규약(JSON 한 줄만, decisionId 에코, 캐릭터 유지, talk ≤ 1문장, 스타일 발설 금지).
   4. **게임 루프**: 스펙 §3 의사코드 그대로 + 딜러 규약: public 이벤트만 publish, publishId 단조 증가, AI 워치독(60초 → 재요청 30초 → `apply <pid> --force-default`), 사용자 apply 거부 시 재게시+재대기, 4b 탈출 조건(handOver/gameOver).
   5. **코칭**: 핸드 종료마다 `hand <n> --redacted` + `stats` + 연습 포커스 + coach-meta(과폴드 코멘트 기사용 여부)를 입력으로 **격리된 1회성 코치 서브에이전트**를 호출(전 패를 본 딜러 컨텍스트가 직접 쓰지 않는다), 출력을 `{handNo, text}`로 publish(재진입 시 마지막 coach handNo 확인으로 중복 방지 — 스펙 §14).
-  6. **종료**: gameOver 시 2단계 종합 리뷰(①격리 evaluator: redacted 트레이스+통계 → ②종합자: 결과 확인+스타일 공개) 생성 → review publish + `game/review.md` 저장 → 에이전트 작별·정리.
+  6. **종료**: gameOver 시 2단계 종합 리뷰(①격리 evaluator: redacted 트레이스+통계 → ②종합자: 결과 확인+스타일 공개) 생성 → review는 publish의 `review` 필드로 게시 + `game/review.md` 저장 → 에이전트 작별·정리.
   7. **resume**: `resume-check` → 서버 생존이면 attach, 죽었으면 재기동 → 재진입 체크리스트(§3) → 에이전트 재스폰+브리핑(자기 페르소나, 현재 스택, 진행 상황 요약).
   8. **호스트 어댑테이션 절**: Claude Code=정본(지속 에이전트), Codex/Grok=저하 모드 문서화(스펙 §9 v1 범위 — 구현 아님).
-- [ ] **Step 2:** 심볼릭 링크 생성: `mkdir -p .claude/skills && ln -s ../../.agents/skills/start-game .claude/skills/start-game`. (Claude Code 심볼릭 링크 인식은 코드만으로 검증 불가 — README의 "구현 후 확인 체크리스트"에 기록: Claude Code 세션에서 `/start-game` 노출 확인, 실패 시 얇은 래퍼 폴백. Codex·Grok 경로도 같은 체크리스트에.)
+- [ ] **Step 2:** 호스트 링크 설치 — ① Claude: `mkdir -p .claude/skills && ln -s ../../.agents/skills/start-game .claude/skills/start-game`. ② Codex: 이 머신의 `~/.codex/` 구성과 로컬 문서에서 프로젝트 스킬 경로를 탐지해 확정되면 링크/포인터를 생성하고, 확정 불가면 **저장소 루트 `AGENTS.md`에 '스킬 정본: `.agents/skills/start-game/SKILL.md`' 포인터 절을 추가**하는 것을 산출물로 한다. ③ Grok: 동일 요령(탐지 → 링크 또는 포인터). ④ 호스트별 **인식 실측**(스킬이 실제로 노출되는지)만 README '구현 후 확인 체크리스트'에 남긴다.
 - [ ] **Step 3:** `README.md` 완성: 실행 방법(스킬/수동), 테스트 실행, 파일 구조, 구현 후 확인 체크리스트(호스트별 스킬 링크 인식 3항목 + Claude Code 세션 첫 게임 스모크).
 - [ ] **Step 4:** 전체 테스트 그린 재확인 → 커밋 `feat: start-game 스킬 정본·호스트 링크·README`.
 
@@ -808,7 +836,7 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
 
 ## 수용 기준 (전체)
 
-1. `node --test test/` 전부 그린 (엔진 단위 + 서버 + 시뮬레이션).
+1. `node --test` 전부 그린 (엔진 단위 + 서버 + 시뮬레이션).
 2. `dev-drive.js` 시퀀스가 브라우저에서 스펙 §7의 전 요소를 시연.
 3. 시뮬레이션 불변식(칩 보존·종료 보장·음수 금지)이 3구성×3시드에서 통과.
 4. `game/`은 gitignore, 커밋된 코드에 시크릿·절대경로 없음.

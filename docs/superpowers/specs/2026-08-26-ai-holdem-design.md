@@ -108,7 +108,7 @@ AI와 함께 즐기는 노리밋 텍사스 홀덤. 메인 Claude 세션이 딜�
 - `apply`는 `--expect-version <N>` 옵션을 받는다(딜러는 직전 legal의 stateVersion을 전달). 불일치 시 거부하며, 중복 적용·경합을 값싸게 차단한다.
 - 모든 이벤트는 `{seq, visibility, type, ...}` 형태이고 `visibility`는 `public | actor:<playerId> | engine` 3종이다. **딜러는 public 이벤트만 서버에 게시하고, 나레이션도 public 이벤트만 근거로 작성한다** (홀카드·덱 유출 차단).
 - `view --for user` 반환 필드(고정): `{handNo, level, levelEvery, blinds, street, board, pots[], seats[](playerId, name, stack, bet, folded, allIn, isButton), toAct, myCards, legal?, gameOver, result?}`. `levelEvery`는 UI가 다음 레벨업까지 남은 핸드를 계산하기 위한 공개 설정값이다(순수 추가 필드). `legal`은 사용자 차례일 때만 포함되며 `legal` 명령과 동일 숫자 + `decisionId`를 담는다 — UI 액션 바는 이것으로 활성화된다.
-- 이벤트 type enum(최소): `hand_start, blinds_posted, deal_hole(actor), action, street, showdown, pot_award, level_up, bust, talk, coach, game_over`.
+- 이벤트 type enum(최소, **엔진 이벤트**): `hand_start, blinds_posted, deal_hole(actor), action, street, showdown, pot_award, level_up, bust, game_over`. 딜러가 작성하는 `talk`(테이블 톡)·`narration`(나레이션)·`coach`(코치 노트)·`review`(종합 리뷰)는 엔진 이벤트가 아니라 publish 본문의 별도 필드로 전달되며(§5), `seq` 없이 서버 `revision`이 순서 정본이다.
 - 핸드 히스토리는 각 결정 지점마다 `{decisionId, street, potTotal, callAmount, minRaiseTo, maxRaiseTo, 공개 보드, 각자 스택}` 스냅샷을 기록한다(redacted 뷰도 보존) — 코칭의 결정 시점 재구성용.
 
 ### CLI 명령
@@ -140,11 +140,11 @@ Node 내장 `http`만 사용. 서버는 **127.0.0.1에만 바인딩**하며 포�
 | `GET /api/health` | 생존 확인 (토큰 불필요) |
 | `GET /api/events` | 브라우저 SSE 구독 (이벤트 스트림) |
 | `GET /api/snapshot` | 마지막 게시 상태 (새로고침·재접속 복구) |
-| `POST /api/publish` | 딜러가 이벤트 배치 + 화면 상태 게시 → SSE 브로드캐스트 + 스냅샷 갱신 |
+| `POST /api/publish` | 딜러가 게시: `{publishId, view?, events?(엔진 public 이벤트), messages?(딜러 talk·narration), coach?, review?}` → SSE 브로드캐스트 + 스냅샷 갱신 |
 | `POST /api/action` | 사용자 액션 `{decisionId, action, amount?}`를 깊이 1 슬롯에 적재(최신 값이 덮어씀) |
 | `GET /api/wait-action?timeoutMs=25000` | 딜러 long-poll. 액션 도착 시 즉시 반환, 타임아웃 시 `{timeout:true}` |
 
-서버 기동은 detached(터미널 훅업 없이 nohup/setsid + 출력 파일 리다이렉트)다. 서버는 액션의 합법성을 판단하지 않는다(딜러가 엔진으로 검증). 사용자 액션은 큐가 아니라 깊이 1 슬롯이며, `wait-action`이 소비하면 슬롯을 비운다. `decisionId`는 딜러가 게시한 "내 차례" 상태에 포함된 값이다. 딜러는 decisionId가 현재 결정과 불일치하면 폐기하고 안내 이벤트를 게시한다. UI가 내 차례에만 버튼을 활성화해 1차로 거른다. 딜러는 publish 본문에 단조 증가 `publishId`를 포함하고, 서버는 마지막 publishId를 스냅샷에 저장해 중복 publish에는 기존 revision을 반환한다(멱등). 서버는 publish마다 단조 증가 `revision`을 부여하고 SSE 이벤트 id로 사용한다. **스냅샷 = `{revision, view, 누적 이벤트 로그, 누적 코치 노트}`**이며 매 publish 시 `game/ui-snapshot.json`에 원자적으로 저장한다(서버 재시작 시 복원). 복구를 위한 재게시는 view만 갱신하며 events를 포함하지 않는다(누적 로그 중복 방지). 클라이언트는 ① `GET /api/events?token=...&after=<revision>`으로 먼저 접속 → ② snapshot 로드 → ③ after 기준으로 적용한다. 서버는 누적 로그에서 after 이후 이벤트를 재전송한다(부트스트랩 갭 차단). GET 계열 요청의 토큰은 `?token=` 쿼리로 받는다(EventSource가 커스텀 헤더를 지원하지 않으므로). SSE는 15초 간격 heartbeat 코멘트를 보낸다. `POST /api/action`은 서버가 최신 게시된 decisionId와 불일치하면 409로 거부한다(낡은 요청이 유효 액션을 덮어쓰지 못함). `wait-action`은 `expectDecisionId` 쿼리로 일치하는 액션만 소비한다. 딜러는 재진입·publish 실패 시 health로 생존을 확인하고 죽었으면 재기동한다.
+서버 기동은 detached(터미널 훅업 없이 nohup/setsid + 출력 파일 리다이렉트)다. 서버는 액션의 합법성을 판단하지 않는다(딜러가 엔진으로 검증). 사용자 액션은 큐가 아니라 깊이 1 슬롯이며, `wait-action`이 소비하면 슬롯을 비운다. `decisionId`는 딜러가 게시한 "내 차례" 상태에 포함된 값이다. 딜러는 decisionId가 현재 결정과 불일치하면 폐기하고 안내 이벤트를 게시한다. UI가 내 차례에만 버튼을 활성화해 1차로 거른다. 딜러는 publish 본문에 단조 증가 `publishId`를 포함하고, 서버는 마지막 publishId를 스냅샷에 저장해 중복 publish에는 기존 revision을 반환한다(멱등). 서버는 publish마다 단조 증가 `revision`을 부여하고 SSE 이벤트 id로 사용한다. **스냅샷 = `{revision, view, log(이벤트·메시지 병합 누적), coach, review?}`**이며 매 publish 시 `game/ui-snapshot.json`에 원자적으로 저장한다(서버 재시작 시 복원). 복구를 위한 재게시는 view만 갱신하며 events를 포함하지 않는다(누적 로그 중복 방지). 클라이언트는 ① `GET /api/events?token=...&after=<revision>`으로 먼저 접속 → ② snapshot 로드 → ③ after 기준으로 적용한다. 서버는 누적 로그에서 after 이후 이벤트를 재전송한다(부트스트랩 갭 차단). GET 계열 요청의 토큰은 `?token=` 쿼리로 받는다(EventSource가 커스텀 헤더를 지원하지 않으므로). SSE는 15초 간격 heartbeat 코멘트를 보낸다. `POST /api/action`은 서버가 최신 게시된 decisionId와 불일치하면 409로 거부한다(낡은 요청이 유효 액션을 덮어쓰지 못함). `wait-action`은 `expectDecisionId` 쿼리로 일치하는 액션만 소비한다. 딜러는 재진입·publish 실패 시 health로 생존을 확인하고 죽었으면 재기동한다.
 
 ## 6. 플레이어 에이전트
 
