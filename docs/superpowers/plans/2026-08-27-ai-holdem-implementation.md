@@ -370,7 +370,7 @@ test('동점 스플릿 홀수 칩은 순서 앞 좌석부터', () => {
 
 `talk`·`coach`·`narration`은 엔진이 생성하지 않는다 — 딜러 publish 전용 이벤트로 `seq`가 없으며, 순서 정본은 서버 `revision`이다(엔진 seq는 엔진 이벤트만 정렬한다).
 
-- [ ] **Step 1 (RED):** `test/hand-setup.test.js` 실제 케이스:
+- [x] **Step 1 (RED):** `test/hand-setup.test.js` 실제 케이스:
 
 ```js
 test('레벨업 경계: levelEvery=8이면 9번째 핸드부터 레벨 1', () => {
@@ -408,7 +408,7 @@ test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /
 
 (`fixedDeck()`는 `test/helpers/fixtures.js`에 구현: 고정 순서 덱 반환.)
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 핸드 시작·로테이션·블라인드·레벨`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 핸드 시작·로테이션·블라인드·레벨`.
 
 ---
 
