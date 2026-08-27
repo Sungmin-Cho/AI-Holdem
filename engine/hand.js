@@ -179,6 +179,7 @@ export function startHand(state, options = {}) {
     lastRaiseSize: bb,
     lastAggressor: null,
     reopenEligible: true,
+    acted: [],
   };
 
   const events = [];
@@ -198,4 +199,244 @@ export function startHand(state, options = {}) {
   }
 
   return { state: next, events };
+}
+
+function throwIllegal(message) {
+  const error = new Error(message);
+  error.code = 'ILLEGAL_ACTION';
+  throw error;
+}
+
+function potTotal(hand) {
+  if (!hand) return 0;
+  return Object.values(hand.contribs).reduce((sum, chips) => sum + chips, 0);
+}
+
+function inPotPids(hand) {
+  return Object.keys(hand.holes).filter((pid) => !hand.folded.includes(pid));
+}
+
+function canPutChips(state, pid) {
+  const hand = state.hand;
+  if (!hand?.holes[pid]) return false;
+  if (hand.folded.includes(pid)) return false;
+  if (hand.allIn.includes(pid)) return false;
+  const seat = state.seats.find((s) => s.playerId === pid);
+  return Boolean(seat && seat.stack > 0);
+}
+
+function actionablePids(state) {
+  return inPotPids(state.hand).filter((pid) => canPutChips(state, pid));
+}
+
+function needsAction(state, idx) {
+  const seat = state.seats[idx];
+  if (!seat) return false;
+  const pid = seat.playerId;
+  if (!canPutChips(state, pid)) return false;
+  const matched = (state.hand.bets[pid] ?? 0) >= state.hand.currentBet;
+  if (actionablePids(state).length === 1) return !matched;
+  if (state.hand.acted.includes(pid) && matched) return false;
+  return true;
+}
+
+function nextNeedingAction(state, fromIdx) {
+  const n = state.seats.length;
+  for (let step = 1; step <= n; step += 1) {
+    const idx = (fromIdx + step) % n;
+    if (needsAction(state, idx)) return idx;
+  }
+  return null;
+}
+
+function bettingRoundClosed(state) {
+  const inPot = inPotPids(state.hand);
+  if (inPot.length <= 1) return true;
+  const actionable = actionablePids(state);
+  if (actionable.length === 0) return true;
+  if (actionable.length === 1) {
+    const pid = actionable[0];
+    return (state.hand.bets[pid] ?? 0) >= state.hand.currentBet;
+  }
+  return actionable.every(
+    (pid) => state.hand.acted.includes(pid) && (state.hand.bets[pid] ?? 0) >= state.hand.currentBet,
+  );
+}
+
+const NEXT_STREET = { preflop: 'flop', flop: 'turn', turn: 'river' };
+const STREET_CARDS = { flop: 3, turn: 1, river: 1 };
+
+function bbAmount(state) {
+  return blindsForLevel(state.level, state.config.blinds0)[1];
+}
+
+function advanceStreet(state) {
+  const nextStreet = NEXT_STREET[state.hand.street];
+  const n = STREET_CARDS[nextStreet];
+  for (let i = 0; i < n; i += 1) state.hand.board.push(state.hand.deck.shift());
+  state.hand.street = nextStreet;
+  for (const pid of Object.keys(state.hand.bets)) state.hand.bets[pid] = 0;
+  state.hand.currentBet = 0;
+  state.hand.lastRaiseSize = bbAmount(state);
+  state.hand.lastAggressor = null;
+  state.hand.reopenEligible = true;
+  state.hand.acted = [];
+  state.hand.toActIdx = nextNeedingAction(state, state.button);
+}
+
+function afterAction(state) {
+  if (inPotPids(state.hand).length <= 1) {
+    state.hand.toActIdx = null;
+    return;
+  }
+  if (!bettingRoundClosed(state)) {
+    state.hand.toActIdx = nextNeedingAction(state, state.hand.toActIdx);
+    return;
+  }
+  if (state.hand.street === 'river' || !NEXT_STREET[state.hand.street]) {
+    state.hand.toActIdx = null;
+    return;
+  }
+  advanceStreet(state);
+  if (state.hand.toActIdx == null || bettingRoundClosed(state)) {
+    state.hand.toActIdx = null;
+  }
+}
+
+function decisionIdOf(state) {
+  const hand = state.hand;
+  if (!hand) return null;
+  return `d-${state.handNo}-${hand.street}-${hand.actionIndex}`;
+}
+
+function legalSnapshot(state) {
+  const hand = state.hand;
+  const idle = !hand || state.phase !== 'in_hand';
+  const toActIdx = idle ? null : hand.toActIdx;
+  const toAct = toActIdx != null && needsAction(state, toActIdx)
+    ? state.seats[toActIdx].playerId
+    : null;
+  const handOver = idle || toAct == null;
+  const base = {
+    stateVersion: state.stateVersion,
+    decisionId: idle ? null : decisionIdOf(state),
+    handNo: state.handNo,
+    street: hand?.street ?? null,
+    toAct,
+    canCheck: false,
+    callAmount: 0,
+    canRaise: false,
+    minRaiseTo: 0,
+    maxRaiseTo: 0,
+    potTotal: potTotal(hand),
+    handOver,
+    gameOver: state.gameOver,
+  };
+  if (state.result != null) base.result = state.result;
+  if (state.bustedPlayerIds) base.bustedPlayerIds = state.bustedPlayerIds;
+  if (handOver) return base;
+
+  const seat = state.seats[toActIdx];
+  const pid = seat.playerId;
+  const myBet = hand.bets[pid] ?? 0;
+  const callRaw = Math.max(0, hand.currentBet - myBet);
+  const callAmount = Math.min(callRaw, seat.stack);
+  const minRaiseTo = hand.currentBet + hand.lastRaiseSize;
+  const maxRaiseTo = myBet + seat.stack;
+  const reopenBlocked = hand.acted.includes(pid) && !hand.reopenEligible;
+  const canRaise = !reopenBlocked && maxRaiseTo > hand.currentBet;
+  return {
+    ...base,
+    canCheck: callRaw === 0,
+    callAmount,
+    canRaise,
+    minRaiseTo,
+    maxRaiseTo,
+  };
+}
+
+export function legalFor(state) {
+  return legalSnapshot(state);
+}
+
+function putChips(seat, hand, pid, put) {
+  seat.stack -= put;
+  hand.bets[pid] = (hand.bets[pid] ?? 0) + put;
+  hand.contribs[pid] = (hand.contribs[pid] ?? 0) + put;
+  if (seat.stack === 0 && !hand.allIn.includes(pid)) hand.allIn.push(pid);
+}
+
+function markActed(hand, pid) {
+  if (!hand.acted.includes(pid)) hand.acted.push(pid);
+}
+
+export function applyAction(state, playerId, action, amount) {
+  const legal = legalSnapshot(state);
+  if (legal.toAct !== playerId) throwIllegal('not your turn');
+  if (action !== 'fold' && action !== 'check' && action !== 'call' && action !== 'raise') {
+    throwIllegal('unknown action');
+  }
+  if (action === 'check' && !legal.canCheck) throwIllegal('cannot check');
+  if (action === 'call' && (legal.callAmount <= 0 || legal.canCheck)) throwIllegal('cannot call');
+  if (action === 'raise') {
+    if (!legal.canRaise) throwIllegal('cannot raise');
+    if (!Number.isInteger(amount)) throwIllegal('raise-to must be an integer');
+    if (legal.minRaiseTo > legal.maxRaiseTo) {
+      if (amount !== legal.maxRaiseTo) throwIllegal('only all-in raise is legal');
+    } else if (amount < legal.minRaiseTo || amount > legal.maxRaiseTo) {
+      throwIllegal('raise-to out of range');
+    }
+  }
+
+  const next = structuredClone(state);
+  const hand = next.hand;
+  const street = hand.street;
+  const seat = next.seats.find((s) => s.playerId === playerId);
+  const myBet = hand.bets[playerId] ?? 0;
+
+  if (action === 'fold') {
+    hand.folded.push(playerId);
+    markActed(hand, playerId);
+  } else if (action === 'check') {
+    markActed(hand, playerId);
+  } else if (action === 'call') {
+    putChips(seat, hand, playerId, Math.min(hand.currentBet - myBet, seat.stack));
+    markActed(hand, playerId);
+  } else {
+    const put = amount - myBet;
+    const raiseBy = amount - hand.currentBet;
+    const fullRaise = amount >= hand.currentBet + hand.lastRaiseSize;
+    putChips(seat, hand, playerId, put);
+    if (fullRaise) {
+      hand.lastRaiseSize = raiseBy;
+      hand.lastAggressor = playerId;
+      hand.reopenEligible = true;
+      hand.acted = [playerId];
+    } else {
+      hand.reopenEligible = false;
+      markActed(hand, playerId);
+    }
+    hand.currentBet = amount;
+  }
+
+  hand.actionIndex += 1;
+  afterAction(next);
+
+  const events = [];
+  const wentAllIn = next.hand.allIn.includes(playerId);
+  const payload = { playerId, action, street };
+  if (action === 'raise') payload.amount = amount;
+  if (wentAllIn) payload.allIn = true;
+  emit(events, 'public', 'action', payload);
+  if (next.hand.street !== street) {
+    emit(events, 'public', 'street', { street: next.hand.street, board: [...next.hand.board] });
+  }
+  return { state: next, events };
+}
+
+export function forceDefault(state, playerId) {
+  const legal = legalSnapshot(state);
+  if (legal.toAct !== playerId) throwIllegal('not your turn');
+  if (legal.canCheck) return applyAction(state, playerId, 'check');
+  return applyAction(state, playerId, 'fold');
 }

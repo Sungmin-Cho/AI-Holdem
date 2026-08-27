@@ -431,7 +431,7 @@ test('탈락 좌석 건너뛰고 버튼 이동, out 좌석 미딜링', () => { /
   - 벳이 없는 스트리트의 첫 벳도 액션 enum상 `raise`(raise-to)로 표현한다 — `bet` 액션은 없다.
   - `decisionId`는 `(handNo, street, actionIndex)`에서 유도 — apply 성공 시에만 actionIndex 증가
 
-- [ ] **Step 1 (RED):** `test/hand-betting.test.js` 실제 케이스:
+- [x] **Step 1 (RED):** `test/hand-betting.test.js` 실제 케이스:
 
 ```js
 // 공용 셋업: 3인 [user,p1,p2], button=0(user) → SB=p1, BB=p2, 블라인드 25/50, 레벨 0
@@ -493,7 +493,7 @@ test('minRaiseTo 계산', () => { /* 벳 100 → 레이즈는 200 이상; 300 �
 test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => { /* 두 상황 각각 */ });
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 베팅 라운드·legal·apply`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 베팅 라운드·legal·apply`.
 
 ---
 
