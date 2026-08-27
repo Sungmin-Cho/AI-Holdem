@@ -1,5 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { newDeck, shuffle } from './cards.js';
+import { compareScore, evaluate7 } from './evaluator.js';
+import { awardPots, buildPots } from './sidepots.js';
 
 const DEFAULT_BLINDS = [25, 50];
 const BASE_BLINDS = [
@@ -151,6 +153,12 @@ export function startHand(state, options = {}) {
     if (wentAllIn) allIn.push(seat.playerId);
     posts.push({ playerId: seat.playerId, amount: posted, allIn: wentAllIn });
   };
+  const startStacks = {};
+  for (const seatIdx of dealOrder) {
+    const seat = next.seats[seatIdx];
+    startStacks[seat.playerId] = seat.stack;
+  }
+
   post(sbIdx, sb);
   post(bbIdx, bb);
 
@@ -178,8 +186,15 @@ export function startHand(state, options = {}) {
     currentBet: bb,
     lastRaiseSize: bb,
     lastAggressor: null,
+    lastBettingAggressor: null,
     reopenEligible: true,
     acted: [],
+    actions: [],
+    startStacks,
+    vpipped: [],
+    pfrd: [],
+    raiseCount: {},
+    callCount: {},
   };
 
   const events = [];
@@ -197,6 +212,8 @@ export function startHand(state, options = {}) {
     const pid = next.seats[seatIdx].playerId;
     emit(events, `actor:${pid}`, 'deal_hole', { playerId: pid, cards: [...holes[pid]] });
   }
+
+  if (legalSnapshot(next).handOver) finishHand(next, events);
 
   return { state: next, events };
 }
@@ -284,23 +301,225 @@ function advanceStreet(state) {
   state.hand.toActIdx = nextNeedingAction(state, state.button);
 }
 
-function afterAction(state) {
+function runout(state, events) {
+  while (NEXT_STREET[state.hand.street]) {
+    advanceStreet(state);
+    emit(events, 'public', 'street', {
+      street: state.hand.street,
+      board: [...state.hand.board],
+    });
+  }
+}
+
+function clockwiseFrom(state, startIdx, inPot) {
+  const n = state.seats.length;
+  const order = [];
+  for (let i = 0; i < n; i += 1) {
+    const pid = state.seats[(startIdx + i) % n].playerId;
+    if (!inPot || inPot.includes(pid)) order.push(pid);
+  }
+  return order;
+}
+
+function oddChipOrder(state) {
+  return clockwiseFrom(state, (state.button + 1) % state.seats.length);
+}
+
+function revealOrder(state, inPot, lastAggressor) {
+  if (lastAggressor && inPot.includes(lastAggressor)) {
+    const startIdx = state.seats.findIndex((seat) => seat.playerId === lastAggressor);
+    return clockwiseFrom(state, startIdx, inPot);
+  }
+  return clockwiseFrom(state, (state.button + 1) % state.seats.length, inPot);
+}
+
+function potWinnersOf(pot, scores) {
+  let best = null;
+  for (const pid of pot.eligible) {
+    const score = scores.get(pid);
+    if (best == null || compareScore(score, best) > 0) best = score;
+  }
+  return pot.eligible.filter((pid) => compareScore(scores.get(pid), best) === 0);
+}
+
+function buildShowdown(state, hand, inPot, pots, scores, evals) {
+  const winnerSet = new Set();
+  for (const pot of pots) {
+    for (const pid of potWinnersOf(pot, scores)) winnerSet.add(pid);
+  }
+  const order = revealOrder(state, inPot, hand.lastBettingAggressor);
+  const shown = [];
+  const reveals = [];
+  const mucks = [];
+  for (const pid of order) {
+    const mustShow = winnerSet.has(pid) || pots.some((pot) => {
+      if (!pot.eligible.includes(pid)) return false;
+      const shownInPot = shown.filter((id) => pot.eligible.includes(id));
+      if (shownInPot.length === 0) return true;
+      let bestShown = scores.get(shownInPot[0]);
+      for (const id of shownInPot.slice(1)) {
+        if (compareScore(scores.get(id), bestShown) > 0) bestShown = scores.get(id);
+      }
+      return compareScore(scores.get(pid), bestShown) > 0;
+    });
+    if (mustShow) {
+      reveals.push({
+        playerId: pid,
+        cards: [...hand.holes[pid]],
+        handName: evals[pid].name,
+      });
+      shown.push(pid);
+    } else {
+      mucks.push(pid);
+    }
+  }
+  return { reveals, mucks };
+}
+
+function updateStats(state, hand, inPot, contested, awarded) {
+  for (const pid of Object.keys(hand.holes)) {
+    const stats = state.stats[pid] ?? (state.stats[pid] = emptyStats());
+    stats.hands += 1;
+    if (hand.vpipped.includes(pid)) stats.vpip += 1;
+    if (hand.pfrd.includes(pid)) stats.pfr += 1;
+    stats.betsRaises += hand.raiseCount[pid] ?? 0;
+    stats.calls += hand.callCount[pid] ?? 0;
+    if (contested && inPot.includes(pid)) {
+      stats.showdowns += 1;
+      if ((awarded[pid] ?? 0) > 0) stats.showdownWins += 1;
+    }
+    const start = hand.startStacks[pid] ?? 0;
+    const seat = state.seats.find((s) => s.playerId === pid);
+    stats.net += seat.stack - start;
+  }
+}
+
+function finishHand(state, events) {
+  const hand = state.hand;
+  const inPot = inPotPids(hand);
+  const contested = inPot.length >= 2;
+  if (contested) runout(state, events);
+
+  const pots = buildPots(new Map(Object.entries(hand.contribs)), new Set(hand.folded));
+  const evals = {};
+  const scores = new Map();
+  if (contested) {
+    for (const pid of inPot) {
+      const result = evaluate7([...hand.holes[pid], ...hand.board]);
+      evals[pid] = result;
+      scores.set(pid, result.score);
+    }
+  } else {
+    for (const pid of inPot) scores.set(pid, [1]);
+  }
+
+  let showdown = null;
+  if (contested) {
+    showdown = buildShowdown(state, hand, inPot, pots, scores, evals);
+    emit(events, 'public', 'showdown', {
+      reveals: showdown.reveals,
+      mucks: showdown.mucks,
+    });
+  }
+
+  const order = oddChipOrder(state);
+  const awarded = {};
+  const potRecords = [];
+  for (let i = 0; i < pots.length; i += 1) {
+    const pot = pots[i];
+    const part = awardPots([pot], scores, order);
+    const winners = [];
+    for (const pid of order) {
+      const share = part.get(pid) ?? 0;
+      if (share <= 0) continue;
+      winners.push({ playerId: pid, share });
+      awarded[pid] = (awarded[pid] ?? 0) + share;
+      state.seats.find((s) => s.playerId === pid).stack += share;
+    }
+    emit(events, 'public', 'pot_award', {
+      potIndex: i,
+      amount: pot.amount,
+      winners,
+    });
+    potRecords.push({
+      potIndex: i,
+      amount: pot.amount,
+      eligible: [...pot.eligible],
+      winners,
+    });
+  }
+
+  updateStats(state, hand, inPot, contested, awarded);
+
+  const endStacks = {};
+  for (const seat of state.seats) endStacks[seat.playerId] = seat.stack;
+
+  state.lastHand = {
+    handNo: state.handNo,
+    level: state.level,
+    blinds: blindsForLevel(state.level, state.config.blinds0),
+    button: state.seats[state.button].playerId,
+    holes: structuredClone(hand.holes),
+    board: [...hand.board],
+    folded: [...hand.folded],
+    allIn: [...hand.allIn],
+    actions: structuredClone(hand.actions),
+    pots: potRecords,
+    showdown,
+    startStacks: { ...hand.startStacks },
+    endStacks,
+  };
+
+  const bustedPlayerIds = [];
+  for (const seat of state.seats) {
+    if (!seat.out && seat.stack === 0) {
+      seat.out = true;
+      bustedPlayerIds.push(seat.playerId);
+      emit(events, 'public', 'bust', { playerId: seat.playerId });
+    }
+  }
+
+  const user = state.seats.find((seat) => seat.playerId === 'user');
+  const aiAlive = state.seats.some((seat) => seat.playerId !== 'user' && !seat.out);
+  if (!user || user.stack <= 0) {
+    state.gameOver = true;
+    state.result = 'lose';
+    state.bustedPlayerIds = bustedPlayerIds;
+    emit(events, 'public', 'game_over', { result: 'lose', bustedPlayerIds });
+  } else if (!aiAlive) {
+    state.gameOver = true;
+    state.result = 'win';
+    state.bustedPlayerIds = bustedPlayerIds;
+    emit(events, 'public', 'game_over', { result: 'win', bustedPlayerIds });
+  }
+
+  state.phase = 'idle';
+  state.hand = null;
+}
+
+function afterAction(state, events) {
   if (inPotPids(state.hand).length <= 1) {
-    state.hand.toActIdx = null;
+    finishHand(state, events);
     return;
   }
   if (!bettingRoundClosed(state)) {
     state.hand.toActIdx = nextNeedingAction(state, state.hand.toActIdx);
     return;
   }
-  if (state.hand.street === 'river' || !NEXT_STREET[state.hand.street]) {
-    state.hand.toActIdx = null;
+  state.hand.lastBettingAggressor = state.hand.lastAggressor;
+  if (actionablePids(state).length <= 1) {
+    finishHand(state, events);
+    return;
+  }
+  if (!NEXT_STREET[state.hand.street]) {
+    finishHand(state, events);
     return;
   }
   advanceStreet(state);
-  if (state.hand.toActIdx == null || bettingRoundClosed(state)) {
-    state.hand.toActIdx = null;
-  }
+  emit(events, 'public', 'street', {
+    street: state.hand.street,
+    board: [...state.hand.board],
+  });
 }
 
 function decisionIdOf(state) {
@@ -395,6 +614,21 @@ export function applyAction(state, playerId, action, amount) {
   const seat = next.seats.find((s) => s.playerId === playerId);
   const myBet = hand.bets[playerId] ?? 0;
 
+  const record = {
+    decisionId: legal.decisionId,
+    playerId,
+    action,
+    amount: action === 'raise' ? amount : action === 'call' ? legal.callAmount : 0,
+    street,
+    potTotal: legal.potTotal,
+    callAmount: legal.callAmount,
+    minRaiseTo: legal.minRaiseTo,
+    maxRaiseTo: legal.maxRaiseTo,
+    board: [...hand.board],
+    stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
+  };
+  hand.actions.push(record);
+
   if (action === 'fold') {
     hand.folded.push(playerId);
     markActed(hand, playerId);
@@ -403,6 +637,8 @@ export function applyAction(state, playerId, action, amount) {
   } else if (action === 'call') {
     putChips(seat, hand, playerId, Math.min(hand.currentBet - myBet, seat.stack));
     markActed(hand, playerId);
+    hand.callCount[playerId] = (hand.callCount[playerId] ?? 0) + 1;
+    if (street === 'preflop' && !hand.vpipped.includes(playerId)) hand.vpipped.push(playerId);
   } else {
     const put = amount - myBet;
     const raiseBy = amount - hand.currentBet;
@@ -418,20 +654,21 @@ export function applyAction(state, playerId, action, amount) {
       markActed(hand, playerId);
     }
     hand.currentBet = amount;
+    hand.raiseCount[playerId] = (hand.raiseCount[playerId] ?? 0) + 1;
+    if (street === 'preflop') {
+      if (!hand.vpipped.includes(playerId)) hand.vpipped.push(playerId);
+      if (!hand.pfrd.includes(playerId)) hand.pfrd.push(playerId);
+    }
   }
 
   hand.actionIndex += 1;
-  afterAction(next);
-
+  const wentAllIn = hand.allIn.includes(playerId);
   const events = [];
-  const wentAllIn = next.hand.allIn.includes(playerId);
   const payload = { playerId, action, street };
   if (action === 'raise') payload.amount = amount;
   if (wentAllIn) payload.allIn = true;
   emit(events, 'public', 'action', payload);
-  if (next.hand.street !== street) {
-    emit(events, 'public', 'street', { street: next.hand.street, board: [...next.hand.board] });
-  }
+  afterAction(next, events);
   return { state: next, events };
 }
 

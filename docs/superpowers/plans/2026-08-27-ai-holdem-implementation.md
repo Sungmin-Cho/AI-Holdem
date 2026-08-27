@@ -515,7 +515,7 @@ test('forceDefault: 체크 가능하면 체크, 아니면 폴드', () => { /* �
   - 핸드 히스토리(lastHand)에 결정 스냅샷: 각 액션마다 `{decisionId, playerId, action, amount, street, potTotal, callAmount, minRaiseTo, maxRaiseTo, board, stacks}`
   - 통계 누적: `state.stats[pid] = {hands, vpip, pfr, betsRaises, calls, showdowns, showdownWins, net}`
 
-- [ ] **Step 1 (RED):** `test/hand-showdown.test.js` 실제 케이스:
+- [x] **Step 1 (RED):** `test/hand-showdown.test.js` 실제 케이스:
 
 ```js
 test('헤즈업 포스트플랍 선행동은 BB', () => {
@@ -556,7 +556,7 @@ test('bust 좌석은 out=true', () => {});
 test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구성할 수 있다(모듈 수준 비교)', () => {});
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 쇼다운·정산·아카이브·게임 종료`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 쇼다운·정산·아카이브·게임 종료`.
 
 ---
 
