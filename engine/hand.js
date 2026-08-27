@@ -344,7 +344,8 @@ function legalSnapshot(state) {
   const minRaiseTo = hand.currentBet + hand.lastRaiseSize;
   const maxRaiseTo = myBet + seat.stack;
   const reopenBlocked = hand.acted.includes(pid) && !hand.reopenEligible;
-  const canRaise = !reopenBlocked && maxRaiseTo > hand.currentBet;
+  const hasRespondent = actionablePids(state).some((id) => id !== pid);
+  const canRaise = !reopenBlocked && hasRespondent && maxRaiseTo > hand.currentBet;
   return {
     ...base,
     canCheck: callRaw === 0,
@@ -407,9 +408,9 @@ export function applyAction(state, playerId, action, amount) {
     const raiseBy = amount - hand.currentBet;
     const fullRaise = amount >= hand.currentBet + hand.lastRaiseSize;
     putChips(seat, hand, playerId, put);
+    hand.lastAggressor = playerId;
     if (fullRaise) {
       hand.lastRaiseSize = raiseBy;
-      hand.lastAggressor = playerId;
       hand.reopenEligible = true;
       hand.acted = [playerId];
     } else {

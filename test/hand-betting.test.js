@@ -13,6 +13,8 @@ test('언더 레이즈 올인은 베팅을 다시 열지 않는다', () => {
   assert.equal(la.toAct, 'user');
   assert.equal(la.canRaise, false);                    // user에게 다시 열리지 않음
   assert.equal(la.callAmount, 30);
+  assert.equal(st.hand.lastAggressor, 'p2');
+  assert.equal(st.hand.reopenEligible, false);
 });
 
 test('minRaiseTo: 프리플랍 연쇄', () => {
@@ -86,6 +88,18 @@ test('체크-레이즈 합법', () => {
   assert.equal(act.action, 'raise');
   assert.equal(act.amount, 300);
   assert.equal(legalFor(r.state).toAct, 'user');
+});
+
+test('대응 가능한 상대가 없으면 레이즈할 수 없다', () => {
+  // SB 25·BB 50이 블라인드 포스팅으로 이미 올인 — 레이즈할 상대가 없다
+  const st = setup3(5000, 25, 50);
+  const la = legalFor(st);
+  assert.equal(la.toAct, 'user');
+  assert.equal(la.canRaise, false);
+  assert.equal(la.callAmount, 50);
+  const before = JSON.stringify(st);
+  assert.throws(() => applyAction(st, 'user', 'raise', 100), { code: 'ILLEGAL_ACTION' });
+  assert.equal(JSON.stringify(st), before);
 });
 
 test('minRaiseTo 계산', () => {
