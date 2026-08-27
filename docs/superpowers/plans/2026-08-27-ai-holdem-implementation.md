@@ -694,7 +694,7 @@ test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이
   - 127.0.0.1 바인딩, 토큰 불일치 401, body > 64KB 413, `server.timeout=0`, `keepAliveTimeout` 넉넉히
 - Consumes: 없음(엔진 import 금지 — 게임 로직 무지 유지). view 구조는 불투명 JSON으로 취급.
 
-- [ ] **Step 1 (RED):** `test/server.test.js` — 실제 http 왕복(포트 0 사용):
+- [x] **Step 1 (RED):** `test/server.test.js` — 실제 http 왕복(포트 0 사용):
 
 ```js
 test('publish → snapshot → SSE after-replay 갭 없음', async () => {
@@ -712,7 +712,7 @@ test('소비 직후의 두 번째 wait-action은 timeout', async () => {});
 test('슬롯 decisionId ≠ expectDecisionId면 소비하지 않고 timeout', async () => {});
 ```
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 중계 웹 서버`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 중계 웹 서버`.
 
 ---
 
