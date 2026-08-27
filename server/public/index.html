@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 홀덤</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">AI 홀덤</div>
+    <div class="meta">
+      <span>핸드 <strong id="hand-no">—</strong></span>
+      <span>레벨 <strong id="level">—</strong></span>
+      <span>블라인드 <strong id="blinds">—</strong></span>
+      <span>다음 레벨까지 <strong id="level-left">—</strong>핸드</span>
+    </div>
+    <div id="conn" class="conn off" aria-live="polite">연결 중…</div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div class="table-wrap">
+        <div class="table" id="table" aria-label="포커 테이블">
+          <div class="felt">
+            <div class="center">
+              <div id="board" class="board" aria-label="커뮤니티 카드"></div>
+              <div id="pots" class="pots">팟 0</div>
+            </div>
+          </div>
+          <div id="seats" class="seats"></div>
+        </div>
+      </div>
+
+      <p id="thinking" class="thinking" hidden aria-live="polite"></p>
+      <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
+
+      <div id="action-bar" class="action-bar" hidden>
+        <button type="button" id="btn-fold">폴드</button>
+        <button type="button" id="btn-check">체크</button>
+        <button type="button" id="btn-call">콜</button>
+        <div id="raise-panel" class="raise-panel">
+          <div class="raise-row">
+            <input id="raise-slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액">
+            <button type="button" id="btn-raise">레이즈</button>
+          </div>
+          <div class="presets">
+            <button type="button" data-preset="min">최소</button>
+            <button type="button" data-preset="half">½팟</button>
+            <button type="button" data-preset="pot">팟</button>
+            <button type="button" data-preset="allin">올인</button>
+          </div>
+        </div>
+        <button type="button" id="btn-allin-only" hidden>올인</button>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="tabs" role="tablist">
+        <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true">이벤트 로그</button>
+        <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false">코치</button>
+      </div>
+      <div id="panel-log" class="panel" role="tabpanel">
+        <div id="log-list" class="log-list" aria-live="polite"></div>
+      </div>
+      <div id="panel-coach" class="panel" role="tabpanel" hidden>
+        <div id="coach-list" class="coach-list"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="review-overlay" class="overlay" hidden>
+    <div class="review-card" role="dialog" aria-labelledby="review-title">
+      <div class="review-head">
+        <h1 id="review-title">종합 리뷰</h1>
+        <p id="review-result" class="review-result"></p>
+        <button type="button" id="review-close">닫기</button>
+      </div>
+      <div id="review-body" class="review-body"></div>
+    </div>
+  </div>
+
+  <div id="boot-error" class="overlay" hidden>
+    <div class="review-card">
+      <h1>접속할 수 없습니다</h1>
+      <p id="boot-error-text"></p>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
