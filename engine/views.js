@@ -5,7 +5,7 @@ function currentHandData(state) {
   if (state.hand) return state.hand;
   if (state.lastHand) {
     return {
-      street: 'river',
+      street: ['preflop', null, null, 'flop', 'turn', 'river'][state.lastHand.board?.length ?? 0] ?? null,
       board: state.lastHand.board ?? [],
       holes: state.lastHand.holes ?? {},
       bets: {},

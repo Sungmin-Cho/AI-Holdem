@@ -31,7 +31,7 @@ test('userView에 금지 정보가 없다', () => {
 
 test('redactRecord: 머킹된 패 미포함, 쇼다운 공개 패 포함', () => {
   const deck = [...new Set([
-    'As', 'Ah', '2c', '3d', '7s', '8s', 'Ks', 'Kd', 'Kh', '9c', '6d',
+    '7s', '2c', 'As', '8s', '3d', 'Ah', 'Ks', 'Kd', 'Kh', '9c', '6d',
     ...newDeck(),
   ])];
   let st = createGame({ aiCount: 2 });
@@ -41,16 +41,22 @@ test('redactRecord: 머킹된 패 미포함, 쇼다운 공개 패 포함', () =>
   const redacted = redactRecord(st.lastHand);
   const json = JSON.stringify(redacted);
   assert.deepEqual(redacted.holes.user, st.lastHand.holes.user);
+  assert.ok(st.lastHand.showdown.mucks.includes('p2'));
   assert.equal(redacted.holes.p1, undefined);
   assert.equal(redacted.holes.p2, undefined);
   for (const reveal of st.lastHand.showdown?.reveals ?? []) {
     assert.deepEqual(redacted.showdown.reveals.find((r) => r.playerId === reveal.playerId).cards, reveal.cards);
   }
-  for (const pid of ['p1', 'p2']) {
-    if (!st.lastHand.showdown?.reveals.some((r) => r.playerId === pid)) {
-      for (const card of st.lastHand.holes[pid]) assert.equal(json.includes(card), false);
-    }
-  }
+  for (const card of st.lastHand.holes.p2) assert.equal(json.includes(card), false);
+});
+
+test('종료된 프리플랍 폴드 핸드의 뷰 스트리트는 preflop', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'fold').state;
+  st = applyAction(st, 'p1', 'fold').state;
+  const view = userView(st);
+  assert.equal(view.street, 'preflop');
+  assert.deepEqual(view.board, []);
 });
 
 test('public 이벤트에 금지 정보 없음', () => {
