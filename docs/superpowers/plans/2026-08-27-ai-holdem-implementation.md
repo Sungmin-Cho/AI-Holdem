@@ -651,7 +651,7 @@ test('players.json 형태: user 레코드 포함, AI만 페르소나 필드 보�
   - 이벤트는 visibility 필터 없이 **전부** 반환하되 각 이벤트에 `visibility` 표시(public 필터링은 딜러 규약 — 스펙 §4).
 - Consumes: Task 3~9 전부.
 
-- [ ] **Step 1 (RED):** `test/cli.test.js` — `child_process.execFileSync`로 실제 CLI 왕복:
+- [x] **Step 1 (RED):** `test/cli.test.js` — `child_process.execFileSync`로 실제 CLI 왕복:
 
 ```js
 test('스크립트된 3인 핸드 통합', () => {
@@ -672,7 +672,7 @@ test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이
 
 (테스트를 위해 `new-hand --deck "As,Kd,..."` 숨은 옵션 지원 — 52장 콤마 목록. README에는 문서화하지 않는다.)
 
-- [ ] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 엔진 CLI와 공통 envelope`.
+- [x] **Step 2~5:** RED → 구현 → GREEN → 커밋 `feat: 엔진 CLI와 공통 envelope`.
 
 ---
 
