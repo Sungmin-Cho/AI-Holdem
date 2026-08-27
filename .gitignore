@@ -1,3 +1,8 @@
 game/
 *.log
 .DS_Store
+.env
+.env.*
+node_modules/
+.superpowers/
+.claude/.sensor-detection-cache.json
