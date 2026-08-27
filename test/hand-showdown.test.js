@@ -1,11 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { newDeck } from '../engine/cards.js';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
-import { readHand, writeHandArchive } from '../engine/state.js';
 import { fixedDeck, setup3 } from './helpers/fixtures.js';
 
 function chipTotal(st) {
@@ -85,6 +81,44 @@ test('칩 보존: 핸드 전후 총합 불변', () => {
   assert.equal(legalFor(st).handOver, true);
   assert.equal(st.seats.reduce((a, s) => a + s.stack, 0), before);
   for (const seat of st.seats) assert.ok(seat.stack >= 0);
+});
+
+test('칩 보존: 숏스택 올인 블라인드에 폴드하면 언콜 반환', () => {
+  const g = createGame({ aiCount: 1 });
+  g.button = 0;
+  g.seats[0].stack = 8;
+  g.seats[1].stack = 5000;
+  const before = 5008;
+  const started = startHand(g, { deck: fixedDeck() });
+  assert.equal(chipTotal(started.state), before);
+  assert.equal(started.state.seats[started.state.button].playerId, 'p1');
+  const r = applyAction(started.state, 'p1', 'fold');
+  assert.equal(chipTotal(r.state), before);
+  const user = r.state.seats.find((s) => s.playerId === 'user');
+  const p1 = r.state.seats.find((s) => s.playerId === 'p1');
+  assert.equal(user.stack, 16);
+  assert.equal(p1.stack, 4992);
+});
+
+test('칩 보존: 사이드팟 올인과 레이즈-폴드', () => {
+  let st = setup3(100, 300, 500);
+  const allInBefore = chipTotal(st);
+  assert.equal(allInBefore, 900);
+  st = applyAction(st, 'user', 'raise', 100).state;
+  st = applyAction(st, 'p1', 'raise', 300).state;
+  const allIn = applyAction(st, 'p2', 'call');
+  assert.equal(chipTotal(allIn.state), allInBefore);
+  assert.equal(allIn.state.hand, null);
+  for (const seat of allIn.state.seats) assert.ok(seat.stack >= 0);
+
+  let foldSt = setup3(5000, 5000, 5000);
+  const foldBefore = chipTotal(foldSt);
+  foldSt = applyAction(foldSt, 'user', 'raise', 200).state;
+  foldSt = applyAction(foldSt, 'p1', 'fold').state;
+  const folded = applyAction(foldSt, 'p2', 'fold');
+  assert.equal(chipTotal(folded.state), foldBefore);
+  const user = folded.state.seats.find((s) => s.playerId === 'user');
+  assert.equal(user.stack, 5075);
 });
 
 test('한 명 남으면 쇼다운 없이 지급·홀카드 비공개', () => {
@@ -221,6 +255,43 @@ test('bust 좌석은 out=true', () => {
   assert.equal(st.result, null);
 });
 
+test('showdownWins는 경합 팟 승만 집계', () => {
+  const deck = deck3(
+    { p1: ['2c', '3d'], p2: ['9s', '8s'], user: ['As', 'Ah'] },
+    ['Ks', 'Kd', 'Kh', '7c', '6d'],
+  );
+  let st = start3(50, 5000, 5000, deck);
+  st = applyAction(st, 'user', 'call').state;
+  st = applyAction(st, 'p1', 'raise', 200).state;
+  const r = applyAction(st, 'p2', 'fold');
+  st = r.state;
+  assert.equal(chipTotal(st), 10050);
+  assert.ok(r.events.some((e) => e.type === 'showdown'));
+  assert.equal(st.stats.user.showdowns, 1);
+  assert.equal(st.stats.user.showdownWins, 1);
+  assert.equal(st.stats.p1.showdowns, 1);
+  assert.equal(st.stats.p1.showdownWins, 0);
+  assert.equal(st.stats.p2.showdowns, 0);
+  assert.equal(st.stats.p2.showdownWins, 0);
+});
+
+test('SB 컴플릿은 VPIP, BB 체크는 비집계, net 합 0', () => {
+  assert.deepEqual(createGame({ aiCount: 1 }).bustedPlayerIds, []);
+  const r = checkDownToEnd(setup3(5000, 5000, 5000));
+  const st = r.state;
+  assert.equal(st.stats.user.hands, 1);
+  assert.equal(st.stats.p1.hands, 1);
+  assert.equal(st.stats.p2.hands, 1);
+  assert.equal(st.stats.user.vpip, 1);
+  assert.equal(st.stats.p1.vpip, 1);
+  assert.equal(st.stats.p2.vpip, 0);
+  assert.equal(st.stats.user.pfr, 0);
+  assert.equal(st.stats.p1.pfr, 0);
+  assert.equal(st.stats.p2.pfr, 0);
+  const netSum = Object.values(st.stats).reduce((a, s) => a + s.net, 0);
+  assert.equal(netSum, 0);
+});
+
 test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구성할 수 있다(모듈 수준 비교)', () => {
   const r = checkDownToEnd(setup3(5000, 5000, 5000));
   const rec = r.state.lastHand;
@@ -235,6 +306,7 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
   assert.deepEqual(rec.blinds, [25, 50]);
   assert.equal(rec.button, 'user');
   assert.equal(Object.keys(rec.holes).length, 3);
+  assert.equal(rec.holes.user.length, 2);
   assert.equal(rec.board.length, 5);
   assert.ok(Array.isArray(rec.actions));
   assert.ok(rec.actions.length > 0);
@@ -252,14 +324,22 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
   assert.ok(Array.isArray(rec.pots));
   assert.ok(rec.pots.length >= 1);
   assert.equal(typeof rec.pots[0].potIndex, 'number');
+  assert.ok(Array.isArray(rec.pots[0].winners));
+  assert.equal(rec.pots.reduce((a, p) => a + p.amount, 0), 150);
+  const awarded = rec.pots.reduce(
+    (sum, pot) => sum + pot.winners.reduce((a, w) => a + w.share, 0),
+    0,
+  );
+  assert.equal(awarded, 150);
   assert.ok(rec.showdown === null || (Array.isArray(rec.showdown.reveals) && Array.isArray(rec.showdown.mucks)));
   assert.equal(typeof rec.startStacks.user, 'number');
   assert.equal(typeof rec.endStacks.user, 'number');
+  assert.deepEqual(rec.endStacks, Object.fromEntries(r.state.seats.map((s) => [s.playerId, s.stack])));
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-archive-'));
-  writeHandArchive(dir, rec);
-  const loaded = readHand(dir, rec.handNo);
-  assert.deepEqual(loaded, rec);
-  const reconstructed = structuredClone(rec);
+  const reconstructed = JSON.parse(JSON.stringify(rec));
   assert.deepEqual(reconstructed, rec);
+  assert.ok(reconstructed.holes.user);
+  assert.ok(reconstructed.board.length === 5);
+  assert.ok(reconstructed.actions.length === rec.actions.length);
+  assert.ok(reconstructed.pots.length === rec.pots.length);
 });

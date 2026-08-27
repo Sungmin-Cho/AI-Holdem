@@ -81,6 +81,7 @@ export function createGame({
     stats,
     gameOver: false,
     result: null,
+    bustedPlayerIds: [],
   };
 }
 
@@ -376,7 +377,24 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
   return { reveals, mucks };
 }
 
-function updateStats(state, hand, inPot, contested, awarded) {
+function returnUncalled(state) {
+  const contribs = state.hand.contribs;
+  let maxLive = 0;
+  for (const pid of inPotPids(state.hand)) {
+    maxLive = Math.max(maxLive, contribs[pid] ?? 0);
+  }
+  const returned = {};
+  for (const pid of Object.keys(contribs)) {
+    const excess = Math.max(0, (contribs[pid] ?? 0) - maxLive);
+    if (excess <= 0) continue;
+    returned[pid] = excess;
+    contribs[pid] -= excess;
+    state.seats.find((s) => s.playerId === pid).stack += excess;
+  }
+  return returned;
+}
+
+function updateStats(state, hand, inPot, contested, contestedWinners) {
   for (const pid of Object.keys(hand.holes)) {
     const stats = state.stats[pid] ?? (state.stats[pid] = emptyStats());
     stats.hands += 1;
@@ -386,7 +404,7 @@ function updateStats(state, hand, inPot, contested, awarded) {
     stats.calls += hand.callCount[pid] ?? 0;
     if (contested && inPot.includes(pid)) {
       stats.showdowns += 1;
-      if ((awarded[pid] ?? 0) > 0) stats.showdownWins += 1;
+      if (contestedWinners.has(pid)) stats.showdownWins += 1;
     }
     const start = hand.startStacks[pid] ?? 0;
     const seat = state.seats.find((s) => s.playerId === pid);
@@ -398,6 +416,7 @@ function finishHand(state, events) {
   const hand = state.hand;
   const inPot = inPotPids(hand);
   const contested = inPot.length >= 2;
+  returnUncalled(state);
   if (contested) runout(state, events);
 
   const pots = buildPots(new Map(Object.entries(hand.contribs)), new Set(hand.folded));
@@ -423,7 +442,7 @@ function finishHand(state, events) {
   }
 
   const order = oddChipOrder(state);
-  const awarded = {};
+  const contestedWinners = new Set();
   const potRecords = [];
   for (let i = 0; i < pots.length; i += 1) {
     const pot = pots[i];
@@ -433,8 +452,10 @@ function finishHand(state, events) {
       const share = part.get(pid) ?? 0;
       if (share <= 0) continue;
       winners.push({ playerId: pid, share });
-      awarded[pid] = (awarded[pid] ?? 0) + share;
       state.seats.find((s) => s.playerId === pid).stack += share;
+    }
+    if (pot.eligible.length >= 2) {
+      for (const winner of winners) contestedWinners.add(winner.playerId);
     }
     emit(events, 'public', 'pot_award', {
       potIndex: i,
@@ -449,7 +470,7 @@ function finishHand(state, events) {
     });
   }
 
-  updateStats(state, hand, inPot, contested, awarded);
+  updateStats(state, hand, inPot, contested, contestedWinners);
 
   const endStacks = {};
   for (const seat of state.seats) endStacks[seat.playerId] = seat.stack;
