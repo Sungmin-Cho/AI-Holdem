@@ -819,7 +819,7 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
 **Interfaces:**
 - Consumes: 전체 시스템. SKILL.md는 스펙 §3(게임 루프·재진입), §6(프로토콜·타임아웃), §8(코칭 격리) 절차를 딜러 지침으로 옮긴 문서다.
 
-- [ ] **Step 1:** `SKILL.md` 작성 — frontmatter(`name: start-game`, `description: AI 홀덤 게임 시작/재개 — 딜러 오케스트레이션`) + 본문에 다음 절차를 **모두** 포함:
+- [x] **Step 1:** `SKILL.md` 작성 — frontmatter(`name: start-game`, `description: AI 홀덤 게임 시작/재개 — 딜러 오케스트레이션`) + 본문에 다음 절차를 **모두** 포함:
   1. **사전 점검**: `node --version`(≥20), 활성 게임 검사(`game/lock.json` + health), 있으면 사용자에게 resume/새 게임 질문.
   2. **시작**: `node engine/cli.js init --ai <n>` → stdout의 sessionToken 확보 → `nohup node server/server.js --game-dir game --port 8877 --token <t> > game/server.log 2>&1 &` (detached) → health 확인 → `open "http://127.0.0.1:8877/?token=<t>"`.
   3. **에이전트 스폰**: `game/players.json`을 읽고 `playerId`가 `p`로 시작하는 레코드만 대상으로 플레이어마다 명명 에이전트(이름=agentHandle)를 스폰. 스폰 프롬프트 템플릿(전문 포함): 페르소나 카드 전체 + 행동 규약(JSON 한 줄만, decisionId 에코, 캐릭터 유지, talk ≤ 1문장, 스타일 발설 금지).
@@ -828,9 +828,9 @@ test('시뮬레이션 후 stats 정합', () => { /* vpip ≤ 1, showdownWins ≤
   6. **종료**: gameOver 시 2단계 종합 리뷰(①격리 evaluator: redacted 트레이스+통계 → ②종합자: 결과 확인+스타일 공개) 생성 → review는 publish의 `review` 필드로 게시 + `game/review.md` 저장 → 에이전트 작별·정리.
   7. **resume**: `resume-check` → 서버 생존이면 attach, 죽었으면 재기동 → 재진입 체크리스트(§3) → 에이전트 재스폰+브리핑(자기 페르소나, 현재 스택, 진행 상황 요약).
   8. **호스트 어댑테이션 절**: Claude Code=정본(지속 에이전트), Codex/Grok=저하 모드 문서화(스펙 §9 v1 범위 — 구현 아님).
-- [ ] **Step 2:** 호스트 링크 설치 — ① Claude: `mkdir -p .claude/skills && ln -s ../../.agents/skills/start-game .claude/skills/start-game`. ② Codex: 이 머신의 `~/.codex/` 구성과 로컬 문서에서 프로젝트 스킬 경로를 탐지해 확정되면 링크/포인터를 생성하고, 확정 불가면 **저장소 루트 `AGENTS.md`에 '스킬 정본: `.agents/skills/start-game/SKILL.md`' 포인터 절을 추가**하는 것을 산출물로 한다. ③ Grok: 동일 요령(탐지 → 링크 또는 포인터). ④ 호스트별 **인식 실측**(스킬이 실제로 노출되는지)만 README '구현 후 확인 체크리스트'에 남긴다.
-- [ ] **Step 3:** `README.md` 완성: 실행 방법(스킬/수동), 테스트 실행, 파일 구조, 구현 후 확인 체크리스트(호스트별 스킬 링크 인식 3항목 + Claude Code 세션 첫 게임 스모크).
-- [ ] **Step 4:** 전체 테스트 그린 재확인 → 커밋 `feat: start-game 스킬 정본·호스트 링크·README`.
+- [x] **Step 2:** 호스트 링크 설치 — ① Claude: `mkdir -p .claude/skills && ln -s ../../.agents/skills/start-game .claude/skills/start-game`. ② Codex: 이 머신의 `~/.codex/` 구성과 로컬 문서에서 프로젝트 스킬 경로를 탐지해 확정되면 링크/포인터를 생성하고, 확정 불가면 **저장소 루트 `AGENTS.md`에 '스킬 정본: `.agents/skills/start-game/SKILL.md`' 포인터 절을 추가**하는 것을 산출물로 한다. ③ Grok: 동일 요령(탐지 → 링크 또는 포인터). ④ 호스트별 **인식 실측**(스킬이 실제로 노출되는지)만 README '구현 후 확인 체크리스트'에 남긴다.
+- [x] **Step 3:** `README.md` 완성: 실행 방법(스킬/수동), 테스트 실행, 파일 구조, 구현 후 확인 체크리스트(호스트별 스킬 링크 인식 3항목 + Claude Code 세션 첫 게임 스모크).
+- [x] **Step 4:** 전체 테스트 그린 재확인 → 커밋 `feat: start-game 스킬 정본·호스트 링크·README`.
 
 ---
 
