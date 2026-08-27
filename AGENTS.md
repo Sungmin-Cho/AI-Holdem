@@ -2,7 +2,9 @@
 
 스킬 정본: `.agents/skills/start-game/SKILL.md`
 
-딜러 오케스트레이션은 그 파일 하나다. `/start-game` 또는 `/start-game resume`. 정본 게임 런타임은 Claude Code(지속 에이전트). Codex·Grok은 스킬 발견 + 저하 모드 문서화까지가 v1이다.
+딜러 오케스트레이션은 그 파일 하나다. `/start-game` 또는 `/start-game resume`. 세 호스트(Claude Code·Codex·Grok) 모두 지속 명명 서브에이전트로 게임을 돌린다. 호스트가 갈리는 지점은 플레이어 스폰 모델과 회신 경로 둘뿐이며 스킬 §3·§8에 표로 있다.
+
+플레이어는 저비용·저지연 티어로 스폰한다 — Claude Code `haiku`, Codex `gpt-5.6-luna`, Grok `grok-4.6`(effort `low`). 딜러 세션 모델을 상속시키면 폴드 한 번에 수십 초가 걸린다. 코치·리뷰어만 딜러 세션 모델을 상속한다.
 
 ## 호스트 경로
 
