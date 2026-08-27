@@ -29,6 +29,14 @@ test('아키타입은 6종 안에서만', () => {
   }
 });
 
+test('아키타입 배정 순서는 호출마다 무작위로 변함', () => {
+  const sequences = Array.from({ length: 20 }, () => (
+    generatePersonas(8).map((persona) => persona.archetype).join(',')
+  ));
+
+  assert.ok(new Set(sequences).size > 1);
+});
+
 test('AI만 생성하고 좌석과 핸들이 안정적으로 배정됨', () => {
   const personas = generatePersonas(3);
 

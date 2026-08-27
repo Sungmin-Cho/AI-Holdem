@@ -67,13 +67,27 @@ function shuffledNames(count) {
   return names.slice(0, count);
 }
 
+function shuffledArchetypes(count) {
+  const archetypes = [];
+  while (archetypes.length < count) {
+    const bag = [...ARCHETYPES];
+    for (let i = bag.length - 1; i > 0; i -= 1) {
+      const j = randomInt(i + 1);
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    archetypes.push(...bag);
+  }
+  return archetypes.slice(0, count);
+}
+
 export function generatePersonas(n) {
   if (!Number.isInteger(n) || n < 0 || n > NAMES.length) {
     throw new RangeError(`n must be an integer from 0 to ${NAMES.length}`);
   }
 
+  const archetypes = shuffledArchetypes(n);
   return shuffledNames(n).map((name, index) => {
-    const archetype = ARCHETYPES[index % ARCHETYPES.length];
+    const archetype = archetypes[index];
     const profile = PROFILES[archetype];
     return {
       playerId: `p${index + 1}`,
