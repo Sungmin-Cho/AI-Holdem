@@ -168,6 +168,18 @@ test('init은 활성 게임에서 ACTIVE_GAME 거부', () => {
   }
 });
 
+test('init --level-every 0은 USAGE로 거부하고 게임을 만들지 않는다', () => {
+  const dir = tmpGame();
+  for (const n of ['0', '-1']) {
+    const result = cli(dir, ['init', '--ai', '2', '--level-every', n]);
+    assert.equal(result.status, 2);
+    assert.equal(result.json.ok, false);
+    assert.equal(result.json.code, 'USAGE');
+  }
+  assert.equal(fs.existsSync(path.join(dir, 'state.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'players.json')), false);
+});
+
 test('init stdout에 archetype/bluffFreq 미노출', () => {
   const dir = tmpGame();
   const result = initGame(dir, ['--ai', '2']);

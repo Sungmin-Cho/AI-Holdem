@@ -203,7 +203,8 @@ function cmdInit(gameDir, flags) {
   const levelEvery = flags['level-every'] != null
     ? parseIntArg(flags['level-every'], '--level-every')
     : 8;
-  if (startStack < 1 || levelEvery < 0) usage('옵션 값이 올바르지 않습니다.');
+  if (startStack < 1) usage('--stack은 1 이상이어야 합니다.');
+  if (levelEvery < 1) usage('--level-every는 1 이상이어야 합니다.');
 
   const lock = readLock(gameDir);
   const live = Boolean(lock && isAlive(lock.serverPid));
@@ -371,7 +372,10 @@ function main() {
         usage(`알 수 없는 명령: ${cmd}`);
     }
   } catch (error) {
-    const code = error.code || 'ERROR';
+    const inner = error.cause?.code;
+    const code = (inner === 'LOCKED' || inner === 'NO_GAME')
+      ? inner
+      : (error.code || 'ERROR');
     fail(code, FAIL_MESSAGES[code] || error.message || '오류가 발생했습니다.', code === 'USAGE' ? 2 : 1);
   }
 }
