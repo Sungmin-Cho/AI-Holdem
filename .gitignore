@@ -6,3 +6,4 @@ game/
 node_modules/
 .superpowers/
 .claude/.sensor-detection-cache.json
+docs/superpowers/
