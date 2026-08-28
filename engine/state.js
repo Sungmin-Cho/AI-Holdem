@@ -291,6 +291,19 @@ export function withMutation(gameDir, fn, options) {
   }
 }
 
+export function runExclusive(gameDir, fn, options) {
+  const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
+  const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
+  fs.mkdirSync(gameDir, { recursive: true });
+  const dir = mutexPath(gameDir);
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
+  try {
+    return fn();
+  } finally {
+    releaseMutex(dir, mine);
+  }
+}
+
 /**
  * The same identity-checked lock, under a caller-chosen name and around an async
  * body — for critical sections outside state mutation (publishing to the relay).
