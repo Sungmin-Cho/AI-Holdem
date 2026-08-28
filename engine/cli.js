@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newDeck } from './cards.js';
-import { applyAction, createGame, forceDefault, legalFor, startHand } from './hand.js';
-import { generatePersonas } from './personas.js';
-import { loadState, readHand, saveState, withMutation, writeHandArchive, writeJsonAtomic } from './state.js';
+import { initGameDir, isAlive, readLock } from './game-archive.js';
+import { applyAction, forceDefault, legalFor, startHand } from './hand.js';
+import { loadState, readHand, withMutation, writeHandArchive } from './state.js';
 import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
@@ -21,14 +21,10 @@ const FAIL_MESSAGES = {
   VERSION_MISMATCH: 'stateVersion이 일치하지 않습니다.',
   NO_GAME: '게임 상태가 없습니다.',
   ACTIVE_GAME: '이미 진행 중인 게임이 있습니다.',
+  ARCHIVE_FAILED: '직전 게임을 보관하지 못했습니다.',
+  SERVER_ALIVE: '게임 서버가 아직 종료되지 않았습니다.',
   HAND_NOT_FOUND: '핸드를 찾을 수 없습니다.',
 };
-
-const sleepLock = new Int32Array(new SharedArrayBuffer(4));
-
-function sleepSync(ms) {
-  Atomics.wait(sleepLock, 0, 0, ms);
-}
 
 function reply(envelope, exitCode) {
   fs.writeSync(1, `${JSON.stringify(envelope)}\n`);
@@ -110,48 +106,6 @@ function parseDeck(value) {
   return cards;
 }
 
-function isAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === 'ESRCH') return false;
-    if (error.code === 'EPERM') return true;
-    throw error;
-  }
-}
-
-function readLock(gameDir) {
-  try {
-    const lock = JSON.parse(fs.readFileSync(path.join(gameDir, 'lock.json'), 'utf8'));
-    return lock && typeof lock === 'object' ? lock : null;
-  } catch {
-    return null;
-  }
-}
-
-function terminatePid(pid) {
-  if (!isAlive(pid)) return;
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch (error) {
-    if (error.code === 'ESRCH') return;
-    throw error;
-  }
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && isAlive(pid)) sleepSync(50);
-  if (!isAlive(pid)) return;
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch (error) {
-    if (error.code === 'ESRCH') return;
-    throw error;
-  }
-  const killDeadline = Date.now() + 200;
-  while (Date.now() < killDeadline && isAlive(pid)) sleepSync(20);
-}
-
 function requireState(state) {
   if (!state) throwCoded('NO_GAME');
   return state;
@@ -212,31 +166,12 @@ function cmdInit(gameDir, flags) {
     : 8;
   if (startStack < 1) usage('--stack은 1 이상이어야 합니다.');
   if (levelEvery < 1) usage('--level-every는 1 이상이어야 합니다.');
-
-  const lock = readLock(gameDir);
-  const live = Boolean(lock && isAlive(lock.serverPid));
-  if (live && !flags.force) throwCoded('ACTIVE_GAME');
-  if (flags.force && live) terminatePid(lock.serverPid);
-  fs.rmSync(gameDir, { recursive: true, force: true });
-
-  const personas = generatePersonas(aiCount);
-  const state = createGame({
-    aiCount,
-    startStack,
-    blinds0,
-    levelEvery,
-    names: personas.map((persona) => persona.name),
-  });
-  const players = [
-    { playerId: 'user', seat: 0, name: '나' },
-    ...personas,
-  ];
-  writeJsonAtomic(path.join(gameDir, 'players.json'), players);
-  saveState(gameDir, state);
+  const result = initGameDir(gameDir, { aiCount, startStack, blinds0, levelEvery, force: flags.force });
   succeed({
-    stateVersion: state.stateVersion,
-    sessionToken: state.sessionToken,
-    players: players.map((player) => ({ playerId: player.playerId, name: player.name })),
+    stateVersion: result.stateVersion,
+    sessionToken: result.sessionToken,
+    players: result.players,
+    archivedTo: result.archivedTo,
   });
 }
 

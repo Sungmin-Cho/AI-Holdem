@@ -173,6 +173,7 @@ test('init은 활성 게임에서 ACTIVE_GAME 거부', () => {
     assert.equal(result.json.code, 'ACTIVE_GAME');
     const state = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
     assert.equal(state.sessionToken, first.sessionToken);
+    assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
   } finally {
     killPid(dummy.pid);
   }
@@ -193,6 +194,7 @@ test('init --level-every 0은 USAGE로 거부하고 게임을 만들지 않는�
 test('init stdout에 archetype/bluffFreq 미노출', () => {
   const dir = tmpGame();
   const result = initGame(dir, ['--ai', '2']);
+  assert.equal(result.archivedTo, null);
   assert.match(result.sessionToken, /^[0-9a-f]{32}$/);
   const dumped = JSON.stringify(result);
   assert.equal(dumped.includes('archetype'), false);
@@ -287,6 +289,7 @@ test('init --force: 살아 있는 가짜 서버(spawn된 node 대기 프로세�
     writeLock(dir, dummy.pid, first.sessionToken);
     assert.equal(isAlive(dummy.pid), true);
     const forced = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+    assert.equal(forced.archivedTo, null);
     assert.notEqual(forced.sessionToken, first.sessionToken);
     assert.equal(fs.existsSync(path.join(dir, 'lock.json')), false);
     const deadline = Date.now() + 2000;
@@ -297,6 +300,109 @@ test('init --force: 살아 있는 가짜 서버(spawn된 node 대기 프로세�
   } finally {
     killPid(dummy.pid);
   }
+});
+
+test('없는 gameDir 첫 init은 성공한다', () => {
+  const dir = path.join(tmpGame(), 'missing');
+  assert.equal(fs.existsSync(dir), false);
+  const result = initGame(dir, ['--ai', '2']);
+  assert.equal(result.archivedTo, null);
+  assert.equal(fs.existsSync(path.join(dir, 'state.json')), true);
+});
+
+test('init는 핸드가 있는 게임을 archive/로 옮긴다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const forced = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.match(forced.archivedTo, /^archive\/.+-in-progress/);
+  assert.equal(path.isAbsolute(forced.archivedTo), false);
+  assert.equal(forced.archivedTo.includes('\\'), false);
+  const live = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+  assert.equal(live.handNo, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'archive')), true);
+  const dirs = fs.readdirSync(path.join(dir, 'archive')).filter((n) => !n.startsWith('.'));
+  assert.equal(dirs.length, 1);
+  const archivedState = JSON.parse(fs.readFileSync(path.join(dir, forced.archivedTo, 'state.json'), 'utf8'));
+  assert.ok(archivedState.handNo >= 1 || archivedState.hand != null);
+});
+
+test('init 두 번의 플레이는 archive 항목 2개', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const first = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  const firstStatePath = path.join(dir, first.archivedTo, 'state.json');
+  const firstBytes = fs.readFileSync(firstStatePath);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const second = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  const dirs = fs.readdirSync(path.join(dir, 'archive')).filter((n) => !n.startsWith('.') && !n.endsWith('.partial'));
+  assert.equal(dirs.length, 2);
+  assert.match(second.archivedTo, /^archive\//);
+  assert.equal(path.isAbsolute(second.archivedTo), false);
+  assert.equal(second.archivedTo.includes('\\'), false);
+  assert.notEqual(second.archivedTo, first.archivedTo);
+  assert.deepEqual(fs.readFileSync(firstStatePath), firstBytes);
+});
+
+test('end abort만 하고 핸드 없으면 보관하지 않는다', () => {
+  const dir = tmpGame();
+  initGame(dir);
+  assertOk(cli(dir, ['end', '--result', 'abort']));
+  const next = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.equal(next.archivedTo, null);
+});
+
+test('핸드 후 abort 후 init --force는 archivedTo에 -abort', () => {
+  const dir = tmpGame();
+  initGame(dir);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  assertOk(cli(dir, ['end', '--result', 'abort']));
+  const next = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.match(next.archivedTo, /^archive\/.+-abort/);
+  assert.equal(path.isAbsolute(next.archivedTo), false);
+  assert.equal(next.archivedTo.includes('\\'), false);
+});
+
+test('미리 만든 archive/keep-me는 init --force 뒤에도 있다', () => {
+  const dir = tmpGame();
+  initGame(dir);
+  fs.mkdirSync(path.join(dir, 'archive', 'keep-me'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'archive', 'keep-me', 'marker'), 'ok');
+  assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.equal(fs.readFileSync(path.join(dir, 'archive', 'keep-me', 'marker'), 'utf8'), 'ok');
+});
+
+test('init 후 옛 lock.json이 라이브에 없다', () => {
+  const dir = tmpGame();
+  initGame(dir);
+  fs.writeFileSync(path.join(dir, 'lock.json'), '{"serverPid":0,"port":8877,"sessionToken":"x","startedAt":"t"}');
+  fs.writeFileSync(path.join(dir, '.turn.json'), '{}');
+  assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.equal(fs.existsSync(path.join(dir, 'lock.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, '.turn.json')), false);
+});
+
+test('빈 init 두 번은 archivedTo null이고 archive를 만들지 않는다', () => {
+  const dir = tmpGame();
+  const first = initGame(dir);
+  assert.equal(first.archivedTo, null);
+  const second = assertOk(cli(dir, ['init', '--ai', '2', '--force']));
+  assert.equal(second.archivedTo, null);
+  assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+});
+
+test('기존 게임에 --level-every 0은 USAGE이고 보관하지 않는다', () => {
+  const dir = tmpGame();
+  const first = initGame(dir);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const result = cli(dir, ['init', '--ai', '2', '--level-every', '0']);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.ok, false);
+  assert.equal(result.json.code, 'USAGE');
+  assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+  assert.equal(state.sessionToken, first.sessionToken);
 });
 
 test('step: 액션 없이 호출하면 현재 뷰와 다음 행동자를 한 번에 준다', () => {
