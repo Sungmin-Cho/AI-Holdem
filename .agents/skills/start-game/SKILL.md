@@ -85,9 +85,9 @@ Bash   node engine/cli.js step p1 call --expect-version 42 > game/.turn.json \
    - `curl -fsS "http://127.0.0.1:<port>/api/health"` (토큰 불필요). 200 `{ok:true}`이면 서버 생존.
    - `game/`에 상태가 남아 있으면 `node engine/cli.js resume-check`로 `serverPidAlive`·`sessionToken`·`phase`·`toAct`를 확인해도 된다.
 4. 잔여 게임이 있으면 **사용자에게 묻는다**: 이어서 할지(`/start-game resume`) vs 새 게임. 추측으로 init하지 마라.
-   - 이어서 → §7.
-   - 새 게임 + 서버 생존 → `node engine/cli.js init --ai <n> --force ...` (구 서버 SIGTERM 후 `game/` 폐기). **force 전에 review.md를 이미 읽었는지 확인.**
-   - 새 게임 + 서버 사망 → `init`(force 없이 잔여 디렉터리를 폐기한다). 역시 review.md를 먼저 읽는다.
+   - 이어서 → §7 (라이브 슬롯만).
+   - 새 게임 + 서버 생존 → `node engine/cli.js init --ai <n> --force ...`. 구 서버 SIGTERM 후, 직전 판에 플레이 흔적이 있으면 `game/archive/`로 옮기고 라이브 슬롯에 새 게임을 쓴다. `archive/`는 지우지 않는다. stdout `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다. **force 전에 review.md를 이미 읽었는지 확인.**
+   - 새 게임 + 서버 사망 → `init`(force 없이). 직전 판에 플레이 흔적이 있으면 `game/archive/`로 옮기고 라이브 슬롯에 새 게임을 쓴다. `archive/`는 지우지 않는다. stdout `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다. 역시 review.md를 먼저 읽는다.
 
 코치 메타 초기값: `overfoldUsed=false`. 코치 멱등 판정은 서버 스냅샷의 `coach` 배열로 하고(§5), `publishId`는 `tools/publish.js`가 관리한다 — 딜러가 따로 세는 카운터는 없다.
 
@@ -102,7 +102,7 @@ node engine/cli.js init --ai <n>   # 옵션: --stack N --level-every N [--blinds
 # stdout JSON에서 sessionToken 확보. 페르소나 상세는 stdout에 없다.
 ```
 
-stdout 예: `{ok, stateVersion, sessionToken, players:[{playerId,name}], events:[]}`. `sessionToken`은 서버 기동 인자로만 쓴다 — 이후 도구가 `game/lock.json`에서 읽으므로 딜러가 기억할 필요는 없다.
+stdout 예: `{ok, stateVersion, sessionToken, players:[{playerId,name}], events:[], archivedTo}` (`archivedTo`는 문자열 또는 null). `sessionToken`은 서버 기동 인자로만 쓴다 — 이후 도구가 `game/lock.json`에서 읽으므로 딜러가 기억할 필요는 없다. `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다.
 
 서버는 detached(터미널 훅업 없이) 기동한다. 명령 문면 그대로:
 

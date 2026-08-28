@@ -27,7 +27,7 @@ open "http://127.0.0.1:8877/?token=<t>"
 
 UI 시연(가짜 딜러): 서버를 `--token dev`로 띄운 뒤 `node test/helpers/dev-drive.js --port <p> --token dev`.
 
-활성 게임이 있는데 새로 시작하려면 `init --force` (구 서버 SIGTERM 후 `game/` 폐기). 이어하려면 `node engine/cli.js resume-check` 후 스킬 §7.
+활성 게임이 있는데 새로 시작하려면 `init --force`. 구 서버 SIGTERM 후, 직전 판에 플레이 흔적이 있으면 `game/archive/`로 옮기고 라이브 슬롯에 새 게임을 쓴다. `archive/`는 지우지 않는다. stdout `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다. 이어하려면 `node engine/cli.js resume-check` 후 스킬 §7 (라이브 슬롯만).
 
 `game/`은 gitignore 런타임 상태다. `game/state.json`은 엔진만 읽고 쓴다.
 
