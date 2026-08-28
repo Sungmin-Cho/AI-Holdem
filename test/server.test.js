@@ -371,7 +371,7 @@ test('깊이 1 덮어쓰기: 같은 decisionId로 두 번 POST → 마지막 값
   }
 });
 
-test('소비 직후의 두 번째 wait-action은 timeout', async () => {
+test('소비된 액션은 그 결정이 끝날 때까지만 재전달되고, 결정이 넘어가면 사라진다', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';
   const srv = await start(gameDir, token);
@@ -381,10 +381,17 @@ test('소비 직후의 두 번째 wait-action은 timeout', async () => {
     await action(srv.port, token, { decisionId, action: 'check' });
     const first = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
     assert.equal(first.json.action, 'check');
+
+    // 응답을 못 받은 딜러가 같은 결정을 다시 물으면 그대로 다시 받는다
     const second = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 150 });
     assert.equal(second.status, 200);
-    assert.equal(second.json.timeout, true);
-    assert.equal(second.json.action, undefined);
+    assert.equal(second.json.action, 'check');
+
+    // 액션이 적용되어 다음 결정이 게시되면 옛 액션은 더 이상 없다
+    await publish(srv.port, token, { publishId: 2, view: viewWith('d-3-turn-2') });
+    const stale = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 150 });
+    assert.equal(stale.json.timeout, true);
+    assert.equal(stale.json.action, undefined);
   } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });
@@ -405,6 +412,190 @@ test('슬롯 decisionId ≠ expectDecisionId면 소비하지 않고 timeout', as
     assert.equal(matched.json.timeout, undefined);
     assert.equal(matched.json.action, 'fold');
     assert.equal(matched.json.decisionId, decisionId);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('publish: history 엔트리에 게시 시각이 남는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    await publish(srv.port, token, { publishId: 1, view: viewWith('d-1-preflop-0'), events: [ev(0, 'hand_start')] });
+    await publish(srv.port, token, { publishId: 2, events: [ev(1, 'action')] });
+    const persisted = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
+    assert.equal(persisted.history.length, 2);
+    for (const entry of persisted.history) {
+      assert.match(entry.at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      assert.ok(Math.abs(Date.now() - Date.parse(entry.at)) < 60_000);
+    }
+    assert.ok(Date.parse(persisted.history[1].at) >= Date.parse(persisted.history[0].at));
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: 역순으로 도착해도 handNo 순으로 정렬되고 중복은 갱신된다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    // 백그라운드 코치가 핸드 순서와 다르게 완료되는 상황
+    await publish(srv.port, token, { publishId: 1, coach: [{ handNo: 2, text: '두 번째' }] });
+    await publish(srv.port, token, { publishId: 2, coach: [{ handNo: 1, text: '첫 번째' }] });
+    let snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.coach.map((note) => note.handNo), [1, 2]);
+
+    // 같은 핸드가 다시 오면 덧붙지 않고 갱신된다
+    await publish(srv.port, token, { publishId: 3, coach: [{ handNo: 1, text: '첫 번째(수정)' }] });
+    snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.coach.map((note) => note.handNo), [1, 2]);
+    assert.equal(snap.json.coach[0].text, '첫 번째(수정)');
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('publish: 저장에 실패하면 메모리 상태도 바뀌지 않는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    await publish(srv.port, token, { publishId: 1, events: [ev(0, 'hand_start')] });
+    const before = await snapshot(srv.port, token);
+
+    // ui-snapshot.json 자리를 디렉터리로 막아 rename이 실패하게 만든다
+    fs.rmSync(path.join(gameDir, 'ui-snapshot.json'));
+    fs.mkdirSync(path.join(gameDir, 'ui-snapshot.json'));
+    const failed = await publish(srv.port, token, { publishId: 2, events: [ev(1, 'action')] });
+    assert.notEqual(failed.status, 200, '저장 실패인데 성공으로 응답했다');
+
+    const after = await snapshot(srv.port, token);
+    assert.equal(after.json.revision, before.json.revision, '저장 실패인데 메모리가 앞서 나갔다');
+    assert.equal(after.json.log.length, before.json.log.length);
+
+    // 같은 id 재시도가 "이미 처리됨"으로 조용히 넘어가면 안 된다
+    fs.rmdirSync(path.join(gameDir, 'ui-snapshot.json'));
+    const retried = await publish(srv.port, token, { publishId: 2, events: [ev(1, 'action')] });
+    assert.equal(retried.status, 200);
+    const healed = await snapshot(srv.port, token);
+    assert.equal(healed.json.revision, before.json.revision + 1);
+    assert.equal(healed.json.log.length, before.json.log.length + 1);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('wait-action: 같은 decisionId로 다시 물으면 소비된 액션을 재전달한다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const decisionId = 'd-2-turn-4';
+    await publish(srv.port, token, { publishId: 1, view: viewWith(decisionId) });
+    await action(srv.port, token, { decisionId, action: 'raise', amount: 300 });
+
+    const first = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
+    assert.equal(first.json.action, 'raise');
+
+    // 딜러가 그 응답을 못 받았다면 같은 결정으로 다시 물어야 한다
+    const again = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
+    assert.equal(again.json.timeout, undefined, '액션이 사라져 게임이 멈춘다');
+    assert.equal(again.json.action, 'raise');
+    assert.equal(again.json.amount, 300);
+
+    // 다음 결정으로 넘어가면 옛 액션은 더 이상 전달되지 않는다
+    await publish(srv.port, token, { publishId: 2, view: viewWith('d-2-turn-5') });
+    const next = await waitAction(srv.port, token, { expectDecisionId: 'd-2-turn-5', timeoutMs: 150 });
+    assert.equal(next.json.timeout, true);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('publish: 이미 지나간 publishId는 다시 적용하지 않는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    await publish(srv.port, token, { publishId: 1, events: [ev(0, 'hand_start')] });
+    await publish(srv.port, token, { publishId: 2, coach: [{ handNo: 1, text: '코치' }] });
+    const before = await snapshot(srv.port, token);
+
+    // 응답이 유실된 1번 게시를 뒤늦게 재시도하는 상황
+    const stale = await publish(srv.port, token, { publishId: 1, events: [ev(0, 'hand_start')] });
+    assert.equal(stale.status, 200);
+    const after = await snapshot(srv.port, token);
+    assert.equal(after.json.revision, before.json.revision, '지나간 게시가 다시 반영됐다');
+    assert.equal(after.json.log.length, before.json.log.length);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('wait-action: 뷰가 다시 게시되면 소비된 액션은 재전달되지 않는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const decisionId = 'd-5-flop-2';
+    await publish(srv.port, token, { publishId: 1, view: viewWith(decisionId) });
+    await action(srv.port, token, { decisionId, action: 'raise', amount: 10 });
+    const first = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
+    assert.equal(first.json.action, 'raise');
+
+    // 불법 액션이라 엔진이 거부 → 같은 결정을 안내와 함께 재게시 → 다시 대기.
+    // 여기서 그 액션이 또 오면 딜러는 거부·재게시를 무한 반복한다.
+    await publish(srv.port, token, {
+      publishId: 2, view: viewWith(decisionId),
+      messages: [{ type: 'narration', text: '그 액션은 지금 둘 수 없습니다.' }],
+    });
+    const again = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 150 });
+    assert.equal(again.json.timeout, true, '거부된 액션이 즉시 되돌아와 무한 루프가 된다');
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: 같은 handNo를 갱신해도 과폴드 표식은 지워지지 않는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    await publish(srv.port, token, { publishId: 1, coach: [{ handNo: 4, text: '과폴드 누수', overfold: true }] });
+    await publish(srv.port, token, { publishId: 2, coach: [{ handNo: 4, text: '수정된 코멘트' }] });
+    const snap = await snapshot(srv.port, token);
+    assert.equal(snap.json.coach.length, 1);
+    assert.equal(snap.json.coach[0].text, '수정된 코멘트');
+    assert.equal(snap.json.coach[0].overfold, true, '과폴드 사용 기록이 사라져 코멘트가 또 나간다');
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('wait-action: view-only 재게시는 액션 처리 확인이 아니므로 재전달을 유지한다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const decisionId = 'd-6-river-1';
+    await publish(srv.port, token, { publishId: 1, view: viewWith(decisionId) });
+    await action(srv.port, token, { decisionId, action: 'call' });
+    await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
+
+    // 딜러가 죽고 resume이 view-only로 같은 상태를 재게시한 상황
+    await publish(srv.port, token, { publishId: 2, view: viewWith(decisionId), viewOnly: true });
+    const again = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 300 });
+    assert.equal(again.json.action, 'call', 'resume 재게시가 미확인 액션을 지웠다');
   } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });

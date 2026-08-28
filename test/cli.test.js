@@ -61,6 +61,16 @@ function playUntilOver(dir, { deck = FULL_DECK, preferFold = false } = {}) {
   throw new Error('핸드가 종료되지 않았습니다');
 }
 
+function advanceToAi(dir) {
+  for (let i = 0; i < 10; i += 1) {
+    const legal = assertOk(cli(dir, ['legal']));
+    if (legal.handOver) throw new Error('핸드가 이미 종료되었습니다');
+    if (legal.toAct !== 'user') return legal;
+    assertOk(cli(dir, ['apply', 'user', legal.canCheck ? 'check' : 'call']));
+  }
+  throw new Error('AI 차례에 도달하지 못했습니다');
+}
+
 function spawnDummy() {
   return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
 }
@@ -289,6 +299,132 @@ test('init --force: 살아 있는 가짜 서버(spawn된 node 대기 프로세�
   }
 });
 
+test('step: 액션 없이 호출하면 현재 뷰와 다음 행동자를 한 번에 준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const legal = assertOk(cli(dir, ['legal']));
+  const step = assertOk(cli(dir, ['step']));
+
+  assert.equal(step.stateVersion, legal.stateVersion);
+  assert.deepEqual(step.events, []);
+  assert.equal(step.view.handNo, 1);
+  assert.equal(step.view.myCards.length, 2);
+  assert.equal(step.next.toAct, legal.toAct);
+  assert.equal(step.next.decisionId, legal.decisionId);
+  assert.equal(step.next.kind, legal.toAct === 'user' ? 'user' : 'ai');
+});
+
+test('step: AI 차례면 agentHandle과 legal 숫자가 전부 든 자족적 요약을 준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '3']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const legal = advanceToAi(dir);
+  const { next } = assertOk(cli(dir, ['step']));
+
+  assert.equal(next.kind, 'ai');
+  assert.equal(next.agentHandle, `player-${next.toAct}`);
+  assert.equal(typeof next.summary, 'string');
+
+  for (const needle of [
+    legal.decisionId,
+    String(legal.callAmount),
+    String(legal.minRaiseTo),
+    String(legal.maxRaiseTo),
+    String(legal.potTotal),
+  ]) {
+    assert.ok(next.summary.includes(needle), `요약에 ${needle} 누락`);
+  }
+});
+
+test('step: AI 요약에 남의 홀카드가 없다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '3']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  advanceToAi(dir);
+  const { next, view } = assertOk(cli(dir, ['step']));
+
+  const mine = assertOk(cli(dir, ['view', '--for', next.toAct])).myCards;
+  assert.equal(mine.length, 2);
+  for (const card of mine) {
+    assert.ok(next.summary.includes(card), `자기 홀카드 ${card} 누락`);
+  }
+  for (const seat of view.seats) {
+    if (seat.playerId === next.toAct) continue;
+    for (const card of assertOk(cli(dir, ['view', '--for', seat.playerId])).myCards) {
+      assert.equal(next.summary.includes(card), false, `${seat.playerId} 홀카드 ${card} 유출`);
+    }
+  }
+});
+
+test('step: 올인이 없으면 요약 팟 줄은 총액만 보여준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '3']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  advanceToAi(dir);
+  const { next } = assertOk(cli(dir, ['step']));
+  const potLine = next.summary.split('\n').find((line) => line.startsWith('팟: '));
+  assert.equal(potLine.includes('('), false, potLine);
+});
+
+test('step: 액션을 적용하고 갱신된 뷰·다음 행동자를 함께 준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '3']);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  const before = assertOk(cli(dir, ['legal']));
+  const stepped = assertOk(cli(dir, [
+    'step', before.toAct, before.canCheck ? 'check' : 'call',
+    '--expect-version', String(before.stateVersion),
+  ]));
+
+  assert.equal(stepped.stateVersion, before.stateVersion + 1);
+  assert.ok(stepped.events.some((event) => event.type === 'action'));
+  assert.notEqual(stepped.next.decisionId, before.decisionId);
+  assert.equal(stepped.view.toAct, stepped.next.toAct);
+});
+
+test('step --new-hand: 핸드를 시작하고 첫 행동자까지 한 번에 준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const started = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+
+  assert.ok(started.events.some((event) => event.type === 'hand_start'));
+  assert.ok(started.events.some((event) => event.type === 'deal_hole'));
+  assert.equal(started.view.handNo, 1);
+  assert.ok(started.next.toAct);
+});
+
+test('step: --new-hand와 액션을 함께 주면 USAGE로 거부', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const result = cli(dir, ['step', '--new-hand', 'user', 'check']);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.ok, false);
+  assert.equal(result.json.code, 'USAGE');
+});
+
+test('step: 핸드가 끝나면 next는 null이다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  let cur = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  for (let i = 0; i < 20 && !cur.handOver; i += 1) {
+    cur = assertOk(cli(dir, ['step', cur.next.toAct, 'fold']));
+  }
+  assert.equal(cur.handOver, true);
+  assert.equal(cur.next, null);
+});
+
+test('step --force-default: 워치독 경로도 같은 envelope를 준다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const started = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  const forced = assertOk(cli(dir, ['step', started.next.toAct, '--force-default']));
+
+  assert.ok(forced.events.some((event) => event.type === 'action'));
+  assert.equal(forced.stateVersion, started.stateVersion + 1);
+  assert.ok('next' in forced);
+});
+
 test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이동(4인)', () => {
   const dir = tmpGame();
   initGame(dir, ['--ai', '3']);
@@ -314,4 +450,111 @@ test('연속 3핸드 로테이션: 버튼·SB·BB가 매 핸드 시계방향 이
   }
   assert.equal(rounds[1].button, nextOf(rounds[0].button));
   assert.equal(rounds[2].button, nextOf(rounds[1].button));
+});
+
+test('step: 에러 코드가 apply·new-hand와 동일하다', () => {
+  const dir = tmpGame();
+  assert.equal(cli(dir, ['step']).json.code, 'NO_GAME');
+
+  initGame(dir, ['--ai', '2']);
+  assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  const legal = assertOk(cli(dir, ['legal']));
+
+  const mismatch = cli(dir, ['step', legal.toAct, 'fold', '--expect-version', String(legal.stateVersion + 1)]);
+  assert.equal(mismatch.status, 1);
+  assert.equal(mismatch.json.code, 'VERSION_MISMATCH');
+
+  const running = cli(dir, ['step', '--new-hand']);
+  assert.equal(running.status, 1);
+  assert.equal(running.json.code, 'ILLEGAL_ACTION');
+
+  const after = assertOk(cli(dir, ['legal']));
+  assert.equal(after.stateVersion, legal.stateVersion, '거부된 step이 상태를 바꿨다');
+});
+
+test('step: 게임이 끝난 뒤 --new-hand는 GAME_OVER', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '1', '--stack', '50']);
+  let cur = assertOk(cli(dir, ['step', '--new-hand', '--deck', HU_DECK]));
+  for (let i = 0; i < 20 && !cur.gameOver; i += 1) {
+    cur = assertOk(cli(dir, ['step', cur.next.toAct, cur.next.kind === 'user' ? 'call' : 'call']));
+  }
+  assert.equal(cur.gameOver, true);
+  const result = cli(dir, ['step', '--new-hand']);
+  assert.equal(result.status, 1);
+  assert.equal(result.json.code, 'GAME_OVER');
+});
+
+test('step: 실패 envelope는 stderr로도 나온다', () => {
+  const dir = tmpGame();
+  const result = cli(dir, ['step']);
+  assert.equal(result.status, 1);
+  assert.equal(result.json.code, 'NO_GAME');
+  assert.ok(result.stderr.includes('NO_GAME'), `stderr에 코드가 없다: ${result.stderr}`);
+});
+
+test('step: 읽기 전용 호출도 --expect-version 불일치를 거부한다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  const legal = assertOk(cli(dir, ['legal']));
+  assertOk(cli(dir, ['step', '--expect-version', String(legal.stateVersion)]));
+  const stale = cli(dir, ['step', '--expect-version', String(legal.stateVersion + 1)]);
+  assert.equal(stale.status, 1);
+  assert.equal(stale.json.code, 'VERSION_MISMATCH');
+});
+
+test('step: 핸드를 끝내면 apply와 똑같이 아카이브를 남긴다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  let cur = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  for (let i = 0; i < 20 && !cur.handOver; i += 1) {
+    cur = assertOk(cli(dir, ['step', cur.next.toAct, 'fold']));
+  }
+  assert.equal(cur.handOver, true);
+  const archive = path.join(dir, 'hands', 'hand-0001.json');
+  assert.ok(fs.existsSync(archive), '아카이브가 없다');
+  assert.equal(JSON.parse(fs.readFileSync(archive, 'utf8')).handNo, 1);
+});
+
+test('step: envelope가 사용자 관점 view임을 표시한다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const started = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  assert.equal(started.viewFor, 'user');
+});
+
+test('step: top-level·view.legal·저장된 stateVersion이 모두 같다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  let cur = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  // view.legal은 사용자 차례에만 실린다 — 버튼이 무작위이므로 거기까지 진행시킨다.
+  for (let i = 0; i < 10 && cur.next && cur.next.kind !== 'user'; i += 1) {
+    cur = assertOk(cli(dir, ['step', cur.next.toAct, 'call', '--expect-version', String(cur.stateVersion)]));
+  }
+  assert.equal(cur.next?.kind, 'user', '사용자 차례에 도달하지 못했다');
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).stateVersion;
+  assert.equal(cur.stateVersion, persisted);
+  assert.ok(cur.view.legal, '사용자 차례인데 view.legal이 없다');
+  assert.equal(cur.view.legal.stateVersion, cur.stateVersion, 'view.legal이 저장 전 버전을 들고 있다');
+});
+
+test('resume-check: 아카이브 정상·복구·복구실패를 구분해 보고한다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  playUntilOver(dir, { preferFold: true });
+
+  assert.equal(assertOk(cli(dir, ['resume-check'])).archiveStatus, 'healthy');
+
+  const archive = path.join(dir, 'hands', 'hand-0001.json');
+  fs.unlinkSync(archive);
+  assert.equal(assertOk(cli(dir, ['resume-check'])).archiveStatus, 'repaired');
+
+  // 복구 쓰기가 실패하는 상황: 아카이브 자리를 디렉터리로 막는다
+  fs.unlinkSync(archive);
+  fs.mkdirSync(archive);
+  const failed = assertOk(cli(dir, ['resume-check']));
+  assert.equal(failed.archiveStatus, 'repair_failed', '복구 실패가 정상과 구분되지 않는다');
+  assert.equal(failed.archiveRepaired, false);
 });
