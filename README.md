@@ -43,18 +43,28 @@ node --test
 
 ```
 engine/                 # 순수 포커 엔진 CLI (네트워크·LLM 없음)
-  cli.js                # init/new-hand/legal/apply/view/hand/stats/end/resume-check
+  cli.js                # step/init/new-hand/legal/apply/view/hand/stats/end/resume-check
+tools/
+  publish.js            # 딜러용 게시 도구 (public 필터·publishId·사용자 액션 대기)
 server/
   server.js             # 중계 (SSE, wait-action, publish, 토큰)
   public/               # 한국어 포커 테이블 UI
 test/                   # node --test
+  turn-contract.test.js # SKILL의 턴 명령을 문면 그대로 이어 붙인 계약 테스트
   helpers/dev-drive.js  # UI 시연용 가짜 딜러
 .agents/skills/start-game/SKILL.md   # 딜러 절차 정본 (SSOT)
 .claude/skills/start-game            # → 정본 심볼릭 링크
+.claude/agents/holdem-player.md      # Claude Code 플레이어 에이전트 정의 (haiku)
 .grok/skills/start-game              # → 정본 심볼릭 링크
 AGENTS.md                            # Codex 등 호스트 포인터
 game/                   # 런타임 (gitignore)
 ```
+
+## 턴 지연
+
+게임 속도를 지배하는 것은 모델 자체가 아니라 **딜러가 액션 하나에 도는 LLM 왕복 횟수**다. `engine/cli.js step`이 적용·뷰·다음 행동자 요약을 한 번에 돌려주고 `tools/publish.js`가 게시·대기를 맡으므로, AI 액션 1개 = 딜러 라운드 2개, 사용자 액션 1개 = 라운드 1개로 끝난다. 이 경계를 지키는 규약은 SKILL.md의 「턴 명령」과 §4에 있다.
+
+게시 시각은 `game/ui-snapshot.json`의 `history[].at`에 남으므로 턴별 실제 지연을 사후에 측정할 수 있다.
 
 ## 구현 후 확인 체크리스트
 

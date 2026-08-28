@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
 import { fixedDeck, setup3 } from './helpers/fixtures.js';
-import { redactRecord, statsReport, userView, viewFor } from '../engine/views.js';
+import { positionsOf, redactRecord, statsReport, turnSummary, userView, viewFor } from '../engine/views.js';
 
 function holeOf(state, playerId) {
   return state.hand?.holes[playerId] ?? state.lastHand?.holes[playerId];
@@ -118,4 +118,76 @@ test('코치 입력 합성(redactRecord + statsReport JSON)에 상대 홀카드�
   }
   assert.equal(input.includes('archetype'), false);
   assert.equal(input.includes('bluffFreq'), false);
+});
+
+test('positionsOf: 헤즈업은 BTN/SB와 BB', () => {
+  const st = createGame({ aiCount: 1 });
+  st.button = 1; // startHand가 딜 전에 버튼을 한 칸 옮긴다 → user가 버튼
+  const dealt = startHand(st, { deck: fixedDeck() }).state;
+  assert.deepEqual(positionsOf(dealt), { user: 'BTN/SB', p1: 'BB' });
+});
+
+test('positionsOf: 6인은 BTN·SB·BB·UTG·UTG+1·CO, 탈락 좌석은 건너뛴다', () => {
+  const st = createGame({ aiCount: 6 });
+  st.button = 0;
+  const full = positionsOf(st);
+  assert.deepEqual(
+    [full.user, full.p1, full.p2, full.p3, full.p4, full.p5, full.p6],
+    ['BTN', 'SB', 'BB', 'UTG', 'UTG+1', 'UTG+2', 'CO'],
+  );
+  st.seats[1].out = true;
+  const afterBust = positionsOf(st);
+  assert.equal(afterBust.p1, undefined);
+  assert.equal(afterBust.p2, 'SB');
+});
+
+test('turnSummary: 자기 홀카드만 담고 legal 수치를 전부 문면에 쓴다', () => {
+  const st = setup3(5000, 5000, 5000);
+  const legal = legalFor(st);
+  const text = turnSummary(st, legal.toAct);
+  assert.ok(text.includes(legal.decisionId));
+  assert.ok(text.includes(`callAmount=${legal.callAmount}`));
+  assert.ok(text.includes(`minRaiseTo=${legal.minRaiseTo}`));
+  assert.ok(text.includes(`maxRaiseTo=${legal.maxRaiseTo}`));
+  for (const card of holeOf(st, legal.toAct)) assert.ok(text.includes(card));
+  for (const other of ['user', 'p1', 'p2'].filter((pid) => pid !== legal.toAct)) {
+    for (const card of holeOf(st, other)) {
+      assert.equal(text.includes(card), false, `${other} 홀카드 ${card} 유출`);
+    }
+  }
+});
+
+test('turnSummary: 올인이 나오면 팟 줄에 사이드팟이 분해된다', () => {
+  const shortStack = setup3(5000, 5000, 120);
+  const legal = legalFor(shortStack);
+  const allIn = applyAction(shortStack, legal.toAct, 'raise', legalFor(shortStack).maxRaiseTo).state;
+  const next = legalFor(allIn);
+  const text = turnSummary(allIn, next.toAct);
+  const potLine = text.split('\n').find((line) => line.startsWith('팟: '));
+  assert.ok(allIn.hand.allIn.length > 0, '올인이 만들어지지 않았다');
+  assert.ok(potLine.includes('('), potLine);
+});
+
+test('turnSummary: 행동자가 아니면 null', () => {
+  const st = setup3(5000, 5000, 5000);
+  const notActing = ['user', 'p1', 'p2'].find((pid) => pid !== legalFor(st).toAct);
+  assert.equal(turnSummary(st, notActing), null);
+});
+
+test('turnSummary: 숏스택 올인만 가능하면 역방향 범위 대신 단일 금액을 제시한다', () => {
+  const st = setup3(5000, 5000, 5000);
+  // 100으로 레이즈 → currentBet 100, minRaiseTo 150. 다음 행동자의 올인을 120으로 맞추면
+  // 레이즈는 가능한데(120 > 100) 최소 레이즈에는 못 미쳐(120 < 150) 올인 하나만 남는다.
+  const raised = applyAction(st, legalFor(st).toAct, 'raise', 100).state;
+  const actor = legalFor(raised).toAct;
+  const shortSeat = raised.seats.find((seat) => seat.playerId === actor);
+  shortSeat.stack = 120 - (raised.hand.bets[actor] ?? 0);
+  const legal = legalFor(raised);
+  assert.equal(legal.canRaise, true, '레이즈가 가능한 상황이어야 한다');
+  assert.ok(legal.minRaiseTo > legal.maxRaiseTo, `min(${legal.minRaiseTo}) > max(${legal.maxRaiseTo}) 상황이어야 한다`);
+  const text = turnSummary(raised, legal.toAct);
+  const line = text.split('\n').find((l) => l.startsWith('가능한 액션:'));
+  assert.equal(line.includes(`${legal.minRaiseTo}~${legal.maxRaiseTo}`), false, `역방향 범위 노출: ${line}`);
+  assert.ok(line.includes(`raise ${legal.maxRaiseTo}`), line);
+  assert.ok(line.includes('올인'), line);
 });

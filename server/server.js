@@ -71,7 +71,7 @@ function loadUiState(gameDir) {
       revision: Number(raw.revision) || 0,
       view: raw.view ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
-      coach: Array.isArray(raw.coach) ? raw.coach : [],
+      coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
       review: raw.review,
       publishId: raw.publishId,
       history: Array.isArray(raw.history) ? raw.history : [],
@@ -80,6 +80,22 @@ function loadUiState(gameDir) {
     if (error.code === 'ENOENT') return emptyState();
     throw error;
   }
+}
+
+// Coaching runs in the background, so notes arrive out of order and sometimes twice.
+// Keyed by handNo and sorted, the array reads the same however they arrive — including
+// when an older snapshot written before this rule is loaded back.
+function mergeCoach(existing, incoming) {
+  const merged = [...existing];
+  for (const note of incoming) {
+    const at = merged.findIndex((entry) => entry.handNo === note.handNo);
+    if (at === -1) { merged.push(note); continue; }
+    // The once-per-game overfold comment is recorded here; a later edit of the same
+    // note must not erase the fact that it was spent.
+    const overfold = merged[at].overfold || note.overfold;
+    merged[at] = overfold ? { ...note, overfold: true } : note;
+  }
+  return merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
 }
 
 function publicSnapshot(state) {
@@ -210,6 +226,7 @@ export function startServer({ gameDir, port = 8877, token }) {
   const sseClients = new Set();
   const waiters = new Set();
   let slot = null;
+  let delivered = null;
 
   const checkToken = (provided, res) => {
     if (tokensEqual(provided, token)) return true;
@@ -225,6 +242,10 @@ export function startServer({ gameDir, port = 8877, token }) {
       if (waiter.expectDecisionId && waiter.expectDecisionId !== slot.decisionId) continue;
       const taken = slot;
       slot = null;
+      // Delivery is not proof of receipt: an HTTP response can be lost, and the user's
+      // action bar is already disabled, so a consumed-and-forgotten action stalls the
+      // hand with nobody able to resend it. Kept until the next decision is published.
+      delivered = taken;
       waiters.delete(waiter);
       clearTimeout(waiter.timer);
       waiter.finish(taken);
@@ -233,38 +254,71 @@ export function startServer({ gameDir, port = 8877, token }) {
   };
 
   const handlePublish = (body, res) => {
-    if (body.publishId !== undefined && body.publishId === state.publishId) {
+    // publishIds only ever move forward, so anything at or below the last one is a
+    // resend of something already applied — not just the immediately previous id.
+    // Answering it as already-done is what makes a publisher's retry safe.
+    const alreadyApplied = Number.isInteger(body.publishId) && Number.isInteger(state.publishId)
+      ? body.publishId <= state.publishId
+      : body.publishId !== undefined && body.publishId === state.publishId;
+    if (alreadyApplied) {
       sendJson(res, 200, { ok: true, revision: state.revision });
       return;
     }
 
-    state.revision += 1;
-    state.publishId = body.publishId;
+    // Build the whole next state to the side, persist it, and only then commit.
+    // Mutating first would leave memory ahead of disk after a write failure, and the
+    // publisher's same-id retry would then hit the duplicate fast-path above — reported
+    // as published, present nowhere.
+    const next = {
+      revision: state.revision + 1,
+      publishId: body.publishId,
+      view: state.view,
+      log: state.log,
+      coach: state.coach,
+      review: state.review,
+      history: state.history,
+    };
 
     const payload = {};
     if (body.view !== undefined) {
-      state.view = body.view;
+      next.view = body.view;
       payload.view = body.view;
     }
     if (Array.isArray(body.events) && body.events.length) {
-      state.log.push(...body.events);
+      next.log = [...next.log, ...body.events];
       payload.events = body.events;
     }
     if (Array.isArray(body.messages) && body.messages.length) {
-      state.log.push(...body.messages);
+      next.log = [...next.log, ...body.messages];
       payload.messages = body.messages;
     }
     if (Array.isArray(body.coach) && body.coach.length) {
-      state.coach.push(...body.coach);
+      next.coach = mergeCoach(next.coach, body.coach);
       payload.coach = body.coach;
     }
     if (body.review !== undefined) {
-      state.review = body.review;
+      next.review = body.review;
       payload.review = body.review;
     }
 
-    state.history.push({ revision: state.revision, payload });
-    persistUiState(root, state);
+    // Stamped for turn-latency measurement; kept off the payload so clients see no change.
+    next.history = [...next.history, { revision: next.revision, at: new Date().toISOString(), payload }];
+
+    try {
+      persistUiState(root, next);
+    } catch {
+      sendJson(res, 500, { ok: false, code: 'PERSIST_FAILED' });
+      return;
+    }
+
+    Object.assign(state, next);
+    // Any published view means the dealer got the action and moved on — either it was
+    // applied, or it was refused and re-asked. Re-delivering past this point would feed
+    // a refused action straight back into the wait it just re-entered, forever.
+    // A view-only republish is the exception: it re-shows a state rather than
+    // acknowledging anything, so a resuming dealer must still be able to collect an
+    // action whose response was lost.
+    if (body.view !== undefined && body.viewOnly !== true) delivered = null;
     for (const client of sseClients) {
       try { writeSse(client.res, state.revision, payload); } catch { /* disconnected */ }
     }
@@ -326,7 +380,14 @@ export function startServer({ gameDir, port = 8877, token }) {
     if (slot && (!expectDecisionId || slot.decisionId === expectDecisionId)) {
       const taken = slot;
       slot = null;
+      delivered = taken;
       finish(taken);
+      return;
+    }
+
+    // The same decision asked twice means the first answer never arrived.
+    if (delivered && expectDecisionId && delivered.decisionId === expectDecisionId) {
+      finish(delivered);
       return;
     }
 

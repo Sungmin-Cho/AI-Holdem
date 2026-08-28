@@ -236,13 +236,16 @@ function tryCreateMutex(dir) {
     fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
   } catch (error) {
     undoOwnMutex(dir, mine);
+    // The residual window described above: a concurrent reclaimer swept this
+    // directory while it was still empty. We never held the lock, so this is an
+    // acquisition miss to retry — not a failure to hand back to the caller.
+    if (error.code === 'ENOENT') return null;
     throw error;
   }
   return mine;
 }
 
-function acquireMutex(gameDir, ctx) {
-  const dir = mutexPath(gameDir);
+function acquireMutex(dir, ctx) {
   for (;;) {
     let mine = tryCreateMutex(dir);
     if (mine) return mine;
@@ -255,8 +258,7 @@ function acquireMutex(gameDir, ctx) {
   }
 }
 
-function releaseMutex(gameDir, mine) {
-  const dir = mutexPath(gameDir);
+function releaseMutex(dir, mine) {
   // Our pid is alive, so no reclaimer may have deleted our lock: if the inode still
   // matches the one mkdir gave us, the lock is ours to dismantle — pid file first,
   // then the (now empty) directory. Never recursive, never rename.
@@ -278,12 +280,34 @@ function releaseMutex(gameDir, mine) {
 export function withMutation(gameDir, fn, options) {
   const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
   const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
-  const mine = acquireMutex(gameDir, { deadline: Date.now() + timeoutMs, retryMs });
+  const dir = mutexPath(gameDir);
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
   try {
     const result = fn(loadState(gameDir));
     saveState(gameDir, result.state);
     return result;
   } finally {
-    releaseMutex(gameDir, mine);
+    releaseMutex(dir, mine);
+  }
+}
+
+/**
+ * The same identity-checked lock, under a caller-chosen name and around an async
+ * body — for critical sections outside state mutation (publishing to the relay).
+ * Sharing the primitive is the point: a second, hand-rolled lock would repeat the
+ * TOCTOU and ownership mistakes this one was written to avoid.
+ *
+ * `timeoutMs` must exceed the staleness threshold, or a waiter gives up before it
+ * is ever allowed to reclaim a dead owner's lock.
+ */
+export async function withNamedLock(gameDir, name, fn, options) {
+  const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
+  const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
+  const dir = path.join(gameDir, name);
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
+  try {
+    return await fn();
+  } finally {
+    releaseMutex(dir, mine);
   }
 }

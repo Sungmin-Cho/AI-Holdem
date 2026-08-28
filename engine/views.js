@@ -68,6 +68,92 @@ export function userView(state) {
   return viewFor(state, 'user');
 }
 
+const STREET_KO = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
+const ACTION_KO = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈' };
+
+// Clockwise from the button over seats still in the game (busted seats carry out:true).
+function seatedFromButton(state) {
+  const n = state.seats.length;
+  const order = [];
+  for (let step = 0; step < n; step += 1) {
+    const seat = state.seats[(state.button + step) % n];
+    if (!seat.out) order.push(seat);
+  }
+  return order;
+}
+
+export function positionsOf(state) {
+  const order = seatedFromButton(state);
+  const labels = {};
+  if (order.length === 2) {
+    labels[order[0].playerId] = 'BTN/SB';
+    labels[order[1].playerId] = 'BB';
+    return labels;
+  }
+  const head = ['BTN', 'SB', 'BB'];
+  order.forEach((seat, i) => {
+    labels[seat.playerId] = i < 3 ? head[i] : `UTG${i === 3 ? '' : `+${i - 3}`}`;
+  });
+  if (order.length >= 5) labels[order[order.length - 1].playerId] = 'CO';
+  return labels;
+}
+
+export function turnSummary(state, playerId) {
+  const legal = legalFor(state);
+  if (legal.handOver || legal.toAct !== playerId) return null;
+
+  const view = viewFor(state, playerId);
+  const pos = positionsOf(state);
+  const hand = state.hand;
+  const me = state.seats.find((seat) => seat.playerId === playerId);
+  const nameOf = (pid) => state.seats.find((seat) => seat.playerId === pid)?.name ?? pid;
+  const [sb, bb] = view.blinds;
+
+  // Unequal blinds split the pot too; the breakdown only informs a decision once someone is all-in.
+  const sidePots = hand?.allIn?.length && view.pots.length > 1;
+  const pots = sidePots
+    ? `${legal.potTotal} (${view.pots.map((pot) => `팟${pot.potIndex} ${pot.amount}`).join(', ')})`
+    : String(legal.potTotal);
+
+  const survivors = seatedFromButton(state).map((seat) => {
+    const status = hand?.folded?.includes(seat.playerId) ? '폴드'
+      : hand?.allIn?.includes(seat.playerId) ? '올인' : '참여';
+    const bet = hand?.bets?.[seat.playerId] ?? 0;
+    return `${seat.name}(${pos[seat.playerId]}, 스택 ${seat.stack}, 이번 스트리트 ${bet}, ${status})`;
+  });
+
+  const actions = (hand?.actions ?? []).map((entry) => {
+    const amount = entry.action === 'raise' || entry.action === 'call' ? ` ${entry.amount}` : '';
+    return `${STREET_KO[entry.street] ?? entry.street} ${nameOf(entry.playerId)} ${ACTION_KO[entry.action] ?? entry.action}${amount}`;
+  });
+
+  const choices = ['fold'];
+  if (legal.canCheck) choices.push('check');
+  else choices.push(`call ${legal.callAmount}`);
+  if (legal.canRaise) {
+    // Short stack: the raise clears the current bet but not the minimum, so all-in
+    // is the only legal amount. Printing "150~120" would read as no legal raise.
+    choices.push(legal.minRaiseTo > legal.maxRaiseTo
+      ? `raise ${legal.maxRaiseTo} (올인, 유일한 합법 레이즈)`
+      : `raise ${legal.minRaiseTo}~${legal.maxRaiseTo}`);
+  }
+
+  const lines = [
+    `[핸드 ${view.handNo} / ${STREET_KO[view.street] ?? view.street}] 당신: ${me.name} (${pos[playerId]}, 스택 ${me.stack}) | decisionId: ${legal.decisionId}`,
+    `홀카드: ${view.myCards.join(' ')} | 보드: ${view.board.length ? view.board.join(' ') : '없음'}`,
+    `팟: ${pots} | 블라인드 ${sb}/${bb} | 내 이번 스트리트 베팅: ${hand?.bets?.[playerId] ?? 0}`,
+    `생존자: ${survivors.join(' / ')}`,
+    `이번 핸드 공개 액션: ${actions.length ? actions.join(' → ') : '없음'}`,
+    `가능한 액션: ${choices.join(' / ')}`,
+    `legal 수치: canCheck=${legal.canCheck} callAmount=${legal.callAmount} canRaise=${legal.canRaise} minRaiseTo=${legal.minRaiseTo} maxRaiseTo=${legal.maxRaiseTo}`,
+  ];
+  if (legal.canRaise && legal.minRaiseTo > legal.maxRaiseTo) {
+    lines.push(`minRaiseTo>maxRaiseTo 이므로 합법 레이즈는 ${legal.maxRaiseTo}(올인)뿐이다.`);
+  }
+  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?,"talk":"짧은 한마디(선택)"}`);
+  return lines.join('\n');
+}
+
 function safeAction(action) {
   const keys = [
     'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',

@@ -446,7 +446,15 @@ function render(m) {
   }
   if (Array.isArray(m.events) && m.events.length) ui.log.push(...m.events);
   if (Array.isArray(m.messages) && m.messages.length) ui.log.push(...m.messages);
-  if (Array.isArray(m.coach) && m.coach.length) ui.coach.push(...m.coach);
+  if (Array.isArray(m.coach) && m.coach.length) {
+    // Notes arrive whenever their background coach finishes, not in hand order.
+    for (const note of m.coach) {
+      const at = ui.coach.findIndex((existing) => existing.handNo === note.handNo);
+      if (at === -1) ui.coach.push(note);
+      else ui.coach[at] = note;
+    }
+    ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
+  }
   if (m.review !== undefined) {
     ui.review = m.review;
     overlayDismissed = false;

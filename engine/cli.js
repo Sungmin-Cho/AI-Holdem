@@ -6,9 +6,9 @@ import { newDeck } from './cards.js';
 import { applyAction, createGame, forceDefault, legalFor, startHand } from './hand.js';
 import { generatePersonas } from './personas.js';
 import { loadState, readHand, saveState, withMutation, writeHandArchive, writeJsonAtomic } from './state.js';
-import { redactRecord, statsReport, viewFor } from './views.js';
+import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 
-const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted']);
+const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
 const VALUE_FLAGS = new Set([
   'game-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck',
@@ -41,6 +41,8 @@ function succeed(fields) {
 }
 
 function fail(code, message, exitCode = 1) {
+  // The turn command redirects stdout to a file, so stderr is the dealer's only view of a refusal.
+  try { fs.writeSync(2, `${JSON.stringify({ ok: false, code, message })}\n`); } catch { /* closed */ }
   reply({ ok: false, code, message }, exitCode);
 }
 
@@ -177,6 +179,11 @@ function mutate(gameDir, fn) {
   });
   const envelope = result.response ?? {};
   envelope.stateVersion = result.state.stateVersion;
+  // The response is built inside the mutation, before saveState bumps the version;
+  // leaving the nested copy behind would hand out a version that is already stale.
+  if (envelope.view?.legal?.stateVersion !== undefined) {
+    envelope.view.legal.stateVersion = envelope.stateVersion;
+  }
   const lastHand = result.state.lastHand;
   if (lastHand && lastHand.handNo !== result.beforeHandNo) {
     try {
@@ -281,6 +288,86 @@ function cmdView(gameDir, flags) {
   succeed({ stateVersion: state.stateVersion, ...viewFor(state, flags.for) });
 }
 
+function readPlayers(gameDir) {
+  try {
+    const players = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json'), 'utf8'));
+    return Array.isArray(players) ? players : [];
+  } catch {
+    return [];
+  }
+}
+
+function nextBlock(gameDir, state, legal) {
+  if (legal.handOver) return null;
+  const next = {
+    toAct: legal.toAct,
+    decisionId: legal.decisionId,
+    kind: legal.toAct === 'user' ? 'user' : 'ai',
+  };
+  if (next.kind === 'ai') {
+    const record = readPlayers(gameDir).find((player) => player.playerId === legal.toAct);
+    next.agentHandle = record?.agentHandle ?? `player-${legal.toAct}`;
+    next.summary = turnSummary(state, legal.toAct);
+  }
+  return next;
+}
+
+// One dealer round: mutate at most once, then hand back everything the turn needs —
+// events to publish, the user view, and the next actor's self-contained summary.
+function stepEnvelope(gameDir, state, events) {
+  const response = applyEnvelope(state, events);
+  response.view = viewFor(state, 'user');
+  // Marks whose view this is: publishing any other player's view would expose their hole cards.
+  response.viewFor = 'user';
+  response.next = nextBlock(gameDir, state, legalFor(state));
+  return response;
+}
+
+function cmdStep(gameDir, flags, rest) {
+  const newHand = Boolean(flags['new-hand']);
+  const playerId = rest[0];
+  if (newHand && (playerId != null || flags['force-default'])) {
+    usage('step은 --new-hand와 액션을 동시에 받지 않습니다.');
+  }
+
+  const expectVersion = flags['expect-version'] != null
+    ? parseIntArg(flags['expect-version'], '--expect-version')
+    : null;
+
+  if (!newHand && playerId == null) {
+    if (flags['force-default']) usage('--force-default에는 playerId가 필요합니다.');
+    const state = requireState(loadState(gameDir));
+    if (expectVersion != null && state.stateVersion !== expectVersion) throwCoded('VERSION_MISMATCH');
+    succeed({ stateVersion: state.stateVersion, ...stepEnvelope(gameDir, state, []) });
+    return;
+  }
+
+  const deck = flags.deck != null ? parseDeck(flags.deck) : undefined;
+  let action;
+  let amount;
+  if (!newHand && !flags['force-default']) {
+    action = rest[1];
+    if (!action) usage('step에는 action이 필요합니다.');
+    amount = rest[2] != null ? parseIntArg(rest[2], 'amount') : undefined;
+  }
+
+  const envelope = mutate(gameDir, (state) => {
+    requireState(state);
+    if (expectVersion != null && state.stateVersion !== expectVersion) throwCoded('VERSION_MISMATCH');
+    let result;
+    if (newHand) {
+      if (state.hand) throwCoded('ILLEGAL_ACTION', '진행 중인 핸드가 있습니다.');
+      result = startHand(state, deck ? { deck } : {});
+    } else if (flags['force-default']) {
+      result = forceDefault(state, playerId);
+    } else {
+      result = applyAction(state, playerId, action, amount);
+    }
+    return { state: result.state, response: stepEnvelope(gameDir, result.state, result.events) };
+  });
+  succeed(envelope);
+}
+
 function cmdHand(gameDir, flags, rest) {
   if (rest[0] == null) usage('hand에는 핸드 번호가 필요합니다.');
   const n = parseIntArg(rest[0], 'hand');
@@ -317,10 +404,15 @@ function cmdResumeCheck(gameDir) {
   const state = requireState(loadState(gameDir));
   const lock = readLock(gameDir);
   let archiveRepaired = false;
+  // `false` alone cannot say whether the archive was already fine or the repair failed,
+  // and the caller must block the next hand only in the second case.
+  let archiveStatus = 'healthy';
   try {
     archiveRepaired = rebuildArchive(gameDir, state);
+    if (archiveRepaired) archiveStatus = 'repaired';
   } catch {
     archiveRepaired = false;
+    archiveStatus = 'repair_failed';
   }
   succeed({
     stateVersion: state.stateVersion,
@@ -330,6 +422,7 @@ function cmdResumeCheck(gameDir) {
     phase: state.phase,
     toAct: legalFor(state).toAct,
     archiveRepaired,
+    archiveStatus,
   });
 }
 
@@ -355,6 +448,9 @@ function main() {
         break;
       case 'view':
         cmdView(gameDir, flags);
+        break;
+      case 'step':
+        cmdStep(gameDir, flags, rest);
         break;
       case 'hand':
         cmdHand(gameDir, flags, rest);
