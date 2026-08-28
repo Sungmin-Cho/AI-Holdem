@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createGame } from './hand.js';
+import { generatePersonas } from './personas.js';
+import { runExclusive, saveState, writeJsonAtomic } from './state.js';
 
 // Game-directory archive (init vacate), not the per-hand writeHandArchive.
 
@@ -8,8 +11,30 @@ const HAND_FILE = /^hand-.*\.json$/;
 const PARTIAL_NAME = /^\..+\.partial$/;
 const PARTIAL_STAMP = /^\.(\d{8}T\d{6}Z)-.+\.partial$/;
 
+const sleepLock = new Int32Array(new SharedArrayBuffer(4));
+
 function now() {
   return new Date();
+}
+
+function sleepSync(ms) {
+  Atomics.wait(sleepLock, 0, 0, ms);
+}
+
+function clockMs(clock) {
+  const value = clock();
+  return typeof value === 'number' ? value : value.getTime();
+}
+
+function throwCoded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  throw error;
+}
+
+function waitWhileAlive(pid, alive, clock, sleep, timeoutMs, intervalMs) {
+  const deadline = clockMs(clock) + timeoutMs;
+  while (clockMs(clock) < deadline && alive(pid)) sleep(intervalMs);
 }
 
 export function throwArchiveFailed() {
@@ -176,4 +201,100 @@ export function vacateLive(gameDir, io = { fs, now }) {
   mkdirArchive(disk, path.join(archiveDir, partialName));
   moveLiveInto(gameDir, path.join(archiveDir, partialName), io);
   return promotePartial(disk, gameDir, partialName, id);
+}
+
+export function readLock(gameDir, io = { fs }) {
+  const disk = io.fs ?? fs;
+  try {
+    const lock = JSON.parse(disk.readFileSync(path.join(gameDir, 'lock.json'), 'utf8'));
+    return lock && typeof lock === 'object' ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+export function stopServer(pid, deps = {}) {
+  const alive = deps.isAlive ?? isAlive;
+  const kill = deps.kill ?? ((p, signal) => process.kill(p, signal));
+  const sleep = deps.sleepSync ?? sleepSync;
+  const clock = deps.now ?? now;
+
+  if (!alive(pid)) return;
+  try {
+    kill(pid, 'SIGTERM');
+  } catch (error) {
+    if (error.code === 'ESRCH') return;
+    throw error;
+  }
+  waitWhileAlive(pid, alive, clock, sleep, 5000, 50);
+  if (!alive(pid)) return;
+  try {
+    kill(pid, 'SIGKILL');
+  } catch (error) {
+    if (error.code === 'ESRCH') return;
+    throw error;
+  }
+  waitWhileAlive(pid, alive, clock, sleep, 200, 20);
+}
+
+export function initGameDir(gameDir, flags, deps = {}) {
+  const disk = deps.fs ?? fs;
+  const alive = deps.isAlive ?? isAlive;
+  const clock = deps.now ?? now;
+  const { aiCount, startStack, blinds0, levelEvery, force } = flags;
+
+  const lock = readLock(gameDir, { fs: disk });
+  const live = Boolean(lock && alive(lock.serverPid));
+  if (live && !force) throwCoded('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
+  if (force && live) {
+    stopServer(lock.serverPid, {
+      isAlive: alive,
+      kill: deps.kill,
+      sleepSync: deps.sleepSync,
+      now: clock,
+    });
+    if (alive(lock.serverPid)) {
+      throwCoded('SERVER_ALIVE', '게임 서버가 아직 종료되지 않았습니다.');
+    }
+  }
+
+  return runExclusive(gameDir, () => {
+    const io = { fs: disk, now: clock };
+    const closed = closeOpenPartial(gameDir, io);
+    const vacated = vacateLive(gameDir, io);
+    const archivedTo = closed ?? vacated ?? null;
+
+    const personas = generatePersonas(aiCount);
+    const state = createGame({
+      aiCount,
+      startStack,
+      blinds0,
+      levelEvery,
+      names: personas.map((persona) => persona.name),
+    });
+    const players = [
+      { playerId: 'user', seat: 0, name: '나' },
+      ...personas,
+    ];
+    writeJsonAtomic(path.join(gameDir, 'players.json'), players);
+    saveState(gameDir, state);
+    return {
+      stateVersion: state.stateVersion,
+      sessionToken: state.sessionToken,
+      players: players.map((player) => ({ playerId: player.playerId, name: player.name })),
+      archivedTo,
+    };
+  });
 }
