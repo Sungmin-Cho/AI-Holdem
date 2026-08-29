@@ -18,7 +18,7 @@ user-invocable: true
 ## 절대 규약
 
 - **게시는 반드시 `tools/publish.js`를 통한다.** 그 도구만이 `visibility==="public"` 필터와 `publishId` 증가를 책임진다. 직접 `curl`로 게시하면 필터가 사라지고 `actor:*` 이벤트(홀카드 `deal_hole` 등)가 그대로 UI로 나간다.
-- **한 턴 = Bash 1회.** `step`과 게시를 `&&`로 묶어 한 호출에 끝낸다. 명령을 쪼갤 때마다 딜러 왕복이 한 번씩 늘고, 그게 이 게임의 실제 지연이다.
+- **한 턴 = Bash 최대 1회.** Write와 백그라운드 스폰은 같은 턴에 나란히 해도 된다. 명령을 쪼갤 때마다 딜러 왕복이 한 번씩 늘고, 그게 이 게임의 실제 지연이다.
 - 사용자 노출 문자열은 한국어. 아키타입·스타일·bluffFreq는 종합 리뷰 전까지 비공개.
 - 게임은 멈추지 않는다. AI 실패 → `--force-default`. 사용자 불법 액션 → 강제 폴드 금지, 재게시+재대기.
 - 코칭은 딜러 컨텍스트가 직접 쓰지 않는다(전 패를 이미 봤으므로). 격리 1회성 서브에이전트만.
@@ -168,9 +168,11 @@ EOF
 | Codex | `gpt-5.6-luna` | 지정하지 않음 |
 | Grok | `grok-4.6` | `low` |
 
-스폰은 호스트의 네이티브 서브에이전트 메커니즘으로 한다 — Claude Code는 Agent 도구, Codex는 multi_agent, Grok은 `spawn_subagent`. **모델·effort를 지정하는 방법은 그 런타임의 서브에이전트 문서가 정본이다.** 스폰 파라미터에 지정 수단이 없으면(예: Grok `spawn_subagent`에는 model 파라미터가 없다) 에이전트 정의 파일이나 role/persona로 고정한다. 그래도 불가능하면 세션 모델로 스폰하되 **느려진다는 사실을 사용자에게 한 줄로 알린다.** 스폰 문법 때문에 게임이 멈추지는 않는다.
+스폰은 호스트의 네이티브 서브에이전트 메커니즘으로 한다 — Claude Code는 Agent 도구, Codex는 multi_agent, Grok은 `spawn_subagent`. **모델·effort를 지정하는 방법은 그 런타임의 서브에이전트 문서가 정본이다.** 스폰 파라미터에 모델이 있으면 표의 값을 명시한다. effort 파라미터가 없으면 에이전트 정의 파일에 고정한다. 그래도 세션 모델을 상속하게 되면 **느려진다는 사실을 사용자에게 한 줄로 알린다.** 스폰 문법 때문에 게임이 멈추지는 않는다.
 
 Claude Code에는 플레이어 전용 에이전트 정의 `.claude/agents/holdem-player.md`(model `haiku`)가 있다. `subagent_type: "holdem-player"`로 스폰하면 도구 표면과 시스템 프롬프트가 작아져 턴당 응답이 더 빠르다. 그 타입이 목록에 없으면 일반 Agent 도구에 `model:"haiku"`로 스폰한다 — 어느 쪽이든 게임은 진행된다.
+
+Grok에는 `.grok/agents/holdem-player.md`(model `grok-4.6`, `reasoning_effort: low`)가 있다. `spawn_subagent`에 `subagent_type:"holdem-player"`와 `model:"grok-4.6"`을 같이 넘긴다. 세션 모델 상속은 폴드 한 번에 수십 초가 붙는다. 그 타입이 목록에 없으면 같은 `model`로 스폰하고 한 줄로 알린다.
 
 코치(§5)·evaluator·종합자(§6)는 이 표를 따르지 않는다. **딜러 세션이 빠른 모델일 수 있으므로 상속에 기대지 말고 스폰 시 상위 모델을 명시한다**(Claude Code는 `model:"opus"`). 판단 품질이 산출물 그 자체다.
 
@@ -227,15 +229,14 @@ Claude Code에는 플레이어 전용 에이전트 정의 `.claude/agents/holdem
       - next.kind==="user": step … + publish --wait  → userAction 수령 (타임아웃이면 --wait-only 반복)
       - next.kind==="ai"  : next.message를 next.agentHandle에 전송 → JSON 액션 수신
       - 받은 액션을 다음 step의 인자로 → publish (스트리트 진행·팟 정산 이벤트 포함)
-   4b 탈출: envelope의 handOver=true면 4c로, gameOver=true면 5로 이동한다(next는 null이 된다).
-   c. 핸드 종료(아카이브는 엔진이 이미 기록): 코칭을 백그라운드로 띄우고 곧바로 다음 핸드로,
-      버스트 처리(AI면 작별 멘트 후 퇴장, 사용자면 게임 종료), 레벨업 안내
+   4b 탈출: envelope의 handOver=true면 4c로. gameOver여도 4c 코치 스폰을 먼저 한다(new-hand는 치지 않음).
+   c. 핸드 종료: archivePending이면 resume-check만. 아니면 코치 백그라운드 스폰(코치가 hand/stats 실행)과 작별 비차단 요청과 new-hand를 같은 턴에. 사용자 bust·gameOver면 new-hand 없이 §6.
 5. 게임 종료: 전체 히스토리 기반 종합 리뷰 생성 → UI 리뷰 화면 게시 → 에이전트 정리
 ```
 
 `handOver`와 `gameOver`가 동시에 true이면 **4c를 수행한 뒤** §6(종료)으로 간다. 마지막 핸드 코칭을 건너뛰지 마라.
 
-**라운드 예산.** 정상 진행이면 AI 액션 1개 = 딜러 라운드 2개(Bash 1 + 전송 1), 사용자 액션 1개 = 라운드 1개. 그보다 많이 쓰고 있다면 명령을 쪼개고 있다는 뜻이다 — `legal`·`view`를 `step` 앞뒤로 따로 부르거나, `.turn.json`을 읽거나, 게시를 별도 호출로 빼는 것이 전형적인 원인이다.
+**라운드 예산.** 정상 진행이면 AI 액션 1개 = 딜러 라운드 2개(Bash 1 + 전송 1), 사용자 액션 1개 = 라운드 1개, 핸드 종료→다음 핸드 = 라운드 1개(`archivePending`이면 그 앞의 `resume-check` 1개가 추가). 그보다 많이 쓰고 있다면 명령을 쪼개고 있다는 뜻이다 — `legal`·`view`를 `step` 앞뒤로 따로 부르거나, `.turn.json`을 읽거나, 게시를 별도 호출로 빼거나, 4c에서 코치·작별을 기다린 뒤 `new-hand`를 다음 턴으로 미루거나, 4c에서 `hand`/`stats`를 딜러 Bash로 치는 것이 전형적인 원인이다.
 
 ### 딜러 게시 규약
 
@@ -300,13 +301,27 @@ UI "생각 중"은 `view.toAct`가 AI일 때 서버/UI가 처리한다. 딜러�
 
 ### 4c. 핸드 종료
 
-**먼저 `archivePending`을 본다.** 그 필드가 참이면 엔진이 상태는 저장했지만 핸드 아카이브 파일을 쓰지 못한 것이다. **다음 핸드를 시작하면 그 기록은 영구히 사라진다**(다음 핸드가 `lastHand`를 덮어쓰고 복구 대상이 없어진다).
+`handOver===true`인 publish가 **이미 끝난 다음** 딜러 턴의 할 일이다. 핸드를 끝낸 step+publish Bash는 직전 턴에서 소비됐다. stdout에 이미 `archivePending`·`control`·`gameOver`가 있다. `legal`/`view`/인자 없는 `step`/`.turn.json` 열기는 4c에 없다. 이 턴의 Bash는 resume-check 또는 new-hand 중 하나다.
 
-`node engine/cli.js resume-check`를 실행하고 `archiveStatus`를 본다: `repaired`면 복구됐으니 진행, `healthy`면 애초에 문제없음, **`repair_failed`면 멈추고 사용자에게 알린다** — 그 핸드는 코칭·리뷰가 읽을 수 없게 된다. `archiveRepaired`(불리언)만 보면 정상과 복구 실패를 구분할 수 없다.
+**`archivePending`이 참이면 이 턴은 resume-check만 한다.**
 
-`handOver===true`이면 §5 코칭을 **백그라운드로** 띄우고, 그 결과를 기다리지 말고 다음 핸드(`step --new-hand`)로 넘어간다. 코치 입력은 이미 끝난 핸드의 아카이브뿐이라 다음 핸드와 독립적이다 — 여기서 기다리면 핸드 사이에 코치 모델의 지연이 통째로 얹힌다. 코치 결과가 도착하면 그때 게시한다(§5).
+```bash
+node engine/cli.js resume-check
+```
 
-public `bust`가 AI면 작별 멘트 한 줄 요청(최선 노력, 20초) 후 실패해도 그 `agentHandle`을 종료하고 더 이상 메시지를 보내지 않는다. 사용자 bust면 게임 종료(§6). public `level_up`이 보이면 `--narration`으로 레벨업을 알린다(실제 적용은 다음 핸드 시작 전 엔진이 한다).
+`archiveStatus`가 `repaired` 또는 `healthy`면 **같은 handNo에 resume-check를 다시 치지 않는다.** 다음 턴은 직전 publish에 `archivePending`이 남아 있어도 §4.2다. 이 턴에 new-hand 금지. `repair_failed`면 멈추고 사용자에게 알린다 — 그 핸드는 코칭·리뷰가 읽을 수 없게 된다. new-hand 금지. `archiveRepaired`(불리언)만 보면 정상과 복구 실패를 구분할 수 없다. `archivePending`이 없거나 거짓이면 `resume-check`를 치지 않고 병렬 턴으로 간다.
+
+**병렬 턴** (`archivePending`이 아닐 때). 코치 완료와 작별 응답을 기다리지 않고, 아래를 **같은 턴에 나란히** 한다.
+
+1. 코치 서브에이전트를 백그라운드로 스폰한다. 딜러는 `handNo`, `practiceFocus`, `coach-meta`만 넘긴다. `coach-meta.overfoldUsed`는 세션 메모리 또는 이미 본 스냅샷 `coach`의 `overfold:true`로만 정한다. 코치가 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 직접 실행하고, 과폴드 자격이 있으며 스냅샷에 아직 overfold가 없을 때만 `"overfold":true`를 붙인다. 딜러는 4c에서 그 두 명령과 snapshot curl을 Bash하지 않는다. 평가 문장 규칙과 `game/.coach-<n>.json` 게시는 유지한다.
+2. `control.bust`에 AI가 있으면 그 `agentHandle`에 작별 한 줄을 백그라운드로 요청한다. **응답을 이 턴에서 기다리지 않는다.** 그 핸들에는 이후 결정 요약(`next.message`)을 보내지 않는다. 한 줄이 다음 예정된 publish 전에 도착하면 Write `game/.talk-<playerId>-h<handNo>.json` 후 그 publish에 `--talk-from`을 붙인다. **이 턴의 `new-hand` publish에는 `--talk-from`을 붙이지 않는다.** 이후 **이미 예정된** 다른 publish에만 붙인다. `--narration`에 작별을 넣지 않는다. `.turn.json`을 이벤트와 함께 재게시하지 않는다. 그 publish에 이미 플레이어 talk가 있으면 `--talk-from` 파일에 배열로 합치거나 작별을 생략한다. 늦으면 생략한다.
+3. `control.bust`에 `user`가 있거나 `gameOver===true`이면 new-hand를 치지 않는다. 코치 스폰(1)은 한 뒤 §6으로 간다. 마지막 핸드 코칭을 건너뛰지 마라.
+4. 그 외에는 같은 턴의 Bash로 다음 핸드를 시작한다. `control.level_up`이 있으면 그 publish에 `--narration`을 붙인다(딜러가 쓴 문장. 실제 블라인드 적용은 엔진이 다음 핸드 시작 전에 한다).
+
+```bash
+node engine/cli.js step --new-hand > game/.turn.json \
+  && node tools/publish.js --from game/.turn.json --wait
+```
 
 ---
 
@@ -314,14 +329,9 @@ public `bust`가 AI면 작별 멘트 한 줄 요청(최선 노력, 20초) 후 �
 
 핸드가 끝날 때마다 딜러가 코멘트를 **직접 쓰지 않는다.** 전 패를 본 컨텍스트가 쓰면 공정성을 보장할 수 없다.
 
-재진입 멱등(스펙 §14): `GET /api/snapshot?token=`의 `coach` 배열에 이번 `handNo`가 **이미 있으면** 스킵한다. 배열의 마지막 원소만 보지 마라 — 백그라운드 코치는 핸드 순서와 다르게 도착할 수 있다(서버가 `handNo`로 정렬·중복 갱신하므로 배열 전체를 보면 된다).
+재진입 멱등(스펙 §14): 코치가 `game/ui-snapshot.json`의 `coach` 배열을 읽거나, 딜러가 **이미 세션에 있는** 스냅샷 기억만 쓴다. 이번 `handNo`가 **이미 있으면** 스킵한다. 배열의 마지막 원소만 보지 마라 — 백그라운드 코치는 핸드 순서와 다르게 도착할 수 있다(서버가 `handNo`로 정렬·중복 갱신하므로 배열 전체를 보면 된다). 딜러는 4c에서 `GET /api/snapshot?token=`을 치지 않는다.
 
-입력(이 네 가지만 서브에이전트에 전달 — 그 외 딜러 기억·홀카드·아키타입 금지):
-
-1. `node engine/cli.js hand <n> --redacted` JSON (사용자 관점 공개 정보만)
-2. `node engine/cli.js stats` JSON
-3. `practiceFocus` (직전 `game/review.md`의 '연습할 것', 없으면 없음)
-4. `coach-meta`: `{overfoldUsed: boolean}` — 표본 12핸드 이상에서 VPIP < 12%이면 게임 중 1회만 과폴드 코멘트 허용. 이 값은 `GET /api/snapshot`의 `coach`에 `overfold:true`인 노트가 있는지로 구한다(딜러 기억이 아니라 게시된 상태가 정본이므로 resume해도 유지된다)
+입력: 딜러는 handNo, practiceFocus, coach-meta만 넘긴다. 코치가 저장소 루트에서 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 실행한다. 스냅샷 `coach`에 이번 handNo가 있으면 스킵. 과폴드는 stats 자격과 스냅샷에 이미 overfold:true가 없는지를 코치가 본 뒤에만 붙인다.
 
 격리된 **1회성** 코치 서브에이전트를 **백그라운드로** 스폰하고, 게임은 곧바로 다음 핸드를 시작한다. 출력을 `{handNo, text}`로만 받는다. `text`가 빈 문자열이면 게시하지 않는다.
 
@@ -342,7 +352,7 @@ node tools/publish.js --from game/.coach-3.json
 코치 서브에이전트 프롬프트:
 
 ```
-너는 공정한 홀덤 코치다. 입력 JSON만 보고 판단한다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
+너는 공정한 홀덤 코치다. 먼저 hand --redacted와 stats를 실행하고 그 JSON만 보고 판단한다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
 
 할 일: 사용자의 주요 결정 1~2개에 팟 오즈·포지션·레인지 개념을 실제 숫자와 함께 한국어 1~2줄로 코멘트.
 사용자가 프리플랍에서 접은 핸드는 코멘트를 생략한다. 예외: 그 폴드 자체가 주목할 결정인 경우뿐.
@@ -351,7 +361,7 @@ node tools/publish.js --from game/.coach-3.json
 출력은 JSON 한 줄만: {"handNo":N,"text":"..."} 또는 생략 {"handNo":N,"text":""}
 ```
 
-**과폴드 허용은 자격이 실제로 성립할 때만 예약한다.** `stats`가 표본 12핸드 이상·VPIP 12% 미만을 이미 만족하는 핸드에서만 `overfoldUsed:false`를 넘기고, 그 순간 메모리상 `overfoldUsed=true`로 둔다. 자격이 없는 초반 핸드에서 미리 예약하면 정작 누수가 드러날 때 허용이 남아 있지 않다. 코치는 백그라운드로 여러 개가 동시에 떠 있을 수 있으므로 예약은 게시가 아니라 스폰 시점이다. 게시 후에 바꾸면 그 사이에 뜬 코치들이 모두 허용을 받아 같은 코멘트가 여러 번 나간다.
+과폴드 허용: 딜러는 4c에서 stats를 치지 않는다. coach-meta.overfoldUsed는 세션 메모리 또는 이미 본 coach 배열의 overfold:true로만 정한다. 코치가 stats 자격과 스냅샷의 overfold 여부를 본 뒤에만 "overfold":true를 붙인다. 동시 코치가 둘 다 true를 내면 게임당 1회는 최선 노력이다.
 
 코치가 과폴드 코멘트를 냈으면(`"overfold":true`) 게시하는 노트에 그 필드를 함께 싣는다: `{"coach":[{"handNo":N,"text":"…","overfold":true}]}`. 그래야 resume한 딜러가 스냅샷만 보고 이미 썼음을 알 수 있다.
 
@@ -427,11 +437,11 @@ node engine/cli.js resume-check
 |---|---|---|---|---|
 | Claude Code | Agent 도구, `name=agentHandle`, `subagent_type:"holdem-player"`(없으면 `model:"haiku"`) | Haiku 4.5 | `SendMessage` → `to:"main"` | 스폰·회신 경로 실행 검증됨. `model` 지정은 도구 문서 기준 |
 | Codex | multi_agent 서브에이전트 | `gpt-5.6-luna` | 완료 시 부모 반환 | 스폰 문법 미확정 |
-| Grok | `spawn_subagent` | `grok-4.6`, effort `low` | 완료 시 부모 반환 | 스폰 문법 미확정 |
+| Grok | `spawn_subagent`, `subagent_type:"holdem-player"`, `model:"grok-4.6"` | `grok-4.6`, effort `low`(정의 파일) | 완료 시 부모 반환 | `model` 파라미터 확인됨. effort는 스폰 파라미터에 없고 `.grok/agents/holdem-player.md`에 고정 |
 
-"미확정"은 "안 된다"가 아니라 **이 스킬이 그 문법을 확정하지 못했다**는 뜻이다. 실행 런타임이 자기 서브에이전트 문서의 정본이므로, 그 호스트에서 스폰할 때 모델·effort 지정 수단을 직접 확인해 적용한다. 첫 스폰 결과에서 실제 적용 모델을 확인할 수 있으면 확인하고, 표와 다르면 사용자에게 알린다.
+Codex 칸의 "미확정"은 "안 된다"가 아니라 **이 스킬이 그 문법을 확정하지 못했다**는 뜻이다. 실행 런타임이 자기 서브에이전트 문서의 정본이므로, 그 호스트에서 스폰할 때 모델·effort 지정 수단을 직접 확인해 적용한다. 첫 스폰 결과에서 실제 적용 모델을 확인할 수 있으면 확인하고, 표와 다르면 사용자에게 알린다.
 
-알려진 제약 하나: Grok의 `spawn_subagent` 파라미터에는 model이 없다(`prompt`·`description`·`subagent_type`·`background`·`capability_mode`·`isolation`·`resume_from`·`cwd`). 모델·effort는 에이전트 정의 파일(`.grok/agents/*.md` frontmatter)이나 role/persona로 고정한 뒤 `subagent_type`으로 그 정의를 지목한다.
+Grok `spawn_subagent`는 `prompt`·`description`·`subagent_type`·`background`·`isolation`·`resume_from`·`cwd`·`model`을 받는다. `model`은 `"grok-4.6"`으로 넘긴다. effort는 이 파라미터 목록에 없으므로 `.grok/agents/holdem-player.md` frontmatter `reasoning_effort: low`가 정본이다.
 
 확인에 실패해도 게임은 진행한다 — 세션 모델로 스폰하고 사용자에게 한 줄로 알린다.
 
