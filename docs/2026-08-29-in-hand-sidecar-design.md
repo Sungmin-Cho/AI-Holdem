@@ -2,7 +2,7 @@
 
 날짜: 2026-08-29
 이슈: #5 (핸드 안 템포: 게임 루프를 사이드카로 옮기고 talk를 뺀다)
-상태: 리뷰 루프 진행 중 (R2 반영)
+상태: 리뷰 루프 수렴 (R3, model-router CRITICAL 밴드 이중 리뷰). 구현은 이 워크트리의 새 세션.
 
 ## 0. 리뷰 루프
 
@@ -12,6 +12,18 @@
 |---|---|---|---|
 | R1 | FAIL 0.86 | FAIL 0.97 | 12건 전부 수용: 홀카드 격리(무도구+cwd 격리+부정 probe), init↔사이드카 레이스(LOOP_ALIVE), user 분기 완성(강제 폴드 금지), 런타임별 워치독, attach 분기, 상위 모델 probe·리뷰 계약(REVIEW_FAILED), 롤백 절차, loop 락 identity 원시, 메트릭 객관화, 레거시 talk 필터, 테스트 확충, practiceFocus 인계 |
 | R2 | FAIL 0.86 (추출) | FAIL 0.96 | 11건 수용 + 1건 부분: **부트스트랩 재설계**(사이드카가 락→init→서버 소유 — 기동 공백 제거), pid+startTime identity(재사용 방어), 정지 순서 사이드카→서버 + SIGTERM 중 D9 금지, 첫 전이의 종료 국면 술어, 마지막 핸드 코치 재-reserve 금지, review_generated/review_published 체크포인트, probe를 실제 state.json·동일 env로, 런타임 전멸 resume 규칙(playing이면 NO_PLAYER_RUNTIME HALT — 리뷰어의 전결정 force-default 제안은 유령 게임이라 기각), 스킬 사전 점검 동격, grok 27s(4× 산술), 테스트 확충 |
+| R3 | FAIL 0.87 (추출) | FAIL 0.96 | 12건 전부 수용: **probe 미끼를 카나리로**(R2의 state.json probe가 유출 역설 — 라이브 홀카드 경로를 probe에 절대 안 넣음), 락 identity 인코딩을 원시 구현과 정합(pid 파일 확장·추가 파일 금지·epoch는 loop-state로), 딜러 부트 대기를 pid 생존 기반으로(probe 사다리 시간), loop-state 부재/bootstrap/playing+gameOver 복구 유도 규칙(--resume은 init 금지), stats 캡처→reserve 순서(코드 사실), spawn 직후 bind-handle, review 이중 게시 방지(스냅샷 digest 대조), init 옵션 패스스루, practice-focus 소스 game/ 밖, loop-state에 sessionToken·notices, 오버헤드 판정 분리(세부 타이밍+zero-delay 벤치), 테스트 확충 |
+
+**수렴 판정 (R3 최종)**: R2·R3 연속 2라운드에서 신규 발견 과반이 직전-삽입 문면의 파장(R2: 8/12, R3: 9/12) — `review-loop-convergence-rule` 신호 2 충족. 락·복구 시퀀스류 상태기계 명세는 산문 라운드를 더 돌수록 새 경계 조건이 재생산되므로(규칙 3), 여기서 수렴을 선언하고 잔여를 아래로 이월한다.
+
+### 구현 이월 (플랜·구현 검증이 확정)
+
+- 컨테인먼트 플래그·env 목록의 실제 값: Task 0 probe가 카나리 부정 검증으로 핀 (설계는 계약만 정의)
+- 락 identity 기록의 정확한 파일 형식과 `engine/state.js` 원시 확장 API: 구현 + 5e 테스트가 검증
+- grok low effort 핀 방법(`--agent` 정의 파일 vs 설정): Task 0 probe, 실패 시 §2 grok 기준 유지
+- 코치·리뷰 상위 모델 CLI의 정확한 argv(무도구 모드 포함): Task 0 probe
+- 부트 폴링 문면의 최종 스킬 텍스트: 스킬 개정 태스크에서 계약 테스트와 함께 고정
+- 딜러 종료 인지의 호스트별 결선(run_in_background wake 등): 실기 스모크에서 확인
 
 ## 1. 문제
 
@@ -42,7 +54,7 @@ PR #3은 핸드 **사이** 4c를 한 턴으로 접었다. 핸드 **안** 바닥�
 | AI 결정 elapsedMs p95 | ≤ 워치독 1차 한도(D8 표: claude·codex 25s, grok 60s) | 정상 응답의 95%가 워치독을 건드리지 않는다 |
 | AI 결정 elapsedMs 상한 (구조적) | ≤ 1차 한도 + 재전송 한도 + 2s | 워치독 사다리 + step/publish 오버헤드로 하드 바운드 |
 | forced_default 비율 | < 10% (표본 내) | 워치독이 정상 경로가 아니라 예외 경로임을 판정 |
-| 사이드카 오버헤드 (step+publish+파싱, LLM 제외) | ≤ 1s/액션 | 엔진·게시는 ms급 실측 |
+| 사이드카 오버헤드 (step+publish+파싱, LLM 제외) | ≤ 1s/액션 | 판정은 metrics 세부 필드(modelMs/parseMs/stepMs/publishMs)와 §8 5f zero-delay fake 벤치 — 총 elapsedMs에서 유도하지 않는다 |
 | 라이브 Grok 대비 | ≥ 4× 단축 | 중앙값 108s → ≤ 27s (108/27 = 4.0) |
 
 엔진·서버·게시 계약은 바꾸지 않는다: 기존 `node --test` 그린 유지(단, talk 제거·스킬 문면 테스트는 §8에서 조정).
@@ -74,7 +86,7 @@ PR #3은 핸드 **사이** 4c를 한 턴으로 접었다. 핸드 **안** 바닥�
 | D3 | talk 전면 제거: `--talk`/`--talk-from`/`BAD_TALK`(publish.js), turnSummary 응답 형식의 `talk` 필드(views.js), 말풍선·`lastTalk`(app.js·style.css), 4c 작별 요청·병합 규칙(스킬), 플레이어 프롬프트 talk 규약. `--narration`은 유지하되 **사이드카가 쓰는 결정적 문자열만** 싣는다 |
 | D4 | 코치: 사이드카가 기존 `coach-control.js` verbs(reserve→bind-handle→accept→publish, heartbeat, complete-unavailable, finalize-cutoff)를 같은 지점에서 구동한다. 호스트 서브에이전트 스폰 → **상위 모델 CLI 1회성 호출**로 교체. 입력(`hand <n> --redacted`, `stats`)은 사이드카가 실행해 프롬프트에 인라인한다 — 코치는 무도구 단발 생성이 된다. 결과는 사이드카가 `exactResultPath`에 쓴다. `watch-accept` 백그라운드 프로세스는 사이드카 내부 async로 대체(코치 완료 → accept → publish). 공정성 불변식 유지: 코치 입력은 redacted 트레이스+stats뿐, deny 파일 forbidden literal 검사 유지 |
 | D5 | §6 종합 리뷰(evaluator + 종합자)도 사이드카가 상위 모델 CLI 1회성으로 소유한다. finalize-cutoff 시퀀스(20s/10s 예산)는 기존 규약 그대로 코드화. 딜러 세션은 종료 보고만 한다 |
-| D6 | **사이드카가 부트스트랩까지 소유한다**: loop 락 선점 → `init` → 서버 기동 → 루프. 딜러 역할은 사전 점검(사용자 질문, `review.md` practiceFocus 추출·Write — 모델 텍스트이므로 파일로, argv에는 그 **경로만**) → **사이드카 detached 기동**(`--ai N [--force] [--player-runtime r] [--practice-focus-file 경로]`) → loop-state 폴링으로 부트스트랩 확인 → 브라우저 open·archivedTo 한 줄 보고 → 종료 보고. 게임 중 딜러 라운드 0. **이 순서가 기동 공백 레이스를 없앤다**: loop 락이 init보다 먼저 존재하므로, 동시 두 번째 `/start-game`은 어느 시점이든 활성 게임(loop pid)을 본다. practiceFocus 파일은 사이드카가 init 뒤 `game/.practice-focus.json`으로 복사해 코치 프롬프트에 싣는다 |
+| D6 | **사이드카가 부트스트랩까지 소유한다**: loop 락 선점 → `init` → 서버 기동 → 루프. 딜러 역할은 사전 점검(사용자 질문, `review.md` practiceFocus 추출·Write — 모델 텍스트이므로 파일로, argv에는 그 **경로만**, 소스 파일은 **`game/` 밖**에 둔다 — init의 vacate가 지우기 전 game/ 안에 쓰면 소실된다) → **사이드카 detached 기동**(`--ai N [--stack N] [--level-every N] [--blinds SB/BB] [--force] [--player-runtime r] [--practice-focus-file 경로]` — 현행 init 옵션 전부 패스스루) → loop-state 폴링으로 부트스트랩 확인 → 브라우저 open·archivedTo 한 줄 보고 → 종료 보고. 게임 중 딜러 라운드 0. **이 순서가 기동 공백 레이스를 없앤다**: loop 락이 init보다 먼저 존재하므로, 동시 두 번째 `/start-game`은 어느 시점이든 활성 게임(loop pid)을 본다. practiceFocus 파일은 사이드카가 init 뒤 `game/.practice-focus.json`으로 복사해 코치 프롬프트에 싣는다 |
 | D7 | resume: **먼저 `resume-check`의 `loopPidAlive`로 분기한다.** 살아 있으면 스폰하지 않고 **attach** — loop-state를 읽어 "게임 진행 중"을 보고하고, 요청 시 종료까지 관찰만 한다(loop 락은 살아 있는 선점자를 거부하므로 이것이 유일한 정상 경로다). 죽었거나 없을 때만 사이드카 `--resume` 스폰 — 스킬 §7 재진입 체크리스트를 전부 기계화(publish-attempt `--retry`, `repair_failed` 정지, view-only 재게시, `begin-owner` 코치 재개, 플레이어 세션 복원/재생성). **phase 복원이 플레이어 probe보다 먼저다**: loop-state가 종료 국면(finalizing 이후)이면 플레이어 워밍업·probe를 생략하고 그 지점부터 멱등 재개한다(상위 모델 경로만 필요). playing 국면인데 적격 플레이어 런타임이 하나도 없으면 유령 게임(전 결정 force-default)을 돌리지 않는다 — `halt:{code:"NO_PLAYER_RUNTIME"}`로 멈추고 실패한 probe 내역을 보고한다(사용자가 CLI 인증을 고치고 다시 resume) |
 | D8 | 워치독 의미 유지(무응답 1차 한도→동일 요약 재전송 1회→`--force-default`; 파싱 실패·불일치·불법도 재요청 1회→force-default; 늦은/중복 decisionId 폐기; 사용자 대기 무제한). 사이드카 타이머로 구현. **한도는 런타임별**: claude·codex 25s/15s(현행 값), grok 60s/30s(기본 effort 실측 25.3s가 1차 한도에 걸리지 않게). grok low effort 핀이 확인되면 25s/15s로 회귀 |
 | D9 | 서버 자가 치유: 게시 실패 시 사이드카가 health 확인→같은 포트·토큰으로 서버 재기동→`publish.js --retry`(스킬 §4 복구 표의 기계화). **단 SIGTERM 처리 중에는 재기동하지 않는다** — 종료 중 게시 실패는 attempt 기록으로 남기고 나가며, 다음 resume이 `--retry`로 해소한다(§4 `init --force` 순서가 이 조항에 기댄다) |
@@ -104,8 +116,8 @@ preflight(사용자 질문,   tools/game-loop.js
 
 | 파일 | 소유 | 내용 |
 |---|---|---|
-| `game/loop.lock.d/` | 사이드카 | 수명 보유 락 **디렉터리** — `engine/state.js`의 mkdir+pid identity 원시(acquire/reclaim)를 재사용한다. JSON pid 파일의 check-then-write TOCTOU를 만들지 않는다. **pid 재사용 방어**: 락 메타에 `{pid, pidStartTime, gameEpoch}`를 함께 두고, attach·시그널·회수 경로는 pid 생존만이 아니라 **pid+startTime 일치**를 그 행위 직전에 재검증한다 — 불일치면 죽은 것으로 취급하되(회수 가능) 절대 시그널하지 않는다(fail-closed). 회수는 그렇게 확인된 사망 시에만. `.lock.d` 접미사라 `vacateLive`의 reserved 규칙과도 정합 |
-| `game/loop-state.json` | 사이드카 | 전이마다 원자적 갱신: `{phase, handNo, port, lastPublishId, playerRuntime, startedAt, archivedTo?, metrics[], halt?:{code,message}, finishedAt?}` — 딜러 부트스트랩 확인·종료 보고·상태 질의·attach·테스트의 관찰 지점. `phase ∈ {bootstrap, playing, finalizing, review_generated, review_published, done}` — 재진입 멱등의 기준이며, **엔진 `resume-check`의 `phase`(idle 등)와는 별개 축**이다 |
+| `game/loop.lock.d/` | 사이드카 | 수명 보유 락 **디렉터리** — `engine/state.js`의 mkdir+pid identity 원시를 **확장해** 재사용한다(별도 락 재발명 금지). **인코딩 주의**: 현행 `readPidFile`은 십진 pid 문자열만 파싱하므로, identity 기록은 **pid 파일 하나**를 `pid\n startTime` 2줄(또는 원시와 함께 개정된 형식)으로 확장하고 `readPidFile`·staleness 판정을 같이 고친다 — pid 파일에 JSON을 넣으면 `pid:null`→mtime 6s staleness로 **살아 있는 락이 회수된다**. 락 디렉터리에 그 외 파일을 두지 않는다(비재귀 `rmdir`가 ENOTEMPTY로 영구 실패). `gameEpoch`는 sessionToken(=init 이후에만 존재)에서 나오므로 락이 아니라 loop-state에 기록한다. attach·시그널·회수 경로는 pid 생존만이 아니라 **pid+startTime 일치**를 그 행위 직전에 재검증한다 — 불일치면 죽은 것으로 취급하되(회수 가능) 절대 시그널하지 않는다(fail-closed). `.lock.d` 접미사라 `vacateLive`의 reserved 규칙과도 정합 |
+| `game/loop-state.json` | 사이드카 | 전이마다 원자적 갱신: `{phase, handNo, port, sessionToken, gameEpoch, lastPublishId, playerRuntime, startedAt, archivedTo?, notices[], metrics[], halt?:{code,message}, finishedAt?}` — 딜러 부트스트랩 확인·종료 보고·상태 질의·attach·테스트의 관찰 지점(딜러가 브라우저 URL·폴백/리뷰 불가 고지를 여기서 읽는다 — `notices[]`는 사이드카가 쓴 결정적 문자열). init 직후 `phase:"bootstrap"`으로 **가능한 한 빨리** 처음 기록해 딜러 폴링의 대상을 만든다. `phase ∈ {bootstrap, playing, finalizing, review_generated, review_published, done}` — 재진입 멱등의 기준이며, **엔진 `resume-check`의 `phase`(idle 등)와는 별개 축**이다. metrics 항목은 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`로 세분한다(§2 오버헤드 기준의 판정 근거) |
 | `game/loop.log` | 사이드카 | 사이드카가 **스스로 연다**(nohup 리디렉션이 아니라). init의 `vacateLive`가 game/을 비우기 전에 만든 파일이 아카이브로 쓸려 가는 문제를 피한다 — 기동 셸의 리디렉션은 부트 크래시 안전망용 임시 경로로만 |
 | `game/.player-sessions.json` | 사이드카 | `{playerId: {runtime, sessionId, createdAt}}` — resume 시 대화 복원. 복원 불가면 페르소나 카드로 재생성(현행 §7 재스폰과 동일 의미) |
 | `game/.turn.json`·`.publish-attempt.json`·`.coach-authority.json`·`lock.json` | 기존 | 계약 불변 |
@@ -127,7 +139,7 @@ preflight(사용자 질문,   tools/game-loop.js
   - 플레이어·코치·evaluator·종합자 **전부** 도구 없는 모드로 돈다: claude `--tools ""`(빈 목록), grok `--tools ""` + `--deny MCPTool` + `--disable-web-search`, codex는 최소 sandbox + 도구 차단 설정. 정확한 플래그는 Task 0 probe가 핀한다.
   - cwd는 **레포와 `game/` 밖** — `os.tmpdir()` 아래 per-runtime 빈 디렉터리(레포 지침 파일·게임 상태가 컨텍스트에 실리지 않는다). `--game-dir`·레포 경로를 LLM 자식 argv에 절대 넣지 않는다.
   - **LLM 자식의 env를 정리한다**: 레포·워크스페이스를 가리키는 상속 env(각 CLI의 프로젝트/워크스페이스 결정에 쓰이는 변수, `PWD`·`OLDPWD` 포함)를 제거하거나 tmpdir로 덮어쓴다. 인증에 필요한 것(`HOME`, PATH, CLI 자체 자격 변수)만 남긴다 — cwd만 옮기고 env를 상속하면 sandbox가 레포 읽기를 허용하는 구성이 될 수 있다.
-  - **부정 검증(negative probe)이 적격 조건이다**: Task 0과 게임 기동 probe에서 **본게임과 동일한 cwd·argv·env**로 자식을 띄워, 라이브 `game/state.json` 절대 경로(또는 `game/`에 심은 카나리 파일) 읽기를 지시해 **실패해야** 그 런타임이 적격이다 — 임의 경로 센티널이 아니라 실제 보호 대상으로 검증한다. 도구 차단이나 읽기 격리를 검증할 수 없는 런타임은 플레이어·코치·리뷰에 부적격이며 폴백 대상이다.
+  - **부정 검증(negative probe)이 적격 조건이다 — 단 미끼는 카나리다**: Task 0과 게임 기동 probe에서 **본게임과 동일한 cwd·argv·env**로 자식을 띄워, `game/` 안에 심은 **카나리 파일**(예측 불가한 이름, 센티널 바이트, 비밀 아님 — 보호 대상과 같은 접근 경계) 절대 경로 읽기를 지시하고, **stdout/트레이스에 센티널이 나타나지 않아야(또는 기계적 거부가 관측돼야)** 그 런타임이 적격이다. **라이브 `game/state.json`이나 홀카드가 실릴 수 있는 어떤 경로도 probe의 argv·프롬프트에 넣지 않는다** — 격리가 깨진 런타임을 잡는 probe가 그 순간 홀카드를 프로바이더로 유출하는 역설을 막는다(playing 중 resume probe 포함). 도구 차단이나 읽기 격리를 검증할 수 없는 런타임은 플레이어·코치·리뷰에 부적격이며 폴백 대상이다.
   - 코치·evaluator·종합자의 입력은 사이드카가 redacted 트레이스·stats·(종합자에 한해) `players.json`을 프롬프트에 인라인한다 — 자식이 파일에 접근할 이유 자체가 없다.
 
 ## 5. 사이드카 루프 (스킬 §4·§4c·§5·§6·§7의 기계화)
@@ -135,12 +147,18 @@ preflight(사용자 질문,   tools/game-loop.js
 ```
 기동(새 게임): 부트스트랩(§4 순서: 락 → init → 서버) → 플레이어 전원 병렬 워밍업
       (세션 생성 + 페르소나 카드, "ready" 1회 — 첫 결정에서 세션 생성 비용을 뺀다)
-기동(--resume): loop 락 선점 → loop-state.phase 복원이 최우선 —
+기동(--resume): loop 락 선점 → phase 복원이 최우선. **--resume은 어떤 경로에서도 init을 부르지 않는다.**
+      loop-state 없음 + 엔진 state 있음(부트 크래시 or 구스킬 게임) → 유도 규칙:
+        엔진 gameOver → finalizing, 아니면 playing 으로 loop-state를 생성하고 계속
+      loop-state 없음 + 엔진 state 없음 → resume 대상이 아니다(새 게임 안내 후 종료)
+      phase ∈ {bootstrap} → 서버 생존 확인·기동부터 이어서 (init 재실행 금지 — epoch는 이미 존재)
       phase ∈ {finalizing, review_generated, review_published} → 플레이어 워밍업 없이
         종료 시퀀스의 그 지점부터 멱등 재개 (new-hand 금지 — 엔진도 GAME_OVER로 거부한다)
-      phase == playing → 재진입 체크리스트(attempt --retry → repair_failed 검사 →
+      phase == playing → 엔진 gameOver면 종료 시퀀스로 (아래 첫 전이 술어와 동일),
+        아니면 재진입 체크리스트(attempt --retry → repair_failed 검사 →
         인자 없는 step → publish --view-only) → 플레이어 세션 복원/재생성
-첫 전이(playing): 진행 중 핸드가 없으면 step --new-hand → publish --wait,
+첫 전이(playing): **엔진 gameOver이면 new-hand 대신 종료 시퀀스로.**
+      진행 중 핸드가 없으면 step --new-hand → publish --wait,
       있으면 재진입 view-only 출력으로 진입
 
 LOOP:
@@ -171,11 +189,12 @@ LOOP:
 
 ### 코치 파이프라인 (핸드 종료마다, async)
 
-1. `coach-control reserve --consider-overfold` → descriptor(`exactResultPath`, `overfoldReserved`).
-2. 사이드카가 `hand <n> --redacted`·`stats` 실행, deny 파일 생성(비공개 홀카드·아키타입 literal), 코치 프롬프트 조립(§5 평가 문장 규칙 유지 + "아래 입력만 사용" — CLI 실행 지시는 삭제).
-3. 상위 모델 CLI 1회성 호출(120s 생성 한도) → stdout JSON 검증(빈 text·handNo 불일치·forbidden literal 거부) → `exactResultPath`에 기록 → `bind-handle`(자식 pid) → `accept --forbidden-file` → `publish.js --from <exactEnvelopePath>`.
-4. 실패/타임아웃: 동일 입력 교체 시도 1회(attempt 2) → 그래도 실패면 `complete-unavailable`(고정 문구). 핸드 전환마다 `heartbeat`(result-ready/timeout-fence 대응 유지).
-5. 멱등·epoch 가드(publishedSeals·publishQueue·expectedGameEpoch)는 기존 authority 계약 그대로.
+1. 사이드카가 **먼저** `hand <n> --redacted`·`stats`를 실행하고 스냅샷 경로를 확보한다 — `reserve`가 `--stats-file`을 즉시 읽으므로(coach-control.js `reserve()`), stats 캡처가 reserve보다 앞이다.
+2. `coach-control reserve --consider-overfold --stats-file <캡처> --snapshot-file <경로>` → descriptor(`exactResultPath`, `overfoldReserved`). 같은 캡처 stats를 코치 프롬프트에도 재사용한다.
+3. deny 파일 생성(비공개 홀카드·아키타입 literal), 코치 프롬프트 조립(§5 평가 문장 규칙 유지 + "아래 입력만 사용" — CLI 실행 지시는 삭제).
+4. 상위 모델 CLI **spawn 직후** `bind-handle`(자식 pid+startTime — 생성 중 타임아웃·finalize가 그 워커를 식별·종료할 수 있어야 한다) → await(120s 생성 한도) → stdout JSON 검증(빈 text·handNo 불일치·forbidden literal 거부) → `exactResultPath`에 기록 → `accept --forbidden-file` → `publish.js --from <exactEnvelopePath>`.
+5. 실패/타임아웃: 자식 **종료 확인**(TERM→확인→KILL) 후에만 동일 입력 교체 시도 1회(attempt 2) → 그래도 실패면 `complete-unavailable`(고정 문구). 종료 미확인이면 fence·adapter-disable 규약 그대로. 핸드 전환마다 `heartbeat`(result-ready/timeout-fence 대응 유지).
+6. 멱등·epoch 가드(publishedSeals·publishQueue·expectedGameEpoch)는 기존 authority 계약 그대로.
 
 ### 종료 시퀀스 (gameOver 또는 user bust)
 
@@ -183,7 +202,7 @@ loop-state `phase`가 각 단계 전후에 기록되는 체크포인트다(`fina
 
 1. **finalizing**: 마지막 핸드 코치는 **재-reserve하지 않는다** — LOOP의 handOver 분기가 이미 async로 기동한 generation을 그대로 둔다(`reserve`를 다시 부르면 그 prior가 discard돼 결과가 유실된다). `--resume`으로 finalizing에 들어온 경우에만, 그 handNo가 `publishedSeals`/`publishQueue`에 없고 live generation도 없을 때 스폰한다. 그리고 `finalDeadlineMono = now+20s` finalize: 기존 §6 순서(result 소비 → cutoff → `finalize-cutoff` → 잔여 Q 게시)를 코드로.
 2. **review 생성 → `review_generated`**: evaluator(1회성, redacted 트레이스+stats만) → 종합자(1회성, evaluator 출력+결과+`players.json` 아키타입 공개) — 상위 모델, 무도구, 사이드카가 입력 인라인. **각 호출의 계약**: 생성 한도 300s, 출력 검증(비어 있지 않은 본문, 종합자는 §6 리뷰 4요소 헤딩 존재), 실패·타임아웃 시 동일 입력 재시도 1회. 재시도도 실패하면 리뷰를 지어내지 않는다 — loop-state `halt:{code:"REVIEW_FAILED"}`로 종료하고(게임 상태·코치 노트는 온전) 딜러가 사용자에게 보고한다. 성공하면 `game/review.md`(+ loop-state에 그 sha256)를 **먼저** 원자 기록하고 `review_generated`로 전이한다 — 이후 재개는 이 산출물을 재사용하지, 재생성하지 않는다(비결정 생성이 이중 게시되는 창을 없앤다).
-3. **review 게시 → `review_published`**: `review.md` 본문으로 `{"review": …}` envelope 파일을 만들어 게시. 게시의 멱등은 기존 publish-attempt 계약이 보장한다(크래시 후 재개는 pending attempt를 `--retry`로 해소할 뿐 새 본문을 만들지 않는다).
+3. **review 게시 → `review_published`**: `review.md` 본문으로 `{"review": …}` envelope 파일을 만들어 게시. 게시의 멱등은 publish-attempt 계약 + **스냅샷 대조**가 함께 보장한다: publish.js는 서버 ack 후 attempt 파일을 지우므로, ack와 phase 전이 사이에 크래시하면 attempt 없이 phase가 `review_generated`로 남는다 — 재개는 게시 전에 `ui-snapshot.json`의 review가 `review.md` digest와 일치하는지 확인하고, 일치하면 게시를 생략하고 `review_published`로 전이한다(새 publishId로 이중 게시하지 않는다).
 4. **done**: loop-state `finishedAt` 기록 → 플레이어 세션 정리 → exit 0.
 
 ### 상위 모델 표 (코치·evaluator·종합자)
@@ -218,12 +237,16 @@ loop-state `phase`가 각 단계 전후에 기록되는 체크포인트다(`fina
 기동 문면(호스트 공통, 저장소 루트 — init·서버 기동은 사이드카가 한다):
 
 ```bash
-nohup node tools/game-loop.js --game-dir game --ai <n> [--force] [--resume] \
-  [--player-runtime <r>] [--practice-focus-file <경로>] \
+nohup node tools/game-loop.js --game-dir game --ai <n> \
+  [--stack N] [--level-every N] [--blinds SB/BB] [--force] [--resume] \
+  [--player-runtime <r>] [--practice-focus-file <game/ 밖 경로>] \
   > /tmp/ai-holdem-boot.log 2>&1 &
-# 이후 game/loop-state.json 폴링(약 250ms, 최대 ~30s): phase가 bootstrap을 지나면
-# port로 open "http://127.0.0.1:<port>/?token=<t>", archivedTo가 있으면 한 줄 보고.
-# loop-state가 안 생기고 프로세스가 죽었으면 /tmp/ai-holdem-boot.log를 보고 중단.
+# 이후 game/loop-state.json 폴링(약 250ms). 종료 조건은 벽시계가 아니라 셋 중 하나다:
+#   ① halt 기록  ② phase가 bootstrap을 지남  ③ 사이드카 pid 사망.
+# probe 사다리(런타임 × 플레이어/상위/컨테인먼트, grok은 콜드 1회 ~25s)가 있어 부트가
+# 수십 초를 넘을 수 있다 — pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다(중단·--force 금지).
+# ②에 도달하면 loop-state의 port·sessionToken으로 open "http://127.0.0.1:<port>/?token=<t>",
+# archivedTo·notices가 있으면 한 줄씩 보고. ③이면 /tmp/ai-holdem-boot.log를 보고 중단.
 ```
 
 셸 리디렉션이 `game/loop.log`가 아닌 이유: init의 `vacateLive`가 game/을 비우기 전에 만들어진 파일은 아카이브로 쓸려 간다. 본 로그는 사이드카가 init 뒤 `game/loop.log`를 스스로 연다(§4 파일 계약).
@@ -249,7 +272,9 @@ resume 문면(스킬): `resume-check`의 `loopPidAlive`가 참이면 **attach** 
 5. **`init`/`resume-check` (`test/cli.test.js`·`test/archive.test.js` 확장)**: 서버 죽고 사이드카 살아 있는 게임의 force 없는 `init` = `ACTIVE_GAME`, `--force` = **사이드카→서버 순** 정지 후 아카이브(정지 중 D9 재기동이 없음을 fake로 단언), 정지 실패 = `LOOP_ALIVE` + 아카이브 없음, `loopPidAlive` 보고, **pid 재사용 시뮬**(같은 pid·다른 startTime → 시그널 없이 dead 취급), **부트스트랩 동시 기동 인터리빙**(두 번째가 락 선점에서 거부).
 5b. **종료·재개 멱등**: gameOver 상태 `--resume`이 new-hand를 치지 않고 기록된 phase부터 재개, `review_generated` 이후 재개가 리뷰를 재생성하지 않음(review.md digest 재사용), pending review 게시 attempt는 `--retry`로만 해소, 마지막 핸드 코치의 **이중 reserve 부재**(finalizing이 handOver의 generation을 소비).
 5c. **레거시 talk 마이그레이션**: talk가 실린 구버전 `.publish-attempt` 픽스처가 `--retry`로 동일 publishId·동일 본문 재전송에 성공하고, 스냅샷·증분 렌더링 모두 talk를 표시하지 않으며 narration은 유지됨.
-5d. **코치 입력 격리**: 사이드카가 조립한 코치 프롬프트에 상대 홀카드 literal이 없음(redacted 입력 단언), `next.message`가 해당 playerId의 세션에만 전달됨(fake 어댑터 라우팅 단언).
+5d. **코치 입력 격리**: 사이드카가 조립한 코치 프롬프트에 상대 홀카드 literal이 없음(redacted 입력 단언), `next.message`가 해당 playerId의 세션에만 전달됨(fake 어댑터 라우팅 단언), stats 캡처가 reserve보다 선행함(순서 단언), spawn 직후 bind-handle.
+5e. **락 인코딩·부트 복구**: identity 기록 파싱(현행 `readPidFile`과의 호환 개정), 락 디렉터리 추가 파일 금지(rmdir ENOTEMPTY 회귀), 살아 있는 락이 6s staleness로 회수되지 않음, loop-state 부재 + 엔진 state 존재의 유도 규칙(gameOver→finalizing/아니면 playing, init 미호출), playing phase + 엔진 gameOver → 종료 시퀀스, bootstrap phase 재개(재-init 금지), review 게시 ack 후·전이 전 크래시 → 스냅샷 digest 대조로 이중 게시 방지, probe argv/프롬프트에 보호 대상 경로 부재(카나리만).
+5f. **오버헤드 벤치**: zero-delay fake 어댑터로 전체 게임을 돌려 결정당 LLM-제외 오버헤드(parse+step+publish) ≤ 1s를 직접 단언.
 6. **코치 경로**: fake CLI로 결과 파일→accept→publish 승격, 2회 실패→unavailable, finalize-cutoff.
 7. **스킬 문면 계약 (`tempo-skill-contract.test.js` 개편)**: 새 SKILL에 `--talk`류·`SendMessage`·`reply-channel` 부재, 사이드카 기동 문면·attach 분기·`loopPidAlive` 동격 사전 점검 존재, `archivePending`/`repair_failed` 경계가 사이드카 소관임 명시. 기존 `.grok/agents/holdem-player.md` frontmatter 테스트는 D10(파일 삭제)에 맞춰 삭제하고, 플레이어 프롬프트 계약 검사는 `tools/player-prompt.md`로 옮긴다.
 8. **실기 스모크(구현 후 체크리스트, README 갱신)**: 호스트별 3핸드 — §2 수치 판정(런타임별), 컨테인먼트 부정 probe 실측, 코치 노트 게시, 리뷰 오버레이.
