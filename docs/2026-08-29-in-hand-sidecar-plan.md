@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:executing-plans (inline) 또는 superpowers:subagent-driven-development로 태스크 단위 실행. 스텝은 체크박스(`- [ ]`)로 추적한다.
 
+리뷰 상태: **수렴 (플랜 루프 R3)** — model-router HIGH 밴드, grok-4.6(high) + gpt-5.6-sol(high, 승격) 교차 리뷰 3라운드. R2·R3 연속 파장 과반으로 수렴 판정. 라운드 기록·영수증: `docs/sidecar-review/rp*-synthesis.md`, `receipts/rp*`. 잔여 미결은 전부 Task 0 프로브와 태스크 내 RED 테스트가 확정한다.
+
 **이 플랜은 이 워크트리(`/Users/sungmin/orca/workspaces/AI-Holdem/conger`, 브랜치 `Sungmin-Cho/issue-5-design-plan`)에서 실행한다.** 라이브 체크아웃(`/Users/sungmin/Dev/AI-Holdem`, `game/` 있음)을 읽지도 쓰지도 않는다. `/start-game`을 실행하지 않는다. 테스트는 전부 tmp 게임 디렉터리를 쓴다 — 저장소 안에 `game/`을 만들지 않는다.
 
 **Goal:** 핸드 안 게임 루프를 딜러 LLM 세션에서 노드 사이드카(`tools/game-loop.js`)로 옮기고, 플레이어를 호스트 CLI headless 대화 세션으로 부르며, talk를 전면 제거한다.
@@ -106,8 +108,10 @@ Step 1을 두 번 실행한다 — ① 현재 셸 env 그대로, ② `env -i HOM
 ```bash
 echo 'ok 한 단어만 출력' | claude -p --model opus --tools ""
 codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check - <<< 'ok 한 단어만 출력'
-grok -p 'ok 한 단어만 출력' -m grok-4.6 --tools ""
+echo 'ok 한 단어만 출력' | grok --prompt-file /dev/stdin -m grok-4.6 --tools ""
 ```
+
+(grok도 stdin — Step 1의 프로덕션 동등 전송 규칙은 상위 모델 probe에도 적용된다. 컨테인먼트 판정은 stdout만이 아니라 **캡처한 출력·트레이스 전체**에서 센티널 부재로 한다.)
 
 각 소요 시간을 기록한다(코치 120s·리뷰 300s 한도의 타당성 확인).
 
@@ -265,10 +269,11 @@ test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회
 test('owned lock: 죽은 pid는 회수된다', () => { /* 존재하지 않는 큰 pid(예: 99999999) 2줄 기록 → acquire 성공 단언 */ });
 test('readOwnedLock: 락 없음 → null, 자기 자신 → alive true·startTime 일치', () => { /* acquire 후 readOwnedLock으로 pid==process.pid·alive===true 단언 */ });
 test('기존 1줄 pid 기록(단명 락)의 staleness 판정은 그대로다', () => { /* 1줄 기록 + 살아있는 pid → LOCKED, 죽은 pid → 회수 (기존 mutex 의미 회귀) */ });
-test('owned lock 디렉터리에 pid 외 파일이 생기면 release가 디렉터리를 남기고 실패하지 않는다', () => {
-  // acquire → 락 디렉터리에 잡파일 생성 → releaseOwnedLock이 throw 없이 반환하고
-  // (rmdir ENOTEMPTY 삼킴 — 기존 releaseMutex 의미), 다음 acquire는 dead 판정 후 회수 실패가 아니라
-  // ENOTEMPTY 잔존 디렉터리를 보고 LOCKED가 아닌 명확한 에러 경로를 밟는지 단언.
+test('owned lock 디렉터리에 pid 외 파일이 생겨도 fail-closed: 외부 파일을 지우지 않고 LOCKED', () => {
+  // acquire → 락 디렉터리에 잡파일 생성 → releaseOwnedLock이 throw 없이 반환(rmdir ENOTEMPTY
+  // 삼킴 — 기존 releaseMutex 의미, 디렉터리·잡파일은 남는다) → pid 파일이 사라진 잔존 디렉터리에
+  // 대한 다음 acquireOwnedLock은 잡파일을 삭제하지 않고 LOCKED를 던진다(비재귀 rmdir 계약 —
+  // 남의 내용물은 절대 지우지 않는다). 잡파일 존재를 사후 단언.
   // 구현 규칙의 목적: 사이드카는 락 디렉터리에 pid 외 파일을 절대 만들지 않는다(회귀 방지).
 });
 ```
@@ -378,7 +383,12 @@ export function createPlayerRuntime(kind, opts = {})
 //   async warmup({ playerId, prompt, timeoutMs }) -> { sessionId }
 //   async decide({ playerId, sessionId, message, timeoutMs }) -> { raw }   // 타임아웃 시 throw {code:'TIMEOUT'}
 //   oneshotStart({ tier /* 'player'|'upper' */, prompt, timeoutMs })
-//     -> { pid, startTime, done /* Promise<{raw}> — 타임아웃이면 자식 kill 후 reject {code:'TIMEOUT'} */ }
+//     -> { pid, startTime,
+//          done,       // Promise<{raw}> — 타임아웃이면 reject {code:'TIMEOUT'} (자동 kill하지 않는다)
+//          terminate,  // async () => {confirmed:boolean} — 단계적 종료: SIGTERM → pid+startTime
+//        }             //   재검증 대기(5s) → SIGKILL → 재확인(2s). 스펙 §5 코치 5의 소비 지점.
+//   // 호출자(Task 6)는 done 실패/타임아웃 시 terminate()를 먼저 부르고, confirmed:false면
+//   // 교체 시도 없이 coach-control `fence`·`adapter-disable` 경로로 간다.
 export async function resolveRuntimes({ preferred, canaryAbsPath, need /* 'player+upper' | 'upper-only' */ })
 // 폴백 사다리: preferred → 나머지 순서로 probe. need에 필요한 probe만 돈다.
 // -> { player: adapter|null, upper: adapter|null, notices: string[] }
@@ -430,7 +440,19 @@ test('세션 지속: 워밍업 1회 후 결정마다 같은 sessionId로 resume'
   const calls = allFakeCalls();
   assert.equal(calls.filter((c) => c.argv.includes('--session-id')).length, 1);
   assert.equal(calls.filter((c) => c.argv.includes('--resume')).length, 2);
-  // 두 플레이어면 세션 id가 달라야 한다 — 별도 케이스로 단언
+});
+
+test('세션 격리: 두 플레이어의 sessionId가 다르고, 각 decide의 stdin은 그 플레이어 것만 담는다', async () => {
+  const rt = fakeRuntime();
+  const a = await rt.warmup({ playerId: 'p1', prompt: '페르소나A', timeoutMs: 1000 });
+  const b = await rt.warmup({ playerId: 'p2', prompt: '페르소나B', timeoutMs: 1000 });
+  assert.notEqual(a.sessionId, b.sessionId);
+  await rt.decide({ playerId: 'p1', sessionId: a.sessionId, message: 'P1-홀카드-요약', timeoutMs: 1000 });
+  await rt.decide({ playerId: 'p2', sessionId: b.sessionId, message: 'P2-요약', timeoutMs: 1000 });
+  const calls = allFakeCalls();
+  const p2call = calls.at(-1);
+  assert.ok(p2call.argv.includes(b.sessionId) && !p2call.argv.includes(a.sessionId));
+  assert.ok(!p2call.stdin.includes('P1-홀카드-요약'));   // §8.5d: 요약은 그 플레이어 세션에만
 });
 
 test('decide 타임아웃: TIMEOUT을 던지고 자식을 종료한다', async () => { /* delayMs 큰 fake, timeoutMs 50 */ });
@@ -468,8 +490,11 @@ git add tools/player-runtime.js tools/player-prompt.md test/helpers/fake-cli.js 
 - Produces:
 
 ```js
-export function createGameLoop({ gameDir, adapter, upperAdapter, opts = {} })
-// adapter/upperAdapter는 null 가능(늦은 주입) — 아래 CLI main의 순서가 채운다.
+export function createGameLoop({ gameDir, resolver, opts = {} })
+// resolver: ({need, canaryAbsPath}) => Promise<{player, upper, notices}> — 프로덕션은
+//   tools/player-runtime.js의 resolveRuntimes를 preferred와 함께 바인딩해 넘기고,
+//   테스트는 fake adapter를 돌려주는 함수를 주입한다. 어댑터 "늦은 주입" 문제가 없다 —
+//   bootstrap()/resume()이 자기 단계에서 resolver를 부른다.
 // opts(테스트 훅): { watchdog?: {t1Ms,t2Ms}, waitMs?, pollMs?, port?, now?, log? }
 //   port: 서버 포트 (프로덕션 기본 8877, 테스트는 고유 포트/0). 실제 바운드 포트는
 //   서버 기동 후 lock.json에서 다시 읽어 loop-state.port에 기록한다.
@@ -479,31 +504,40 @@ export function createGameLoop({ gameDir, adapter, upperAdapter, opts = {} })
 //   async run(),          // gameOver 완료 시 정상 반환, HALT는 throw {code, message}
 //   requestStop(),        // SIGTERM 핸들러가 부른다. 테스트 티어다운도 이것 + 서버 pid 사망 대기
 // }
-// CLI main(직접 실행 시)의 순서가 계약이다. **owned lock은 어느 경로든 딱 한 곳 — 여기서 —
-// 선점하고 run()/requestStop()까지 보유한다.** resume()·bootstrap()은 락을 다시 잡지 않는다.
-// (스펙 §5 기동: "loop 락 선점 → phase 복원이 최우선". 종료 국면 resume도 예외가 아니다 —
-//  락이 없으면 attach 판정(loopPidAlive)이 이 프로세스를 못 보고, 동시 resume이 리뷰를 이중 생성한다.)
-//   argv 파싱 — 플래그 전체: --game-dir --ai --stack --level-every --blinds --force --resume
-//     --player-runtime --practice-focus-file (스펙 D6·§7. --player-runtime이 resolveRuntimes의
-//     preferred가 된다 — 미지정 시 사다리 claude→codex→grok 첫 적격 + notices 기록)
-//   → --resume이면:
-//        락 선점(죽은 선점자 회수, 산 선점자 → LOCKED 즉시 종료: 동시 resume 거부)
-//        → loop-state/엔진 state 판독으로 phase 유도(스펙 §5 유도 규칙, 어떤 경로도 init 금지)
-//        → phase == bootstrap → 서버 health 확인·(죽었으면) 기동부터 이어서 playing 진입
-//        → finalizing 이후 → 카나리 생성(game/ 안) → resolveRuntimes({need:'upper-only'})
-//                          → 카나리 삭제 → resume() → run()
-//        → playing → 카나리 생성 → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
-//                    player null이면 NO_PLAYER_RUNTIME HALT → resume() → run()
-//   → 새 게임이면: 기존 락 확인·(force면 정지 사다리: 사이드카→서버) → 락 선점 → init 실행 →
-//        카나리 생성(game/ 안) → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
-//        player null이면 락 해제·HALT(기동 거부) → 서버 기동 → bootstrap 나머지 → run()
-//   → 카나리는 항상 finally에서 삭제한다 (예측 불가 이름, 센티널 바이트 — 스펙 §4)
-//   → notices는 매 지점에서 loop-state.notices에 병합 기록
-//   → upperAdapter가 null이면(§7 ② 전멸): 기동 시 notices에 고지하고 게임은 진행하되,
-//     코치는 매 핸드 complete-unavailable 경로만 밟고(oneshotStart 무호출),
-//     종료 시퀀스는 리뷰를 지어내지 않고 halt:{code:'REVIEW_FAILED'}로 종료한다
-//     (사용자가 CLI를 고친 뒤 resume하면 review phase부터 재시도 — 스펙 §5)
-//   → 종료 코드: 0 done, 2 repair_failed, 3 REVIEW_FAILED, 4 NO_PLAYER_RUNTIME, 5 기타 HALT
+//
+// **owned lock의 유일한 선점 지점은 bootstrap()/resume() 함수 안이다** (재진입 불가 락이므로
+// CLI main과 함수가 각각 잡으면 자기 자신에 LOCKED가 난다). 두 함수 모두 첫 동작이 락 선점이고
+// (스펙 §5 "loop 락 선점 → phase 복원이 최우선" — 종료 국면 resume도 예외 없음: 락이 없으면
+// attach 판정이 이 프로세스를 못 보고 동시 resume이 리뷰를 이중 생성한다), 선점한 핸들은
+// run() 종료/requestStop()까지 보유한다. CLI main은 argv 파싱과 분기·종료 코드 변환만 한다.
+//
+// bootstrap() 내부 순서 (스펙 §4 부트스트랩 + §4 loop-state "init 직후 가능한 한 빨리"):
+//   기존 락 확인(산 소유자: force 없으면 ACTIVE_GAME throw / force면 정지 사다리 사이드카→서버,
+//     pid+startTime 재검증 후에만 시그널) → acquireOwnedLock → init 실행(--force 패스스루)
+//   → game/loop.log 열기 → writeLoopState({phase:'bootstrap', sessionToken, notices:[]})  ← 딜러 폴링 대상
+//   → 카나리 생성(game/ 안) → resolver({need:'player+upper'}) → finally 카나리 삭제
+//     → player null이면 writeLoopState({halt:{code:'NO_PLAYER_RUNTIME'}}) → 락 해제 → throw
+//   → 서버 spawn·health → writeLoopState({port}) → practice-focus 복사
+//   → 워밍업(전 플레이어 병렬, `game/.player-sessions.json` 기록) → writeLoopState({phase:'playing'})
+//
+// resume() 내부 순서:
+//   acquireOwnedLock(산 소유자 → LOCKED 즉시 throw: 동시 resume 거부)
+//   → loop-state/엔진 state 판독으로 phase 유도(스펙 §5 유도 규칙, 어떤 경로도 init 금지)
+//   → phase == bootstrap → 서버 health 확인·(죽었으면) 기동부터 이어서 → 워밍업 → playing
+//   → finalizing 이후 → 카나리 생성 → resolver({need:'upper-only'}) → 카나리 삭제 → 종료 시퀀스 재개
+//   → playing → 엔진 gameOver면 종료 시퀀스로 / 아니면 재진입 체크리스트(attempt --retry →
+//     repair_failed → 인자 없는 step → publish --view-only) → 카나리 생성 →
+//     resolver({need:'player+upper'}) → 카나리 삭제 → player null이면 NO_PLAYER_RUNTIME HALT
+//     → 세션 복원/재생성 → 루프 진입
+//
+// CLI main: argv 파싱 — 플래그 전체: --game-dir --ai --stack --level-every --blinds --force
+//   --resume --player-runtime --practice-focus-file (스펙 D6·§7. --player-runtime이 resolver의
+//   preferred — 미지정 시 사다리 claude→codex→grok 첫 적격 + notices 기록) → bootstrap|resume →
+//   run() → 종료 코드: 0 done, 2 repair_failed, 3 REVIEW_FAILED, 4 NO_PLAYER_RUNTIME, 5 기타 HALT
+//
+// upper가 null이면(§7 ② 전멸): notices에 고지하고 게임은 진행하되, 코치는 매 핸드
+// complete-unavailable 경로만 밟고(oneshotStart 무호출), 종료 시퀀스는 리뷰를 지어내지 않고
+// halt:{code:'REVIEW_FAILED'}로 종료한다(사용자가 CLI를 고친 뒤 resume하면 review phase부터 재시도).
 ```
 
 **코치 owner 수명**: bootstrap이 owner uuid를 **1회 생성**해 loop-state에 기록하고 게임 내내 전 핸드의 `reserve`/`bind-handle`/`accept`/`heartbeat`/`complete-unavailable`/`finalize-cutoff`에 재사용한다(핸드마다 새 uuid를 쓰면 두 번째 핸드부터 STALE_OWNER로 거절된다). `--resume`만 **새 uuid로 `begin-owner`** 후 그 uuid를 이어 쓴다. `--snapshot-file`은 항상 `<gameDir>/ui-snapshot.json`.
@@ -522,10 +556,16 @@ function scriptedAdapter(script /* {playerId -> [액션들]} */, hooks = {}) {
   // Task 4 인터페이스를 만족하는 fake: decide가 스크립트를 순서대로 소비.
   // hooks.beforeDecide 등으로 지연·무응답·쓰레기 응답 주입.
 }
+function fakeResolver(adapter, upper = fakeUpperAdapter()) {
+  // createGameLoop의 resolver 계약을 만족: need에 따라 {player, upper, notices:[]} 반환
+  return async ({ need }) => (need === 'upper-only'
+    ? { player: null, upper, notices: [] }
+    : { player: adapter, upper, notices: [] });
+}
 
 test('AI 3 + user 게임을 완주하고 칩이 보존된다', async () => {
   const dir = tmpGame();
-  const loop = createGameLoop({ gameDir: dir, adapter: scriptedAdapter(allCallScript),
+  const loop = createGameLoop({ gameDir: dir, resolver: fakeResolver(scriptedAdapter(allCallScript)),
     opts: { watchdog: { t1Ms: 2000, t2Ms: 1000 }, waitMs: 200 } });
   await loop.bootstrap({ ai: 3 });
   const userDriver = driveUserActions(dir);   // 폴링: 사용자 차례면 POST /api/action (turn-contract 패턴)
@@ -573,13 +613,17 @@ test('--force 부트스트랩: 정지 순서 사이드카→서버, 정지 중 D
   // fake 형제 loop(자식 프로세스로 락 보유) + 서버 상대로 force bootstrap 3케이스 (스펙 §8.5):
   // ① kill 순서 로그 단언 ② 정지 창에서 서버 재spawn 부재 ③ SIGTERM 무시 형제 → LOOP_ALIVE·이전 game/ 무변화
 });
+test('--force: 같은 pid·다른 startTime의 락(재사용 의심)에는 시그널을 절대 보내지 않는다', async () => {
+  // 락 pid 파일의 startTime을 조작(살아 있는 pid, 불일치 startTime) → force bootstrap이
+  // kill 훅을 한 번도 부르지 않고(스파이) dead 취급·회수로 진행함을 단언 (스펙 §4 fail-closed)
+});
 ```
 
 각 테스트는 티어다운에서 `requestStop()` 후 **서버 pid 사망을 대기**한다(포트는 `opts.port`에 고유 값 — 기본 8877을 테스트에서 쓰지 않는다. EADDRINUSE는 티어다운 누락 신호다).
 
 - [ ] **Step 2: 구현 — 부트스트랩·루프·워치독**
 
-부트스트랩(스펙 §4 순서): 기존 락 확인(alive+force → 정지 사다리: TERM→확인→KILL, startTime 재검증 후에만 시그널; alive+비force → ACTIVE_GAME throw) → `acquireOwnedLock` → `runCli(['init','--ai',…,force&&'--force'])` → **`game/loop.log`를 이 시점에 열어 이후 로그를 자체 기록**(스펙 §4 — 셸 리디렉션 파일은 부트 크래시 안전망일 뿐) → practice-focus 복사 → 서버 spawn(detached, 스킬 §2와 같은 인자) + health 폴링 → `writeLoopState({phase:'bootstrap', port, sessionToken, gameEpoch, …})` → 워밍업(전 플레이어 병렬, 결과 sessionId를 `game/.player-sessions.json`에 `{playerId:{runtime,sessionId,createdAt}}`로 기록 — Task 7 resume이 읽는다) → `writeLoopState({phase:'playing'})`. 루프 본문은 스펙 §5 의사코드 그대로 — 각 분기의 publish stdout이 다음 `out`. 실패 표(§4의 code 분기)는 `switch (code)`로 기계화.
+부트스트랩은 **Interfaces의 bootstrap() 내부 순서 그대로** 구현한다(그 블록이 정본이다 — 락은 bootstrap() 안에서 선점하고, loop-state `{phase:'bootstrap'}`은 init·loop.log 직후이자 probe **전**에 기록해 딜러 폴링 대상과 NO_PLAYER_RUNTIME halt의 기록처를 만든다. 서버 기동은 probe 성공 뒤다). `game/loop.log`는 init 직후 사이드카가 스스로 연다(셸 리디렉션 파일은 부트 크래시 안전망일 뿐). 워밍업 결과 sessionId는 `game/.player-sessions.json`에 `{playerId:{runtime,sessionId,createdAt}}`로 기록한다(Task 7 resume이 읽는다). 루프 본문은 스펙 §5 의사코드 그대로 — 각 분기의 publish stdout이 다음 `out`. 실패 표(§4의 code 분기)는 `switch (code)`로 기계화.
 
 - [ ] **Step 3: 전체 그린 확인 후 커밋**
 
@@ -599,7 +643,7 @@ git add tools/game-loop.js test/game-loop.test.js && git commit -m "feat: 사이
 - Test: `test/game-loop.test.js` (확장)
 
 **Interfaces:**
-- Consumes: `oneshotStart`(Task 4), coach-control verbs — 정확한 argv(코드 확인 완료): `reserve --owner O --hand N --attempt K --consider-overfold --stats-file S --snapshot-file P`, `bind-handle --owner O --hand N --generation G --handle <문자열>`, `accept --owner O --hand N --generation G --forbidden-file F`, `complete-unavailable --owner O --hand N --reason R --snapshot-file P`, `heartbeat --owner O`.
+- Consumes: `oneshotStart`/`terminate`(Task 4), coach-control verbs — 정확한 argv(코드 확인 완료): `reserve --owner O --hand N --attempt K --consider-overfold --stats-file S --snapshot-file P`, `bind-handle --owner O --hand N --generation G --handle <문자열>`, `accept --owner O --hand N --generation G --forbidden-file F`, `complete-unavailable --owner O --hand N --generation G --reason R --snapshot-file P`(**reserve 이후 실패 경로에서는 `--generation` 필수** — 살아 있는 예약이 있는 핸드에 generation 없이 부르면 `GENERATION_REQUIRED`로 거절된다. 예약 없이 부르는 경로 — upper 부재로 reserve 자체를 건너뛴 경우 — 만 생략 가능), `heartbeat --owner O`.
 - Produces: `coachPipeline(handNo)` — async, 루프를 막지 않는다. 실패 격리: reject를 잡아 loop-state.notices에 기록.
 
 - [ ] **Step 1: 실패 테스트**
@@ -613,7 +657,12 @@ test('코치: 프롬프트에 상대 홀카드 literal이 없다', async () => {
   // 한 핸드 완료 후 fake upper가 받은 stdin에서 상대 hole 카드 문자열 부재 단언 (redacted 입력)
 });
 test('코치: bind-handle이 생성 완료 전에 불린다', async () => { /* oneshotStart 직후 bind, done 이전 — fake 지연으로 순서 검증 */ });
-test('코치: 1차 실패(빈 text) → 동일 입력 attempt 2 → 실패 시 complete-unavailable', async () => { /* … */ });
+test('코치: 1차 실패(빈 text) → terminate 확인 → 동일 입력 attempt 2 → 실패 시 complete-unavailable --generation', async () => {
+  // coach-control 호출 로그에서 complete-unavailable에 --generation이 실려 있고 seal이 성공했음 단언
+});
+test('코치: terminate가 confirmed:false → 교체 없이 fence·adapter-disable, 이후 핸드는 unavailable', async () => {
+  // fake terminate가 {confirmed:false} 반환 → attempt 2 무시도, fence/adapter-disable 호출 단언
+});
 test('코치: 다음 핸드를 막지 않는다', async () => { /* 코치 fake를 5s 지연시켜도 new-hand publish가 먼저 나감 */ });
 test('practiceFocus: 파일이 있으면 코치 프롬프트에 실린다', async () => { /* bootstrap({practiceFocusFile}) 후 단언 */ });
 test('upperAdapter가 null이면 코치는 complete-unavailable 경로만 밟는다', async () => {
@@ -623,7 +672,7 @@ test('upperAdapter가 null이면 코치는 complete-unavailable 경로만 밟는
 
 - [ ] **Step 2: 구현**
 
-`coachPipeline(handNo)`: ① `runCli(['hand',String(handNo),'--redacted'])`·`runCli(['stats'])`를 파일로 캡처(`game/.coach-stats-<hand>.json` 등 — 사이드카가 쓰는 경로) ② `coach-control reserve …` → descriptor ③ deny 파일 생성(players.json의 archetype 등 literal + 비공개 홀카드 코드 — 스킬 §5 목록) ④ 프롬프트 조립(현행 코치 프롬프트에서 "먼저 hand --redacted와 stats를 실행한다"를 "아래 입력만 사용한다"로 교체, 입력 인라인) ⑤ `oneshotStart({tier:'upper'})` → 즉시 `bind-handle --handle "<pid>:<startTime>"` ⑥ `await done`(120s) → `extractJsonLine` 검증(handNo 일치·text 비어있지 않음·forbidden literal 부재) → `writeFileSync(exactResultPath)` ⑦ `accept --forbidden-file` → `runPublish(['--from', exactEnvelopePath])` ⑧ 실패 경로: 자식 종료 확인 후 attempt 2, 그다음 `complete-unavailable --reason <기계 사유>`. 핸드 전환 지점에서 `heartbeat` 실행·`result-ready`/`timeout-fence` 대응(스킬 §5 표).
+`coachPipeline(handNo)`: ① `runCli(['hand',String(handNo),'--redacted'])`·`runCli(['stats'])`를 파일로 캡처(`game/.coach-stats-<hand>.json` 등 — 사이드카가 쓰는 경로) ② `coach-control reserve …` → descriptor ③ deny 파일 생성(players.json의 archetype 등 literal + 비공개 홀카드 코드 — 스킬 §5 목록) ④ 프롬프트 조립(현행 코치 프롬프트에서 "먼저 hand --redacted와 stats를 실행한다"를 "아래 입력만 사용한다"로 교체, 입력 인라인) ⑤ `oneshotStart({tier:'upper'})` → 즉시 `bind-handle --handle "<pid>:<startTime>"` ⑥ `await done`(120s) → `extractJsonLine` 검증(handNo 일치·text 비어있지 않음·forbidden literal 부재) → `writeFileSync(exactResultPath)` ⑦ `accept --forbidden-file` → `runPublish(['--from', exactEnvelopePath])` ⑧ 실패 경로: `terminate()`로 자식 종료 확인(`{confirmed:true}`) 후에만 동일 입력 attempt 2, 그래도 실패면 `complete-unavailable --generation <G> --reason <기계 사유>`(G = 그 시도의 descriptor generation — 없이 부르면 `GENERATION_REQUIRED`). `{confirmed:false}`면 교체 없이 `fence` 후 `adapter-disable`(이후 핸드는 unavailable fallback). 핸드 전환 지점에서 `heartbeat` 실행·`result-ready`/`timeout-fence` 대응(스킬 §5 표).
 
 - [ ] **Step 3: 전체 그린 확인 후 커밋**
 
@@ -668,6 +717,10 @@ test('resume: 게시 ack 후·전이 전 크래시 → 스냅샷 digest 대조�
   // 스냅샷에 review를 심고 phase는 review_generated → publish 스파이 무호출, phase가 review_published로
 });
 test('resume: attempt pending이면 --retry로 해소 후 진행', async () => { /* .publish-attempt.json 심기 */ });
+test('resume: playing·핸드 진행 중 → view-only 재게시가 있고 --new-hand는 없다', async () => {
+  // 핸드 중간 상태로 resume → publish 호출 로그에 --view-only 존재, step --new-hand 부재,
+  // 이후 next를 따라 정상 진행 (스펙 §7 재진입 체크리스트 3)
+});
 test('resume: 플레이어 세션 복원 실패 시 재생성(워밍업 재실행)', async () => { /* .player-sessions.json 손상 */ });
 test('resume: playing + 적격 런타임 0 → NO_PLAYER_RUNTIME HALT', async () => { /* probe 전실패 fake */ });
 test('resume: finalizing 이후 재개는 플레이어 probe를 생략한다', async () => { /* player probe 스파이 무호출 */ });
