@@ -661,7 +661,7 @@ test('코치: 1차 실패(빈 text) → terminate 확인 → 동일 입력 attem
   // coach-control 호출 로그에서 complete-unavailable에 --generation이 실려 있고 seal이 성공했음 단언
 });
 test('코치: terminate가 confirmed:false → 교체 없이 fence·adapter-disable, 이후 핸드는 unavailable', async () => {
-  // fake terminate가 {confirmed:false} 반환 → attempt 2 무시도, fence/adapter-disable 호출 단언
+  // fake terminate가 {confirmed:false} 반환 → attempt 2 미시도, fence/adapter-disable 호출 단언
 });
 test('코치: 다음 핸드를 막지 않는다', async () => { /* 코치 fake를 5s 지연시켜도 new-hand publish가 먼저 나감 */ });
 test('practiceFocus: 파일이 있으면 코치 프롬프트에 실린다', async () => { /* bootstrap({practiceFocusFile}) 후 단언 */ });

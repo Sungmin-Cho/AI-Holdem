@@ -322,7 +322,7 @@ resume 문면(스킬): `resume-check`의 `loopPidAlive`가 참이면 **attach** 
 
 ## 13. 새 세션 인계물
 
-- 이 설계: `docs/2026-08-29-in-hand-sidecar-design.md` (커밋됨)
-- 플랜: `docs/2026-08-29-in-hand-sidecar-plan.md` (리뷰 수렴 후 커밋)
+- 이 설계: `docs/2026-08-29-in-hand-sidecar-design.md` (커밋됨, 리뷰 루프 R3 수렴)
+- 플랜: `docs/2026-08-29-in-hand-sidecar-plan.md` (커밋됨, 플랜 리뷰 루프 R3 수렴)
 - 현행 정본: `.agents/skills/start-game/SKILL.md` / `engine/cli.js` `step` / `tools/publish.js` / `tools/coach-control.js`
 - 실측 근거: §2 표 (프로브 2026-08-29, 이 머신) + `game/ui-snapshot.json`·`game/archive/` `history[].at`
