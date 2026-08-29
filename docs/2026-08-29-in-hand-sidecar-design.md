@@ -238,8 +238,9 @@ loop-state `phase`가 각 단계 전후에 기록되는 체크포인트다(`fina
 
 ```bash
 nohup node tools/game-loop.js --game-dir game --ai <n> \
+  --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   [--stack N] [--level-every N] [--blinds SB/BB] [--force] [--resume] \
-  [--player-runtime <r>] [--practice-focus-file <game/ 밖 경로>] \
+  [--practice-focus-file <game/ 밖 경로>] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 # 이후 game/loop-state.json 폴링(약 250ms). 종료 조건은 벽시계가 아니라 셋 중 하나다:
 #   ① halt 기록  ② phase가 bootstrap을 지남  ③ 사이드카 pid 사망.
@@ -250,6 +251,8 @@ nohup node tools/game-loop.js --game-dir game --ai <n> \
 ```
 
 셸 리디렉션이 `game/loop.log`가 아닌 이유: init의 `vacateLive`가 game/을 비우기 전에 만들어진 파일은 아카이브로 쓸려 간다. 본 로그는 사이드카가 init 뒤 `game/loop.log`를 스스로 연다(§4 파일 계약).
+
+`--player-runtime`은 **스킬이 명시하는 인자다** — detached 노드 프로세스는 자기를 띄운 호스트를 추론할 수 없으므로, 각 호스트의 딜러가 위 표의 자기 값을 넣는 것이 "기본 런타임 = 시작 호스트"(D2)의 유일한 캐리어다. 미지정 시 사이드카는 폴백 사다리(claude→codex→grok) 첫 적격을 쓰고 notices에 남긴다.
 
 | 호스트 | 기동 | 종료 인지 | 플레이어 기본 런타임 |
 |---|---|---|---|

@@ -45,6 +45,7 @@ test/player-runtime.test.js   # 신규
 test/game-loop.test.js        # 신규
 test/state.test.js            # 확장 (owned lock)
 test/archive.test.js, test/cli.test.js  # 확장 (활성 정의·loopPidAlive)
+test/helpers/dev-drive.js     # 수정: talk 픽스처 교체
 test/publish.test.js, test/views.test.js, test/server.test.js  # talk 접점 수정
 test/turn-contract.test.js    # 개편 (SKILL 문면 유래 제거, CLI 시퀀스 계약으로)
 test/tempo-skill-contract.test.js  # 개편 (새 SKILL 문면 계약)
@@ -94,7 +95,7 @@ codex exec -m gpt-5.6-luna --sandbox read-only --skip-git-repo-check - <<< '같�
 grok -p '같은 지시' -m grok-4.6 --tools "" --deny MCPTool --disable-web-search --sandbox read-only
 ```
 
-카나리 준비(각 시도 전): `CANARY=$(mktemp -d)/canary-$(uuidgen).txt; echo "SENTINEL-$(uuidgen)" > "$CANARY"` — **레포·홈 밖 임시 디렉터리**에 두고, cwd는 별도 빈 tmp 디렉터리에서 실행한다. 판정: stdout에 SENTINEL 문자열이 **없어야** 통과. 실제 게임 파일 경로는 절대 지시하지 않는다.
+카나리 준비(각 시도 전): 게임 디렉터리 **역할**의 tmp 디렉터리를 만들고 그 안에 심는다 — `GD=$(mktemp -d); CANARY="$GD/canary-$(uuidgen).txt"; echo "SENTINEL-$(uuidgen)" > "$CANARY"` (스펙 §4: 보호 대상과 같은 접근 경계. 본게임 기동 probe는 init 뒤 실제 `game/` 안에 심었다 지운다). cwd는 별도 빈 tmp 디렉터리. **전송도 프로덕션 동등**: 프롬프트는 전부 stdin으로 — grok도 `--prompt-file /dev/stdin`을 쓰고 위 예시의 argv 프롬프트(`-p '지시'`)는 probe에서 쓰지 않는다. 판정: stdout에 SENTINEL 문자열이 **없어야** 통과. 실제 게임 파일·홀카드 경로는 절대 지시하지 않는다.
 
 - [ ] **Step 2: env 상속 확인**
 
@@ -136,7 +137,8 @@ git add docs/sidecar-probe-notes.md && git commit -m "docs: 사이드카 어댑�
 - Modify: `tools/publish.js` (talks/talkFiles/parseTalk/readTalkFile/BAD_TALK, `nextForDealer`의 reply-channel append)
 - Modify: `engine/views.js` (`turnSummary` 마지막 줄)
 - Modify: `server/public/app.js` (lastTalk·bubble·`case 'talk'` + 명시 필터), `server/public/style.css` (`.bubble`)
-- Modify: `test/publish.test.js`, `test/views.test.js`, `test/server.test.js`(talk 케이스), `test/turn-contract.test.js`(talk 사용 지점만 — 개편은 Task 8)
+- Modify: `test/helpers/dev-drive.js` (talk 픽스처 → narration 또는 talk 없는 픽스처로 교체)
+- Modify: `test/publish.test.js`(talk 케이스 삭제 + **기존 reply-channel append 단언 — `next.message`에 `SendMessage로 to:"main"` 문구를 기대하는 케이스 — 를 "message == summary 원문" 단언으로 교체**), `test/views.test.js`, `test/server.test.js`(talk 케이스), `test/turn-contract.test.js`(**기존 `결정은 … 최종 출력으로 반환한다` 회신 문구 단언을 summary 원문 단언으로 교체** — 구조 개편은 Task 8)
 
 **Interfaces:**
 - Produces: `publish.js`의 `next.message` == 엔진 `summary` 원문(append 없음). 이후 태스크의 사이드카·어댑터가 이 성질에 기댄다.
@@ -194,13 +196,16 @@ test('talk가 실린 구버전 pending attempt는 --retry로 동일 본문 재�
 });
 ```
 
-UI 억제는 app.js 필터가 담당한다(수동 확인은 Task 9 체크리스트).
+UI 억제의 회귀는 **문면 계약**으로 고정한다(app.js는 브라우저 스크립트라 node --test로 실행하지 않는다): `test/server.test.js` 또는 tempo-skill-contract에 — app.js 소스에 `case 'talk'` 부재 + `type === 'talk'`(또는 동등한 필터 식) `continue`/skip 존재 + `case 'narration'` 유지 단언.
 
 - [ ] **Step 5: 전체 그린 확인 후 커밋**
 
 ```bash
 node --test
-git add -A && git commit -m "feat: talk·reply-channel 배선 제거 — UI는 레거시 talk 필터"
+git add tools/publish.js engine/views.js server/public/app.js server/public/style.css \
+  test/helpers/dev-drive.js test/publish.test.js test/views.test.js test/server.test.js \
+  test/turn-contract.test.js
+git commit -m "feat: talk·reply-channel 배선 제거 — UI는 레거시 talk 필터"
 ```
 
 ---
@@ -370,13 +375,16 @@ export function createPlayerRuntime(kind, opts = {})
 //   async decide({ playerId, sessionId, message, timeoutMs }) -> { raw }   // 타임아웃 시 throw {code:'TIMEOUT'}
 //   oneshotStart({ tier /* 'player'|'upper' */, prompt, timeoutMs })
 //     -> { pid, startTime, done /* Promise<{raw}> — 타임아웃이면 자식 kill 후 reject {code:'TIMEOUT'} */ }
-export async function resolveRuntimes({ preferred, canaryAbsPath })
-// 폴백 사다리: preferred → 나머지 순서로 probe.
+export async function resolveRuntimes({ preferred, canaryAbsPath, need /* 'player+upper' | 'upper-only' */ })
+// 폴백 사다리: preferred → 나머지 순서로 probe. need에 필요한 probe만 돈다.
 // -> { player: adapter|null, upper: adapter|null, notices: string[] }
 // 규칙(스펙 §7): 플레이어 probe(①+③ 컨테인먼트) 통과 런타임이 player.
 //   그 런타임의 상위 모델 probe(②)가 실패하면 upper는 ②를 통과한 다른 런타임으로 갈라 쓴다.
-//   upper가 전무하면 upper: null + notice (코치는 unavailable 경로, 리뷰는 기동 시 고지).
-//   player가 전무하면 { player: null } — 호출자(부트스트랩)는 기동을 거부한다.
+//   upper가 전무하면 upper: null + notice (코치는 unavailable 경로, 리뷰는 생성 대신 기동 시 고지).
+//   player가 전무하면 { player: null } — 호출자(부트스트랩/playing resume)는 기동을 거부한다.
+//   'upper-only'(finalizing 이후 resume)는 플레이어 probe를 아예 돌지 않는다 (스펙 D7).
+//   notices는 호출자가 loop-state.notices에 기록한다 — 이것이 딜러 고지의 유일한 경로다.
+//   preferred가 없으면(미지정) 사다리 순서 claude → codex → grok의 첫 적격.
 ```
 
 - 규칙(스펙 §4): 프롬프트는 **stdin으로만**. 모델 텍스트·decisionId를 argv에 넣지 않는다. cwd는 `opts.cwdRoot`(기본 `os.tmpdir()` 아래 per-runtime 빈 디렉터리). env는 Task 0의 최소 집합.
@@ -456,17 +464,35 @@ git add tools/player-runtime.js tools/player-prompt.md test/helpers/fake-cli.js 
 - Produces:
 
 ```js
-export function createGameLoop({ gameDir, adapter, opts = {} })
-// opts(테스트 훅): { watchdog?: {t1Ms,t2Ms}, waitMs?, pollMs?, upperAdapter?, now?, log? }
+export function createGameLoop({ gameDir, adapter, upperAdapter, opts = {} })
+// adapter/upperAdapter는 null 가능(늦은 주입) — 아래 CLI main의 순서가 채운다.
+// opts(테스트 훅): { watchdog?: {t1Ms,t2Ms}, waitMs?, pollMs?, port?, now?, log? }
+//   port: 서버 포트 (프로덕션 기본 8877, 테스트는 고유 포트/0). 실제 바운드 포트는
+//   서버 기동 후 lock.json에서 다시 읽어 loop-state.port에 기록한다.
 // -> {
 //   async bootstrap({ ai, stack, levelEvery, blinds, force, practiceFocusFile }),
 //   async resume(),
 //   async run(),          // gameOver 완료 시 정상 반환, HALT는 throw {code, message}
-//   requestStop(),        // SIGTERM 핸들러가 부른다
+//   requestStop(),        // SIGTERM 핸들러가 부른다. 테스트 티어다운도 이것 + 서버 pid 사망 대기
 // }
-// CLI main(직접 실행 시): argv 파싱 → resolveRuntimes → createGameLoop → bootstrap|resume → run
+// CLI main(직접 실행 시)의 순서가 계약이다 (스펙 D6·D7 — probe가 락·phase보다 먼저 가면 안 된다):
+//   argv 파싱
+//   → --resume이면: loop-state/엔진 state 판독으로 phase 유도(스펙 §5 유도 규칙, init 금지)
+//        finalizing 이후 → resolveRuntimes({need:'upper-only'}) → resume() → run()
+//        playing        → 락 선점 → resolveRuntimes({need:'player+upper'}) →
+//                          player null이면 NO_PLAYER_RUNTIME HALT → resume() → run()
+//   → 새 게임이면: 기존 락 확인·(force면 정지 사다리) → 락 선점 → init 실행 →
+//        game/ 안에 카나리 생성 → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
+//        player null이면 락 해제·HALT(기동 거부) → 서버 기동 → bootstrap 나머지 → run()
+//   → notices는 매 지점에서 loop-state.notices에 병합 기록
+//   → upperAdapter가 null이면(§7 ② 전멸): 기동 시 notices에 고지하고 게임은 진행하되,
+//     코치는 매 핸드 complete-unavailable 경로만 밟고(oneshotStart 무호출),
+//     종료 시퀀스는 리뷰를 지어내지 않고 halt:{code:'REVIEW_FAILED'}로 종료한다
+//     (사용자가 CLI를 고친 뒤 resume하면 review phase부터 재시도 — 스펙 §5)
 //   → 종료 코드: 0 done, 2 repair_failed, 3 REVIEW_FAILED, 4 NO_PLAYER_RUNTIME, 5 기타 HALT
 ```
+
+**자식 argv 공통 규칙**: `runCli`·`runPublish`·coach-control 호출은 **항상 `--game-dir <gameDir>`를 덧붙인다** (기본값 `game/`에 기대지 않는다 — 테스트는 tmp 디렉터리다. `test/turn-contract.test.js`와 같은 패턴).
 
 - 내부 헬퍼(파일 안에 유지): `runCli(args)`(engine/cli.js execFile, stdout/stderr JSON 파싱), `runPublish(args)`, `writeLoopState(patch)`(writeJsonAtomic), `decideWithWatchdog(next)`(T1→재전송 T2→force-default; 파싱·불일치·불법도 재요청 1회 규칙), metrics 기록(`{playerId,decisionId,runtime,outcome,elapsedMs,modelMs,parseMs,stepMs,publishMs}`).
 - 루프는 스펙 §5 의사코드의 문면을 그대로 구현한다: user 경로(강제 폴드 금지·waitError·decisionId 불일치·재동기화+narration 재게시), archivePending→resume-check 1회·repair_failed HALT, VERSION_MISMATCH 재동기화, publish 실패 표(D9 재기동은 SIGTERM 중 금지), 첫 전이의 gameOver 술어.
@@ -516,7 +542,23 @@ test('archivePending → resume-check 1회, repair_failed → HALT', async () =>
 test('zero-delay 벤치: 결정당 LLM 제외 오버헤드 ≤ 1s', async () => {
   // 즉답 fake로 두 핸드 진행, metrics의 parseMs+stepMs+publishMs 합 p95 ≤ 1000ms 단언 (스펙 §2·§8 5f)
 });
+test('user 차례: timeout이면 --wait-only 반복만 하고 force-default가 없다', async () => {
+  // driveUserActions가 일부러 수 회 무응답 → publish 호출 로그에 --wait-only 반복, step force-default 부재 단언
+});
+test('user 차례: decisionId 불일치 액션은 폐기하고 다시 대기한다', async () => { /* 낡은 decisionId POST → 무시 후 정상 진행 */ });
+test('VERSION_MISMATCH: 인자 없는 step으로 재동기화 후 진행한다', async () => {
+  // 루프 진행 중 외부에서 state.json을 한 번 mutate(apply 자식 호출) → 다음 step 거부 → 재동기화 경로 단언
+});
+test('RUNTIME_TABLE 워치독 프로파일: grok은 60s/30s, claude·codex는 25s/15s가 decideWithWatchdog에 쓰인다', () => {
+  // 단위 단언 — opts.watchdog 미지정 시 adapter.watchdog 값이 그대로 쓰임 (grok fake로 필드 관찰)
+});
+test('--force 부트스트랩: 정지 순서 사이드카→서버, 정지 중 D9 재기동 없음, 정지 실패면 아카이브 없음', async () => {
+  // fake 형제 loop(자식 프로세스로 락 보유) + 서버 상대로 force bootstrap 3케이스 (스펙 §8.5):
+  // ① kill 순서 로그 단언 ② 정지 창에서 서버 재spawn 부재 ③ SIGTERM 무시 형제 → LOOP_ALIVE·이전 game/ 무변화
+});
 ```
+
+각 테스트는 티어다운에서 `requestStop()` 후 **서버 pid 사망을 대기**한다(포트는 `opts.port`에 고유 값 — 기본 8877을 테스트에서 쓰지 않는다. EADDRINUSE는 티어다운 누락 신호다).
 
 - [ ] **Step 2: 구현 — 부트스트랩·루프·워치독**
 
@@ -557,6 +599,9 @@ test('코치: bind-handle이 생성 완료 전에 불린다', async () => { /* o
 test('코치: 1차 실패(빈 text) → 동일 입력 attempt 2 → 실패 시 complete-unavailable', async () => { /* … */ });
 test('코치: 다음 핸드를 막지 않는다', async () => { /* 코치 fake를 5s 지연시켜도 new-hand publish가 먼저 나감 */ });
 test('practiceFocus: 파일이 있으면 코치 프롬프트에 실린다', async () => { /* bootstrap({practiceFocusFile}) 후 단언 */ });
+test('upperAdapter가 null이면 코치는 complete-unavailable 경로만 밟는다', async () => {
+  // oneshotStart 무호출 + complete-unavailable 호출 + loop-state.notices에 고지 단언 (스펙 §7 ②만 실패)
+});
 ```
 
 - [ ] **Step 2: 구현**
@@ -609,6 +654,10 @@ test('resume: attempt pending이면 --retry로 해소 후 진행', async () => {
 test('resume: 플레이어 세션 복원 실패 시 재생성(워밍업 재실행)', async () => { /* .player-sessions.json 손상 */ });
 test('resume: playing + 적격 런타임 0 → NO_PLAYER_RUNTIME HALT', async () => { /* probe 전실패 fake */ });
 test('resume: finalizing 이후 재개는 플레이어 probe를 생략한다', async () => { /* player probe 스파이 무호출 */ });
+test('finalize-cutoff 후 잔여 pending Q 게시가 --retry/attempt 계약으로 처리된다', async () => {
+  // unavailable seal 하나를 남긴 채 종료 시퀀스 진행 → 그 Q가 게시되고 스냅샷에 실림 단언
+});
+test('upperAdapter null로 종료 시퀀스 진입 → 리뷰를 지어내지 않고 REVIEW_FAILED HALT + notices 고지', async () => { /* … */ });
 ```
 
 - [ ] **Step 2: 구현**
@@ -652,6 +701,10 @@ test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있�
   assert.match(skill, /loopPidAlive/);        // 사전 점검 동격 + attach 분기
   assert.match(skill, /attach/i);
   assert.match(skill, /repair_failed/);       // 정지 안내가 남아 있다 (사이드카 소관 명시)
+  // 호스트 → --player-runtime 매핑 3종이 문면에 있다 (스펙 §7 캐리어)
+  for (const pair of ['Claude Code=claude', 'Codex=codex', 'Grok=grok']) {
+    assert.ok(skill.includes(pair), pair);
+  }
 });
 test('플레이어 프롬프트 정본: talk 규약이 없고 JSON 한 줄 회신만 있다', () => {
   const prompt = read('tools/player-prompt.md');
@@ -678,7 +731,10 @@ README: 파일 구조에 game-loop/player-runtime/player-prompt 추가·에이�
 
 ```bash
 node --test
-git add -A && git commit -m "docs: 딜러 스킬을 사이드카 기동 절차로 전면 개정, 호스트 에이전트 정의 제거"
+git add .agents/skills/start-game/SKILL.md README.md AGENTS.md \
+  test/tempo-skill-contract.test.js test/turn-contract.test.js
+git rm .claude/agents/holdem-player.md .grok/agents/holdem-player.md
+git commit -m "docs: 딜러 스킬을 사이드카 기동 절차로 전면 개정, 호스트 에이전트 정의 제거"
 ```
 
 ---
@@ -699,7 +755,7 @@ git diff --name-only "$BASE"..HEAD
 git status --porcelain
 ```
 
-나온 경로 전부가 이 플랜의 「파일 구조」 목록(+ `docs/2026-08-29-in-hand-sidecar-*.md`, `docs/sidecar-probe-notes.md`) 안이어야 한다. `engine/hand.js`·`server/server.js`·`tools/coach-control.js`·`publish-contract.js`가 보이면 되돌린다.
+나온 경로 전부가 이 플랜의 「파일 구조」 목록(+ `docs/2026-08-29-in-hand-sidecar-*.md`, `docs/sidecar-probe-notes.md`) 안이어야 한다. 목록 밖 경로가 보이면 **지우거나 되돌리지 말고 멈춰서 보고한다** — 특히 `docs/sidecar-review/`(리뷰 워크스페이스, 의도적 untracked)와 사용자 소유 파일은 건드리지 않는다. 자신이 잘못 수정한 범위 밖 파일(`engine/hand.js`·`server/server.js`·`tools/coach-control.js`·`publish-contract.js`)만 그 커밋을 고쳐 되돌린다.
 
 - [ ] **Step 3: 스펙 대조 셀프 체크**
 
