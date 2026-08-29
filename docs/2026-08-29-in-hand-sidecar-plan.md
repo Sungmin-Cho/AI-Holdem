@@ -176,7 +176,7 @@ test('next.message는 reply-channel.txt가 있어도 summary 원문이다', asyn
 
 - [ ] **Step 3: 구현 — publish.js·views.js·app.js·style.css에서 제거**
 
-publish.js: `talks/talkFiles` 필드, `--talk`/`--talk-from` 파싱, `parseTalk`/`readTalkFile`, `buildBody`의 talks 병합, `nextForDealer`의 reply-channel 읽기·append(→ `out.message = summary`)를 삭제. views.js 153행의 응답 형식을 `{"decisionId":"…","action":"fold|check|call|raise","amount":숫자?}`로. app.js: `lastTalk` 수집·bubble 생성 삭제, `formatLogItem`에서 `case 'talk'` 삭제하고 **로그 순회에서 `item.type === 'talk'`이면 `continue`**(레거시 스냅샷·마이그레이션 전 attempt의 --retry 대비). style.css `.bubble` 블록 삭제.
+publish.js: `talks/talkFiles` 필드, `--talk`/`--talk-from` 파싱, `parseTalk`/`readTalkFile`, `buildBody`의 talks 병합, `nextForDealer`의 reply-channel 읽기·append(→ `out.message = summary`)를 삭제. views.js 153행의 응답 형식을 `{"decisionId":"…","action":"fold|check|call|raise","amount":숫자?}`로. app.js: `lastTalk` 수집·bubble 생성 삭제, `formatLogItem`에서 `case 'talk'` 삭제하고 **로그 순회에서 `item.type === 'talk'`이면 `continue`**(레거시 스냅샷·마이그레이션 전 attempt의 --retry 대비). style.css `.bubble` 블록 삭제. **turn-contract.test.js의 talk 경로도 이 스텝에서 걷어낸다** — `.talk.json` 생성·`--talk-from` 게시·`type==='talk'` 단언 케이스 삭제(시퀀스 구조 개편은 Task 8이지만, talk 옵션이 사라진 순간 이 케이스들은 영구 레드가 되므로 여기서 지운다).
 
 - [ ] **Step 4: 레거시 attempt 픽스처 테스트 (스펙 §8 5c)**
 
@@ -315,8 +315,10 @@ test('서버가 죽어도 loop 락이 살아 있으면 init은 ACTIVE_GAME', () 
   const h = acquireOwnedLock(dir, 'loop.lock.d');   // 이 테스트 프로세스가 소유(살아 있음)
   // 주의: 이 테스트가 소유자이므로 ppid 예외를 피하려면 자식 프로세스로 initGameDir을 부르거나
   // deps로 ppid를 주입한다 — initGameDir(dir, flags, { callerPpid: 0 })
-  assert.throws(() => initGameDir(dir, baseFlags, { callerPpid: 0 }), /ACTIVE_GAME/);
-  assert.throws(() => initGameDir(dir, { ...baseFlags, force: true }, { callerPpid: 0 }), /LOOP_ALIVE/);
+  assert.throws(() => initGameDir(dir, baseFlags, { callerPpid: 0 }),
+    (e) => e.code === 'ACTIVE_GAME');   // message는 한국어 — code로 단언한다 (기존 archive.test.js 관례)
+  assert.throws(() => initGameDir(dir, { ...baseFlags, force: true }, { callerPpid: 0 }),
+    (e) => e.code === 'LOOP_ALIVE');
   releaseOwnedLock(h);
 });
 
@@ -362,7 +364,9 @@ git add engine/game-archive.js engine/cli.js test/archive.test.js test/cli.test.
 export const RUNTIME_TABLE = {
   claude: { player: 'haiku', upper: 'opus',        watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
   codex:  { player: 'gpt-5.6-luna', upper: 'gpt-5.6-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
-  grok:   { player: 'grok-4.6', upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
+  // grok 워치독은 Task 0 결과 조건부다: low effort 핀 성공 → 25_000/15_000, 실패(기본 effort 유지)
+  // → 60_000/30_000 (스펙 D8). 아래 값은 Task 0 기록을 보고 채운다.
+  grok:   { player: 'grok-4.6', upper: 'grok-4.6', watchdog: { t1Ms: /* Task 0 */ 60_000, t2Ms: 30_000 } },
 };
 export function extractJsonLine(text)  // -> object|null. 코드펜스·전후 산문 관용: 첫 '{'부터 균형 '}'까지 JSON.parse 시도
 export function buildPlayerPrompt({ persona, summaryPlaceholder }) // player-prompt.md 로드·치환
@@ -439,7 +443,7 @@ RED 확인 후,
 
 - [ ] **Step 3: 구현**
 
-어댑터별 argv 빌더(Task 0 값). claude 예시(핀 값으로 교체): 생성 `['-p','--model',m,'--tools','','--session-id',id]`, 재개 `['-p','--model',m,'--tools','','--resume',id]`. codex: `['exec','-m',m,'--sandbox','read-only','--skip-git-repo-check','--json','-']` + 재개 `['exec','resume',threadId,…,'-']`. grok: `['-p','--prompt-file','/dev/stdin','-m',m,'--tools','','--deny','MCPTool','--disable-web-search','--sandbox','read-only','--session-id',id]` 류. 전 호출 `spawn(cmd, argv, {cwd, env, stdio:['pipe','pipe','pipe']})` — stdin에 프롬프트 write 후 end, 타임아웃 타이머로 kill('SIGKILL') + reject. `player-prompt.md`: 현행 스킬 §3 템플릿에서 talk 규약·SendMessage/ready 절 제거, 회신 규약은 "JSON 한 줄을 최종 출력으로. 다른 텍스트 금지." (워밍업 지시: "준비되면 ok 한 단어만 출력").
+어댑터별 argv 빌더(Task 0 값). claude 예시(핀 값으로 교체): 생성 `['-p','--model',m,'--tools','','--session-id',id]`, 재개 `['-p','--model',m,'--tools','','--resume',id]`. codex: `['exec','-m',m,'--sandbox','read-only','--skip-git-repo-check','--json','-']` + 재개 `['exec','resume',threadId,…,'-']`. grok: `['-p','--prompt-file','/dev/stdin','-m',m,'--tools','','--deny','MCPTool','--disable-web-search','--sandbox','read-only','--session-id',id]` 류. 전 호출 `spawn(cmd, argv, {cwd, env, stdio:['pipe','pipe','pipe']})` — stdin에 프롬프트 write 후 end, 타임아웃 타이머로 kill('SIGKILL') + reject. `player-prompt.md`: 현행 스킬 §3 템플릿에서 talk 규약·SendMessage 절 제거, 회신 규약은 "JSON 한 줄을 최종 출력으로. 다른 텍스트 금지.", 워밍업 지시는 스펙 §5 문면 그대로 **"준비되면 \"ready\" 한 줄만 출력"** (Task 0의 상위 모델 probe가 쓰는 `ok`와는 별개다).
 
 - [ ] **Step 4: 전체 그린 확인 후 커밋**
 
@@ -475,15 +479,25 @@ export function createGameLoop({ gameDir, adapter, upperAdapter, opts = {} })
 //   async run(),          // gameOver 완료 시 정상 반환, HALT는 throw {code, message}
 //   requestStop(),        // SIGTERM 핸들러가 부른다. 테스트 티어다운도 이것 + 서버 pid 사망 대기
 // }
-// CLI main(직접 실행 시)의 순서가 계약이다 (스펙 D6·D7 — probe가 락·phase보다 먼저 가면 안 된다):
-//   argv 파싱
-//   → --resume이면: loop-state/엔진 state 판독으로 phase 유도(스펙 §5 유도 규칙, init 금지)
-//        finalizing 이후 → resolveRuntimes({need:'upper-only'}) → resume() → run()
-//        playing        → 락 선점 → resolveRuntimes({need:'player+upper'}) →
-//                          player null이면 NO_PLAYER_RUNTIME HALT → resume() → run()
-//   → 새 게임이면: 기존 락 확인·(force면 정지 사다리) → 락 선점 → init 실행 →
-//        game/ 안에 카나리 생성 → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
+// CLI main(직접 실행 시)의 순서가 계약이다. **owned lock은 어느 경로든 딱 한 곳 — 여기서 —
+// 선점하고 run()/requestStop()까지 보유한다.** resume()·bootstrap()은 락을 다시 잡지 않는다.
+// (스펙 §5 기동: "loop 락 선점 → phase 복원이 최우선". 종료 국면 resume도 예외가 아니다 —
+//  락이 없으면 attach 판정(loopPidAlive)이 이 프로세스를 못 보고, 동시 resume이 리뷰를 이중 생성한다.)
+//   argv 파싱 — 플래그 전체: --game-dir --ai --stack --level-every --blinds --force --resume
+//     --player-runtime --practice-focus-file (스펙 D6·§7. --player-runtime이 resolveRuntimes의
+//     preferred가 된다 — 미지정 시 사다리 claude→codex→grok 첫 적격 + notices 기록)
+//   → --resume이면:
+//        락 선점(죽은 선점자 회수, 산 선점자 → LOCKED 즉시 종료: 동시 resume 거부)
+//        → loop-state/엔진 state 판독으로 phase 유도(스펙 §5 유도 규칙, 어떤 경로도 init 금지)
+//        → phase == bootstrap → 서버 health 확인·(죽었으면) 기동부터 이어서 playing 진입
+//        → finalizing 이후 → 카나리 생성(game/ 안) → resolveRuntimes({need:'upper-only'})
+//                          → 카나리 삭제 → resume() → run()
+//        → playing → 카나리 생성 → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
+//                    player null이면 NO_PLAYER_RUNTIME HALT → resume() → run()
+//   → 새 게임이면: 기존 락 확인·(force면 정지 사다리: 사이드카→서버) → 락 선점 → init 실행 →
+//        카나리 생성(game/ 안) → resolveRuntimes({need:'player+upper'}) → 카나리 삭제 →
 //        player null이면 락 해제·HALT(기동 거부) → 서버 기동 → bootstrap 나머지 → run()
+//   → 카나리는 항상 finally에서 삭제한다 (예측 불가 이름, 센티널 바이트 — 스펙 §4)
 //   → notices는 매 지점에서 loop-state.notices에 병합 기록
 //   → upperAdapter가 null이면(§7 ② 전멸): 기동 시 notices에 고지하고 게임은 진행하되,
 //     코치는 매 핸드 complete-unavailable 경로만 밟고(oneshotStart 무호출),
@@ -491,6 +505,8 @@ export function createGameLoop({ gameDir, adapter, upperAdapter, opts = {} })
 //     (사용자가 CLI를 고친 뒤 resume하면 review phase부터 재시도 — 스펙 §5)
 //   → 종료 코드: 0 done, 2 repair_failed, 3 REVIEW_FAILED, 4 NO_PLAYER_RUNTIME, 5 기타 HALT
 ```
+
+**코치 owner 수명**: bootstrap이 owner uuid를 **1회 생성**해 loop-state에 기록하고 게임 내내 전 핸드의 `reserve`/`bind-handle`/`accept`/`heartbeat`/`complete-unavailable`/`finalize-cutoff`에 재사용한다(핸드마다 새 uuid를 쓰면 두 번째 핸드부터 STALE_OWNER로 거절된다). `--resume`만 **새 uuid로 `begin-owner`** 후 그 uuid를 이어 쓴다. `--snapshot-file`은 항상 `<gameDir>/ui-snapshot.json`.
 
 **자식 argv 공통 규칙**: `runCli`·`runPublish`·coach-control 호출은 **항상 `--game-dir <gameDir>`를 덧붙인다** (기본값 `game/`에 기대지 않는다 — 테스트는 tmp 디렉터리다. `test/turn-contract.test.js`와 같은 패턴).
 
@@ -549,8 +565,9 @@ test('user 차례: decisionId 불일치 액션은 폐기하고 다시 대기한�
 test('VERSION_MISMATCH: 인자 없는 step으로 재동기화 후 진행한다', async () => {
   // 루프 진행 중 외부에서 state.json을 한 번 mutate(apply 자식 호출) → 다음 step 거부 → 재동기화 경로 단언
 });
-test('RUNTIME_TABLE 워치독 프로파일: grok은 60s/30s, claude·codex는 25s/15s가 decideWithWatchdog에 쓰인다', () => {
-  // 단위 단언 — opts.watchdog 미지정 시 adapter.watchdog 값이 그대로 쓰임 (grok fake로 필드 관찰)
+test('워치독 프로파일: opts.watchdog 미지정 시 RUNTIME_TABLE의 adapter.watchdog 값이 decideWithWatchdog에 그대로 쓰인다', () => {
+  // 단위 단언 — 구체 수치를 하드코딩하지 말고 RUNTIME_TABLE[kind].watchdog 참조로 단언한다
+  // (grok 값은 Task 0 조건부 — 테이블이 정본이고 테스트는 테이블을 따른다)
 });
 test('--force 부트스트랩: 정지 순서 사이드카→서버, 정지 중 D9 재기동 없음, 정지 실패면 아카이브 없음', async () => {
   // fake 형제 loop(자식 프로세스로 락 보유) + 서버 상대로 force bootstrap 3케이스 (스펙 §8.5):
@@ -654,10 +671,21 @@ test('resume: attempt pending이면 --retry로 해소 후 진행', async () => {
 test('resume: 플레이어 세션 복원 실패 시 재생성(워밍업 재실행)', async () => { /* .player-sessions.json 손상 */ });
 test('resume: playing + 적격 런타임 0 → NO_PLAYER_RUNTIME HALT', async () => { /* probe 전실패 fake */ });
 test('resume: finalizing 이후 재개는 플레이어 probe를 생략한다', async () => { /* player probe 스파이 무호출 */ });
+test('resume: phase bootstrap → init 0회, 서버 health 확인/기동부터 재개해 playing 진입', async () => {
+  // loop-state {phase:'bootstrap'} + 엔진 state 존재 + 서버 사망 상태로 resume →
+  // init 스파이 무호출, 서버가 다시 떠 있고 phase가 playing으로 전이됨 단언 (epoch 유지)
+});
+test('resume: loop-state·엔진 state 둘 다 없음 → resume 거부(init 무호출, 새 게임 안내)', async () => { /* … */ });
+test('resume: 동시 두 프로세스 중 하나는 LOCKED로 즉시 종료한다', async () => {
+  // 자식 프로세스 두 개로 --resume 인터리빙 — 한쪽만 진행 (락 단일 소유)
+});
 test('finalize-cutoff 후 잔여 pending Q 게시가 --retry/attempt 계약으로 처리된다', async () => {
   // unavailable seal 하나를 남긴 채 종료 시퀀스 진행 → 그 Q가 게시되고 스냅샷에 실림 단언
 });
 test('upperAdapter null로 종료 시퀀스 진입 → 리뷰를 지어내지 않고 REVIEW_FAILED HALT + notices 고지', async () => { /* … */ });
+test('코치 owner: 게임 내내 같은 uuid가 재사용되고, resume에서만 begin-owner로 교체된다', async () => {
+  // 두 핸드 진행 → coach-control 호출 로그의 --owner가 동일 · resume 후에는 begin-owner 1회 + 새 owner
+});
 ```
 
 - [ ] **Step 2: 구현**
@@ -722,6 +750,10 @@ test('호스트 에이전트 정의 파일이 없다', () => {
 - [ ] **Step 2: SKILL.md 재작성**
 
 새 구조(스펙 §7): ① 개요(사이드카가 루프를 소유한다 — 딜러는 게임 중 개입하지 않는다) ② 절대 규약(게시는 publish.js만·한국어·모델 텍스트 argv 금지 — 코치·리뷰 본문 규칙은 사이드카가 지키고, 딜러가 남기는 문자열은 practiceFocus 파일뿐) ③ 사전 점검(node ≥ 20, review.md practiceFocus 추출 → `game/` 밖 파일로 Write, 잔여 게임: `resume-check`의 `serverPidAlive`·`loopPidAlive` 동격 — 하나라도 참이면 사용자에게 질문) ④ 시작(기동 문면 = 스펙 §7 코드 블록 그대로: nohup + 폴링 3조건 + open + archivedTo/notices 보고) ⑤ 게임 중(개입 금지; 상태 질의는 loop-state 읽기 한 번) ⑥ 종료 보고(loop-state `done`/`halt` — `REVIEW_FAILED`·`repair_failed`·`NO_PLAYER_RUNTIME`별 사용자 안내 한 줄) ⑦ resume(loopPidAlive → attach 보고 / 아니면 `--resume` 기동) ⑧ 중단(사이드카 SIGTERM 후 `end --result abort`) ⑨ 호스트 표(기동은 공통, Claude Code는 run_in_background 권장 — 종료 자동 보고). 라운드 예산·코치·리뷰·재스폰 절은 전부 삭제(사이드카 소관 명시 한 줄만).
+
+- [ ] **Step 2b: 스킬 중단 절에 롤백 3단계**
+
+스킬 ⑧ 중단(또는 README 운영 절)에 스펙 §9 문면을 남긴다: 이 변경을 되돌리거나 새 버전을 얹기 전에는 ① loop 락 pid를 identity 검증 후 SIGTERM→확인 정지 ② 미해소 `publish-attempt`는 `--retry`, 코치 pending Q는 게시(또는 보존) ③ 그 다음 `git revert` — "revert 단독은 quiescent 게임에서만".
 
 - [ ] **Step 3: README·AGENTS 갱신**
 
