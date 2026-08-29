@@ -186,3 +186,79 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
     await started.close();
   }
 });
+
+test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..sample', async () => {
+  const { createCoachControl } = await import('../tools/coach-control.js');
+  const dir = tmpGame();
+  const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '2000', '--game-dir', dir])).trim());
+  const token = init.sessionToken;
+  const started = await startServer({ gameDir: dir, port: 0, token });
+  fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '결정은 최종 출력으로 반환한다.');
+  const owner = '11111111-1111-4111-8111-111111111111';
+  const cc = createCoachControl();
+  const snapshotFile = path.join(dir, 'ui-snapshot.json');
+  const statsFile = path.join(dir, 'stats.json');
+
+  try {
+    let handsPlayed = 0;
+    while (handsPlayed < 3) {
+      let out = await turn(dir, ['--new-hand'], ['--wait', '--wait-ms', '400']);
+      handsPlayed += 1;
+      for (let guard = 0; guard < 200 && !out.handOver; guard += 1) {
+        const { next, stateVersion } = out;
+        if (next.kind === 'user') {
+          let action = out.userAction;
+          if (!action || action.timeout) {
+            const press = pressUser(started.port, token, next.decisionId);
+            const waited = await publishOnly(dir, ['--wait-only', '--wait-ms', '10000']);
+            await press;
+            action = waited.userAction;
+          }
+          const args = ['user', action.action];
+          if (action.amount != null) args.push(String(action.amount));
+          out = await turn(dir, [...args, '--expect-version', String(stateVersion)], ['--wait', '--wait-ms', '400']);
+        } else {
+          const decided = decideFromMessage(next.message);
+          out = await turn(
+            dir,
+            [next.toAct, decided.action, '--expect-version', String(stateVersion)],
+            ['--wait', '--wait-ms', '400'],
+          );
+        }
+      }
+
+      const stats = JSON.parse((await node([CLI, 'stats', '--game-dir', dir])).trim());
+      fs.writeFileSync(statsFile, JSON.stringify(stats));
+      const begun = await cc.beginOwner({
+        gameDir: dir, owner, completed: handsPlayed, statsFile, snapshotFile,
+      });
+      const desc = begun.descriptors.find((row) => row.handNo === handsPlayed);
+      assert.ok(desc, `hand ${handsPlayed} descriptor 없음 ${JSON.stringify(begun)}`);
+      fs.writeFileSync(desc.exactResultPath, JSON.stringify({
+        handNo: handsPlayed,
+        text: handsPlayed === 1
+          ? '프리플랍 폴드는 포지션 대비 무난합니다.'
+          : `핸드 ${handsPlayed}의 핵심 결정은 타당합니다.`,
+      }));
+      const accepted = await cc.accept({
+        gameDir: dir, owner, handNo: handsPlayed, generation: desc.generation,
+      });
+      assert.equal(accepted.ok, true);
+      await node([TOOL, '--from', desc.exactEnvelopePath, '--game-dir', dir]);
+      if (out.gameOver) break;
+    }
+
+    const completeness = cc.completeness(dir, handsPlayed);
+    assert.equal(completeness.ok, true, JSON.stringify(completeness));
+    assert.deepEqual(completeness.publishedSealHandNos, Array.from({ length: handsPlayed }, (_, i) => i + 1));
+    assert.equal(completeness.pending.length, 0);
+    const snap = JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
+    assert.equal(snap.coach.length, handsPlayed);
+    for (const note of snap.coach) {
+      assert.ok(note.text.trim().length > 0);
+      assert.ok(note.coachProof);
+    }
+  } finally {
+    await started.close();
+  }
+});

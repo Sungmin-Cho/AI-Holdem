@@ -565,6 +565,100 @@ test('wait-action: 뷰가 다시 게시되면 소비된 액션은 재전달되�
   }
 });
 
+test('coach: schema v2 authority만 있어도 proofless update는 COACH_PROOF_REQUIRED', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  fs.writeFileSync(path.join(gameDir, '.coach-authority.json'), JSON.stringify({
+    schemaVersion: 2, legacyMigrationCompleted: false, publishQueue: {}, publishedSeals: {},
+  }));
+  const srv = await start(gameDir, token);
+  try {
+    const r = await publish(srv.port, token, { publishId: 1, coach: [{ handNo: 1, text: '증명 없는 노트' }] });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.code, 'COACH_PROOF_REQUIRED');
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: v2 활성 후 proofless update는 COACH_PROOF_REQUIRED', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  fs.writeFileSync(path.join(gameDir, '.coach-authority.json'), JSON.stringify({
+    schemaVersion: 2, legacyMigrationCompleted: true, publishQueue: {}, publishedSeals: {},
+  }));
+  const srv = await start(gameDir, token);
+  try {
+    const r = await publish(srv.port, token, { publishId: 1, coach: [{ handNo: 1, text: '증명 없는 노트' }] });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.code, 'COACH_PROOF_REQUIRED');
+    const snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.coach, []);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: proof digest mismatch는 전체를 거부한다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const r = await publish(srv.port, token, {
+      publishId: 1,
+      coach: [{
+        handNo: 1,
+        text: '실제 텍스트',
+        coachProof: { id: 'a'.repeat(64), payloadSha256: 'b'.repeat(64) },
+      }],
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.code, 'COACH_PROOF_MISMATCH');
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: sticky-overfold가 incoming tuple을 바꾸면 COACH_SEMANTIC_CONFLICT', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const { payloadSha256 } = await import('../publish-contract.js');
+    const first = {
+      handNo: 4,
+      text: '과폴드 누수',
+      overfold: true,
+    };
+    const firstProof = payloadSha256({ ...first, unavailable: false });
+    await publish(srv.port, token, {
+      publishId: 1,
+      coach: [{ ...first, coachProof: { id: 'c'.repeat(64), payloadSha256: firstProof } }],
+    });
+    const secondTuple = { handNo: 4, text: '수정된 코멘트', overfold: false, unavailable: false };
+    const secondProof = payloadSha256(secondTuple);
+    const r = await publish(srv.port, token, {
+      publishId: 2,
+      coach: [{
+        handNo: 4,
+        text: '수정된 코멘트',
+        coachProof: { id: 'd'.repeat(64), payloadSha256: secondProof },
+      }],
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.code, 'COACH_SEMANTIC_CONFLICT');
+    const snap = await snapshot(srv.port, token);
+    assert.equal(snap.json.coach[0].text, '과폴드 누수');
+    assert.equal(snap.json.coach[0].overfold, true);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
 test('coach: 같은 handNo를 갱신해도 과폴드 표식은 지워지지 않는다', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';

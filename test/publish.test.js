@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { startServer } from '../server/server.js';
+import { gameEpochOf } from '../publish-contract.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 
@@ -412,7 +413,10 @@ test('publish --retry: 실패한 게시를 같은 publishId로 다시 보내 중
 
     // 서버는 처리했는데 응답이 딜러에 닿지 않은 상황: 시도 기록이 남아 있다.
     const body = { publishId: first.publishId, view: sampleTurn().view, events: [{ seq: 0, visibility: 'public', type: 'hand_start', handNo: 1 }] };
-    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({ body }));
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+      body,
+      expectedGameEpoch: gameEpochOf('tok'),
+    }));
     const retried = await run(dir, ['--from', file, '--retry']);
     const snap = await snapshotOf(started.port);
     assert.equal(retried.publishId, 1, '재시도가 새 id를 썼다');
@@ -543,6 +547,7 @@ test('publish: 미해소 재시도 기록이 있으면 새 게시를 거부한�
     // 턴 게시 A가 실패해 기록이 남은 상태
     fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
       body: { publishId: 1, view: { handNo: 1 }, events: [{ seq: 0, visibility: 'public', type: 'hand_start', handNo: 1 }] },
+      expectedGameEpoch: gameEpochOf('tok'),
     }));
     // 백그라운드 코치가 그 기록을 덮어쓰면 A의 --retry가 남의 본문을 보내게 된다
     const coach = path.join(dir, 'coach.json');
@@ -578,12 +583,267 @@ test('publish: 재시도 기록이 깨졌으면 새 게시를 만들지 않고 B
     for (const bad of ['{}', '{"body":null}', '{"body":{}}', '{"body":{"publishId":"1"}}']) {
       fs.writeFileSync(path.join(dir, '.publish-attempt.json'), bad);
       const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
-      assert.equal(failed.json.code, 'BAD_ATTEMPT', bad);
+      assert.equal(failed.json.code, 'BAD_ATTEMPT_VERSION', bad);
     }
+    const epoch = gameEpochOf('tok');
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+      expectedGameEpoch: epoch,
+      body: { publishId: '1' },
+    }));
+    const badBody = await runFailing(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(badBody.json.code, 'BAD_ATTEMPT');
     assert.equal((await snapshotOf(started.port)).revision, 0, '깨진 기록으로 게시가 나갔다');
   } finally {
     await started.close();
   }
+});
+
+test('publish --print-game-epoch: sessionToken 해시만 출력한다', async () => {
+  const dir = tmpDir();
+  writeLockJson(dir, 8877, 'tok-epoch');
+  const out = await run(dir, ['--print-game-epoch']);
+  assert.equal(out.ok, true);
+  assert.equal(out.gameEpoch, gameEpochOf('tok-epoch'));
+  assert.equal(JSON.stringify(out).includes('tok-epoch'), false);
+});
+
+test('publish: unsupported schema는 HTTP/attempt/publishId 전에 fail closed', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    fs.writeFileSync(path.join(dir, '.coach-authority.json'), JSON.stringify({ schemaVersion: 1 }));
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(failed.json.code, 'UNSUPPORTED_COACH_AUTHORITY');
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: old-epoch attempt는 send 없이 지우고 새 게시를 막지 않는다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+      body: { publishId: 99, view: { handNo: 9 } },
+      expectedGameEpoch: '0'.repeat(64),
+    }));
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(out.ok, true);
+    assert.equal(out.publishId, 1);
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone이 된다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    if (!fs.existsSync(snapshotFile)) fs.writeFileSync(snapshotFile, JSON.stringify({ coach: [] }));
+    const owner = '11111111-1111-4111-8111-111111111111';
+    const begun = await cc.beginOwner({
+      gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+    });
+    fs.writeFileSync(begun.descriptors[0].exactResultPath, JSON.stringify({
+      handNo: 1, text: '무난한 폴드입니다.',
+    }));
+    const accepted = await cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: begun.descriptors[0].generation,
+    });
+    assert.equal(accepted.ok, true);
+    const envelope = cc.loadAuthority(dir).publishQueue['1'].exactEnvelopePath;
+    const out = await run(dir, ['--from', envelope]);
+    assert.equal(out.ok, true);
+    const snap = await snapshotOf(started.port);
+    assert.equal(snap.coach[0].text, '무난한 폴드입니다.');
+    assert.ok(snap.coach[0].coachProof);
+    const auth = cc.loadAuthority(dir);
+    assert.equal(auth.publishQueue['1'], undefined);
+    assert.ok(auth.publishedSeals['1']);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish --retry: matching authority라도 변조된 coach body는 STALE_COACH_AUTHORITY', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const { payloadSha256, publicProofId } = await import('../publish-contract.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    if (!fs.existsSync(snapshotFile)) fs.writeFileSync(snapshotFile, JSON.stringify({ coach: [] }));
+    const owner = '11111111-1111-4111-8111-111111111111';
+    const begun = await cc.beginOwner({
+      gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+    });
+    fs.writeFileSync(begun.descriptors[0].exactResultPath, JSON.stringify({
+      handNo: 1, text: '원문 노트',
+    }));
+    await cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: begun.descriptors[0].generation,
+    });
+    const queued = cc.loadAuthority(dir).publishQueue['1'];
+    const fakeTuple = { handNo: 1, text: '변조', overfold: false, unavailable: false };
+    const fakeDigest = payloadSha256(fakeTuple);
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+      body: {
+        publishId: 1,
+        coach: [{
+          handNo: 1,
+          text: '변조',
+          coachProof: { id: publicProofId(queued.queueId), payloadSha256: fakeDigest },
+        }],
+      },
+      expectedGameEpoch: gameEpochOf('tok'),
+      coachAuthority: {
+        expectedGameEpoch: gameEpochOf('tok'),
+        queueId: queued.queueId,
+        handNo: 1,
+        generation: queued.generation,
+        exactEnvelopePath: queued.exactEnvelopePath,
+        payloadSha256: queued.payloadSha256,
+      },
+    }));
+    const failed = await runFailing(dir, ['--from', queued.exactEnvelopePath, '--retry']);
+    assert.equal(failed.json.code, 'STALE_COACH_AUTHORITY');
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: matching coach attempt는 다른 hand 게시에도 ATTEMPT_PENDING', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    if (!fs.existsSync(snapshotFile)) fs.writeFileSync(snapshotFile, JSON.stringify({ coach: [] }));
+    const owner = '11111111-1111-4111-8111-111111111111';
+    const begun = await cc.beginOwner({
+      gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+    });
+    fs.writeFileSync(begun.descriptors[0].exactResultPath, JSON.stringify({
+      handNo: 1, text: '대기 중 코치',
+    }));
+    await cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: begun.descriptors[0].generation,
+    });
+    const queued = cc.loadAuthority(dir).publishQueue['1'];
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+      body: { publishId: 3, coach: [{ handNo: 1, text: '대기 중 코치' }] },
+      expectedGameEpoch: gameEpochOf('tok'),
+      coachAuthority: {
+        expectedGameEpoch: gameEpochOf('tok'),
+        queueId: queued.queueId,
+        handNo: 1,
+        generation: queued.generation,
+        exactEnvelopePath: queued.exactEnvelopePath,
+        payloadSha256: queued.payloadSha256,
+      },
+    }));
+    const blocked = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(blocked.json.code, 'ATTEMPT_PENDING');
+    const kept = JSON.parse(fs.readFileSync(path.join(dir, '.publish-attempt.json'), 'utf8'));
+    assert.equal(kept.coachAuthority.queueId, queued.queueId);
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: queue digest mismatch coach attempt는 STALE_COACH_AUTHORITY이고 publishId를 안 쓴다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const envelope = path.join(dir, 'coach-env.json');
+    fs.writeFileSync(envelope, JSON.stringify({
+      coach: [{ handNo: 1, text: 'x' }],
+      coachAuthority: {
+        expectedGameEpoch: gameEpochOf('tok'),
+        queueId: 'missing',
+        handNo: 1,
+        generation: 1,
+        exactEnvelopePath: envelope,
+        payloadSha256: 'a'.repeat(64),
+      },
+    }));
+    fs.writeFileSync(path.join(dir, '.coach-authority.json'), JSON.stringify({
+      schemaVersion: 2,
+      gameEpoch: gameEpochOf('tok'),
+      publishQueue: {},
+      publishedSeals: {},
+    }));
+    const failed = await runFailing(dir, ['--from', envelope]);
+    assert.equal(failed.json.code, 'STALE_COACH_AUTHORITY');
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: cutoff 이후 review와 view-only는 되고 새 turn은 막힌다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    if (!fs.existsSync(snapshotFile)) fs.writeFileSync(snapshotFile, JSON.stringify({ coach: [] }));
+    const owner = '11111111-1111-4111-8111-111111111111';
+    await cc.beginOwner({
+      gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+    });
+    const host = {
+      stopNewPlayTimePublishers() {},
+      listLivePublishers() { return []; },
+      async terminateLive() { return { confirmed: true }; },
+      hasLiveLockHolder() { return false; },
+    };
+    const cut = await cc.finalizeCutoff({
+      gameDir: dir, owner, completed: 1, snapshotFile, statsFile, host,
+    });
+    assert.equal(cut.ok, true, JSON.stringify(cut));
+    const review = path.join(dir, 'review.json');
+    fs.writeFileSync(review, JSON.stringify({ review: '# 리뷰' }));
+    const reviewed = await run(dir, ['--from', review]);
+    assert.equal(reviewed.ok, true);
+    const viewOnly = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--view-only']);
+    assert.equal(viewOnly.ok, true);
+    const blocked = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(blocked.json.code, 'PLAYTIME_PUBLISH_STOPPED');
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish: 만료된 --deadline-monotonic-ns는 전송 없이 DEADLINE_EXPIRED', async () => {
+  const dir = tmpDir();
+  writeLockJson(dir, await deadPort());
+  const failed = await runFailing(dir, [
+    '--from', turnFile(dir, sampleTurn()),
+    '--deadline-monotonic-ns', '1',
+  ]);
+  assert.equal(failed.json.code, 'DEADLINE_EXPIRED');
+  assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
 });
 
 test('publish --retry: .turn.json이 거부 envelope여도 기록된 본문으로 해소된다', async () => {
@@ -592,6 +852,7 @@ test('publish --retry: .turn.json이 거부 envelope여도 기록된 본문으�
   try {
     fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
       body: { publishId: 1, view: { handNo: 1 }, events: [{ seq: 0, visibility: 'public', type: 'hand_start', handNo: 1 }] },
+      expectedGameEpoch: gameEpochOf('tok'),
     }));
     // step이 거부되며 .turn.json을 에러 envelope로 덮어쓴 상태
     const rejected = turnFile(dir, { ok: false, code: 'VERSION_MISMATCH', message: '…' });
