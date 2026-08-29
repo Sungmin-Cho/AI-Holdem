@@ -46,6 +46,8 @@ engine/                 # 순수 포커 엔진 CLI (네트워크·LLM 없음)
   cli.js                # step/init/new-hand/legal/apply/view/hand/stats/end/resume-check
 tools/
   publish.js            # 딜러용 게시 도구 (public 필터·publishId·사용자 액션 대기)
+  coach-control.js      # 코치 authority·queue/tombstone·owner/generation
+publish-contract.js     # 공유 body-byte/publishId 상한
 server/
   server.js             # 중계 (SSE, wait-action, publish, 토큰)
   public/               # 한국어 포커 테이블 UI
@@ -74,4 +76,5 @@ game/                   # 런타임 (gitignore)
 - [ ] **Claude Code:** 이 저장소에서 세션을 열고 `/start-game`이 슬래시 메뉴에 보이는지. 안 되면 폴백: `.claude/skills/start-game/SKILL.md`를 정본을 참조하는 얇은 래퍼 파일로 바꾼다(심볼릭 링크 미인식 시).
 - [ ] **Codex:** `$start-game` / 스킬 목록에 `.agents/skills/start-game`이 보이는지. 안 되면 `AGENTS.md` 포인터를 읽고 그 경로의 `SKILL.md`를 연다. `.codex/skills/` 심볼릭 링크는 Codex가 심볼릭 디렉터리를 무시하므로 두지 않았다.
 - [ ] **Grok:** `/start-game` 또는 `/local:start-game`이 보이는지(`.grok/skills` 또는 `.agents/skills`). 안 되면 `AGENTS.md` 포인터.
-- [ ] **Claude Code 첫 게임 스모크:** `/start-game` 기본 3 AI → 브라우저가 `/?token=`으로 열리는지 → 한 핸드 이상 진행(내 액션 + AI 액션 + 로그) → 핸드 종료 후 코치 탭에 노트 → 가능하면 게임 종료 후 리뷰 오버레이와 `game/review.md`. 코치 문구에 비공개 홀카드·아키타입이 없어야 한다.
+- [ ] **호스트 스모크(최소 3핸드):** 평범한 프리플랍 폴드, 포스트플랍 결정, 게임 종료 직전 핸드. 모든 완료 `handNo`가 Published 또는 Pending이고 `text`가 비어 있지 않거나 `unavailable` 표식이 있다. 코치가 다음 핸드를 막지 않는다. 코치 문구에 비공개 홀카드·아키타입이 없다. 완료된 1회성 코치 세션이 누적되지 않는다. resume는 missing만 백필하고 Q는 재스폰하지 않는다. late old epoch/owner callback은 새 게임을 오염시키지 않는다. 실제 Gate 0 primitive 존재 여부는 호스트별로 정직하게 기록한다(다른 호스트 결과를 일반화하지 않는다).
+- [ ] **Claude Code 첫 게임 스모크:** `/start-game` 기본 3 AI → 브라우저가 `/?token=`으로 열리는지 → 위 3핸드 스모크 → 가능하면 게임 종료 후 리뷰 오버레이와 `game/review.md`. Pending이 있으면 리뷰에 `handNo`·`noteKind`를 명시하고 UI 게시 완료를 주장하지 않는다.

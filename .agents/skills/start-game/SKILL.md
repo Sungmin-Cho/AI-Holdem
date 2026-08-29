@@ -1,8 +1,9 @@
 ---
 name: start-game
 description: AI 홀덤 게임 시작/재개 — 딜러 오케스트레이션
-argument-hint: "[AI수 1~8] | resume [--stack N] [--level-every N]"
-user-invocable: true
+metadata:
+  argument-hint: "[AI수 1~8] | resume [--stack N] [--level-every N]"
+  user-invocable: true
 ---
 
 # start-game
@@ -89,7 +90,7 @@ Bash   node engine/cli.js step p1 call --expect-version 42 > game/.turn.json \
    - 새 게임 + 서버 생존 → `node engine/cli.js init --ai <n> --force ...`. 구 서버 SIGTERM 후, 직전 판에 플레이 흔적이 있으면 `game/archive/`로 옮기고 라이브 슬롯에 새 게임을 쓴다. `archive/`는 지우지 않는다. stdout `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다. **force 전에 review.md를 이미 읽었는지 확인.**
    - 새 게임 + 서버 사망 → `init`(force 없이). 직전 판에 플레이 흔적이 있으면 `game/archive/`로 옮기고 라이브 슬롯에 새 게임을 쓴다. `archive/`는 지우지 않는다. stdout `archivedTo`가 문자열이면 사용자에게 그 경로를 한 줄로 알린다. 역시 review.md를 먼저 읽는다.
 
-코치 메타 초기값: `overfoldUsed=false`. 코치 멱등 판정은 서버 스냅샷의 `coach` 배열로 하고(§5), `publishId`는 `tools/publish.js`가 관리한다 — 딜러가 따로 세는 카운터는 없다.
+코치 메타 초기값: `overfoldUsed=false`. 코치 멱등·과폴드 1회·미게시 집합의 정본은 `game/.coach-authority.json`(schema v2)의 `publishedSeals`·`publishQueue`·`overfoldLease`다. 스냅샷 `coach` 배열만 보고 건너뛰지 마라(§5). `publishId`는 `tools/publish.js`가 관리한다.
 
 ---
 
@@ -313,7 +314,7 @@ node engine/cli.js resume-check
 
 **병렬 턴 (§4.2).** 코치 완료와 작별 응답을 기다리지 않고, 아래를 **같은 턴에 나란히** 한다. 직전 턴에서 같은 handNo의 resume-check가 repaired/healthy였으면, 직전 publish에 `archivePending`이 남아 있어도 여기로 온다.
 
-1. 코치 서브에이전트를 백그라운드로 스폰한다. 딜러는 `handNo`, `practiceFocus`, `coach-meta`만 넘긴다. `coach-meta.overfoldUsed`는 세션 메모리 또는 이미 본 스냅샷 `coach`의 `overfold:true`로만 정한다. 코치가 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 직접 실행하고, 과폴드 자격이 있으며 스냅샷에 아직 overfold가 없을 때만 `"overfold":true`를 붙인다. 딜러는 4c에서 그 두 명령과 snapshot curl을 Bash하지 않는다. 평가 문장 규칙과 `game/.coach-<n>.json` 게시는 유지한다.
+1. §5 코치를 백그라운드로 스폰한다. 딜러는 `handNo`, `practiceFocus`, `coach-meta`만 넘긴다. 코치가 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 직접 실행하고, 결과는 reserve가 준 `exactResultPath`에만 Write한다. 딜러는 4c에서 그 두 명령과 snapshot curl을 Bash하지 않는다. 같은 턴에 `watch-accept --publish`를 백그라운드로 띄운다(이 턴의 Bash는 아래 new-hand 한 줄). 평가·authority·unavailable은 §5다.
 2. `control.bust`에 AI가 있으면 그 `agentHandle`에 작별 한 줄을 백그라운드로 요청한다. **응답을 이 턴에서 기다리지 않는다.** 그 핸들에는 이후 결정 요약(`next.message`)을 보내지 않는다. 한 줄이 다음 예정된 publish 전에 도착하면 Write `game/.talk-<playerId>-h<handNo>.json` 후 그 publish에 `--talk-from`을 붙인다. **이 턴의 `new-hand` publish에는 `--talk-from`을 붙이지 않는다.** 이후 **이미 예정된** 다른 publish에만 붙인다. `--narration`에 작별을 넣지 않는다. `.turn.json`을 이벤트와 함께 재게시하지 않는다. 그 publish에 이미 플레이어 talk가 있으면 `--talk-from` 파일에 배열로 합치거나 작별을 생략한다. 늦으면 생략한다.
 3. `control.bust`에 `user`가 있거나 `gameOver===true`이면 new-hand를 치지 않는다. 코치 스폰(1)은 한 뒤 §6으로 간다. 마지막 핸드 코칭을 건너뛰지 마라.
 4. 그 외에는 같은 턴의 Bash로 다음 핸드를 시작한다. `control.level_up`이 있으면 그 publish에 `--narration`을 붙인다(딜러가 쓴 문장. 실제 블라인드 적용은 엔진이 다음 핸드 시작 전에 한다).
@@ -327,43 +328,58 @@ node engine/cli.js step --new-hand > game/.turn.json \
 
 ## 5. 코칭
 
-핸드가 끝날 때마다 딜러가 코멘트를 **직접 쓰지 않는다.** 전 패를 본 컨텍스트가 쓰면 공정성을 보장할 수 없다.
+핸드가 끝날 때마다 딜러가 코멘트를 **직접 쓰지 않는다.** 전 패를 본 컨텍스트가 쓰면 공정성을 보장할 수 없다. 권한 정본은 `game/.coach-authority.json`(schema v2)이고, 모든 mutation은 `publish.lock.d`로 직렬화한다. CLI는 `node tools/coach-control.js`다.
 
-재진입 멱등(스펙 §14): 코치가 `game/ui-snapshot.json`의 `coach` 배열을 읽거나, 딜러가 **이미 세션에 있는** 스냅샷 기억만 쓴다. 이번 `handNo`가 **이미 있으면** 스킵한다. 배열의 마지막 원소만 보지 마라 — 백그라운드 코치는 핸드 순서와 다르게 도착할 수 있다(서버가 `handNo`로 정렬·중복 갱신하므로 배열 전체를 보면 된다). 딜러는 4c에서 `GET /api/snapshot?token=`을 치지 않는다.
+게임 시작 직후 **Gate 0**: 현재 세션 tool schema에서 코치용 background spawn·결과 수집·cancel/release(또는 런타임이 완료 시 자동 해제함을 입증) primitive가 있는지 확인한다. 하나라도 없으면 adapter unavailable이다. 실제 코치를 가장하지 말고 각 종료 핸드에 `complete-unavailable --reason gate0`만 사용한다. 플레이어 모델은 AGENTS 저비용 티어를 유지하고, 코치·evaluator·종합자는 **스폰 시 상위 모델을 명시**한다.
 
-입력: 딜러는 handNo, practiceFocus, coach-meta만 넘긴다. 코치가 저장소 루트에서 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 실행한다. 스냅샷 `coach`에 이번 handNo가 있으면 스킵. 과폴드는 stats 자격과 스냅샷에 이미 overfold:true가 없는지를 코치가 본 뒤에만 붙인다.
+재진입 멱등: `publishQueue[handNo]` 또는 `publishedSeals[handNo]`가 있으면 그 핸드는 이미 seal됐다. 스냅샷 `coach` 배열만 보고 건너뛰지 마라. 진단용 `missing` 출력으로 spawn을 결정하지 마라 — resume spawn은 `begin-owner` descriptor만 사용한다(§7). 딜러는 4c에서 `GET /api/snapshot?token=`을 치지 않는다.
 
-격리된 **1회성** 코치 서브에이전트를 **백그라운드로** 스폰하고, 게임은 곧바로 다음 핸드를 시작한다. 출력을 `{handNo, text}`로만 받는다. `text`가 빈 문자열이면 게시하지 않는다.
+입력: 딜러는 `handNo`, `practiceFocus`, `coach-meta`만 넘긴다. 코치가 저장소 루트에서 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 실행한다. `coach-meta.overfoldUsed`는 `reserve --consider-overfold`가 lock 안에서 반환한 `overfoldReserved`만 넣는다. 딜러 메모리로 선결정하지 마라.
 
-코치 결과가 도착하면 파일로 적어 게시한다. 진행 중인 턴을 가로채지 않으며, `publishId`는 도구가 락 안에서 매기므로 턴 게시와 겹쳐도 유실되지 않는다:
-
-코치 결과 파일은 **핸드마다 다른 이름**을 쓴다. 하나를 공유하면 동시에 끝난 코치들이 서로 덮어쓴다.
+정상 핸드 순서: `reserve` → host spawn(결과는 reserve가 준 `exactResultPath`에만 Write) → `bind-handle` → **딜러 턴과 직렬로 `accept`를 기다리지 말고** `watch-accept`를 백그라운드로 띄운 뒤 곧바로 다음 핸드로 간다.
 
 ```bash
-# 파일은 Write 도구로 만든다 — 모델 텍스트를 셸에 통과시키지 않는다(§ 「모델 텍스트」).
-# game/.coach-3.json  →  {"coach":[{"handNo":3,"text":"<코치 출력 그대로>"}]}
-node tools/publish.js --from game/.coach-3.json
+node tools/coach-control.js watch-accept \
+  --owner <O> --hand <n> --generation <g> \
+  --forbidden-file game/.coach-deny.json --game-dir game --publish
 ```
 
-`init --force`로 새 게임을 시작할 때 이전 게임의 코치가 아직 떠 있으면 그 결과는 **버린다.** 늦게 도착한 코치를 새 게임에 게시하면 남의 핸드 코멘트가 섞인다.
+`watch-accept`는 result 파일이 생기는 즉시 `accept`하고 `--publish`면 envelope를 게시한다. 딜러가 다음 핸드 AI 턴을 도는 동안에도 승격이 일어난다. deny 파일은 Write 도구로 만든다(해당 핸드 비공개 상대 홀카드 코드와 `players.json`의 `archetype, personality, bluffFreq, threeBetFreq, tiltProne` literal 배열). argv로 literal을 넘기지 마라. `accept`는 authority에 기록된 result file만 읽고 owner-neutral `publishQueue`로 승격한다. HTTP 2xx만으로 Q를 제거했다고 보지 마라. envelope의 `coachAuthority`는 HTTP body에 넣지 않는다(publisher가 뺀다).
 
-코치는 §3의 플레이어 모델 표를 따르지 않는다. **딜러 세션이 빠른 모델일 수 있으므로 스폰 시 상위 모델을 명시한다**(Claude Code는 `model:"opus"`). 코멘트의 판단 품질이 산출물 그 자체다. 회신 경로는 플레이어와 같다(§3 「회신 경로」).
+매 핸드 전환마다 `node tools/coach-control.js heartbeat --owner <O> --game-dir game`을 실행한다. 반환 `actions`:
+
+- `result-ready`: 유효 파일이 이미 있다. `watch-accept`가 놓쳤으면 즉시 `accept --forbidden-file` 후 `publish.js --from <exactEnvelopePath>`. **fence하지 마라.**
+- `timeout-fence`: 파일이 없이 generation deadline이 지났다. 같은 입력으로 attempt 2 `reserve`를 한 번만 하고, attempt가 이미 2면 `complete-unavailable`이다.
+
+cancel 거부·timeout·termination 미확인·release 실패면 `fence` 후 `adapter-disable`하고 이후 핸드는 unavailable fallback이다.
+
+한 핸드 체인은 최대 두 번의 독립 1회성 시도. 빈 문자열·공백·JSON 파싱 실패·`handNo` 불일치·forbidden literal·timeout은 `INVALID_COACH_OUTPUT` / timeout이다. 첫 실패면 동일 입력으로 한 번만 교체 스폰하고, 직전 본문·부분 출력은 전달하지 않는다. 프롬프트 끝에 출력 계약 위반이라는 기계적 재시도 사유만 덧붙인다. 두 번째도 실패하면 딜러는 내용을 지어내지 않고 `complete-unavailable`로 고정 문구를 봉인한다.
+
+```json
+{"handNo":7,"text":"이 핸드의 코치 응답을 생성하지 못했습니다. 종합 리뷰에서 해당 핸드를 다시 확인합니다.","unavailable":true}
+```
+
+절대 deadline은 `process.hrtime.bigint()`다. 각 시도의 **생성 한도**는 `attemptStartedMono + 120초`다. 이 한도는 코치가 결과를 쓸 시간이지, 딜러가 `accept`를 부르기까지의 한도가 아니다. live matching generation에 유효 result 파일이 있으면 `accept`는 deadline 이후에도 승격한다. 파일이 없는 expired attempt만 `ATTEMPT_TIMEOUT`이다. 경계값 120,000ms에서 파일 없음은 expired. cancel 2초 → terminal 확인 5초 → release 2초. termination 미확인을 성공으로 보고하지 말고 adapter를 disable한 뒤 이후 핸드는 unavailable fallback이다. 회수 대상은 현재 epoch·owner의 `status=terminal`이고 `resultState=consumed|discarded`인 핸들뿐이다. persistent player·foreign handle·terminal-unread는 닫지 않는다. 게임 종료 절대 예산은 그대로 20초다. 이미 쓰인 파일은 cutoff 전에 `result-ready`/`watch-accept`로 소비하고, 그때까지 없는 핸드만 unavailable이다.
 
 코치 서브에이전트 프롬프트:
 
 ```
-너는 공정한 홀덤 코치다. 먼저 hand --redacted와 stats를 실행하고, 과폴드 판정을 위해 `game/ui-snapshot.json`의 coach 배열을 본다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
+너는 공정한 홀덤 코치다. 먼저 hand --redacted와 stats를 실행한다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
 
-할 일: 사용자의 주요 결정 1~2개에 팟 오즈·포지션·레인지 개념을 실제 숫자와 함께 한국어 1~2줄로 코멘트.
-사용자가 프리플랍에서 접은 핸드는 코멘트를 생략한다. 예외: 그 폴드 자체가 주목할 결정인 경우뿐.
-표본 12핸드 이상이고 사용자 VPIP가 12% 미만이며 스냅샷 coach 배열에 아직 overfold:true가 없으면, 과폴드 누수 코멘트를 이번 한 번 허용한다. 그때 출력 JSON에 "overfold":true를 덧붙인다. 동시 코치가 둘 다 true를 내면 게임당 1회는 최선 노력이다.
+할 일: 사용자의 주요 결정 1~2개를 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.
+폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 근거로 무난한 폴드라고 평가한다.
+폴드가 지나치게 타이트하면 공개 정보로 확인되는 누수를 설명한다.
+특별한 누수가 없다고 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.
+팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.
+표본 12핸드 이상이고 사용자 VPIP가 12% 미만이며 coach-meta.overfoldUsed가 false이면, 과폴드 누수 코멘트를 이번 한 번 허용한다. 그때 출력 JSON에 "overfold":true를 덧붙인다.
 
-출력은 JSON 한 줄만: {"handNo":N,"text":"..."} 또는 생략 {"handNo":N,"text":""}
+출력은 JSON 한 줄만: {"handNo":N,"text":"..."}  (text.trim()은 비어 있으면 안 된다)
+설명·마크다운·코드펜스·빈 text 금지.
 ```
 
-과폴드 허용: 딜러는 4c에서 stats를 치지 않는다. coach-meta.overfoldUsed는 세션 메모리 또는 이미 본 coach 배열의 overfold:true로만 정한다. 코치가 stats 자격과 스냅샷의 overfold 여부를 본 뒤에만 "overfold":true를 붙인다. 동시 코치가 둘 다 true를 내면 게임당 1회는 최선 노력이다.
+과폴드 허용: 딜러는 4c에서 stats를 치지 않는다. `coach-meta.overfoldUsed`는 `reserve --consider-overfold`의 `overfoldReserved`만 쓴다. 모델 본문은 argv·셸 interpolation·lifecycle trace에 넣지 않는다. result/envelope는 reserve가 준 exact path만 쓰고 symlink/outside/multi-link는 거부된다.
 
-코치가 과폴드 코멘트를 냈으면(`"overfold":true`) 게시하는 노트에 그 필드를 함께 싣는다: `{"coach":[{"handNo":N,"text":"…","overfold":true}]}`. 그래야 resume한 딜러가 스냅샷만 보고 이미 썼음을 알 수 있다.
+`init --force`로 새 게임을 시작할 때 이전 게임의 코치 callback은 새 epoch에 게시되지 않는다. publisher가 generic `expectedGameEpoch`와 per-item `coachAuthority`로 막는다.
 
 `view --for user`와 public 이벤트에는 아키타입·스타일을 넣지 않는다.
 
@@ -390,8 +406,9 @@ node tools/publish.js --from game/.coach-3.json
 
 - `review` 필드(마크다운 문자열)로 게시한다. 본문은 **Write 도구로** `game/.review.json`(`{"review":"<마크다운>"}`)에 쓴 뒤 `node tools/publish.js --from game/.review.json`. 셸 인자나 heredoc으로 넘기지 마라(§ 「모델 텍스트」). UI 오버레이는 `view.gameOver && review`일 때 표시.
 - 동일 본문을 `game/review.md`로 저장.
-- **정리 전에 떠 있는 코치를 회수한다.** 마지막 핸드 코칭은 백그라운드로 시작됐을 수 있고(§4c), 여기서 그냥 정리하면 §4가 보장한 마지막 핸드 코멘트가 사라진다. 최대 20초 기다렸다가 도착한 것만 게시하고, 안 오면 포기한 사실을 리뷰에 남긴다.
-- 생존 에이전트에 작별 한 줄(최선 노력, 20초) 후 전부 종료·정리.
+- **게임 종료 코치 finalization.** `finalDeadlineMono = now + 20초`, `resultWaitCutoffMono = finalDeadlineMono - 10초`를 한 번만 정한다. 플레이 중 생성 한도(120초)와 별개다. 순서는 설계 정본 §9.2다: (1) heartbeat의 `result-ready`와 이미 쓰인 result file을 `accept --forbidden-file`로 소비하고, migration·reconcile·terminal 결과를 소비 (2) running은 cutoff까지 대기, 교체 시도는 remaining ≥ 5초일 때만 (3) cutoff에서 새 play-time `publish.js` 시작을 멈추고 live publisher process-group만 TERM 2초 → 확인 5초 → KILL/release 2초 (4) lock holder 부재를 확인한 뒤 `node tools/coach-control.js finalize-cutoff --completed N --owner O --stats-file S --snapshot-file P --termination-confirmed true|false` 한 번으로 missing 전체를 한 transaction에서 fence + unavailable Q seal한다. `--termination-confirmed false`이거나 명령이 `FINALIZATION_ABORTED`면 리뷰 gate를 열지 마라. (5) 그 다음에만 remaining으로 `publish.js --deadline-monotonic-ns <finalDeadline>` retry/Q 게시 (6) missing handNo를 성공처럼 숨기지 마라.
+- step 4가 commit됐으면 Published 또는 durable Pending(coach/unavailable)이 `1..sample`을 덮는다. 그때만 evaluator·종합 리뷰를 시작하고 Pending의 `handNo`·`noteKind`를 명시한다. UI 게시를 주장하지 마라.
+- 생존 에이전트에 작별 한 줄(최선 노력, 20초) 후 전부 종료·정리. persistent player를 코치 용량 때문에 닫지 마라.
 - 서버는 굳이 죽이지 않아도 된다. 사용자가 닫으면 그만이다. 명시적 중단은 `node engine/cli.js end --result abort`.
 
 ---
@@ -419,7 +436,7 @@ node engine/cli.js resume-check
    ```
 4. 출력의 `next`가 그대로 다음 할 일이다 — `kind:"user"`면 `--wait-only`로 대기, `kind:"ai"`면 `next.message`를 그 에이전트에 전송.
 5. `decisionId`는 같은 (handNo, street, actionIndex)에 안정적이다. 액션이 적용되기 전까지 `step`을 다시 불러도 새 id가 생기지 않는다.
-6. 코치 재진입 멱등은 `GET /api/snapshot`의 `coach` 배열에 그 `handNo`가 **있는지**로 판정한다(§5). 마지막 원소만 보면 안 된다 — 백그라운드 코치는 순서대로 도착하지 않으므로 배열이 `[1,3]`일 때 마지막 원소는 핸드 2에 대해 아무것도 말해 주지 않는다.
+6. 코치 resume는 `begin-owner --completed N --stats-file S --snapshot-file P --owner <새UUID>` 한 번이다. 이 명령이 lock 안에서 migration·reconcile·Published/Pending 재독·owner switch·`M_now` 전체 reserve를 한다. 반환된 descriptor만 attempt 1로 스폰하고, 사전 `missing`이나 별도 `reserve`로 spawn을 결정하지 마라. pending Q는 재스폰하지 않고 `--retry`로 먼저 게시한다.
 
 에이전트는 기억이 리셋된다. `players.json`에서 페르소나를 읽어 §3 템플릿으로 **재스폰**한다. 별도 브리핑은 필요 없다 — 차례가 온 플레이어는 `next.message`만으로 자족적이다(스택·보드·생존자·공개 액션이 전부 들어 있다). 아직 차례가 아닌 플레이어에게 상황을 미리 알리려면 페르소나 카드까지만, 스타일 수치는 브리핑에 포함하되 사용자에게는 말하지 않는다.
 
@@ -474,5 +491,9 @@ Grok `spawn_subagent`는 `prompt`·`description`·`subagent_type`·`background`�
 | `--wait [--wait-ms N]` | 게시 후 사용자 액션 long-poll (기본 25000ms) |
 | `--wait-only` | 게시 없이 대기만 (타임아웃 재시도) |
 | `--lock-wait-ms N` | 게시 락 대기 한도(기본 20000). 평소 건드릴 일 없다 |
+| `--print-game-epoch` | 현재 `lock.json` sessionToken의 sha256 hex만 출력 |
+| `--deadline-monotonic-ns N` | lock wait와 HTTP를 이 절대 deadline remaining으로 자른다 |
+
+`tools/coach-control.js`: `begin-owner`, `reserve`, `bind-handle`, `accept`, `watch-accept`, `complete-unavailable`, `reconcile`, `heartbeat`, `fence`, `adapter-disable`, `missing`, `finalize-cutoff`, `completeness`, `cleanup-result`, `rollback-guard`. `watch-accept`는 result 파일을 폴링해 즉시 승격한다(`--publish`면 envelope 게시). 권한 파일은 `game/.coach-authority.json`. pending Q·active worker·unresolved attempt가 있으면 `rollback-guard`가 `ROLLBACK_REFUSED`다.
 
 포트·토큰은 도구가 `game/lock.json`에서 읽는다. 서버 `127.0.0.1:8877`, `GET /api/health`만 토큰 불필요. 직접 호출이 필요하면 `POST /api/action`, `GET /api/snapshot?token=`.

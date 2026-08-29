@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MAX_PUBLISH_BODY_BYTES, MAX_PUBLISH_ID, payloadSha256 } from '../publish-contract.js';
 
-const MAX_BODY = 64 * 1024;
+const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 const HEARTBEAT_MS = 15_000;
 const KEEP_ALIVE_MS = 120_000;
 const HEADERS_MS = 125_000;
@@ -82,6 +83,53 @@ function loadUiState(gameDir) {
   }
 }
 
+function v2ProofRequired(gameDir) {
+  try {
+    const auth = JSON.parse(fs.readFileSync(path.join(gameDir, '.coach-authority.json'), 'utf8'));
+    return auth.schemaVersion === 2;
+  } catch {
+    return false;
+  }
+}
+
+function hasCoachProof(note) {
+  const proof = note?.coachProof;
+  return Boolean(
+    proof
+    && typeof proof.id === 'string'
+    && typeof proof.payloadSha256 === 'string'
+    && /^[0-9a-f]{64}$/.test(proof.id)
+    && /^[0-9a-f]{64}$/.test(proof.payloadSha256),
+  );
+}
+
+function validateIncomingCoach(existing, incoming, gameDir) {
+  const required = v2ProofRequired(gameDir);
+  for (const note of incoming) {
+    if (required && !hasCoachProof(note)) return 'COACH_PROOF_REQUIRED';
+    if (!hasCoachProof(note)) continue;
+    if (!Number.isInteger(note.handNo) || typeof note.text !== 'string' || !note.text.trim()) {
+      return 'COACH_PROOF_MISMATCH';
+    }
+    if (note.overfold !== undefined && note.overfold !== true) return 'COACH_PROOF_MISMATCH';
+    if (note.unavailable !== undefined && note.unavailable !== true) return 'COACH_PROOF_MISMATCH';
+    const digest = payloadSha256({
+      handNo: note.handNo,
+      text: note.text,
+      overfold: note.overfold === true,
+      unavailable: note.unavailable === true,
+    });
+    if (digest !== note.coachProof.payloadSha256) return 'COACH_PROOF_MISMATCH';
+    const prev = existing.find((entry) => entry.handNo === note.handNo);
+    if (prev) {
+      const incomingOverfold = note.overfold === true;
+      const sticky = Boolean(prev.overfold) || incomingOverfold;
+      if (sticky !== incomingOverfold) return 'COACH_SEMANTIC_CONFLICT';
+    }
+  }
+  return null;
+}
+
 // Coaching runs in the background, so notes arrive out of order and sometimes twice.
 // Keyed by handNo and sorted, the array reads the same however they arrive — including
 // when an older snapshot written before this rule is loaded back.
@@ -89,6 +137,11 @@ function mergeCoach(existing, incoming) {
   const merged = [...existing];
   for (const note of incoming) {
     const at = merged.findIndex((entry) => entry.handNo === note.handNo);
+    if (hasCoachProof(note)) {
+      if (at === -1) merged.push(note);
+      else merged[at] = note;
+      continue;
+    }
     if (at === -1) { merged.push(note); continue; }
     // The once-per-game overfold comment is recorded here; a later edit of the same
     // note must not erase the fact that it was spent.
@@ -254,12 +307,16 @@ export function startServer({ gameDir, port = 8877, token }) {
   };
 
   const handlePublish = (body, res) => {
+    if (!Number.isInteger(body.publishId) || body.publishId < 1 || body.publishId > MAX_PUBLISH_ID) {
+      sendJson(res, 400, { ok: false, code: 'BAD_PUBLISH_ID' });
+      return;
+    }
     // publishIds only ever move forward, so anything at or below the last one is a
     // resend of something already applied — not just the immediately previous id.
     // Answering it as already-done is what makes a publisher's retry safe.
-    const alreadyApplied = Number.isInteger(body.publishId) && Number.isInteger(state.publishId)
+    const alreadyApplied = Number.isInteger(state.publishId)
       ? body.publishId <= state.publishId
-      : body.publishId !== undefined && body.publishId === state.publishId;
+      : false;
     if (alreadyApplied) {
       sendJson(res, 200, { ok: true, revision: state.revision });
       return;
@@ -293,6 +350,11 @@ export function startServer({ gameDir, port = 8877, token }) {
       payload.messages = body.messages;
     }
     if (Array.isArray(body.coach) && body.coach.length) {
+      const coachError = validateIncomingCoach(next.coach, body.coach, root);
+      if (coachError) {
+        sendJson(res, 400, { ok: false, code: coachError });
+        return;
+      }
       next.coach = mergeCoach(next.coach, body.coach);
       payload.coach = body.coach;
     }

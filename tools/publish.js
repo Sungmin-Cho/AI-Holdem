@@ -5,6 +5,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
+import {
+  MAX_PUBLISH_BODY_BYTES,
+  MAX_PUBLISH_ID,
+  SUPPORTED_COACH_AUTHORITY_SCHEMAS,
+  gameEpochOf,
+  payloadSha256,
+  utf8ByteLength,
+} from '../publish-contract.js';
+import { createCoachControl } from './coach-control.js';
 
 // Comfortably past the engine mutex's staleness threshold: a waiter that gives up
 // sooner would never reach the point where it may reclaim a dead owner's lock.
@@ -35,6 +44,7 @@ function parseArgs(argv) {
     gameDir: 'game', from: null, talks: [], talkFiles: [], narrations: [],
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
+    printGameEpoch: false, deadlineMonotonicNs: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -60,9 +70,14 @@ function parseArgs(argv) {
     else if (arg === '--wait-only') { out.wait = true; out.waitOnly = true; }
     else if (arg === '--wait-ms') out.waitMs = positiveMs(arg);
     else if (arg === '--lock-wait-ms') out.lockWaitMs = positiveMs(arg);
+    else if (arg === '--print-game-epoch') out.printGameEpoch = true;
+    else if (arg === '--deadline-monotonic-ns') {
+      try { out.deadlineMonotonicNs = BigInt(needsValue(arg)); }
+      catch { bail('USAGE', '--deadline-monotonic-ns는 bigint 나노초여야 합니다.'); }
+    }
     else bail('USAGE', `알 수 없는 옵션: ${arg}`);
   }
-  if (!out.from) bail('USAGE', '--from <파일>이 필요합니다.');
+  if (!out.from && !out.printGameEpoch) bail('USAGE', '--from <파일>이 필요합니다.');
   return out;
 }
 
@@ -189,17 +204,73 @@ function nextForDealer(gameDir, envelope) {
   return out;
 }
 
+function remainingMs(deadlineNs) {
+  if (deadlineNs == null) return null;
+  const left = deadlineNs - process.hrtime.bigint();
+  if (left <= 0n) return 0;
+  const ms = Number(left / 1_000_000n);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function readAuthority(gameDir) {
+  const file = path.join(gameDir, '.coach-authority.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    bail('BAD_AUTHORITY', 'coach authority를 읽지 못했습니다.');
+  }
+  return null;
+}
+
+function assertSupportedAuthority(auth) {
+  if (!auth) return;
+  if (!SUPPORTED_COACH_AUTHORITY_SCHEMAS.includes(auth.schemaVersion)) {
+    bail('UNSUPPORTED_COACH_AUTHORITY', `schema ${auth.schemaVersion}은 이 publisher가 지원하지 않습니다.`);
+  }
+}
+
+function staleAttemptReason(record, epoch, auth) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return 'BAD_ATTEMPT';
+  if (!Object.prototype.hasOwnProperty.call(record, 'expectedGameEpoch')) return 'BAD_ATTEMPT_VERSION';
+  if (record.expectedGameEpoch !== epoch) return 'STALE_GAME_ATTEMPT';
+  const itemAuth = record.coachAuthority;
+  if (itemAuth) {
+    const queued = auth?.publishQueue?.[String(itemAuth.handNo)];
+    if (!queued
+      || queued.queueId !== itemAuth.queueId
+      || queued.exactEnvelopePath !== itemAuth.exactEnvelopePath
+      || queued.payloadSha256 !== itemAuth.payloadSha256) {
+      return 'STALE_COACH_AUTHORITY';
+    }
+  }
+  return null;
+}
+
+function assertCoachQueue(auth, coachAuthority, epoch) {
+  if (!coachAuthority) return;
+  if (coachAuthority.expectedGameEpoch !== epoch) bail('STALE_COACH_AUTHORITY');
+  const queued = auth?.publishQueue?.[String(coachAuthority.handNo)];
+  if (!queued
+    || queued.queueId !== coachAuthority.queueId
+    || queued.exactEnvelopePath !== coachAuthority.exactEnvelopePath
+    || queued.payloadSha256 !== coachAuthority.payloadSha256) {
+    bail('STALE_COACH_AUTHORITY');
+  }
+}
+
 // Never interpolate a fetch failure's message: it quotes the URL, and the URL carries
 // the session token.
-async function postPublish(lock, body) {
+async function postPublish(lock, body, timeoutMs = PUBLISH_TIMEOUT_MS) {
   const url = `http://127.0.0.1:${lock.port}/api/publish?token=${encodeURIComponent(lock.sessionToken)}`;
+  const budget = Math.max(1, timeoutMs);
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(PUBLISH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(budget),
     });
   } catch {
     bail('PUBLISH_FAILED', '서버에 게시하지 못했습니다. 서버가 살아 있는지 확인하세요.');
@@ -223,30 +294,54 @@ function attemptPath(gameDir) {
 }
 
 // A half-written record is worse than none: --retry would read it and stop the game.
-function writeAttempt(gameDir, body) {
+function writeAttempt(gameDir, record) {
   const target = attemptPath(gameDir);
   const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ body }));
+  fs.writeFileSync(tmp, JSON.stringify(record));
   fs.renameSync(tmp, target);
 }
 
 async function publishOnce(gameDir, lock, envelope, opts) {
+  const beforeLock = remainingMs(opts.deadlineMonotonicNs);
+  if (beforeLock === 0) bail('DEADLINE_EXPIRED', '게시 deadline이 이미 만료됐습니다.');
+  const lockWaitMs = beforeLock == null ? opts.lockWaitMs : Math.min(opts.lockWaitMs, beforeLock);
   try {
-    return await withNamedLock(gameDir, LOCK_NAME, async () => {
-      let body = null;
-      const pending = fs.existsSync(attemptPath(gameDir));
-      if (pending && !opts.retry) {
-        // Overwriting an unresolved attempt would make its --retry resend somebody
-        // else's body — a coach note published as if it were the turn's transition.
-        bail('ATTEMPT_PENDING', '해소되지 않은 게시 시도가 있습니다. 먼저 --retry로 그것을 끝내세요.');
+    const published = await withNamedLock(gameDir, LOCK_NAME, async () => {
+      const liveLock = readLock(gameDir);
+      Object.assign(lock, liveLock);
+      const epoch = gameEpochOf(lock.sessionToken);
+      const auth = readAuthority(gameDir);
+      assertSupportedAuthority(auth);
+      if (auth?.noNewPlayTimePublishers && opts.deadlineMonotonicNs == null
+        && !opts.viewOnly && !opts.retry && envelope.review === undefined) {
+        bail('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시는 중단됐습니다.');
       }
+
+      let body = null;
+      let coachAuthority = envelope.coachAuthority ?? null;
+      const pendingPath = attemptPath(gameDir);
+      const pending = fs.existsSync(pendingPath);
       if (pending) {
-        body = readJson(attemptPath(gameDir), 'BAD_ATTEMPT', '직전 게시 시도').body;
-        // "같은 id, 같은 본문" 보장은 기록이 온전할 때만 성립한다. 깨졌으면 새 게시를
-        // 지어내지 말고 멈춘다 — 지어내는 순간 원래 전이가 조용히 사라진다.
-        if (!body || typeof body !== 'object' || Array.isArray(body)
-          || !Number.isInteger(body.publishId) || body.publishId < 1) {
-          bail('BAD_ATTEMPT', '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
+        const record = readJson(pendingPath, 'BAD_ATTEMPT', '직전 게시 시도');
+        const stale = staleAttemptReason(record, epoch, auth);
+        if (stale === 'BAD_ATTEMPT' || stale === 'BAD_ATTEMPT_VERSION') {
+          bail(stale, '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
+        }
+        if (stale) {
+          try { fs.unlinkSync(pendingPath); } catch { /* already gone */ }
+          if (opts.retry) bail(stale, 'stale 게시는 전송하지 않았습니다.');
+        } else if (!opts.retry) {
+          // Overwriting an unresolved attempt would make its --retry resend somebody
+          // else's body — a coach note published as if it were the turn's transition.
+          bail('ATTEMPT_PENDING', '해소되지 않은 게시 시도가 있습니다. 먼저 --retry로 그것을 끝내세요.');
+        } else {
+          body = record.body;
+          coachAuthority = record.coachAuthority ?? null;
+          if (!body || typeof body !== 'object' || Array.isArray(body)
+            || !Number.isInteger(body.publishId) || body.publishId < 1
+            || body.publishId > MAX_PUBLISH_ID) {
+            bail('BAD_ATTEMPT', '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
+          }
         }
       }
       if (!body) {
@@ -254,13 +349,70 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         const snapshot = fs.existsSync(snapshotPath)
           ? readJson(snapshotPath, 'BAD_SNAPSHOT', 'ui-snapshot.json')
           : {};
-        body = { publishId: (Number(snapshot.publishId) || 0) + 1, ...buildBody(envelope, opts) };
+        const nextId = (Number(snapshot.publishId) || 0) + 1;
+        if (!Number.isInteger(nextId) || nextId < 1 || nextId > MAX_PUBLISH_ID) {
+          bail('PUBLISH_ID_OVERFLOW', '다음 publishId가 허용 범위를 넘습니다.');
+        }
+        body = { publishId: nextId, ...buildBody(envelope, opts) };
       }
-      writeAttempt(gameDir, body);
-      const json = await postPublish(lock, body);
+      assertCoachQueue(auth, coachAuthority, epoch);
+      if (coachAuthority && !opts.retry) {
+        const fromPath = path.resolve(opts.from);
+        if (path.resolve(coachAuthority.exactEnvelopePath) !== fromPath) {
+          bail('STALE_COACH_AUTHORITY', 'envelope 경로가 queue exactEnvelopePath와 다릅니다.');
+        }
+        const st = fs.lstatSync(fromPath);
+        if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+          bail('UNSAFE_PATH', 'coach envelope 경로가 안전하지 않습니다.');
+        }
+      }
+      if (coachAuthority) {
+        const notes = body.coach;
+        const note = Array.isArray(notes) ? notes[0] : null;
+        if (!note || notes.length !== 1) {
+          bail('STALE_COACH_AUTHORITY', 'coach body shape이 올바르지 않습니다.');
+        }
+        const digest = payloadSha256({
+          handNo: note.handNo,
+          text: note.text,
+          overfold: note.overfold === true,
+          unavailable: note.unavailable === true,
+        });
+        const queued = auth.publishQueue[String(coachAuthority.handNo)];
+        if (digest !== coachAuthority.payloadSha256
+          || digest !== queued?.payloadSha256
+          || note.coachProof?.payloadSha256 !== digest
+          || note.coachProof?.id !== queued?.publicProofId) {
+          bail('STALE_COACH_AUTHORITY', 'envelope semantic digest가 queue와 일치하지 않습니다.');
+        }
+      }
+      const serialized = JSON.stringify(body);
+      if (utf8ByteLength(serialized) > MAX_PUBLISH_BODY_BYTES) {
+        bail('PAYLOAD_TOO_LARGE', '게시 본문이 공유 상한을 넘습니다.');
+      }
+      const attemptRecord = { body, expectedGameEpoch: epoch };
+      if (coachAuthority) attemptRecord.coachAuthority = coachAuthority;
+      writeAttempt(gameDir, attemptRecord);
+      const afterLock = remainingMs(opts.deadlineMonotonicNs);
+      if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');
+      const httpMs = afterLock == null ? PUBLISH_TIMEOUT_MS : Math.min(PUBLISH_TIMEOUT_MS, afterLock);
+      const json = await postPublish(lock, body, httpMs);
       try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
-      return { publishId: body.publishId, revision: json.revision };
-    }, { timeoutMs: opts.lockWaitMs });
+      return { publishId: body.publishId, revision: json.revision, hadCoach: Array.isArray(body.coach) };
+    }, { timeoutMs: lockWaitMs });
+    if (published.hadCoach) {
+      const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
+      const left = remainingMs(opts.deadlineMonotonicNs);
+      try {
+        const rec = await createCoachControl({
+          lockTimeoutMs: left == null ? 5_000 : Math.min(5_000, Math.max(1, left)),
+        }).reconcile({ gameDir, snapshotFile });
+        published.reconciled = rec.reconciled ?? [];
+      } catch {
+        published.reconcilePending = true;
+      }
+    }
+    return published;
   } catch (error) {
     if (error?.code === 'LOCKED') bail('LOCK_TIMEOUT', '다른 게시가 락을 붙잡고 있습니다.');
     throw error;
@@ -299,6 +451,10 @@ async function waitForUser(lock, envelope, opts, out) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const gameDir = path.resolve(opts.gameDir);
+  if (opts.printGameEpoch) {
+    const lock = readLock(gameDir);
+    reply({ ok: true, gameEpoch: gameEpochOf(lock.sessionToken) }, 0);
+  }
   const envelope = readJson(opts.from, 'BAD_ENVELOPE', 'envelope');
   // A --retry that resolves a pending attempt sends the recorded body, never this
   // envelope — and the file is often a rejection envelope by then, which would

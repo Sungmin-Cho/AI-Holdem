@@ -84,6 +84,19 @@ test('public 이벤트에 금지 정보 없음', () => {
   assert.equal(json.includes(unseenCard), false);
 });
 
+test('진행 중 핸드는 sample에 안 들어가고 finishHand 직후 1 증가한다', () => {
+  let st = setup3(5000, 5000, 5000);
+  assert.equal(statsReport(st).perPlayer.user.sample, 0);
+  while (!legalFor(st).handOver) {
+    const legal = legalFor(st);
+    st = applyAction(st, legal.toAct, 'fold').state;
+  }
+  assert.equal(legalFor(st).handOver, true);
+  assert.equal(statsReport(st).perPlayer.user.sample, 1);
+  assert.equal(st.hand, null);
+  assert.ok(st.lastHand);
+});
+
 test('VPIP: BB 체크는 미집계, SB 컴플릿은 집계', () => {
   const st = finishByChecks(setup3(5000, 5000, 5000));
   assert.equal(statsReport(st).perPlayer.user.vpip, 1);
