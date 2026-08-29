@@ -309,9 +309,9 @@ UI "생각 중"은 `view.toAct`가 AI일 때 서버/UI가 처리한다. 딜러�
 node engine/cli.js resume-check
 ```
 
-`archiveStatus`가 `repaired` 또는 `healthy`면 **같은 handNo에 resume-check를 다시 치지 않는다.** 다음 턴은 직전 publish에 `archivePending`이 남아 있어도 §4.2다. 이 턴에 new-hand 금지. `repair_failed`면 멈추고 사용자에게 알린다 — 그 핸드는 코칭·리뷰가 읽을 수 없게 된다. new-hand 금지. `archiveRepaired`(불리언)만 보면 정상과 복구 실패를 구분할 수 없다. `archivePending`이 없거나 거짓이면 `resume-check`를 치지 않고 병렬 턴으로 간다.
+`archiveStatus`가 `repaired` 또는 `healthy`면 **같은 handNo에 resume-check를 다시 치지 않는다.** 다음 턴은 직전 publish에 `archivePending`이 남아 있어도 아래 §4.2다. 이 턴에 new-hand 금지. `repair_failed`면 멈추고 사용자에게 알린다 — 그 핸드는 코칭·리뷰가 읽을 수 없게 된다. new-hand 금지. `archiveRepaired`(불리언)만 보면 정상과 복구 실패를 구분할 수 없다. `archivePending`이 없거나 거짓이면 `resume-check`를 치지 않고 §4.2로 간다.
 
-**병렬 턴** (`archivePending`이 아닐 때). 코치 완료와 작별 응답을 기다리지 않고, 아래를 **같은 턴에 나란히** 한다.
+**병렬 턴 (§4.2).** 코치 완료와 작별 응답을 기다리지 않고, 아래를 **같은 턴에 나란히** 한다. 직전 턴에서 같은 handNo의 resume-check가 repaired/healthy였으면, 직전 publish에 `archivePending`이 남아 있어도 여기로 온다.
 
 1. 코치 서브에이전트를 백그라운드로 스폰한다. 딜러는 `handNo`, `practiceFocus`, `coach-meta`만 넘긴다. `coach-meta.overfoldUsed`는 세션 메모리 또는 이미 본 스냅샷 `coach`의 `overfold:true`로만 정한다. 코치가 `node engine/cli.js hand <n> --redacted`와 `node engine/cli.js stats`를 직접 실행하고, 과폴드 자격이 있으며 스냅샷에 아직 overfold가 없을 때만 `"overfold":true`를 붙인다. 딜러는 4c에서 그 두 명령과 snapshot curl을 Bash하지 않는다. 평가 문장 규칙과 `game/.coach-<n>.json` 게시는 유지한다.
 2. `control.bust`에 AI가 있으면 그 `agentHandle`에 작별 한 줄을 백그라운드로 요청한다. **응답을 이 턴에서 기다리지 않는다.** 그 핸들에는 이후 결정 요약(`next.message`)을 보내지 않는다. 한 줄이 다음 예정된 publish 전에 도착하면 Write `game/.talk-<playerId>-h<handNo>.json` 후 그 publish에 `--talk-from`을 붙인다. **이 턴의 `new-hand` publish에는 `--talk-from`을 붙이지 않는다.** 이후 **이미 예정된** 다른 publish에만 붙인다. `--narration`에 작별을 넣지 않는다. `.turn.json`을 이벤트와 함께 재게시하지 않는다. 그 publish에 이미 플레이어 talk가 있으면 `--talk-from` 파일에 배열로 합치거나 작별을 생략한다. 늦으면 생략한다.
@@ -352,11 +352,11 @@ node tools/publish.js --from game/.coach-3.json
 코치 서브에이전트 프롬프트:
 
 ```
-너는 공정한 홀덤 코치다. 먼저 hand --redacted와 stats를 실행하고 그 JSON만 보고 판단한다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
+너는 공정한 홀덤 코치다. 먼저 hand --redacted와 stats를 실행하고, 과폴드 판정을 위해 `game/ui-snapshot.json`의 coach 배열을 본다. 입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.
 
 할 일: 사용자의 주요 결정 1~2개에 팟 오즈·포지션·레인지 개념을 실제 숫자와 함께 한국어 1~2줄로 코멘트.
 사용자가 프리플랍에서 접은 핸드는 코멘트를 생략한다. 예외: 그 폴드 자체가 주목할 결정인 경우뿐.
-표본 12핸드 이상이고 사용자 VPIP가 12% 미만이며 coach-meta.overfoldUsed가 false이면, 과폴드 누수 코멘트를 이번 한 번 허용한다. 그때 출력 JSON에 "overfold":true를 덧붙인다.
+표본 12핸드 이상이고 사용자 VPIP가 12% 미만이며 스냅샷 coach 배열에 아직 overfold:true가 없으면, 과폴드 누수 코멘트를 이번 한 번 허용한다. 그때 출력 JSON에 "overfold":true를 덧붙인다. 동시 코치가 둘 다 true를 내면 게임당 1회는 최선 노력이다.
 
 출력은 JSON 한 줄만: {"handNo":N,"text":"..."} 또는 생략 {"handNo":N,"text":""}
 ```
