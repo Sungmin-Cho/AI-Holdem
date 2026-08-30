@@ -382,6 +382,31 @@ test('decide 타임아웃: TIMEOUT을 던지고 자식을 종료한다', async (
   }
 });
 
+test('decide 타임아웃은 SIGKILL 후 실제 close가 확인된 뒤에만 TIMEOUT을 반환한다', { timeout: 5_000 }, async () => {
+  const f = fakeRuntime('claude', {
+    default: {
+      reply: 'late',
+      delayMs: 30_000,
+      // 직계 자식이 SIGKILL되어도 후손이 stdio를 잡아 close를 늦춘다.
+      // pid 사망만 기다리는 구현은 TIMEOUT을 너무 일찍 반환한다.
+      orphanMs: 500,
+    },
+  });
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 150 }),
+      (error) => error.code === 'TIMEOUT',
+    );
+    const orphan = f.calls().find((entry) => Number.isInteger(entry.orphanPid));
+    assert.ok(orphan, '타임아웃 close를 늦출 후손 pid가 기록되어야 한다');
+    assert.equal(isAlive(orphan.orphanPid), false, 'stdio close 전에 TIMEOUT이 반환됐다');
+    assert.equal(Date.now() - started >= 400, true, 'close 지연을 기다리지 않았다');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('probe: 카나리 센티널이 응답에 나오면 containment false, 프롬프트에는 카나리 경로만 실린다', async () => {
   const { file, sentinel } = canary();
   const leaky = fakeRuntime('codex', {
@@ -1291,13 +1316,49 @@ test('extractJsonLine: 문자열 리터럴 안의 중괄호·이스케이프 따
   );
 });
 
+test('dispose는 진행 중인 probe·warmup·decide·oneshot 자식을 전부 종료·settle한 뒤 반환한다', { timeout: 5_000 }, async () => {
+  const f = fakeRuntime('claude', {
+    default: { reply: 'late', delayMs: 30_000, ignoreTerm: true },
+  }, {
+    terminateGraceMs: 50,
+    terminateKillWaitMs: 1_000,
+  });
+  const { file } = canary();
+  const probe = f.rt.probe({ canaryAbsPath: file, timeoutMs: 10_000 });
+  const warmup = f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 10_000 });
+  const decide = f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 10_000 });
+  const one = f.rt.oneshotStart({ tier: 'upper', prompt: '코치', timeoutMs: 10_000 });
+  const pending = [probe, warmup, decide, one.done];
+  for (const promise of pending) promise.catch(() => {});
+
+  try {
+    const deadline = Date.now() + 2_000;
+    while (f.calls().filter((entry) => Number.isInteger(entry.pid)).length < 4 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const calls = f.calls().filter((entry) => Number.isInteger(entry.pid));
+    assert.equal(calls.length, 4, '네 자식이 모두 시작되지 않았다');
+    assert.equal(calls.every((entry) => isAlive(entry.pid)), true);
+    const runtimeCwd = calls[0].cwd;
+
+    await f.rt.dispose();
+    assert.equal(calls.every((entry) => !isAlive(entry.pid)), true, 'dispose 반환 후 런타임 자식이 남았다');
+    const settled = await Promise.allSettled(pending);
+    assert.equal(settled.length, 4);
+    assert.equal(fs.existsSync(runtimeCwd), false, '자식 settle 후 runtime cwd가 정리되지 않았다');
+  } finally {
+    f.cleanup();
+    await Promise.allSettled(pending);
+  }
+});
+
 test('dispose: 빈 작업 디렉터리를 정리하고 다음 호출은 새 디렉터리로 돈다', async () => {
   const f = fakeRuntime('claude');
   try {
     await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 5000 });
     const firstCwd = f.last().cwd;
     assert.ok(fs.existsSync(firstCwd));
-    f.rt.dispose();
+    await f.rt.dispose();
     assert.equal(fs.existsSync(firstCwd), false, 'dispose가 빈 cwd를 지운다');
     await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 5000 });
     const secondCwd = f.last().cwd;

@@ -385,7 +385,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   const startTimeOf = opts.processStartTime ?? defaultProcessStartTime;
   const graceMs = opts.terminateGraceMs ?? TERMINATE_GRACE_MS;
   const killWaitMs = opts.terminateKillWaitMs ?? TERMINATE_KILL_WAIT_MS;
+  const activeHandles = new Set();
   let cwd = null;
+  let disposePromise = null;
 
   // 레포·game/ 밖의 빈 디렉터리 하나를 런타임당 한 번 만든다. 레포 안이면 CLI가
   // 지침 파일·게임 상태를 컨텍스트로 빨아들일 수 있으므로 여기서 거부한다.
@@ -417,23 +419,73 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   function start({ purpose, model, sessionId = null, input }) {
+    if (disposePromise) {
+      throw runtimeError('RUNTIME_DISPOSING', `RUNTIME_DISPOSING: ${kind} runtime을 정리 중입니다.`);
+    }
     const { args, format } = argvBuilder(purpose, model, sessionId);
-    const handle = exec({ command, args, cwd: ensureCwd(), env: buildEnv(), input });
+    const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(), input });
+    const entry = { handle: null, closed: false, error: null };
+    const done = Promise.resolve(spawned.done).then(
+      (result) => {
+        entry.closed = true;
+        activeHandles.delete(entry);
+        return result;
+      },
+      (error) => {
+        // done 거부는 close 증거가 아니다. dispose/terminate가 해당 pid의
+        // lifecycle을 따로 확인할 수 있게 registry에 남겨 둔다.
+        entry.error = error;
+        throw error;
+      },
+    );
+    const handle = { ...spawned, done };
+    entry.handle = handle;
+    activeHandles.add(entry);
     // 경합에서 진 쪽의 거부가 unhandled rejection이 되지 않도록 관찰자를 하나 붙인다.
     handle.done.catch(() => {});
-    return { handle, format, args };
+    return { handle, format, args, entry };
+  }
+
+  async function killAndConfirmClose(entry, signal = 'SIGKILL') {
+    if (entry.closed) return;
+    let delivered;
+    try {
+      delivered = entry.handle.kill(signal);
+    } catch (error) {
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error });
+    }
+    if (delivered === false) {
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`);
+    }
+    const outcome = await Promise.race([
+      entry.handle.done.then(
+        () => ({ closed: true }),
+        (error) => ({ closed: false, error }),
+      ),
+      sleep(killWaitMs).then(() => ({ closed: false, timeout: true })),
+    ]);
+    if (entry.closed && outcome.closed) return;
+    throw runtimeError(
+      'CHILD_CLOSE_UNCONFIRMED',
+      `CHILD_CLOSE_UNCONFIRMED: ${kind} 자식의 close를 확인하지 못했습니다.`,
+      { cause: outcome.error },
+    );
   }
 
   // decide/warmup/probe의 공통 실행: 타임아웃이 이기면 **여기서** 자식을 죽인다.
   async function runOnce({ purpose, model, sessionId = null, input, timeoutMs }) {
     const started = Date.now();
-    const { handle, format } = start({ purpose, model, sessionId, input });
+    const { handle, format, entry } = start({ purpose, model, sessionId, input });
     const timer = timeoutIn(timeoutMs);
     try {
       const result = await Promise.race([handle.done, timer.promise]);
       return { ...result, format, elapsedMs: Date.now() - started };
     } catch (error) {
-      if (error.code === 'TIMEOUT') handle.kill('SIGKILL');
+      if (error.code === 'TIMEOUT') {
+        // T2가 같은 세션에 오버랩되지 않도록 SIGKILL 전송만이 아니라
+        // child `close`(전 stdio 종료)까지 확인한 뒤에만 TIMEOUT을 반환한다.
+        await killAndConfirmClose(entry, 'SIGKILL');
+      }
       throw error;
     } finally {
       timer.cancel();
@@ -681,11 +733,29 @@ export function createPlayerRuntime(kind, opts = {}) {
       return { pid, startTime, done, terminate };
     },
 
-    // 게임 종료 시 빈 작업 디렉터리 정리(선택).
-    dispose() {
-      if (!cwd) return;
-      try { fs.rmdirSync(cwd); } catch { /* 비어 있지 않거나 이미 없다 */ }
-      cwd = null;
+    // 게임 종료 시 probe/warmup/decide/oneshot 전체를 종료·settle한 뒤 cwd를 정리한다.
+    // requestStop은 이 Promise를 await하므로 runtime child가 남은 채 loop lock을 풀 수 없다.
+    async dispose() {
+      if (disposePromise) return disposePromise;
+      disposePromise = (async () => {
+        const pending = [...activeHandles];
+        const results = await Promise.allSettled(
+          pending.map((entry) => killAndConfirmClose(entry, 'SIGKILL')),
+        );
+        const failed = results.find((result) => result.status === 'rejected');
+        if (failed) throw failed.reason;
+        if (activeHandles.size !== 0) {
+          throw runtimeError('CHILD_CLOSE_UNCONFIRMED', `CHILD_CLOSE_UNCONFIRMED: ${kind} runtime 자식이 registry에 남았습니다.`);
+        }
+        if (!cwd) return;
+        try { fs.rmdirSync(cwd); } catch { /* 비어 있지 않거나 이미 없다 */ }
+        cwd = null;
+      })();
+      try {
+        await disposePromise;
+      } finally {
+        disposePromise = null;
+      }
     },
   };
 }

@@ -160,6 +160,20 @@ function validatedDecision(raw, next) {
     : null;
 }
 
+const USER_ACTIONS = new Set(['fold', 'check', 'call', 'raise']);
+
+function validatedUserAction(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !USER_ACTIONS.has(raw.action)) return null;
+  if (raw.action === 'raise') {
+    if (!Number.isSafeInteger(raw.amount) || raw.amount < 1) return null;
+    return { action: 'raise', amount: raw.amount };
+  }
+  // 숫자라도 raise 외 action의 amount는 engine argv에 싣을 의미가 없다.
+  // 예상 못 한 필드를 버리지 말고 요청 전체를 거부해 경계를 명확히 한다.
+  if (raw.amount !== undefined) return null;
+  return { action: raw.action };
+}
+
 export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
@@ -282,7 +296,6 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (mode === 'bootstrap') {
         if (force) {
           await stopExistingLoopForForce(owner);
-          await stopRereadServerForForce();
           lockHandle = acquireOwnedLock(root, LOOP_LOCK);
           return;
         }
@@ -440,15 +453,34 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }
   };
 
-  const waitForIdentityDeath = async (pid, startTime, timeoutMs) => {
+  const waitForIdentityDeath = async (pid, startTime, timeoutMs, {
+    unavailableCode,
+    mismatchCode,
+    label,
+  }) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!processAlive(pid)) return true;
       const current = processStartTime(pid);
-      if (current !== null && current !== startTime) return true;
+      if (current === null) {
+        throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
+      }
+      if (current !== startTime) {
+        // pid 재사용은 원래 대상의 사망 증거가 아니다. 새 프로세스를
+        // 살려 둔 채 아카이브나 추가 시그널로 진행하지 않는다.
+        throw codedError(mismatchCode, `${label} pid가 다른 프로세스로 재사용됐습니다.`);
+      }
       await sleep(pollMs);
     }
-    return !identityStillAlive(pid, startTime);
+    if (!processAlive(pid)) return true;
+    const current = processStartTime(pid);
+    if (current === null) {
+      throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
+    }
+    if (current !== startTime) {
+      throw codedError(mismatchCode, `${label} pid가 다른 프로세스로 재사용됐습니다.`);
+    }
+    return false;
   };
 
   const assertSameLoopOwner = (expected) => {
@@ -465,13 +497,27 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const stopExistingLoopForForce = async (owner) => {
     const expected = { pid: owner.pid, startTime: owner.startTime };
-    assertSameLoopOwner(expected);
-    sendSignal(expected.pid, 'SIGTERM', 'LOOP_SIGNAL_FAILED');
-    if (await waitForIdentityDeath(expected.pid, expected.startTime, forceStopMs)) return;
+    const signalLoopOwner = (signal) => {
+      assertSameLoopOwner(expected);
+      // lock 동일성 검사 직후 startTime을 한 번 더 맞춘 뒤 동기적으로 시그널한다.
+      if (!identityStillAlive(expected.pid, expected.startTime)) {
+        throw codedError('LOOP_IDENTITY_MISMATCH', '정지 대상 loop pid identity가 바뀌었습니다.');
+      }
+      return sendSignal(expected.pid, signal, 'LOOP_SIGNAL_FAILED');
+    };
+    signalLoopOwner('SIGTERM');
+    if (await waitForIdentityDeath(expected.pid, expected.startTime, forceStopMs, {
+      unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
+      mismatchCode: 'LOOP_IDENTITY_MISMATCH',
+      label: 'loop',
+    })) return;
     // KILL 직전에도 lock pid+startTime이 같은 소유자를 가리킬 때만 신호한다.
-    assertSameLoopOwner(expected);
-    sendSignal(expected.pid, 'SIGKILL', 'LOOP_SIGNAL_FAILED');
-    if (!await waitForIdentityDeath(expected.pid, expected.startTime, forceKillMs)) {
+    signalLoopOwner('SIGKILL');
+    if (!await waitForIdentityDeath(expected.pid, expected.startTime, forceKillMs, {
+      unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
+      mismatchCode: 'LOOP_IDENTITY_MISMATCH',
+      label: 'loop',
+    })) {
       throw codedError('LOOP_ALIVE', '기존 게임 루프 종료를 확인하지 못해 아카이브하지 않습니다.');
     }
   };
@@ -491,39 +537,84 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     await assertServerBinding(current);
   };
 
+  const signalSameForceServer = (expected, signal) => {
+    const current = readServerLock();
+    if (
+      current?.serverPid !== expected.serverPid
+      || current.port !== expected.port
+      || current.sessionToken !== expected.sessionToken
+    ) {
+      throw codedError('SERVER_IDENTITY_CHANGED', '시그널 직전 server lock이 바뀌었습니다.');
+    }
+    // listener/token 검증은 await를 포함하므로, 그 뒤 신호 직전에
+    // pid+startTime을 다시 맞춰 async 간격에서의 pid 재사용을 차단한다.
+    if (!identityStillAlive(expected.serverPid, expected.startTime)) {
+      throw codedError('SERVER_IDENTITY_MISMATCH', '정지 대상 server pid가 재사용됐습니다.');
+    }
+    return sendSignal(expected.serverPid, signal, 'SERVER_SIGNAL_FAILED');
+  };
+
+  const removeStoppedForceServerLock = (expected) => {
+    const current = readServerLock();
+    if (!current) return;
+    if (
+      current.serverPid !== expected.serverPid
+      || current.port !== expected.port
+      || current.sessionToken !== expected.sessionToken
+    ) {
+      throw codedError('SERVER_IDENTITY_CHANGED', '종료 확인 후 server lock이 바뀌었습니다.');
+    }
+    if (processAlive(current.serverPid)) {
+      if (expected.startTime !== undefined) {
+        const currentStart = processStartTime(current.serverPid);
+        if (currentStart === null) {
+          throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 후 server pid identity를 확인할 수 없습니다.');
+        }
+        if (currentStart !== expected.startTime) {
+          throw codedError('SERVER_IDENTITY_MISMATCH', '종료 후 server pid가 재사용되어 lock을 제거하지 않습니다.');
+        }
+      }
+      throw codedError('SERVER_ALIVE', '기존 게임 서버가 살아 있어 lock을 제거하지 않습니다.');
+    }
+    fs.unlinkSync(lockPath);
+  };
+
   const stopRereadServerForForce = async () => {
     // Loop 사망 확인 뒤 lock.json을 새로 읽는다. loop가 종료 직전 교체한 서버가
     // 있더라도, force 시작 전에 보았던 낡은 pid가 아니라 이 identity만 대상이다.
     const lock = readServerLock();
-    if (!lock || !processAlive(lock.serverPid)) return;
+    if (!lock) return;
+    if (!processAlive(lock.serverPid)) {
+      // 시그널 대상이 없는 stale lock도 정확한 기록을 다시 읽고 pid가
+      // 여전히 없을 때만 제거한다. init은 lock 부재 후에만 호출된다.
+      removeStoppedForceServerLock(lock);
+      return;
+    }
     const startTime = processStartTime(lock.serverPid);
     if (startTime === null) {
       throw codedError('SERVER_IDENTITY_UNAVAILABLE', 'force server startTime을 확인할 수 없습니다.');
     }
     const expected = { ...lock, startTime };
-    const confirmGoneWithoutReuse = () => {
-      if (!processAlive(expected.serverPid)) return;
-      const current = processStartTime(expected.serverPid);
-      if (current === null) {
-        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 뒤 server pid identity를 확인할 수 없습니다.');
-      }
-      if (current !== expected.startTime) {
-        throw codedError('SERVER_IDENTITY_MISMATCH', '종료 뒤 server pid가 재사용되어 아카이브하지 않습니다.');
-      }
-      throw codedError('SERVER_ALIVE', '기존 게임 서버 종료를 확인하지 못해 아카이브하지 않습니다.');
-    };
     await assertSameForceServer(expected);
-    sendSignal(expected.serverPid, 'SIGTERM', 'SERVER_SIGNAL_FAILED');
-    if (await waitForIdentityDeath(expected.serverPid, expected.startTime, forceStopMs)) {
-      confirmGoneWithoutReuse();
+    signalSameForceServer(expected, 'SIGTERM');
+    if (await waitForIdentityDeath(expected.serverPid, expected.startTime, forceStopMs, {
+      unavailableCode: 'SERVER_IDENTITY_UNAVAILABLE',
+      mismatchCode: 'SERVER_IDENTITY_MISMATCH',
+      label: 'server',
+    })) {
+      removeStoppedForceServerLock(expected);
       return;
     }
     await assertSameForceServer(expected);
-    sendSignal(expected.serverPid, 'SIGKILL', 'SERVER_SIGNAL_FAILED');
-    if (!await waitForIdentityDeath(expected.serverPid, expected.startTime, forceKillMs)) {
+    signalSameForceServer(expected, 'SIGKILL');
+    if (!await waitForIdentityDeath(expected.serverPid, expected.startTime, forceKillMs, {
+      unavailableCode: 'SERVER_IDENTITY_UNAVAILABLE',
+      mismatchCode: 'SERVER_IDENTITY_MISMATCH',
+      label: 'server',
+    })) {
       throw codedError('SERVER_ALIVE', '기존 게임 서버 종료를 확인하지 못해 아카이브하지 않습니다.');
     }
-    confirmGoneWithoutReuse();
+    removeStoppedForceServerLock(expected);
   };
 
   const ensureServer = async (sessionToken) => {
@@ -678,16 +769,35 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const stopDirectServerChild = async () => {
     const child = serverChild;
     if (!child) return;
+    const signalDirectChild = (signal) => {
+      if (child.exitCode !== null || child.signalCode !== null || !processAlive(child.pid)) return false;
+      const identity = serverIdentity;
+      if (!identity || identity.pid !== child.pid) {
+        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child의 시작 identity가 없습니다.');
+      }
+      const current = processStartTime(child.pid);
+      if (current === null) {
+        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child startTime을 시그널 직전 확인할 수 없습니다.');
+      }
+      if (current !== identity.startTime) {
+        throw codedError('SERVER_IDENTITY_MISMATCH', '직접 server child pid가 다른 프로세스로 재사용됐습니다.');
+      }
+      const delivered = child.kill(signal);
+      if (delivered === false && child.exitCode === null && child.signalCode === null && processAlive(child.pid)) {
+        throw codedError('SERVER_SIGNAL_FAILED', `직접 server child에 ${signal}을 전달하지 못했습니다.`);
+      }
+      return delivered;
+    };
     if (child.exitCode === null && child.signalCode === null) {
       let exited = false;
       const exit = new Promise((resolve) => child.once('exit', () => {
         exited = true;
         resolve();
       }));
-      child.kill('SIGTERM');
+      signalDirectChild('SIGTERM');
       await Promise.race([exit, sleep(1_000)]);
       if (!exited && child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGKILL');
+        signalDirectChild('SIGKILL');
         await Promise.race([exit, sleep(1_000)]);
       }
       if (!exited && child.exitCode === null && child.signalCode === null) {
@@ -1013,17 +1123,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       return waitOnlyForUser();
     }
 
-    const action = out.userAction;
-    if (!action || action.timeout) {
+    const submitted = out.userAction;
+    if (!submitted || submitted.timeout) {
       log('user-wait-timeout', { decisionId: next.decisionId });
       return waitOnlyForUser();
     }
-    if (action.decisionId !== next.decisionId) {
+    if (submitted.decisionId !== next.decisionId) {
       log('user-stale-decision', {
         expectedDecisionId: next.decisionId,
-        receivedDecisionId: action.decisionId ?? null,
+        receivedDecisionId: submitted.decisionId ?? null,
       });
       return waitOnlyForUser();
+    }
+
+    // Relay payload는 외부 입력이다. action/amount를 semantic argv로 검증한 뒤에만
+    // engine 인자를 만든다. 특히 `--force-default`가 user 경로에서 flag가 될 수 없다.
+    const action = validatedUserAction(submitted);
+    if (!action) {
+      if (stopRequested) return null;
+      return republishAfterRejectedUserAction('ILLEGAL_ACTION');
     }
 
     const stepArgs = ['step', 'user', action.action];
@@ -1131,6 +1249,11 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   } = {}) => {
     await acquireLoopLock({ mode: 'bootstrap', force });
     try {
+      if (force) {
+        // force는 loop 유무와 무관하게 sidecar의 pid+startTime+listener+token
+        // 사다리를 수행한다. 이 후 lock 부재가 증명된 상태에서만 init한다.
+        await stopRereadServerForForce();
+      }
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
@@ -1138,7 +1261,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (stack !== undefined) initArgs.push('--stack', String(stack));
       if (levelEvery !== undefined) initArgs.push('--level-every', String(levelEvery));
       if (blinds !== undefined) initArgs.push('--blinds', String(blinds));
-      if (force) initArgs.push('--force');
+      // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
+      // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
       const initialized = await runCli(initArgs);
       openLog();
       const startedAt = isoNow(now);

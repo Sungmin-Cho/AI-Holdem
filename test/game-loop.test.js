@@ -23,6 +23,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
 const SERVER = path.join(ROOT, 'server/server.js');
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+const REAL_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
@@ -1070,6 +1071,33 @@ test('adopted server startTime mismatch after capture is never signalled', { tim
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
+test('direct server child startTime mismatch is rechecked before the first stop signal', { timeout: 10_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0 },
+  });
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  const serverPid = loop.serverPid;
+  const marker = path.join(os.tmpdir(), `holdem-direct-server-reused-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(marker, 'reused');
+  t.after(async () => {
+    try { process.kill(serverPid, 'SIGKILL'); } catch { /* already dead */ }
+    await waitUntilDead(serverPid).catch(() => {});
+    try { fs.unlinkSync(marker); } catch { /* absent */ }
+  });
+
+  await withFakePs(
+    `if [ "$2" = "${serverPid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(
+      loop.requestStop(),
+      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
+    ),
+  );
+  assert.doesNotThrow(() => process.kill(serverPid, 0), 'identity mismatch server child was signalled');
+});
+
 test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
@@ -1512,6 +1540,43 @@ test('user timeouts repeat wait-only indefinitely and never force-default before
   assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'user-force-default'), false);
 });
 
+test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않고 같은 결정을 다시 기다린다', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
+  const running = startRun(loop);
+  let current = await waitForUserSnapshot(gameDir);
+  const decisionId = current.snapshot.view.legal.decisionId;
+  const invalids = [
+    { decisionId, action: '--force-default' },
+    { decisionId, action: 'raise', amount: '--force-default' },
+    { decisionId, action: 'raise', amount: 1.5 },
+    { decisionId, action: 'raise', amount: 0 },
+    { decisionId, action: 'fold', amount: 1 },
+  ];
+
+  for (const payload of invalids) {
+    const rejectedBefore = readLoopLog(gameDir)
+      .filter((entry) => entry.event === 'user-action-rejected').length;
+    assert.deepEqual(await postUserAction(current.lock, payload), { status: 200, body: { ok: true } });
+    await waitWhileRunning(running, () => (
+      readLoopLog(gameDir).filter((entry) => entry.event === 'user-action-rejected').length > rejectedBefore
+    ), `invalid user payload was not rejected: ${JSON.stringify(payload)}`);
+    assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0,
+      `invalid payload reached engine mutation: ${JSON.stringify(payload)}`);
+    current = await waitForUserSnapshot(gameDir);
+    assert.equal(current.snapshot.view.legal.decisionId, decisionId);
+  }
+
+  const valid = preferredUserAction(current.snapshot.view.legal);
+  await postUserAction(current.lock, valid);
+  const applied = await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir, (entry) => entry.decisionId === decisionId),
+    'valid user action was not accepted after invalid payloads',
+  );
+  assert.equal(applied.action, valid.action);
+  await stopRun(loop, running);
+});
+
 test('stale user decision is discarded and the same current decision is re-waited', { timeout: 10_000 }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
   const running = startRun(loop);
@@ -1712,6 +1777,11 @@ test('D9 never restarts the server while stopping and preserves the failed publi
     () => waitForUserSnapshot(gameDir),
     'resume did not recover the pending publish and user decision',
   );
+  await waitWhileRunning(
+    resumedRun,
+    () => readLoopLog(gameDir).some((entry) => entry.event === 'user-wait-timeout'),
+    'resume entry publish had not settled into the user wait loop',
+  );
   await stopRun(resumed, resumedRun);
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
 });
@@ -1812,6 +1882,59 @@ test('--force stops loop, rereads replacement server identity, then stops that s
   assert.equal(fs.existsSync(path.join(gameDir, bootstrapped.archivedTo, 'must-archive.txt')), true);
 });
 
+test('--force with no live loop rejects a forged unrelated server pid before any signal or archive', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const initialized = await initGame(gameDir);
+  await execFileAsync(process.execPath, [CLI, 'step', '--new-hand', '--game-dir', gameDir], {
+    encoding: 'utf8', timeout: 5_000,
+  });
+  fs.writeFileSync(path.join(gameDir, 'must-survive-forged-force.txt'), 'old-game');
+  const external = await startExternalServer(gameDir, initialized.sessionToken);
+  const signalLog = path.join(os.tmpdir(), `holdem-forged-force-${process.pid}-${Date.now()}.log`);
+  const unrelated = spawn(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs';
+    process.once('SIGTERM', () => {
+      fs.appendFileSync(${JSON.stringify(signalLog)}, 'SIGTERM\\n');
+      process.exit(0);
+    });
+    process.stdout.write('ready\\n');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'ignore'] });
+  assert.equal(await readLine(unrelated), 'ready');
+
+  const lockPath = path.join(gameDir, 'lock.json');
+  fs.writeFileSync(lockPath, JSON.stringify({
+    ...external.lock,
+    serverPid: unrelated.pid,
+  }));
+  const before = snapshotTree(gameDir);
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async (...args) => {
+      resolverCalls += 1;
+      return resolverFor(makeAdapter())(...args);
+    },
+    opts: { port: 0 },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(unrelated);
+    await terminateIfAlive(external.child);
+    try { fs.unlinkSync(signalLog); } catch { /* no signal */ }
+  });
+
+  await assert.rejects(
+    loop.bootstrap({ ai: 1, force: true }),
+    (error) => error.code === 'SERVER_LISTENER_MISMATCH',
+  );
+  assert.equal(resolverCalls, 0);
+  assert.equal(fs.existsSync(signalLog), false, 'forged unrelated pid received a server signal');
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.deepEqual(snapshotTree(gameDir), before);
+});
+
 test('--force leaves the game byte-for-byte unchanged when loop termination is unconfirmed', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   await initGame(gameDir);
@@ -1871,6 +1994,113 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
   assert.equal(fs.existsSync(signalLog), false);
   assert.doesNotThrow(() => process.kill(holder.pid, 0));
   assert.notEqual(processStartTime(holder.pid), 'Mon Jan  1 00:00:00 2001');
+});
+
+test('--force treats loop pid reuse after TERM as an identity error, not death, and blocks archive plus KILL', { timeout: 10_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  await initGame(gameDir);
+  await execFileAsync(process.execPath, [CLI, 'step', '--new-hand', '--game-dir', gameDir], {
+    encoding: 'utf8', timeout: 5_000,
+  });
+  fs.writeFileSync(path.join(gameDir, 'must-survive-loop-reuse.txt'), 'old-game');
+  const holder = await startOwnedLoopHolder(gameDir, { ignoreTerm: true });
+  const marker = path.join(os.tmpdir(), `holdem-loop-reused-${process.pid}-${Date.now()}`);
+  const before = snapshotTree(gameDir);
+  const signals = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: {
+      port: 0,
+      forceStopMs: 100,
+      pollMs: 10,
+      signalProcess: (pid, signal) => {
+        signals.push([pid, signal]);
+        if (pid === holder.pid && signal === 'SIGTERM') {
+          fs.writeFileSync(marker, 'term-sent');
+          return;
+        }
+        process.kill(pid, signal);
+      },
+    },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+    try { fs.unlinkSync(marker); } catch { /* absent */ }
+  });
+
+  await withFakePs(
+    `if [ "$2" = "${holder.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(
+      loop.bootstrap({ ai: 1, force: true }),
+      (error) => error.code === 'LOOP_IDENTITY_MISMATCH',
+    ),
+  );
+  assert.deepEqual(signals, [[holder.pid, 'SIGTERM']], 'pid reuse 후 추가 시그널을 보냈다');
+  assert.doesNotThrow(() => process.kill(holder.pid, 0));
+  assert.deepEqual(snapshotTree(gameDir), before);
+});
+
+test('--force rechecks server startTime immediately after async binding and before the first signal', { timeout: 15_000, concurrency: false }, async (t) => {
+  if (!REAL_LSOF) {
+    t.skip('lsof is required for authoritative listener binding');
+    return;
+  }
+  const gameDir = tmpGame();
+  const initialized = await initGame(gameDir);
+  await execFileAsync(process.execPath, [CLI, 'step', '--new-hand', '--game-dir', gameDir], {
+    encoding: 'utf8', timeout: 5_000,
+  });
+  fs.writeFileSync(path.join(gameDir, 'must-survive-adjacency.txt'), 'old-game');
+  const external = await startExternalServer(gameDir, initialized.sessionToken);
+  const holder = await startOwnedLoopHolder(gameDir);
+  const marker = path.join(os.tmpdir(), `holdem-server-adjacency-${process.pid}-${Date.now()}`);
+  const lsofDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-lsof-'));
+  const lsofPath = path.join(lsofDir, 'lsof');
+  fs.writeFileSync(lsofPath, `#!/bin/sh\ntouch "${marker}"\nexec ${REAL_LSOF} "$@"\n`);
+  fs.chmodSync(lsofPath, 0o755);
+  const beforeState = fs.readFileSync(path.join(gameDir, 'state.json'));
+  const beforeArchives = fs.existsSync(path.join(gameDir, 'archive'))
+    ? fs.readdirSync(path.join(gameDir, 'archive')).sort()
+    : [];
+  const signals = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: {
+      port: 0,
+      lsofPath,
+      forceStopMs: 100,
+      signalProcess: (pid, signal) => {
+        signals.push([pid, signal]);
+        if (pid === external.child.pid) return;
+        process.kill(pid, signal);
+      },
+    },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+    await terminateIfAlive(external.child);
+    try { fs.unlinkSync(marker); } catch { /* absent */ }
+  });
+
+  await withFakePs(
+    `if [ "$2" = "${external.child.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(
+      loop.bootstrap({ ai: 1, force: true }),
+      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
+    ),
+  );
+  assert.deepEqual(signals, [[holder.pid, 'SIGTERM']], 'binding 후 재사용된 server pid에 시그널을 보냈다');
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), beforeState);
+  assert.equal(fs.readFileSync(path.join(gameDir, 'must-survive-adjacency.txt'), 'utf8'), 'old-game');
+  assert.deepEqual(
+    fs.existsSync(path.join(gameDir, 'archive')) ? fs.readdirSync(path.join(gameDir, 'archive')).sort() : [],
+    beforeArchives,
+  );
 });
 
 test('--force aborts before archive when the stopped server pid is observed as reused', { timeout: 10_000, concurrency: false }, async (t) => {
