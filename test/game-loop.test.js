@@ -26,6 +26,24 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+function snapshotTree(root) {
+  const entries = {};
+  const visit = (dir, prefix = '') => {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${item.name}` : item.name;
+      const full = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        entries[`${rel}/`] = null;
+        visit(full, rel);
+      } else {
+        entries[rel] = fs.readFileSync(full).toString('base64');
+      }
+    }
+  };
+  visit(root);
+  return entries;
+}
+
 async function initGame(gameDir, extra = []) {
   const { stdout } = await execFileAsync(process.execPath, [
     CLI, 'init', '--ai', '2', ...extra, '--game-dir', gameDir,
@@ -593,6 +611,56 @@ test('present invalid or falsy lock.json fails closed without spawn, adoption, o
       );
       assert.equal(snapshot.ok, true, 'preserved external server stopped responding');
       assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    });
+  }
+});
+
+test('bootstrap validates present invalid lock.json before init, archive, spawn, or signal', { timeout: 20_000 }, async (t) => {
+  const cases = [
+    ['malformed-json', '{'],
+    ['null', 'null'],
+    ['false', 'false'],
+    ['zero', '0'],
+    ['empty-string', '""'],
+    ['array', '[]'],
+    ['missing-pid', (lock) => JSON.stringify({ port: lock.port, sessionToken: lock.sessionToken })],
+    ['missing-port', (lock) => JSON.stringify({ serverPid: lock.serverPid, sessionToken: lock.sessionToken })],
+    ['missing-token', (lock) => JSON.stringify({ serverPid: lock.serverPid, port: lock.port })],
+  ];
+
+  for (const [label, rawOrBuilder] of cases) {
+    await t.test(label, async (st) => {
+      const gameDir = tmpGame();
+      const init = await initGame(gameDir);
+      fs.writeFileSync(path.join(gameDir, 'must-survive-bootstrap.txt'), 'original-game');
+      fs.mkdirSync(path.join(gameDir, 'archive', 'keep-existing'), { recursive: true });
+      fs.writeFileSync(path.join(gameDir, 'archive', 'keep-existing', 'receipt.txt'), 'keep');
+      const external = await startExternalServer(gameDir, init.sessionToken);
+      const raw = typeof rawOrBuilder === 'function' ? rawOrBuilder(external.lock) : rawOrBuilder;
+      fs.writeFileSync(path.join(gameDir, 'lock.json'), raw);
+      const before = snapshotTree(gameDir);
+      let resolverCalls = 0;
+      const loop = createGameLoop({
+        gameDir,
+        resolver: async (...args) => {
+          resolverCalls += 1;
+          return resolverFor(makeAdapter())(...args);
+        },
+        opts: { port: 0 },
+      });
+      st.after(async () => {
+        await loop.requestStop().catch(() => {});
+        await terminateIfAlive(external.child);
+      });
+
+      await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'BAD_SERVER_LOCK');
+      assert.equal(resolverCalls, 0, 'resolver ran after a present-invalid pre-init lock');
+      assert.deepEqual(snapshotTree(gameDir), before, 'init/archive/spawn changed the game tree');
+      assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+      const snapshot = await fetch(
+        `http://127.0.0.1:${external.lock.port}/api/snapshot?token=${init.sessionToken}`,
+      );
+      assert.equal(snapshot.ok, true, 'preserved external server stopped responding');
     });
   }
 });

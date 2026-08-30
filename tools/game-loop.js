@@ -625,6 +625,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   } = {}) => {
     acquireLoopLock({ mode: 'bootstrap', force });
     try {
+      // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
+      // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
+      readServerLock();
       const initArgs = ['init', '--ai', String(ai)];
       if (stack !== undefined) initArgs.push('--stack', String(stack));
       if (levelEvery !== undefined) initArgs.push('--level-every', String(levelEvery));
