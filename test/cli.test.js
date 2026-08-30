@@ -860,9 +860,13 @@ test('resume-check: unknown/mismatch/malformed loop identity는 loopPidAlive fal
     const dir = tmpGame();
     initGame(dir, ['--ai', '2']);
     const holder = spawnLockHolder(dir);
-    await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
-    await terminateChild(holder);
-    assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
+    try {
+      await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
+      await terminateChild(holder);
+      assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
+    } finally {
+      await terminateChild(holder);
+    }
   });
 
   for (const [label, record] of [
