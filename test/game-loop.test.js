@@ -858,6 +858,47 @@ test('playing resume seeds the checked hand so its archive is checked exactly on
   assert.equal(checks[0].handNo, 1);
 });
 
+test('resumed archivePending for the pre-checked hand is suppressed without a second resume-check', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const original = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await original.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  const active = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  assert.equal(active.next.toAct, 'p1');
+  await original.requestStop();
+  fs.rmSync(path.join(gameDir, 'lock.json'), { force: true });
+
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => {
+      fs.mkdirSync(path.join(gameDir, 'hands', 'hand-0001.json'), { recursive: true });
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+
+  await runUntilUserStub(resumed);
+
+  const checks = readLoopLog(gameDir).filter((entry) => (
+    entry.event === 'resume-archive-check' || entry.event === 'archive-resume-check'
+  ));
+  assert.deepEqual(checks.map((entry) => [entry.event, entry.handNo]), [
+    ['resume-archive-check', 1],
+  ]);
+  assert.equal(fs.statSync(path.join(gameDir, 'hands', 'hand-0001.json')).isDirectory(), true);
+});
+
 test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 }, async (t) => {
   const adapter = makeAdapter({
     onDecide: async ({ message }) => ({
