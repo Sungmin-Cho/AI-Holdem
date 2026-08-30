@@ -17,6 +17,7 @@ import {
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
+import { gameEpochOf } from '../publish-contract.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -322,6 +323,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const writeLoopState = (patch) => {
     const current = readLoopState() ?? {};
     const next = { ...current, ...patch };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete next[key];
+    }
     writeJsonAtomic(loopStatePath, next);
     return next;
   };
@@ -825,13 +829,42 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
-  const warmPlayers = async () => {
+  const preparePlayerSessions = async ({ reuseExisting = false } = {}) => {
     if (!playerAdapter) throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
     const players = readJsonOptional(playersPath, 'PLAYERS');
     if (!Array.isArray(players)) throw codedError('BAD_PLAYERS', 'players.json이 배열이 아닙니다.');
     const aiPlayers = players.filter((player) => player.playerId !== 'user');
     const createdAt = readLoopState()?.startedAt ?? isoNow(now);
+    let existing = {};
+    if (reuseExisting) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+      } catch {
+        // 파일 전체가 없거나 손상돼도 게임 identity와는 독립이다. 해당 entry들을 아래에서
+        // 페르소나 카드로 다시 만들고 repaired map을 원자 기록한다.
+        existing = {};
+      }
+    }
     const settled = await Promise.allSettled(aiPlayers.map(async (persona) => {
+      const prior = existing[persona.playerId];
+      if (
+        reuseExisting
+        && prior
+        && typeof prior === 'object'
+        && !Array.isArray(prior)
+        && prior.runtime === playerAdapter.kind
+        && typeof prior.sessionId === 'string'
+        && prior.sessionId !== ''
+        && typeof prior.createdAt === 'string'
+        && prior.createdAt !== ''
+      ) {
+        return [persona.playerId, {
+          runtime: prior.runtime,
+          sessionId: prior.sessionId,
+          createdAt: prior.createdAt,
+        }];
+      }
       const prompt = buildPlayerPrompt({ persona });
       const result = await playerAdapter.warmup({ playerId: persona.playerId, prompt });
       if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
@@ -851,6 +884,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     playerSessions = sessions;
     return sessions;
   };
+  const warmPlayers = () => preparePlayerSessions({ reuseExisting: false });
+  const restorePlayers = () => preparePlayerSessions({ reuseExisting: true });
 
   const stopDirectServerChild = async () => {
     const child = serverChild;
@@ -1430,7 +1465,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         handNo: 0,
         port: null,
         sessionToken: initialized.sessionToken,
-        gameEpoch: initialized.sessionToken,
+        gameEpoch: gameEpochOf(initialized.sessionToken),
         ownerSessionId: randomUUID(),
         lastPublishId: null,
         playerRuntime: null,
@@ -1478,9 +1513,17 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       return writeLoopState({
         notices,
         upperRuntime: upperAdapter?.kind ?? null,
+        ...(existingState.halt?.code === 'REVIEW_FAILED' ? { halt: undefined } : {}),
       });
     }
-    if (phase === 'done') return existingState;
+    if (phase === 'done') {
+      const liveLock = readServerLock();
+      if (liveLock && processAlive(liveLock.serverPid)) {
+        const port = await ensureServer(engineState.sessionToken, { port: liveLock.port });
+        return writeLoopState({ port });
+      }
+      return existingState;
+    }
     if (phase !== 'bootstrap' && phase !== 'playing') {
       throw codedError('BAD_LOOP_PHASE', `알 수 없는 loop phase: ${phase}`);
     }
@@ -1496,21 +1539,40 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       notices,
       playerRuntime: playerAdapter?.kind ?? null,
       upperRuntime: upperAdapter?.kind ?? null,
+      ...(existingState.halt?.code === 'NO_PLAYER_RUNTIME' && playerAdapter ? { halt: undefined } : {}),
     });
     if (!playerAdapter) await haltNoPlayer(notices);
-    const port = await ensureServer(engineState.sessionToken);
+    const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
+      ? existingState.port
+      : requestedPort;
+    const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
-    await warmPlayers();
+    await restorePlayers();
     return writeLoopState({ phase: 'playing' });
   };
 
   const resume = async () => {
     await acquireLoopLock({ mode: 'resume' });
+    let lifecycleStarted = false;
     try {
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
       if (!engineState) throw codedError('NO_GAME', 'resume할 engine 상태가 없습니다.');
+      if (typeof engineState.sessionToken !== 'string' || engineState.sessionToken === '') {
+        throw codedError('BAD_ENGINE_IDENTITY', 'resume할 engine sessionToken이 없습니다.');
+      }
+      const canonicalEpoch = gameEpochOf(engineState.sessionToken);
+      if (state && (
+        state.sessionToken !== engineState.sessionToken
+        || state.gameEpoch !== canonicalEpoch
+      )) {
+        throw codedError(
+          'LOOP_STATE_IDENTITY_MISMATCH',
+          'loop-state sessionToken/gameEpoch가 engine identity와 일치하지 않습니다.',
+        );
+      }
       openLog();
+      lifecycleStarted = true;
 
       const ownerSessionId = randomUUID();
       if (!state) {
@@ -1520,7 +1582,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           handNo: engineState.handNo ?? 0,
           port: null,
           sessionToken: engineState.sessionToken,
-          gameEpoch: engineState.sessionToken,
+          gameEpoch: canonicalEpoch,
           ownerSessionId,
           stopping: false,
           lastPublishId: null,
@@ -1544,7 +1606,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       log('resume-ready', { phase: resumed.phase });
       return resumed;
     } catch (error) {
-      await requestStop();
+      if (lifecycleStarted) await requestStop();
+      else releaseLock();
       throw error;
     }
   };
@@ -1552,7 +1615,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const run = async () => {
     let state = readLoopState();
     if (!state) throw codedError('NOT_BOOTSTRAPPED', 'bootstrap 또는 resume이 필요합니다.');
-    if (state.halt?.code) throw codedError(state.halt.code, state.halt.message);
+    const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
+    if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
     if (FINAL_PHASES.has(state.phase)) {
       throw codedError('FINALIZATION_TASK_7', 'finalization은 Task 7에서 구현됩니다.');
     }
@@ -1585,9 +1649,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         writeLoopState({ halt: { code: 'repair_failed', message } });
         throw codedError('repair_failed', message);
       }
-      const synchronized = await runCli(['step']);
-      out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
+      if (readLoopState()?.halt?.code === 'repair_failed') writeLoopState({ halt: undefined });
       resumeEntryPending = false;
+      if (engine.hand) {
+        out = await publishEnvelope(current, ['--view-only', ...waitFlags()]);
+      } else {
+        out = await runAtomicStepPublish(['step', '--new-hand'], waitFlags());
+      }
     } else if (engine.hand) {
       const synchronized = await runCli(['step']);
       out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);

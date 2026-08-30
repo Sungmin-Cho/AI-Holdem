@@ -528,6 +528,27 @@ function readLoopLog(gameDir) {
     .map((line) => JSON.parse(line));
 }
 
+function writeLoopStateFixture(gameDir, sessionToken, overrides = {}) {
+  const state = {
+    phase: 'playing',
+    handNo: 0,
+    port: null,
+    sessionToken,
+    gameEpoch: gameEpochOf(sessionToken),
+    ownerSessionId: 'old-owner',
+    stopping: false,
+    lastPublishId: null,
+    playerRuntime: 'fake',
+    upperRuntime: 'fake',
+    startedAt: '2026-08-30T00:00:00.000Z',
+    notices: [],
+    metrics: [],
+    ...overrides,
+  };
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify(state));
+  return state;
+}
+
 async function setupAiFirst(t, {
   adapter,
   ai = 1,
@@ -605,7 +626,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     const initial = readJson(path.join(gameDir, 'loop-state.json'));
     assert.equal(initial.phase, 'bootstrap');
     assert.match(initial.sessionToken, /^[0-9a-f]{32}$/);
-    assert.equal(initial.gameEpoch, initial.sessionToken);
+    assert.equal(initial.gameEpoch, gameEpochOf(initial.sessionToken));
     assert.match(initial.ownerSessionId, /^[0-9a-f-]{36}$/);
     assert.deepEqual(initial.notices, []);
     assert.deepEqual(initial.metrics, []);
@@ -836,6 +857,46 @@ test('IDENTITY_UNAVAILABLE is surfaced distinctly and leaves no partial lock', {
   }
 });
 
+test('resume rejects missing or mismatched loop-state identity before resolver, server, or log work', { timeout: 20_000 }, async (t) => {
+  const cases = [
+    ['missing-sessionToken', (state) => { delete state.sessionToken; }],
+    ['mismatched-sessionToken', (state) => { state.sessionToken = 'different-session-token'; }],
+    ['missing-gameEpoch', (state) => { delete state.gameEpoch; }],
+    ['noncanonical-gameEpoch', (state, token) => { state.gameEpoch = token; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async (st) => {
+      const gameDir = tmpGame();
+      const init = await initGame(gameDir);
+      const state = writeLoopStateFixture(gameDir, init.sessionToken);
+      mutate(state, init.sessionToken);
+      fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify(state));
+      const engineBefore = fs.readFileSync(path.join(gameDir, 'state.json'));
+      let resolverCalls = 0;
+      const loop = createGameLoop({
+        gameDir,
+        resolver: async () => {
+          resolverCalls += 1;
+          return resolverFor(makeAdapter())();
+        },
+        opts: { port: 0 },
+      });
+      st.after(() => loop.requestStop().catch(() => {}));
+
+      await assert.rejects(
+        loop.resume(),
+        (error) => error.code === 'LOOP_STATE_IDENTITY_MISMATCH',
+      );
+
+      assert.equal(resolverCalls, 0);
+      assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false);
+      assert.equal(fs.existsSync(path.join(gameDir, 'loop.log')), false);
+      assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBefore);
+      assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    });
+  }
+});
+
 test('resume from bootstrap never calls init, preserves engine files, and completes server plus warmup', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
@@ -845,7 +906,7 @@ test('resume from bootstrap never calls init, preserves engine files, and comple
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
     phase: 'bootstrap',
     sessionToken: init.sessionToken,
-    gameEpoch: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: '00000000-0000-4000-8000-000000000000',
     startedAt: '2026-08-30T00:00:00.000Z',
     notices: [],
@@ -866,13 +927,123 @@ test('resume from bootstrap never calls init, preserves engine files, and comple
   assert.equal(state.port > 0, true);
 });
 
+test('playing resume reuses every valid matching player session without warmup', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  putAiFirst(gameDir);
+  const state = writeLoopStateFixture(gameDir, init.sessionToken);
+  const sessions = {
+    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+    p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: '2026-08-29T01:00:00.000Z' },
+  };
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify(sessions));
+  const adapter = makeAdapter();
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(adapter.calls.length, 0, 'valid sessions were unnecessarily recreated');
+  assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), sessions);
+  await runUntilUserBoundary(loop, gameDir);
+  assert.equal(adapter.decideCalls[0].sessionId, 'persisted-p1');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).startedAt, state.startedAt);
+});
+
+test('playing resume recreates only missing, corrupt, or runtime-mismatched session entries', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  const state = writeLoopStateFixture(gameDir, init.sessionToken);
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+    p2: { runtime: 'other-runtime', sessionId: '', createdAt: null },
+    ghost: { runtime: 'fake', sessionId: 'ghost', createdAt: state.startedAt },
+  }));
+  const adapter = makeAdapter();
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
+  t.after(() => loop.requestStop());
+
+  await loop.resume();
+
+  assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p2']);
+  assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), {
+    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+    p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt },
+  });
+});
+
+test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const original = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await original.bootstrap({ ai: 1, stack: 100 });
+  const persistedPort = readJson(path.join(gameDir, 'loop-state.json')).port;
+  await original.requestStop();
+  fs.rmSync(path.join(gameDir, 'lock.json'), { force: true });
+  assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false);
+
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).port, persistedPort);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).port, persistedPort);
+});
+
+test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume boundary', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'bootstrap',
+    halt: { code: 'NO_PLAYER_RUNTIME', message: 'old runtime failure' },
+  });
+  const adapter = makeAdapter();
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(Object.hasOwn(resumed, 'halt'), false);
+  await runUntilUserBoundary(loop, gameDir);
+});
+
+test('repair_failed halt clears only after resume-check reports a successful repair boundary', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    halt: { code: 'repair_failed', message: 'old archive failure' },
+  });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'repair_failed resume did not continue');
+  await stopRun(loop, running);
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(Object.hasOwn(state, 'halt'), false);
+  assert.equal(readLoopLog(gameDir).some((entry) => (
+    entry.event === 'resume-archive-check' && entry.archiveStatus !== 'repair_failed'
+  )), true);
+});
+
 test('resume adopts a healthy external server and requestStop identity-confirms its death', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
     phase: 'bootstrap',
     sessionToken: init.sessionToken,
-    gameEpoch: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner',
     startedAt: '2026-08-30T00:00:00.000Z',
     notices: [],
@@ -899,7 +1070,7 @@ test('requestStop fails closed without signalling an adopted server when identit
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
     phase: 'bootstrap',
     sessionToken: init.sessionToken,
-    gameEpoch: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner',
     startedAt: '2026-08-30T00:00:00.000Z',
     notices: [],
@@ -924,7 +1095,7 @@ test('forged lock cannot bind an unrelated live pid to another healthy authentic
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -949,7 +1120,7 @@ test('listener ownership without token-authenticated snapshot is never adopted',
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const fake = await startHealthOnlyServer();
@@ -971,7 +1142,7 @@ test('snapshot endpoint that accepts a fresh wrong token is not treated as authe
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const fake = await startHealthOnlyServer({ acceptsEveryToken: true });
@@ -995,7 +1166,7 @@ test('missing or timed-out listener verifier fails closed without adopting or si
       const gameDir = tmpGame();
       const init = await initGame(gameDir);
       fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
         ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
       }));
       const external = await startExternalServer(gameDir, init.sessionToken);
@@ -1037,7 +1208,7 @@ test('present invalid or falsy lock.json fails closed without spawn, adoption, o
       const gameDir = tmpGame();
       const init = await initGame(gameDir);
       fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
         ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
       }));
       const external = await startExternalServer(gameDir, init.sessionToken);
@@ -1116,7 +1287,7 @@ test('adopted server startTime mismatch after capture is never signalled', { tim
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -1163,7 +1334,7 @@ test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 1
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
-    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const external = await startExternalServer(gameDir, init.sessionToken, { ignoreTerm: true });
@@ -1214,8 +1385,31 @@ test('resume derives a missing loop state from engine state, but an entirely abs
   const derived = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(derived.phase, 'playing');
   assert.equal(derived.sessionToken, init.sessionToken);
-  assert.equal(derived.gameEpoch, init.sessionToken);
+  assert.equal(derived.gameEpoch, gameEpochOf(init.sessionToken));
   assert.equal(adapter.calls.length, 2);
+});
+
+test('idle playing resume starts the next hand without an unnecessary view-only publish', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'init', '--ai', '1', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'idle resume did not start a hand');
+  await stopRun(loop, running);
+
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(snapshot.publishId, 1, 'idle resume emitted a view-only publish before new-hand');
+  assert.equal(snapshot.view.handNo, 1);
 });
 
 test('playing resume seeds the checked hand so its archive is checked exactly once', { timeout: 10_000 }, async (t) => {
@@ -2529,7 +2723,7 @@ test('finalizing resume resolves upper-only with a live canary and exposes an ex
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
     phase: 'finalizing',
     sessionToken: init.sessionToken,
-    gameEpoch: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
     ownerSessionId: 'old-owner',
     startedAt: '2026-08-30T00:00:00.000Z',
     notices: [],
@@ -2554,6 +2748,64 @@ test('finalizing resume resolves upper-only with a live canary and exposes an ex
   assert.equal(fs.existsSync(canaryAbsPath), false);
   assert.equal(warmups, 0, 'finalization must not warm player sessions');
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_TASK_7');
+});
+
+test('done resume adopts a live server so normal cleanup stops it without spawning or resolving runtimes', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.gameOver = true;
+  engine.result = 'lose';
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'done' });
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => { resolverCalls += 1; return { player: null, upper: null, notices: [] }; },
+    opts: { port: 0 },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(external.child);
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.phase, 'done');
+  assert.equal(resolverCalls, 0);
+  assert.equal(loop.serverPid, external.child.pid, 'done resume did not adopt the live server');
+  await loop.requestStop();
+  await waitUntilDead(external.child.pid);
+});
+
+test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and reaches the Task 7 stub', async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'finalizing',
+    halt: { code: 'REVIEW_FAILED', message: 'old review runtime failure' },
+    notices: ['prior notice'],
+    upperRuntime: 'old-upper',
+  });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper: null, notices: ['upper unavailable'] };
+    },
+  });
+  t.after(() => loop.requestStop());
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.phase, 'finalizing');
+  assert.equal(resumed.upperRuntime, null);
+  assert.deepEqual(resumed.notices, ['prior notice', 'upper unavailable']);
+  assert.equal(Object.hasOwn(resumed, 'halt'), false);
+  assert.notEqual(resumed.ownerSessionId, 'old-owner');
   await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_TASK_7');
 });
 
