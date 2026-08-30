@@ -85,14 +85,18 @@ function readPidFile(dir) {
   try {
     const st = fs.fstatSync(fd, { bigint: true });
     const lines = fs.readFileSync(fd, 'utf8').split('\n');
-    const parsed = Number(lines[0].trim());
-    const startTimeLine = lines.length > 1 ? lines[1].trim() : '';
-    return {
-      dev: st.dev,
-      ino: st.ino,
-      pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null,
-      startTime: startTimeLine || null,
-    };
+    const base = { dev: st.dev, ino: st.ino };
+    if (lines.length === 1) {
+      const parsed = Number(lines[0].trim());
+      return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: null };
+    }
+    if (lines.length === 2 && lines[0].trim() !== '' && lines[1].trim() !== '') {
+      const parsed = Number(lines[0].trim());
+      return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: lines[1].trim() };
+    }
+    // 3줄 이상이거나 2줄이지만 빈 줄이 섞인 기록은 legacy도 owned도 아닌 malformed —
+    // pid-less 취급(mtime staleness 경로)으로 fail-closed, 절대 owned·alive로 해석하지 않는다.
+    return { ...base, pid: null, startTime: null };
   } finally {
     fs.closeSync(fd);
   }
@@ -132,13 +136,25 @@ function mutexIdentity(dir) {
   }
 }
 
+// pid+startTime identity의 3상태 판정. read-time에 ps가 실패하면(현재 startTime을
+// 알 수 없음) 생존도 사망도 증명되지 않은 'unknown'이다 — 이 경우를 죽음과
+// 같이 취급하면(예: null !== recordedStartTime) 살아 있는 소유자가 회수되는
+// fail-open이 생긴다. isIdentityStale·readOwnedLock 양쪽 모두 'unknown'을
+// 'dead'가 아닌 별도 상태로 다뤄야 한다.
+function ownedIdentityStatus(pid, recordedStartTime) {
+  if (!isProcessAlive(pid)) return 'dead';
+  const current = processStartTime(pid);
+  if (current === null) return 'unknown';
+  return current === recordedStartTime ? 'alive' : 'dead';
+}
+
 function isIdentityStale(id) {
   if (id.pid !== null) {
     // owned 락(2줄 기록)은 startTime이 남아 있다: pid 생존만으로는 재사용된
     // pid를 원래 소유자로 오판할 수 있으므로 pid+startTime 일치까지 재검증한다.
     // 기존 1줄 기록(startTime 없음)의 판정은 이전과 동일하게 pid 생존만 본다.
     const startTime = id.pidFile ? id.pidFile.startTime : null;
-    if (startTime !== null) return !(isProcessAlive(id.pid) && processStartTime(id.pid) === startTime);
+    if (startTime !== null) return ownedIdentityStatus(id.pid, startTime) === 'dead';
     return !isProcessAlive(id.pid);
   }
   return Date.now() - id.mtimeMs >= MUTEX_STALE_MS;
@@ -351,18 +367,20 @@ export function processStartTime(pid) {
 
 /**
  * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락이
- * 없으면 null. `alive`는 시그널·회수 가능 여부를 가르는 유일한 근거이며,
- * pid 생존만이 아니라 기록된 startTime과의 일치까지 요구한다 — pid가 죽은
- * 뒤 재사용되어도 다른 프로세스를 원래 소유자로 오인해 시그널하지 않는다.
+ * 없거나, 1줄짜리 legacy 기록이거나, malformed(3줄 이상 등)면 owned 기록이
+ * 아니므로 null. `alive`는 시그널·회수 가능 여부를 가르는 유일한 근거이며,
+ * `ownedIdentityStatus`가 'alive'로 **긍정 증명**했을 때만 true다 — read-time에
+ * ps가 실패해 현재 startTime을 알 수 없는('unknown') 경우도 false로 떨어져,
+ * 증명되지 않은 identity로는 절대 시그널하지 않는다(fail-closed).
  */
 export function readOwnedLock(gameDir, name) {
   const pidFile = readPidFile(path.join(gameDir, name));
-  if (!pidFile || pidFile.pid === null) return null;
-  const alive = isProcessAlive(pidFile.pid) && processStartTime(pidFile.pid) === pidFile.startTime;
+  if (!pidFile || pidFile.pid === null || pidFile.startTime === null) return null;
+  const alive = ownedIdentityStatus(pidFile.pid, pidFile.startTime) === 'alive';
   return { pid: pidFile.pid, startTime: pidFile.startTime, alive };
 }
 
-function tryCreateOwnedLock(dir) {
+function tryCreateOwnedLock(dir, startTime) {
   try {
     fs.mkdirSync(dir);
   } catch (error) {
@@ -370,7 +388,6 @@ function tryCreateOwnedLock(dir) {
     throw error;
   }
   const mine = inodeKey(dir);
-  const startTime = processStartTime(process.pid);
   try {
     fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime}`);
   } catch (error) {
@@ -388,16 +405,28 @@ function tryCreateOwnedLock(dir) {
  * `alive` 판정 하나로만 결정된다 — 살아 있는 소유자는 시간이 얼마나 지나도
  * 회수되지 않는다. 죽은 것으로 판정되면 기존 reclaim 경로(inode 검증
  * unlink+rmdir)를 그대로 재사용해 회수하고 한 번만 재시도한다.
+ *
+ * 자기 자신의 startTime을 mkdir보다 먼저 확인한다: ps 실패로 null이면 identity를
+ * 세울 수 없으므로 디렉터리·pid 파일을 아예 만들지 않고 실패한다. `LOCKED`와
+ * 혼동되지 않도록 별도 코드(`IDENTITY_UNAVAILABLE`)로 던진다 — 상대측 회수 로직이
+ * "내가 owner인데 락을 못 세웠다"를 "누가 락을 쥐고 있다"와 구별할 수 있어야 한다.
  */
 export function acquireOwnedLock(gameDir, name) {
   const dir = path.join(gameDir, name);
-  let handle = tryCreateOwnedLock(dir);
+  const startTime = processStartTime(process.pid);
+  if (startTime === null) {
+    const error = new Error('IDENTITY_UNAVAILABLE');
+    error.code = 'IDENTITY_UNAVAILABLE';
+    throw error;
+  }
+
+  let handle = tryCreateOwnedLock(dir, startTime);
   if (handle) return handle;
 
   const owner = readOwnedLock(gameDir, name);
   if (owner && owner.alive) throwLocked();
   if (!reclaimMutex(dir)) throwLocked();
-  handle = tryCreateOwnedLock(dir);
+  handle = tryCreateOwnedLock(dir, startTime);
   if (!handle) throwLocked();
   return handle;
 }
