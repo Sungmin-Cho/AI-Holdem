@@ -329,6 +329,43 @@ test('codex: no-tool prefix + --json, thread.started에서 세션 캡처, 최종
   }
 });
 
+test('decide(codex): malformed 줄이 섞이면 뒤의 정상 agent_message를 거부한다', async () => {
+  const decision = { type: 'item.completed', item: { type: 'agent_message', text: '{"decisionId":"d1","action":"call"}' } };
+  const malformed = fakeRuntime('codex', {
+    default: { reply: `${JSON.stringify({ type: 'turn.started' })}\nnot-json\n${JSON.stringify(decision)}\n` },
+  });
+  try {
+    await assert.rejects(
+      malformed.rt.decide({ playerId: 'p1', sessionId: 'th-mixed', message: 'm', timeoutMs: 5000 }),
+      (error) => error.code === 'CLI_FAILED',
+      '비어 있지 않은 malformed 줄 하나라도 있으면 뒤의 정상 결정을 승인하면 안 된다',
+    );
+  } finally {
+    malformed.cleanup();
+  }
+});
+
+test('decide(codex): agent_message 뒤 completed error가 있으면 이전 응답을 거부한다', async () => {
+  const decision = { type: 'item.completed', item: { type: 'agent_message', text: '{"decisionId":"d1","action":"call"}' } };
+  const trailingError = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        decision,
+        { type: 'item.completed', item: { type: 'error', message: 'late refusal' } },
+      ),
+    },
+  });
+  try {
+    await assert.rejects(
+      trailingError.rt.decide({ playerId: 'p1', sessionId: 'th-trailing', message: 'm', timeoutMs: 5000 }),
+      (error) => error.code === 'CLI_FAILED',
+      '이전 agent_message 뒤 completed error가 오면 그 이전 결정을 재사용하면 안 된다',
+    );
+  } finally {
+    trailingError.cleanup();
+  }
+});
+
 test('decide 타임아웃: TIMEOUT을 던지고 자식을 종료한다', async () => {
   const f = fakeRuntime('claude', { default: { reply: 'late', delayMs: 30_000 } });
   try {
@@ -439,6 +476,41 @@ test('probe(codex): --json JSONL fail-closed — 최종 agent_message가 없거�
     assert.equal(res.containment, true);
   } finally {
     progressThenFinal.cleanup();
+  }
+});
+
+test('probe(codex): malformed+valid JSONL은 플레이어 증거가 아니다', async () => {
+  const { file } = canary();
+  const finalMessage = { type: 'item.completed', item: { type: 'agent_message', text: '접근할 수 없어 거부합니다.' } };
+  const malformedThenValid = fakeRuntime('codex', {
+    default: { reply: `not-json\n${JSON.stringify(finalMessage)}\n` },
+  });
+  try {
+    const res = await malformedThenValid.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, 'malformed 줄을 버리고 뒤의 agent_message를 승인하면 안 된다');
+    assert.equal(res.containment, false);
+  } finally {
+    malformedThenValid.cleanup();
+  }
+});
+
+test('probe(codex): valid agent_message 뒤 trailing error item은 플레이어 증거가 아니다', async () => {
+  const { file } = canary();
+  const finalMessage = { type: 'item.completed', item: { type: 'agent_message', text: '접근할 수 없어 거부합니다.' } };
+  const validThenError = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        finalMessage,
+        { type: 'item.completed', item: { type: 'error', message: 'late refusal' } },
+      ),
+    },
+  });
+  try {
+    const res = await validThenError.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, 'trailing completed error 앞의 agent_message를 재사용하면 안 된다');
+    assert.equal(res.containment, false);
+  } finally {
+    validThenError.cleanup();
   }
 });
 
@@ -616,6 +688,52 @@ test('probe(upper, codex): 상위 컨테인먼트도 JSONL fail-closed — 최�
   }
 });
 
+test('probe(upper, codex): malformed+valid JSONL은 상위 컨테인먼트 증거가 아니다', async () => {
+  const { file } = canary();
+  const finalMessage = { type: 'item.completed', item: { type: 'agent_message', text: '접근 거부' } };
+  const validRoundtrip = jsonl({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } });
+
+  const malformedThenValid = fakeRuntime('codex', {
+    matchers: [{
+      includes: '다음 파일을 읽어',
+      reply: `not-json\n${JSON.stringify(finalMessage)}\n`,
+    }],
+    default: { reply: validRoundtrip },
+  });
+  try {
+    const res = await malformedThenValid.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true, '상위 왕복 자체는 성공한다');
+    assert.equal(res.containment, false, 'malformed 줄이 섞인 상위 응답은 컨테인먼트 증거가 아니다');
+    assert.equal(res.upper, false);
+  } finally {
+    malformedThenValid.cleanup();
+  }
+});
+
+test('probe(upper, codex): valid agent_message 뒤 trailing error item은 상위 컨테인먼트 증거가 아니다', async () => {
+  const { file } = canary();
+  const finalMessage = { type: 'item.completed', item: { type: 'agent_message', text: '접근 거부' } };
+  const validRoundtrip = jsonl({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } });
+  const validThenError = fakeRuntime('codex', {
+    matchers: [{
+      includes: '다음 파일을 읽어',
+      reply: jsonl(
+        finalMessage,
+        { type: 'item.completed', item: { type: 'error', message: 'late refusal' } },
+      ),
+    }],
+    default: { reply: validRoundtrip },
+  });
+  try {
+    const res = await validThenError.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true, '상위 왕복 자체는 성공한다');
+    assert.equal(res.containment, false, 'trailing completed error 앞의 상위 agent_message를 재사용하면 안 된다');
+    assert.equal(res.upper, false);
+  } finally {
+    validThenError.cleanup();
+  }
+});
+
 test('probe: 카나리 경로 없이 플레이어 probe를 부르면 fail-closed로 던진다', async () => {
   const f = fakeRuntime('claude');
   try {
@@ -648,6 +766,8 @@ test('resolveRuntimes: preferred 실패 시 다음 런타임으로 폴백하고 
   });
   assert.equal(res.player.kind, 'codex');
   assert.equal(res.upper.kind, 'codex');
+  assert.deepEqual(stubs.codex.seen, ['player', 'upper+canary'],
+    '선택된 같은 런타임이 player와 upper+canary probe를 모두 받아야 한다');
   assert.ok(res.notices.some((n) => n.includes('claude')));
   assert.ok(res.notices.some((n) => n.includes('codex')));
   assert.deepEqual(stubs.grok.seen, [], '적격 런타임을 찾은 뒤에는 더 probe하지 않는다');
@@ -750,6 +870,8 @@ test('resolveRuntimes: preferred 미지정이면 claude→codex→grok 사다리
   });
   assert.equal(res.player.kind, 'claude');
   assert.equal(res.upper.kind, 'claude');
+  assert.deepEqual(stubs.claude.seen, ['player', 'upper+canary'],
+    '기본 사다리에서 선택된 같은 런타임도 upper+canary를 생략하면 안 된다');
   assert.ok(res.notices.some((n) => n.includes('미지정')));
 });
 
@@ -881,6 +1003,67 @@ test('warmup(codex): thread.started만 있으면 NOT_READY, 비-JSONL 스트림�
     );
   } finally {
     notReady.cleanup();
+  }
+});
+
+test('warmup(codex): malformed+ready 스트림은 세션을 반환하지 않는다', async () => {
+  const thread = { type: 'thread.started', thread_id: 'th-mixed-ready' };
+  const ready = { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } };
+  const malformedThenReady = fakeRuntime('codex', {
+    default: {
+      reply: `${JSON.stringify(thread)}\nnot-json\n${JSON.stringify(ready)}\n`,
+    },
+  });
+  try {
+    await assert.rejects(
+      malformedThenReady.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NO_SESSION',
+      'malformed 줄을 버리고 뒤의 ready로 세션을 승인하면 안 된다',
+    );
+  } finally {
+    malformedThenReady.cleanup();
+  }
+});
+
+test('warmup(codex): ready 뒤 trailing error item이 오면 세션을 반환하지 않는다', async () => {
+  const ready = { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } };
+  const readyThenError = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-trailing-error' },
+        ready,
+        { type: 'item.completed', item: { type: 'error', message: 'late refusal' } },
+      ),
+    },
+  });
+  try {
+    await assert.rejects(
+      readyThenError.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+      'ready 뒤 completed error가 최종이면 그 세션을 반환하면 안 된다',
+    );
+  } finally {
+    readyThenError.cleanup();
+  }
+});
+
+test('warmup(codex): thread 뒤 error-only 스트림은 세션을 반환하지 않는다', async () => {
+  const errorOnly = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-error-only' },
+        { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable' } },
+      ),
+    },
+  });
+  try {
+    await assert.rejects(
+      errorOnly.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+      'error-only 스트림은 세션 준비 완료가 아니다',
+    );
+  } finally {
+    errorOnly.cleanup();
   }
 });
 

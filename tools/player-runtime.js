@@ -196,13 +196,20 @@ function parseJsonLines(stdout) {
     if (!trimmed) continue;
     try {
       events.push(JSON.parse(trimmed));
-    } catch { /* 스트림에 섞인 비-JSON 줄은 무시한다 */ }
+    } catch {
+      // JSONL은 스트림 전체가 하나의 신뢰 단위다. 비어 있지 않은 malformed 줄을
+      // 버리고 나머지만 쓰면 그 뒤의 agent_message가 실패 출력을 정상 응답으로
+      // 승격할 수 있으므로, 한 줄이라도 깨지면 전체를 무효화한다.
+      return null;
+    }
   }
   return events;
 }
 
 function codexThreadId(stdout) {
-  for (const event of parseJsonLines(stdout)) {
+  const events = parseJsonLines(stdout);
+  if (events === null) return null;
+  for (const event of events) {
     if (event?.type === 'thread.started' && typeof event.thread_id === 'string' && event.thread_id) {
       return event.thread_id;
     }
@@ -211,14 +218,24 @@ function codexThreadId(stdout) {
 }
 
 // Codex JSONL에는 fail-closed error item(`Code Mode is unavailable` 등)이 섞인다.
-// 모델 응답으로 취급하는 것은 **최종 `agent_message.text`** 하나뿐이다.
+// 앞선 error/progress 뒤 정말 마지막 completed item이 비어 있지 않은 agent_message일
+// 때만 그 text를 모델 응답으로 취급한다. 이전 메시지 뒤 error/reasoning 등 다른
+// completed item이 오면 이전 메시지를 재사용하지 않는다.
 function codexFinalMessage(stdout) {
-  let text = null;
-  for (const event of parseJsonLines(stdout)) {
-    const item = event?.item ?? event;
-    if (item?.type === 'agent_message' && typeof item.text === 'string') text = item.text;
+  const events = parseJsonLines(stdout);
+  if (events === null) return null;
+  let finalCompletedItem = null;
+  let sawCompletedItem = false;
+  for (const event of events) {
+    if (event?.type !== 'item.completed') continue;
+    sawCompletedItem = true;
+    finalCompletedItem = event?.item ?? null;
   }
-  return text === null ? null : text.trim();
+  if (!sawCompletedItem
+    || finalCompletedItem?.type !== 'agent_message'
+    || typeof finalCompletedItem.text !== 'string') return null;
+  const text = finalCompletedItem.text.trim();
+  return text === '' ? null : text;
 }
 
 function claudeStreamText(events) {
@@ -257,6 +274,7 @@ function isEmptyContainer(value) {
 // tool_use와 hook이 0이어야 한다. init이 아예 없으면 검증 불가 → fail-closed.
 function claudeStreamAudit(stdout) {
   const events = parseJsonLines(stdout);
+  if (events === null) return { clean: false, text: null };
   const init = events.find((e) => e?.type === 'system' && e?.subtype === 'init') ?? null;
   const hooked = events.some((e) => /hook/i.test(String(e?.type ?? '')) || /hook/i.test(String(e?.subtype ?? '')))
     || Boolean(init && init.hooks !== undefined && !isEmptyContainer(init.hooks));
