@@ -22,6 +22,7 @@ const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
 const SERVER = path.join(ROOT, 'server/server.js');
+const GAME_LOOP = path.join(ROOT, 'tools/game-loop.js');
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 const REAL_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 
@@ -412,6 +413,66 @@ async function startHealthOnlyServer({ acceptsEveryToken = false } = {}) {
     });
   });
   return { child, port };
+}
+
+async function startRejectOnceRelay(token, logPath) {
+  const script = `
+    const fs = require('node:fs');
+    const http = require('node:http');
+    const token = ${JSON.stringify(token)};
+    let publishes = 0;
+    const send = (res, status, body) => {
+      res.writeHead(status, {'Content-Type':'application/json'});
+      res.end(JSON.stringify(body));
+    };
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, {ok:true});
+      if (req.method === 'GET' && url.pathname === '/api/snapshot') {
+        if (url.searchParams.get('token') !== token) return send(res, 401, {ok:false,code:'UNAUTHORIZED'});
+        return send(res, 200, {revision:publishes,view:null,log:[],coach:[]});
+      }
+      if (req.method === 'GET' && url.pathname === '/api/wait-action') {
+        if (url.searchParams.get('token') !== token) return send(res, 401, {ok:false,code:'UNAUTHORIZED'});
+        return send(res, 200, {timeout:true});
+      }
+      if (req.method === 'POST' && url.pathname === '/api/publish') {
+        let raw = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({type:'publish',raw}) + '\\n');
+          publishes += 1;
+          if (publishes === 1) return send(res, 503, {ok:false,code:'REJECT_ONCE'});
+          return send(res, 200, {ok:true,revision:publishes});
+        });
+        return;
+      }
+      send(res, 404, {ok:false});
+    });
+    process.once('SIGTERM', () => server.close(() => process.exit(0)));
+    server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));
+  `;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const port = Number(await readLine(child));
+  return { child, port };
+}
+
+async function startPublishFailHealthHangServer(port, logPath) {
+  const script = `
+    const fs = require('node:fs');
+    const http = require('node:http');
+    const server = http.createServer((req) => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      fs.appendFileSync(${JSON.stringify(logPath)}, url.pathname + '\\n');
+      if (url.pathname === '/api/health') return;
+      req.socket.destroy();
+    });
+    server.listen(${Number(port)}, '127.0.0.1', () => process.stdout.write('ready\\n'));
+  `;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  assert.equal(await readLine(child), 'ready');
+  return child;
 }
 
 async function terminateIfAlive(child) {
@@ -1442,6 +1503,41 @@ test('zero-delay AI metrics include every timing field and keep non-model overhe
   assert.equal(metric.parseMs + metric.stepMs + metric.publishMs <= 1_000, true);
 });
 
+test('an applied AI step records publishMs and publishError even when terminal publication fails', { timeout: 15_000 }, async (t) => {
+  let gameDir = null;
+  let loop = null;
+  let foreign = null;
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => {
+      const owned = readJson(path.join(gameDir, 'lock.json'));
+      process.kill(owned.serverPid, 'SIGKILL');
+      await waitUntilDead(owned.serverPid);
+      foreign = await startHealthOnlyServer();
+      fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+        serverPid: foreign.child.pid,
+        port: foreign.port,
+        sessionToken: owned.sessionToken,
+      }));
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const setup = await setupAiFirst(t, { adapter });
+  ({ gameDir, loop } = setup);
+  t.after(async () => {
+    if (foreign) await terminateIfAlive(foreign.child);
+  });
+
+  await assert.rejects(loop.run(), (error) => error.code === 'SERVER_AUTH_FAILED');
+
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  const actions = engine.hand?.actions ?? engine.lastHand?.actions ?? [];
+  assert.equal(actions.some((action) => action.playerId === 'p1' && action.action === 'fold'), true);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics.at(-1);
+  assert.equal(metric.outcome, 'accepted');
+  assert.equal(metric.publishError, 'SERVER_AUTH_FAILED');
+  assert.equal(Number.isFinite(metric.publishMs) && metric.publishMs >= 0, true);
+});
+
 test('archivePending runs resume-check once and repair_failed halts before a new hand', { timeout: 10_000 }, async (t) => {
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
@@ -1499,18 +1595,144 @@ test('ATTEMPT_PENDING is retried before the current AI transition publish', { ti
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).lastPublishId >= 4, true);
 });
 
+test('BAD_ATTEMPT deletes only the corrupt record, resyncs state, and republishes view-only', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), '{broken-json');
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'BAD_ATTEMPT recovery did not resume play');
+  await stopRun(loop, running);
+
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(Number.isInteger(snapshot.view.handNo), true);
+});
+
+test('BAD_SNAPSHOT verifies the server, removes the corrupt snapshot, and republishes once', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), '{broken-snapshot');
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'BAD_SNAPSHOT recovery did not resume play');
+  await stopRun(loop, running);
+
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(Number.isInteger(snapshot.view.handNo), true);
+  assert.equal(Number.isInteger(snapshot.publishId), true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+});
+
+test('LOCK_TIMEOUT retries the same publish once after the competing publisher releases', { timeout: 35_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const releaseTimer = setTimeout(() => held.release(), 20_500);
+  t.after(async () => {
+    clearTimeout(releaseTimer);
+    held.release();
+    await held.done.catch(() => {});
+  });
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'LOCK_TIMEOUT retry did not resume play', 25_000);
+  await stopRun(loop, running);
+
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(Number.isInteger(readJson(path.join(gameDir, 'ui-snapshot.json')).view.handNo), true);
+  assert.equal(readLoopLog(gameDir).some((entry) => (
+    entry.event === 'publish-recovery' && entry.code === 'LOCK_TIMEOUT'
+  )), true);
+});
+
+test('NO_LOCK restarts on the persisted actual port and retries without rerunning the step', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  const lockPath = path.join(gameDir, 'lock.json');
+  const oldLock = readJson(lockPath);
+  process.kill(oldLock.serverPid, 'SIGKILL');
+  await waitUntilDead(oldLock.serverPid);
+  fs.unlinkSync(lockPath);
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'NO_LOCK recovery did not resume play', 6_000);
+  await stopRun(loop, running);
+
+  const recovered = readJson(lockPath);
+  assert.equal(recovered.port, oldLock.port);
+  assert.notEqual(recovered.serverPid, oldLock.serverPid);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+});
+
 test('PUBLISH_FAILED after the owned server dies restarts it and retries the recorded attempt', { timeout: 20_000 }, async (t) => {
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
   const oldPid = loop.serverPid;
+  const oldPort = readJson(path.join(gameDir, 'lock.json')).port;
   process.kill(oldPid, 'SIGKILL');
   await waitUntilDead(oldPid);
 
   await runUntilUserBoundary(loop, gameDir);
 
   assert.notEqual(loop.serverPid, oldPid);
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).port, oldPort, 'D9 restarted on a new random port');
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), true);
+});
+
+test('D9 rejects a healthy listener unless pid, port, token auth, startTime, and lock identity all bind', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
+  const oldLock = readJson(path.join(gameDir, 'lock.json'));
+  process.kill(oldLock.serverPid, 'SIGKILL');
+  await waitUntilDead(oldLock.serverPid);
+  const foreign = await startHealthOnlyServer();
+  t.after(() => terminateIfAlive(foreign.child));
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: foreign.child.pid,
+    port: foreign.port,
+    sessionToken: oldLock.sessionToken,
+  }));
+
+  await assert.rejects(
+    loop.run(),
+    (error) => error.code === 'SERVER_AUTH_FAILED',
+  );
+
+  assert.doesNotThrow(() => process.kill(foreign.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), false);
+});
+
+test('PUBLISH_REJECTED verifies the live relay then retries the exact recorded body once', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
+  const oldLock = readJson(path.join(gameDir, 'lock.json'));
+  process.kill(oldLock.serverPid, 'SIGKILL');
+  await waitUntilDead(oldLock.serverPid);
+  const relayLog = path.join(os.tmpdir(), `holdem-reject-once-${process.pid}-${Date.now()}.jsonl`);
+  const relay = await startRejectOnceRelay(oldLock.sessionToken, relayLog);
+  t.after(async () => {
+    await terminateIfAlive(relay.child);
+    try { fs.unlinkSync(relayLog); } catch { /* absent */ }
+  });
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: relay.child.pid,
+    port: relay.port,
+    sessionToken: oldLock.sessionToken,
+  }));
+  const running = startRun(loop);
+
+  const requests = await waitWhileRunning(running, () => {
+    if (!fs.existsSync(relayLog)) return null;
+    const rows = fs.readFileSync(relayLog, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const publishes = rows.filter((row) => row.type === 'publish');
+    return publishes.length >= 2 ? publishes : null;
+  }, 'PUBLISH_REJECTED was not retried against the verified relay', 5_000);
+
+  assert.equal(requests[1].raw, requests[0].raw, 'retry changed publishId or recorded body');
+  await waitWhileRunning(
+    running,
+    () => !fs.existsSync(path.join(gameDir, '.publish-attempt.json')),
+    'verified retry did not clear the recorded attempt after ack',
+  );
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  await stopRun(loop, running);
 });
 
 test('user timeouts repeat wait-only indefinitely and never force-default before the submitted raise', { timeout: 10_000 }, async (t) => {
@@ -1786,6 +2008,80 @@ test('D9 never restarts the server while stopping and preserves the failed publi
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
 });
 
+test('SIGTERM during D9 health await cannot unlink, spawn, retry, or resolve the attempt', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  const lockPath = path.join(gameDir, 'lock.json');
+  const originalRaw = fs.readFileSync(lockPath, 'utf8');
+  const original = readJson(lockPath);
+  process.kill(original.serverPid, 'SIGKILL');
+  await waitUntilDead(original.serverPid);
+  const originalStat = fs.lstatSync(lockPath);
+  const blackholeLog = path.join(os.tmpdir(), `holdem-d9-stop-${process.pid}-${Date.now()}.log`);
+  const blackhole = await startPublishFailHealthHangServer(original.port, blackholeLog);
+  t.after(async () => {
+    await terminateIfAlive(blackhole);
+    try { fs.unlinkSync(blackholeLog); } catch { /* absent */ }
+  });
+  const running = startRun(loop);
+  await waitWhileRunning(running, () => (
+    fs.existsSync(blackholeLog) && fs.readFileSync(blackholeLog, 'utf8').includes('/api/health')
+  ), 'D9 did not enter the health await');
+
+  const stopping = loop.requestStop();
+  await assert.rejects(running, (error) => error.code === 'STOPPING');
+  await stopping;
+
+  const finalStat = fs.lstatSync(lockPath);
+  assert.equal(finalStat.dev, originalStat.dev);
+  assert.equal(finalStat.ino, originalStat.ino, 'recovery replaced or unlinked the pinned lock while stopping');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), originalRaw);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), false);
+});
+
+test('D9 preserves an identical-byte replacement lock by pinned path identity and aborts recovery', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  const lockPath = path.join(gameDir, 'lock.json');
+  const originalRaw = fs.readFileSync(lockPath, 'utf8');
+  const original = readJson(lockPath);
+  process.kill(original.serverPid, 'SIGKILL');
+  await waitUntilDead(original.serverPid);
+  const blackholeLog = path.join(os.tmpdir(), `holdem-d9-pin-${process.pid}-${Date.now()}.log`);
+  const blackhole = await startPublishFailHealthHangServer(original.port, blackholeLog);
+  t.after(async () => {
+    await terminateIfAlive(blackhole);
+    try { fs.unlinkSync(blackholeLog); } catch { /* absent */ }
+  });
+  const running = startRun(loop);
+  await waitWhileRunning(running, () => (
+    fs.existsSync(blackholeLog) && fs.readFileSync(blackholeLog, 'utf8').includes('/api/health')
+  ), 'D9 did not pin the lock before its health await');
+
+  const replacementTmp = `${lockPath}.replacement`;
+  fs.writeFileSync(replacementTmp, originalRaw);
+  fs.renameSync(replacementTmp, lockPath);
+  const replacementStat = fs.lstatSync(lockPath);
+  const outcome = await Promise.race([
+    running.then(
+      () => ({ type: 'resolved' }),
+      (error) => ({ type: 'rejected', error }),
+    ),
+    waitFor(
+      () => readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'),
+      'recovery neither rejected nor spawned',
+      4_000,
+    ).then(() => ({ type: 'recovered' })),
+  ]);
+
+  assert.equal(outcome.type, 'rejected');
+  assert.equal(outcome.error.code, 'SERVER_LOCK_REPLACED');
+  const finalStat = fs.lstatSync(lockPath);
+  assert.equal(finalStat.dev, replacementStat.dev);
+  assert.equal(finalStat.ino, replacementStat.ino, 'replacement lock inode was unlinked');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), originalRaw);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+});
+
 test('SIGTERM waits for the real in-flight publish, records stop state, and removes its server child', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
@@ -1837,6 +2133,78 @@ test('SIGTERM waits for the real in-flight publish, records stop state, and remo
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).stoppedAt != null, true);
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   await waitUntilDead(ready.serverPid);
+});
+
+test('production SIGTERM reports cleanup failure and exits nonzero instead of masking it', { timeout: 20_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-main-bin-'));
+  const marker = path.join(binDir, 'reuse.marker');
+  const targetFile = path.join(binDir, 'reuse.pid');
+  const claudePath = path.join(binDir, 'claude');
+  fs.writeFileSync(claudePath, `#!/usr/bin/env node
+    const fs = require('node:fs');
+    const args = process.argv.slice(2);
+    fs.readFileSync(0, 'utf8');
+    if (args.includes('stream-json')) {
+      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],hooks:[]}) + '\\n');
+      process.stdout.write(JSON.stringify({type:'result',result:'ok'}) + '\\n');
+    } else {
+      process.stdout.write('ready\\n');
+    }
+  `);
+  fs.chmodSync(claudePath, 0o755);
+  const psPath = path.join(binDir, 'ps');
+  fs.writeFileSync(psPath, `#!/bin/sh
+    if [ -f "${marker}" ] && [ -f "${targetFile}" ]; then
+      target=$(sed -n '1p' "${targetFile}")
+      if [ "$2" = "$target" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi
+    fi
+    exec ${REAL_PS} "$@"
+  `);
+  fs.chmodSync(psPath, 0o755);
+  let stderr = '';
+  const child = spawn(process.execPath, [
+    GAME_LOOP, '--ai', '1', '--stack', '100', '--game-dir', gameDir, '--player-runtime', 'claude',
+  ], {
+    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  let serverPid = null;
+  t.after(async () => {
+    await terminateIfAlive(child);
+    if (serverPid) {
+      try { process.kill(serverPid, 'SIGKILL'); } catch { /* already dead */ }
+      await waitUntilDead(serverPid).catch(() => {});
+    }
+  });
+  await waitFor(() => {
+    try {
+      const state = readJson(path.join(gameDir, 'loop-state.json'));
+      const lock = readJson(path.join(gameDir, 'lock.json'));
+      if (state.phase !== 'playing' || !Number.isInteger(lock.serverPid)) return null;
+      serverPid = lock.serverPid;
+      return lock;
+    } catch {
+      return null;
+    }
+  }, 'production game-loop did not reach playing', 10_000);
+  const userTurn = await waitForUserSnapshot(gameDir, 5_000);
+  const userAction = preferredUserAction(userTurn.snapshot.view.legal);
+  await postUserAction(userTurn.lock, userAction);
+  await waitForUserAction(gameDir, (action) => action.decisionId === userAction.decisionId, 5_000);
+  fs.writeFileSync(targetFile, `${serverPid}\n`);
+  fs.writeFileSync(marker, 'reuse');
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+
+  child.kill('SIGTERM');
+  const result = await exited;
+
+  assert.deepEqual(result, { code: 5, signal: null });
+  const envelope = stderr.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).at(-1);
+  assert.equal(envelope.code, 'SERVER_IDENTITY_MISMATCH');
+  assert.doesNotThrow(() => process.kill(serverPid, 0), 'cleanup failure fixture server was signalled');
 });
 
 test('--force stops loop, rereads replacement server identity, then stops that server before archive', { timeout: 20_000 }, async (t) => {

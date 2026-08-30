@@ -215,6 +215,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let stopPromise = null;
   let atomicTransition = null;
 
+  const assertNotStopping = () => {
+    if (stopRequested) throw codedError('STOPPING', '정지 중에는 서버 복구·게시 재시도를 시작하지 않습니다.');
+  };
+
   const log = (event, fields = {}) => {
     const record = { at: isoNow(now), event, ...fields };
     if (logFd !== null) fs.writeSync(logFd, `${JSON.stringify(record)}\n`);
@@ -228,14 +232,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const readLoopState = () => readJsonOptional(loopStatePath, 'LOOP_STATE');
-  const readServerLock = () => {
-    let raw;
-    try {
-      raw = fs.readFileSync(lockPath, 'utf8');
-    } catch (error) {
-      if (error.code === 'ENOENT') return null;
-      throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK을 읽을 수 없습니다.', { cause: error });
-    }
+  const parseServerLock = (raw) => {
     let lock;
     try {
       lock = JSON.parse(raw);
@@ -257,6 +254,70 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK pid/port/sessionToken 계약이 올바르지 않습니다.');
     }
     return lock;
+  };
+  const openServerLockPin = () => {
+    let fd;
+    try {
+      fd = fs.openSync(lockPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK을 열 수 없습니다.', { cause: error });
+    }
+    try {
+      const stat = fs.fstatSync(fd, { bigint: true });
+      if (!stat.isFile() || stat.nlink !== 1n) {
+        throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK이 일반 단일-link 파일이 아닙니다.');
+      }
+      const raw = fs.readFileSync(fd, 'utf8');
+      return { fd, stat, raw, lock: parseServerLock(raw) };
+    } catch (error) {
+      fs.closeSync(fd);
+      throw error;
+    }
+  };
+  const closeServerLockPin = (pin) => {
+    if (!pin || pin.fd === null) return;
+    fs.closeSync(pin.fd);
+    pin.fd = null;
+  };
+  const assertPinnedServerLock = (pin) => {
+    if (!pin) throw codedError('SERVER_LOCK_REPLACED', '고정한 server lock identity가 없습니다.');
+    let stat;
+    let raw;
+    try {
+      stat = fs.lstatSync(lockPath, { bigint: true });
+      raw = fs.readFileSync(lockPath, 'utf8');
+    } catch (error) {
+      throw codedError('SERVER_LOCK_REPLACED', '검증 중 server lock이 사라졌습니다.', { cause: error });
+    }
+    if (
+      !stat.isFile()
+      || stat.isSymbolicLink()
+      || stat.dev !== pin.stat.dev
+      || stat.ino !== pin.stat.ino
+      || raw !== pin.raw
+    ) {
+      throw codedError('SERVER_LOCK_REPLACED', '검증 중 server lock path identity 또는 bytes가 교체됐습니다.');
+    }
+    return parseServerLock(raw);
+  };
+  const unlinkPinnedServerLock = (pin) => {
+    assertNotStopping();
+    assertPinnedServerLock(pin);
+    fs.unlinkSync(lockPath);
+    const pinned = fs.fstatSync(pin.fd, { bigint: true });
+    if (pinned.nlink !== 0n) {
+      throw codedError('SERVER_LOCK_REPLACED', '고정한 server lock inode가 제거되지 않았습니다.');
+    }
+  };
+  const readServerLock = () => {
+    const pin = openServerLockPin();
+    if (!pin) return null;
+    try {
+      return pin.lock;
+    } finally {
+      closeServerLockPin(pin);
+    }
   };
   const writeLoopState = (patch) => {
     const current = readLoopState() ?? {};
@@ -335,14 +396,18 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const runCli = (args) => runJsonChild(ENGINE_CLI, args);
   const runPublish = (args) => runJsonChild(PUBLISH_CLI, args);
 
-  const serverHealthy = async (port) => {
+  const serverHealthy = async (port, { stopAware = false } = {}) => {
     if (!Number.isInteger(port) || port < 1) return false;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 500);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
-      return response.ok && (await response.json()).ok === true;
-    } catch {
+      if (stopAware) assertNotStopping();
+      const body = await response.json();
+      if (stopAware) assertNotStopping();
+      return response.ok && body.ok === true;
+    } catch (error) {
+      if (error.code === 'STOPPING') throw error;
       return false;
     } finally {
       clearTimeout(timer);
@@ -381,7 +446,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     activeChildren.add(child);
   });
 
-  const assertAuthenticatedServer = async (port, sessionToken) => {
+  const assertAuthenticatedServer = async (port, sessionToken, { stopAware = false } = {}) => {
     const requestSnapshot = async (token) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 500);
@@ -400,10 +465,12 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     try {
       const challenge = `SIDECAR_AUTH_CHALLENGE_${randomBytes(24).toString('hex')}`;
       const denied = await requestSnapshot(challenge);
+      if (stopAware) assertNotStopping();
       if (denied.response.status !== 401 || denied.body?.code !== 'UNAUTHORIZED') {
         throw codedError('SERVER_AUTH_FAILED', '서버가 fresh wrong-token challenge를 거부하지 않았습니다.');
       }
       const { response, body: snapshot } = await requestSnapshot(sessionToken);
+      if (stopAware) assertNotStopping();
       if (!response.ok) throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 probe가 거부됐습니다.');
       if (
         !snapshot
@@ -416,22 +483,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 응답이 relay snapshot 계약과 다릅니다.');
       }
     } catch (error) {
+      if (error.code === 'STOPPING') throw error;
       if (error.code === 'SERVER_AUTH_FAILED') throw error;
       throw codedError('SERVER_AUTH_UNAVAILABLE', '서버 token 인증 probe를 완료할 수 없습니다.', { cause: error });
     }
   };
 
-  const assertServerBinding = async ({ serverPid: pid, port, sessionToken }) => {
+  const assertServerBinding = async ({ serverPid: pid, port, sessionToken }, { stopAware = false } = {}) => {
     let ownsListener;
     try {
       ownsListener = await listenerOwnedBy(pid, port);
+      if (stopAware) assertNotStopping();
     } catch (error) {
       throw error;
     }
     if (!ownsListener) {
       throw codedError('SERVER_LISTENER_MISMATCH', 'lock.serverPid가 lock.port listener를 소유하지 않습니다.');
     }
-    await assertAuthenticatedServer(port, sessionToken);
+    await assertAuthenticatedServer(port, sessionToken, { stopAware });
+    if (stopAware) assertNotStopping();
   };
 
   const identityStillAlive = (pid, startTime) => {
@@ -463,7 +533,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (!processAlive(pid)) return true;
       const current = processStartTime(pid);
       if (current === null) {
-        throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
+        // 종료 직후 kill(0)은 아직 성공하지만 ps identity가 먼저 사라지는
+        // 짧은 전이 창이 있다. unknown을 사망으로 승격하지 않고 deadline까지 재확인한다.
+        await sleep(pollMs);
+        continue;
       }
       if (current !== startTime) {
         // pid 재사용은 원래 대상의 사망 증거가 아니다. 새 프로세스를
@@ -617,93 +690,106 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     removeStoppedForceServerLock(expected);
   };
 
-  const ensureServer = async (sessionToken) => {
-    let existing = readServerLock();
-    if (existing) {
-      if (existing.sessionToken !== sessionToken) {
-        throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
-      }
-      if (!processAlive(existing.serverPid)) {
-        const confirmed = readServerLock();
-        if (
-          confirmed?.serverPid !== existing.serverPid
-          || confirmed.port !== existing.port
-          || confirmed.sessionToken !== existing.sessionToken
-        ) {
-          throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server lock 확인 중 identity가 바뀌었습니다.');
+  const ensureServer = async (sessionToken, {
+    port: desiredPort = requestedPort,
+    pin: providedPin = null,
+    stopAware = true,
+  } = {}) => {
+    if (stopAware) assertNotStopping();
+    if (!Number.isSafeInteger(desiredPort) || desiredPort < 0 || desiredPort > 65_535) {
+      throw codedError('BAD_SERVER_PORT', `서버 재기동 port가 올바르지 않습니다: ${desiredPort}`);
+    }
+    const ownsPin = providedPin === null;
+    let pin = providedPin ?? openServerLockPin();
+    try {
+      const existing = pin?.lock ?? null;
+      if (existing) {
+        if (existing.sessionToken !== sessionToken) {
+          throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
+        if (processAlive(existing.serverPid)) {
+          const startTime = processStartTime(existing.serverPid);
+          if (startTime === null) {
+            throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
+          }
+          await assertServerBinding(existing, { stopAware });
+          if (stopAware) assertNotStopping();
+          const confirmed = assertPinnedServerLock(pin);
+          if (
+            confirmed.serverPid !== existing.serverPid
+            || confirmed.port !== existing.port
+            || confirmed.sessionToken !== sessionToken
+            || processStartTime(existing.serverPid) !== startTime
+          ) {
+            throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
+          }
+          await assertServerBinding(confirmed, { stopAware });
+          if (stopAware) assertNotStopping();
+          if (processStartTime(existing.serverPid) !== startTime) {
+            throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
+          }
+          serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
+          serverPid = existing.serverPid;
+          serverIdentity = { pid: existing.serverPid, startTime };
+          serverAdopted = serverChild === null;
+          return existing.port;
+        }
+
+        const confirmed = assertPinnedServerLock(pin);
         if (processAlive(confirmed.serverPid)) {
           throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server pid가 확인 중 다시 살아났습니다.');
         }
-        fs.unlinkSync(lockPath);
-        existing = null;
+        if (stopAware) assertNotStopping();
+        unlinkPinnedServerLock(pin);
       }
-    }
-    if (existing) {
-      await assertServerBinding(existing);
-      if (!Number.isInteger(existing.serverPid) || !processAlive(existing.serverPid)) {
-        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 pid를 확인할 수 없습니다.');
-      }
-      const startTime = processStartTime(existing.serverPid);
-      if (startTime === null) {
-        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
-      }
-      const confirmed = readServerLock();
-      if (
-        confirmed?.serverPid !== existing.serverPid
-        || confirmed.port !== existing.port
-        || confirmed.sessionToken !== sessionToken
-        || processStartTime(existing.serverPid) !== startTime
-      ) {
-        throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
-      }
-      await assertServerBinding(confirmed);
-      if (processStartTime(existing.serverPid) !== startTime) {
-        throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
-      }
-      serverPid = existing.serverPid;
-      serverIdentity = { pid: existing.serverPid, startTime };
-      serverAdopted = true;
-      return existing.port;
-    }
 
-    const argv = [
-      SERVER_CLI,
-      '--game-dir', root,
-      '--port', String(requestedPort),
-      '--token', sessionToken,
-    ];
-    const child = spawn(process.execPath, argv, {
-      cwd: ROOT,
-      stdio: 'ignore',
-    });
-    serverChild = child;
-    serverPid = child.pid ?? null;
-    serverAdopted = false;
-    let spawnError = null;
-    child.once('error', (error) => { spawnError = error; });
-    log('server-spawn', { pid: serverPid, requestedPort });
+      if (stopAware) assertNotStopping();
+      const argv = [
+        SERVER_CLI,
+        '--game-dir', root,
+        '--port', String(desiredPort),
+        '--token', sessionToken,
+      ];
+      const child = spawn(process.execPath, argv, {
+        cwd: ROOT,
+        stdio: 'ignore',
+      });
+      serverChild = child;
+      serverPid = child.pid ?? null;
+      serverAdopted = false;
+      let spawnError = null;
+      child.once('error', (error) => { spawnError = error; });
+      log('server-spawn', { pid: serverPid, requestedPort: desiredPort });
 
-    const deadline = Date.now() + serverStartMs;
-    while (Date.now() < deadline) {
-      if (spawnError) throw codedError('SERVER_START_FAILED', spawnError.message, { cause: spawnError });
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw codedError('SERVER_START_FAILED', `서버 자식이 조기 종료했습니다: ${child.exitCode ?? child.signalCode}`);
+      const deadline = Date.now() + serverStartMs;
+      while (Date.now() < deadline) {
+        if (stopAware) assertNotStopping();
+        if (spawnError) throw codedError('SERVER_START_FAILED', spawnError.message, { cause: spawnError });
+        if (child.exitCode !== null || child.signalCode !== null) {
+          throw codedError('SERVER_START_FAILED', `서버 자식이 조기 종료했습니다: ${child.exitCode ?? child.signalCode}`);
+        }
+        const lock = readServerLock();
+        if (
+          lock?.serverPid === child.pid
+          && lock.sessionToken === sessionToken
+          && await serverHealthy(lock.port, { stopAware })
+        ) {
+          if (stopAware) assertNotStopping();
+          serverPid = lock.serverPid;
+          const startTime = processStartTime(lock.serverPid);
+          if (startTime === null) {
+            throw codedError('SERVER_IDENTITY_UNAVAILABLE', '새 server child startTime을 확인할 수 없습니다.');
+          }
+          serverIdentity = { pid: lock.serverPid, startTime };
+          return lock.port;
+        }
+        await sleep(pollMs);
+        if (stopAware) assertNotStopping();
       }
-      const lock = readServerLock();
-      if (
-        lock?.serverPid === child.pid
-        && lock.sessionToken === sessionToken
-        && await serverHealthy(lock.port)
-      ) {
-        serverPid = lock.serverPid;
-        const startTime = processStartTime(lock.serverPid);
-        serverIdentity = startTime === null ? null : { pid: lock.serverPid, startTime };
-        return lock.port;
-      }
-      await sleep(pollMs);
+      throw codedError('SERVER_START_TIMEOUT', '서버 health 확인 시간이 초과됐습니다.');
+    } finally {
+      if (ownsPin) closeServerLockPin(pin);
     }
-    throw codedError('SERVER_START_TIMEOUT', '서버 health 확인 시간이 초과됐습니다.');
   };
 
   const createCanaryAndResolve = async (need) => {
@@ -986,52 +1072,73 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const recoverServerForPublish = async () => {
-    if (stopRequested) throw codedError('STOPPING', '정지 중에는 서버를 재기동하지 않습니다.');
-    const expected = readServerLock();
-    if (expected && await serverHealthy(expected.port)) return expected.port;
-    if (expected && processAlive(expected.serverPid)) {
-      if (expected.serverPid !== serverPid) {
-        throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 server lock 소유자가 바뀌었습니다.');
-      }
-      await stopServer();
-    } else if (serverChild?.pid === expected?.serverPid) {
-      serverChild = null;
-      serverIdentity = null;
-      serverPid = null;
-      serverAdopted = false;
-    }
-
-    const current = readServerLock();
-    if (current) {
-      if (
-        !expected
-        || current.serverPid !== expected.serverPid
-        || current.port !== expected.port
-        || current.sessionToken !== expected.sessionToken
-      ) {
-        throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 server lock이 교체됐습니다.');
-      }
-      if (processAlive(current.serverPid)) {
-        throw codedError('SERVER_STOP_UNCONFIRMED', '기존 서버가 살아 있어 lock을 지울 수 없습니다.');
-      }
-      fs.unlinkSync(lockPath);
-    }
-    const sessionToken = readLoopState()?.sessionToken;
+    assertNotStopping();
+    const state = readLoopState();
+    const sessionToken = state?.sessionToken;
     if (typeof sessionToken !== 'string' || sessionToken === '') {
       throw codedError('NO_GAME', '게시 복구에 필요한 sessionToken이 없습니다.');
     }
-    const port = await ensureServer(sessionToken);
-    writeLoopState({ port });
-    log('server-recovered', { port, serverPid });
-    return port;
+    const pin = openServerLockPin();
+    const expected = pin?.lock ?? null;
+    const actualPort = expected?.port
+      ?? (Number.isSafeInteger(state?.port) && state.port > 0 ? state.port : requestedPort);
+    try {
+      if (expected) {
+        if (expected.sessionToken !== sessionToken) {
+          throw codedError('SERVER_LOCK_MISMATCH', '게시 복구 server lock의 sessionToken이 현재 게임과 다릅니다.');
+        }
+        const healthy = await serverHealthy(expected.port, { stopAware: true });
+        assertNotStopping();
+        if (healthy) {
+          // health만으로는 신뢰하지 않는다. adoption과 동일하게 listener,
+          // wrong-token/real-token, startTime, pinned lock을 두 번 맞춘 서버만 재사용한다.
+          const port = await ensureServer(sessionToken, { port: actualPort, pin, stopAware: true });
+          assertNotStopping();
+          writeLoopState({ port });
+          log('server-recovery-verified', { port, serverPid });
+          return port;
+        }
+
+        if (processAlive(expected.serverPid)) {
+          if (expected.serverPid !== serverPid) {
+            throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 검증하지 못한 server lock 소유자가 살아 있습니다.');
+          }
+          assertPinnedServerLock(pin);
+          await stopServer();
+          assertNotStopping();
+        } else if (serverChild?.pid === expected.serverPid) {
+          serverChild = null;
+          serverIdentity = null;
+          serverPid = null;
+          serverAdopted = false;
+        }
+
+        const confirmed = assertPinnedServerLock(pin);
+        if (processAlive(confirmed.serverPid)) {
+          throw codedError('SERVER_STOP_UNCONFIRMED', '기존 서버가 살아 있어 lock을 지울 수 없습니다.');
+        }
+        assertNotStopping();
+        unlinkPinnedServerLock(pin);
+      }
+
+      assertNotStopping();
+      const port = await ensureServer(sessionToken, { port: actualPort, stopAware: true });
+      assertNotStopping();
+      writeLoopState({ port });
+      log('server-recovered', { port, serverPid });
+      return port;
+    } finally {
+      closeServerLockPin(pin);
+    }
   };
 
   const executePublish = async (args) => {
     try {
       return await runPublish(args);
     } catch (error) {
-      if (error.code !== 'PUBLISH_FAILED') throw error;
+      if (error.code !== 'PUBLISH_FAILED' && error.code !== 'PUBLISH_REJECTED') throw error;
       await recoverServerForPublish();
+      assertNotStopping();
       const retryArgs = args.includes('--retry') ? args : [...args, '--retry'];
       return runPublish(retryArgs);
     }
@@ -1040,14 +1147,66 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const turnPath = path.join(root, '.turn.json');
   const publishEnvelope = async (envelope, flags = []) => {
     writeJsonAtomic(turnPath, envelope);
-    const args = ['--from', turnPath, ...flags];
+    let args = ['--from', turnPath, ...flags];
+    const recovered = new Set();
     let out;
-    try {
-      out = await executePublish(args);
-    } catch (error) {
-      if (error.code !== 'ATTEMPT_PENDING') throw error;
-      await executePublish(['--from', turnPath, '--retry']);
-      out = await executePublish(args);
+    for (;;) {
+      try {
+        out = await executePublish(args);
+        break;
+      } catch (error) {
+        const code = error.code;
+        if (recovered.has(code)) throw error;
+        if (code === 'ATTEMPT_PENDING') {
+          recovered.add(code);
+          assertNotStopping();
+          await executePublish(['--from', turnPath, '--retry']);
+          assertNotStopping();
+          continue;
+        }
+        if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
+          recovered.add(code);
+          assertNotStopping();
+          const pendingPath = path.join(root, '.publish-attempt.json');
+          try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
+            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+          }
+          assertNotStopping();
+          const synchronized = await runCli(['step']);
+          assertNotStopping();
+          writeJsonAtomic(turnPath, synchronized);
+          const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
+          args = ['--from', turnPath, '--view-only', ...recoveryFlags];
+          log('publish-recovery', { code, mode: 'view-only-resync' });
+          continue;
+        }
+        if (code === 'BAD_SNAPSHOT') {
+          recovered.add(code);
+          await recoverServerForPublish();
+          assertNotStopping();
+          const snapshotPath = path.join(root, 'ui-snapshot.json');
+          try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
+            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+          }
+          assertNotStopping();
+          log('publish-recovery', { code, mode: 'snapshot-rebuild' });
+          continue;
+        }
+        if (code === 'LOCK_TIMEOUT') {
+          recovered.add(code);
+          assertNotStopping();
+          log('publish-recovery', { code, mode: 'retry-once' });
+          continue;
+        }
+        if (code === 'NO_LOCK') {
+          recovered.add(code);
+          await recoverServerForPublish();
+          assertNotStopping();
+          log('publish-recovery', { code, mode: 'server-lock-rebuild' });
+          continue;
+        }
+        throw error;
+      }
     }
     const patch = {};
     if (Number.isInteger(out.publishId)) patch.lastPublishId = out.publishId;
@@ -1486,20 +1645,29 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       const elapsedMs = Math.max(0, monotonicNow() - decision.startedAt);
       const publishStarted = monotonicNow();
+      const metric = {
+        playerId: next.toAct,
+        decisionId: next.decisionId,
+        runtime: playerAdapter.kind,
+        outcome: decision.outcome,
+        elapsedMs,
+        modelMs: decision.modelMs,
+        parseMs: decision.parseMs,
+        stepMs: decision.stepMs,
+      };
       try {
         out = await publishEnvelope(decision.envelope, waitFlags());
         const publishMs = Math.max(0, monotonicNow() - publishStarted);
+        appendMetric({ ...metric, publishMs });
+      } catch (error) {
+        // Engine step이 적용된 이상 게시 실패로 표본을 숨기지 않는다.
+        // outcome은 모델 결정 결과를 그대로 두고, 게시 경계는 별도 code로 정직하게 표시한다.
         appendMetric({
-          playerId: next.toAct,
-          decisionId: next.decisionId,
-          runtime: playerAdapter.kind,
-          outcome: decision.outcome,
-          elapsedMs,
-          modelMs: decision.modelMs,
-          parseMs: decision.parseMs,
-          stepMs: decision.stepMs,
-          publishMs,
+          ...metric,
+          publishMs: Math.max(0, monotonicNow() - publishStarted),
+          publishError: error.code ?? 'ERROR',
         });
+        throw error;
       } finally {
         decision.atomicUnit.finish();
       }
@@ -1520,6 +1688,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 async function main() {
   let loop = null;
   let caught = null;
+  let handlingSignal = false;
+  let signalStopPromise = null;
+  let signalStopError = null;
   try {
     const args = parseGameLoopArgs(process.argv.slice(2));
     if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
@@ -1529,11 +1700,12 @@ async function main() {
       preferred: args.playerRuntime ?? null,
     });
     loop = createGameLoop({ gameDir: args.gameDir, resolver });
-    let handlingSignal = false;
     process.once('SIGTERM', () => {
       if (handlingSignal) return;
       handlingSignal = true;
-      loop.requestStop().finally(() => process.exit(0));
+      signalStopPromise = loop.requestStop().catch((error) => {
+        signalStopError = error;
+      });
     });
     if (args.resume) await loop.resume();
     else await loop.bootstrap({
@@ -1546,12 +1718,24 @@ async function main() {
     });
     await loop.run();
   } catch (error) {
-    caught = error;
-    try {
-      fs.writeSync(2, `${JSON.stringify({ ok: false, code: error.code ?? 'ERROR', message: error.message })}\n`);
-    } catch { /* stderr unavailable */ }
+    // 정상 SIGTERM 처리 중의 STOPPING은 실패가 아니다. 다른 runtime/cleanup
+    // 실패는 그대로 보고하고 비정상 종료한다.
+    if (!(handlingSignal && error.code === 'STOPPING')) caught = error;
   } finally {
-    if (loop) await loop.requestStop();
+    if (loop) {
+      try {
+        if (signalStopPromise) await signalStopPromise;
+        else await loop.requestStop();
+      } catch (error) {
+        caught ??= error;
+      }
+    }
+    if (signalStopError) caught = signalStopError;
+  }
+  if (caught) {
+    try {
+      fs.writeSync(2, `${JSON.stringify({ ok: false, code: caught.code ?? 'ERROR', message: caught.message })}\n`);
+    } catch { /* stderr unavailable */ }
   }
   process.exit(exitCodeFor(caught));
 }
