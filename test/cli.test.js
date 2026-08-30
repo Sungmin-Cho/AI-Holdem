@@ -12,6 +12,7 @@ const STATE_MODULE_URL = pathToFileURL(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/state.js'),
 ).href;
 const FULL_DECK = newDeck().join(',');
+const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 
 function stackedDeck(front) {
   const used = new Set(front);
@@ -25,11 +26,12 @@ function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-cli-'));
 }
 
-function cli(gameDir, args) {
+function cli(gameDir, args, options = {}) {
   try {
     const stdout = execFileSync(process.execPath, [CLI, ...args, '--game-dir', gameDir], {
       encoding: 'utf8',
       timeout: 20000,
+      env: options.env ?? process.env,
     });
     return { status: 0, json: JSON.parse(stdout.trim()), stdout };
   } catch (error) {
@@ -119,6 +121,56 @@ function killPid(pid) {
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
 }
 
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(child.signalCode, 'SIGKILL');
+}
+
+async function waitForPath(filePath, child, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(filePath) && Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`lock holder exited early: ${child.exitCode}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(fs.existsSync(filePath), true, `${filePath}가 제때 생기지 않았다`);
+}
+
+function fakePsEnv(pid) {
+  const binDir = tmpGame();
+  const psPath = path.join(binDir, 'ps');
+  fs.writeFileSync(psPath, `#!/bin/sh\nif [ "$2" = "${pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"\n`);
+  fs.chmodSync(psPath, 0o755);
+  return { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+}
+
+function assertInitRejected(result, code, message) {
+  const expected = { ok: false, code, message };
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.json, expected);
+  assert.deepEqual(JSON.parse(result.stderr.trim()), expected);
+}
+
+function snapshotGame(dir) {
+  const state = fs.readFileSync(path.join(dir, 'state.json'));
+  return {
+    state,
+    parsed: JSON.parse(state.toString('utf8')),
+    players: fs.readFileSync(path.join(dir, 'players.json')),
+  };
+}
+
+function assertGameUnchanged(dir, before) {
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'state.json')), before.state);
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'players.json')), before.players);
+  const after = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+  assert.equal(after.sessionToken, before.parsed.sessionToken);
+  assert.equal(after.stateVersion, before.parsed.stateVersion);
+  assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+}
+
 function isAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -191,6 +243,97 @@ test('init은 활성 게임에서 ACTIVE_GAME 거부', () => {
     assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
   } finally {
     killPid(dummy.pid);
+  }
+});
+
+test('init CLI: 살아 있는 남의 loop가 서버보다 먼저 이겨 exact envelope로 inert 거부한다', async () => {
+  const dir = tmpGame();
+  initGame(dir);
+  const before = snapshotGame(dir);
+  const holder = spawnLockHolder(dir);
+  const server = spawnDummy();
+  try {
+    await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
+    writeLock(dir, server.pid, before.parsed.sessionToken);
+
+    assertInitRejected(
+      cli(dir, ['init', '--ai', '2']),
+      'ACTIVE_GAME',
+      '이미 진행 중인 게임이 있습니다.',
+    );
+    assertGameUnchanged(dir, before);
+    assert.equal(isAlive(server.pid), true, 'non-force가 서버를 종료했다');
+    assert.equal(isAlive(holder.pid), true, '엔진이 loop pid를 종료했다');
+
+    assertInitRejected(
+      cli(dir, ['init', '--ai', '2', '--force']),
+      'LOOP_ALIVE',
+      '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
+    );
+    assertGameUnchanged(dir, before);
+    assert.equal(isAlive(server.pid), true, 'loop보다 먼저 서버를 종료했다');
+    assert.equal(isAlive(holder.pid), true, '엔진이 loop pid를 종료했다');
+  } finally {
+    await terminateChild(holder);
+    await terminateChild(server);
+  }
+});
+
+test('init CLI: live loop identity unknown이면 force 여부와 무관하게 게임을 보존한다', async () => {
+  const dir = tmpGame();
+  initGame(dir);
+  const before = snapshotGame(dir);
+  const holder = spawnLockHolder(dir);
+  try {
+    await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
+    const env = fakePsEnv(holder.pid);
+    assertInitRejected(
+      cli(dir, ['init', '--ai', '2'], { env }),
+      'ACTIVE_GAME',
+      '이미 진행 중인 게임이 있습니다.',
+    );
+    assertGameUnchanged(dir, before);
+    assert.equal(isAlive(holder.pid), true);
+
+    assertInitRejected(
+      cli(dir, ['init', '--ai', '2', '--force'], { env }),
+      'LOOP_ALIVE',
+      '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
+    );
+    assertGameUnchanged(dir, before);
+    assert.equal(isAlive(holder.pid), true);
+  } finally {
+    await terminateChild(holder);
+  }
+});
+
+test('init CLI: partial/malformed/unreadable loop.lock.d는 부재가 아니라 unknown이다', async (t) => {
+  const cases = [
+    ['partial', (lockDir) => fs.writeFileSync(path.join(lockDir, 'pid'), '')],
+    ['malformed', (lockDir) => fs.writeFileSync(path.join(lockDir, 'pid'), '1\nstart\nextra')],
+    ['unreadable', (lockDir) => fs.mkdirSync(path.join(lockDir, 'pid'))],
+  ];
+  for (const [label, seed] of cases) {
+    await t.test(label, () => {
+      const dir = tmpGame();
+      initGame(dir);
+      const before = snapshotGame(dir);
+      const lockDir = path.join(dir, 'loop.lock.d');
+      fs.mkdirSync(lockDir);
+      seed(lockDir);
+      assertInitRejected(
+        cli(dir, ['init', '--ai', '2']),
+        'ACTIVE_GAME',
+        '이미 진행 중인 게임이 있습니다.',
+      );
+      assertGameUnchanged(dir, before);
+      assertInitRejected(
+        cli(dir, ['init', '--ai', '2', '--force']),
+        'LOOP_ALIVE',
+        '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
+      );
+      assertGameUnchanged(dir, before);
+    });
   }
 });
 
@@ -695,6 +838,34 @@ test('resume-check: loopPidAlive는 loop 락 생존을 보고한다', async () =
     assert.equal(fs.existsSync(pidFile), true, 'loop.lock.d/pid가 제때 생기지 않았다');
     assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, true);
   } finally {
-    killPid(holder.pid);
+    await terminateChild(holder);
+  }
+});
+
+test('resume-check: unknown/mismatch/malformed loop identity는 loopPidAlive false다', async (t) => {
+  await t.test('unknown', async () => {
+    const dir = tmpGame();
+    initGame(dir, ['--ai', '2']);
+    const holder = spawnLockHolder(dir);
+    try {
+      await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
+      assert.equal(assertOk(cli(dir, ['resume-check'], { env: fakePsEnv(holder.pid) })).loopPidAlive, false);
+    } finally {
+      await terminateChild(holder);
+    }
+  });
+
+  for (const [label, record] of [
+    ['mismatch', `${process.pid}\nnot-the-real-start-time`],
+    ['malformed', `${process.pid}\nstart\nextra`],
+  ]) {
+    await t.test(label, () => {
+      const dir = tmpGame();
+      initGame(dir, ['--ai', '2']);
+      const lockDir = path.join(dir, 'loop.lock.d');
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, 'pid'), record);
+      assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
+    });
   }
 });

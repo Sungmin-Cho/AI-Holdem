@@ -366,18 +366,40 @@ export function processStartTime(pid) {
 }
 
 /**
- * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락이
- * 없거나, 1줄짜리 legacy 기록이거나, malformed(3줄 이상 등)면 owned 기록이
- * 아니므로 null. `alive`는 시그널·회수 가능 여부를 가르는 유일한 근거이며,
- * `ownedIdentityStatus`가 'alive'로 **긍정 증명**했을 때만 true다 — read-time에
- * ps가 실패해 현재 startTime을 알 수 없는('unknown') 경우도 false로 떨어져,
- * 증명되지 않은 identity로는 절대 시그널하지 않는다(fail-closed).
+ * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락 경로가
+ * 없을 때만 null이다. 기록이 partial/legacy/malformed/unreadable이면 존재는 하지만
+ * identity를 증명할 수 없으므로 `{ alive:false, status:'unknown' }`을 돌려준다.
+ * 유효한 2줄 기록은 `status: 'alive'|'dead'|'unknown'`으로 3상태를 보존한다.
+ * 기존 호출자를 위해 pid/startTime/alive 필드는 그대로 유지하며, `alive`는
+ * `ownedIdentityStatus`가 'alive'로 **긍정 증명**했을 때만 true다.
  */
 export function readOwnedLock(gameDir, name) {
-  const pidFile = readPidFile(path.join(gameDir, name));
-  if (!pidFile || pidFile.pid === null || pidFile.startTime === null) return null;
-  const alive = ownedIdentityStatus(pidFile.pid, pidFile.startTime) === 'alive';
-  return { pid: pidFile.pid, startTime: pidFile.startTime, alive };
+  const dir = path.join(gameDir, name);
+  let pidFile;
+  try {
+    pidFile = readPidFile(dir);
+  } catch {
+    return { pid: null, startTime: null, alive: false, status: 'unknown' };
+  }
+  if (!pidFile) {
+    if (!inodeKey(dir)) return null;
+    return { pid: null, startTime: null, alive: false, status: 'unknown' };
+  }
+  if (pidFile.pid === null || pidFile.startTime === null) {
+    return {
+      pid: pidFile.pid,
+      startTime: pidFile.startTime,
+      alive: false,
+      status: 'unknown',
+    };
+  }
+  const status = ownedIdentityStatus(pidFile.pid, pidFile.startTime);
+  return {
+    pid: pidFile.pid,
+    startTime: pidFile.startTime,
+    alive: status === 'alive',
+    status,
+  };
 }
 
 function tryCreateOwnedLock(dir, startTime) {

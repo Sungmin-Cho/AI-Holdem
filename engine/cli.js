@@ -341,6 +341,7 @@ function cmdEnd(gameDir, flags) {
 function cmdResumeCheck(gameDir) {
   const state = requireState(loadState(gameDir));
   const lock = readLock(gameDir);
+  const loop = readOwnedLock(gameDir, 'loop.lock.d');
   let archiveRepaired = false;
   // `false` alone cannot say whether the archive was already fine or the repair failed,
   // and the caller must block the next hand only in the second case.
@@ -355,7 +356,7 @@ function cmdResumeCheck(gameDir) {
   succeed({
     stateVersion: state.stateVersion,
     serverPidAlive: Boolean(lock && isAlive(lock.serverPid)),
-    loopPidAlive: Boolean(readOwnedLock(gameDir, 'loop.lock.d')?.alive),
+    loopPidAlive: loop?.status === 'alive',
     port: lock?.port ?? null,
     sessionToken: state.sessionToken,
     phase: state.phase,

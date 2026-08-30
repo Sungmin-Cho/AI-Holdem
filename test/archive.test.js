@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   acquireOwnedLock, releaseOwnedLock, runExclusive, withMutation,
 } from '../engine/state.js';
@@ -10,6 +12,10 @@ import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
   closeOpenPartial, vacateLive, initGameDir, stopServer,
 } from '../engine/game-archive.js';
+
+const STATE_MODULE_URL = pathToFileURL(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/state.js'),
+).href;
 
 function delegateFs(overrides = {}) {
   return {
@@ -42,6 +48,38 @@ function listedArchives(dir) {
   const archiveDir = path.join(dir, 'archive');
   if (!fs.existsSync(archiveDir)) return [];
   return fs.readdirSync(archiveDir).filter((name) => !name.startsWith('.'));
+}
+
+async function waitForPath(filePath, child, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(filePath) && Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`lock holder exited early: ${child.exitCode}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(fs.existsSync(filePath), true, `${filePath}가 제때 생기지 않았다`);
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(child.signalCode, 'SIGKILL');
+}
+
+function spawnLoopAfterGate(dir, gatePath, readyPath) {
+  const script = `
+    import fs from 'node:fs';
+    import { acquireOwnedLock, runExclusive } from ${JSON.stringify(STATE_MODULE_URL)};
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    runExclusive(${JSON.stringify(dir)}, () => {
+      fs.writeFileSync(${JSON.stringify(readyPath)}, 'ready');
+      while (!fs.existsSync(${JSON.stringify(gatePath)})) Atomics.wait(sleeper, 0, 0, 10);
+      acquireOwnedLock(${JSON.stringify(dir)}, 'loop.lock.d');
+    });
+    setInterval(() => {}, 1e6);
+  `;
+  return spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' });
 }
 
 test('runExclusive는 state.json 없이 락을 잡고 fn을 실행한다', () => {
@@ -426,21 +464,86 @@ test('loop 소유자가 부른 자식 init(ppid == loopPid)은 통과한다', ()
   }
 });
 
-test('죽은 loop 락(또는 startTime 불일치)은 활성으로 치지 않는다', () => {
+test('initGameDir: 서버 시그널 직전 생긴 loop를 재검사해 서버를 건드리지 않는다', () => {
+  const dir = tmpGame();
+  const first = initGameDir(dir, { aiCount: 2 });
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: 42, port: 8877, sessionToken: first.sessionToken, startedAt: new Date().toISOString(),
+  }));
+  const before = fs.readFileSync(path.join(dir, 'state.json'));
+  let holder;
+  const signals = [];
+  let aliveCalls = 0;
+  try {
+    assert.throws(
+      () => initGameDir(dir, { aiCount: 2, force: true }, {
+        callerPpid: 0,
+        isAlive() {
+          aliveCalls += 1;
+          // 1회차는 init의 server preflight다. 2회차(stopServer 내부의 마지막
+          // alive 확인)에서 loop를 만들어, 실제 kill 바로 앞 재검사가 없으면 잡는다.
+          if (aliveCalls === 2) holder = acquireOwnedLock(dir, 'loop.lock.d');
+          return true;
+        },
+        kill(pid, signal) { signals.push([pid, signal]); },
+        sleepSync() {},
+        now: jumpingNow(),
+      }),
+      (error) => error.code === 'LOOP_ALIVE'
+        && error.message === '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
+    );
+    assert.deepEqual(signals, []);
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'state.json')), before);
+    assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+  } finally {
+    if (holder) releaseOwnedLock(holder);
+  }
+});
+
+test('initGameDir: runExclusive 대기 중 생긴 loop를 pre-archive 재검사해 게임을 보존한다', async () => {
+  const dir = tmpGame();
+  const first = initGameDir(dir, { aiCount: 2 });
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), '{"log":[1]}');
+  const stateBefore = fs.readFileSync(path.join(dir, 'state.json'));
+  const gatePath = path.join(dir, '.test-loop-gate');
+  const readyPath = path.join(dir, '.test-mutex-ready');
+  const holder = spawnLoopAfterGate(dir, gatePath, readyPath);
+  try {
+    await waitForPath(readyPath, holder);
+    const ioFs = delegateFs({
+      readFileSync(filePath, ...args) {
+        if (filePath === path.join(dir, 'lock.json')) fs.writeFileSync(gatePath, 'go');
+        return fs.readFileSync(filePath, ...args);
+      },
+    });
+    assert.throws(
+      () => initGameDir(dir, { aiCount: 2, force: true }, { fs: ioFs, callerPpid: 0 }),
+      (error) => error.code === 'LOOP_ALIVE',
+    );
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'state.json')), stateBefore);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).sessionToken,
+      first.sessionToken,
+    );
+    assert.equal(fs.existsSync(path.join(dir, 'ui-snapshot.json')), true);
+    assert.deepEqual(listedArchives(dir), []);
+  } finally {
+    await terminateChild(holder);
+  }
+});
+
+test('loop startTime 불일치는 dead로 판정해 활성으로 치지 않는다', () => {
   const dir = tmpGame();
   fs.mkdirSync(path.join(dir, 'loop.lock.d'));
-  fs.writeFileSync(path.join(dir, 'loop.lock.d', 'pid'), '999999\nbogus-dead-pid');
-  const first = initGameDir(dir, { aiCount: 2 });
-  assert.ok(first.sessionToken);
-
   // 살아 있는 pid(이 테스트 프로세스 자신)지만 기록된 startTime이 실제와
-  // 다르면(재사용 방어) 여전히 죽은 것으로 취급한다.
+  // 다르면 pid 재사용 방어에 의해 이전 owner는 dead다. 플랫폼별 pid 상한을
+  // 추측하는 임의의 큰 pid에는 기대지 않는다.
   fs.writeFileSync(
     path.join(dir, 'loop.lock.d', 'pid'),
     `${process.pid}\nbogus-mismatched-start-time`,
   );
-  const second = initGameDir(dir, { aiCount: 2, force: true });
-  assert.ok(second.sessionToken);
+  const result = initGameDir(dir, { aiCount: 2 });
+  assert.ok(result.sessionToken);
 });
 
 test('stopServer: now가 마감을 넘기면 sleep 없이 SIGTERM 후 SIGKILL한다', () => {

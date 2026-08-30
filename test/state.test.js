@@ -6,6 +6,14 @@ import { loadState, saveState, withMutation, writeHandArchive, readHand, isRecla
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
 
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(child.signalCode, 'SIGKILL');
+}
+
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 
 // PATH 맨 앞에 가짜 ps를 꽂아 실제 프로세스 경계(자식 프로세스 실행)로 read-time
@@ -186,6 +194,7 @@ test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회
   fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n다른-시각-문자열`);
   const seen = readOwnedLock(dir, 'loop.lock.d');
   assert.equal(seen.alive, false); // 시그널 금지 판정의 근거
+  assert.equal(seen.status, 'dead');
   const h = acquireOwnedLock(dir, 'loop.lock.d'); // 회수 후 선점 성공
   assert.equal(h.pid, process.pid); // 회수 후 선점한 락은 진짜 나 자신의 identity를 기록한다
   assert.equal(h.startTime, processStartTime(process.pid));
@@ -210,6 +219,7 @@ test('readOwnedLock: 락 없음 → null, 자기 자신 → alive true·startTim
   const seen = readOwnedLock(dir, 'loop.lock.d');
   assert.equal(seen.pid, process.pid);
   assert.equal(seen.alive, true);
+  assert.equal(seen.status, 'alive');
   assert.equal(seen.startTime, processStartTime(process.pid));
   assert.equal(seen.startTime, h.startTime);
   releaseOwnedLock(h);
@@ -275,29 +285,40 @@ test('owned lock: 살아있는 기록 소유자의 read-time startTime을 알 �
       () => {
         const seen = readOwnedLock(dir, 'loop.lock.d');
         assert.equal(seen.alive, false); // 긍정 증명 없이는 시그널을 authorize하지 않는다
+        assert.equal(seen.status, 'unknown'); // destructive caller가 dead와 구분할 공개 근거
         assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/); // unknown은 회수하지 않는다
       },
     );
     assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), recorded); // 기록 보존
   } finally {
-    child.kill();
+    await terminateChild(child);
   }
 });
 
-test('owned lock: 3줄 이상 malformed 기록은 owned로 해석되지 않아 alive를 authorize하지 않는다', () => {
+test('readOwnedLock: malformed 기록은 존재하는 unknown 락으로 보고 alive를 authorize하지 않는다', () => {
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n${processStartTime(process.pid)}\n잡줄`);
-  assert.equal(readOwnedLock(dir, 'loop.lock.d'), null);
+  assert.deepEqual(readOwnedLock(dir, 'loop.lock.d'), {
+    pid: null,
+    startTime: null,
+    alive: false,
+    status: 'unknown',
+  });
 });
 
-test('readOwnedLock: 1줄 레거시 기록은 owned로 해석되지 않는다(null)', () => {
+test('readOwnedLock: 1줄 레거시 기록은 존재하는 unknown owned 락으로 구분한다', () => {
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   fs.writeFileSync(path.join(lockDir, 'pid'), String(process.pid));
-  assert.equal(readOwnedLock(dir, 'loop.lock.d'), null);
+  assert.deepEqual(readOwnedLock(dir, 'loop.lock.d'), {
+    pid: process.pid,
+    startTime: null,
+    alive: false,
+    status: 'unknown',
+  });
 });
 
 test('owned lock: pid 파일 하나만, 정확히 "pid\\nstartTime" 2줄', () => {
