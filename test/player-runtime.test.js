@@ -900,6 +900,33 @@ test('resolveRuntimes: preferred 미지정이면 claude→codex→grok 사다리
   assert.ok(res.notices.some((n) => n.includes('미지정')));
 });
 
+test('resolveRuntimes는 adapter를 만든 즉시 production owner에 등록한 뒤 probe한다', async () => {
+  const events = [];
+  const runtimes = new Map();
+  const out = await resolveRuntimes({
+    canaryAbsPath: canary().file,
+    createRuntime: (kind) => {
+      const adapter = stubRuntime(kind, { player: { ok: false } });
+      const originalProbe = adapter.probe.bind(adapter);
+      adapter.probe = async (input) => {
+        events.push(`probe:${kind}`);
+        return originalProbe(input);
+      };
+      runtimes.set(kind, adapter);
+      return adapter;
+    },
+    onAdapterCreated: (adapter) => events.push(`register:${adapter.kind}`),
+  });
+
+  assert.equal(out.player, null);
+  assert.deepEqual(events, [
+    'register:claude', 'probe:claude',
+    'register:codex', 'probe:codex',
+    'register:grok', 'probe:grok',
+  ]);
+  assert.deepEqual([...runtimes.keys()], ['claude', 'codex', 'grok']);
+});
+
 test('oneshotStart: pid·startTime을 spawn 직후 제공하고 done이 raw를 준다', async () => {
   const f = fakeRuntime('claude', { default: { reply: '코치 본문' } });
   try {
@@ -1352,19 +1379,46 @@ test('dispose는 진행 중인 probe·warmup·decide·oneshot 자식을 전부 �
   }
 });
 
-test('dispose: 빈 작업 디렉터리를 정리하고 다음 호출은 새 디렉터리로 돈다', async () => {
+test('dispose: 빈 작업 디렉터리를 정리하고 성공 뒤에도 runtime은 영구 closed다', async () => {
   const f = fakeRuntime('claude');
   try {
     await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 5000 });
     const firstCwd = f.last().cwd;
+    const callsBeforeDispose = f.calls().length;
     assert.ok(fs.existsSync(firstCwd));
     await f.rt.dispose();
     assert.equal(fs.existsSync(firstCwd), false, 'dispose가 빈 cwd를 지운다');
-    await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 5000 });
-    const secondCwd = f.last().cwd;
-    assert.notEqual(secondCwd, firstCwd);
-    assert.ok(fs.existsSync(secondCwd));
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 5000 }),
+      (error) => error.code === 'RUNTIME_CLOSED',
+    );
+    assert.equal(f.calls().length, callsBeforeDispose, 'closed runtime이 새 child를 만들었다');
   } finally {
     f.cleanup();
+  }
+});
+
+test('dispose: 종료 확인 실패 뒤에도 runtime은 영구 closed이고 두 번째 child를 만들지 않는다', async () => {
+  let rejectDone;
+  let execCalls = 0;
+  const done = new Promise((_, reject) => { rejectDone = reject; });
+  const rt = createPlayerRuntime('claude', {
+    exec: () => {
+      execCalls += 1;
+      return { pid: 424242, kill: () => false, done };
+    },
+  });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 10_000 });
+  decision.catch(() => {});
+  try {
+    await assert.rejects(rt.dispose(), (error) => error.code === 'CHILD_SIGNAL_FAILED');
+    await assert.rejects(
+      rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 20 }),
+      (error) => error.code === 'RUNTIME_CLOSED',
+    );
+    assert.equal(execCalls, 1, 'failed dispose 뒤 새 child가 생성됐다');
+  } finally {
+    rejectDone(new Error('test cleanup'));
+    await assert.rejects(decision);
   }
 });

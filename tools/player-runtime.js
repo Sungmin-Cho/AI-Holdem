@@ -388,6 +388,7 @@ export function createPlayerRuntime(kind, opts = {}) {
   const activeHandles = new Set();
   let cwd = null;
   let disposePromise = null;
+  let disposed = false;
 
   // 레포·game/ 밖의 빈 디렉터리 하나를 런타임당 한 번 만든다. 레포 안이면 CLI가
   // 지침 파일·게임 상태를 컨텍스트로 빨아들일 수 있으므로 여기서 거부한다.
@@ -419,6 +420,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   function start({ purpose, model, sessionId = null, input }) {
+    if (disposed) {
+      throw runtimeError('RUNTIME_CLOSED', `RUNTIME_CLOSED: ${kind} runtime은 이미 영구 종료됐습니다.`);
+    }
     if (disposePromise) {
       throw runtimeError('RUNTIME_DISPOSING', `RUNTIME_DISPOSING: ${kind} runtime을 정리 중입니다.`);
     }
@@ -737,6 +741,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     // requestStop은 이 Promise를 await하므로 runtime child가 남은 채 loop lock을 풀 수 없다.
     async dispose() {
       if (disposePromise) return disposePromise;
+      // 성공 여부와 무관하게 첫 disposal 시도가 lifecycle의 영구 닫힘 경계다.
+      // 실패 뒤 재사용하면 아직 살아 있는 handle과 새 child가 겹칠 수 있다.
+      disposed = true;
       disposePromise = (async () => {
         const pending = [...activeHandles];
         const results = await Promise.allSettled(
@@ -751,11 +758,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         try { fs.rmdirSync(cwd); } catch { /* 비어 있지 않거나 이미 없다 */ }
         cwd = null;
       })();
-      try {
-        await disposePromise;
-      } finally {
-        disposePromise = null;
-      }
+      return disposePromise;
     },
   };
 }
@@ -785,6 +788,7 @@ export async function resolveRuntimes({
   canaryAbsPath = null,
   need = 'player+upper',
   createRuntime = createPlayerRuntime,
+  onAdapterCreated = null,
   runtimeOpts = {},
   probeTimeoutMs,
 } = {}) {
@@ -792,7 +796,11 @@ export async function resolveRuntimes({
   const notices = [];
   const made = new Map();
   const adapterFor = (kind) => {
-    if (!made.has(kind)) made.set(kind, createRuntime(kind, runtimeOpts));
+    if (!made.has(kind)) {
+      const adapter = createRuntime(kind, runtimeOpts);
+      made.set(kind, adapter);
+      onAdapterCreated?.(adapter);
+    }
     return made.get(kind);
   };
   const probeOpts = probeTimeoutMs === undefined ? {} : { timeoutMs: probeTimeoutMs };
