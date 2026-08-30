@@ -91,20 +91,24 @@ function canary() {
   return { file, sentinel };
 }
 
-// resolveRuntimes 사다리 테스트용 스텁 — probe 호출 순서·종류를 그대로 기록한다.
+// resolveRuntimes 사다리 테스트용 스텁 — probe 호출 순서·종류·카나리 전달 여부를 기록한다.
+// 상위 probe도 fresh 카나리 컨테인먼트를 요구하므로 upper 계획에 containment가 없으면
+// 왕복 성공을 그대로 따른다(containment: false를 명시해야 유출 상위를 흉내 낸다).
 function stubRuntime(kind, plan = {}) {
   const seen = [];
   return {
     kind,
     seen,
     watchdog: RUNTIME_TABLE[kind].watchdog,
-    async probe({ upper = false } = {}) {
-      seen.push(upper ? 'upper' : 'player');
+    async probe({ upper = false, canaryAbsPath = null } = {}) {
+      seen.push(upper ? (canaryAbsPath ? 'upper+canary' : 'upper') : 'player');
       const p = (upper ? plan.upper : plan.player) ?? {};
+      const ok = p.ok ?? false;
+      const containment = upper ? (p.containment ?? ok) : (p.containment ?? false);
       return {
-        ok: p.ok ?? false,
-        containment: upper ? null : (p.containment ?? false),
-        upper: upper ? (p.ok ?? false) : null,
+        ok,
+        containment,
+        upper: upper ? (ok && containment) : null,
         elapsedMs: 1,
         ...(p.notice ? { notice: p.notice } : {}),
       };
@@ -343,7 +347,14 @@ test('decide 타임아웃: TIMEOUT을 던지고 자식을 종료한다', async (
 
 test('probe: 카나리 센티널이 응답에 나오면 containment false, 프롬프트에는 카나리 경로만 실린다', async () => {
   const { file, sentinel } = canary();
-  const leaky = fakeRuntime('codex', { default: { reply: `파일 내용: ${sentinel}` } });
+  const leaky = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-probe' },
+        { type: 'item.completed', item: { type: 'agent_message', text: `파일 내용: ${sentinel}` } },
+      ),
+    },
+  });
   try {
     const res = await leaky.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, true);
@@ -354,18 +365,80 @@ test('probe: 카나리 센티널이 응답에 나오면 containment false, 프�
     assert.ok(call.stdin.includes(file));
     assert.equal(call.argv.join(' ').includes(file), false, '카나리 경로도 argv가 아니라 stdin이다');
     assert.equal(call.stdin.includes('state.json'), false);
-    assert.equal(call.argv.includes('--json'), false, '컨테인먼트 probe는 핀된 plain argv다');
   } finally {
     leaky.cleanup();
   }
 
-  const clean = fakeRuntime('codex', { default: { reply: '접근할 수 없어 거부합니다.' } });
+  const clean = fakeRuntime('codex', {
+    default: {
+      reply: jsonl({ type: 'item.completed', item: { type: 'agent_message', text: '접근할 수 없어 거부합니다.' } }),
+    },
+  });
   try {
     const res = await clean.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, true);
     assert.equal(res.containment, true);
   } finally {
     clean.cleanup();
+  }
+});
+
+test('probe(codex): --json JSONL fail-closed — 최종 agent_message가 없거나 plain이면 부적격', async () => {
+  // Task 0 기록의 plain 통과형과 probe 노트 산문(JSONL 최종 메시지 기계 검증)이 어긋난
+  // 지점이다. Fix round 1에서 명시 불변식(JSONL fail-closed) 쪽으로 의도적으로 해소한다
+  // — plain 산문 응답은 더 이상 컨테인먼트 증거가 아니다. 실기 스모크 재검증 대상.
+  const { file } = canary();
+  const prefix = [
+    '-c', 'mcp_servers={}', '-c', 'web_search="disabled"',
+    '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'plugins',
+    '--disable', 'browser_use', '--disable', 'computer_use', '--disable', 'image_generation',
+    '--disable', 'view_image', '--disable', 'hooks', '--disable', 'code_mode_host',
+  ];
+
+  const plain = fakeRuntime('codex', { default: { reply: '접근할 수 없어 거부합니다.' } });
+  try {
+    const res = await plain.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, 'plain 산문 스트림은 JSONL fail-closed에서 정상 응답이 아니다');
+    assert.equal(res.containment, false);
+    assert.deepEqual(plain.last().argv, [
+      ...prefix, 'exec', '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-',
+    ], '컨테인먼트 probe argv는 생성과 같은 --json 형이다');
+  } finally {
+    plain.cleanup();
+  }
+
+  const errorOnly = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-err' },
+        { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable' } },
+      ),
+    },
+  });
+  try {
+    const res = await errorOnly.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, 'error item만 있는 스트림은 최종 agent_message가 없어 부적격이다');
+    assert.equal(res.containment, false);
+  } finally {
+    errorOnly.cleanup();
+  }
+
+  const progressThenFinal = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-ok' },
+        { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable' } },
+        { type: 'item.completed', item: { type: 'agent_message', text: '중간 진행 메시지' } },
+        { type: 'item.completed', item: { type: 'agent_message', text: '읽을 수 없어 거부합니다.' } },
+      ),
+    },
+  });
+  try {
+    const res = await progressThenFinal.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, true, '앞선 error·중간 메시지는 무시하고 최종 agent_message만 본다');
+    assert.equal(res.containment, true);
+  } finally {
+    progressThenFinal.cleanup();
   }
 });
 
@@ -435,31 +508,111 @@ test('probe(grok): 핀 시작 argv(세션 플래그 없음)로 돌고, 센티널
   }
 });
 
-test('probe(upper): 상위 모델 왕복만 돌고 카나리·세션을 쓰지 않는다', async () => {
+test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async () => {
+  const { file } = canary();
+  const upperArgv = ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', ''];
   const f = fakeRuntime('claude', {
-    default: { reply: jsonl({ type: 'result', subtype: 'success', result: 'ok' }) },
+    matchers: [{ includes: '다음 파일을 읽어', reply: '접근할 수 없어 거부합니다.' }],
+    default: { reply: 'ok' },
   });
   try {
-    const res = await f.rt.probe({ upper: true });
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res.ok, true);
     assert.equal(res.upper, true);
-    assert.equal(res.containment, null);
-    const call = f.last();
-    assert.ok(call.argv.includes('opus'));
-    assert.equal(call.argv.includes('--session-id'), false);
-    assert.equal(call.argv.includes('canary'), false);
+    assert.equal(res.containment, true, '상위 후보도 카나리 컨테인먼트를 통과해야 한다');
+    const [roundtrip, containment] = f.calls().slice(-2);
+    assert.deepEqual(roundtrip.argv, upperArgv, '상위 왕복은 정확한 상위 oneshot argv다');
+    assert.deepEqual(containment.argv, upperArgv, '상위 컨테인먼트도 정확한 상위 oneshot argv다');
+    assert.equal(roundtrip.stdin, 'ok 한 단어만 출력\n');
+    const freshPath = containment.stdin.match(/\/[^\s'"]+/)?.[0];
+    assert.ok(freshPath && freshPath !== file, '상위 컨테인먼트는 플레이어 카나리가 아닌 fresh 카나리를 쓴다');
+    assert.equal(fs.existsSync(freshPath), false, 'fresh 카나리는 probe 뒤 정리된다');
+    assert.equal(containment.argv.join(' ').includes(freshPath), false, '카나리 경로는 stdin으로만 간다');
+
+    const res2 = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res2.containment, true);
+    const freshPath2 = f.calls().at(-1).stdin.match(/\/[^\s'"]+/)?.[0];
+    assert.notEqual(freshPath2, freshPath, '상위 컨테인먼트 카나리는 probe마다 새로 만든다');
   } finally {
     f.cleanup();
   }
 
   const dead = fakeRuntime('claude', { default: { reply: '', exitCode: 1, stderr: 'auth failed' } });
   try {
-    const res = await dead.rt.probe({ upper: true });
+    const res = await dead.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res.ok, false);
     assert.equal(res.upper, false);
+    assert.equal(res.containment, false, '왕복이 죽으면 컨테인먼트도 확인 불가 — 통과가 아니다');
     assert.ok(res.notice);
   } finally {
     dead.cleanup();
+  }
+});
+
+test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('grok', {
+    matchers: [{ includes: '다음 파일을 읽어', reply: '읽었습니다: ', echoCanary: true }],
+    default: { reply: 'ok' },
+  });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true, '왕복 자체는 성공한다');
+    assert.equal(res.containment, false, '카나리 유출 상위 후보는 탈락해야 한다');
+    assert.equal(res.upper, false);
+    assert.ok(res.notice && !/SENTINEL/i.test(res.notice), 'notice가 센티널을 다시 유출하면 안 된다');
+    assert.deepEqual(f.last().argv, [
+      '--prompt-file', '/dev/stdin', '-m', 'grok-4.6', '--tools', '', '--deny', 'MCPTool',
+      '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
+    ], 'grok 상위 probe는 세션 플래그 없는 핀 argv다');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('probe(upper, codex): 상위 컨테인먼트도 JSONL fail-closed — 최종 agent_message 없으면 부적격', async () => {
+  const { file } = canary();
+  const noFinal = fakeRuntime('codex', {
+    matchers: [{
+      includes: '다음 파일을 읽어',
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-u1' },
+        { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable' } },
+      ),
+    }],
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-u0' },
+        { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } },
+      ),
+    },
+  });
+  try {
+    const res = await noFinal.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true);
+    assert.equal(res.containment, false, '최종 agent_message 없는 상위 컨테인먼트 스트림은 부적격이다');
+    assert.equal(res.upper, false);
+    assert.ok(noFinal.last().argv.includes('gpt-5.6-sol'));
+    assert.ok(noFinal.last().argv.includes('--json'));
+  } finally {
+    noFinal.cleanup();
+  }
+
+  const clean = fakeRuntime('codex', {
+    matchers: [{
+      includes: '다음 파일을 읽어',
+      reply: jsonl({ type: 'item.completed', item: { type: 'agent_message', text: '접근 거부' } }),
+    }],
+    default: {
+      reply: jsonl({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }),
+    },
+  });
+  try {
+    const res = await clean.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, true);
+    assert.equal(res.containment, true);
+  } finally {
+    clean.cleanup();
   }
 });
 
@@ -467,6 +620,15 @@ test('probe: 카나리 경로 없이 플레이어 probe를 부르면 fail-closed
   const f = fakeRuntime('claude');
   try {
     await assert.rejects(f.rt.probe({}), /CANARY_REQUIRED/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('probe(upper): 카나리 경로 없이 부르면 fail-closed로 던진다', async () => {
+  const f = fakeRuntime('claude', { default: { reply: 'ok' } });
+  try {
+    await assert.rejects(f.rt.probe({ upper: true }), /CANARY_REQUIRED/);
   } finally {
     f.cleanup();
   }
@@ -503,6 +665,8 @@ test('resolveRuntimes: 상위 모델은 다른 런타임으로 갈라 쓰고, �
   assert.equal(res.player.kind, 'claude');
   assert.equal(res.upper.kind, 'codex');
   assert.ok(res.notices.some((n) => n.includes('상위 모델')));
+  assert.deepEqual(split.claude.seen, ['player', 'upper+canary'], '상위 probe에도 카나리 경로가 전달된다');
+  assert.deepEqual(split.codex.seen, ['upper+canary']);
 
   const none = {
     claude: stubRuntime('claude', { player: { ok: true, containment: true }, upper: { ok: false } }),
@@ -517,20 +681,45 @@ test('resolveRuntimes: 상위 모델은 다른 런타임으로 갈라 쓰고, �
   assert.ok(res2.notices.some((n) => n.includes('리뷰')));
 });
 
-test('resolveRuntimes: upper-only는 플레이어 probe를 아예 돌지 않는다', async () => {
+test('resolveRuntimes: upper-only는 플레이어 probe를 아예 돌지 않고, 상위 probe에 카나리를 넘긴다', async () => {
   const stubs = {
     claude: stubRuntime('claude', { player: { ok: true, containment: true }, upper: { ok: false } }),
     codex: stubRuntime('codex', { player: { ok: true, containment: true }, upper: { ok: true } }),
     grok: stubRuntime('grok', { player: { ok: true, containment: true }, upper: { ok: true } }),
   };
   const res = await resolveRuntimes({
-    preferred: 'claude', need: 'upper-only', createRuntime: (kind) => stubs[kind],
+    preferred: 'claude', canaryAbsPath: '/tmp/c.txt', need: 'upper-only', createRuntime: (kind) => stubs[kind],
   });
   assert.equal(res.player, null);
   assert.equal(res.upper.kind, 'codex');
-  assert.deepEqual(stubs.claude.seen, ['upper']);
-  assert.deepEqual(stubs.codex.seen, ['upper']);
+  assert.deepEqual(stubs.claude.seen, ['upper+canary']);
+  assert.deepEqual(stubs.codex.seen, ['upper+canary']);
   assert.deepEqual(stubs.grok.seen, []);
+});
+
+test('resolveRuntimes: 상위 왕복이 성공해도 컨테인먼트에 실패한 후보(유출 grok)는 상위로 절대 선택되지 않는다', async () => {
+  const stubs = {
+    claude: stubRuntime('claude', { player: { ok: true, containment: true }, upper: { ok: false } }),
+    codex: stubRuntime('codex', { player: { ok: false }, upper: { ok: false } }),
+    grok: stubRuntime('grok', { player: { ok: true, containment: false }, upper: { ok: true, containment: false } }),
+  };
+  const res = await resolveRuntimes({
+    preferred: 'claude', canaryAbsPath: '/tmp/c.txt', need: 'player+upper', createRuntime: (kind) => stubs[kind],
+  });
+  assert.equal(res.player.kind, 'claude');
+  assert.equal(res.upper, null, '왕복만 통과한 유출 상위 후보를 선택하면 안 된다');
+  assert.ok(res.notices.some((n) => n.includes('상위 모델 런타임이 없습니다')));
+
+  const splitClean = {
+    claude: stubRuntime('claude', { player: { ok: true, containment: true }, upper: { ok: true, containment: false } }),
+    codex: stubRuntime('codex', { player: { ok: false }, upper: { ok: true, containment: true } }),
+    grok: stubRuntime('grok', { player: { ok: false }, upper: { ok: true, containment: false } }),
+  };
+  const res2 = await resolveRuntimes({
+    preferred: 'claude', canaryAbsPath: '/tmp/c.txt', need: 'player+upper', createRuntime: (kind) => splitClean[kind],
+  });
+  assert.equal(res2.player.kind, 'claude');
+  assert.equal(res2.upper.kind, 'codex', '컨테인먼트까지 통과한 후보로 갈라 쓴다');
 });
 
 test('resolveRuntimes: 전 런타임 플레이어 부적격이면 player null이고 상위 probe로 넘어가지 않는다', async () => {
@@ -616,6 +805,321 @@ test('oneshotStart: startTime을 확인할 수 없으면 시그널 없이 fail-c
     assert.ok(result.reason);
     assert.deepEqual(f.kills, [], 'identity 미확인 pid에는 절대 시그널하지 않는다');
     assert.equal(isAlive(handle.pid), true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('warmup: 최종 응답이 정확한 ready가 아니면 NOT_READY로 던지고 세션을 쓰지 않는다', async () => {
+  const refusal = fakeRuntime('claude', { default: { reply: '알겠습니다. 준비를 마쳤습니다.' } });
+  try {
+    await assert.rejects(
+      refusal.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+      '비-ready 산문 응답은 세션을 만들면 안 된다',
+    );
+  } finally {
+    refusal.cleanup();
+  }
+
+  const empty = fakeRuntime('claude', { default: { reply: '' } });
+  try {
+    await assert.rejects(
+      empty.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+      '빈 응답은 세션을 만들면 안 된다',
+    );
+  } finally {
+    empty.cleanup();
+  }
+
+  const padded = fakeRuntime('claude', { default: { reply: '  ready\n' } });
+  try {
+    const { sessionId } = await padded.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    assert.ok(sessionId, 'trim 뒤 정확한 ready는 통과한다');
+  } finally {
+    padded.cleanup();
+  }
+});
+
+test('warmup(codex): thread.started만 있으면 NOT_READY, 비-JSONL 스트림이면 NO_SESSION — 세션이 살아남지 않는다', async () => {
+  const startedOnly = fakeRuntime('codex', {
+    default: { reply: jsonl({ type: 'thread.started', thread_id: 'th-only' }) },
+  });
+  try {
+    await assert.rejects(
+      startedOnly.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+      'agent_message 없는 스트림은 준비 완료가 아니다',
+    );
+  } finally {
+    startedOnly.cleanup();
+  }
+
+  const malformed = fakeRuntime('codex', { default: { reply: 'JSONL이 아닌 산문 출력' } });
+  try {
+    await assert.rejects(
+      malformed.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NO_SESSION',
+    );
+  } finally {
+    malformed.cleanup();
+  }
+
+  const notReady = fakeRuntime('codex', {
+    default: {
+      reply: jsonl(
+        { type: 'thread.started', thread_id: 'th-nr' },
+        { type: 'item.completed', item: { type: 'agent_message', text: '준비됐다고 생각합니다' } },
+      ),
+    },
+  });
+  try {
+    await assert.rejects(
+      notReady.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NOT_READY',
+    );
+  } finally {
+    notReady.cleanup();
+  }
+});
+
+test('probe(claude): hook 이벤트·비어 있지 않은 init.hooks·init 부재·stderr 센티널은 전부 containment false', async () => {
+  const { file, sentinel } = canary();
+
+  const hookEvent = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'system', subtype: 'hook_event', hook: 'PreToolUse' },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+    },
+  });
+  try {
+    const res = await hookEvent.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false, 'hook 이벤트가 있으면 부적격이다');
+    assert.ok(res.notice && !res.notice.includes(sentinel) && !res.notice.includes('거부합니다'),
+      'notice에 센티널·모델 출력을 싣지 않는다');
+  } finally {
+    hookEvent.cleanup();
+  }
+
+  const initHooks = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], hooks: { PreToolUse: [{ command: 'x' }] } },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+    },
+  });
+  try {
+    assert.equal((await initHooks.rt.probe({ canaryAbsPath: file })).containment, false,
+      'init.hooks가 비어 있지 않으면 부적격이다');
+  } finally {
+    initHooks.cleanup();
+  }
+
+  const noInit = fakeRuntime('claude', {
+    default: { reply: jsonl({ type: 'result', subtype: 'success', result: '거부합니다' }) },
+  });
+  try {
+    assert.equal((await noInit.rt.probe({ canaryAbsPath: file })).containment, false,
+      'init이 없으면 검증 불가 — fail-closed');
+  } finally {
+    noInit.cleanup();
+  }
+
+  const stderrLeak = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+      stderr: `trace: ${sentinel}`,
+    },
+  });
+  try {
+    const res = await stderrLeak.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false, 'stderr 센티널도 유출이다');
+    assert.ok(res.notice && !res.notice.includes(sentinel));
+  } finally {
+    stderrLeak.cleanup();
+  }
+});
+
+test('terminate: done 거부는 종료 증거가 아니다 — close 미확정이면 pid가 살아 있든 죽든 confirmed false', async () => {
+  const kills = [];
+  const handles = [];
+  const f = fakeRuntime(
+    'claude',
+    { default: { reply: '늦은 본문', delayMs: 30_000 } },
+    {
+      terminateGraceMs: 150,
+      terminateKillWaitMs: 150,
+      exec: (spec) => {
+        const h = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
+        handles.push(h);
+        return {
+          pid: h.pid,
+          kill: (signal) => { kills.push(signal); return h.kill(signal); },
+          done: Promise.reject(Object.assign(new Error('중계 오류'), { code: 'RELAY_ERROR' })),
+        };
+      },
+    },
+  );
+  try {
+    const handle = f.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 5000 });
+    await assert.rejects(handle.done, (error) => error.code === 'RELAY_ERROR');
+    assert.equal(isAlive(handle.pid), true, '자식은 여전히 살아 있다');
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false, 'done 거부를 종료 확인으로 승격하면 안 된다');
+    assert.ok(result.reason);
+  } finally {
+    for (const h of handles) { try { h.kill('SIGKILL'); } catch { /* 이미 종료 */ } }
+    f.cleanup();
+  }
+});
+
+test('terminate: 재검증에서 identity가 mismatch/unknown으로 바뀌면 그 즉시 시그널을 멈추고 confirmed false', async () => {
+  let mismatchCalls = 0;
+  const mismatch = fakeRuntime(
+    'claude',
+    { default: { reply: '늦은 본문', delayMs: 30_000, ignoreTerm: true } },
+    {
+      terminateGraceMs: 150,
+      terminateKillWaitMs: 150,
+      processStartTime: () => { mismatchCalls += 1; return mismatchCalls <= 2 ? 'st-1' : 'st-2'; },
+    },
+  );
+  try {
+    const handle = mismatch.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 100 });
+    await assert.rejects(handle.done, (error) => error.code === 'TIMEOUT');
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false);
+    assert.equal(result.reason, 'IDENTITY_MISMATCH');
+    assert.deepEqual(mismatch.kills, ['SIGTERM'], 'mismatch 이후에는 SIGKILL을 보내지 않는다');
+  } finally {
+    mismatch.cleanup();
+  }
+
+  let unknownCalls = 0;
+  const unknown = fakeRuntime(
+    'claude',
+    { default: { reply: '늦은 본문', delayMs: 30_000, ignoreTerm: true } },
+    {
+      terminateGraceMs: 150,
+      terminateKillWaitMs: 150,
+      processStartTime: () => { unknownCalls += 1; return unknownCalls <= 2 ? 'st-1' : null; },
+    },
+  );
+  try {
+    const handle = unknown.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 100 });
+    await assert.rejects(handle.done, (error) => error.code === 'TIMEOUT');
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false);
+    assert.equal(result.reason, 'IDENTITY_UNVERIFIABLE');
+    assert.deepEqual(unknown.kills, ['SIGTERM']);
+  } finally {
+    unknown.cleanup();
+  }
+});
+
+test('terminate: kill이 false를 반환하거나 던지면 SIGNAL_FAILED로 즉시 fail-closed', async () => {
+  const handles = [];
+  const makeOpts = (kill) => ({
+    terminateGraceMs: 5000,
+    terminateKillWaitMs: 5000,
+    exec: (spec) => {
+      const h = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
+      handles.push(h);
+      return { pid: h.pid, kill, done: h.done };
+    },
+  });
+
+  const returnsFalse = fakeRuntime('claude', { default: { reply: '늦은 본문', delayMs: 30_000 } }, makeOpts(() => false));
+  try {
+    const handle = returnsFalse.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 100 });
+    await assert.rejects(handle.done, (error) => error.code === 'TIMEOUT');
+    const started = Date.now();
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false);
+    assert.equal(result.reason, 'SIGNAL_FAILED');
+    assert.ok(Date.now() - started < 4000, '시그널 실패를 확인하고도 유예를 기다리면 안 된다');
+  } finally {
+    for (const h of handles) { try { h.kill('SIGKILL'); } catch { /* 이미 종료 */ } }
+    returnsFalse.cleanup();
+  }
+
+  const throws = fakeRuntime('claude', { default: { reply: '늦은 본문', delayMs: 30_000 } }, makeOpts(() => { throw new Error('EPERM'); }));
+  try {
+    const handle = throws.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 100 });
+    await assert.rejects(handle.done, (error) => error.code === 'TIMEOUT');
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false, 'kill 예외가 terminate 밖으로 새면 안 된다');
+    assert.equal(result.reason, 'SIGNAL_FAILED');
+  } finally {
+    for (const h of handles) { try { h.kill('SIGKILL'); } catch { /* 이미 종료 */ } }
+    throws.cleanup();
+  }
+});
+
+test('terminate: 직계 자식이 죽어도 상속 stdio를 쥔 후손이 있으면 confirmed false — pid 사망은 close가 아니다', async () => {
+  const f = fakeRuntime(
+    'claude',
+    { default: { reply: '본문', orphanMs: 8000 } },
+    { terminateGraceMs: 150, terminateKillWaitMs: 150 },
+  );
+  try {
+    const handle = f.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 5000 });
+    assert.equal(await waitDead(handle.pid), true, '직계 fake CLI는 즉시 exit 0 한다');
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false, '후손이 stdio를 쥐고 있는 동안 종료를 확인하면 안 된다');
+    assert.ok(result.reason);
+    assert.deepEqual(f.kills, [], '죽은 직계 pid에 시그널하지 않는다');
+  } finally {
+    const orphanPid = f.calls().find((c) => c.orphanPid)?.orphanPid;
+    if (orphanPid) { try { process.kill(orphanPid, 'SIGKILL'); } catch { /* 이미 종료 */ } }
+    f.cleanup();
+  }
+});
+
+test('terminate: pid가 없으면 시그널 없이 NO_PID로 fail-closed', async () => {
+  const f = fakeRuntime('claude', { default: { reply: 'x' } }, {
+    exec: () => ({ pid: null, kill: () => { throw new Error('시그널하면 안 된다'); }, done: new Promise(() => {}) }),
+  });
+  try {
+    const handle = f.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 100 });
+    assert.equal(handle.pid, null);
+    const result = await handle.terminate();
+    assert.equal(result.confirmed, false);
+    assert.equal(result.reason, 'NO_PID');
+    await assert.rejects(handle.done, (error) => error.code === 'TIMEOUT');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('extractJsonLine: 문자열 리터럴 안의 중괄호·이스케이프 따옴표를 건너뛴다', () => {
+  assert.deepEqual(extractJsonLine('{"a":"x}y","b":"q\\"r"}'), { a: 'x}y', b: 'q"r' });
+  assert.deepEqual(
+    extractJsonLine('앞말 {"talk":"괄호 } 포함 \\" 인용","action":"fold"} 뒷말'),
+    { talk: '괄호 } 포함 " 인용', action: 'fold' },
+  );
+});
+
+test('dispose: 빈 작업 디렉터리를 정리하고 다음 호출은 새 디렉터리로 돈다', async () => {
+  const f = fakeRuntime('claude');
+  try {
+    await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 5000 });
+    const firstCwd = f.last().cwd;
+    assert.ok(fs.existsSync(firstCwd));
+    f.rt.dispose();
+    assert.equal(fs.existsSync(firstCwd), false, 'dispose가 빈 cwd를 지운다');
+    await f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 5000 });
+    const secondCwd = f.last().cwd;
+    assert.notEqual(secondCwd, firstCwd);
+    assert.ok(fs.existsSync(secondCwd));
   } finally {
     f.cleanup();
   }

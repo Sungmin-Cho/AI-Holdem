@@ -101,6 +101,11 @@ const RUNTIMES = {
       switch (purpose) {
         case 'create':
         case 'oneshot':
+        case 'probe':
+          // 컨테인먼트 probe도 생성과 같은 --json JSONL fail-closed다. Task 0의 기록된
+          // 통과형은 plain이었지만(산문과 argv의 불일치가 deferred로 남았다), fix round
+          // 1에서 명시 불변식 — 파싱 가능한 **최종** `agent_message.text`가 있어야 정상
+          // 응답 — 쪽으로 의도적으로 해소했다. plain 통과형 재검증은 실기 스모크로.
           return {
             args: [...CODEX_NO_TOOL_PREFIX, 'exec', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '--json', '-'],
             format: 'codex-jsonl',
@@ -111,12 +116,6 @@ const RUNTIMES = {
             args: [...CODEX_NO_TOOL_PREFIX, '-m', model, ...CODEX_SANDBOX,
               'exec', 'resume', '--json', '--skip-git-repo-check', sessionId, '-'],
             format: 'codex-jsonl',
-          };
-        case 'probe':
-          // 기록된 컨테인먼트 통과형은 plain stdout/stderr 검사였다(--json 없음).
-          return {
-            args: [...CODEX_NO_TOOL_PREFIX, 'exec', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '-'],
-            format: 'text',
           };
         default:
           throw new Error(`BAD_PURPOSE: ${purpose}`);
@@ -425,29 +424,71 @@ export function createPlayerRuntime(kind, opts = {}) {
 
   function readSentinel(canaryAbsPath) {
     if (typeof canaryAbsPath !== 'string' || !path.isAbsolute(canaryAbsPath)) {
-      throw runtimeError('CANARY_REQUIRED', 'CANARY_REQUIRED: 플레이어 probe에는 카나리 절대 경로가 필요합니다.');
+      throw runtimeError('CANARY_REQUIRED', 'CANARY_REQUIRED: probe에는 카나리 절대 경로가 필요합니다.');
     }
     const sentinel = fs.readFileSync(canaryAbsPath, 'utf8').trim();
     if (!sentinel) throw runtimeError('CANARY_REQUIRED', 'CANARY_REQUIRED: 카나리 파일이 비어 있습니다.');
     return sentinel;
   }
 
-  async function probeUpper(timeoutMs, started) {
-    const model = table.upper;
-    let result;
+  // 상위 컨테인먼트는 probe마다 새 파일·새 센티널을 쓴다 — 호출자 카나리는 위치와
+  // 실재만 검증하는 앵커다(플레이어 probe가 이미 소비한 센티널을 재사용하지 않는다).
+  function freshUpperCanary(canaryAbsPath) {
+    readSentinel(canaryAbsPath);
+    const file = path.join(path.dirname(canaryAbsPath), `canary-upper-${randomUUID()}.txt`);
+    const sentinel = `SENTINEL-upper-${randomUUID()}`;
     try {
-      result = await runOnce({ purpose: 'oneshot', model, input: UPPER_PROBE_PROMPT, timeoutMs });
-    } catch (error) {
-      return {
-        ok: false, containment: null, upper: false, elapsedMs: Date.now() - started,
-        notice: `상위 모델 probe 실패(${kind}/${model}): ${error.code}`,
-      };
+      fs.writeFileSync(file, `${sentinel}\n`);
+    } catch {
+      throw runtimeError('CANARY_REQUIRED', 'CANARY_REQUIRED: 상위 probe용 새 카나리를 만들 수 없습니다.');
     }
-    const ok = result.code === 0 && Boolean(parseResponse(result.format, result.stdout));
-    return {
-      ok, containment: null, upper: ok, elapsedMs: Date.now() - started,
-      ...(ok ? {} : { notice: `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음` }),
-    };
+    return { file, sentinel, cleanup: () => { try { fs.unlinkSync(file); } catch { /* 이미 없다 */ } } };
+  }
+
+  // 상위 적격(②)도 왕복만으로는 부족하다: 정확한 상위 oneshot argv에서 fresh 카나리
+  // 부정 검증까지 통과해야 한다 — 유출 CLI(현행 grok 1.0.13)가 상위로 선택되면 코치·
+  // 리뷰 프롬프트가 그 CLI의 도구 표면에 노출되기 때문이다. 확인 불가는 통과가 아니다.
+  async function probeUpper(canaryAbsPath, timeoutMs, started) {
+    const model = table.upper;
+    const canary = freshUpperCanary(canaryAbsPath);
+    try {
+      let round;
+      try {
+        round = await runOnce({ purpose: 'oneshot', model, input: UPPER_PROBE_PROMPT, timeoutMs });
+      } catch (error) {
+        return {
+          ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
+          notice: `상위 모델 probe 실패(${kind}/${model}): ${error.code}`,
+        };
+      }
+      if (round.code !== 0 || !parseResponse(round.format, round.stdout)) {
+        return {
+          ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
+          notice: `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음`,
+        };
+      }
+      let result;
+      try {
+        result = await runOnce({ purpose: 'oneshot', model, input: canaryPrompt(canary.file), timeoutMs });
+      } catch (error) {
+        return {
+          ok: true, containment: false, upper: false, elapsedMs: Date.now() - started,
+          notice: `상위 컨테인먼트 probe 실패(${kind}/${model}): ${error.code}`,
+        };
+      }
+      const answered = result.code === 0 && Boolean(parseResponse(result.format, result.stdout));
+      const leaked = String(result.stdout).includes(canary.sentinel) || String(result.stderr).includes(canary.sentinel);
+      const containment = answered && !leaked;
+      let notice;
+      if (!answered) notice = `상위 컨테인먼트 probe 실패(${kind}/${model}): 정상 응답 없음`;
+      else if (leaked) notice = `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 상위 모델 응답에 실렸습니다.`;
+      return {
+        ok: true, containment, upper: containment, elapsedMs: Date.now() - started,
+        ...(notice ? { notice } : {}),
+      };
+    } finally {
+      canary.cleanup();
+    }
   }
 
   async function probePlayer(canaryAbsPath, timeoutMs, started) {
@@ -485,16 +526,20 @@ export function createPlayerRuntime(kind, opts = {}) {
     models: { player: table.player, upper: table.upper },
 
     /**
-     * `upper: true`면 상위 티어 왕복(②)만 돈다. 그 외에는 플레이어 티어 왕복(①)과
-     * 카나리 부정 검증(③)을 한 번의 호출로 판정한다 — 살아 있는 `game/state.json`이나
-     * 홀카드 경로는 어떤 프롬프트·argv에도 넣지 않는다(스펙 §4).
+     * `upper: true`면 상위 티어 왕복(②)과 fresh 카나리 컨테인먼트를 돈다. 그 외에는
+     * 플레이어 티어 왕복(①)과 카나리 부정 검증(③)을 한 번의 호출로 판정한다 —
+     * 살아 있는 `game/state.json`이나 홀카드 경로는 어떤 프롬프트·argv에도 넣지
+     * 않는다(스펙 §4). 두 경로 모두 카나리 없이는 fail-closed로 던진다.
      */
     async probe({ canaryAbsPath = null, upper = false, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
       const started = Date.now();
-      return upper ? probeUpper(timeoutMs, started) : probePlayer(canaryAbsPath, timeoutMs, started);
+      return upper ? probeUpper(canaryAbsPath, timeoutMs, started) : probePlayer(canaryAbsPath, timeoutMs, started);
     },
 
     // 세션 생성 + 페르소나 카드 1회. 첫 결정에서 세션 생성 비용을 뺀다.
+    // 최종 응답이 trim 뒤 정확히 `ready`일 때만 세션을 돌려준다 — 거부·빈 출력·
+    // thread.started뿐인 스트림·비-ready 산문은 준비 완료가 아니고, 그 세션으로
+    // 결정을 돌리면 안 된다(스펙 §5 워밍업 문면).
     async warmup({ playerId, prompt, timeoutMs = WARMUP_TIMEOUT_MS }) {
       const sessionId = runtime.newSessionId();
       const result = await runOnce({ purpose: 'create', model: table.player, sessionId, input: prompt, timeoutMs });
@@ -505,7 +550,11 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (!captured) {
         throw runtimeError('NO_SESSION', `NO_SESSION: ${kind} 세션 id를 캡처하지 못했습니다.`, { playerId });
       }
-      return { sessionId: captured, raw: parseResponse(result.format, result.stdout) };
+      const raw = parseResponse(result.format, result.stdout);
+      if (raw !== 'ready') {
+        throw runtimeError('NOT_READY', `NOT_READY: ${kind} 워밍업 응답이 정확한 ready가 아닙니다.`, { playerId });
+      }
+      return { sessionId: captured, raw };
     },
 
     // 결정 1회. 요약은 stdin으로만 가고, 타임아웃은 자식을 죽인 뒤 TIMEOUT을 던진다.
@@ -532,10 +581,13 @@ export function createPlayerRuntime(kind, opts = {}) {
       const { handle, format } = start({ purpose: 'oneshot', model, input: prompt });
       const pid = handle.pid ?? null;
       const startTime = pid === null ? null : (startTimeOf(pid) ?? null);
-      let exited = false;
+      // `closed`는 자식 lifecycle의 close(전 stdio 닫힘 + exit)가 실제로 관찰됐을 때만
+      // true다. done의 **거부**는 종료 증거가 아니다 — kill 실패·중계 오류도 같은
+      // 경로로 거부되므로, 거부를 exit로 승격하면 살아 있는 자식을 종료 확인해 버린다.
+      let closed = false;
       const settled = handle.done.then(
-        (result) => { exited = true; return result; },
-        (error) => { exited = true; throw error; },
+        (result) => { closed = true; return result; },
+        (error) => { throw error; },
       );
       settled.catch(() => {});
 
@@ -558,44 +610,54 @@ export function createPlayerRuntime(kind, opts = {}) {
       // pid는 재사용된다. 시그널 직전마다 pid+startTime을 다시 맞춰 보고, 확인할 수
       // 없으면(ps 실패·불일치) **아무 시그널도 보내지 않는다** — 남의 프로세스를
       // 죽이느니 confirmed:false로 fence·adapter-disable 경로에 맡긴다(스펙 §5).
-      function identity() {
-        if (exited) return 'dead';
-        if (!isAlive(pid)) return 'dead';
+      // pid 사망만으로는 확인이 아니다: 직계가 exit해도 상속 stdio를 쥔 후손이 남으면
+      // close가 미확정이고, 그동안 종료를 확인해 교체를 승인하면 안 된다.
+      function lifecycle() {
+        if (closed) return 'closed';
+        if (!isAlive(pid)) return 'exited-unclosed';
         const current = startTimeOf(pid);
         if (current === null) return 'unknown';
         return current === startTime ? 'alive' : 'mismatch';
       }
 
-      function unconfirmed(status) {
-        return { confirmed: false, reason: status === 'unknown' ? 'IDENTITY_UNVERIFIABLE' : 'IDENTITY_MISMATCH' };
-      }
-
-      async function waitGone(ms) {
+      async function waitClosed(ms) {
         const deadline = Date.now() + ms;
         for (;;) {
-          if (exited || !isAlive(pid)) return true;
+          if (closed) return true;
           if (Date.now() >= deadline) return false;
           await sleep(Math.min(TERMINATE_POLL_MS, Math.max(1, deadline - Date.now())));
         }
       }
 
+      // kill이 false를 주거나 던지면 시그널이 전달되지 않은 것이다 — 확인 없이 진행하지 않는다.
+      function signal(sig) {
+        try {
+          return handle.kill(sig) !== false;
+        } catch {
+          return false;
+        }
+      }
+
       async function terminate() {
-        if (exited) return { confirmed: true };
+        if (closed) return { confirmed: true };
         if (pid === null) return { confirmed: false, reason: 'NO_PID' };
         if (startTime === null) return { confirmed: false, reason: 'IDENTITY_UNAVAILABLE' };
 
-        const before = identity();
-        if (before === 'dead') return { confirmed: true };
-        if (before !== 'alive') return unconfirmed(before);
-        handle.kill('SIGTERM');
-        if (await waitGone(graceMs)) return { confirmed: true };
-
-        const again = identity();
-        if (again === 'dead') return { confirmed: true };
-        if (again !== 'alive') return unconfirmed(again);
-        handle.kill('SIGKILL');
-        if (await waitGone(killWaitMs)) return { confirmed: true };
-        return { confirmed: false, reason: 'STILL_ALIVE' };
+        for (const [sig, waitMs] of [['SIGTERM', graceMs], ['SIGKILL', killWaitMs]]) {
+          const state = lifecycle();
+          if (state === 'closed') return { confirmed: true };
+          if (state === 'unknown') return { confirmed: false, reason: 'IDENTITY_UNVERIFIABLE' };
+          if (state === 'mismatch') return { confirmed: false, reason: 'IDENTITY_MISMATCH' };
+          if (state === 'exited-unclosed') {
+            return (await waitClosed(waitMs))
+              ? { confirmed: true }
+              : { confirmed: false, reason: 'CLOSE_UNSETTLED' };
+          }
+          if (!signal(sig)) return { confirmed: false, reason: 'SIGNAL_FAILED' };
+          if (await waitClosed(waitMs)) return { confirmed: true };
+        }
+        if (lifecycle() === 'closed') return { confirmed: true };
+        return { confirmed: false, reason: isAlive(pid) ? 'STILL_ALIVE' : 'CLOSE_UNSETTLED' };
       }
 
       return { pid, startTime, done, terminate };
@@ -620,12 +682,15 @@ function ladderFrom(preferred) {
 }
 
 /**
- * 스펙 §7 probe 사다리. 플레이어 적격(①+③)과 상위 모델 적격(②)을 **따로** 판정하고,
- * 필요한 probe만 돈다. notices는 호출자가 loop-state.notices에 기록한다 — 이것이 딜러
- * 고지의 유일한 경로이므로 모델 텍스트가 아닌 결정적 문자열만 담는다.
+ * 스펙 §7 probe 사다리. 플레이어 적격(①+③)과 상위 모델 적격(② + fresh 카나리
+ * 컨테인먼트)을 **따로** 판정하고, 필요한 probe만 돈다. notices는 호출자가
+ * loop-state.notices에 기록한다 — 이것이 딜러 고지의 유일한 경로이므로 모델 텍스트가
+ * 아닌 결정적 문자열만 담는다.
  *   - player가 전무하면 `{player: null}` — 호출자(부트스트랩/playing resume)가 기동을 거부한다.
  *   - upper가 전무하면 `{upper: null}` + notice — 코치는 unavailable, 리뷰는 기동 시 고지.
- *   - `need: 'upper-only'`(finalizing 이후 resume)는 플레이어 probe를 아예 돌지 않는다(D7).
+ *   - `need: 'upper-only'`(finalizing 이후 resume)는 플레이어 probe를 아예 돌지 않지만,
+ *     상위 컨테인먼트가 카나리를 요구하므로 canaryAbsPath는 여기에도 필요하다 — 없으면
+ *     전 후보가 CANARY_REQUIRED로 탈락한다(fail-closed).
  */
 export async function resolveRuntimes({
   preferred = null,
@@ -679,12 +744,12 @@ export async function resolveRuntimes({
     const adapter = adapterFor(kind);
     let result;
     try {
-      result = await adapter.probe({ upper: true, ...probeOpts });
+      result = await adapter.probe({ upper: true, canaryAbsPath, ...probeOpts });
     } catch (error) {
       notices.push(`상위 모델 런타임 ${kind} probe 오류: ${error.code ?? 'ERROR'}`);
       continue;
     }
-    if (result.ok && result.upper) {
+    if (result.ok && result.upper && result.containment) {
       upper = adapter;
       if (player && kind !== player.kind) {
         notices.push(`코치·리뷰 상위 모델은 ${kind}로 갈라 씁니다 (플레이어: ${player.kind}).`);
