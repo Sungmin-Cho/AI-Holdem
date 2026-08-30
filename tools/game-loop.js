@@ -641,23 +641,18 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const decideOnce = async (input, timeoutMs) => {
     const started = monotonicNow();
-    let timer = null;
-    const decision = Promise.resolve().then(() => playerAdapter.decide({ ...input, timeoutMs }));
-    decision.catch(() => {});
-    const deadline = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(codedError('TIMEOUT', `AI 결정이 ${timeoutMs}ms를 넘었습니다.`)), timeoutMs);
-    });
     try {
-      const result = await Promise.race([decision, deadline]);
+      // Task 4 adapter owns the child timeout contract: it kills and rejects before
+      // this promise settles. Starting a second request before that settlement would
+      // let two resume calls race on one persistent player session.
+      const result = await playerAdapter.decide({ ...input, timeoutMs });
       return { ok: true, raw: result?.raw, modelMs: Math.max(0, monotonicNow() - started) };
     } catch (error) {
       return { ok: false, error, modelMs: Math.max(0, monotonicNow() - started) };
-    } finally {
-      clearTimeout(timer);
     }
   };
 
-  const decideWithWatchdog = async (next) => {
+  const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
     }
@@ -671,6 +666,23 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     const startedAt = monotonicNow();
     let modelMs = 0;
     let parseMs = 0;
+    let stepMs = 0;
+    const applyDecision = async (action) => {
+      const stepArgs = ['step', next.toAct];
+      if (action === null) {
+        stepArgs.push('--force-default');
+      } else {
+        stepArgs.push(action.action);
+        if (action.action === 'raise') stepArgs.push(String(action.amount));
+      }
+      stepArgs.push('--expect-version', String(stateVersion));
+      const stepStarted = monotonicNow();
+      try {
+        return await runCli(stepArgs);
+      } finally {
+        stepMs += Math.max(0, monotonicNow() - stepStarted);
+      }
+    };
     for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
       const round = await decideOnce({
         playerId: next.toAct,
@@ -683,21 +695,31 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       const action = validatedDecision(round.raw, next);
       parseMs += Math.max(0, monotonicNow() - parseStarted);
       if (action) {
+        let envelope;
+        try {
+          envelope = await applyDecision(action);
+        } catch (error) {
+          if (error.code === 'ILLEGAL_ACTION') continue;
+          throw error;
+        }
         return {
-          action,
+          envelope,
           outcome: attempt === 0 ? 'accepted' : 'retried_accepted',
           startedAt,
           modelMs,
           parseMs,
+          stepMs,
         };
       }
     }
+    const envelope = await applyDecision(null);
     return {
-      action: null,
+      envelope,
       outcome: 'forced_default',
       startedAt,
       modelMs,
       parseMs,
+      stepMs,
     };
   };
 
@@ -999,7 +1021,11 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         await publishEnvelope(current, ['--retry']);
       }
       const checked = await runCli(['resume-check']);
-      log('resume-archive-check', { archiveStatus: checked.archiveStatus });
+      const checkedHandNo = Number(current.view?.handNo ?? state.handNo);
+      if (Number.isSafeInteger(checkedHandNo) && checkedHandNo >= 0) {
+        archiveCheckedHands.add(checkedHandNo);
+      }
+      log('resume-archive-check', { handNo: checkedHandNo, archiveStatus: checked.archiveStatus });
       if (checked.archiveStatus === 'repair_failed') {
         const message = 'resume 중 아카이브 복구에 실패해 게임을 중단합니다.';
         writeLoopState({ halt: { code: 'repair_failed', message } });
@@ -1042,20 +1068,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
 
       const next = out.next;
-      const decision = await decideWithWatchdog(next);
-      const stepArgs = ['step', next.toAct];
-      if (decision.action === null) {
-        stepArgs.push('--force-default');
-      } else {
-        stepArgs.push(decision.action.action);
-        if (decision.action.action === 'raise') stepArgs.push(String(decision.action.amount));
-      }
-      stepArgs.push('--expect-version', String(out.stateVersion));
-
-      const stepStarted = monotonicNow();
-      let envelope;
+      let decision;
       try {
-        envelope = await runCli(stepArgs);
+        decision = await decideWithWatchdog(next, out.stateVersion);
       } catch (error) {
         if (error.code !== 'VERSION_MISMATCH') throw error;
         const synchronized = await runCli(['step']);
@@ -1066,10 +1081,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
         continue;
       }
-      const stepMs = Math.max(0, monotonicNow() - stepStarted);
       const elapsedMs = Math.max(0, monotonicNow() - decision.startedAt);
       const publishStarted = monotonicNow();
-      out = await publishEnvelope(envelope, waitFlags());
+      out = await publishEnvelope(decision.envelope, waitFlags());
       const publishMs = Math.max(0, monotonicNow() - publishStarted);
       appendMetric({
         playerId: next.toAct,
@@ -1079,7 +1093,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         elapsedMs,
         modelMs: decision.modelMs,
         parseMs: decision.parseMs,
-        stepMs,
+        stepMs: decision.stepMs,
         publishMs,
       });
     }

@@ -203,6 +203,14 @@ function putAiFirst(gameDir) {
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
+function makeCurrentActorCanCheck(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  const playerId = state.seats[state.hand.toActIdx].playerId;
+  state.hand.currentBet = state.hand.bets[playerId] ?? 0;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+}
+
 function decisionIdOfMessage(message) {
   return /decisionId:\s*([^\s]+)/.exec(message)?.[1] ?? null;
 }
@@ -810,6 +818,46 @@ test('resume derives a missing loop state from engine state, but an entirely abs
   assert.equal(adapter.calls.length, 2);
 });
 
+test('playing resume seeds the checked hand so its archive is checked exactly once', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const original = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await original.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  let envelope = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  envelope = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', envelope.next.toAct, 'fold',
+    '--expect-version', String(envelope.stateVersion), '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  assert.equal(envelope.handOver, true);
+  const archive = path.join(gameDir, 'hands', 'hand-0001.json');
+  fs.unlinkSync(archive);
+  await original.requestStop();
+  fs.rmSync(path.join(gameDir, 'lock.json'), { force: true });
+
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  await runUntilUserStub(resumed);
+
+  assert.equal(fs.existsSync(archive), true);
+  const checks = readLoopLog(gameDir).filter((entry) => (
+    entry.event === 'resume-archive-check' || entry.event === 'archive-resume-check'
+  ));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].event, 'resume-archive-check');
+  assert.equal(checks[0].handNo, 1);
+});
+
 test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 }, async (t) => {
   const adapter = makeAdapter({
     onDecide: async ({ message }) => ({
@@ -836,7 +884,13 @@ test('playing starts a hand, accepts a tolerant AI decision, and preserves every
 
 test('watchdog resends the identical AI summary once, then force-defaults and records the timeout outcome', { timeout: 10_000 }, async (t) => {
   const adapter = makeAdapter({
-    onDecide: async () => new Promise(() => {}),
+    onDecide: async ({ timeoutMs }) => new Promise((_, reject) => {
+      setTimeout(() => {
+        const error = new Error('adapter timeout');
+        error.code = 'TIMEOUT';
+        reject(error);
+      }, timeoutMs);
+    }),
   });
   const { gameDir, loop } = await setupAiFirst(t, {
     adapter,
@@ -852,6 +906,87 @@ test('watchdog resends the identical AI summary once, then force-defaults and re
   const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics[0];
   assert.equal(metric.outcome, 'forced_default');
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].action, 'fold');
+});
+
+test('T2 never overlaps an unresolved T1 and a late T1 rejection cannot affect the applied decision', { timeout: 10_000 }, async (t) => {
+  let active = 0;
+  let maxActive = 0;
+  let firstSettled = false;
+  let secondStartedBeforeFirstSettled = false;
+  const adapter = makeAdapter({
+    onDecide: async ({ message }, attempt) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        active -= 1;
+        firstSettled = true;
+        const error = new Error('late adapter timeout');
+        error.code = 'TIMEOUT';
+        throw error;
+      }
+      secondStartedBeforeFirstSettled = !firstSettled;
+      active -= 1;
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter,
+    loopOpts: { watchdog: { t1Ms: 10, t2Ms: 20 } },
+  });
+
+  await runUntilUserStub(loop);
+  await new Promise((resolve) => setTimeout(resolve, 70));
+
+  assert.equal(maxActive, 1);
+  assert.equal(secondStartedBeforeFirstSettled, false);
+  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'retried_accepted');
+  assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].action, 'fold');
+});
+
+test('engine first ILLEGAL_ACTION retries the same AI summary once and applies the accepted retry', { timeout: 10_000 }, async (t) => {
+  let gameDir = null;
+  const adapter = makeAdapter({
+    onDecide: async ({ message }, attempt) => {
+      if (attempt === 1) makeCurrentActorCanCheck(gameDir);
+      return { raw: JSON.stringify({
+        decisionId: decisionIdOfMessage(message),
+        action: attempt === 1 ? 'call' : 'fold',
+      }) };
+    },
+  });
+  const setup = await setupAiFirst(t, { adapter });
+  gameDir = setup.gameDir;
+
+  await runUntilUserStub(setup.loop);
+
+  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  assert.equal(engine.lastHand.actions.length, 1);
+  assert.equal(engine.lastHand.actions[0].action, 'fold');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'retried_accepted');
+});
+
+test('two engine ILLEGAL_ACTION rejections force-default without a third model request', { timeout: 10_000 }, async (t) => {
+  let gameDir = null;
+  const adapter = makeAdapter({
+    onDecide: async ({ message }, attempt) => {
+      if (attempt === 1) makeCurrentActorCanCheck(gameDir);
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'call' }) };
+    },
+  });
+  const setup = await setupAiFirst(t, { adapter });
+  gameDir = setup.gameDir;
+
+  await runUntilUserStub(setup.loop);
+
+  assert.equal(adapter.decideCalls.length, 2);
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  assert.equal(engine.hand.actions.length, 1);
+  assert.equal(engine.hand.actions[0].action, 'check');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'forced_default');
 });
 
 test('malformed, mismatched, and illegal AI decisions each get one retry before force-default', { timeout: 20_000 }, async (t) => {
