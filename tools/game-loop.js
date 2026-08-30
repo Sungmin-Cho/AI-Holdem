@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   acquireOwnedLock,
+  processStartTime,
   readOwnedLock,
   releaseOwnedLock,
   writeJsonAtomic,
@@ -146,6 +147,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let lockHandle = null;
   let serverChild = null;
   let serverPid = null;
+  let serverIdentity = null;
+  let serverAdopted = false;
   let logFd = null;
   let playerAdapter = null;
   let upperAdapter = null;
@@ -256,7 +259,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const ensureServer = async (sessionToken) => {
     const existing = readJsonOptional(lockPath, 'SERVER_LOCK');
     if (existing?.sessionToken === sessionToken && await serverHealthy(existing.port)) {
+      if (!Number.isInteger(existing.serverPid) || !processAlive(existing.serverPid)) {
+        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 pid를 확인할 수 없습니다.');
+      }
+      const startTime = processStartTime(existing.serverPid);
+      if (startTime === null) {
+        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
+      }
+      const confirmed = readJsonOptional(lockPath, 'SERVER_LOCK');
+      if (
+        confirmed?.serverPid !== existing.serverPid
+        || confirmed.sessionToken !== sessionToken
+        || processStartTime(existing.serverPid) !== startTime
+        || !await serverHealthy(existing.port)
+      ) {
+        throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
+      }
       serverPid = existing.serverPid;
+      serverIdentity = { pid: existing.serverPid, startTime };
+      serverAdopted = true;
       return existing.port;
     }
 
@@ -272,6 +293,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     });
     serverChild = child;
     serverPid = child.pid ?? null;
+    serverAdopted = false;
     let spawnError = null;
     child.once('error', (error) => { spawnError = error; });
     log('server-spawn', { pid: serverPid, requestedPort });
@@ -289,6 +311,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         && await serverHealthy(lock.port)
       ) {
         serverPid = lock.serverPid;
+        const startTime = processStartTime(lock.serverPid);
+        serverIdentity = startTime === null ? null : { pid: lock.serverPid, startTime };
         return lock.port;
       }
       await sleep(pollMs);
@@ -335,7 +359,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (!Array.isArray(players)) throw codedError('BAD_PLAYERS', 'players.json이 배열이 아닙니다.');
     const aiPlayers = players.filter((player) => player.playerId !== 'user');
     const createdAt = readLoopState()?.startedAt ?? isoNow(now);
-    const rows = await Promise.all(aiPlayers.map(async (persona) => {
+    const settled = await Promise.allSettled(aiPlayers.map(async (persona) => {
       const prompt = buildPlayerPrompt({ persona });
       const result = await playerAdapter.warmup({ playerId: persona.playerId, prompt });
       if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
@@ -347,6 +371,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         createdAt,
       }];
     }));
+    const failed = settled.find((result) => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    const rows = settled.map((result) => result.value);
     const sessions = Object.fromEntries(rows);
     writeJsonAtomic(sessionsPath, sessions);
     return sessions;
@@ -367,18 +394,81 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         child.kill('SIGKILL');
         await Promise.race([exit, sleep(1_000)]);
       }
+      if (!exited && child.exitCode === null && child.signalCode === null) {
+        throw codedError('SERVER_STOP_UNCONFIRMED', '직접 server child 종료를 확인하지 못했습니다.');
+      }
     }
     serverChild = null;
+    serverIdentity = null;
+    serverPid = null;
+  };
+
+  const adoptedIdentityStatus = () => {
+    const identity = serverIdentity;
+    if (!identity) throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 identity가 없습니다.');
+    if (!processAlive(identity.pid)) return 'dead';
+    const current = processStartTime(identity.pid);
+    if (current === null) {
+      throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime 재검증에 실패했습니다.');
+    }
+    if (current !== identity.startTime) {
+      throw codedError('SERVER_IDENTITY_MISMATCH', '재사용 서버 pid가 다른 프로세스로 바뀌었습니다.');
+    }
+    return 'alive';
+  };
+
+  const waitForAdoptedDeath = async (timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!processAlive(serverIdentity.pid)) return true;
+      await sleep(pollMs);
+    }
+    return !processAlive(serverIdentity.pid);
+  };
+
+  const signalAdoptedServer = (signal) => {
+    if (adoptedIdentityStatus() === 'dead') return false;
+    try {
+      process.kill(serverIdentity.pid, signal);
+      return true;
+    } catch (error) {
+      if (error.code === 'ESRCH') return false;
+      throw codedError('SERVER_SIGNAL_FAILED', `재사용 서버 ${signal} 전송에 실패했습니다.`, { cause: error });
+    }
+  };
+
+  const stopServer = async () => {
+    if (!serverAdopted) {
+      await stopDirectServerChild();
+      return;
+    }
+    if (adoptedIdentityStatus() === 'dead') return;
+    signalAdoptedServer('SIGTERM');
+    if (!await waitForAdoptedDeath(1_000)) {
+      // pid+startTime을 KILL 직전에 다시 확인한다. unknown/mismatch면 신호 없이 실패한다.
+      signalAdoptedServer('SIGKILL');
+      if (!await waitForAdoptedDeath(1_000)) {
+        throw codedError('SERVER_STOP_UNCONFIRMED', '재사용 서버 종료를 확인하지 못했습니다.');
+      }
+    }
+    serverIdentity = null;
+    serverPid = null;
+    serverAdopted = false;
   };
 
   const requestStop = () => {
     if (stopPromise) return stopPromise;
     stopRequested = true;
     stopPromise = (async () => {
+      let stopError = null;
       for (const child of activeChildren) {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       }
-      await stopDirectServerChild();
+      try {
+        await stopServer();
+      } catch (error) {
+        stopError = error;
+      }
       for (const adapter of adapters) {
         if (typeof adapter.dispose === 'function') await adapter.dispose();
       }
@@ -394,6 +484,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         fs.closeSync(logFd);
         logFd = null;
       }
+      if (stopError) throw stopError;
     })();
     return stopPromise;
   };
@@ -498,10 +589,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const resume = async () => {
     acquireLoopLock({ mode: 'resume' });
     try {
-      openLog();
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
-      if (!state && !engineState) throw codedError('NO_GAME', 'resume할 게임 상태가 없습니다.');
+      if (!engineState) throw codedError('NO_GAME', 'resume할 engine 상태가 없습니다.');
+      openLog();
 
       const ownerSessionId = randomUUID();
       if (!state) {

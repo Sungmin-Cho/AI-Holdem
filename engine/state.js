@@ -241,6 +241,49 @@ function reclaimMutex(dir) {
   return true;
 }
 
+// Lifetime-owned locks require a complete pid+startTime identity. They never use
+// the generic pid-less/legacy mtime fallback: an unknown owned record may belong
+// to a live process whose metadata is partial or temporarily unreadable.
+function ownedIdentityIsDead(id) {
+  const pidFile = id?.pidFile;
+  return Boolean(
+    pidFile
+    && pidFile.pid !== null
+    && pidFile.startTime !== null
+    && ownedIdentityStatus(pidFile.pid, pidFile.startTime) === 'dead'
+  );
+}
+
+function sameOwnedIdentity(expected, current) {
+  if (!expected || !current || !sameInode(expected, current)) return false;
+  const a = expected.pidFile;
+  const b = current.pidFile;
+  return Boolean(
+    a
+    && b
+    && a.dev === b.dev
+    && a.ino === b.ino
+    && a.pid === b.pid
+    && a.startTime === b.startTime
+  );
+}
+
+function reclaimOwnedMutex(dir) {
+  const decided = mutexIdentity(dir);
+  if (!ownedIdentityIsDead(decided)) return false;
+  const confirmed = mutexIdentity(dir);
+  if (!sameOwnedIdentity(decided, confirmed) || !ownedIdentityIsDead(confirmed)) return false;
+  if (!unlinkStalePidFile(dir, confirmed.pidFile)) return false;
+  try {
+    fs.rmdirSync(dir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return false;
+    throw error;
+  }
+  return true;
+}
+
 function undoOwnMutex(dir, mine) {
   // Called while the pid-write error is propagating; secondary failures must not
   // mask it. The inode check keeps this from ever touching somebody else's lock.
@@ -446,8 +489,8 @@ export function acquireOwnedLock(gameDir, name) {
   if (handle) return handle;
 
   const owner = readOwnedLock(gameDir, name);
-  if (owner && owner.alive) throwLocked();
-  if (!reclaimMutex(dir)) throwLocked();
+  if (!owner || owner.status !== 'dead') throwLocked();
+  if (!reclaimOwnedMutex(dir)) throwLocked();
   handle = tryCreateOwnedLock(dir, startTime);
   if (!handle) throwLocked();
   return handle;

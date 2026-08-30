@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,7 @@ import {
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
+const SERVER = path.join(ROOT, 'server/server.js');
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
@@ -74,6 +75,49 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`pid ${pid} did not exit`);
+}
+
+async function startExternalServer(gameDir, token) {
+  const child = spawn(process.execPath, [
+    SERVER, '--game-dir', gameDir, '--port', '0', '--token', token,
+  ], { stdio: 'ignore' });
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`external server exited early: ${child.exitCode ?? child.signalCode}`);
+    }
+    try {
+      const lock = readJson(path.join(gameDir, 'lock.json'));
+      if (lock.serverPid === child.pid) {
+        const health = await fetch(`http://127.0.0.1:${lock.port}/api/health`);
+        if (health.ok && (await health.json()).ok === true) return { child, lock };
+      }
+    } catch { /* server not ready */ }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  child.kill('SIGKILL');
+  throw new Error('external server did not become healthy');
+}
+
+async function terminateIfAlive(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exit = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exit;
+}
+
+async function withFakePs(scriptBody, fn) {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-ps-'));
+  const psPath = path.join(binDir, 'ps');
+  fs.writeFileSync(psPath, `#!/bin/sh\n${scriptBody}\n`);
+  fs.chmodSync(psPath, 0o755);
+  const original = process.env.PATH;
+  process.env.PATH = `${binDir}:${original}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = original;
+  }
 }
 
 test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 }, async (t) => {
@@ -183,6 +227,40 @@ test('bootstrap records NO_PLAYER_RUNTIME, removes the canary, and releases owne
   await loop.requestStop();
 });
 
+test('warmup failure waits for every sibling to settle before adapter cleanup and bootstrap rejection', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const completed = [];
+  let inFlight = 0;
+  let disposedAfter = null;
+  const adapter = {
+    kind: 'fake',
+    watchdog: { t1Ms: 25, t2Ms: 15 },
+    async warmup({ playerId }) {
+      inFlight += 1;
+      try {
+        if (playerId === 'p1') throw Object.assign(new Error('warmup failed'), { code: 'WARMUP_FAILED' });
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        completed.push(playerId);
+        return { sessionId: `session-${playerId}`, raw: 'ready' };
+      } finally {
+        inFlight -= 1;
+      }
+    },
+    async dispose() { disposedAfter = [...completed]; },
+  };
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
+  t.after(() => loop.requestStop());
+
+  const started = Date.now();
+  await assert.rejects(loop.bootstrap({ ai: 3 }), (error) => error.code === 'WARMUP_FAILED');
+  assert.equal(Date.now() - started >= 100, true, 'bootstrap rejected before delayed siblings settled');
+  assert.deepEqual(completed.sort(), ['p2', 'p3']);
+  assert.equal(inFlight, 0);
+  assert.deepEqual(disposedAfter.sort(), ['p2', 'p3']);
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
 test('a live owner rejects a second bootstrap and resume without re-running init', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
@@ -282,6 +360,60 @@ test('resume from bootstrap never calls init, preserves engine files, and comple
   assert.equal(state.port > 0, true);
 });
 
+test('resume adopts a healthy external server and requestStop identity-confirms its death', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap',
+    sessionToken: init.sessionToken,
+    gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner',
+    startedAt: '2026-08-30T00:00:00.000Z',
+    notices: [],
+    metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(external.child);
+  });
+
+  await loop.resume();
+  assert.equal(loop.serverPid, external.child.pid);
+  await loop.requestStop();
+  await waitUntilDead(external.child.pid);
+  assert.equal(external.child.exitCode !== null || external.child.signalCode !== null, true);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('requestStop fails closed without signalling an adopted server when identity revalidation is unavailable', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap',
+    sessionToken: init.sessionToken,
+    gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner',
+    startedAt: '2026-08-30T00:00:00.000Z',
+    notices: [],
+    metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(() => terminateIfAlive(external.child));
+  await loop.resume();
+
+  await withFakePs('exit 1', async () => {
+    await assert.rejects(
+      loop.requestStop(),
+      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+    );
+  });
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
 test('resume derives a missing loop state from engine state, but an entirely absent game releases the lock and fails', { timeout: 10_000 }, async (t) => {
   const emptyDir = tmpGame();
   const absent = createGameLoop({
@@ -290,6 +422,22 @@ test('resume derives a missing loop state from engine state, but an entirely abs
   });
   await assert.rejects(absent.resume(), (error) => error.code === 'NO_GAME');
   assert.equal(fs.existsSync(path.join(emptyDir, 'loop.lock.d')), false);
+  assert.equal(fs.existsSync(path.join(emptyDir, 'loop.log')), false);
+
+  const orphanDir = tmpGame();
+  fs.writeFileSync(path.join(orphanDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap',
+    sessionToken: 'orphan-token',
+    notices: [],
+    metrics: [],
+  }));
+  const orphan = createGameLoop({
+    gameDir: orphanDir,
+    resolver: async () => assert.fail('resolver must not run without engine state'),
+  });
+  await assert.rejects(orphan.resume(), (error) => error.code === 'NO_GAME');
+  assert.equal(fs.existsSync(path.join(orphanDir, 'loop.lock.d')), false);
+  assert.equal(fs.existsSync(path.join(orphanDir, 'loop.log')), false);
 
   const gameDir = tmpGame();
   const init = await initGame(gameDir);

@@ -236,7 +236,32 @@ test('readOwnedLock: 기존 빈 lock 디렉터리는 부재가 아니라 unknown
   });
 });
 
-test('기존 1줄 pid 기록(단명 락)의 staleness 판정은 그대로다', () => {
+test('owned lock: 오래된 pid-less unknown 기록도 shared acquire가 회수하지 않는다', () => {
+  const dir = tmpDir();
+  const lockDir = path.join(dir, 'loop.lock.d');
+  fs.mkdirSync(lockDir);
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockDir, past, past);
+
+  assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+  assert.equal(fs.existsSync(lockDir), true);
+  assert.deepEqual(fs.readdirSync(lockDir), []);
+});
+
+test('owned lock: 오래된 malformed unknown 기록도 shared acquire가 원문을 보존한다', () => {
+  const dir = tmpDir();
+  const lockDir = path.join(dir, 'loop.lock.d');
+  const malformed = `${process.pid}\n${processStartTime(process.pid)}\nextra`;
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), malformed);
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockDir, past, past);
+
+  assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+  assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), malformed);
+});
+
+test('1줄 legacy owned 기록은 pid 생존과 무관하게 unknown이라 shared acquire가 회수하지 않는다', () => {
   const alive = tmpDir();
   const aliveLockDir = path.join(alive, 'loop.lock.d');
   fs.mkdirSync(aliveLockDir);
@@ -247,8 +272,8 @@ test('기존 1줄 pid 기록(단명 락)의 staleness 판정은 그대로다', (
   const deadLockDir = path.join(dead, 'loop.lock.d');
   fs.mkdirSync(deadLockDir);
   fs.writeFileSync(path.join(deadLockDir, 'pid'), '99999999');
-  const h = acquireOwnedLock(dead, 'loop.lock.d');
-  releaseOwnedLock(h);
+  assert.throws(() => acquireOwnedLock(dead, 'loop.lock.d'), /LOCKED/);
+  assert.equal(fs.readFileSync(path.join(deadLockDir, 'pid'), 'utf8'), '99999999');
 });
 
 test('owned lock 디렉터리에 pid 외 파일이 생겨도 fail-closed: 외부 파일을 지우지 않고 LOCKED', () => {
