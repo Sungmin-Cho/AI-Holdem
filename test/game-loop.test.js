@@ -3303,6 +3303,376 @@ test('pending coach retry 후 reconcile가 일시 불가능하면 새 publishId 
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 1);
 });
 
+test('live coach publish는 pending이 retry 직전 사라지고 reconcile이 pending이어도 exact envelope를 두 번 게시하지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const attemptPath = path.join(gameDir, '.publish-attempt.json');
+  const controlPath = path.join(os.tmpdir(), `holdem-live-coach-control-${process.pid}-${Date.now()}`);
+  const requestLog = path.join(os.tmpdir(), `holdem-live-coach-requests-${process.pid}-${Date.now()}.log`);
+  const publishCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: 'live reconcile guard' }) }],
+  });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), upper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onPublishInvoke(args) {
+        publishCalls.push(args);
+        if (args.includes('--retry')) {
+          try { fs.unlinkSync(attemptPath); } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+          }
+        }
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+
+  const directPid = loop.serverPid;
+  process.kill(directPid, 'SIGKILL');
+  await waitUntilDead(directPid);
+  try { fs.unlinkSync(path.join(gameDir, 'lock.json')); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const relay = await startToggleAuthRelay(
+    readJson(path.join(gameDir, 'state.json')).sessionToken,
+    controlPath,
+    requestLog,
+  );
+  t.after(async () => {
+    await terminateIfAlive(relay.child);
+    for (const file of [controlPath, requestLog]) {
+      try { fs.unlinkSync(file); } catch { /* absent */ }
+    }
+  });
+  const token = readJson(path.join(gameDir, 'state.json')).sessionToken;
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: relay.child.pid,
+    port: relay.port,
+    sessionToken: token,
+  }));
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 0,
+    publishId: 0,
+    view: null,
+    log: [],
+    coach: [],
+    review: null,
+    history: [],
+  }));
+  fs.writeFileSync(attemptPath, JSON.stringify({
+    body: { publishId: 1, messages: [{ type: 'narration', text: 'pending disappears' }] },
+    expectedGameEpoch: gameEpochOf(token),
+  }));
+
+  await assert.rejects(
+    loop.coachPipeline(1),
+    (error) => error.code === 'COACH_RECONCILE_PENDING',
+  );
+
+  const coachPublishes = fs.readFileSync(requestLog, 'utf8')
+    .split('\n')
+    .filter((line) => line === 'POST /api/publish');
+  assert.equal(coachPublishes.length, 1, 'live guard sent the coach body more than once');
+  assert.equal(publishCalls.filter((args) => args.includes('--retry')).length, 1);
+  assert.equal(publishCalls.length, 2, 'live guard started a normal republish after retry');
+  assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).publishQueue['1']);
+});
+
+test('playing resume은 begin-owner 반환 descriptor의 redacted hand만 캡처하고 손상된 sealedSkipped archive를 읽지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  let started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  await seedQueuedCoach(gameDir, owner, 1);
+  putAiFirst(gameDir);
+  started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  await first.requestStop();
+  const missingArchive = path.join(gameDir, 'hands', 'hand-0001.json');
+  fs.unlinkSync(missingArchive);
+  assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.handNo, 2);
+
+  const handCalls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), null),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onEngineInvoke(args) {
+        if (args[0] === 'hand') handCalls.push(Number(args[1]));
+      },
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  await resumed.resume();
+  const second = await waitForCoachNote(gameDir, 2);
+
+  assert.equal(second.unavailable, true);
+  assert.deepEqual(handCalls, [2]);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).coach.some((note) => note.handNo === 1), true);
+});
+
+test('handOver heartbeat 중 stop이 요청되면 coach task를 launch하지 않고 coachPipeline 진입도 새 child를 만들지 않는다', { timeout: 15_000 }, async (t) => {
+  let loopRef = null;
+  let stopPromise = null;
+  let heartbeatRequestedStop = false;
+  const engineHandsAfterStop = [];
+  const upper = makeCoachAdapter();
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] === 'heartbeat' && !stopPromise) {
+          heartbeatRequestedStop = true;
+          stopPromise = loopRef.requestStop();
+        }
+      },
+      onEngineInvoke(args) {
+        if (loopRef?.stopping && args[0] === 'hand') engineHandsAfterStop.push(Number(args[1]));
+      },
+    },
+  });
+  loopRef = setup.loop;
+  const owner = readJson(path.join(setup.gameDir, 'loop-state.json')).ownerSessionId;
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', setup.gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(setup.gameDir, '.stop-guard-stats.json');
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  await runCoachCli(setup.gameDir, [
+    'begin-owner', '--owner', owner, '--completed', '0', '--stats-file', statsPath,
+    '--snapshot-file', path.join(setup.gameDir, 'ui-snapshot.json'),
+  ]);
+  const running = startRun(setup.loop);
+
+  await running.catch(() => {});
+  assert.equal(heartbeatRequestedStop, true, 'handOver did not reach heartbeat');
+  await stopPromise;
+  await setup.loop.coachPipeline(1).catch(() => {});
+
+  assert.deepEqual(engineHandsAfterStop, []);
+  assert.equal(upper.starts.length, 0);
+});
+
+test('heartbeat result-ready remediation은 다음 핸드를 막지 않지만 shutdown은 tracked remediation settle을 기다린다', { timeout: 20_000 }, async (t) => {
+  let releaseGeneration;
+  const generationGate = new Promise((resolve) => { releaseGeneration = resolve; });
+  let enteredTerminate;
+  const terminateEntered = new Promise((resolve) => { enteredTerminate = resolve; });
+  let releaseTerminate;
+  const terminateGate = new Promise((resolve) => { releaseTerminate = resolve; });
+  t.after(() => {
+    releaseGeneration();
+    releaseTerminate();
+  });
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: generationGate,
+      raw: JSON.stringify({ handNo: 1, text: '늦은 원본' }),
+      terminate: async () => {
+        enteredTerminate();
+        await terminateGate;
+        return { confirmed: true };
+      },
+    }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: { waitMs: 40 },
+  });
+  const running = startRun(loop);
+  const handTwo = await waitForUserSnapshot(gameDir);
+  assert.equal(handTwo.snapshot.view.handNo, 2);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = await waitFor(() => {
+    const value = readJson(authorityPath);
+    return value.hands?.['1']?.agentHandle ? value : null;
+  }, 'hand 1 coach generation was not running');
+  fs.writeFileSync(authority.hands['1'].exactResultPath, JSON.stringify({
+    handNo: 1,
+    text: 'heartbeat result ready',
+  }));
+  authority.hands['1'].deadlineMono = '0';
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  await postUserAction(handTwo.lock, {
+    decisionId: handTwo.snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+  await terminateEntered;
+
+  await waitFor(
+    () => readJson(path.join(gameDir, 'state.json')).handNo >= 3,
+    'next hand waited for heartbeat remediation termination',
+    1_000,
+  );
+  let stopSettled = false;
+  const stopping = loop.requestStop().finally(() => { stopSettled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(stopSettled, false, 'shutdown ignored tracked heartbeat remediation');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+
+  releaseTerminate();
+  await stopping;
+  await running.catch(() => {});
+});
+
+test('heartbeat result-ready accept 실패는 handle 종료 확인·fence 후 generation-bearing unavailable로 봉인한다', { timeout: 20_000 }, async (t) => {
+  const never = new Promise(() => {});
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: never,
+      raw: JSON.stringify({ handNo: 1, text: '사용되지 않음' }),
+      terminate: { confirmed: true },
+    }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const running = startRun(loop);
+  const handTwo = await waitForUserSnapshot(gameDir);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = await waitFor(() => {
+    const value = readJson(authorityPath);
+    return value.hands?.['1']?.agentHandle ? value : null;
+  }, 'hand 1 coach generation was not running');
+  const forbidden = readJson(path.join(gameDir, '.coach-deny-1.json'))[0];
+  fs.writeFileSync(authority.hands['1'].exactResultPath, JSON.stringify({
+    handNo: 1,
+    text: `forbidden ${forbidden}`,
+  }));
+  authority.hands['1'].deadlineMono = '0';
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  await postUserAction(handTwo.lock, {
+    decisionId: handTwo.snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(note.unavailable, true);
+  assert.equal(upper.terminations.length >= 1, true);
+  assert.equal(readJson(authorityPath).publishedSeals['1'].noteKind, 'unavailable');
+});
+
+test('attempt 2 reserve가 ADAPTER_DISABLED면 종료 확인된 attempt 1을 fence하고 generation-bearing unavailable로 봉인한다', { timeout: 15_000 }, async (t) => {
+  let gameDir = null;
+  let disabledAtAttemptTwo = false;
+  const coachCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      raw: JSON.stringify({ handNo: 1, text: '' }),
+      terminate: { confirmed: true },
+    }],
+  });
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        coachCalls.push(args);
+        if (
+          gameDir
+          && !disabledAtAttemptTwo
+          && args[0] === 'reserve'
+          && args[args.indexOf('--attempt') + 1] === '2'
+        ) {
+          disabledAtAttemptTwo = true;
+          const authorityPath = path.join(gameDir, '.coach-authority.json');
+          const authority = readJson(authorityPath);
+          authority.adapterState = 'disabled';
+          fs.writeFileSync(authorityPath, JSON.stringify(authority));
+        }
+      },
+    },
+  });
+  gameDir = setup.gameDir;
+  const running = startRun(setup.loop);
+
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(setup.loop, running);
+
+  assert.equal(disabledAtAttemptTwo, true);
+  assert.equal(note.unavailable, true);
+  assert.equal(upper.starts.length, 1);
+  assert.equal(coachCalls.some((args) => args[0] === 'fence'), true);
+  const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
+  assert.ok(unavailable);
+  assert.notEqual(unavailable.indexOf('--generation'), -1);
+});
+
+test('playing resume descriptor에 upper adapter interface가 없으면 해당 generation을 unavailable로 봉인한다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  await first.requestStop();
+
+  const coachCalls = [];
+  const unusableUpper = makeAdapter();
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), unusableUpper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => coachCalls.push(args),
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  await resumed.resume();
+  const note = await waitForCoachNote(gameDir, 1);
+
+  assert.equal(note.unavailable, true);
+  const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
+  assert.ok(unavailable);
+  assert.notEqual(unavailable.indexOf('--generation'), -1);
+  const seal = await waitFor(() => (
+    readJson(path.join(gameDir, '.coach-authority.json')).publishedSeals['1'] ?? null
+  ), 'upper-unusable unavailable did not reconcile to a seal');
+  assert.equal(seal.noteKind, 'unavailable');
+});
+
 test('heartbeat가 generation을 먼저 retire해도 unconfirmed 종료는 STALE_GENERATION을 fenced로 보고 adapter-disable·current/future unavailable을 완수한다', { timeout: 20_000 }, async (t) => {
   let enteredTerminate;
   const terminateEntered = new Promise((resolve) => { enteredTerminate = resolve; });

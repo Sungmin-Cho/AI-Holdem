@@ -1715,17 +1715,70 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     ?? fallback
   );
 
+  const ensureCoachPublishReconciled = async (handNo) => {
+    let queued = readCoachAuthority()?.publishQueue?.[String(handNo)];
+    if (!queued) return;
+    await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
+    queued = readCoachAuthority()?.publishQueue?.[String(handNo)];
+    if (queued) {
+      throw codedError(
+        'COACH_RECONCILE_PENDING',
+        `핸드 ${handNo} 코치 게시 후 reconcile 증명을 확인하지 못했습니다.`,
+      );
+    }
+  };
+
   const executeCoachPublish = async (handNo, exactEnvelopePath) => {
     const args = ['--from', exactEnvelopePath];
     try {
-      return await executePublish(args);
+      const published = await executePublish(args);
+      await ensureCoachPublishReconciled(handNo);
+      return published;
     } catch (error) {
-      if (error.code === 'LOCK_TIMEOUT') return executePublish(args);
+      if (error.code === 'COACH_RECONCILE_PENDING') throw error;
+      if (error.code === 'LOCK_TIMEOUT') {
+        const published = await executePublish(args);
+        await ensureCoachPublishReconciled(handNo);
+        return published;
+      }
       if (error.code !== 'ATTEMPT_PENDING') throw error;
-      await executePublish([...args, '--retry']);
+      let attemptedCoachQueueId = null;
+      let attemptedPublishId = null;
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(root, '.publish-attempt.json'), 'utf8'));
+        attemptedCoachQueueId = record?.coachAuthority?.queueId ?? null;
+        attemptedPublishId = Number.isInteger(record?.body?.publishId) ? record.body.publishId : null;
+      } catch { /* publish.js owns malformed/stale attempt classification */ }
+      const retried = await executePublish([...args, '--retry']);
+      await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
       const auth = readCoachAuthority();
       if (auth?.publishedSeals?.[String(handNo)]) return { ok: true, reconciled: true };
-      return executePublish(args);
+      const currentQueueId = auth?.publishQueue?.[String(handNo)]?.queueId ?? null;
+      const retryPublishedCurrent = (
+        (attemptedCoachQueueId && attemptedCoachQueueId === currentQueueId)
+        || (!attemptedCoachQueueId && retried?.hadCoach === true)
+      );
+      if (retryPublishedCurrent || retried?.reconcilePending === true) {
+        throw codedError(
+          'COACH_RECONCILE_PENDING',
+          `핸드 ${handNo} 코치 retry 후 reconcile 증명을 확인하지 못했습니다.`,
+        );
+      }
+      let recordedBodyProven = false;
+      if (attemptedPublishId !== null) {
+        try {
+          recordedBodyProven = Number(readJsonOptional(coachSnapshotPath, 'COACH_SNAPSHOT')?.publishId) >= attemptedPublishId;
+        } catch { /* an unavailable snapshot is not publication proof */ }
+      }
+      if (!attemptedCoachQueueId && !recordedBodyProven) {
+        throw codedError(
+          'COACH_RECONCILE_PENDING',
+          `핸드 ${handNo} 코치 retry 중 recorded body 반영을 확인하지 못했습니다.`,
+        );
+      }
+      const published = await executePublish(args);
+      await ensureCoachPublishReconciled(handNo);
+      return published;
     }
   };
 
@@ -1756,6 +1809,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   ]);
 
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
+    if (stopRequested) return;
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const upperUsable = upperAdapter && typeof upperAdapter.oneshotStart === 'function';
@@ -1771,9 +1825,18 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       return;
     }
     // A non-null object that does not implement the probed interface is not a truthful
-    // upper-null result. Preserve old test adapters without pretending they generated coaching.
+    // upper-null result. It still must seal the hand; a live descriptor requires its
+    // exact generation, while a play-time hand without a reservation uses fallback.
     if (!upperUsable) {
-      appendNotice(`핸드 ${handNo} 코치 adapter 인터페이스가 없어 생성을 건너뜁니다.`);
+      coachAdapterDisabled = true;
+      appendNotice(`핸드 ${handNo} 코치 adapter 인터페이스가 없어 고정 문구로 대체합니다.`);
+      await completeCoachUnavailable({
+        owner,
+        handNo,
+        generation: initialDescriptor?.generation,
+        reason: 'upper-interface-unavailable',
+        fallbackEnvelopePath: initialDescriptor?.exactEnvelopePath,
+      });
       return;
     }
 
@@ -1893,7 +1956,31 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           return;
         }
         if (attempt === 1) {
-          descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
+          try {
+            descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
+          } catch (reserveError) {
+            if (reserveError.code !== 'ADAPTER_DISABLED') throw reserveError;
+            coachAdapterDisabled = true;
+            try {
+              await runCoach([
+                'fence',
+                '--owner', owner,
+                '--hand', String(handNo),
+                '--generation', String(currentDescriptor.generation),
+                '--reason', 'adapter-disabled-before-attempt-2',
+              ]);
+            } catch (fenceError) {
+              if (fenceError.code !== 'STALE_GENERATION') throw fenceError;
+            }
+            await completeCoachUnavailable({
+              owner,
+              handNo,
+              generation: currentDescriptor.generation,
+              reason: 'adapter-disabled-before-attempt-2',
+              fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+            });
+            return;
+          }
           continue;
         }
         await completeCoachUnavailable({
@@ -1915,7 +2002,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const trackCoachTask = (handNo, work) => {
     let task;
-    task = Promise.resolve(work)
+    task = Promise.resolve()
+      .then(() => (typeof work === 'function' ? work() : work))
       .catch((error) => {
         appendNotice(`핸드 ${handNo} 코치 파이프라인 오류: ${error.code ?? 'ERROR'}`);
         log('coach-error', { handNo, code: error.code ?? 'ERROR' });
@@ -1926,7 +2014,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const launchCoachPipeline = (handNo, options = {}) => (
-    trackCoachTask(handNo, coachPipeline(handNo, options))
+    trackCoachTask(handNo, () => coachPipeline(handNo, options))
   );
 
   const publishQueuedCoachHand = async (handNo) => {
@@ -1996,10 +2084,6 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const reconcileOnly = readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING';
-    const hands = new Map();
-    for (let handNo = 1; handNo <= completed; handNo += 1) {
-      hands.set(handNo, await captureCoachHand(handNo));
-    }
     const stats = await captureCoachStats('owner');
     const begun = await runCoach([
       'begin-owner',
@@ -2031,15 +2115,109 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       writeLoopState({ halt: undefined });
     }
     for (const descriptor of begun.descriptors ?? []) {
+      if (stopRequested) break;
+      const hand = await captureCoachHand(descriptor.handNo);
+      if (stopRequested) break;
       launchCoachPipeline(descriptor.handNo, {
         descriptor,
-        prepared: { hand: hands.get(descriptor.handNo), stats },
+        prepared: { hand, stats },
       });
     }
     for (const handNo of begun.unavailableSealed ?? []) {
-      trackCoachTask(handNo, publishQueuedCoachHand(handNo));
+      if (stopRequested) break;
+      trackCoachTask(handNo, () => publishQueuedCoachHand(handNo));
     }
     return begun;
+  };
+
+  const fenceHeartbeatGeneration = async (owner, action, reason) => {
+    try {
+      await runCoach([
+        'fence',
+        '--owner', owner,
+        '--hand', String(action.handNo),
+        '--generation', String(action.generation),
+        '--reason', reason,
+      ]);
+    } catch (error) {
+      if (error.code !== 'STALE_GENERATION') throw error;
+    }
+  };
+
+  const remediateHeartbeatAction = async (owner, action) => {
+    const record = coachAttempts.get(coachAttemptKey(action.handNo, action.generation));
+    if (action.action === 'timeout-fence') {
+      if (record) record.interrupt();
+      else {
+        await completeCoachUnavailable({
+          owner,
+          handNo: action.handNo,
+          generation: action.generation,
+          reason: 'heartbeat-timeout',
+        });
+      }
+      return;
+    }
+    if (action.action !== 'result-ready') return;
+
+    let accepted = false;
+    try {
+      const deny = writeCoachDeny(action.handNo);
+      await runCoach([
+        'accept',
+        '--owner', owner,
+        '--hand', String(action.handNo),
+        '--generation', String(action.generation),
+        '--forbidden-file', deny.path,
+      ]);
+      accepted = true;
+      await publishQueuedCoachHand(action.handNo);
+    } catch (error) {
+      if (!record) throw error;
+      const termination = await record.handle.terminate();
+      if (accepted) {
+        if (termination?.confirmed !== true) {
+          await runCoach([
+            'adapter-disable',
+            '--owner', owner,
+            '--reason', 'result-ready-termination-unconfirmed',
+          ]);
+          coachAdapterDisabled = true;
+        }
+        record.interrupt('COACH_RESULT_ACCEPTED');
+        throw error;
+      }
+      await fenceHeartbeatGeneration(owner, action, 'result-ready-accept-failed');
+      if (termination?.confirmed !== true) {
+        await runCoach([
+          'adapter-disable',
+          '--owner', owner,
+          '--reason', 'result-ready-termination-unconfirmed',
+        ]);
+        coachAdapterDisabled = true;
+      }
+      await completeCoachUnavailable({
+        owner,
+        handNo: action.handNo,
+        generation: action.generation,
+        reason: error.code ?? 'result-ready-accept-failed',
+      });
+      record.interrupt('COACH_RESULT_ACCEPTED');
+      return;
+    }
+
+    if (record) {
+      const termination = await record.handle.terminate();
+      if (termination?.confirmed !== true) {
+        await runCoach([
+          'adapter-disable',
+          '--owner', owner,
+          '--reason', 'result-ready-termination-unconfirmed',
+        ]);
+        coachAdapterDisabled = true;
+      }
+      record.interrupt('COACH_RESULT_ACCEPTED');
+    }
   };
 
   const heartbeatCoach = async () => {
@@ -2050,47 +2228,15 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     // game startup depend on the publication lock.
     if (!fs.existsSync(coachAuthorityPath)) return;
     const heartbeat = await runCoach(['heartbeat', '--owner', owner]);
+    if (stopRequested) return;
     for (const action of heartbeat.actions ?? []) {
+      if (stopRequested) break;
       log('coach-heartbeat', {
         handNo: action.handNo,
         action: action.action,
         generation: action.generation,
       });
-      if (action.action === 'timeout-fence') {
-        const record = coachAttempts.get(coachAttemptKey(action.handNo, action.generation));
-        if (record) record.interrupt();
-        else {
-          await completeCoachUnavailable({
-            owner,
-            handNo: action.handNo,
-            generation: action.generation,
-            reason: 'heartbeat-timeout',
-          });
-        }
-      } else if (action.action === 'result-ready') {
-        const deny = writeCoachDeny(action.handNo);
-        await runCoach([
-          'accept',
-          '--owner', owner,
-          '--hand', String(action.handNo),
-          '--generation', String(action.generation),
-          '--forbidden-file', deny.path,
-        ]);
-        await publishQueuedCoachHand(action.handNo);
-        const record = coachAttempts.get(coachAttemptKey(action.handNo, action.generation));
-        if (record) {
-          const termination = await record.handle.terminate();
-          if (termination?.confirmed !== true) {
-            await runCoach([
-              'adapter-disable',
-              '--owner', owner,
-              '--reason', 'result-ready-termination-unconfirmed',
-            ]);
-            coachAdapterDisabled = true;
-          }
-          record.interrupt('COACH_RESULT_ACCEPTED');
-        }
-      }
+      trackCoachTask(action.handNo, () => remediateHeartbeatAction(owner, action));
     }
   };
 
@@ -2565,6 +2711,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           appendNotice(`코치 heartbeat 오류: ${error.code ?? 'ERROR'}`);
           log('coach-heartbeat-error', { handNo: out.handNo, code: error.code ?? 'ERROR' });
         }
+        if (stopRequested) break;
         launchCoachPipeline(out.handNo);
         const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
         if (out.gameOver || userBusted) {
