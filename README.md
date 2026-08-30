@@ -43,7 +43,7 @@ nohup node tools/game-loop.js --game-dir game --ai 3 --player-runtime claude \
 open "http://127.0.0.1:<port>/?token=<t>"
 ```
 
-재개는 `--ai` 대신 `--resume`. 종료 코드: `0` done, `2` repair_failed/USAGE, `3` REVIEW_FAILED, `4` NO_PLAYER_RUNTIME, `5` 기타 halt.
+재개는 `--ai` 대신 `--resume`. 종료 코드 `0`은 SIGTERM을 포함한 정상 프로세스 정리이며 게임 완료를 뜻하지 않는다. 완료는 오직 `loop-state.json`의 `phase: "done"` + `finishedAt`으로 판정한다. 비정상 종료 코드는 `2` repair_failed/USAGE, `3` REVIEW_FAILED, `4` NO_PLAYER_RUNTIME, `5` 기타 halt다.
 
 ### 수동 (엔진·서버만)
 

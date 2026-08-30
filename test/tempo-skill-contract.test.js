@@ -44,7 +44,7 @@ test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있�
   // 폴링 종료 조건 셋 — 벽시계가 아니다.
   assert.match(skill, /halt/);
   assert.match(skill, /phase가 bootstrap을 지남|phase가 bootstrap을 벗어/);
-  assert.match(skill, /pid 사망|pid가 죽/);
+  assert.match(skill, /pid 사망|pid가 사망|pid가 죽/);
   assert.ok(!skill.includes('--talk'), 'talk 배선이 남아 있다');
   assert.ok(!skill.includes('SendMessage'), 'SendMessage 회신 경로가 남아 있다');
   assert.ok(!skill.includes('reply-channel'), 'reply-channel이 남아 있다');
@@ -77,6 +77,8 @@ test('시작: 활성 게임은 --force 없이는 ACTIVE_GAME이고 init·서버 
   assert.match(start, /ACTIVE_GAME/);
   assert.match(start, /--force/);
   assert.match(start, /loop-state\.json/);
+  assert.match(start, /resume-check/);
+  assert.match(start, /loopPidAlive:false/);
   assert.match(start, /archivedTo/);
   assert.match(start, /notices/);
   assert.match(start, /open "http:\/\/127\.0\.0\.1:/);
@@ -97,10 +99,13 @@ test('스킬에 옛 딜러 루프 문면이 남아 있지 않다', () => {
     'spawn_subagent',
     'subagent_type',
     'holdem-player',
-    '.turn.json',
   ]) {
     assert.equal(skill.includes(gone), false, `옛 루프 문면 잔존: ${gone}`);
   }
+  const rollbackAt = skill.indexOf('## 6. 중단');
+  assert.ok(rollbackAt > 0);
+  assert.equal(skill.slice(0, rollbackAt).includes('.turn.json'), false,
+    'rollback 밖에 수동 turn envelope 문면이 남아 있다');
   assert.match(skill, /개입하지 않는다|개입은 없다/);
 });
 
@@ -140,6 +145,9 @@ test('중단·롤백: 정지 → 미해소 게시 해소 → revert 3단계가 �
     `롤백 3단계 순서가 아니다: ${first}/${second}/${third}`);
   assert.match(stop, /identity|pid\+startTime/i);
   assert.match(stop, /pending Q|publishQueue|코치 pending/);
+  assert.match(stop, /node server\/server\.js/);
+  assert.match(stop, /port.*sessionToken|sessionToken.*port/);
+  assert.match(stop, /\{"ok":true\}/);
   assert.match(stop, /quiescent|정지 확인이 끝난/);
   // 종료 정리 실패는 같은 프로세스에서 재시도되지 않는다 — 새 --resume이 복구 경로다.
   assert.match(stop, /cleanupFailedAt|정리 실패/);
@@ -178,6 +186,8 @@ test('README: 사이드카 소유·런타임 어댑터·loopPidAlive·metrics·�
   assert.match(readme, /metrics/);
   assert.match(readme, /finalizing/);
   assert.match(readme, /review_published/);
+  assert.match(readme, /phase:\s*"done"/);
+  assert.match(readme, /SIGTERM.*정상 프로세스 정리/);
   assert.match(readme, /컨테인먼트/);
   assert.equal(readme.includes('holdem-player.md'), false, 'README가 삭제된 에이전트 정의를 가리킨다');
 });

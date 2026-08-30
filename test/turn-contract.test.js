@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
 const TOOL = path.join(ROOT, 'tools/publish.js');
+const COACH = path.join(ROOT, 'tools/coach-control.js');
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-turn-'));
@@ -245,5 +246,32 @@ test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..samp
     }
   } finally {
     await started.close();
+  }
+});
+
+test('롤백 계약: 정지된 relay를 같은 token으로 복구하면 recorded attempt를 retry하고 guard가 열린다', async () => {
+  const dir = tmpGame();
+  const init = await node([CLI, 'init', '--ai', '1', '--stack', '400', '--game-dir', dir]);
+  const first = await startServer({ gameDir: dir, port: 0, token: init.sessionToken });
+  const envelope = await node([CLI, 'step', '--new-hand', '--game-dir', dir]);
+  const turnPath = path.join(dir, '.turn.json');
+  fs.writeFileSync(turnPath, JSON.stringify(envelope));
+  await first.close();
+
+  await assert.rejects(
+    node([TOOL, '--from', turnPath, '--game-dir', dir]),
+    /Command failed/,
+  );
+  assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), true);
+
+  const relay = await startServer({ gameDir: dir, port: 0, token: init.sessionToken });
+  try {
+    const retried = await node([TOOL, '--from', turnPath, '--game-dir', dir, '--retry']);
+    assert.equal(retried.ok, true);
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+    const guard = await node([COACH, 'rollback-guard', '--game-dir', dir]);
+    assert.deepEqual(guard, { ok: true });
+  } finally {
+    await relay.close();
   }
 });

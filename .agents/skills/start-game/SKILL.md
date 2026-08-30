@@ -59,11 +59,17 @@ nohup node tools/game-loop.js --game-dir game --ai <n> \
 
 살아 있는 게임이 있는데 `--force` 없이 기동하면 사이드카가 `ACTIVE_GAME`으로 즉시 종료한다. 새 게임으로 덮어쓰기로 사용자가 정했을 때만 `--force`를 붙인다(정지 순서 사이드카 → 서버, 아카이브는 둘 다 사망 확인 후. 남의 살아 있는 loop는 엔진이 죽이지 않는다).
 
-그다음 `game/loop-state.json`을 약 250ms 간격으로 폴링한다. **종료 조건은 벽시계가 아니라 셋 중 하나다:**
+그다음 약 250ms 간격으로 `game/loop-state.json`과 아래 명령을 함께 폴링한다.
+
+```bash
+node engine/cli.js resume-check --game-dir game
+```
+
+**종료 조건은 벽시계가 아니라 셋 중 하나다:**
 
 1. `halt` 기록 — 기동 실패다. `halt.code`·`message`와 `/tmp/ai-holdem-boot.log`를 보고 중단한다.
 2. `phase`가 `bootstrap`을 지남(`playing` 이후) — 정상 기동이다.
-3. 사이드카 **pid 사망** — `/tmp/ai-holdem-boot.log`를 보고 중단한다.
+3. `resume-check`의 **`loopPidAlive:false`** — 사이드카 pid가 사망했다. `/tmp/ai-holdem-boot.log`를 보고 중단한다.
 
 런타임 probe 사다리(런타임 × 플레이어/상위 모델/컨테인먼트, grok 콜드 1회 ~25s)가 있어 부트가 수십 초를 넘을 수 있다. **pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다** — 중단하거나 `--force`로 다시 띄우지 마라.
 
@@ -89,7 +95,7 @@ macOS `open`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
 
 ## 4. 종료 보고
 
-종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, 사이드카 pid 사망. 사이드카는 `loop-state.json`의 `phase`가 done이 된 시점에 `finishedAt`을 남기고 exit 0으로 끝난다. 정상 종료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `game/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.
+종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM 정지를 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `game/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.
 
 `halt`가 기록돼 있으면 `halt.code`로 분기해 **한 줄씩** 안내한다.
 
@@ -132,8 +138,8 @@ node engine/cli.js end --result abort --game-dir game
 
 **이 변경을 되돌리거나(revert) 새 버전을 얹기 전에는 아래 3단계를 순서대로 밟는다.** detached 사이드카는 revert 뒤에도 메모리에 올린 코드로 계속 돌기 때문에 revert 단독으로는 부족하다.
 
-1. **정지.** `game/loop.lock.d/`의 pid를 읽어 **pid+startTime identity를 그 행위 직전에 재검증한 뒤에만** SIGTERM을 보내고 사망을 확인한다. 불일치(pid 재사용)면 죽은 것으로 취급하고 **절대 시그널하지 않는다.** 사이드카 사망 확인 후 `game/lock.json`을 다시 읽어 그 `serverPid`를 정지한다(순서는 사이드카 → 서버. 반대로 하면 사이드카가 새 서버를 띄운다).
-2. **미해소 게시 해소.** `game/.publish-attempt.json`이 남아 있으면 `node tools/publish.js --from <그 시도의 envelope> --game-dir game --retry`로 끝낸다. 코치 pending Q(`game/.coach-authority.json`의 `publishQueue`)는 게시하거나 그대로 보존한다 — `node tools/coach-control.js rollback-guard --game-dir game`이 `ROLLBACK_REFUSED`를 주는 동안에는 보존이 맞다.
+1. **정지.** 정지 전에 `game/loop-state.json`의 `port`·`sessionToken`을 보관한다. `game/loop.lock.d/`의 pid를 읽어 **pid+startTime identity를 그 행위 직전에 재검증한 뒤에만** SIGTERM을 보내고 사망을 확인한다. 불일치(pid 재사용)면 죽은 것으로 취급하고 **절대 시그널하지 않는다.** 사이드카 사망 확인 후 `game/lock.json`을 다시 읽어 그 `serverPid`를 정지한다(순서는 사이드카 → 서버. 반대로 하면 사이드카가 새 서버를 띄운다).
+2. **미해소 게시 해소.** 사이드카 정지는 서버도 닫으므로, 1단계에서 보관한 port·sessionToken으로 **임시 relay만** 다시 띄우고 token-authenticated snapshot을 확인한다: `nohup node server/server.js --game-dir game --port <port> --token <sessionToken> > /tmp/ai-holdem-rollback-server.log 2>&1 &`. `game/.publish-attempt.json`이 남아 있으면 `node tools/publish.js --from game/.turn.json --game-dir game --retry`로 기록된 exact body를 끝낸다. 그 다음 코치 `publishQueue` 각 행의 `exactEnvelopePath`를 `publish.js --from`으로 게시한다. `node tools/coach-control.js rollback-guard --game-dir game`이 **`{"ok":true}`**를 반환해야만 계속한다. `ROLLBACK_REFUSED`면 revert하지 말고 active/queued/attempt를 해소한다. 성공 후 임시 relay pid identity를 재검증해 정지하고 사망을 확인한다.
 3. **그 다음에** `git revert`. "revert로 충분"은 정지 확인이 끝난 **quiescent** 게임에만 성립한다.
 
 종료 정리가 실패하면(`loop-state.json`에 `cleanupFailedAt`·`cleanupError`가 남고 프로세스가 비정상 종료) 그 프로세스는 이미 끝났으므로 **같은 프로세스에서 재시도되지 않는다.** 복구는 **새 `--resume` 프로세스**가 한다 — 락·서버·미해소 게시를 다시 들고 정리한다. 원인(자식 종료 미확인·디스크 오류 등)을 먼저 해소한 뒤 §5의 `--resume`을 띄운다.
