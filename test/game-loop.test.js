@@ -5314,6 +5314,37 @@ test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 
   assert.deepEqual(halted.halt.recovery.commands, []);
 });
 
+test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked worker 종료 전에 차단한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const never = new Promise(() => {});
+  const upper = makeCoachAdapter({
+    rounds: [{ gate: never, raw: JSON.stringify({ handNo: 1, text: '종료되면 안 되는 worker' }) }],
+  });
+  const signals = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      finalizeBudgetMs: 1_200,
+      finalizeCutoffLeadMs: 800,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  await loop.resume();
+  await waitFor(() => upper.starts.length === 1, 'finalize epoch guard용 worker가 시작되지 않았다');
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.gameEpoch = 'stale-before-finalize-epoch';
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  assert.deepEqual(signals, [], 'stale authority가 가리킨 persisted pid에 signal을 보냈다');
+  const halted = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(halted.halt.recovery.attempts[0].reason, 'STALE_GAME_EPOCH');
+});
+
 test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spawn/bind하지 않는다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -5360,6 +5391,38 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   assert.equal(upper.starts.length, 0, 'capture 뒤 cutoff를 재확인하지 않고 worker를 시작했다');
   assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.terminationConfirmed, true);
+});
+
+test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handle 없는 worker를 시작하지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let releaseSpawn;
+  const spawnGate = new Promise((resolve) => { releaseSpawn = resolve; });
+  t.after(() => releaseSpawn());
+  let spawnEntered;
+  const entered = new Promise((resolve) => { spawnEntered = resolve; });
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      finalizeBudgetMs: 1_200,
+      finalizeCutoffLeadMs: 800,
+      coachSpawnCheckpoint: async () => {
+        spawnEntered();
+        await spawnGate;
+      },
+    },
+  });
+
+  await loop.resume();
+  await entered;
+  const running = startRun(loop);
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  releaseSpawn();
+  assert.equal((await running).phase, 'done');
+
+  assert.equal(upper.starts.length, 0, 'cutoff 뒤 handle 없는 worker를 시작했다');
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
 });
 
 test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시도를 abort하고 review gate를 잠근다', { timeout: 10_000 }, async (t) => {
@@ -5821,6 +5884,7 @@ test('Task 7A full review: terminal engine lastHand.handNo가 없으면 stats sa
   assert.equal(state.phase, 'finalizing');
   assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
   assert.match(state.halt.message, /lastHand\.handNo/);
+  assert.equal(state.finalization.cutoff.terminationConfirmed, true);
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
   assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
 });
@@ -5842,6 +5906,7 @@ test('Task 7A full review: engine lastHand.handNo와 stats user.sample 불일치
   assert.equal(state.phase, 'finalizing');
   assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
   assert.match(state.halt.message, /stats user\.sample/);
+  assert.equal(state.finalization.cutoff.terminationConfirmed, true);
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
   assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
 });
@@ -6220,6 +6285,35 @@ test('Task 7B full review: session과 adapter cleanup은 lock 소유 중 done ch
     sessionsExist: false,
     lockExists: true,
   });
+  assert.equal(completed.phase, 'done');
+  assert.match(completed.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('Task 7B full review: concurrent requestStop이 먼저 시작돼도 done patch를 같은 cleanup에 병합한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter();
+  let loopRef;
+  let competingStop;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: {
+      port: 0,
+      beforeDoneRequestStop: () => {
+        competingStop = loopRef.requestStop();
+      },
+    },
+  });
+  loopRef = loop;
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'finalizing', handNo: 1 });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const completed = await loop.run();
+  await competingStop;
+
   assert.equal(completed.phase, 'done');
   assert.match(completed.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);

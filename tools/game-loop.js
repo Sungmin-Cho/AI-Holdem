@@ -301,6 +301,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let resumeEntryPending = false;
   let stopRequested = false;
   let stopPromise = null;
+  let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
   let finalizationCutoff = false;
@@ -2358,6 +2359,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       let heartbeatTimedOut = false;
       try {
         if (coachWorkSuspended()) return;
+        if (typeof opts.coachSpawnCheckpoint === 'function') {
+          await opts.coachSpawnCheckpoint({ handNo, attempt });
+        }
         assertBeforeResultWaitCutoff();
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
@@ -3188,6 +3192,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       finishedAt: current?.finishedAt ?? isoNow(now),
       halt: undefined,
     });
+    if (typeof opts.beforeDoneRequestStop === 'function') opts.beforeDoneRequestStop();
     await requestStop({ finalStatePatch });
     return readLoopState() ?? current;
   };
@@ -3232,7 +3237,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     );
   };
 
-  const abortCompletedHandAuthority = (reason, message) => {
+  const abortCompletedHandAuthority = (reason, message, terminationConfirmed) => {
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
       finalization: {
@@ -3240,6 +3245,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         cutoff: {
           ...(current.cutoff ?? {}),
           at: isoNow(now),
+          terminationConfirmed,
           reason,
           reviewGate: 'closed',
         },
@@ -3248,19 +3254,20 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return haltFinalization('FINALIZATION_ABORTED', message);
   };
 
-  const completedHandFromEngine = () => {
+  const completedHandFromEngine = (terminationConfirmed) => {
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     const completed = engine?.lastHand?.handNo;
     if (!Number.isSafeInteger(completed) || completed < 0) {
       throw abortCompletedHandAuthority(
         'invalid_engine_last_hand',
         '종료 engine lastHand.handNo가 안전한 0 이상 정수가 아니어서 리뷰 게이트를 열지 않습니다.',
+        terminationConfirmed,
       );
     }
     return completed;
   };
 
-  const assertStatsCompletedHand = (completed, statsRaw) => {
+  const assertStatsCompletedHand = (completed, statsRaw, terminationConfirmed) => {
     let sample;
     try {
       sample = JSON.parse(statsRaw)?.perPlayer?.user?.sample;
@@ -3271,12 +3278,14 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       throw abortCompletedHandAuthority(
         'invalid_stats_sample',
         'stats user.sample이 안전한 0 이상 정수가 아니어서 리뷰 게이트를 열지 않습니다.',
+        terminationConfirmed,
       );
     }
     if (sample !== completed) {
       throw abortCompletedHandAuthority(
         'completed_stats_disagreement',
         `engine lastHand.handNo(${completed})와 stats user.sample(${sample})이 일치하지 않아 리뷰 게이트를 열지 않습니다.`,
+        terminationConfirmed,
       );
     }
   };
@@ -3350,9 +3359,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     assertFinalizationDeadline();
 
     // (4) 한 transaction으로 missing 전체를 fence + unavailable Q seal.
-    const completed = completedHandFromEngine();
+    const completed = completedHandFromEngine(terminationConfirmed);
     const stats = await captureCoachStats('final');
-    assertStatsCompletedHand(completed, stats.raw);
+    assertStatsCompletedHand(completed, stats.raw, terminationConfirmed);
     let cutoff;
     try {
       cutoff = await runCoach([
@@ -3564,6 +3573,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const requestStop = ({ finalStatePatch = null } = {}) => {
+    if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
     const attempt = (async () => {
@@ -3638,9 +3648,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
       try {
         if (fs.existsSync(loopStatePath)) {
-          const resolvedFinalStatePatch = typeof finalStatePatch === 'function'
-            ? finalStatePatch()
-            : (finalStatePatch ?? {});
+          const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
+            ? pendingFinalStatePatch()
+            : (pendingFinalStatePatch ?? {});
           writeLoopState({
             stopping: true,
             stoppedAt: isoNow(now),
