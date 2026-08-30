@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createGame } from './hand.js';
 import { generatePersonas } from './personas.js';
-import { runExclusive, saveState, writeJsonAtomic } from './state.js';
+import {
+  readOwnedLock, runExclusive, saveState, writeJsonAtomic,
+} from './state.js';
 
 // Game-directory archive (init vacate), not the per-hand writeHandArchive.
 
@@ -253,7 +255,21 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const disk = deps.fs ?? fs;
   const alive = deps.isAlive ?? isAlive;
   const clock = deps.now ?? now;
+  const callerPpid = deps.callerPpid ?? process.ppid;
   const { aiCount, startStack, blinds0, levelEvery, force } = flags;
+
+  // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
+  // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
+  // 활성으로 치지 않는다: 부트스트랩이 자기 락에 막히지 않기 위한 예외다.
+  const loop = readOwnedLock(gameDir, 'loop.lock.d');
+  if (loop?.alive && loop.pid !== callerPpid) {
+    throwCoded(
+      force ? 'LOOP_ALIVE' : 'ACTIVE_GAME',
+      force
+        ? '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.'
+        : '이미 진행 중인 게임이 있습니다.',
+    );
+  }
 
   const lock = readLock(gameDir, { fs: disk });
   const live = Boolean(lock && alive(lock.serverPid));

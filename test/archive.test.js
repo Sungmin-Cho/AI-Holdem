@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runExclusive, withMutation } from '../engine/state.js';
+import {
+  acquireOwnedLock, releaseOwnedLock, runExclusive, withMutation,
+} from '../engine/state.js';
 import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
   closeOpenPartial, vacateLive, initGameDir, stopServer,
@@ -391,6 +393,54 @@ test('initGameDir: publish.lock.d는 보관·삭제 뒤에도 라이브에 남�
   assert.match(out.archivedTo, /^archive\//);
   assert.equal(fs.existsSync(path.join(archived, 'publish.lock.d')), true);
   assert.equal(fs.existsSync(path.join(archived, out.archivedTo, 'publish.lock.d')), false);
+});
+
+test('서버가 죽어도 loop 락이 살아 있으면 init은 ACTIVE_GAME/LOOP_ALIVE', () => {
+  const dir = tmpGame();
+  initGameDir(dir, { aiCount: 2 });
+  // 이 테스트 프로세스가 loop.lock.d의 소유자(살아 있음)가 된다. callerPpid를
+  // 0으로 주입해 "락 소유자가 부른 자식"의 ppid 예외를 피한다.
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  try {
+    assert.throws(
+      () => initGameDir(dir, { aiCount: 2 }, { callerPpid: 0 }),
+      (e) => e.code === 'ACTIVE_GAME',
+    );
+    assert.throws(
+      () => initGameDir(dir, { aiCount: 2, force: true }, { callerPpid: 0 }),
+      (e) => e.code === 'LOOP_ALIVE',
+    );
+  } finally {
+    releaseOwnedLock(h);
+  }
+});
+
+test('loop 소유자가 부른 자식 init(ppid == loopPid)은 통과한다', () => {
+  const dir = tmpGame();
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  try {
+    const result = initGameDir(dir, { aiCount: 2 }, { callerPpid: process.pid });
+    assert.ok(result.sessionToken);
+  } finally {
+    releaseOwnedLock(h);
+  }
+});
+
+test('죽은 loop 락(또는 startTime 불일치)은 활성으로 치지 않는다', () => {
+  const dir = tmpGame();
+  fs.mkdirSync(path.join(dir, 'loop.lock.d'));
+  fs.writeFileSync(path.join(dir, 'loop.lock.d', 'pid'), '999999\nbogus-dead-pid');
+  const first = initGameDir(dir, { aiCount: 2 });
+  assert.ok(first.sessionToken);
+
+  // 살아 있는 pid(이 테스트 프로세스 자신)지만 기록된 startTime이 실제와
+  // 다르면(재사용 방어) 여전히 죽은 것으로 취급한다.
+  fs.writeFileSync(
+    path.join(dir, 'loop.lock.d', 'pid'),
+    `${process.pid}\nbogus-mismatched-start-time`,
+  );
+  const second = initGameDir(dir, { aiCount: 2, force: true });
+  assert.ok(second.sessionToken);
 });
 
 test('stopServer: now가 마감을 넘기면 sleep 없이 SIGTERM 후 SIGKILL한다', () => {

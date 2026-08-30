@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { newDeck } from './cards.js';
 import { initGameDir, isAlive, readLock } from './game-archive.js';
 import { applyAction, forceDefault, legalFor, startHand } from './hand.js';
-import { loadState, readHand, withMutation, writeHandArchive } from './state.js';
+import {
+  loadState, readHand, readOwnedLock, withMutation, writeHandArchive,
+} from './state.js';
 import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
@@ -24,6 +26,7 @@ const FAIL_MESSAGES = {
   ARCHIVE_FAILED: '직전 게임을 보관하지 못했습니다.',
   SERVER_ALIVE: '게임 서버가 아직 종료되지 않았습니다.',
   HAND_NOT_FOUND: '핸드를 찾을 수 없습니다.',
+  LOOP_ALIVE: '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
 };
 
 function reply(envelope, exitCode) {
@@ -352,6 +355,7 @@ function cmdResumeCheck(gameDir) {
   succeed({
     stateVersion: state.stateVersion,
     serverPidAlive: Boolean(lock && isAlive(lock.serverPid)),
+    loopPidAlive: Boolean(readOwnedLock(gameDir, 'loop.lock.d')?.alive),
     port: lock?.port ?? null,
     sessionToken: state.sessionToken,
     phase: state.phase,

@@ -4,10 +4,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
+const STATE_MODULE_URL = pathToFileURL(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/state.js'),
+).href;
 const FULL_DECK = newDeck().join(',');
 
 function stackedDeck(front) {
@@ -98,6 +101,18 @@ function writeLock(dir, pid, sessionToken = 'tok') {
     sessionToken,
     startedAt: new Date().toISOString(),
   }));
+}
+
+// 이 테스트 프로세스와 무관한 pid+startTime identity를 실제로 세우기 위해
+// 자식 프로세스 안에서 engine/state.js의 acquireOwnedLock을 직접 호출한다
+// (identity 판정을 목으로 우회하지 않는다).
+function spawnLockHolder(dir) {
+  const script = `
+    import { acquireOwnedLock } from ${JSON.stringify(STATE_MODULE_URL)};
+    acquireOwnedLock(${JSON.stringify(dir)}, 'loop.lock.d');
+    setInterval(() => {}, 1e6);
+  `;
+  return spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' });
 }
 
 function killPid(pid) {
@@ -663,4 +678,23 @@ test('resume-check: 아카이브 정상·복구·복구실패를 구분해 보�
   const failed = assertOk(cli(dir, ['resume-check']));
   assert.equal(failed.archiveStatus, 'repair_failed', '복구 실패가 정상과 구분되지 않는다');
   assert.equal(failed.archiveRepaired, false);
+});
+
+test('resume-check: loopPidAlive는 loop 락 생존을 보고한다', async () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
+
+  const holder = spawnLockHolder(dir);
+  try {
+    const pidFile = path.join(dir, 'loop.lock.d', 'pid');
+    const deadline = Date.now() + 2000;
+    while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    assert.equal(fs.existsSync(pidFile), true, 'loop.lock.d/pid가 제때 생기지 않았다');
+    assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, true);
+  } finally {
+    killPid(holder.pid);
+  }
 });
