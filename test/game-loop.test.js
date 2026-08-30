@@ -7,6 +7,10 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  processStartTime,
+  withNamedLock,
+} from '../engine/state.js';
+import {
   createGameLoop,
   exitCodeFor,
   parseGameLoopArgs,
@@ -111,6 +115,240 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`pid ${pid} did not exit`);
+}
+
+async function waitFor(predicate, message, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const value = await predicate();
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (lastError) throw new Error(`${message}: ${lastError.message}`);
+  assert.fail(message);
+}
+
+async function waitForUserSnapshot(gameDir, timeoutMs = 3_000) {
+  return waitFor(async () => {
+    const lock = readJson(path.join(gameDir, 'lock.json'));
+    const response = await fetch(
+      `http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`,
+    );
+    if (!response.ok) return null;
+    const snapshot = await response.json();
+    return snapshot.view?.legal?.toAct === 'user' ? { lock, snapshot } : null;
+  }, 'user snapshot did not become available', timeoutMs);
+}
+
+function preferredUserAction(legal) {
+  if (legal.canRaise) {
+    return {
+      decisionId: legal.decisionId,
+      action: 'raise',
+      amount: legal.minRaiseTo > legal.maxRaiseTo ? legal.maxRaiseTo : legal.minRaiseTo,
+    };
+  }
+  if (legal.canCheck) return { decisionId: legal.decisionId, action: 'check' };
+  return { decisionId: legal.decisionId, action: 'call' };
+}
+
+async function postUserAction(lock, action) {
+  const response = await fetch(
+    `http://127.0.0.1:${lock.port}/api/action?token=${lock.sessionToken}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(action),
+    },
+  );
+  const body = await response.json();
+  return { status: response.status, body };
+}
+
+function startRun(loop) {
+  const promise = loop.run();
+  // Attach a handler immediately so a deliberate RED rejection is not reported as
+  // unhandled while the test is still arranging the external action.
+  promise.catch(() => {});
+  return promise;
+}
+
+async function waitWhileRunning(runPromise, predicate, message, timeoutMs = 3_000) {
+  return Promise.race([
+    waitFor(predicate, message, timeoutMs),
+    runPromise.then(
+      () => { throw new Error(`loop stopped before condition: ${message}`); },
+      (error) => { throw error; },
+    ),
+  ]);
+}
+
+async function stopRun(loop, runPromise) {
+  await loop.requestStop();
+  return runPromise;
+}
+
+async function waitForUserAction(gameDir, predicate = () => true, timeoutMs = 3_000) {
+  return waitFor(() => {
+    const state = readJson(path.join(gameDir, 'state.json'));
+    const actions = state.hand?.actions ?? state.lastHand?.actions ?? [];
+    return actions.find((action) => action.playerId === 'user' && predicate(action)) ?? null;
+  }, 'user action was not applied', timeoutMs);
+}
+
+async function readLine(child, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    const timer = setTimeout(() => reject(new Error('child stdout line timeout')), timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const newline = stdout.indexOf('\n');
+      if (newline === -1) return;
+      clearTimeout(timer);
+      resolve(stdout.slice(0, newline));
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      reject(new Error(`child exited before stdout line: ${code ?? signal}`));
+    });
+  });
+}
+
+async function startOwnedLoopHolder(gameDir, { signalLog = null, ignoreTerm = false } = {}) {
+  const stateUrl = pathToFileURL(path.join(ROOT, 'engine/state.js')).href;
+  const script = `
+    import fs from 'node:fs';
+    import { acquireOwnedLock, releaseOwnedLock } from ${JSON.stringify(stateUrl)};
+    const gameDir = ${JSON.stringify(gameDir)};
+    const signalLog = ${JSON.stringify(signalLog)};
+    const handle = acquireOwnedLock(gameDir, 'loop.lock.d');
+    process.on('SIGTERM', () => {
+      if (signalLog) fs.appendFileSync(signalLog, 'loop:SIGTERM\\n');
+      if (${ignoreTerm ? 'true' : 'false'}) return;
+      releaseOwnedLock(handle);
+      process.exit(0);
+    });
+    process.stdout.write('ready\\n');
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  assert.equal(await readLine(child), 'ready');
+  return child;
+}
+
+async function startReplacingLoopHolder(gameDir, token, signalLog) {
+  const stateUrl = pathToFileURL(path.join(ROOT, 'engine/state.js')).href;
+  const serverUrl = pathToFileURL(SERVER).href;
+  const replacementScript = `
+    import fs from 'node:fs';
+    import { startServer } from ${JSON.stringify(serverUrl)};
+    const running = await startServer({
+      gameDir: ${JSON.stringify(gameDir)}, port: 0, token: ${JSON.stringify(token)}
+    });
+    fs.appendFileSync(${JSON.stringify(signalLog)}, 'replacement:ready:' + process.pid + '\\n');
+    process.once('SIGTERM', async () => {
+      fs.appendFileSync(${JSON.stringify(signalLog)}, 'replacement:SIGTERM\\n');
+      await running.close();
+      process.exit(0);
+    });
+  `;
+  const script = `
+    import fs from 'node:fs';
+    import { spawn } from 'node:child_process';
+    import { acquireOwnedLock, releaseOwnedLock } from ${JSON.stringify(stateUrl)};
+    const handle = acquireOwnedLock(${JSON.stringify(gameDir)}, 'loop.lock.d');
+    let stopping = false;
+    process.on('SIGTERM', async () => {
+      if (stopping) return;
+      stopping = true;
+      fs.appendFileSync(${JSON.stringify(signalLog)}, 'loop:SIGTERM\\n');
+      const replacement = spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(replacementScript)}], {
+        stdio: 'ignore'
+      });
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        try {
+          const lock = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(gameDir, 'lock.json'))}, 'utf8'));
+          if (lock.serverPid === replacement.pid) break;
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      releaseOwnedLock(handle);
+      process.exit(0);
+    });
+    process.stdout.write('ready\\n');
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  assert.equal(await readLine(child), 'ready');
+  return child;
+}
+
+function spawnBootstrapWorker(gameDir) {
+  const loopUrl = pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href;
+  const script = `
+    import { createGameLoop } from ${JSON.stringify(loopUrl)};
+    const adapter = {
+      kind: 'fake', watchdog: { t1Ms: 10, t2Ms: 10 },
+      async warmup({playerId}) { return {sessionId: 's-' + playerId, raw: 'ready'}; },
+      async decide() { return {raw: '{}'}; },
+      async dispose() {}
+    };
+    const loop = createGameLoop({
+      gameDir: ${JSON.stringify(gameDir)},
+      resolver: async () => ({player: adapter, upper: adapter, notices: []}),
+      opts: {port: 0, waitMs: 0}
+    });
+    try {
+      await loop.bootstrap({ai: 1, stack: 100});
+      process.stdout.write(JSON.stringify({ok: true, pid: process.pid}) + '\\n');
+      process.once('SIGTERM', async () => { await loop.requestStop(); process.exit(0); });
+      setInterval(() => {}, 1000);
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ok: false, code: error.code}) + '\\n');
+      await loop.requestStop().catch(() => {});
+      process.exit(0);
+    }
+  `;
+  return spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+}
+
+async function startLoggedServer(gameDir, token, signalLog, label) {
+  const serverUrl = pathToFileURL(SERVER).href;
+  const script = `
+    import fs from 'node:fs';
+    import { startServer } from ${JSON.stringify(serverUrl)};
+    const running = await startServer({
+      gameDir: ${JSON.stringify(gameDir)}, port: 0, token: ${JSON.stringify(token)}
+    });
+    process.once('SIGTERM', async () => {
+      fs.appendFileSync(${JSON.stringify(signalLog)}, ${JSON.stringify(`${label}:SIGTERM\n`)});
+      await running.close();
+      process.exit(0);
+    });
+    process.stdout.write(String(running.port) + '\\n');
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const port = Number(await readLine(child));
+  await waitFor(() => {
+    const lock = readJson(path.join(gameDir, 'lock.json'));
+    return lock.serverPid === child.pid && lock.port === port ? lock : null;
+  }, `${label} server did not own lock`);
+  return { child, port };
 }
 
 async function startExternalServer(gameDir, token, { ignoreTerm = false } = {}) {
@@ -246,11 +484,42 @@ async function setupAiFirst(t, {
   return { gameDir, loop };
 }
 
-async function runUntilUserStub(loop) {
-  await assert.rejects(
-    loop.run(),
-    (error) => error.code === 'USER_HAND_LOOP_TASK_5C',
-  );
+async function setupUserFirst(t, { loopOpts = {}, adapter = makeAdapter() } = {}) {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 40, ...loopOpts },
+  });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai: 1, stack: 500 });
+  return { gameDir, loop, adapter };
+}
+
+async function holdNamedLock(gameDir, name) {
+  let release;
+  let entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const locked = new Promise((resolve) => { entered = resolve; });
+  const done = withNamedLock(gameDir, name, async () => {
+    entered();
+    await gate;
+  });
+  await locked;
+  return { release, done };
+}
+
+function narrationTexts(gameDir) {
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  return (snapshot.log ?? [])
+    .filter((entry) => entry.type === 'narration')
+    .map((entry) => entry.text);
+}
+
+async function runUntilUserBoundary(loop, gameDir) {
+  const running = startRun(loop);
+  await waitForUserSnapshot(gameDir);
+  await stopRun(loop, running);
 }
 
 test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 }, async (t) => {
@@ -279,7 +548,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     assert.deepEqual(initial.notices, []);
     assert.deepEqual(initial.metrics, []);
   });
-  const loop = createGameLoop({ gameDir, resolver, opts: { port: 0 } });
+  const loop = createGameLoop({ gameDir, resolver, opts: { port: 0, waitMs: 0 } });
   t.after(async () => {
     await loop.requestStop();
     try { fs.unlinkSync(focusSource); } catch { /* already gone */ }
@@ -321,7 +590,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt },
     p3: { runtime: 'fake', sessionId: 'session-p3', createdAt: state.startedAt },
   });
-  await assert.rejects(loop.run(), (error) => error.code === 'USER_HAND_LOOP_TASK_5C');
+  await runUntilUserBoundary(loop, gameDir);
 
   await loop.requestStop();
   await waitUntilDead(lock.serverPid);
@@ -439,6 +708,48 @@ test('an old-looking pid-less loop lock is still unknown and is never reclaimed 
   await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'LOOP_LOCK_UNKNOWN');
   assert.equal(fs.existsSync(lockDir), true);
   assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
+});
+
+test('two bootstrap processes racing on one game directory produce exactly one owner', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const workers = [spawnBootstrapWorker(gameDir), spawnBootstrapWorker(gameDir)];
+  t.after(() => Promise.all(workers.map((child) => terminateIfAlive(child))));
+
+  const results = await Promise.all(workers.map(async (child) => JSON.parse(await readLine(child, 10_000))));
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  assert.equal(results.filter((result) => !result.ok).length, 1);
+  assert.equal(
+    ['ACTIVE_GAME', 'LOCKED', 'LOOP_LOCK_UNKNOWN'].includes(results.find((result) => !result.ok).code),
+    true,
+    JSON.stringify(results),
+  );
+  const winner = workers[results.findIndex((result) => result.ok)];
+  assert.equal(
+    Number(fs.readFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), 'utf8').split('\n')[0]),
+    winner.pid,
+  );
+  winner.kill('SIGTERM');
+  await waitUntilDead(winner.pid, 4_000);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('a positively dead loop lock is reclaimed before bootstrap without force', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const deadOwner = await startOwnedLoopHolder(gameDir);
+  const recorded = fs.readFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), 'utf8');
+  deadOwner.kill('SIGKILL');
+  await waitUntilDead(deadOwner.pid);
+  assert.match(recorded, new RegExp(`^${deadOwner.pid}\\n`));
+
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0 },
+  });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai: 1 });
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'playing');
+  assert.notEqual(fs.readFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), 'utf8'), recorded);
 });
 
 test('IDENTITY_UNAVAILABLE is surfaced distinctly and leaves no partial lock', { concurrency: false }, async () => {
@@ -847,7 +1158,7 @@ test('playing resume seeds the checked hand so its archive is checked exactly on
   });
   t.after(() => resumed.requestStop());
   await resumed.resume();
-  await runUntilUserStub(resumed);
+  await runUntilUserBoundary(resumed, gameDir);
 
   assert.equal(fs.existsSync(archive), true);
   const checks = readLoopLog(gameDir).filter((entry) => (
@@ -888,7 +1199,7 @@ test('resumed archivePending for the pre-checked hand is suppressed without a se
   t.after(() => resumed.requestStop());
   await resumed.resume();
 
-  await runUntilUserStub(resumed);
+  await runUntilUserBoundary(resumed, gameDir);
 
   const checks = readLoopLog(gameDir).filter((entry) => (
     entry.event === 'resume-archive-check' || entry.event === 'archive-resume-check'
@@ -910,7 +1221,7 @@ test('playing starts a hand, accepts a tolerant AI decision, and preserves every
   });
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   const engine = readJson(path.join(gameDir, 'state.json'));
   const state = readJson(path.join(gameDir, 'loop-state.json'));
@@ -938,7 +1249,7 @@ test('watchdog resends the identical AI summary once, then force-defaults and re
     loopOpts: { watchdog: { t1Ms: 20, t2Ms: 15 } },
   });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   assert.equal(adapter.decideCalls.length, 2);
   assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
@@ -976,7 +1287,7 @@ test('T2 never overlaps an unresolved T1 and a late T1 rejection cannot affect t
     loopOpts: { watchdog: { t1Ms: 10, t2Ms: 20 } },
   });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
   await new Promise((resolve) => setTimeout(resolve, 70));
 
   assert.equal(maxActive, 1);
@@ -1000,7 +1311,7 @@ test('engine first ILLEGAL_ACTION retries the same AI summary once and applies t
   const setup = await setupAiFirst(t, { adapter });
   gameDir = setup.gameDir;
 
-  await runUntilUserStub(setup.loop);
+  await runUntilUserBoundary(setup.loop, gameDir);
 
   assert.equal(adapter.decideCalls.length, 2);
   assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
@@ -1021,7 +1332,7 @@ test('two engine ILLEGAL_ACTION rejections force-default without a third model r
   const setup = await setupAiFirst(t, { adapter });
   gameDir = setup.gameDir;
 
-  await runUntilUserStub(setup.loop);
+  await runUntilUserBoundary(setup.loop, gameDir);
 
   assert.equal(adapter.decideCalls.length, 2);
   const engine = readJson(path.join(gameDir, 'state.json'));
@@ -1046,7 +1357,7 @@ test('malformed, mismatched, and illegal AI decisions each get one retry before 
         onDecide: async (input) => ({ raw: response(input) }),
       });
       const { gameDir, loop } = await setupAiFirst(st, { adapter });
-      await runUntilUserStub(loop);
+      await runUntilUserBoundary(loop, gameDir);
       assert.equal(adapter.decideCalls.length, 2);
       assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
       assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'forced_default');
@@ -1064,7 +1375,7 @@ test('a valid second response after parse failure is recorded as retried_accepte
   });
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   assert.equal(adapter.decideCalls.length, 2);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'retried_accepted');
@@ -1076,9 +1387,9 @@ test('adapter runtime watchdog is used when opts.watchdog is absent', { timeout:
     watchdog: null,
     onDecide: async () => ({ raw: 'invalid' }),
   });
-  const { loop } = await setupAiFirst(t, { adapter });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   assert.deepEqual(
     adapter.decideCalls.map((call) => call.timeoutMs),
@@ -1090,7 +1401,7 @@ test('zero-delay AI metrics include every timing field and keep non-model overhe
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   const [metric] = readJson(path.join(gameDir, 'loop-state.json')).metrics;
   assert.deepEqual(Object.keys(metric).sort(), [
@@ -1135,7 +1446,7 @@ test('VERSION_MISMATCH discards the stale model decision, resynchronizes with an
   const setup = await setupAiFirst(t, { adapter });
   gameDir = setup.gameDir;
 
-  await runUntilUserStub(setup.loop);
+  await runUntilUserBoundary(setup.loop, gameDir);
 
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics.length, 0);
   assert.equal(
@@ -1154,7 +1465,7 @@ test('ATTEMPT_PENDING is retried before the current AI transition publish', { ti
     expectedGameEpoch: gameEpochOf(engine.sessionToken),
   }));
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).lastPublishId >= 4, true);
@@ -1167,11 +1478,451 @@ test('PUBLISH_FAILED after the owned server dies restarts it and retries the rec
   process.kill(oldPid, 'SIGKILL');
   await waitUntilDead(oldPid);
 
-  await runUntilUserStub(loop);
+  await runUntilUserBoundary(loop, gameDir);
 
   assert.notEqual(loop.serverPid, oldPid);
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), true);
+});
+
+test('user timeouts repeat wait-only indefinitely and never force-default before the submitted raise', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 30 } });
+  const running = startRun(loop);
+
+  await waitWhileRunning(running, () => (
+    readLoopLog(gameDir).filter((entry) => entry.event === 'user-wait-timeout').length >= 3
+  ), 'three user wait-only timeouts were not observed');
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const action = preferredUserAction(snapshot.view.legal);
+  assert.equal(action.action, 'raise', 'fixture must distinguish a real user action from force-default');
+  assert.deepEqual(await postUserAction(lock, action), { status: 200, body: { ok: true } });
+  const applied = await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir, (entry) => entry.action === 'raise'),
+    'submitted user raise was not applied',
+  );
+  assert.equal(applied.decisionId, action.decisionId);
+
+  await stopRun(loop, running);
+  const userActions = [
+    ...(readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []),
+    ...(readJson(path.join(gameDir, 'state.json')).lastHand?.actions ?? []),
+  ].filter((entry) => entry.playerId === 'user');
+  assert.equal(userActions[0].action, 'raise');
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'user-force-default'), false);
+});
+
+test('stale user decision is discarded and the same current decision is re-waited', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const current = snapshot.view.legal.decisionId;
+
+  assert.deepEqual(await postUserAction(lock, {
+    decisionId: `${current}-stale`, action: 'fold',
+  }), { status: 409, body: { ok: false, code: 'STALE_DECISION' } });
+  await waitWhileRunning(running, () => (
+    readLoopLog(gameDir).filter((entry) => entry.event === 'user-wait-timeout').length >= 2
+  ), 'sidecar did not continue waiting after a stale action');
+  assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
+
+  const refreshed = await waitForUserSnapshot(gameDir);
+  assert.equal(refreshed.snapshot.view.legal.decisionId, current);
+  const action = preferredUserAction(refreshed.snapshot.view.legal);
+  await postUserAction(refreshed.lock, action);
+  await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir, (entry) => entry.decisionId === current),
+    'current user action was not accepted after stale discard',
+  );
+  await stopRun(loop, running);
+});
+
+test('illegal user action resynchronizes, narrates, and waits again without folding the user', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 40 } });
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const legal = snapshot.view.legal;
+  const illegal = {
+    decisionId: legal.decisionId,
+    action: 'raise',
+    amount: legal.maxRaiseTo + 1,
+  };
+  assert.deepEqual(await postUserAction(lock, illegal), { status: 200, body: { ok: true } });
+
+  await waitWhileRunning(running, () => (
+    narrationTexts(gameDir).some((text) => text.includes('허용되지 않아'))
+  ), 'illegal-action narration was not published');
+  assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
+  const refreshed = await waitForUserSnapshot(gameDir);
+  assert.equal(refreshed.snapshot.view.legal.decisionId, legal.decisionId);
+  const action = preferredUserAction(refreshed.snapshot.view.legal);
+  await postUserAction(refreshed.lock, action);
+  await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir, (entry) => entry.decisionId === legal.decisionId),
+    'user action was not accepted after illegal-action resync',
+  );
+  await stopRun(loop, running);
+});
+
+test('user VERSION_MISMATCH republishes the authoritative decision with narration and re-waits', { timeout: 10_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 40 } });
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const staleVersion = readJson(path.join(gameDir, 'state.json')).stateVersion;
+  const externallyChanged = readJson(path.join(gameDir, 'state.json'));
+  externallyChanged.stateVersion += 1;
+  fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(externallyChanged));
+  await postUserAction(lock, preferredUserAction(snapshot.view.legal));
+
+  await waitWhileRunning(running, () => (
+    narrationTexts(gameDir).some((text) => text.includes('상태가 변경되어'))
+  ), 'VERSION_MISMATCH narration was not published');
+  assert.equal(readJson(path.join(gameDir, 'state.json')).stateVersion, staleVersion + 1);
+  assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
+  const refreshed = await waitForUserSnapshot(gameDir);
+  await postUserAction(refreshed.lock, preferredUserAction(refreshed.snapshot.view.legal));
+  await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir),
+    'user action was not accepted after VERSION_MISMATCH resync',
+  );
+  await stopRun(loop, running);
+});
+
+test('user waitError restarts a dead server, republishes view-only, and re-waits for the action', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 1_000 } });
+  const oldPid = loop.serverPid;
+  const running = startRun(loop);
+  await waitForUserSnapshot(gameDir);
+  process.kill(oldPid, 'SIGKILL');
+  await waitUntilDead(oldPid);
+
+  await waitWhileRunning(running, () => (
+    loop.serverPid !== null && loop.serverPid !== oldPid
+      && readLoopLog(gameDir).some((entry) => entry.event === 'user-view-republished')
+  ), 'waitError recovery did not restart and republish', 6_000);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir, 6_000);
+  await postUserAction(lock, preferredUserAction(snapshot.view.legal));
+  await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir),
+    'user action was not accepted after waitError recovery',
+    6_000,
+  );
+  await stopRun(loop, running);
+  const events = readLoopLog(gameDir).map((entry) => entry.event);
+  assert.equal(events.includes('user-wait-error'), true);
+  assert.equal(events.includes('server-recovered'), true);
+  assert.equal(events.includes('user-view-republished'), true);
+});
+
+test('AI 3 plus user reaches the Task 7 boundary through the real loop with chips preserved', { timeout: 25_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 40 },
+  });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai: 3, stack: 100, levelEvery: 1, blinds: '25/50' });
+  const running = startRun(loop);
+  let settled = false;
+  running.finally(() => { settled = true; }).catch(() => {});
+  const sent = new Set();
+  const driver = (async () => {
+    while (!settled) {
+      try {
+        const { lock, snapshot } = await waitForUserSnapshot(gameDir, 200);
+        const decisionId = snapshot.view.legal.decisionId;
+        if (!sent.has(decisionId)) {
+          sent.add(decisionId);
+          await postUserAction(lock, preferredUserAction(snapshot.view.legal));
+        }
+      } catch { /* AI turn, server transition, or terminal boundary */ }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  })();
+
+  await assert.rejects(running, (error) => error.code === 'FINALIZATION_TASK_7');
+  await driver;
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  assert.equal(chipTotal(engine), 400);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
+  assert.equal(adapter.decideCalls.length > 0, true);
+  assert.equal(sent.size > 0, true);
+});
+
+test('requestStop lets the in-flight step+publish unit commit before child and server cleanup', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 0 } });
+  const serverPid = loop.serverPid;
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const running = startRun(loop);
+  await waitFor(() => readJson(path.join(gameDir, 'state.json')).hand !== null, 'step did not start a hand');
+
+  const stopping = loop.requestStop();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true, 'lock released before atomic publish');
+  held.release();
+  await held.done;
+  await stopping;
+  await running;
+
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(snapshot.view.handNo, 1);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).stoppedAt != null, true);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  await waitUntilDead(serverPid);
+});
+
+test('D9 never restarts the server while stopping and preserves the failed publish attempt for resume', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 0 } });
+  const oldPid = loop.serverPid;
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const running = startRun(loop);
+  await waitFor(() => readJson(path.join(gameDir, 'state.json')).hand !== null, 'step did not start a hand');
+  process.kill(oldPid, 'SIGKILL');
+  await waitUntilDead(oldPid);
+
+  const stopping = loop.requestStop();
+  held.release();
+  await held.done;
+  await assert.rejects(running, (error) => error.code === 'STOPPING');
+  await stopping;
+
+  assert.equal(loop.serverPid, null);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), false);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).stopping, false);
+  const resumedRun = startRun(resumed);
+  await waitWhileRunning(
+    resumedRun,
+    () => waitForUserSnapshot(gameDir),
+    'resume did not recover the pending publish and user decision',
+  );
+  await stopRun(resumed, resumedRun);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+});
+
+test('SIGTERM waits for the real in-flight publish, records stop state, and removes its server child', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const loopUrl = pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href;
+  const script = `
+    import { createGameLoop } from ${JSON.stringify(loopUrl)};
+    const adapter = {
+      kind: 'fake', watchdog: {t1Ms: 10, t2Ms: 10},
+      async warmup({playerId}) { return {sessionId: 's-' + playerId, raw: 'ready'}; },
+      async decide() { return {raw: '{}'}; },
+      async dispose() {}
+    };
+    const loop = createGameLoop({
+      gameDir: ${JSON.stringify(gameDir)},
+      resolver: async () => ({player: adapter, upper: adapter, notices: []}),
+      opts: {port: 0, waitMs: 0}
+    });
+    let stopping = false;
+    process.once('SIGTERM', async () => {
+      if (stopping) return;
+      stopping = true;
+      try { await loop.requestStop(); process.exit(0); }
+      catch { process.exit(5); }
+    });
+    await loop.bootstrap({ai: 1, stack: 500});
+    process.stdout.write(JSON.stringify({ready: true, serverPid: loop.serverPid}) + '\\n');
+    await loop.run();
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  t.after(async () => {
+    held.release();
+    await held.done.catch(() => {});
+    await terminateIfAlive(child);
+  });
+  const ready = JSON.parse(await readLine(child, 10_000));
+  await waitFor(() => readJson(path.join(gameDir, 'state.json')).hand !== null, 'signal child step did not start');
+
+  child.kill('SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.doesNotThrow(() => process.kill(child.pid, 0), 'sidecar exited before publish lock released');
+  held.release();
+  await held.done;
+  const exit = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+
+  assert.deepEqual(exit, { code: 0, signal: null });
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).view.handNo, 1);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).stoppedAt != null, true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  await waitUntilDead(ready.serverPid);
+});
+
+test('--force stops loop, rereads replacement server identity, then stops that server before archive', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const signalLog = path.join(os.tmpdir(), `holdem-force-signals-${process.pid}-${Date.now()}.log`);
+  const initialized = await initGame(gameDir);
+  await execFileAsync(process.execPath, [CLI, 'step', '--new-hand', '--game-dir', gameDir], {
+    encoding: 'utf8', timeout: 5_000,
+  });
+  fs.writeFileSync(path.join(gameDir, 'must-archive.txt'), 'old-game');
+  const original = await startLoggedServer(gameDir, initialized.sessionToken, signalLog, 'original');
+  const holder = await startReplacingLoopHolder(gameDir, initialized.sessionToken, signalLog);
+  let replacementPid = null;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, forceStopMs: 4_000 },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+    await terminateIfAlive(original.child);
+    if (replacementPid) {
+      try { process.kill(replacementPid, 'SIGKILL'); } catch { /* already dead */ }
+    }
+    try { fs.unlinkSync(signalLog); } catch { /* already gone */ }
+  });
+
+  const bootstrapped = await loop.bootstrap({ ai: 1, force: true });
+  const lines = fs.readFileSync(signalLog, 'utf8').trim().split('\n');
+  const readyLine = lines.find((line) => line.startsWith('replacement:ready:'));
+  replacementPid = Number(readyLine?.split(':').at(-1));
+  assert.deepEqual(lines.slice(0, 3).map((line) => line.replace(/:\d+$/, ':PID')), [
+    'loop:SIGTERM',
+    'replacement:ready:PID',
+    'replacement:SIGTERM',
+  ]);
+  assert.equal(lines.includes('original:SIGTERM'), false, 'pre-loop server lock was not reread');
+  assert.doesNotThrow(() => process.kill(original.child.pid, 0), 'stale pre-loop server was signalled');
+  await waitUntilDead(replacementPid);
+  assert.equal(bootstrapped.phase, 'playing');
+  assert.equal(typeof bootstrapped.archivedTo, 'string');
+  assert.equal(fs.existsSync(path.join(gameDir, bootstrapped.archivedTo, 'must-archive.txt')), true);
+});
+
+test('--force leaves the game byte-for-byte unchanged when loop termination is unconfirmed', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'must-survive-force.txt'), 'old-game');
+  const holder = await startOwnedLoopHolder(gameDir, { ignoreTerm: true });
+  const before = snapshotTree(gameDir);
+  const signals = [];
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => { resolverCalls += 1; return resolverFor(makeAdapter())(); },
+    opts: {
+      port: 0,
+      forceStopMs: 60,
+      signalProcess: (pid, signal) => { signals.push([pid, signal]); },
+    },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+  });
+
+  await assert.rejects(loop.bootstrap({ ai: 1, force: true }), (error) => error.code === 'LOOP_ALIVE');
+  assert.deepEqual(signals, [[holder.pid, 'SIGTERM'], [holder.pid, 'SIGKILL']]);
+  assert.equal(resolverCalls, 0);
+  assert.deepEqual(snapshotTree(gameDir), before);
+  assert.doesNotThrow(() => process.kill(holder.pid, 0));
+});
+
+test('--force treats a reused-pid startTime mismatch as dead and never signals that process', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const signalLog = path.join(gameDir, 'pid-reuse-signals.log');
+  const holder = await startOwnedLoopHolder(gameDir, { signalLog });
+  fs.writeFileSync(
+    path.join(gameDir, 'loop.lock.d', 'pid'),
+    `${holder.pid}\nMon Jan  1 00:00:00 2001`,
+  );
+  const signals = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: {
+      port: 0,
+      signalProcess: (pid, signal) => {
+        signals.push([pid, signal]);
+        process.kill(pid, signal);
+      },
+    },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+  });
+
+  await loop.bootstrap({ ai: 1, force: true });
+  assert.deepEqual(signals, []);
+  assert.equal(fs.existsSync(signalLog), false);
+  assert.doesNotThrow(() => process.kill(holder.pid, 0));
+  assert.notEqual(processStartTime(holder.pid), 'Mon Jan  1 00:00:00 2001');
+});
+
+test('--force aborts before archive when the stopped server pid is observed as reused', { timeout: 10_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const marker = path.join(os.tmpdir(), `holdem-server-reused-${process.pid}-${Date.now()}`);
+  const initialized = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'must-survive-server-reuse.txt'), 'old-game');
+  const server = await startExternalServer(gameDir, initialized.sessionToken);
+  const holder = await startOwnedLoopHolder(gameDir);
+  const beforeState = fs.readFileSync(path.join(gameDir, 'state.json'));
+  const beforeArchives = fs.existsSync(path.join(gameDir, 'archive'))
+    ? fs.readdirSync(path.join(gameDir, 'archive')).sort()
+    : [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: {
+      port: 0,
+      forceStopMs: 100,
+      signalProcess: (pid, signal) => {
+        if (pid === server.child.pid) {
+          fs.writeFileSync(marker, signal);
+          return;
+        }
+        process.kill(pid, signal);
+      },
+    },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(holder);
+    await terminateIfAlive(server.child);
+    try { fs.unlinkSync(marker); } catch { /* already gone */ }
+  });
+
+  await withFakePs(
+    `if [ "$2" = "${server.child.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(
+      loop.bootstrap({ ai: 1, force: true }),
+      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
+    ),
+  );
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'SIGTERM');
+  assert.doesNotThrow(() => process.kill(server.child.pid, 0));
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), beforeState);
+  assert.equal(fs.readFileSync(path.join(gameDir, 'must-survive-server-reuse.txt'), 'utf8'), 'old-game');
+  assert.deepEqual(
+    fs.existsSync(path.join(gameDir, 'archive'))
+      ? fs.readdirSync(path.join(gameDir, 'archive')).sort()
+      : [],
+    beforeArchives,
+  );
 });
 
 test('finalizing resume resolves upper-only with a live canary and exposes an explicit Task 7 stub', async (t) => {
@@ -1231,5 +1982,5 @@ test('CLI parser covers the full surface and halt errors map to stable process e
   assert.equal(exitCodeFor({ code: 'repair_failed' }), 2);
   assert.equal(exitCodeFor({ code: 'REVIEW_FAILED' }), 3);
   assert.equal(exitCodeFor({ code: 'NO_PLAYER_RUNTIME' }), 4);
-  assert.equal(exitCodeFor({ code: 'USER_HAND_LOOP_TASK_5C' }), 5);
+  assert.equal(exitCodeFor({ code: 'STOPPING' }), 5);
 });

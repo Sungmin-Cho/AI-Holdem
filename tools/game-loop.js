@@ -171,9 +171,12 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const serverStartMs = opts.serverStartMs ?? 5_000;
   const childTimeoutMs = opts.childTimeoutMs ?? 30_000;
   const osVerifyMs = opts.osVerifyMs ?? 1_000;
-  const waitMs = opts.waitMs ?? 0;
+  const waitMs = opts.waitMs ?? 60_000;
   const monotonicNow = opts.monotonicNow ?? (() => performance.now());
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
+  const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
+  const forceStopMs = opts.forceStopMs ?? 5_000;
+  const forceKillMs = opts.forceKillMs ?? 200;
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
@@ -196,6 +199,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let resumeEntryPending = false;
   let stopRequested = false;
   let stopPromise = null;
+  let atomicTransition = null;
 
   const log = (event, fields = {}) => {
     const record = { at: isoNow(now), event, ...fields };
@@ -253,7 +257,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     lockHandle = null;
   };
 
-  const acquireLoopLock = ({ mode, force = false }) => {
+  const acquireLoopLock = async ({ mode, force = false }) => {
     if (lockHandle) throw codedError('LOCKED', '이 loop 인스턴스가 이미 락을 보유하고 있습니다.');
     // acquireOwnedLock은 일반 pid-less mutex와의 호환 때문에 오래된 unknown 기록을
     // mtime으로 회수할 수 있다. loop 락은 init의 파괴 경계를 보호하므로 더 엄격하다:
@@ -277,7 +281,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       if (mode === 'bootstrap') {
         if (force) {
-          throw codedError('FORCE_STOP_TASK_5C', '--force 소유자 정지는 Task 5C에서 구현됩니다.');
+          await stopExistingLoopForForce(owner);
+          await stopRereadServerForForce();
+          lockHandle = acquireOwnedLock(root, LOOP_LOCK);
+          return;
         }
         throw codedError('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
       }
@@ -414,12 +421,134 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     await assertAuthenticatedServer(port, sessionToken);
   };
 
+  const identityStillAlive = (pid, startTime) => {
+    if (!processAlive(pid)) return false;
+    const current = processStartTime(pid);
+    if (current === null) {
+      throw codedError('IDENTITY_UNAVAILABLE', `pid ${pid} startTime을 재검증할 수 없습니다.`);
+    }
+    return current === startTime;
+  };
+
+  const sendSignal = (pid, signal, code) => {
+    try {
+      signalProcess(pid, signal);
+      return true;
+    } catch (error) {
+      if (error.code === 'ESRCH') return false;
+      throw codedError(code, `pid ${pid}에 ${signal} 전송을 완료하지 못했습니다.`, { cause: error });
+    }
+  };
+
+  const waitForIdentityDeath = async (pid, startTime, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!processAlive(pid)) return true;
+      const current = processStartTime(pid);
+      if (current !== null && current !== startTime) return true;
+      await sleep(pollMs);
+    }
+    return !identityStillAlive(pid, startTime);
+  };
+
+  const assertSameLoopOwner = (expected) => {
+    const current = readOwnedLock(root, LOOP_LOCK);
+    if (
+      current?.status !== 'alive'
+      || current.pid !== expected.pid
+      || current.startTime !== expected.startTime
+    ) {
+      throw codedError('LOOP_IDENTITY_CHANGED', '정지 대상 loop identity가 바뀌어 시그널을 보내지 않습니다.');
+    }
+    return current;
+  };
+
+  const stopExistingLoopForForce = async (owner) => {
+    const expected = { pid: owner.pid, startTime: owner.startTime };
+    assertSameLoopOwner(expected);
+    sendSignal(expected.pid, 'SIGTERM', 'LOOP_SIGNAL_FAILED');
+    if (await waitForIdentityDeath(expected.pid, expected.startTime, forceStopMs)) return;
+    // KILL 직전에도 lock pid+startTime이 같은 소유자를 가리킬 때만 신호한다.
+    assertSameLoopOwner(expected);
+    sendSignal(expected.pid, 'SIGKILL', 'LOOP_SIGNAL_FAILED');
+    if (!await waitForIdentityDeath(expected.pid, expected.startTime, forceKillMs)) {
+      throw codedError('LOOP_ALIVE', '기존 게임 루프 종료를 확인하지 못해 아카이브하지 않습니다.');
+    }
+  };
+
+  const assertSameForceServer = async (expected) => {
+    const current = readServerLock();
+    if (
+      current?.serverPid !== expected.serverPid
+      || current.port !== expected.port
+      || current.sessionToken !== expected.sessionToken
+    ) {
+      throw codedError('SERVER_IDENTITY_CHANGED', '정지 대상 server lock이 바뀌어 시그널을 보내지 않습니다.');
+    }
+    if (!identityStillAlive(expected.serverPid, expected.startTime)) {
+      throw codedError('SERVER_IDENTITY_MISMATCH', '정지 대상 server pid가 재사용되어 시그널을 보내지 않습니다.');
+    }
+    await assertServerBinding(current);
+  };
+
+  const stopRereadServerForForce = async () => {
+    // Loop 사망 확인 뒤 lock.json을 새로 읽는다. loop가 종료 직전 교체한 서버가
+    // 있더라도, force 시작 전에 보았던 낡은 pid가 아니라 이 identity만 대상이다.
+    const lock = readServerLock();
+    if (!lock || !processAlive(lock.serverPid)) return;
+    const startTime = processStartTime(lock.serverPid);
+    if (startTime === null) {
+      throw codedError('SERVER_IDENTITY_UNAVAILABLE', 'force server startTime을 확인할 수 없습니다.');
+    }
+    const expected = { ...lock, startTime };
+    const confirmGoneWithoutReuse = () => {
+      if (!processAlive(expected.serverPid)) return;
+      const current = processStartTime(expected.serverPid);
+      if (current === null) {
+        throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 뒤 server pid identity를 확인할 수 없습니다.');
+      }
+      if (current !== expected.startTime) {
+        throw codedError('SERVER_IDENTITY_MISMATCH', '종료 뒤 server pid가 재사용되어 아카이브하지 않습니다.');
+      }
+      throw codedError('SERVER_ALIVE', '기존 게임 서버 종료를 확인하지 못해 아카이브하지 않습니다.');
+    };
+    await assertSameForceServer(expected);
+    sendSignal(expected.serverPid, 'SIGTERM', 'SERVER_SIGNAL_FAILED');
+    if (await waitForIdentityDeath(expected.serverPid, expected.startTime, forceStopMs)) {
+      confirmGoneWithoutReuse();
+      return;
+    }
+    await assertSameForceServer(expected);
+    sendSignal(expected.serverPid, 'SIGKILL', 'SERVER_SIGNAL_FAILED');
+    if (!await waitForIdentityDeath(expected.serverPid, expected.startTime, forceKillMs)) {
+      throw codedError('SERVER_ALIVE', '기존 게임 서버 종료를 확인하지 못해 아카이브하지 않습니다.');
+    }
+    confirmGoneWithoutReuse();
+  };
+
   const ensureServer = async (sessionToken) => {
-    const existing = readServerLock();
+    let existing = readServerLock();
     if (existing) {
       if (existing.sessionToken !== sessionToken) {
         throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
       }
+      if (!processAlive(existing.serverPid)) {
+        const confirmed = readServerLock();
+        if (
+          confirmed?.serverPid !== existing.serverPid
+          || confirmed.port !== existing.port
+          || confirmed.sessionToken !== existing.sessionToken
+        ) {
+          throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server lock 확인 중 identity가 바뀌었습니다.');
+        }
+        if (processAlive(confirmed.serverPid)) {
+          throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server pid가 확인 중 다시 살아났습니다.');
+        }
+        fs.unlinkSync(lockPath);
+        existing = null;
+      }
+    }
+    if (existing) {
       await assertServerBinding(existing);
       if (!Number.isInteger(existing.serverPid) || !processAlive(existing.serverPid)) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 pid를 확인할 수 없습니다.');
@@ -639,6 +768,22 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return profile;
   };
 
+  const beginAtomicTransition = () => {
+    if (stopRequested) throw codedError('STOPPING', '정지 요청 뒤에는 새 step을 시작하지 않습니다.');
+    if (atomicTransition) throw codedError('TRANSITION_OVERLAP', 'step+publish 원자 단위가 중첩됐습니다.');
+    let settle;
+    const promise = new Promise((resolve) => { settle = resolve; });
+    const unit = {
+      promise,
+      finish() {
+        if (atomicTransition === unit) atomicTransition = null;
+        settle();
+      },
+    };
+    atomicTransition = unit;
+    return unit;
+  };
+
   const decideOnce = async (input, timeoutMs) => {
     const started = monotonicNow();
     try {
@@ -677,8 +822,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       stepArgs.push('--expect-version', String(stateVersion));
       const stepStarted = monotonicNow();
+      const atomicUnit = beginAtomicTransition();
       try {
-        return await runCli(stepArgs);
+        const envelope = await runCli(stepArgs);
+        return { envelope, atomicUnit };
+      } catch (error) {
+        atomicUnit.finish();
+        throw error;
       } finally {
         stepMs += Math.max(0, monotonicNow() - stepStarted);
       }
@@ -695,15 +845,16 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       const action = validatedDecision(round.raw, next);
       parseMs += Math.max(0, monotonicNow() - parseStarted);
       if (action) {
-        let envelope;
+        let applied;
         try {
-          envelope = await applyDecision(action);
+          applied = await applyDecision(action);
         } catch (error) {
           if (error.code === 'ILLEGAL_ACTION') continue;
           throw error;
         }
         return {
-          envelope,
+          envelope: applied.envelope,
+          atomicUnit: applied.atomicUnit,
           outcome: attempt === 0 ? 'accepted' : 'retried_accepted',
           startedAt,
           modelMs,
@@ -712,9 +863,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         };
       }
     }
-    const envelope = await applyDecision(null);
+    const applied = await applyDecision(null);
     return {
-      envelope,
+      envelope: applied.envelope,
+      atomicUnit: applied.atomicUnit,
       outcome: 'forced_default',
       startedAt,
       modelMs,
@@ -794,6 +946,17 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return out;
   };
 
+  const runAtomicStepPublish = async (stepArgs, publishFlags = []) => {
+    const atomicUnit = beginAtomicTransition();
+    try {
+      const envelope = await runCli(stepArgs);
+      const flags = typeof publishFlags === 'function' ? publishFlags(envelope) : publishFlags;
+      return await publishEnvelope(envelope, flags);
+    } finally {
+      atomicUnit.finish();
+    }
+  };
+
   const waitFlags = () => ['--wait', '--wait-ms', String(waitMs)];
 
   const checkArchivePending = async (out) => {
@@ -818,21 +981,121 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     writeLoopState({ metrics });
   };
 
+  const waitOnlyForUser = () => executePublish([
+    '--from', turnPath,
+    '--wait-only', '--wait-ms', String(waitMs),
+  ]);
+
+  const republishAfterRejectedUserAction = async (code) => {
+    const synchronized = await runCli(['step']);
+    const narration = code === 'VERSION_MISMATCH'
+      ? '게임 상태가 변경되어 최신 결정으로 다시 기다립니다.'
+      : '입력한 액션이 허용되지 않아 같은 결정을 다시 기다립니다.';
+    // First emit the contract's view-only+narration republish. The relay retains a
+    // possibly response-lost action for view-only publishes, so an authoritative
+    // empty-event publish follows to acknowledge this positively rejected action
+    // before entering the next wait; otherwise the rejected action is replayed forever.
+    await publishEnvelope(synchronized, ['--view-only', '--narration', narration]);
+    log('user-action-rejected', { code, decisionId: synchronized.next?.decisionId ?? null });
+    return publishEnvelope(synchronized, waitFlags());
+  };
+
+  const handleUserTurn = async (out) => {
+    const next = out.next;
+    if (out.waitError) {
+      log('user-wait-error', { decisionId: next.decisionId, message: out.waitError });
+      if (stopRequested) return null;
+      const lock = readServerLock();
+      if (!lock || !await serverHealthy(lock.port)) await recoverServerForPublish();
+      const synchronized = await runCli(['step']);
+      await publishEnvelope(synchronized, ['--view-only']);
+      log('user-view-republished', { decisionId: synchronized.next?.decisionId ?? null });
+      return waitOnlyForUser();
+    }
+
+    const action = out.userAction;
+    if (!action || action.timeout) {
+      log('user-wait-timeout', { decisionId: next.decisionId });
+      return waitOnlyForUser();
+    }
+    if (action.decisionId !== next.decisionId) {
+      log('user-stale-decision', {
+        expectedDecisionId: next.decisionId,
+        receivedDecisionId: action.decisionId ?? null,
+      });
+      return waitOnlyForUser();
+    }
+
+    const stepArgs = ['step', 'user', action.action];
+    if (action.amount !== undefined) stepArgs.push(String(action.amount));
+    stepArgs.push('--expect-version', String(out.stateVersion));
+    try {
+      return await runAtomicStepPublish(stepArgs, waitFlags());
+    } catch (error) {
+      if (error.code !== 'ILLEGAL_ACTION' && error.code !== 'VERSION_MISMATCH') throw error;
+      if (stopRequested) return null;
+      return republishAfterRejectedUserAction(error.code);
+    }
+  };
+
+  const waitForChildExit = async (child, timeoutMs) => {
+    if (child.exitCode !== null || child.signalCode !== null) return true;
+    let exited = false;
+    const exit = new Promise((resolve) => child.once('exit', () => {
+      exited = true;
+      resolve();
+    }));
+    await Promise.race([exit, sleep(timeoutMs)]);
+    return exited || child.exitCode !== null || child.signalCode !== null;
+  };
+
+  const terminateActiveChildren = async () => {
+    const children = [...activeChildren];
+    await Promise.all(children.map(async (child) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill('SIGTERM');
+      if (await waitForChildExit(child, 500)) return;
+      child.kill('SIGKILL');
+      if (!await waitForChildExit(child, 500)) {
+        throw codedError('CHILD_STOP_UNCONFIRMED', `자식 pid ${child.pid} 종료를 확인하지 못했습니다.`);
+      }
+    }));
+  };
+
   const requestStop = () => {
     if (stopPromise) return stopPromise;
     stopRequested = true;
     stopPromise = (async () => {
       let stopError = null;
-      for (const child of activeChildren) {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      try {
+        if (fs.existsSync(loopStatePath)) {
+          writeLoopState({ stopping: true, stopRequestedAt: isoNow(now) });
+        }
+      } catch (error) {
+        stopError = error;
+      }
+      const inFlight = atomicTransition;
+      if (inFlight) {
+        // The mutation and its matching publish are one recoverable unit. Its own
+        // error is observed by run(); shutdown still proceeds after it settles.
+        await inFlight.promise;
+      }
+      try {
+        await terminateActiveChildren();
+      } catch (error) {
+        stopError ??= error;
       }
       try {
         await stopServer();
       } catch (error) {
-        stopError = error;
+        stopError ??= error;
       }
       for (const adapter of adapters) {
-        if (typeof adapter.dispose === 'function') await adapter.dispose();
+        try {
+          if (typeof adapter.dispose === 'function') await adapter.dispose();
+        } catch (error) {
+          stopError ??= error;
+        }
       }
       adapters.clear();
       for (const canary of canaries) {
@@ -841,6 +1104,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         }
       }
       canaries.clear();
+      try {
+        if (fs.existsSync(loopStatePath)) {
+          writeLoopState({ stopping: true, stoppedAt: isoNow(now) });
+        }
+      } catch (error) {
+        stopError ??= error;
+      }
       releaseLock();
       if (logFd !== null) {
         fs.closeSync(logFd);
@@ -859,7 +1129,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     force = false,
     practiceFocusFile,
   } = {}) => {
-    acquireLoopLock({ mode: 'bootstrap', force });
+    await acquireLoopLock({ mode: 'bootstrap', force });
     try {
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
@@ -952,7 +1222,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const resume = async () => {
-    acquireLoopLock({ mode: 'resume' });
+    await acquireLoopLock({ mode: 'resume' });
     try {
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
@@ -969,6 +1239,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           sessionToken: engineState.sessionToken,
           gameEpoch: engineState.sessionToken,
           ownerSessionId,
+          stopping: false,
           lastPublishId: null,
           playerRuntime: null,
           upperRuntime: null,
@@ -977,7 +1248,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           metrics: [],
         });
       } else {
-        state = writeLoopState({ ownerSessionId });
+        state = writeLoopState({ ownerSessionId, stopping: false });
       }
 
       let phase = state.phase;
@@ -1038,8 +1309,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       const synchronized = await runCli(['step']);
       out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
     } else {
-      const started = await runCli(['step', '--new-hand']);
-      out = await publishEnvelope(started, waitFlags());
+      out = await runAtomicStepPublish(['step', '--new-hand'], waitFlags());
     }
 
     while (!stopRequested) {
@@ -1051,17 +1321,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           state = writeLoopState({ phase: 'finalizing', handNo: out.handNo });
           throw codedError('FINALIZATION_TASK_7', 'finalization은 Task 7에서 구현됩니다.');
         }
-        const started = await runCli(['step', '--new-hand']);
-        const narration = started.events?.find((event) => event.type === 'level_up');
-        const flags = narration
-          ? ['--narration', `블라인드 ${narration.sb}/${narration.bb}`, ...waitFlags()]
-          : waitFlags();
-        out = await publishEnvelope(started, flags);
+        if (stopRequested) break;
+        out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
+          const narration = started.events?.find((event) => event.type === 'level_up');
+          return narration
+            ? ['--narration', `블라인드 ${narration.sb}/${narration.bb}`, ...waitFlags()]
+            : waitFlags();
+        });
         continue;
       }
 
       if (out.next?.kind === 'user') {
-        throw codedError('USER_HAND_LOOP_TASK_5C', 'user wait/action 경로는 Task 5C에서 구현됩니다.');
+        try {
+          out = await handleUserTurn(out);
+        } catch (error) {
+          if (stopRequested && error.code !== 'STOPPING') break;
+          throw error;
+        }
+        if (out === null) break;
+        continue;
       }
       if (out.next?.kind !== 'ai') {
         throw codedError('BAD_NEXT', '다음 행동자 계약이 ai/user가 아닙니다.');
@@ -1072,6 +1350,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       try {
         decision = await decideWithWatchdog(next, out.stateVersion);
       } catch (error) {
+        if (stopRequested && error.code !== 'STOPPING') break;
         if (error.code !== 'VERSION_MISMATCH') throw error;
         const synchronized = await runCli(['step']);
         log('version-resync', {
@@ -1083,19 +1362,23 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       const elapsedMs = Math.max(0, monotonicNow() - decision.startedAt);
       const publishStarted = monotonicNow();
-      out = await publishEnvelope(decision.envelope, waitFlags());
-      const publishMs = Math.max(0, monotonicNow() - publishStarted);
-      appendMetric({
-        playerId: next.toAct,
-        decisionId: next.decisionId,
-        runtime: playerAdapter.kind,
-        outcome: decision.outcome,
-        elapsedMs,
-        modelMs: decision.modelMs,
-        parseMs: decision.parseMs,
-        stepMs: decision.stepMs,
-        publishMs,
-      });
+      try {
+        out = await publishEnvelope(decision.envelope, waitFlags());
+        const publishMs = Math.max(0, monotonicNow() - publishStarted);
+        appendMetric({
+          playerId: next.toAct,
+          decisionId: next.decisionId,
+          runtime: playerAdapter.kind,
+          outcome: decision.outcome,
+          elapsedMs,
+          modelMs: decision.modelMs,
+          parseMs: decision.parseMs,
+          stepMs: decision.stepMs,
+          publishMs,
+        });
+      } finally {
+        decision.atomicUnit.finish();
+      }
     }
     return readLoopState();
   };
