@@ -22,6 +22,7 @@ import { gameEpochOf } from '../publish-contract.js';
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
+const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER = path.join(ROOT, 'server/server.js');
 const GAME_LOOP = path.join(ROOT, 'tools/game-loop.js');
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
@@ -58,6 +59,37 @@ async function initGame(gameDir, extra = []) {
     CLI, 'init', '--ai', '2', ...extra, '--game-dir', gameDir,
   ], { encoding: 'utf8', timeout: 20_000 });
   return JSON.parse(stdout.trim());
+}
+
+async function runCoachCli(gameDir, args) {
+  const { stdout } = await execFileAsync(process.execPath, [
+    COACH_CLI, ...args, '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 20_000 });
+  return JSON.parse(stdout.trim());
+}
+
+async function seedQueuedCoach(gameDir, owner, handNo = 1) {
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, `.seed-coach-stats-${handNo}.json`);
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  const reserved = await runCoachCli(gameDir, [
+    'reserve', '--owner', owner, '--hand', String(handNo), '--attempt', '1',
+    '--consider-overfold', '--stats-file', statsPath,
+    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+  ]);
+  fs.writeFileSync(reserved.exactResultPath, JSON.stringify({
+    handNo,
+    text: `resume queued coach ${handNo}`,
+  }));
+  const denyPath = path.join(gameDir, `.seed-coach-deny-${handNo}.json`);
+  fs.writeFileSync(denyPath, JSON.stringify(['SEED_FORBIDDEN_SENTINEL']));
+  await runCoachCli(gameDir, [
+    'accept', '--owner', owner, '--hand', String(handNo),
+    '--generation', String(reserved.generation), '--forbidden-file', denyPath,
+  ]);
+  return reserved;
 }
 
 function makeAdapter({
@@ -143,7 +175,9 @@ function makeCoachAdapter({ rounds = [] } = {}) {
         startTime: `coach-start-${index}`,
         done,
         async terminate() {
-          const result = round.terminate ?? { confirmed: true };
+          const result = typeof round.terminate === 'function'
+            ? await round.terminate()
+            : await (round.terminate ?? { confirmed: true });
           terminations.push({ index, result });
           round.onTerminate?.(result, index);
           return result;
@@ -3087,6 +3121,162 @@ test('upperAdapter가 null이면 oneshot·reserve 없이 snapshot을 전달한 c
   assert.equal(unavailable[unavailable.indexOf('--game-dir') + 1], gameDir);
   const notices = readJson(path.join(gameDir, 'loop-state.json')).notices;
   assert.equal(notices.some((notice) => notice.includes('핸드 1') && notice.includes('고정 코치 문구')), true);
+});
+
+test('playing resume은 기존 coach Q를 descriptor·turn 전에 exact path로 먼저 게시하고 sealedSkipped를 respawn하지 않는다', { timeout: 30_000 }, async (t) => {
+  for (const pendingAttempt of [false, true]) {
+    await t.test(pendingAttempt ? 'recorded attempt first' : 'no recorded attempt', async (st) => {
+      const gameDir = tmpGame();
+      const first = createGameLoop({
+        gameDir,
+        resolver: resolverFor(makeAdapter()),
+        opts: { port: 0, waitMs: 0 },
+      });
+      await first.bootstrap({ ai: 1, stack: 100 });
+      putAiFirst(gameDir);
+      const started = JSON.parse((await execFileAsync(process.execPath, [
+        CLI, 'step', '--new-hand', '--game-dir', gameDir,
+      ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+      assert.equal(started.next.toAct, 'p1');
+      await execFileAsync(process.execPath, [
+        CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+        '--game-dir', gameDir,
+      ], { encoding: 'utf8', timeout: 5_000 });
+      const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+      const queued = await seedQueuedCoach(gameDir, owner, 1);
+      await first.requestStop();
+
+      if (pendingAttempt) {
+        const engine = readJson(path.join(gameDir, 'state.json'));
+        fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify({
+          body: {
+            publishId: 1,
+            messages: [{ type: 'narration', text: 'recorded-before-coach-Q' }],
+          },
+          expectedGameEpoch: gameEpochOf(engine.sessionToken),
+        }));
+      }
+
+      const publishes = [];
+      const upper = makeCoachAdapter();
+      const resumed = createGameLoop({
+        gameDir,
+        resolver: resolverForCoach(makeAdapter(), upper),
+        opts: {
+          port: 0,
+          waitMs: 0,
+          onPublishInvoke: (args) => publishes.push(args),
+        },
+      });
+      st.after(() => resumed.requestStop().catch(() => {}));
+
+      await resumed.resume();
+
+      const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+      assert.equal(snapshot.coach.some((note) => note.handNo === 1), true, 'resume returned before queued Q publication');
+      assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).publishQueue['1'], undefined);
+      assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+      assert.equal(upper.starts.length, 0, 'sealedSkipped queue was respawned');
+      assert.equal(publishes.length >= 1, true);
+      assert.equal(publishes[0][publishes[0].indexOf('--from') + 1], queued.exactEnvelopePath);
+      assert.equal(publishes[0].includes('--retry'), pendingAttempt);
+      if (pendingAttempt) {
+        assert.equal(publishes.some((args) => !args.includes('--retry')), true, 'queued envelope was not published after recorded body');
+      }
+    });
+  }
+});
+
+test('heartbeat가 generation을 먼저 retire해도 unconfirmed 종료는 STALE_GENERATION을 fenced로 보고 adapter-disable·current/future unavailable을 완수한다', { timeout: 20_000 }, async (t) => {
+  let enteredTerminate;
+  const terminateEntered = new Promise((resolve) => { enteredTerminate = resolve; });
+  let releaseTerminate;
+  const terminateGate = new Promise((resolve) => { releaseTerminate = resolve; });
+  t.after(() => releaseTerminate());
+  const upper = makeCoachAdapter({
+    rounds: [{
+      raw: JSON.stringify({ handNo: 1, text: '' }),
+      terminate: async () => {
+        enteredTerminate();
+        await terminateGate;
+        return { confirmed: false, reason: 'still-alive-after-heartbeat' };
+      },
+    }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const running = startRun(loop);
+  await terminateEntered;
+
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].deadlineMono = '0';
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const heartbeat = await runCoachCli(gameDir, ['heartbeat', '--owner', owner]);
+  assert.deepEqual(heartbeat.actions.map((action) => action.action), ['timeout-fence']);
+
+  releaseTerminate();
+  const first = await waitForCoachNote(gameDir, 1);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  await postUserAction(lock, {
+    decisionId: snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+  const second = await waitForCoachNote(gameDir, 2);
+  await stopRun(loop, running);
+
+  assert.equal(first.unavailable, true);
+  assert.equal(second.unavailable, true);
+  assert.equal(upper.starts.length, 1);
+  assert.equal(readJson(authorityPath).adapterState, 'disabled');
+});
+
+test('capture 중 adapter가 disabled되어 reserve가 ADAPTER_DISABLED면 generation 없는 unavailable fallback을 게시한다', { timeout: 15_000 }, async (t) => {
+  let gameDir = null;
+  let injectedDisable = false;
+  const coachCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '스폰되면 안 됨' }) }],
+  });
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onEngineInvoke(args) {
+        if (!gameDir || injectedDisable || args[0] !== 'hand') return;
+        injectedDisable = true;
+        const authorityPath = path.join(gameDir, '.coach-authority.json');
+        const authority = readJson(authorityPath);
+        authority.adapterState = 'disabled';
+        fs.writeFileSync(authorityPath, JSON.stringify(authority));
+      },
+      onCoachInvoke(args) { coachCalls.push(args); },
+    },
+  });
+  gameDir = setup.gameDir;
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, '.adapter-race-stats.json');
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  await runCoachCli(gameDir, [
+    'begin-owner', '--owner', owner, '--completed', '0', '--stats-file', statsPath,
+    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+  ]);
+  coachCalls.length = 0;
+  const running = startRun(setup.loop);
+
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(setup.loop, running);
+
+  assert.equal(injectedDisable, true);
+  assert.equal(note.unavailable, true);
+  assert.equal(upper.starts.length, 0);
+  assert.equal(coachCalls.filter((args) => args[0] === 'reserve').length, 1);
+  const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
+  assert.ok(unavailable);
+  assert.equal(unavailable.includes('--generation'), false);
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).publishedSeals['1'].noteKind, 'unavailable');
 });
 
 test('requestStop lets the in-flight step+publish unit commit before child and server cleanup', { timeout: 15_000 }, async (t) => {

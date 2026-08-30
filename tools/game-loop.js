@@ -1779,7 +1779,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
     const inputs = await captureCoachInputs(handNo, prepared);
     const deny = writeCoachDeny(handNo);
-    let descriptor = initialDescriptor ?? await reserveCoach(owner, handNo, 1, inputs.stats.path);
+    let descriptor = initialDescriptor;
+    if (!descriptor) {
+      try {
+        descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
+      } catch (reserveError) {
+        if (reserveError.code !== 'ADAPTER_DISABLED') throw reserveError;
+        // Adapter authority can change while the redacted captures are running. No
+        // generation exists when the initial reserve is rejected, so use the explicit
+        // generation-less fallback instead of degrading to a log-only coach gap.
+        coachAdapterDisabled = true;
+        appendNotice(`핸드 ${handNo} 코치 reserve 전 adapter가 disabled되어 고정 문구로 대체합니다.`);
+        await completeCoachUnavailable({
+          owner,
+          handNo,
+          reason: 'adapter-disabled-before-reserve',
+        });
+        return;
+      }
+    }
     for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
       const currentDescriptor = descriptor;
       const prompt = buildCoachPrompt({
@@ -1840,13 +1858,24 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         // never a hidden success signal.
         if (termination?.confirmed !== true) {
           if (!heartbeatTimedOut) {
-            await runCoach([
-              'fence',
-              '--owner', owner,
-              '--hand', String(handNo),
-              '--generation', String(currentDescriptor.generation),
-              '--reason', 'termination-unconfirmed',
-            ]);
+            try {
+              await runCoach([
+                'fence',
+                '--owner', owner,
+                '--hand', String(handNo),
+                '--generation', String(currentDescriptor.generation),
+                '--reason', 'termination-unconfirmed',
+              ]);
+            } catch (fenceError) {
+              // heartbeat may retire this exact generation while terminate() is still
+              // pending. STALE_GENERATION then means there is no live generation left to
+              // fence; it must not skip the fail-closed adapter transition below.
+              if (fenceError.code !== 'STALE_GENERATION') throw fenceError;
+              log('coach-fence-already-retired', {
+                handNo,
+                generation: currentDescriptor.generation,
+              });
+            }
           }
           await runCoach([
             'adapter-disable',
@@ -1905,6 +1934,34 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (exactEnvelopePath && !stopRequested) await executeCoachPublish(handNo, exactEnvelopePath);
   };
 
+  const drainQueuedCoachPublications = async () => {
+    const attemptPath = path.join(root, '.publish-attempt.json');
+    for (;;) {
+      const auth = readCoachAuthority();
+      const queued = Object.values(auth?.publishQueue ?? {})
+        .sort((left, right) => left.handNo - right.handNo)[0];
+      if (!queued) return;
+      if (fs.existsSync(attemptPath)) {
+        // The recorded body owns the current publishId regardless of which queued hand
+        // supplied --from. Retry it first, then re-read authority before choosing a Q.
+        await executePublish(['--from', queued.exactEnvelopePath, '--retry']);
+        continue;
+      }
+      await executeCoachPublish(queued.handNo, queued.exactEnvelopePath);
+      let remaining = readCoachAuthority()?.publishQueue?.[String(queued.handNo)];
+      if (remaining?.queueId === queued.queueId) {
+        await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
+        remaining = readCoachAuthority()?.publishQueue?.[String(queued.handNo)];
+      }
+      if (remaining?.queueId === queued.queueId) {
+        throw codedError(
+          'COACH_QUEUE_NOT_SEALED',
+          `핸드 ${queued.handNo} 코치 Q 게시 후 seal을 확인하지 못했습니다.`,
+        );
+      }
+    }
+  };
+
   const beginCoachOwner = async (completed) => {
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
@@ -1923,6 +1980,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (begun.adapterState === 'disabled' || begun.adapterState === 'unavailable') {
       coachAdapterDisabled = true;
     }
+    // begin-owner has already reconciled the snapshot and atomically selected missing
+    // descriptors. Existing owner-neutral Q must become visible before any new worker or
+    // turn publication can overtake it; sealedSkipped is never a spawn list.
+    await drainQueuedCoachPublications();
     for (const descriptor of begun.descriptors ?? []) {
       launchCoachPipeline(descriptor.handNo, {
         descriptor,
