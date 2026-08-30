@@ -18,6 +18,7 @@ import {
 } from '../tools/game-loop.js';
 import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
+import { newDeck } from '../engine/cards.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -851,6 +852,83 @@ function narrationTexts(gameDir) {
   return (snapshot.log ?? [])
     .filter((entry) => entry.type === 'narration')
     .map((entry) => entry.text);
+}
+
+function stackedDeck(front) {
+  const used = new Set(front);
+  return [...front, ...newDeck().filter((card) => !used.has(card))].join(',');
+}
+
+// HU: SB 7h2c never splits against BB AsAh on this board, so the SB always busts.
+const HU_BUST_DECK = stackedDeck(['7h', 'As', '2c', 'Ah', 'Ks', 'Qd', '9c', '8s', '3d']);
+
+async function cliJson(gameDir, args) {
+  const { stdout } = await execFileAsync(process.execPath, [
+    CLI, ...args, '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 20_000 });
+  return JSON.parse(stdout.trim());
+}
+
+// startHand advances the button first, so seat the user one short of it.
+function putUserOnTheButton(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  const userIdx = state.seats.findIndex((seat) => seat.playerId === 'user');
+  state.button = (userIdx + state.seats.length - 1) % state.seats.length;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+}
+
+// Both blinds are all-in at the post, so startHand runs the rigged board out with no
+// actions at all: exactly one completed hand and a deterministic user bust.
+async function seedFinishedGame(gameDir) {
+  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '25']);
+  putUserOnTheButton(gameDir);
+  const over = await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  assert.equal(over.handOver, true);
+  assert.equal(over.gameOver, true);
+  return init;
+}
+
+function finalizingLoop(t, gameDir, sessionToken, { upper, loopOpts = {}, stateOverrides = {} } = {}) {
+  writeLoopStateFixture(gameDir, sessionToken, {
+    phase: 'finalizing',
+    handNo: 1,
+    playerRuntime: null,
+    upperRuntime: 'coach-fake',
+    ...stateOverrides,
+  });
+  const calls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper, notices: [] };
+    },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => calls.push({ kind: 'coach', args }),
+      onPublishInvoke: (args) => calls.push({ kind: 'publish', args }),
+      ...loopOpts,
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  return { loop, calls };
+}
+
+function coachInvocations(calls, verb = null) {
+  return calls
+    .filter((call) => call.kind === 'coach' && (verb === null || call.args[0] === verb))
+    .map((call) => call.args);
+}
+
+function publishInvocations(calls) {
+  return calls.filter((call) => call.kind === 'publish').map((call) => call.args);
+}
+
+function flagValue(args, flag) {
+  const index = args.indexOf(flag);
+  return index === -1 ? null : args[index + 1];
 }
 
 async function runUntilUserBoundary(loop, gameDir) {
@@ -2800,7 +2878,7 @@ test('user waitError rejects a foreign healthy listener before any step republis
   assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'user-view-republished'), false);
 });
 
-test('AI 3 plus user reaches the Task 7 boundary through the real loop with chips preserved', { timeout: 25_000 }, async (t) => {
+test('AI 3 plus user runs the finalization cutoff through the real loop with chips preserved', { timeout: 25_000 }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   const loop = createGameLoop({
@@ -2828,11 +2906,16 @@ test('AI 3 plus user reaches the Task 7 boundary through the real loop with chip
     }
   })();
 
-  await assert.rejects(running, (error) => error.code === 'FINALIZATION_TASK_7');
+  // The fake upper has no oneshotStart, so the sequence runs the full cutoff and then
+  // refuses to fabricate a review.
+  await assert.rejects(running, (error) => error.code === 'REVIEW_FAILED');
   await driver;
   const engine = readJson(path.join(gameDir, 'state.json'));
   assert.equal(chipTotal(engine), 400);
-  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.phase, 'finalizing');
+  assert.equal(loopState.halt.code, 'REVIEW_FAILED');
+  assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
   assert.equal(adapter.decideCalls.length > 0, true);
   assert.equal(sent.size > 0, true);
 });
@@ -4759,7 +4842,7 @@ test('--force aborts before archive when the stopped server pid is observed as r
   );
 });
 
-test('finalizing resume resolves upper-only with a live canary and exposes an explicit Task 7 stub', async (t) => {
+test('finalizing resume resolves upper-only with a live canary and stops before the Task 7B review', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
@@ -4773,7 +4856,11 @@ test('finalizing resume resolves upper-only with a live canary and exposes an ex
   }));
   let canaryAbsPath;
   let warmups = 0;
-  const upper = makeAdapter({ onWarmup: () => { warmups += 1; } });
+  const upper = makeCoachAdapter();
+  upper.warmup = async (input) => {
+    warmups += 1;
+    return { sessionId: `session-${input.playerId}`, raw: 'ready' };
+  };
   const loop = createGameLoop({
     gameDir,
     resolver: async ({ need, canaryAbsPath: canary }) => {
@@ -4783,14 +4870,15 @@ test('finalizing resume resolves upper-only with a live canary and exposes an ex
       canaryAbsPath = canary;
       return { player: null, upper, notices: [] };
     },
+    opts: { port: 0 },
   });
-  t.after(() => loop.requestStop());
+  t.after(() => loop.requestStop().catch(() => {}));
 
   await loop.resume();
   assert.equal(fs.existsSync(canaryAbsPath), false);
   assert.equal(warmups, 0, 'finalization must not warm player sessions');
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
-  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_TASK_7');
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
 });
 
 test('done resume adopts a live server so normal cleanup stops it without spawning or resolving runtimes', { timeout: 10_000 }, async (t) => {
@@ -4823,7 +4911,7 @@ test('done resume adopts a live server so normal cleanup stops it without spawni
   await waitUntilDead(external.child.pid);
 });
 
-test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and reaches the Task 7 stub', async (t) => {
+test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and re-halts on the review gate', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   writeLoopStateFixture(gameDir, init.sessionToken, {
@@ -4838,8 +4926,9 @@ test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and
       assert.equal(need, 'upper-only');
       return { player: null, upper: null, notices: ['upper unavailable'] };
     },
+    opts: { port: 0 },
   });
-  t.after(() => loop.requestStop());
+  t.after(() => loop.requestStop().catch(() => {}));
 
   const resumed = await loop.resume();
 
@@ -4848,7 +4937,320 @@ test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and
   assert.deepEqual(resumed.notices, ['prior notice', 'upper unavailable']);
   assert.equal(Object.hasOwn(resumed, 'halt'), false);
   assert.notEqual(resumed.ownerSessionId, 'old-owner');
-  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_TASK_7');
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+});
+
+test('종료: 마지막 핸드 코치를 재-reserve하지 않고 finalizing 체크포인트로 전이한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '100']);
+  putUserOnTheButton(gameDir);
+  const started = await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  assert.equal(started.next.toAct, 'user');
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'playing', handNo: 1 });
+
+  const calls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '마지막 핸드 결정을 평가했습니다.' }) }],
+  });
+  const player = makeAdapter({
+    onDecide: (input) => ({
+      raw: JSON.stringify({ decisionId: decisionIdOfMessage(input.message), action: 'call' }),
+    }),
+  });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(player, upper),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      onCoachInvoke: (args) => calls.push({ kind: 'coach', args }),
+      onPublishInvoke: (args) => calls.push({ kind: 'publish', args }),
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  await postUserAction(lock, {
+    decisionId: snapshot.view.legal.decisionId,
+    action: 'raise',
+    amount: snapshot.view.legal.maxRaiseTo,
+  });
+
+  await assert.rejects(running, (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.equal(readJson(path.join(gameDir, 'state.json')).gameOver, true);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.phase, 'finalizing');
+  assert.equal(loopState.handNo, 1);
+  const reserves = coachInvocations(calls, 'reserve')
+    .filter((args) => flagValue(args, '--hand') === '1');
+  assert.equal(reserves.length, 1, '마지막 핸드 generation을 재-reserve했다');
+  assert.equal(upper.starts.length, 1);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 1, 'live finalization이 owner를 교체했다');
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, undefined, '살아 있던 generation의 결과가 유실됐다');
+  const cutoff = coachInvocations(calls, 'finalize-cutoff');
+  assert.equal(cutoff.length, 1);
+  assert.equal(flagValue(cutoff[0], '--termination-confirmed'), 'true');
+  assert.equal(flagValue(cutoff[0], '--completed'), '1');
+});
+
+test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행하고 봉인된 핸드를 재스폰하지 않는다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  // coach-control reads the session identity from lock.json, so the pre-crash Q is
+  // seeded against a live server that the finalizing resume then adopts.
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedQueuedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  const resumed = await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.notEqual(resumed.ownerSessionId, 'old-owner');
+  const beginOwners = coachInvocations(calls, 'begin-owner');
+  assert.equal(beginOwners.length, 1);
+  assert.equal(flagValue(beginOwners[0], '--owner'), resumed.ownerSessionId);
+  assert.equal(upper.starts.length, 0, '이미 Q에 있는 핸드를 재스폰했다');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).coach.some((row) => row.handNo === 1), true);
+  const cutoff = coachInvocations(calls, 'finalize-cutoff');
+  assert.equal(cutoff.length, 1);
+  assert.equal(flagValue(cutoff[0], '--owner'), resumed.ownerSessionId);
+  assert.equal(flagValue(cutoff[0], '--completed'), '1');
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authority.finalization.status, 'SEALED');
+  assert.equal(authority.activeOwnerSessionId, resumed.ownerSessionId);
+});
+
+test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finalize-cutoff가 봉인한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const upper = makeCoachAdapter({
+    rounds: [{ gate, raw: JSON.stringify({ handNo: 1, text: '예산을 넘긴 코치' }) }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.equal(upper.starts.length, 1, 'begin-owner descriptor가 스폰되지 않았다');
+  assert.equal(upper.terminations.length, 1, 'cutoff가 live generation을 종료하지 않았다');
+  const verbs = calls.filter((call) => call.kind === 'coach').map((call) => call.args[0]);
+  const cutoffAt = verbs.indexOf('finalize-cutoff');
+  assert.notEqual(cutoffAt, -1);
+  assert.equal(verbs.indexOf('bind-handle') < cutoffAt, true, 'bind-handle이 cutoff 뒤로 밀렸다');
+  assert.equal(
+    verbs.slice(cutoffAt + 1).some((verb) => verb === 'reserve' || verb === 'begin-owner'),
+    false,
+    'cutoff 뒤에 새 generation을 예약했다',
+  );
+  const cutoff = coachInvocations(calls, 'finalize-cutoff')[0];
+  assert.equal(flagValue(cutoff, '--termination-confirmed'), 'true');
+  assert.equal(flagValue(cutoff, '--completed'), '1');
+  assert.equal(flagValue(cutoff, '--snapshot-file'), path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(fs.existsSync(flagValue(cutoff, '--stats-file')), true);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.finalization.budgetMs, 5_000);
+  assert.equal(loopState.finalization.resultWaitMs, 700);
+  assert.equal(loopState.finalization.cutoff.terminationConfirmed, true);
+  assert.deepEqual(loopState.finalization.cutoff.sealed, [1]);
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, true);
+});
+
+test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 그 generation을 unavailable로 봉인한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  // Attempt 1 fails only after the finalization checkpoint exists, so the remaining
+  // result-wait budget (≤ 2s here) is always below the 5s replacement floor of §9.2 (2).
+  const gate = waitFor(
+    () => Boolean(readJson(path.join(gameDir, 'loop-state.json')).finalization),
+    'finalization checkpoint did not appear',
+    10_000,
+  );
+  const upper = makeCoachAdapter({
+    rounds: [
+      { gate, raw: '코치 응답이 JSON이 아니다' },
+      { raw: JSON.stringify({ handNo: 1, text: '교체 예산 없이 스폰된 attempt 2' }) },
+    ],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 4_000 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.equal(upper.starts.length, 1, '5초 미만 잔여 예산으로 교체 attempt 2를 스폰했다');
+  assert.equal(upper.terminations.length, 1);
+  assert.equal(
+    coachInvocations(calls, 'reserve').filter((args) => flagValue(args, '--attempt') === '2').length,
+    0,
+    '교체 reserve가 실행됐다',
+  );
+  const unavailable = coachInvocations(calls, 'complete-unavailable');
+  assert.equal(unavailable.length, 1);
+  assert.equal(flagValue(unavailable[0], '--reason'), 'finalize-no-replacement-budget');
+  assert.notEqual(flagValue(unavailable[0], '--generation'), null, 'attempt 1 generation 없이 봉인했다');
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, true);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.finalization.cutoff.terminationConfirmed, true);
+  assert.deepEqual(loopState.finalization.cutoff.sealed, [], 'cutoff 전에 봉인되지 않은 핸드가 남았다');
+  assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
+});
+
+test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const upper = makeCoachAdapter({
+    rounds: [{ gate, raw: JSON.stringify({ handNo: 1, text: '예산을 넘긴 코치' }) }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
+  assert.equal(
+    calls.slice(0, cutoffAt).some((call) => call.kind === 'publish'),
+    false,
+    'cutoff 전에 게시할 것이 없는데 게시했다',
+  );
+  const residual = calls.slice(cutoffAt + 1).filter((call) => call.kind === 'publish');
+  assert.equal(residual.length, 1, '잔여 Q가 정확히 한 번 게시되지 않았다');
+  assert.equal(residual[0].args.includes('--deadline-monotonic-ns'), true);
+  assert.match(flagValue(residual[0].args, '--deadline-monotonic-ns'), /^\d+$/);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(snapshot.coach.filter((row) => row.handNo === 1).length, 1);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authority.noNewPlayTimePublishers, true);
+  assert.equal(authority.publishQueue['1'], undefined);
+  assert.notEqual(authority.publishedSeals['1'], undefined);
+  assert.equal(publishInvocations(calls).length, 1);
+});
+
+test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION_ABORTED로 리뷰 게이트를 잠근다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate,
+      raw: JSON.stringify({ handNo: 1, text: '종료를 확인할 수 없는 코치' }),
+      terminate: { confirmed: false, reason: 'reason-must-not-open-the-gate' },
+    }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const verbs = coachInvocations(calls).map((args) => args[0]);
+  assert.equal(verbs.includes('fence'), true);
+  assert.equal(verbs.includes('adapter-disable'), true);
+  const cutoff = coachInvocations(calls, 'finalize-cutoff');
+  assert.equal(cutoff.length, 1);
+  assert.equal(flagValue(cutoff[0], '--termination-confirmed'), 'false');
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.halt.code, 'FINALIZATION_ABORTED');
+  assert.equal(loopState.finalization.cutoff.reviewGate, 'closed');
+  assert.equal(loopState.finalization.cutoff.terminationConfirmed, false);
+  assert.equal(loopState.notices.some((notice) => notice.includes('리뷰')), true);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authority.finalization, null, 'abort된 cutoff가 authority를 커밋했다');
+  assert.equal(authority.adapterState, 'disabled');
+  assert.equal(authority.publishedSeals['1'], undefined);
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+});
+
+test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FAILED로 멈춘다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, { upper: null });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.halt.code, 'REVIEW_FAILED');
+  assert.equal(loopState.finalization.budgetMs, 20_000, '기본 finalization 예산은 20초다');
+  assert.equal(loopState.finalization.resultWaitMs, 10_000);
+  assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
+  assert.equal(loopState.notices.some((notice) => notice.includes('리뷰')), true);
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+  assert.equal(coachInvocations(calls, 'reserve').length, 0);
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, true, '코치 노트가 봉인되지 않았다');
+  assert.notEqual(readJson(path.join(gameDir, '.coach-authority.json')).publishedSeals['1'], undefined);
+  assert.equal(exitCodeFor({ code: 'REVIEW_FAILED' }), 3);
+});
+
+test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시하지 않는다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const first = finalizingLoop(t, gameDir, init.sessionToken, { upper: null });
+  await first.loop.resume();
+  await assert.rejects(first.loop.run(), (error) => error.code === 'REVIEW_FAILED');
+  await first.loop.requestStop();
+
+  const snapshotBefore = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  const authorityBefore = readJson(path.join(gameDir, '.coach-authority.json'));
+  // The second pass reuses the persisted checkpoint: no fixture rewrite.
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
+  const secondCalls = [];
+  const upper = makeCoachAdapter();
+  const secondLoop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => secondCalls.push({ kind: 'coach', args }),
+      onPublishInvoke: (args) => secondCalls.push({ kind: 'publish', args }),
+    },
+  });
+  t.after(() => secondLoop.requestStop().catch(() => {}));
+  await secondLoop.resume();
+  await assert.rejects(secondLoop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.equal(publishInvocations(secondCalls).length, 0, '봉인된 코치 노트를 다시 게시했다');
+  assert.equal(upper.starts.length, 0);
+  const snapshotAfter = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(snapshotAfter.publishId, snapshotBefore.publishId);
+  assert.deepEqual(snapshotAfter.coach, snapshotBefore.coach);
+  const authorityAfter = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.deepEqual(
+    Object.keys(authorityAfter.publishedSeals),
+    Object.keys(authorityBefore.publishedSeals),
+  );
+  assert.deepEqual(authorityAfter.publishQueue, {});
+  assert.deepEqual(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.sealed, []);
 });
 
 test('CLI parser covers the full surface and halt errors map to stable process exits', () => {
