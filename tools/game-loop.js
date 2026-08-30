@@ -171,6 +171,36 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const readLoopState = () => readJsonOptional(loopStatePath, 'LOOP_STATE');
+  const readServerLock = () => {
+    let raw;
+    try {
+      raw = fs.readFileSync(lockPath, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK을 읽을 수 없습니다.', { cause: error });
+    }
+    let lock;
+    try {
+      lock = JSON.parse(raw);
+    } catch (error) {
+      throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK JSON이 올바르지 않습니다.', { cause: error });
+    }
+    if (
+      !lock
+      || typeof lock !== 'object'
+      || Array.isArray(lock)
+      || !Number.isSafeInteger(lock.serverPid)
+      || lock.serverPid < 1
+      || !Number.isSafeInteger(lock.port)
+      || lock.port < 1
+      || lock.port > 65_535
+      || typeof lock.sessionToken !== 'string'
+      || lock.sessionToken.length === 0
+    ) {
+      throw codedError('BAD_SERVER_LOCK', 'SERVER_LOCK pid/port/sessionToken 계약이 올바르지 않습니다.');
+    }
+    return lock;
+  };
   const writeLoopState = (patch) => {
     const current = readLoopState() ?? {};
     const next = { ...current, ...patch };
@@ -345,7 +375,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const ensureServer = async (sessionToken) => {
-    const existing = readJsonOptional(lockPath, 'SERVER_LOCK');
+    const existing = readServerLock();
     if (existing) {
       if (existing.sessionToken !== sessionToken) {
         throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
@@ -358,7 +388,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (startTime === null) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
       }
-      const confirmed = readJsonOptional(lockPath, 'SERVER_LOCK');
+      const confirmed = readServerLock();
       if (
         confirmed?.serverPid !== existing.serverPid
         || confirmed.port !== existing.port
@@ -400,7 +430,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (child.exitCode !== null || child.signalCode !== null) {
         throw codedError('SERVER_START_FAILED', `서버 자식이 조기 종료했습니다: ${child.exitCode ?? child.signalCode}`);
       }
-      const lock = readJsonOptional(lockPath, 'SERVER_LOCK');
+      const lock = readServerLock();
       if (
         lock?.serverPid === child.pid
         && lock.sessionToken === sessionToken

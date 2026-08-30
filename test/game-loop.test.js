@@ -554,6 +554,49 @@ test('missing or timed-out listener verifier fails closed without adopting or si
   }
 });
 
+test('present invalid or falsy lock.json fails closed without spawn, adoption, or signal', { timeout: 20_000 }, async (t) => {
+  const cases = [
+    ['malformed-json', '{'],
+    ['null', 'null'],
+    ['false', 'false'],
+    ['zero', '0'],
+    ['empty-string', '""'],
+    ['array', '[]'],
+    ['missing-pid', (lock) => JSON.stringify({ port: lock.port, sessionToken: lock.sessionToken })],
+    ['missing-port', (lock) => JSON.stringify({ serverPid: lock.serverPid, sessionToken: lock.sessionToken })],
+    ['missing-token', (lock) => JSON.stringify({ serverPid: lock.serverPid, port: lock.port })],
+  ];
+
+  for (const [label, rawOrBuilder] of cases) {
+    await t.test(label, async (st) => {
+      const gameDir = tmpGame();
+      const init = await initGame(gameDir);
+      fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+        ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+      }));
+      const external = await startExternalServer(gameDir, init.sessionToken);
+      const raw = typeof rawOrBuilder === 'function' ? rawOrBuilder(external.lock) : rawOrBuilder;
+      const lockPath = path.join(gameDir, 'lock.json');
+      fs.writeFileSync(lockPath, raw);
+      const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+      st.after(async () => {
+        await loop.requestStop().catch(() => {});
+        await terminateIfAlive(external.child);
+      });
+
+      await assert.rejects(loop.resume(), (error) => error.code === 'BAD_SERVER_LOCK');
+      assert.equal(fs.readFileSync(lockPath, 'utf8'), raw, 'invalid lock was replaced by a spawned server');
+      assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+      const snapshot = await fetch(
+        `http://127.0.0.1:${external.lock.port}/api/snapshot?token=${init.sessionToken}`,
+      );
+      assert.equal(snapshot.ok, true, 'preserved external server stopped responding');
+      assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    });
+  }
+});
+
 test('adopted server startTime mismatch after capture is never signalled', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
