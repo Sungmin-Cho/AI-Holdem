@@ -81,6 +81,7 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
   const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '400', '--game-dir', dir])).trim());
   const token = init.sessionToken;
   const started = await startServer({ gameDir: dir, port: 0, token });
+  fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '결정은 최종 출력으로 반환한다.');
 
   try {
     let handsPlayed = 0;
@@ -114,7 +115,9 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
           out = await turn(dir, [...args, '--expect-version', String(stateVersion)], ['--wait', '--wait-ms', '400']);
         } else {
           sawAiTurn = true;
-          assert.equal(next.message, next.summary ?? next.message);
+          const rawStep = JSON.parse(fs.readFileSync(path.join(dir, '.turn.json'), 'utf8'));
+          assert.equal(next.message, rawStep.next.summary);
+          assert.equal(next.message.includes('결정은 최종 출력으로 반환한다.'), false);
           // 딜러는 legal을 따로 부르지 않는다 — 플레이어처럼 message만으로 결정한다.
           const decided = decideFromMessage(next.message);
           assert.equal(decided.decisionId, next.decisionId, '요약의 decisionId가 next와 다르다');

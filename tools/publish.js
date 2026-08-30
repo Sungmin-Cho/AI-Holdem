@@ -170,7 +170,7 @@ function controlOf(envelope) {
   return Object.keys(control).length ? control : null;
 }
 
-function nextForDealer(gameDir, envelope) {
+function nextForDealer(envelope) {
   const next = envelope.next;
   if (!next) return null;
   const { summary, ...out } = next;
@@ -455,7 +455,7 @@ async function main() {
   if (envelope.archivePending) out.archivePending = true;
   const control = controlOf(envelope);
   if (control) out.control = control;
-  out.next = nextForDealer(gameDir, envelope);
+  out.next = nextForDealer(envelope);
 
   // The user's turn is publish-then-wait; doing both here spares the dealer a round.
   if (opts.wait && envelope.next?.kind === 'user') await waitForUser(lock, envelope, opts, out);

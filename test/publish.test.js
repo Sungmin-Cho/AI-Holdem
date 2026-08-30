@@ -129,6 +129,29 @@ test('--talk-from은 더 이상 존재하지 않는 옵션이다', async () => {
   } finally { await started.close(); }
 });
 
+test('--talk도 더 이상 존재하지 않는 옵션이다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk', 'p1:안녕']).catch((e) => e);
+    assert.match(String(out.stdout ?? out.message), /USAGE|알 수 없는 옵션/);
+  } finally { await started.close(); }
+});
+
+test('talk가 실린 구버전 pending attempt는 --retry로 동일 본문 재전송된다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const body = { publishId: 1, view: sampleTurn().view, viewOnly: true,
+      messages: [{ type: 'talk', playerId: 'p1', text: '레거시 한마디' }] };
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({ body, expectedGameEpoch: gameEpochOf('tok') }));
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(out.publishId, 1);
+    const snap = await snapshotOf(started.port);
+    assert.ok(JSON.stringify(snap).includes('레거시 한마디'));
+  } finally { await started.close(); }
+});
+
 test('publish --view-only: 이벤트 없이 뷰만 재게시한다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
