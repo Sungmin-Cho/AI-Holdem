@@ -1666,14 +1666,29 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }));
   };
 
+  const persistCleanupFailure = (error) => {
+    try {
+      if (!fs.existsSync(loopStatePath)) return;
+      writeLoopState({
+        stopping: true,
+        stoppedAt: undefined,
+        cleanupFailedAt: isoNow(now),
+        cleanupError: {
+          code: error.code ?? 'ERROR',
+          message: error.message ?? String(error),
+        },
+      });
+    } catch { /* 원래 cleanup failure와 lock ownership을 보존한다 */ }
+  };
+
   const requestStop = () => {
     if (stopPromise) return stopPromise;
     stopRequested = true;
-    stopPromise = (async () => {
+    const attempt = (async () => {
       let stopError = null;
       try {
         if (fs.existsSync(loopStatePath)) {
-          writeLoopState({ stopping: true, stopRequestedAt: isoNow(now) });
+          writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
         }
       } catch (error) {
         stopError = error;
@@ -1707,28 +1722,58 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       } catch (error) {
         stopError ??= error;
       }
-      adapters.clear();
-      for (const canary of canaries) {
+      if (!disposalFailure) adapters.clear();
+      for (const canary of [...canaries]) {
         try { fs.unlinkSync(canary); } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
+          if (error.code !== 'ENOENT') {
+            stopError ??= error;
+            continue;
+          }
+        }
+        canaries.delete(canary);
+      }
+
+      if (stopError) {
+        persistCleanupFailure(stopError);
+        throw stopError;
+      }
+
+      if (logFd !== null) {
+        try {
+          fs.closeSync(logFd);
+          logFd = null;
+        } catch (error) {
+          stopError = error;
         }
       }
-      canaries.clear();
+      if (stopError) {
+        persistCleanupFailure(stopError);
+        throw stopError;
+      }
+
       try {
         if (fs.existsSync(loopStatePath)) {
-          writeLoopState({ stopping: true, stoppedAt: isoNow(now) });
+          writeLoopState({
+            stopping: true,
+            stoppedAt: isoNow(now),
+            cleanupFailedAt: undefined,
+            cleanupError: undefined,
+          });
         }
+        releaseLock();
       } catch (error) {
-        stopError ??= error;
+        persistCleanupFailure(error);
+        throw error;
       }
-      releaseLock();
-      if (logFd !== null) {
-        fs.closeSync(logFd);
-        logFd = null;
-      }
-      if (stopError) throw stopError;
     })();
-    return stopPromise;
+    stopPromise = attempt;
+    attempt.catch(() => {
+      // A failed attempt keeps ownership/resources but may be retried after the external
+      // condition changes (child exits, signal works, filesystem recovers). Concurrent
+      // callers during this attempt still shared the exact same Promise above.
+      if (stopPromise === attempt) stopPromise = null;
+    });
+    return attempt;
   };
 
   const bootstrap = async ({

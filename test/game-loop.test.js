@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   processStartTime,
+  readOwnedLock,
   withNamedLock,
 } from '../engine/state.js';
 import {
@@ -1360,6 +1361,10 @@ test('requestStop fails closed without signalling an adopted server when identit
     );
   });
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).cleanupError.code, 'SERVER_IDENTITY_UNAVAILABLE');
+  await loop.requestStop();
+  await waitUntilDead(external.child.pid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
@@ -1572,6 +1577,9 @@ test('adopted server startTime mismatch after capture is never signalled', { tim
     async () => assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_IDENTITY_MISMATCH'),
   );
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+  await loop.requestStop();
+  await waitUntilDead(external.child.pid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
@@ -1600,6 +1608,10 @@ test('direct server child startTime mismatch is rechecked before the first stop 
     ),
   );
   assert.doesNotThrow(() => process.kill(serverPid, 0), 'identity mismatch server child was signalled');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+  await loop.requestStop();
+  await waitUntilDead(serverPid);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
 test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 10_000 }, async (t) => {
@@ -3138,7 +3150,7 @@ test('initial server startTime failure retains ownership after a failed kill and
   }
 });
 
-test('unsettled startup identity cleanup keeps the child handle owned and requestStop fails closed', { timeout: 15_000, concurrency: false }, async () => {
+test('unsettled cleanup retains loop lock, blocks a contender, and releases only after a confirmed requestStop retry', { timeout: 20_000, concurrency: false }, async () => {
   const gameDir = tmpGame();
   const loop = createGameLoop({
     gameDir,
@@ -3148,6 +3160,7 @@ test('unsettled startup identity cleanup keeps the child handle owned and reques
   const originalKill = ChildProcess.prototype.kill;
   let serverHandle = null;
   let killAttempts = 0;
+  let prototypeRestored = false;
   ChildProcess.prototype.kill = function rejectStartupKills(signal) {
     if (signal === 'SIGKILL' && this.spawnargs?.includes(SERVER)) {
       serverHandle = this;
@@ -3168,9 +3181,34 @@ test('unsettled startup identity cleanup keeps the child handle owned and reques
     assert.equal(killAttempts >= 2, true, 'requestStop did not retry unsettled startup cleanup');
     assert.equal(loop.serverPid, serverHandle.pid, 'unsettled child ownership was discarded');
     assert.doesNotThrow(() => process.kill(serverHandle.pid, 0));
-    await assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_STOP_UNCONFIRMED');
-  } finally {
+    assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true, 'cleanup failure released loop ownership');
+    const failedState = readJson(path.join(gameDir, 'loop-state.json'));
+    assert.equal(failedState.stoppedAt, undefined);
+    assert.equal(failedState.cleanupError.code, 'SERVER_STOP_UNCONFIRMED');
+
+    let contenderResolverCalls = 0;
+    const contender = createGameLoop({
+      gameDir,
+      resolver: async () => {
+        contenderResolverCalls += 1;
+        return resolverFor(makeAdapter())();
+      },
+      opts: { port: 0, waitMs: 0 },
+    });
+    await assert.rejects(contender.resume(), (error) => error.code === 'LOCKED');
+    assert.equal(contenderResolverCalls, 0, 'contender reached resolver while failed owner retained the lock');
+
     ChildProcess.prototype.kill = originalKill;
+    prototypeRestored = true;
+    await loop.requestStop();
+    await waitUntilDead(serverHandle.pid);
+    assert.equal(loop.serverPid, null);
+    assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    const stopped = readJson(path.join(gameDir, 'loop-state.json'));
+    assert.equal(typeof stopped.stoppedAt, 'string');
+    assert.equal(Object.hasOwn(stopped, 'cleanupError'), false);
+  } finally {
+    if (!prototypeRestored) ChildProcess.prototype.kill = originalKill;
     if (serverHandle && serverHandle.exitCode === null && serverHandle.signalCode === null) {
       originalKill.call(serverHandle, 'SIGKILL');
       await waitUntilDead(serverHandle.pid).catch(() => {});
@@ -3301,6 +3339,23 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
   const envelope = stderr.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).at(-1);
   assert.equal(envelope.code, 'SERVER_IDENTITY_MISMATCH');
   assert.doesNotThrow(() => process.kill(serverPid, 0), 'cleanup failure fixture server was signalled');
+  const retainedOwner = readOwnedLock(gameDir, 'loop.lock.d');
+  assert.notEqual(retainedOwner, null, 'nonzero SIGTERM exit removed the failed owner lock');
+  assert.equal(retainedOwner.status, 'dead');
+  assert.equal(retainedOwner.pid, child.pid);
+  const failedState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(failedState.stoppedAt, undefined);
+  assert.equal(failedState.cleanupError.code, 'SERVER_IDENTITY_MISMATCH');
+
+  const recovery = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await recovery.resume();
+  await recovery.requestStop();
+  await waitUntilDead(serverPid);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
 test('--force stops loop, rereads replacement server identity, then stops that server before archive', { timeout: 20_000 }, async (t) => {
