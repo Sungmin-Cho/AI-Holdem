@@ -21,6 +21,7 @@ const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
+const DEFAULT_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 
 function codedError(code, message, extra = {}) {
   const error = new Error(message ?? code);
@@ -135,6 +136,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const pollMs = opts.pollMs ?? 20;
   const serverStartMs = opts.serverStartMs ?? 5_000;
   const childTimeoutMs = opts.childTimeoutMs ?? 30_000;
+  const osVerifyMs = opts.osVerifyMs ?? 1_000;
+  const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
@@ -256,9 +259,98 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }
   };
 
+  const listenerOwnedBy = (pid, port) => new Promise((resolve, reject) => {
+    if (!lsofPath) {
+      reject(codedError('SERVER_LISTENER_UNAVAILABLE', 'pid↔port 검증 도구를 찾을 수 없습니다.'));
+      return;
+    }
+    const child = execFile(lsofPath, [
+      '-nP', '-a', '-p', String(pid), `-iTCP:${port}`, '-sTCP:LISTEN', '-Fptn',
+    ], {
+      encoding: 'utf8',
+      timeout: osVerifyMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 64 * 1024,
+    }, (error, stdout, stderr) => {
+      activeChildren.delete(child);
+      if (error) {
+        if (Number(error.code) === 1 && !error.killed && !error.signal && String(stderr).trim() === '') {
+          resolve(false);
+          return;
+        }
+        reject(codedError(
+          'SERVER_LISTENER_UNAVAILABLE',
+          'pid↔port OS 검증을 완료할 수 없습니다.',
+          { cause: error },
+        ));
+        return;
+      }
+      const lines = String(stdout).split(/\r?\n/);
+      resolve(lines.includes(`p${pid}`) && lines.includes(`n127.0.0.1:${port}`));
+    });
+    activeChildren.add(child);
+  });
+
+  const assertAuthenticatedServer = async (port, sessionToken) => {
+    const requestSnapshot = async (token) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 500);
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/api/snapshot?token=${encodeURIComponent(token)}`,
+          { signal: controller.signal },
+        );
+        let body = null;
+        try { body = await response.json(); } catch { /* validated by caller */ }
+        return { response, body };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    try {
+      const challenge = `SIDECAR_AUTH_CHALLENGE_${randomBytes(24).toString('hex')}`;
+      const denied = await requestSnapshot(challenge);
+      if (denied.response.status !== 401 || denied.body?.code !== 'UNAUTHORIZED') {
+        throw codedError('SERVER_AUTH_FAILED', '서버가 fresh wrong-token challenge를 거부하지 않았습니다.');
+      }
+      const { response, body: snapshot } = await requestSnapshot(sessionToken);
+      if (!response.ok) throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 probe가 거부됐습니다.');
+      if (
+        !snapshot
+        || typeof snapshot !== 'object'
+        || !Number.isInteger(snapshot.revision)
+        || !Object.hasOwn(snapshot, 'view')
+        || !Array.isArray(snapshot.log)
+        || !Array.isArray(snapshot.coach)
+      ) {
+        throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 응답이 relay snapshot 계약과 다릅니다.');
+      }
+    } catch (error) {
+      if (error.code === 'SERVER_AUTH_FAILED') throw error;
+      throw codedError('SERVER_AUTH_UNAVAILABLE', '서버 token 인증 probe를 완료할 수 없습니다.', { cause: error });
+    }
+  };
+
+  const assertServerBinding = async ({ serverPid: pid, port, sessionToken }) => {
+    let ownsListener;
+    try {
+      ownsListener = await listenerOwnedBy(pid, port);
+    } catch (error) {
+      throw error;
+    }
+    if (!ownsListener) {
+      throw codedError('SERVER_LISTENER_MISMATCH', 'lock.serverPid가 lock.port listener를 소유하지 않습니다.');
+    }
+    await assertAuthenticatedServer(port, sessionToken);
+  };
+
   const ensureServer = async (sessionToken) => {
     const existing = readJsonOptional(lockPath, 'SERVER_LOCK');
-    if (existing?.sessionToken === sessionToken && await serverHealthy(existing.port)) {
+    if (existing) {
+      if (existing.sessionToken !== sessionToken) {
+        throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
+      }
+      await assertServerBinding(existing);
       if (!Number.isInteger(existing.serverPid) || !processAlive(existing.serverPid)) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 pid를 확인할 수 없습니다.');
       }
@@ -269,11 +361,15 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       const confirmed = readJsonOptional(lockPath, 'SERVER_LOCK');
       if (
         confirmed?.serverPid !== existing.serverPid
+        || confirmed.port !== existing.port
         || confirmed.sessionToken !== sessionToken
         || processStartTime(existing.serverPid) !== startTime
-        || !await serverHealthy(existing.port)
       ) {
         throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
+      }
+      await assertServerBinding(confirmed);
+      if (processStartTime(existing.serverPid) !== startTime) {
+        throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
       }
       serverPid = existing.serverPid;
       serverIdentity = { pid: existing.serverPid, startTime };

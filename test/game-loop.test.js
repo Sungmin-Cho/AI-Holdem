@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   createGameLoop,
@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
 const SERVER = path.join(ROOT, 'server/server.js');
+const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
@@ -77,10 +78,15 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
   assert.fail(`pid ${pid} did not exit`);
 }
 
-async function startExternalServer(gameDir, token) {
-  const child = spawn(process.execPath, [
-    SERVER, '--game-dir', gameDir, '--port', '0', '--token', token,
-  ], { stdio: 'ignore' });
+async function startExternalServer(gameDir, token, { ignoreTerm = false } = {}) {
+  const argv = ignoreTerm
+    ? ['--input-type=module', '-e', `
+      import { startServer } from ${JSON.stringify(pathToFileURL(SERVER).href)};
+      process.on('SIGTERM', () => {});
+      await startServer({ gameDir: ${JSON.stringify(gameDir)}, port: 0, token: ${JSON.stringify(token)} });
+    `]
+    : [SERVER, '--game-dir', gameDir, '--port', '0', '--token', token];
+  const child = spawn(process.execPath, argv, { stdio: 'ignore' });
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) {
@@ -97,6 +103,41 @@ async function startExternalServer(gameDir, token) {
   }
   child.kill('SIGKILL');
   throw new Error('external server did not become healthy');
+}
+
+async function startHealthOnlyServer({ acceptsEveryToken = false } = {}) {
+  const script = `
+    const http = require('node:http');
+    const server = http.createServer((req, res) => {
+      const health = req.url === '/api/health';
+      const permissive = ${acceptsEveryToken ? 'true' : 'false'} && req.url.startsWith('/api/snapshot');
+      const body = health ? '{"ok":true}' : (permissive
+        ? '{"revision":0,"view":null,"log":[],"coach":[]}'
+        : '{"ok":false,"code":"UNAUTHORIZED"}');
+      res.writeHead(health || permissive ? 200 : 401, {'Content-Type':'application/json'});
+      res.end(body);
+    });
+    server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));
+  `;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const port = await new Promise((resolve, reject) => {
+    let stdout = '';
+    const timer = setTimeout(() => reject(new Error('health-only server timeout')), 3_000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const line = stdout.split('\n')[0];
+      if (/^\d+$/.test(line)) {
+        clearTimeout(timer);
+        resolve(Number(line));
+      }
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`health-only server exited: ${code}`));
+    });
+  });
+  return { child, port };
 }
 
 async function terminateIfAlive(child) {
@@ -411,6 +452,146 @@ test('requestStop fails closed without signalling an adopted server when identit
     );
   });
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('forged lock cannot bind an unrelated live pid to another healthy authenticated server', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    ...external.lock,
+    serverPid: unrelated.pid,
+  }));
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(async () => {
+    await terminateIfAlive(external.child);
+    await terminateIfAlive(unrelated);
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_MISMATCH');
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('listener ownership without token-authenticated snapshot is never adopted', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const fake = await startHealthOnlyServer();
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: fake.child.pid,
+    port: fake.port,
+    sessionToken: init.sessionToken,
+    startedAt: new Date().toISOString(),
+  }));
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(() => terminateIfAlive(fake.child));
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_AUTH_FAILED');
+  assert.doesNotThrow(() => process.kill(fake.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('snapshot endpoint that accepts a fresh wrong token is not treated as authenticated', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const fake = await startHealthOnlyServer({ acceptsEveryToken: true });
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: fake.child.pid,
+    port: fake.port,
+    sessionToken: init.sessionToken,
+    startedAt: new Date().toISOString(),
+  }));
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(() => terminateIfAlive(fake.child));
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_AUTH_FAILED');
+  assert.doesNotThrow(() => process.kill(fake.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('missing or timed-out listener verifier fails closed without adopting or signalling', { timeout: 10_000 }, async (t) => {
+  for (const mode of ['missing', 'timeout']) {
+    await t.test(mode, async (st) => {
+      const gameDir = tmpGame();
+      const init = await initGame(gameDir);
+      fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+        phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+        ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+      }));
+      const external = await startExternalServer(gameDir, init.sessionToken);
+      st.after(() => terminateIfAlive(external.child));
+      let lsofPath = path.join(gameDir, 'missing-lsof');
+      if (mode === 'timeout') {
+        lsofPath = path.join(gameDir, 'slow-lsof');
+        fs.writeFileSync(lsofPath, '#!/bin/sh\nsleep 5\n');
+        fs.chmodSync(lsofPath, 0o755);
+      }
+      const loop = createGameLoop({
+        gameDir,
+        resolver: resolverFor(makeAdapter()),
+        opts: { port: 0, lsofPath, osVerifyMs: 50 },
+      });
+
+      await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_UNAVAILABLE');
+      assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+      assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    });
+  }
+});
+
+test('adopted server startTime mismatch after capture is never signalled', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(() => terminateIfAlive(external.child));
+  await loop.resume();
+
+  await withFakePs(
+    `if [ "$2" = "${external.child.pid}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_IDENTITY_MISMATCH'),
+  );
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: init.sessionToken,
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken, { ignoreTerm: true });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(external.child);
+  });
+  await loop.resume();
+
+  await loop.requestStop();
+  await waitUntilDead(external.child.pid);
+  assert.equal(external.child.signalCode, 'SIGKILL');
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
