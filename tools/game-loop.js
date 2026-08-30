@@ -22,8 +22,11 @@ import { gameEpochOf } from '../publish-contract.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
 const PUBLISH_CLI = path.join(ROOT, 'tools/publish.js');
+const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
+const COACH_GENERATION_MS = 120_000;
+const COACH_PRIVATE_FIELDS = ['archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne'];
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 const DEFAULT_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 const DEFAULT_WAIT_NETWORK_MARGIN_MS = 11_000;
@@ -231,6 +234,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const activeChildren = new Set();
   const adapters = new Set();
   const adapterDisposals = new Map();
+  const coachTasks = new Set();
+  const coachAttempts = new Map();
   const archiveCheckedHands = new Set();
   const restoredPlayerSessions = new Set();
 
@@ -243,6 +248,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let logFd = null;
   let playerAdapter = null;
   let upperAdapter = null;
+  let coachAdapterDisabled = false;
   let playerSessions = null;
   let resumeEntryPending = false;
   let stopRequested = false;
@@ -495,7 +501,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const runJsonChild = (script, args) => new Promise((resolve, reject) => {
-    const argv = [script, ...args, '--game-dir', root];
+    const childArgs = [...args, '--game-dir', root];
+    const argv = [script, ...childArgs];
+    if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
+    if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
     const child = execFile(process.execPath, argv, {
       encoding: 'utf8',
       timeout: timeoutForChild(args),
@@ -522,6 +531,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   });
 
   const runCli = (args) => runJsonChild(ENGINE_CLI, args);
+  const runCoach = (args) => runJsonChild(COACH_CLI, args);
   const runPublish = (args) => {
     opts.onPublishInvoke?.([...args]);
     return runJsonChild(PUBLISH_CLI, args);
@@ -1551,6 +1561,432 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const waitFlags = () => ['--wait', '--wait-ms', String(waitMs)];
 
+  const coachSnapshotPath = path.join(root, 'ui-snapshot.json');
+  const coachStatsPath = (handNo) => path.join(root, `.coach-stats-${handNo}.json`);
+  const coachHandPath = (handNo) => path.join(root, `.coach-hand-${handNo}-redacted.json`);
+  const coachDenyPath = (handNo) => path.join(root, `.coach-deny-${handNo}.json`);
+  const coachAuthorityPath = path.join(root, '.coach-authority.json');
+  const coachAttemptKey = (handNo, generation) => `${handNo}:${generation}`;
+
+  const semanticChildPayload = (envelope) => {
+    const payload = { ...envelope };
+    delete payload.ok;
+    delete payload.events;
+    delete payload.stateVersion;
+    return payload;
+  };
+
+  const appendNotice = (message) => {
+    const state = readLoopState();
+    if (!state) return;
+    const notices = Array.isArray(state.notices) ? [...state.notices] : [];
+    if (!notices.includes(message)) notices.push(message);
+    writeLoopState({ notices });
+  };
+
+  const captureCoachStats = async (label) => {
+    const captured = semanticChildPayload(await runCli(['stats']));
+    const filePath = label === 'owner'
+      ? path.join(root, '.coach-owner-stats.json')
+      : coachStatsPath(label);
+    writeJsonAtomic(filePath, captured);
+    return { path: filePath, raw: fs.readFileSync(filePath, 'utf8') };
+  };
+
+  const captureCoachHand = async (handNo) => {
+    const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--redacted']));
+    const filePath = coachHandPath(handNo);
+    writeJsonAtomic(filePath, captured);
+    return { path: filePath, raw: fs.readFileSync(filePath, 'utf8') };
+  };
+
+  const captureCoachInputs = async (handNo, prepared = null) => {
+    if (prepared) return prepared;
+    // reserve consumes the stats file synchronously. Both captures therefore finish before
+    // the first reservation, and the exact bytes written here are reused in the prompt.
+    const hand = await captureCoachHand(handNo);
+    const stats = await captureCoachStats(handNo);
+    return { hand, stats };
+  };
+
+  const fullHandRecord = (handNo) => {
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    if (engine?.lastHand?.handNo === handNo) return engine.lastHand;
+    const archivePath = path.join(root, 'hands', `hand-${String(handNo).padStart(4, '0')}.json`);
+    return readJsonOptional(archivePath, 'HAND_RECORD');
+  };
+
+  const coachForbiddenLiterals = (handNo) => {
+    const values = [];
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    for (const player of Array.isArray(players) ? players : []) {
+      if (player?.playerId === 'user') continue;
+      for (const field of COACH_PRIVATE_FIELDS) {
+        const value = player?.[field];
+        if (value !== undefined && value !== null && String(value).length > 0) values.push(String(value));
+      }
+    }
+    const record = fullHandRecord(handNo);
+    const publicCards = new Set(
+      (record?.showdown?.reveals ?? []).flatMap((reveal) => reveal?.cards ?? []),
+    );
+    for (const [playerId, cards] of Object.entries(record?.holes ?? {})) {
+      if (playerId === 'user') continue;
+      for (const card of cards ?? []) {
+        if (!publicCards.has(card)) values.push(String(card));
+      }
+    }
+    return [...new Set(values)];
+  };
+
+  const writeCoachDeny = (handNo) => {
+    const literals = coachForbiddenLiterals(handNo);
+    if (literals.length === 0) {
+      throw codedError('BAD_COACH_DENY', `핸드 ${handNo} private literal deny 목록이 비어 있습니다.`);
+    }
+    const filePath = coachDenyPath(handNo);
+    writeJsonAtomic(filePath, literals);
+    return { path: filePath, literals };
+  };
+
+  const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
+    let practiceFocus = '없음';
+    try {
+      practiceFocus = fs.readFileSync(path.join(root, '.practice-focus.json'), 'utf8');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const prompt = [
+      '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
+      '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
+      '',
+      `hand ${handNo} (redacted):`,
+      inputs.hand.raw,
+      '',
+      'stats (reserve가 읽은 동일 캡처):',
+      inputs.stats.raw,
+      '',
+      'practiceFocus:',
+      practiceFocus,
+      '',
+      `과폴드 코멘트: ${overfoldReserved ? '허용' : '금지'}`,
+      '',
+      '할 일: 사용자의 주요 결정 1~2개를 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.',
+      '폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 공개 근거로 무난한 폴드라고 평가한다.',
+      '특별한 누수가 없다면 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.',
+      '팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.',
+      overfoldReserved
+        ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
+        : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
+      '',
+      `출력은 JSON 한 줄만: {"handNo":${handNo},"text":"..."}`,
+      'text.trim()은 비어 있으면 안 되고, 설명·마크다운·코드펜스·추가 필드는 금지한다.',
+    ].join('\n');
+    return retry
+      ? `${prompt}\n재시도 사유: 직전 출력이 기계적 JSON 계약을 만족하지 못했다. 부분 출력은 무시하고 동일 입력으로 새로 작성하라.`
+      : prompt;
+  };
+
+  const validateCoachNote = (raw, handNo, forbiddenLiterals) => {
+    const note = extractJsonLine(raw);
+    if (!note || typeof note !== 'object' || Array.isArray(note)) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 JSON 객체가 아닙니다.');
+    }
+    const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable']);
+    if (
+      note.handNo !== handNo
+      || typeof note.text !== 'string'
+      || note.text.trim() === ''
+      || (note.overfold !== undefined && note.overfold !== true)
+      || (note.unavailable !== undefined && note.unavailable !== true)
+      || Object.keys(note).some((field) => !allowed.has(field))
+    ) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력 필드 계약이 올바르지 않습니다.');
+    }
+    if (forbiddenLiterals.some((literal) => literal && note.text.includes(literal))) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력에 private literal이 포함됐습니다.');
+    }
+    return note;
+  };
+
+  const readCoachAuthority = () => readJsonOptional(coachAuthorityPath, 'COACH_AUTHORITY');
+  const coachEnvelopePathFor = (handNo, fallback = null) => (
+    readCoachAuthority()?.publishQueue?.[String(handNo)]?.exactEnvelopePath
+    ?? fallback
+  );
+
+  const executeCoachPublish = async (handNo, exactEnvelopePath) => {
+    const args = ['--from', exactEnvelopePath];
+    try {
+      return await executePublish(args);
+    } catch (error) {
+      if (error.code === 'LOCK_TIMEOUT') return executePublish(args);
+      if (error.code !== 'ATTEMPT_PENDING') throw error;
+      await executePublish([...args, '--retry']);
+      const auth = readCoachAuthority();
+      if (auth?.publishedSeals?.[String(handNo)]) return { ok: true, reconciled: true };
+      return executePublish(args);
+    }
+  };
+
+  const completeCoachUnavailable = async ({ owner, handNo, generation, reason, fallbackEnvelopePath = null }) => {
+    const args = [
+      'complete-unavailable',
+      '--owner', owner,
+      '--hand', String(handNo),
+      ...(generation == null ? [] : ['--generation', String(generation)]),
+      '--reason', reason,
+      '--snapshot-file', coachSnapshotPath,
+    ];
+    await runCoach(args);
+    const exactEnvelopePath = coachEnvelopePathFor(handNo, fallbackEnvelopePath);
+    if (!exactEnvelopePath) throw codedError('NO_COACH_ENVELOPE', `핸드 ${handNo} unavailable envelope이 없습니다.`);
+    if (stopRequested) return;
+    await executeCoachPublish(handNo, exactEnvelopePath);
+  };
+
+  const reserveCoach = (owner, handNo, attempt, statsPath) => runCoach([
+    'reserve',
+    '--owner', owner,
+    '--hand', String(handNo),
+    '--attempt', String(attempt),
+    '--consider-overfold',
+    '--stats-file', statsPath,
+    '--snapshot-file', coachSnapshotPath,
+  ]);
+
+  const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
+    const owner = readLoopState()?.ownerSessionId;
+    if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
+    const upperUsable = upperAdapter && typeof upperAdapter.oneshotStart === 'function';
+    if (coachAdapterDisabled || upperAdapter === null) {
+      appendNotice(`상위 모델 런타임이 없어 핸드 ${handNo}은 고정 코치 문구로 대체합니다.`);
+      await completeCoachUnavailable({
+        owner,
+        handNo,
+        generation: initialDescriptor?.generation,
+        reason: coachAdapterDisabled ? 'adapter-disabled' : 'upper-unavailable',
+        fallbackEnvelopePath: initialDescriptor?.exactEnvelopePath,
+      });
+      return;
+    }
+    // A non-null object that does not implement the probed interface is not a truthful
+    // upper-null result. Preserve old test adapters without pretending they generated coaching.
+    if (!upperUsable) {
+      appendNotice(`핸드 ${handNo} 코치 adapter 인터페이스가 없어 생성을 건너뜁니다.`);
+      return;
+    }
+
+    const inputs = await captureCoachInputs(handNo, prepared);
+    const deny = writeCoachDeny(handNo);
+    let descriptor = initialDescriptor ?? await reserveCoach(owner, handNo, 1, inputs.stats.path);
+    for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
+      const currentDescriptor = descriptor;
+      const prompt = buildCoachPrompt({
+        handNo,
+        inputs,
+        overfoldReserved: currentDescriptor.overfoldReserved === true,
+        retry: attempt === 2,
+      });
+      let handle = null;
+      let accepted = false;
+      let heartbeatTimedOut = false;
+      try {
+        handle = upperAdapter.oneshotStart({
+          tier: 'upper',
+          prompt,
+          timeoutMs: COACH_GENERATION_MS,
+        });
+        let interrupt;
+        const interrupted = new Promise((_, reject) => {
+          interrupt = (code = 'COACH_HEARTBEAT_TIMEOUT') => reject(codedError(
+            code,
+            code === 'COACH_RESULT_ACCEPTED'
+              ? '코치 heartbeat가 준비된 결과를 승격했습니다.'
+              : '코치 heartbeat deadline이 만료됐습니다.',
+          ));
+        });
+        const record = { handNo, generation: currentDescriptor.generation, attempt, handle, interrupt };
+        coachAttempts.set(coachAttemptKey(handNo, currentDescriptor.generation), record);
+        await runCoach([
+          'bind-handle',
+          '--owner', owner,
+          '--hand', String(handNo),
+          '--generation', String(currentDescriptor.generation),
+          '--handle', `${handle.pid}:${handle.startTime}`,
+        ]);
+        const completed = await Promise.race([handle.done, interrupted]);
+        const note = validateCoachNote(completed?.raw, handNo, deny.literals);
+        writeJsonAtomic(currentDescriptor.exactResultPath, note);
+        await runCoach([
+          'accept',
+          '--owner', owner,
+          '--hand', String(handNo),
+          '--generation', String(currentDescriptor.generation),
+          '--forbidden-file', deny.path,
+        ]);
+        accepted = true;
+        if (!stopRequested) await executeCoachPublish(handNo, currentDescriptor.exactEnvelopePath);
+        return;
+      } catch (error) {
+        if (error.code === 'COACH_RESULT_ACCEPTED') return;
+        heartbeatTimedOut = error.code === 'COACH_HEARTBEAT_TIMEOUT';
+        if (accepted) throw error;
+        if (stopRequested) return;
+        const termination = handle && typeof handle.terminate === 'function'
+          ? await handle.terminate()
+          : { confirmed: false };
+        // Only the boolean confirmation authorizes replacement. `reason` is diagnostic,
+        // never a hidden success signal.
+        if (termination?.confirmed !== true) {
+          if (!heartbeatTimedOut) {
+            await runCoach([
+              'fence',
+              '--owner', owner,
+              '--hand', String(handNo),
+              '--generation', String(currentDescriptor.generation),
+              '--reason', 'termination-unconfirmed',
+            ]);
+          }
+          await runCoach([
+            'adapter-disable',
+            '--owner', owner,
+            '--reason', 'termination-unconfirmed',
+          ]);
+          coachAdapterDisabled = true;
+          await completeCoachUnavailable({
+            owner,
+            handNo,
+            generation: currentDescriptor.generation,
+            reason: 'termination-unconfirmed',
+            fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+          });
+          return;
+        }
+        if (attempt === 1) {
+          descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
+          continue;
+        }
+        await completeCoachUnavailable({
+          owner,
+          handNo,
+          generation: currentDescriptor.generation,
+          reason: error.code ?? 'invalid-coach-output',
+          fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+        });
+        return;
+      } finally {
+        const key = coachAttemptKey(handNo, currentDescriptor.generation);
+        if (coachAttempts.get(key)?.handle === handle) {
+          coachAttempts.delete(key);
+        }
+      }
+    }
+  };
+
+  const trackCoachTask = (handNo, work) => {
+    let task;
+    task = Promise.resolve(work)
+      .catch((error) => {
+        appendNotice(`핸드 ${handNo} 코치 파이프라인 오류: ${error.code ?? 'ERROR'}`);
+        log('coach-error', { handNo, code: error.code ?? 'ERROR' });
+      })
+      .finally(() => coachTasks.delete(task));
+    coachTasks.add(task);
+    return task;
+  };
+
+  const launchCoachPipeline = (handNo, options = {}) => (
+    trackCoachTask(handNo, coachPipeline(handNo, options))
+  );
+
+  const publishQueuedCoachHand = async (handNo) => {
+    const exactEnvelopePath = coachEnvelopePathFor(handNo);
+    if (exactEnvelopePath && !stopRequested) await executeCoachPublish(handNo, exactEnvelopePath);
+  };
+
+  const beginCoachOwner = async (completed) => {
+    const owner = readLoopState()?.ownerSessionId;
+    if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
+    const hands = new Map();
+    for (let handNo = 1; handNo <= completed; handNo += 1) {
+      hands.set(handNo, await captureCoachHand(handNo));
+    }
+    const stats = await captureCoachStats('owner');
+    const begun = await runCoach([
+      'begin-owner',
+      '--owner', owner,
+      '--completed', String(completed),
+      '--stats-file', stats.path,
+      '--snapshot-file', coachSnapshotPath,
+    ]);
+    if (begun.adapterState === 'disabled' || begun.adapterState === 'unavailable') {
+      coachAdapterDisabled = true;
+    }
+    for (const descriptor of begun.descriptors ?? []) {
+      launchCoachPipeline(descriptor.handNo, {
+        descriptor,
+        prepared: { hand: hands.get(descriptor.handNo), stats },
+      });
+    }
+    for (const handNo of begun.unavailableSealed ?? []) {
+      trackCoachTask(handNo, publishQueuedCoachHand(handNo));
+    }
+    return begun;
+  };
+
+  const heartbeatCoach = async () => {
+    const owner = readLoopState()?.ownerSessionId;
+    if (typeof owner !== 'string' || owner === '') return;
+    // A fresh game has no authority until its first reserve/unavailable seal. There is
+    // nothing to heartbeat before then, and manufacturing it during bootstrap would make
+    // game startup depend on the publication lock.
+    if (!fs.existsSync(coachAuthorityPath)) return;
+    const heartbeat = await runCoach(['heartbeat', '--owner', owner]);
+    for (const action of heartbeat.actions ?? []) {
+      log('coach-heartbeat', {
+        handNo: action.handNo,
+        action: action.action,
+        generation: action.generation,
+      });
+      if (action.action === 'timeout-fence') {
+        const record = coachAttempts.get(coachAttemptKey(action.handNo, action.generation));
+        if (record) record.interrupt();
+        else {
+          await completeCoachUnavailable({
+            owner,
+            handNo: action.handNo,
+            generation: action.generation,
+            reason: 'heartbeat-timeout',
+          });
+        }
+      } else if (action.action === 'result-ready') {
+        const deny = writeCoachDeny(action.handNo);
+        await runCoach([
+          'accept',
+          '--owner', owner,
+          '--hand', String(action.handNo),
+          '--generation', String(action.generation),
+          '--forbidden-file', deny.path,
+        ]);
+        await publishQueuedCoachHand(action.handNo);
+        const record = coachAttempts.get(coachAttemptKey(action.handNo, action.generation));
+        if (record) {
+          const termination = await record.handle.terminate();
+          if (termination?.confirmed !== true) {
+            await runCoach([
+              'adapter-disable',
+              '--owner', owner,
+              '--reason', 'result-ready-termination-unconfirmed',
+            ]);
+            coachAdapterDisabled = true;
+          }
+          record.interrupt('COACH_RESULT_ACCEPTED');
+        }
+      }
+    }
+  };
+
   const checkArchivePending = async (out) => {
     if (!out?.archivePending) return;
     const handNo = Number(out.handNo);
@@ -1712,6 +2148,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       const disposalResults = await Promise.allSettled([...adapterDisposals.values()]);
       const disposalFailure = disposalResults.find((result) => result.status === 'rejected');
       if (disposalFailure) stopError ??= disposalFailure.reason;
+      // Coach work is nonblocking only with respect to the next hand. Shutdown still owns
+      // every task until the upper adapter has cancelled it and its authority/file work settles.
+      await Promise.allSettled([...coachTasks]);
       try {
         await terminateActiveChildren();
       } catch (error) {
@@ -1945,6 +2384,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         state = writeLoopState({ phase });
       }
       const resumed = await resolveForPhase(phase, engineState, state);
+      if (resumed.phase === 'playing') {
+        await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
+      }
       resumeEntryPending = resumed.phase === 'playing';
       log('resume-ready', { phase: resumed.phase });
       return resumed;
@@ -2009,7 +2451,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     while (!stopRequested) {
       await checkArchivePending(out);
       if (out.handOver) {
-        log('coach-task-6-stub', { handNo: out.handNo });
+        try {
+          await heartbeatCoach();
+        } catch (error) {
+          appendNotice(`코치 heartbeat 오류: ${error.code ?? 'ERROR'}`);
+          log('coach-heartbeat-error', { handNo: out.handNo, code: error.code ?? 'ERROR' });
+        }
+        launchCoachPipeline(out.handNo);
         const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
         if (out.gameOver || userBusted) {
           state = writeLoopState({ phase: 'finalizing', handNo: out.handNo });
@@ -2091,6 +2539,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     bootstrap,
     resume,
     run,
+    coachPipeline,
     requestStop,
     get stopping() { return stopRequested; },
     get serverPid() { return serverPid; },

@@ -106,6 +106,63 @@ function resolverFor(adapter, inspect = null) {
   };
 }
 
+function makeCoachAdapter({ rounds = [] } = {}) {
+  const prompts = [];
+  const starts = [];
+  const terminations = [];
+  const pending = new Set();
+  let disposed = 0;
+  return {
+    kind: 'coach-fake',
+    prompts,
+    starts,
+    terminations,
+    get disposed() { return disposed; },
+    oneshotStart(input) {
+      const index = starts.length;
+      const round = rounds[index] ?? {
+        raw: JSON.stringify({ handNo: 1, text: '기본 코치 응답' }),
+      };
+      prompts.push(input.prompt);
+      starts.push(input);
+      round.onStart?.(input, index);
+      let cancel;
+      const cancelled = new Promise((_, reject) => { cancel = reject; });
+      const produced = (async () => {
+        if (round.gate) await round.gate;
+        if (round.error) throw round.error;
+        return { raw: round.raw };
+      })();
+      const done = Promise.race([produced, cancelled]);
+      const entry = { cancel };
+      pending.add(entry);
+      done.finally(() => pending.delete(entry)).catch(() => {});
+      done.catch(() => {});
+      return {
+        pid: 910_000 + index,
+        startTime: `coach-start-${index}`,
+        done,
+        async terminate() {
+          const result = round.terminate ?? { confirmed: true };
+          terminations.push({ index, result });
+          round.onTerminate?.(result, index);
+          return result;
+        },
+      };
+    },
+    async dispose() {
+      disposed += 1;
+      for (const entry of pending) {
+        entry.cancel(Object.assign(new Error('fake coach disposed'), { code: 'RUNTIME_CLOSED' }));
+      }
+    },
+  };
+}
+
+function resolverForCoach(player, upper, notices = []) {
+  return async () => ({ player, upper, notices });
+}
+
 async function waitUntilDead(pid, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -698,6 +755,36 @@ async function setupAiFirst(t, {
   await loop.bootstrap({ ai, stack });
   putAiFirst(gameDir);
   return { gameDir, loop };
+}
+
+async function setupCoachHand(t, {
+  upper = makeCoachAdapter(),
+  player = makeAdapter(),
+  notices = ['fake coach runtime selected'],
+  loopOpts = {},
+  practiceFocusFile,
+} = {}) {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(player, upper, notices),
+    opts: { port: 0, waitMs: 0, ...loopOpts },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile });
+  putAiFirst(gameDir);
+  return { gameDir, loop, player, upper };
+}
+
+async function waitForCoachNote(gameDir, handNo, timeoutMs = 5_000) {
+  return waitFor(() => {
+    try {
+      const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+      return snapshot.coach?.find((note) => note.handNo === handNo) ?? null;
+    } catch {
+      return null;
+    }
+  }, `coach note for hand ${handNo} was not published`, timeoutMs);
 }
 
 async function setupUserFirst(t, { loopOpts = {}, adapter = makeAdapter() } = {}) {
@@ -2714,6 +2801,292 @@ test('AI 3 plus user reaches the Task 7 boundary through the real loop with chip
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
   assert.equal(adapter.decideCalls.length > 0, true);
   assert.equal(sent.size > 0, true);
+});
+
+test('코치는 redacted hand·stats를 reserve 전에 캡처하고 동일 stats·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
+  const events = [];
+  const coachCalls = [];
+  const engineCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      raw: JSON.stringify({ handNo: 1, text: '프리플랍 폴드는 무난합니다.' }),
+      onStart: () => events.push('oneshotStart'),
+    }],
+  });
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onEngineInvoke(args) {
+        engineCalls.push(args);
+        if (args[0] === 'hand' || args[0] === 'stats') events.push(`engine:${args[0]}`);
+      },
+      onCoachInvoke(args) {
+        coachCalls.push(args);
+        if (['reserve', 'bind-handle', 'accept'].includes(args[0])) events.push(`coach:${args[0]}`);
+        if (args[0] === 'accept') {
+          const authority = readJson(path.join(setup.gameDir, '.coach-authority.json'));
+          assert.equal(fs.existsSync(authority.hands['1'].exactResultPath), true, 'accept ran before exactResultPath was written');
+        }
+      },
+      onPublishInvoke(args) {
+        if (String(args[1] ?? '').includes('.coach-')) events.push('publish:coach');
+      },
+    },
+  });
+  const { gameDir, loop } = setup;
+  events.length = 0;
+  coachCalls.length = 0;
+  engineCalls.length = 0;
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const running = startRun(loop);
+
+  await waitForCoachNote(gameDir, 1);
+  await waitForUserSnapshot(gameDir);
+  await stopRun(loop, running);
+
+  assert.deepEqual(events.slice(0, 7), [
+    'engine:hand',
+    'engine:stats',
+    'coach:reserve',
+    'oneshotStart',
+    'coach:bind-handle',
+    'coach:accept',
+    'publish:coach',
+  ]);
+  const reserve = coachCalls.find((args) => args[0] === 'reserve');
+  assert.ok(reserve, 'reserve was not invoked');
+  const statsPath = reserve[reserve.indexOf('--stats-file') + 1];
+  const snapshotPath = reserve[reserve.indexOf('--snapshot-file') + 1];
+  assert.equal(path.resolve(snapshotPath), path.join(gameDir, 'ui-snapshot.json'));
+  const capturedStats = fs.readFileSync(statsPath, 'utf8');
+  assert.equal(upper.prompts[0].includes(capturedStats), true, 'prompt did not reuse the exact stats capture');
+  assert.equal(upper.starts[0].timeoutMs, 120_000);
+  for (const args of coachCalls.filter((args) => ['heartbeat', 'reserve', 'bind-handle', 'accept'].includes(args[0]))) {
+    assert.equal(args[args.indexOf('--owner') + 1], owner, `${args[0]} minted a per-hand owner`);
+    assert.equal(args[args.indexOf('--game-dir') + 1], gameDir, `${args[0]} omitted --game-dir`);
+  }
+  for (const args of engineCalls.filter((args) => args[0] === 'hand' || args[0] === 'stats')) {
+    assert.equal(args[args.indexOf('--game-dir') + 1], gameDir, `${args[0]} omitted --game-dir`);
+  }
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authority.activeOwnerSessionId, owner);
+  assert.ok(authority.publishedSeals['1']);
+  assert.equal(authority.retiredAttempts.every((row) => row.ownerSessionId === owner), true);
+});
+
+test('코치 프롬프트는 상대 비공개 홀카드와 아키타입 literal을 감추고 deny 파일로만 검증한다', { timeout: 15_000 }, async (t) => {
+  let forbiddenFile = null;
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '공개 액션만 보면 무난한 폴드입니다.' }) }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] === 'accept') forbiddenFile = args[args.indexOf('--forbidden-file') + 1];
+      },
+    },
+  });
+  const players = readJson(path.join(gameDir, 'players.json'));
+  const villain = players.find((player) => player.playerId === 'p1');
+  Object.assign(villain, {
+    archetype: 'PRIVATE_ARCHETYPE_SENTINEL',
+    personality: 'PRIVATE_PERSONALITY_SENTINEL',
+    bluffFreq: 0.731927,
+    threeBetFreq: 0.418263,
+    tiltProne: true,
+  });
+  fs.writeFileSync(path.join(gameDir, 'players.json'), JSON.stringify(players));
+  const running = startRun(loop);
+
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  const record = readJson(path.join(gameDir, 'state.json')).lastHand;
+  const privateCards = record.holes.p1;
+  const prompt = upper.prompts[0];
+  for (const literal of [
+    ...privateCards,
+    villain.archetype,
+    villain.personality,
+    String(villain.bluffFreq),
+    String(villain.threeBetFreq),
+  ]) {
+    assert.equal(prompt.includes(literal), false, `private literal leaked into prompt: ${literal}`);
+  }
+  const deny = readJson(forbiddenFile);
+  for (const literal of [...privateCards, villain.archetype, villain.personality]) {
+    assert.equal(deny.includes(literal), true, `deny file omitted ${literal}`);
+  }
+  assert.equal(path.dirname(forbiddenFile), gameDir);
+});
+
+test('코치 oneshot은 spawn 직후 done을 기다리기 전에 pid:startTime을 bind-handle한다', { timeout: 15_000 }, async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  let released = false;
+  const order = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate,
+      raw: JSON.stringify({ handNo: 1, text: '바인드 후 생성을 완료했습니다.' }),
+      onStart: () => order.push('spawn'),
+    }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] !== 'bind-handle') return;
+        assert.equal(released, false, 'done settled before bind-handle');
+        order.push('bind');
+        assert.equal(args[args.indexOf('--handle') + 1], '910000:coach-start-0');
+      },
+    },
+  });
+  const running = startRun(loop);
+
+  await waitFor(() => order.includes('bind'), 'bind-handle was not invoked');
+  released = true;
+  release();
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.deepEqual(order, ['spawn', 'bind']);
+});
+
+test('코치 1차 빈 text는 종료 확인 후 동일 입력 attempt 2로 교체하고 2차 실패는 generation 포함 unavailable로 봉인한다', { timeout: 15_000 }, async (t) => {
+  const coachCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [
+      { raw: JSON.stringify({ handNo: 1, text: '   ' }), terminate: { confirmed: true, reason: 'closed-one' } },
+      { raw: JSON.stringify({ handNo: 1, text: '' }), terminate: { confirmed: true, reason: 'closed-two' } },
+    ],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: { onCoachInvoke: (args) => coachCalls.push(args) },
+  });
+  const running = startRun(loop);
+
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(note.unavailable, true);
+  assert.equal(upper.starts.length, 2);
+  assert.equal(upper.terminations.length, 2);
+  const statsRaw = fs.readFileSync(path.join(gameDir, '.coach-stats-1.json'), 'utf8');
+  assert.equal(upper.prompts[0].includes(statsRaw), true);
+  assert.equal(upper.prompts[1].includes(statsRaw), true);
+  const reserves = coachCalls.filter((args) => args[0] === 'reserve');
+  assert.deepEqual(reserves.map((args) => args[args.indexOf('--attempt') + 1]), ['1', '2']);
+  const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
+  assert.ok(unavailable, 'complete-unavailable was not invoked');
+  assert.match(unavailable[unavailable.indexOf('--generation') + 1], /^\d+$/);
+  assert.equal(unavailable[unavailable.indexOf('--snapshot-file') + 1], path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(coachCalls.filter((args) => args[0] === 'bind-handle').length, 2);
+});
+
+test('코치 terminate confirmed:false는 reason과 무관하게 교체를 금지하고 fence·adapter-disable 후 다음 핸드를 unavailable로 처리한다', { timeout: 20_000 }, async (t) => {
+  const coachCalls = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      raw: JSON.stringify({ handNo: 1, text: '' }),
+      terminate: { confirmed: false, reason: 'reason-must-not-control-the-branch' },
+    }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: { onCoachInvoke: (args) => coachCalls.push(args) },
+  });
+  const running = startRun(loop);
+  const first = await waitForCoachNote(gameDir, 1);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  assert.equal(snapshot.view.handNo, 2);
+  await postUserAction(lock, {
+    decisionId: snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+  const second = await waitForCoachNote(gameDir, 2);
+  await stopRun(loop, running);
+
+  assert.equal(first.unavailable, true);
+  assert.equal(second.unavailable, true);
+  assert.equal(upper.starts.length, 1, 'confirmed:false incorrectly allowed a replacement or later spawn');
+  const verbs = coachCalls.map((args) => args[0]);
+  assert.equal(verbs.includes('fence'), true);
+  assert.equal(verbs.includes('adapter-disable'), true);
+  const completes = coachCalls.filter((args) => args[0] === 'complete-unavailable');
+  assert.equal(completes.length >= 2, true);
+  assert.notEqual(completes[0].indexOf('--generation'), -1, 'fenced current generation was omitted');
+  assert.equal(completes.some((args) => args.indexOf('--generation') === -1), true, 'future unavailable path reserved a generation');
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).adapterState, 'disabled');
+});
+
+test('코치 1회성 생성이 느려도 다음 핸드 publish를 막지 않는다', { timeout: 15_000 }, async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const upper = makeCoachAdapter({
+    rounds: [{ gate, raw: JSON.stringify({ handNo: 1, text: '늦은 코치' }) }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, { upper, loopOpts: { waitMs: 200 } });
+  const running = startRun(loop);
+
+  const nextHand = await waitForUserSnapshot(gameDir);
+  assert.equal(nextHand.snapshot.view.handNo, 2);
+  await waitFor(() => upper.starts.length === 1, 'slow coach oneshot did not start');
+  assert.equal(upper.starts.length, 1);
+  assert.equal((readJson(path.join(gameDir, 'ui-snapshot.json')).coach ?? []).length, 0);
+
+  release();
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.disposed, 1);
+});
+
+test('practiceFocus 파일이 있으면 코치 프롬프트에 인라인된다', { timeout: 15_000 }, async (t) => {
+  const focusSource = path.join(os.tmpdir(), `holdem-coach-focus-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(focusSource, JSON.stringify({ focus: 'TURN_BARREL_SENTINEL' }));
+  t.after(() => { try { fs.unlinkSync(focusSource); } catch { /* already gone */ } });
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '연습 포커스를 반영했습니다.' }) }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, { upper, practiceFocusFile: focusSource });
+  const running = startRun(loop);
+
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(upper.prompts[0].includes('TURN_BARREL_SENTINEL'), true);
+  assert.equal(upper.prompts[0].includes('practiceFocus'), true);
+});
+
+test('upperAdapter가 null이면 oneshot·reserve 없이 snapshot을 전달한 complete-unavailable만 거쳐 다음 핸드로 간다', { timeout: 15_000 }, async (t) => {
+  const coachCalls = [];
+  const { gameDir, loop, player } = await setupCoachHand(t, {
+    upper: null,
+    notices: ['upper unavailable from resolver'],
+    loopOpts: { onCoachInvoke: (args) => coachCalls.push(args) },
+  });
+  const running = startRun(loop);
+
+  const note = await waitForCoachNote(gameDir, 1);
+  const nextHand = await waitForUserSnapshot(gameDir);
+  await stopRun(loop, running);
+
+  assert.equal(note.unavailable, true);
+  assert.equal(nextHand.snapshot.view.handNo, 2);
+  assert.equal(typeof player.oneshotStart, 'undefined');
+  assert.equal(coachCalls.some((args) => args[0] === 'reserve'), false);
+  const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
+  assert.ok(unavailable);
+  assert.equal(unavailable.indexOf('--generation'), -1);
+  assert.equal(unavailable[unavailable.indexOf('--snapshot-file') + 1], path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(unavailable[unavailable.indexOf('--game-dir') + 1], gameDir);
+  const notices = readJson(path.join(gameDir, 'loop-state.json')).notices;
+  assert.equal(notices.some((notice) => notice.includes('핸드 1') && notice.includes('고정 코치 문구')), true);
 });
 
 test('requestStop lets the in-flight step+publish unit commit before child and server cleanup', { timeout: 15_000 }, async (t) => {
