@@ -93,6 +93,41 @@ async function seedQueuedCoach(gameDir, owner, handNo = 1) {
   return reserved;
 }
 
+async function seedRunningCoach(gameDir, owner, handNo, child) {
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, `.seed-running-coach-stats-${handNo}.json`);
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  const reserved = await runCoachCli(gameDir, [
+    'reserve', '--owner', owner, '--hand', String(handNo), '--attempt', '1',
+    '--stats-file', statsPath,
+    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+  ]);
+  const startTime = await waitFor(
+    () => processStartTime(child.pid),
+    `coach orphan ${child.pid} start identity was not observable`,
+  );
+  await runCoachCli(gameDir, [
+    'bind-handle', '--owner', owner, '--hand', String(handNo),
+    '--generation', String(reserved.generation), '--handle', `${child.pid}:${startTime}`,
+  ]);
+  return { ...reserved, startTime };
+}
+
+async function startCoachOrphan({ ignoreTerm = true } = {}) {
+  const script = `
+    ${ignoreTerm ? "process.on('SIGTERM', () => {});" : ''}
+    process.stdout.write('ready\\n');
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['-e', script], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  assert.equal(await readLine(child), 'ready');
+  return child;
+}
+
 function makeAdapter({
   kind = 'fake',
   delayMs = 0,
@@ -4997,6 +5032,225 @@ test('종료: 마지막 핸드 코치를 재-reserve하지 않고 finalizing 체
   assert.equal(flagValue(cutoff[0], '--completed'), '1');
 });
 
+test('Task 7A r1: cutoff 커밋 뒤 crash-resume은 pending Q를 owner 교대 중 게시하지 않고 새 deadline으로만 drain한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedQueuedCoach(gameDir, 'old-owner', 1);
+  const stats = await cliJson(gameDir, ['stats']);
+  const statsPath = path.join(gameDir, '.post-cutoff-crash-stats.json');
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  const sealed = await runCoachCli(gameDir, [
+    'finalize-cutoff', '--owner', 'old-owner', '--completed', '1',
+    '--stats-file', statsPath, '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+    '--termination-confirmed', 'true',
+  ]);
+  assert.equal(sealed.reviewGate, 'open');
+  const before = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(before.finalization.status, 'SEALED');
+  assert.equal(before.noNewPlayTimePublishers, true);
+  assert.ok(before.publishQueue['1']);
+
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  const resumed = await loop.resume();
+  assert.equal(resumed.phase, 'finalizing');
+  assert.equal(publishInvocations(calls).length, 0, 'resume owner 교대가 cutoff Q를 먼저 게시했다');
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
+  const firstPublishAt = calls.findIndex((call) => call.kind === 'publish');
+  assert.notEqual(cutoffAt, -1);
+  assert.equal(firstPublishAt > cutoffAt, true, 'pending Q가 cutoff transaction보다 먼저 게시됐다');
+  const publishes = publishInvocations(calls);
+  assert.equal(publishes.length, 1);
+  assert.match(flagValue(publishes[0], '--deadline-monotonic-ns'), /^\d+$/);
+  assert.equal(upper.starts.length, 0);
+  const after = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.deepEqual(after.publishQueue, {});
+  assert.ok(after.publishedSeals['1']);
+});
+
+test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫은 뒤에만 replacement를 시작한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphans = [await startCoachOrphan(), await startCoachOrphan()];
+  for (const child of orphans) t.after(() => terminateIfAlive(child));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphans[0]);
+  await seedRunningCoach(gameDir, 'old-owner', 2, orphans[1]);
+
+  const signals = [];
+  let liveAtReplacement = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      onStart: () => {
+        liveAtReplacement = orphans.filter((child) => {
+          try { process.kill(child.pid, 0); return true; } catch (error) {
+            if (error.code === 'ESRCH') return false;
+            throw error;
+          }
+        }).map((child) => child.pid);
+      },
+      raw: JSON.stringify({ handNo: 1, text: 'persisted worker closure 뒤 replacement' }),
+    }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 2_000,
+      finalizeCutoffLeadMs: 1_200,
+      orphanTerminateGraceMs: 180,
+      orphanTerminateKillWaitMs: 180,
+      signalProcess: (pid, signal) => {
+        if (orphans.some((child) => child.pid === pid)) signals.push({ pid, signal, at: Date.now() });
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  await loop.resume();
+  await waitFor(() => upper.starts.length === 1, 'replacement coach did not start');
+  await Promise.all(orphans.map((child) => waitUntilDead(child.pid)));
+
+  assert.deepEqual(liveAtReplacement, [], 'persisted worker와 replacement generation이 겹쳤다');
+  const terms = signals.filter((entry) => entry.signal === 'SIGTERM');
+  assert.equal(terms.length, 2);
+  assert.equal(Math.abs(terms[0].at - terms[1].at) < 80, true, 'persisted workers를 순차 종료했다');
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+});
+
+test('Task 7A r1: identity가 불명인 persisted worker는 signal·replacement 없이 fence되고 review gate를 잠근다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].agentHandle = `${orphan.pid}:identity-does-not-match`;
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+
+  const signalled = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 1_500,
+      finalizeCutoffLeadMs: 1_000,
+      signalProcess: (pid, signal) => {
+        signalled.push({ pid, signal });
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
+  assert.equal(upper.starts.length, 0, 'identity 미확인 worker 위에 replacement를 스폰했다');
+  const after = readJson(authorityPath);
+  assert.equal(after.adapterState, 'disabled');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reviewGate, 'closed');
+});
+
+test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spawn/bind하지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let releaseCapture;
+  const captureGate = new Promise((resolve) => { releaseCapture = resolve; });
+  t.after(() => releaseCapture());
+  let captureEntered;
+  const entered = new Promise((resolve) => { captureEntered = resolve; });
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: new Promise(() => {}),
+      raw: JSON.stringify({ handNo: 1, text: 'cutoff 뒤 시작하면 안 되는 worker' }),
+    }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      finalizeBudgetMs: 1_200,
+      finalizeCutoffLeadMs: 1_200,
+      coachCaptureCheckpoint: async () => {
+        captureEntered();
+        await captureGate;
+      },
+    },
+  });
+
+  await loop.resume();
+  // The checkpoint is a deterministic scheduler only. Against the old implementation it
+  // is absent, so continue after one short turn and let the behavior assertions prove the
+  // worker crossed cutoff instead of hanging on the missing hook.
+  await Promise.race([
+    entered,
+    new Promise((resolve) => setTimeout(resolve, 100)),
+  ]);
+  const running = startRun(loop);
+  await waitFor(
+    () => Boolean(readJson(path.join(gameDir, 'loop-state.json')).finalization),
+    'finalization checkpoint did not appear',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  releaseCapture();
+  await assert.rejects(running, (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+
+  assert.equal(upper.starts.length, 0, 'capture 뒤 cutoff를 재확인하지 않고 worker를 시작했다');
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.terminationConfirmed, true);
+});
+
+test('Task 7A r1: held coach-control lock은 finalDeadline에서 종료 시도 전체를 abort하고 review gate를 잠근다', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      finalizeBudgetMs: 250,
+      finalizeCutoffLeadMs: 150,
+      childTimeoutMs: 5_000,
+    },
+  });
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    held.release();
+  };
+  const timer = setTimeout(release, 700);
+  t.after(async () => {
+    clearTimeout(timer);
+    release();
+    await held.done;
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(elapsed < 650, true, `deadline abort가 lock release까지 ${elapsed}ms 기다렸다`);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
+  assert.equal(state.finalization.cutoff.reason, 'deadline_exceeded');
+  assert.equal(state.finalization.cutoff.reviewGate, 'closed');
+  assert.equal(upper.starts.length, 0);
+});
+
 test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행하고 봉인된 핸드를 재스폰하지 않는다', { timeout: 40_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -5012,6 +5266,7 @@ test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행
   });
 
   const resumed = await loop.resume();
+  assert.equal(publishInvocations(calls).length, 0, 'pre-cutoff Q를 owner 교대 중 drain했다');
   await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
 
   assert.notEqual(resumed.ownerSessionId, 'old-owner');
@@ -5024,6 +5279,10 @@ test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행
   assert.equal(cutoff.length, 1);
   assert.equal(flagValue(cutoff[0], '--owner'), resumed.ownerSessionId);
   assert.equal(flagValue(cutoff[0], '--completed'), '1');
+  const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
+  const publishAt = calls.findIndex((call) => call.kind === 'publish');
+  assert.equal(publishAt > cutoffAt, true, 'pre-cutoff Q가 cutoff보다 먼저 게시됐다');
+  assert.match(flagValue(publishInvocations(calls)[0], '--deadline-monotonic-ns'), /^\d+$/);
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   assert.equal(authority.finalization.status, 'SEALED');
   assert.equal(authority.activeOwnerSessionId, resumed.ownerSessionId);

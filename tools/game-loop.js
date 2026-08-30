@@ -240,6 +240,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     opts.finalizeCutoffLeadMs ?? FINALIZE_CUTOFF_LEAD_MS,
     finalizeBudgetMs,
   );
+  const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? 5_000;
+  const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
@@ -277,6 +279,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
   let finalizeResultWaitCutoffNs = null;
+  let finalizationDeadlineNs = null;
+  let finalizationDeadlineStartedAt = null;
+  let finalizationPriorTerminationConfirmed = true;
 
   // §9.2 (2): during the finalizing result-wait window a failed attempt may only be
   // replaced while at least 5s of that window remain. Outside finalization the play-time
@@ -291,9 +296,35 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   // still-missing hand in one transaction and the residual drain publishes it.
   const coachWorkSuspended = () => stopRequested || finalizationCutoff;
 
+  // During finalization every accepted note remains in the owner-neutral Q until the
+  // cutoff transaction has stopped play-time publishers. The residual drain is the only
+  // publication path and carries the same final deadline.
+  const coachPublicationDeferred = () => (
+    coachWorkSuspended() || finalizationDeadlineNs !== null
+  );
+
   const remainingMsUntil = (deadlineNs) => {
     const left = deadlineNs - monotonicNs();
     return left <= 0n ? 0 : Math.ceil(Number(left) / 1e6);
+  };
+
+  const finalizationDeadlineError = () => codedError(
+    'FINALIZATION_DEADLINE_EXCEEDED',
+    'finalization 공통 deadline이 만료됐습니다.',
+  );
+
+  const ensureFinalizationDeadline = () => {
+    if (finalizationDeadlineNs === null) {
+      finalizationDeadlineNs = monotonicNs() + BigInt(finalizeBudgetMs) * 1_000_000n;
+      finalizationDeadlineStartedAt = isoNow(now);
+    }
+    return finalizationDeadlineNs;
+  };
+
+  const assertFinalizationDeadline = () => {
+    if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
+      throw finalizationDeadlineError();
+    }
   };
 
   const settleOrTimeout = async (promise, ms) => {
@@ -302,6 +333,25 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       return await Promise.race([
         promise.then(() => true, () => true),
         new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  };
+
+  const settleValueBeforeDeadline = async (promise, deadlineNs) => {
+    const remaining = remainingMsUntil(deadlineNs);
+    if (remaining <= 0) return { settled: false };
+    let timer = null;
+    try {
+      return await Promise.race([
+        Promise.resolve(promise).then(
+          (value) => ({ settled: true, value }),
+          (error) => ({ settled: true, error }),
+        ),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ settled: false }), remaining);
+        }),
       ]);
     } finally {
       if (timer !== null) clearTimeout(timer);
@@ -552,35 +602,53 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return Math.max(childTimeoutMs, boundedWait + waitNetworkMarginMs);
   };
 
-  const runJsonChild = (script, args) => new Promise((resolve, reject) => {
-    const childArgs = [...args, '--game-dir', root];
-    const argv = [script, ...childArgs];
-    if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
-    if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
-    const child = execFile(process.execPath, argv, {
-      encoding: 'utf8',
-      timeout: timeoutForChild(args),
-      maxBuffer: 4 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      activeChildren.delete(child);
-      let envelope = null;
-      try { envelope = JSON.parse(String(stdout).trim()); } catch { /* classified below */ }
-      if (error || envelope?.ok === false) {
-        reject(codedError(
-          envelope?.code ?? error?.code ?? 'CHILD_FAILED',
-          envelope?.message ?? String(stderr).trim() ?? '자식 프로세스가 실패했습니다.',
-          { cause: error, envelope },
-        ));
-        return;
-      }
-      if (!envelope || envelope.ok !== true) {
-        reject(codedError('BAD_CHILD_OUTPUT', `${path.basename(script)} 출력이 JSON 성공 envelope가 아닙니다.`));
-        return;
-      }
-      resolve(envelope);
+  const runJsonChild = (script, args) => {
+    const deadlineNs = finalizationDeadlineNs;
+    const ordinaryTimeout = timeoutForChild(args);
+    const deadlineRemaining = deadlineNs === null ? null : remainingMsUntil(deadlineNs);
+    if (deadlineRemaining !== null && deadlineRemaining <= 0) {
+      return Promise.reject(finalizationDeadlineError());
+    }
+    const deadlineLimited = deadlineRemaining !== null && deadlineRemaining <= ordinaryTimeout;
+    const timeout = deadlineLimited ? Math.max(1, deadlineRemaining) : ordinaryTimeout;
+    return new Promise((resolve, reject) => {
+      const childArgs = [...args, '--game-dir', root];
+      const argv = [script, ...childArgs];
+      if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
+      if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
+      const child = execFile(process.execPath, argv, {
+        encoding: 'utf8',
+        timeout,
+        maxBuffer: 4 * 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        activeChildren.delete(child);
+        let envelope = null;
+        try { envelope = JSON.parse(String(stdout).trim()); } catch { /* classified below */ }
+        if (error || envelope?.ok === false) {
+          if (
+            deadlineNs !== null
+            && (envelope?.code === 'DEADLINE_EXPIRED'
+              || (deadlineLimited && (error?.code === 'ETIMEDOUT' || error?.killed === true)))
+          ) {
+            reject(finalizationDeadlineError());
+            return;
+          }
+          reject(codedError(
+            envelope?.code ?? error?.code ?? 'CHILD_FAILED',
+            envelope?.message ?? String(stderr).trim() ?? '자식 프로세스가 실패했습니다.',
+            { cause: error, envelope },
+          ));
+          return;
+        }
+        if (!envelope || envelope.ok !== true) {
+          reject(codedError('BAD_CHILD_OUTPUT', `${path.basename(script)} 출력이 JSON 성공 envelope가 아닙니다.`));
+          return;
+        }
+        resolve(envelope);
+      });
+      activeChildren.add(child);
     });
-    activeChildren.add(child);
-  });
+  };
 
   const runCli = (args) => runJsonChild(ENGINE_CLI, args);
   const runCoach = (args) => runJsonChild(COACH_CLI, args);
@@ -1773,6 +1841,166 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const readCoachAuthority = () => readJsonOptional(coachAuthorityPath, 'COACH_AUTHORITY');
+
+  const parsePersistedCoachHandle = (raw) => {
+    if (typeof raw !== 'string') return null;
+    const separator = raw.indexOf(':');
+    if (separator <= 0 || separator === raw.length - 1) return null;
+    const pid = Number(raw.slice(0, separator));
+    const startTime = raw.slice(separator + 1);
+    if (!Number.isSafeInteger(pid) || pid < 1 || startTime === '') return null;
+    return { pid, startTime };
+  };
+
+  const persistedCoachIdentityState = ({ pid, startTime }) => {
+    if (!processAlive(pid)) return 'dead';
+    const current = processStartTime(pid);
+    if (current === null) return 'unknown';
+    return current === startTime ? 'alive' : 'mismatch';
+  };
+
+  const waitForPersistedCoachDeath = async (identity, maxWaitMs, deadlineNs) => {
+    const phaseDeadline = monotonicNs() + BigInt(Math.max(0, maxWaitMs)) * 1_000_000n;
+    const deadline = phaseDeadline < deadlineNs ? phaseDeadline : deadlineNs;
+    for (;;) {
+      const state = persistedCoachIdentityState(identity);
+      if (state !== 'alive') return state;
+      const remaining = remainingMsUntil(deadline);
+      if (remaining <= 0) return persistedCoachIdentityState(identity);
+      await sleep(Math.min(pollMs, remaining));
+    }
+  };
+
+  const terminatePersistedCoachAttempt = async (attempt, deadlineNs, {
+    allowCurrentReservedWithoutHandle = false,
+  } = {}) => {
+    if (
+      allowCurrentReservedWithoutHandle
+      && attempt.source === 'active'
+      && attempt.status === 'reserved'
+      && !attempt.agentHandle
+    ) {
+      return { confirmed: true, reason: 'NOT_SPAWNED' };
+    }
+    const identity = parsePersistedCoachHandle(attempt.agentHandle);
+    if (!identity) return { confirmed: false, reason: 'IDENTITY_UNAVAILABLE' };
+    let state = persistedCoachIdentityState(identity);
+    if (state === 'dead') return { confirmed: true };
+    if (state !== 'alive') return { confirmed: false, reason: `IDENTITY_${state.toUpperCase()}` };
+
+    try {
+      signalProcess(identity.pid, 'SIGTERM');
+    } catch (error) {
+      if (error.code !== 'ESRCH') return { confirmed: false, reason: 'SIGNAL_FAILED' };
+    }
+    state = await waitForPersistedCoachDeath(identity, orphanTerminateGraceMs, deadlineNs);
+    if (state === 'dead') return { confirmed: true };
+    if (state !== 'alive') return { confirmed: false, reason: `IDENTITY_${state.toUpperCase()}` };
+    if (remainingMsUntil(deadlineNs) <= 0) return { confirmed: false, reason: 'DEADLINE_EXCEEDED' };
+
+    try {
+      signalProcess(identity.pid, 'SIGKILL');
+    } catch (error) {
+      if (error.code !== 'ESRCH') return { confirmed: false, reason: 'SIGNAL_FAILED' };
+    }
+    state = await waitForPersistedCoachDeath(identity, orphanTerminateKillWaitMs, deadlineNs);
+    if (state === 'dead') return { confirmed: true };
+    return {
+      confirmed: false,
+      reason: state === 'alive' ? 'STILL_ALIVE' : `IDENTITY_${state.toUpperCase()}`,
+    };
+  };
+
+  const persistedCoachAttempts = () => {
+    const auth = readCoachAuthority();
+    if (!auth) return { owner: null, attempts: [] };
+    const owner = auth.activeOwnerSessionId;
+    const attempts = [];
+    for (const [handKey, hand] of Object.entries(auth.hands ?? {})) {
+      if (!['reserved', 'running'].includes(hand?.status)
+        && !(hand?.status === 'terminal' && hand?.resultState === 'unread')) continue;
+      attempts.push({
+        source: 'active',
+        handNo: Number(handKey),
+        generation: hand.generation,
+        status: hand.status,
+        agentHandle: hand.agentHandle,
+        cleanupAuthorized: true,
+      });
+    }
+    for (const row of auth.retiredAttempts ?? []) {
+      if (['released', 'cancelled'].includes(row?.cleanupState)) continue;
+      const reclaimable = row?.ownerSessionId === owner
+        || (row?.cleanupEligible === true && row?.replacementGeneration != null);
+      const unresolved = ['termination_unconfirmed', 'release_failed'].includes(row?.cleanupState);
+      if (!reclaimable && !unresolved) continue;
+      if (typeof row?.agentHandle !== 'string' && !unresolved) continue;
+      attempts.push({
+        source: 'retired',
+        handNo: row.handNo,
+        generation: row.generation,
+        status: row.cleanupState,
+        agentHandle: row.agentHandle,
+        cleanupAuthorized: reclaimable,
+      });
+    }
+    return { owner, attempts };
+  };
+
+  const closePersistedCoachWorkers = async ({ allowCurrentReservedWithoutHandle = false } = {}) => {
+    const deadlineNs = ensureFinalizationDeadline();
+    const { owner, attempts } = persistedCoachAttempts();
+    if (attempts.length === 0) return true;
+    if (typeof owner !== 'string' || owner === '') {
+      throw codedError('NO_COACH_OWNER', 'persisted 코치 worker를 정리할 owner가 없습니다.');
+    }
+    const outcomes = await Promise.all(attempts.map(async (attempt) => ({
+      attempt,
+      result: await terminatePersistedCoachAttempt(attempt, deadlineNs, {
+        allowCurrentReservedWithoutHandle,
+      }),
+    })));
+    let confirmed = true;
+    for (const { attempt, result } of outcomes) {
+      if (attempt.source === 'active') {
+        try {
+          await runCoach([
+            'fence', '--owner', owner,
+            '--hand', String(attempt.handNo),
+            '--generation', String(attempt.generation),
+            '--reason', result.confirmed ? 'finalize-persisted-closed' : 'finalize-persisted-unconfirmed',
+          ]);
+        } catch (error) {
+          if (error.code !== 'STALE_GENERATION') throw error;
+        }
+      }
+      if (attempt.cleanupAuthorized) {
+        await runCoach([
+          'cleanup-result', '--owner', owner,
+          '--hand', String(attempt.handNo),
+          '--generation', String(attempt.generation),
+          '--cleanup-state', result.confirmed ? 'released' : 'termination_unconfirmed',
+        ]);
+      }
+      if (result.confirmed !== true) {
+        confirmed = false;
+        log('finalize-persisted-unconfirmed', {
+          handNo: attempt.handNo,
+          generation: attempt.generation,
+          reason: result.reason,
+        });
+      }
+    }
+    if (!confirmed) {
+      await runCoach([
+        'adapter-disable', '--owner', owner,
+        '--reason', 'finalize-persisted-termination-unconfirmed',
+      ]);
+      coachAdapterDisabled = true;
+    }
+    return confirmed;
+  };
+
   const coachEnvelopePathFor = (handNo, fallback = null) => (
     readCoachAuthority()?.publishQueue?.[String(handNo)]?.exactEnvelopePath
     ?? fallback
@@ -1860,7 +2088,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     await runCoach(args);
     const exactEnvelopePath = coachEnvelopePathFor(handNo, fallbackEnvelopePath);
     if (!exactEnvelopePath) throw codedError('NO_COACH_ENVELOPE', `핸드 ${handNo} unavailable envelope이 없습니다.`);
-    if (coachWorkSuspended()) return;
+    if (coachPublicationDeferred()) return;
     await executeCoachPublish(handNo, exactEnvelopePath);
   };
 
@@ -1907,9 +2135,14 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }
 
     const inputs = await captureCoachInputs(handNo, prepared);
+    if (typeof opts.coachCaptureCheckpoint === 'function') {
+      await opts.coachCaptureCheckpoint({ handNo });
+    }
+    if (coachWorkSuspended()) return;
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
+      if (coachWorkSuspended()) return;
       try {
         descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
       } catch (reserveError) {
@@ -1927,6 +2160,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         return;
       }
     }
+    if (coachWorkSuspended()) return;
     for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
       const currentDescriptor = descriptor;
       const prompt = buildCoachPrompt({
@@ -1939,6 +2173,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       let accepted = false;
       let heartbeatTimedOut = false;
       try {
+        if (coachWorkSuspended()) return;
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
           prompt,
@@ -1955,6 +2190,15 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         });
         const record = { handNo, generation: currentDescriptor.generation, attempt, handle, interrupt };
         coachAttempts.set(coachAttemptKey(handNo, currentDescriptor.generation), record);
+        if (coachWorkSuspended()) {
+          const deadlineNs = ensureFinalizationDeadline();
+          const stopped = await settleValueBeforeDeadline(handle.terminate(), deadlineNs);
+          if (!stopped.settled || stopped.error || stopped.value?.confirmed !== true) {
+            finalizationPriorTerminationConfirmed = false;
+          }
+          interrupt('COACH_FINALIZE_CUTOFF');
+          return;
+        }
         await runCoach([
           'bind-handle',
           '--owner', owner,
@@ -1975,7 +2219,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         accepted = true;
         // A cutoff between accept and publish leaves this hand in the authority Q; the
         // post-cutoff residual drain owns it from there.
-        if (!coachWorkSuspended()) await executeCoachPublish(handNo, currentDescriptor.exactEnvelopePath);
+        if (!coachPublicationDeferred()) await executeCoachPublish(handNo, currentDescriptor.exactEnvelopePath);
         return;
       } catch (error) {
         if (error.code === 'COACH_RESULT_ACCEPTED') return;
@@ -2023,6 +2267,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           });
           return;
         }
+        if (coachWorkSuspended()) return;
         if (attempt === 1) {
           if (!coachReplacementAllowed()) {
             appendNotice(`핸드 ${handNo} 코치 교체 예산(5초)이 남지 않아 고정 문구로 대체합니다.`);
@@ -2036,6 +2281,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
             return;
           }
           try {
+            if (coachWorkSuspended()) return;
             descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
           } catch (reserveError) {
             if (reserveError.code !== 'ADAPTER_DISABLED') throw reserveError;
@@ -2098,7 +2344,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const publishQueuedCoachHand = async (handNo) => {
     const exactEnvelopePath = coachEnvelopePathFor(handNo);
-    if (exactEnvelopePath && !coachWorkSuspended()) await executeCoachPublish(handNo, exactEnvelopePath);
+    if (exactEnvelopePath && !coachPublicationDeferred()) await executeCoachPublish(handNo, exactEnvelopePath);
   };
 
   const drainQueuedCoachPublications = async ({ reconcileOnly = false } = {}) => {
@@ -2159,7 +2405,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }
   };
 
-  const beginCoachOwner = async (completed) => {
+  const beginCoachOwner = async (completed, { drainQueued = true } = {}) => {
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const reconcileOnly = readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING';
@@ -2177,21 +2423,23 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     // begin-owner has already reconciled the snapshot and atomically selected missing
     // descriptors. Existing owner-neutral Q must become visible before any new worker or
     // turn publication can overtake it; sealedSkipped is never a spawn list.
-    try {
-      await drainQueuedCoachPublications({ reconcileOnly });
-    } catch (error) {
-      if (error.code === 'COACH_RECONCILE_PENDING') {
-        writeLoopState({
-          halt: {
-            code: 'COACH_RECONCILE_PENDING',
-            message: error.message,
-          },
-        });
+    if (drainQueued) {
+      try {
+        await drainQueuedCoachPublications({ reconcileOnly });
+      } catch (error) {
+        if (error.code === 'COACH_RECONCILE_PENDING') {
+          writeLoopState({
+            halt: {
+              code: 'COACH_RECONCILE_PENDING',
+              message: error.message,
+            },
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
-    if (readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING') {
-      writeLoopState({ halt: undefined });
+      if (readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING') {
+        writeLoopState({ halt: undefined });
+      }
     }
     for (const descriptor of begun.descriptors ?? []) {
       if (stopRequested) break;
@@ -2331,33 +2579,53 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   // §9.2 (3): the sidecar owns termination; coach-control only records the boolean the
   // sidecar proves here. Only a positive confirmation authorizes an open review gate —
   // an unconfirmed worker is fenced and disables the adapter exactly as in play time.
-  const terminateLiveCoachGenerations = async (owner) => {
-    let confirmed = true;
-    for (const [key, record] of [...coachAttempts]) {
-      let termination = null;
+  const terminateLiveCoachGenerations = async (owner, deadlineNs) => {
+    const records = [...coachAttempts.values()];
+    const outcomes = await Promise.all(records.map(async (record) => {
+      let invocation;
       try {
-        termination = await record.handle.terminate();
+        invocation = record.handle.terminate();
       } catch (error) {
-        log('finalize-terminate-error', { handNo: record.handNo, code: error.code ?? 'ERROR' });
+        invocation = Promise.reject(error);
       }
-      if (termination?.confirmed !== true) {
-        confirmed = false;
+      const settled = await settleValueBeforeDeadline(invocation, deadlineNs);
+      if (settled.error) {
+        log('finalize-terminate-error', {
+          handNo: record.handNo,
+          code: settled.error.code ?? 'ERROR',
+        });
+      }
+      return {
+        record,
+        confirmed: settled.settled && !settled.error && settled.value?.confirmed === true,
+      };
+    }));
+
+    let confirmed = true;
+    for (const outcome of outcomes) {
+      if (!outcome.confirmed) confirmed = false;
+      outcome.record.interrupt('COACH_FINALIZE_CUTOFF');
+    }
+    if (!confirmed && remainingMsUntil(deadlineNs) > 0) {
+      for (const outcome of outcomes.filter((row) => !row.confirmed)) {
         await fenceHeartbeatGeneration(
           owner,
-          { handNo: record.handNo, generation: record.generation },
+          { handNo: outcome.record.handNo, generation: outcome.record.generation },
           'finalize-termination-unconfirmed',
         );
-        await runCoach([
-          'adapter-disable',
-          '--owner', owner,
-          '--reason', 'finalize-termination-unconfirmed',
-        ]);
-        coachAdapterDisabled = true;
       }
-      record.interrupt('COACH_FINALIZE_CUTOFF');
-      coachAttempts.delete(key);
+      await runCoach([
+        'adapter-disable',
+        '--owner', owner,
+        '--reason', 'finalize-termination-unconfirmed',
+      ]);
+      coachAdapterDisabled = true;
     }
-    return confirmed;
+    const tasksSettled = await settleCoachTasks(deadlineNs);
+    return confirmed
+      && tasksSettled
+      && coachAttempts.size === 0
+      && coachTasks.size === 0;
   };
 
   const haltFinalization = (code, message) => {
@@ -2365,6 +2633,37 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     writeLoopState({ halt: { code, message } });
     log('finalize-halt', { code });
     return codedError(code, message);
+  };
+
+  const baseFinalizationCheckpoint = () => ({
+    startedAt: finalizationDeadlineStartedAt ?? isoNow(now),
+    budgetMs: finalizeBudgetMs,
+    resultWaitMs: finalizeBudgetMs - finalizeCutoffLeadMs,
+  });
+
+  const abortExpiredFinalization = () => {
+    const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
+    writeLoopState({
+      finalization: {
+        ...current,
+        cutoff: {
+          ...(current.cutoff ?? {}),
+          at: isoNow(now),
+          terminationConfirmed: false,
+          reason: 'deadline_exceeded',
+          reviewGate: 'closed',
+        },
+      },
+    });
+    return haltFinalization(
+      'FINALIZATION_ABORTED',
+      'finalization 공통 deadline이 만료돼 리뷰 게이트를 열지 않습니다.',
+    );
+  };
+
+  const translateFinalizationDeadline = (error) => {
+    if (error?.code !== 'FINALIZATION_DEADLINE_EXCEEDED') return error;
+    return abortExpiredFinalization();
   };
 
   // 종료 시퀀스 §5/§9.2. Phase는 이미 finalizing이고, 각 단계가 loop-state 체크포인트다.
@@ -2375,15 +2674,12 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         'evaluator·종합자 리뷰 생성과 게시는 Task 7B에서 구현됩니다.',
       );
     }
-    // finalDeadline/resultWaitCutoff는 이 종료 시도에서 한 번만 정한다.
-    const finalDeadlineNs = monotonicNs() + BigInt(finalizeBudgetMs) * 1_000_000n;
+    // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
+    // 번만 정한다. finalizing resume은 begin-owner 전에 이미 같은 값을 설치한다.
+    const finalDeadlineNs = ensureFinalizationDeadline();
     const resultWaitCutoffNs = finalDeadlineNs - BigInt(finalizeCutoffLeadMs) * 1_000_000n;
     finalizeResultWaitCutoffNs = resultWaitCutoffNs;
-    const checkpoint = {
-      startedAt: isoNow(now),
-      budgetMs: finalizeBudgetMs,
-      resultWaitMs: finalizeBudgetMs - finalizeCutoffLeadMs,
-    };
+    const checkpoint = baseFinalizationCheckpoint();
     writeLoopState({ finalization: checkpoint });
     log('finalize-start', { budgetMs: finalizeBudgetMs, resultWaitMs: checkpoint.resultWaitMs });
 
@@ -2408,8 +2704,16 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
     // (3) cutoff: 새 play-time publisher 금지 + live worker 종료 확인.
     finalizationCutoff = true;
-    const terminationConfirmed = await terminateLiveCoachGenerations(owner);
-    await settleCoachTasks(finalDeadlineNs);
+    const trackedTerminationConfirmed = await terminateLiveCoachGenerations(owner, finalDeadlineNs);
+    const postCutoffPersistedConfirmed = remainingMsUntil(finalDeadlineNs) > 0
+      ? await closePersistedCoachWorkers({ allowCurrentReservedWithoutHandle: true })
+      : false;
+    const terminationConfirmed = finalizationPriorTerminationConfirmed
+      && trackedTerminationConfirmed
+      && postCutoffPersistedConfirmed
+      && coachAttempts.size === 0
+      && coachTasks.size === 0;
+    assertFinalizationDeadline();
 
     // (4) 한 transaction으로 missing 전체를 fence + unavailable Q seal.
     const stats = await captureCoachStats('final');
@@ -2896,17 +3200,34 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       // §5 finalizing 1: --resume으로 종료 국면에 들어온 경우에만 owner를 교체한다.
       // begin-owner가 seal/Q에 없는 핸드만 새 descriptor로 돌려주므로, 살아 있는
       // generation이 없는 크래시 재개에서만 그 핸드를 다시 스폰한다.
-      if (resumed.phase === 'playing' || resumed.phase === 'finalizing') {
+      if (resumed.phase === 'playing') {
         await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
+        resumed = readLoopState();
+      } else if (resumed.phase === 'finalizing') {
+        ensureFinalizationDeadline();
+        finalizationPriorTerminationConfirmed = await closePersistedCoachWorkers();
+        await beginCoachOwner(
+          Number(engineState.lastHand?.handNo ?? 0),
+          { drainQueued: false },
+        );
         resumed = readLoopState();
       }
       resumeEntryPending = resumed.phase === 'playing';
       log('resume-ready', { phase: resumed.phase });
       return resumed;
     } catch (error) {
+      const translated = translateFinalizationDeadline(error);
       if (lifecycleStarted) await requestStop();
       else releaseLock();
-      throw error;
+      throw translated;
+    }
+  };
+
+  const runFinalization = async () => {
+    try {
+      return await finalize();
+    } catch (error) {
+      throw translateFinalizationDeadline(error);
     }
   };
 
@@ -2915,7 +3236,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (!state) throw codedError('NOT_BOOTSTRAPPED', 'bootstrap 또는 resume이 필요합니다.');
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
-    if (FINAL_PHASES.has(state.phase)) return finalize();
+    if (FINAL_PHASES.has(state.phase)) return runFinalization();
     if (state.phase === 'done') return state;
     if (state.phase !== 'playing') {
       throw codedError('BOOTSTRAP_INCOMPLETE', `run할 수 없는 phase: ${state.phase}`);
@@ -2925,7 +3246,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (!engine) throw codedError('NO_GAME', 'engine state가 없습니다.');
     if (engine.gameOver) {
       writeLoopState({ phase: 'finalizing', handNo: engine.handNo ?? state.handNo });
-      return finalize();
+      return runFinalization();
     }
 
     let out;
@@ -2975,7 +3296,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           // §5 finalizing 1: handOver 분기가 이미 async로 띄운 마지막 핸드 generation을
           // 그대로 둔다. 여기서 reserve를 다시 부르면 그 prior가 discard된다.
           writeLoopState({ phase: 'finalizing', handNo: out.handNo });
-          return await finalize();
+          return await runFinalization();
         }
         if (stopRequested) break;
         out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
