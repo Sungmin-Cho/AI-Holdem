@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ChildProcess, execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,6 +29,16 @@ const SERVER = path.join(ROOT, 'server/server.js');
 const GAME_LOOP = path.join(ROOT, 'tools/game-loop.js');
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 const REAL_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
+const VALID_REVIEW = [
+  '## 내 성향 통계',
+  'VPIP와 PFR은 참고용 표본으로 해석합니다.',
+  '## 결정적 핸드 2~3개 리플레이',
+  '결정 시점의 공개 정보로 과정을 복기합니다.',
+  '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
+  '상대 성향을 맞게 읽은 부분과 놓친 부분을 구분합니다.',
+  '## 다음 게임에서 연습할 것',
+  '팟 오즈 확인과 포지션별 오픈 범위를 연습합니다.',
+].join('\n\n');
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
@@ -200,25 +211,57 @@ function resolverFor(adapter, inspect = null) {
   };
 }
 
-function makeCoachAdapter({ rounds = [] } = {}) {
+function makeCoachAdapter({ rounds = [], evaluatorRounds = [], synthesizerRounds = [] } = {}) {
   const prompts = [];
   const starts = [];
   const terminations = [];
+  const evaluatorStarts = [];
+  const synthesizerStarts = [];
+  const reviewPrompts = [];
+  const reviewTerminations = [];
   const pending = new Set();
   let disposed = 0;
+  let serial = 0;
   return {
     kind: 'coach-fake',
     prompts,
     starts,
     terminations,
+    evaluatorStarts,
+    synthesizerStarts,
+    reviewPrompts,
+    reviewTerminations,
     get disposed() { return disposed; },
     oneshotStart(input) {
-      const index = starts.length;
-      const round = rounds[index] ?? {
-        raw: JSON.stringify({ handNo: 1, text: '기본 코치 응답' }),
+      const stage = input.prompt.includes('역할: 격리 evaluator')
+        ? 'evaluator'
+        : input.prompt.includes('역할: 종합자')
+          ? 'synthesizer'
+          : 'coach';
+      const stageStarts = stage === 'evaluator'
+        ? evaluatorStarts
+        : stage === 'synthesizer'
+          ? synthesizerStarts
+          : starts;
+      const stageRounds = stage === 'evaluator'
+        ? evaluatorRounds
+        : stage === 'synthesizer'
+          ? synthesizerRounds
+          : rounds;
+      const index = stageStarts.length;
+      const coachHandNo = Number(/hand (\d+) \(redacted\):/.exec(input.prompt)?.[1] ?? 1);
+      const round = stageRounds[index] ?? {
+        raw: stage === 'evaluator'
+          ? '표본 30핸드 미만이므로 참고용입니다. 공개 정보 기준 과정 평가는 안정적이었습니다.'
+          : stage === 'synthesizer'
+            ? VALID_REVIEW
+            : JSON.stringify({ handNo: coachHandNo, text: '기본 코치 응답' }),
       };
-      prompts.push(input.prompt);
-      starts.push(input);
+      if (stage === 'coach') prompts.push(input.prompt);
+      else reviewPrompts.push(input.prompt);
+      stageStarts.push(input);
+      const handleIndex = serial;
+      serial += 1;
       round.onStart?.(input, index);
       let cancel;
       const cancelled = new Promise((_, reject) => { cancel = reject; });
@@ -233,14 +276,15 @@ function makeCoachAdapter({ rounds = [] } = {}) {
       done.finally(() => pending.delete(entry)).catch(() => {});
       done.catch(() => {});
       return {
-        pid: 910_000 + index,
-        startTime: `coach-start-${index}`,
+        pid: 910_000 + handleIndex,
+        startTime: `coach-start-${handleIndex}`,
         done,
         async terminate() {
           const result = typeof round.terminate === 'function'
             ? await round.terminate()
             : await (round.terminate ?? { confirmed: true });
-          terminations.push({ index, result });
+          if (stage === 'coach') terminations.push({ index, result });
+          else reviewTerminations.push({ stage, index, result });
           round.onTerminate?.(result, index);
           return result;
         },
@@ -950,6 +994,32 @@ async function seedFinishedGame(gameDir) {
   return init;
 }
 
+function expandFinishedGameToTwoHands(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  const second = structuredClone(state.lastHand);
+  second.handNo = 2;
+  second.actions = [...(second.actions ?? []), {
+    decisionId: 'TRACE_ONLY_SENTINEL',
+    playerId: 'user',
+    action: 'fold',
+    street: 'river',
+    potTotal: 50,
+    board: [...(second.board ?? [])],
+    stacks: { ...(second.endStacks ?? {}) },
+  }];
+  fs.mkdirSync(path.join(gameDir, 'hands'), { recursive: true });
+  fs.writeFileSync(path.join(gameDir, 'hands', 'hand-0002.json'), JSON.stringify(second));
+  state.handNo = 2;
+  state.lastHand = second;
+  for (const stats of Object.values(state.stats ?? {})) stats.hands = 2;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+}
+
+function sha256Text(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function finalizingLoop(t, gameDir, sessionToken, { upper, loopOpts = {}, stateOverrides = {} } = {}) {
   writeLoopStateFixture(gameDir, sessionToken, {
     phase: 'finalizing',
@@ -985,6 +1055,10 @@ function coachInvocations(calls, verb = null) {
 
 function publishInvocations(calls) {
   return calls.filter((call) => call.kind === 'publish').map((call) => call.args);
+}
+
+function nonReviewPublishInvocations(calls) {
+  return publishInvocations(calls).filter((args) => path.basename(flagValue(args, '--from') ?? '') !== '.review.json');
 }
 
 function flagValue(args, flag) {
@@ -4903,9 +4977,14 @@ test('--force aborts before archive when the stopped server pid is observed as r
   );
 });
 
-test('finalizing resume resolves upper-only with a live canary and stops before the Task 7B review', { timeout: 20_000 }, async (t) => {
+test('finalizing resume resolves upper-only with a live canary and completes review without player warmup', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.gameOver = true;
+  engine.result = 'lose';
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
     phase: 'finalizing',
     sessionToken: init.sessionToken,
@@ -4939,7 +5018,7 @@ test('finalizing resume resolves upper-only with a live canary and stops before 
   assert.equal(fs.existsSync(canaryAbsPath), false);
   assert.equal(warmups, 0, 'finalization must not warm player sessions');
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('done resume adopts a live server so normal cleanup stops it without spawning or resolving runtimes', { timeout: 10_000 }, async (t) => {
@@ -5039,11 +5118,11 @@ test('종료: 마지막 핸드 코치를 재-reserve하지 않고 finalizing 체
     amount: snapshot.view.legal.maxRaiseTo,
   });
 
-  await assert.rejects(running, (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await running).phase, 'done');
 
   assert.equal(readJson(path.join(gameDir, 'state.json')).gameOver, true);
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(loopState.phase, 'finalizing');
+  assert.equal(loopState.phase, 'done');
   assert.equal(loopState.handNo, 1);
   const reserves = coachInvocations(calls, 'reserve')
     .filter((args) => flagValue(args, '--hand') === '1');
@@ -5087,13 +5166,13 @@ test('Task 7A r1: cutoff 커밋 뒤 crash-resume은 pending Q를 owner 교대 �
   const resumed = await loop.resume();
   assert.equal(resumed.phase, 'finalizing');
   assert.equal(publishInvocations(calls).length, 0, 'resume owner 교대가 cutoff Q를 먼저 게시했다');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
   const firstPublishAt = calls.findIndex((call) => call.kind === 'publish');
   assert.notEqual(cutoffAt, -1);
   assert.equal(firstPublishAt > cutoffAt, true, 'pending Q가 cutoff transaction보다 먼저 게시됐다');
-  const publishes = publishInvocations(calls);
+  const publishes = nonReviewPublishInvocations(calls);
   assert.equal(publishes.length, 1);
   assert.match(flagValue(publishes[0], '--deadline-monotonic-ns'), /^\d+$/);
   assert.equal(upper.starts.length, 0);
@@ -5150,7 +5229,7 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
   const terms = signals.filter((entry) => entry.signal === 'SIGTERM');
   assert.equal(terms.length, 2);
   assert.equal(Math.abs(terms[0].at - terms[1].at) < 80, true, 'persisted workers를 순차 종료했다');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('Task 7A r2: persisted pid startTime mismatch는 다른 pid identity에 signal하지 않고 prior cleanup을 cancelled로 닫는다', { timeout: 20_000 }, async (t) => {
@@ -5183,7 +5262,7 @@ test('Task 7A r2: persisted pid startTime mismatch는 다른 pid identity에 sig
 
   await loop.resume();
   await waitFor(() => upper.starts.length >= 1, 'identity replacement 뒤 coach generation이 시작되지 않았다');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
   assert.equal(upper.starts.length, 1);
@@ -5238,7 +5317,7 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   );
   await new Promise((resolve) => setTimeout(resolve, 250));
   releaseCapture();
-  await assert.rejects(running, (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await running).phase, 'done');
 
   assert.equal(upper.starts.length, 0, 'capture 뒤 cutoff를 재확인하지 않고 worker를 시작했다');
   assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
@@ -5301,7 +5380,7 @@ test('Task 7A r2: finalizing resume은 stale COACH_RECONCILE_PENDING halt를 지
   const resumed = await loop.resume();
   assert.equal(Object.hasOwn(resumed, 'halt'), false, 'finalizing resume이 stale reconcile halt를 보존했다');
   assert.equal(publishInvocations(calls).length, 0);
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
   const publishAt = calls.findIndex((call) => call.kind === 'publish');
@@ -5374,7 +5453,7 @@ test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 �
     async () => {
       await loop.resume();
       await waitFor(() => upper.starts.length >= 1, 'unknown identity가 해소된 뒤 replacement가 시작되지 않았다');
-      await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+      assert.equal((await loop.run()).phase, 'done');
     },
   );
 
@@ -5478,7 +5557,7 @@ test('Task 7A r2: handle-less persisted generation은 owner 교대 전에 recove
   });
   t.after(() => second.requestStop().catch(() => {}));
   await second.resume();
-  await assert.rejects(second.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await second.run()).phase, 'done');
   assert.equal(coachInvocations(secondCalls, 'begin-owner').length, 1);
 });
 
@@ -5515,7 +5594,7 @@ test('Task 7A r2: persisted authority fence/cleanup은 shared deadline 아래 ha
   await resuming;
 
   assert.equal(concurrentFences, 2, 'persisted fence children were serialized per hand');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('Task 7A r3: Q로 이미 봉인되고 pid가 죽은 retired attempt는 cleanup released를 durable 기록한다', { timeout: 20_000 }, async (t) => {
@@ -5544,7 +5623,7 @@ test('Task 7A r3: Q로 이미 봉인되고 pid가 죽은 retired attempt는 clea
     'released',
   );
   assert.equal(upper.starts.length, 0);
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설치해 5초 미만 attempt-2를 막는다', { timeout: 20_000 }, async (t) => {
@@ -5573,7 +5652,7 @@ test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설
     0,
   );
   assert.equal(flagValue(coachInvocations(calls, 'complete-unavailable')[0], '--reason'), 'finalize-no-replacement-budget');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('Task 7A r2: open review gate는 cutoff deadline을 해제하고 독립 300초 Task 7B handoff scope를 연다', { timeout: 20_000 }, async (t) => {
@@ -5594,7 +5673,7 @@ test('Task 7A r2: open review gate는 cutoff deadline을 해제하고 독립 300
   });
 
   await loop.resume();
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.equal(seamCalls, 1);
   assert.equal(coachInvocations(calls, 'completeness').length, 1, 'reset 뒤 Task 7B handoff proof child가 실행되지 않았다');
@@ -5619,7 +5698,7 @@ test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행
 
   const resumed = await loop.resume();
   assert.equal(publishInvocations(calls).length, 0, 'pre-cutoff Q를 owner 교대 중 drain했다');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.notEqual(resumed.ownerSessionId, 'old-owner');
   const beginOwners = coachInvocations(calls, 'begin-owner');
@@ -5655,7 +5734,7 @@ test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finali
   });
 
   await loop.resume();
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.equal(upper.starts.length, 1, 'begin-owner descriptor가 스폰되지 않았다');
   assert.equal(upper.terminations.length, 1, 'cutoff가 live generation을 종료하지 않았다');
@@ -5704,7 +5783,7 @@ test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 �
   });
 
   await loop.resume();
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.equal(upper.starts.length, 1, '5초 미만 잔여 예산으로 교체 attempt 2를 스폰했다');
   assert.equal(upper.terminations.length, 1);
@@ -5740,7 +5819,7 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
   });
 
   await loop.resume();
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await loop.run()).phase, 'done');
 
   const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
   assert.equal(
@@ -5748,7 +5827,9 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
     false,
     'cutoff 전에 게시할 것이 없는데 게시했다',
   );
-  const residual = calls.slice(cutoffAt + 1).filter((call) => call.kind === 'publish');
+  const residual = calls.slice(cutoffAt + 1).filter((call) => (
+    call.kind === 'publish' && path.basename(flagValue(call.args, '--from') ?? '') !== '.review.json'
+  ));
   assert.equal(residual.length, 1, '잔여 Q가 정확히 한 번 게시되지 않았다');
   assert.equal(residual[0].args.includes('--deadline-monotonic-ns'), true);
   assert.match(flagValue(residual[0].args, '--deadline-monotonic-ns'), /^\d+$/);
@@ -5758,7 +5839,7 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
   assert.equal(authority.noNewPlayTimePublishers, true);
   assert.equal(authority.publishQueue['1'], undefined);
   assert.notEqual(authority.publishedSeals['1'], undefined);
-  assert.equal(publishInvocations(calls).length, 1);
+  assert.equal(nonReviewPublishInvocations(calls).length, 1);
 });
 
 test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION_ABORTED로 리뷰 게이트를 잠근다', { timeout: 40_000 }, async (t) => {
@@ -5851,12 +5932,12 @@ test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시�
   });
   t.after(() => secondLoop.requestStop().catch(() => {}));
   await secondLoop.resume();
-  await assert.rejects(secondLoop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
+  assert.equal((await secondLoop.run()).phase, 'done');
 
-  assert.equal(publishInvocations(secondCalls).length, 0, '봉인된 코치 노트를 다시 게시했다');
+  assert.equal(nonReviewPublishInvocations(secondCalls).length, 0, '봉인된 코치 노트를 다시 게시했다');
   assert.equal(upper.starts.length, 0);
   const snapshotAfter = readJson(path.join(gameDir, 'ui-snapshot.json'));
-  assert.equal(snapshotAfter.publishId, snapshotBefore.publishId);
+  assert.equal(snapshotAfter.publishId, snapshotBefore.publishId + 1, '코치가 아니라 review publishId 한 개만 늘어야 한다');
   assert.deepEqual(snapshotAfter.coach, snapshotBefore.coach);
   const authorityAfter = readJson(path.join(gameDir, '.coach-authority.json'));
   assert.deepEqual(
@@ -5865,6 +5946,329 @@ test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시�
   );
   assert.deepEqual(authorityAfter.publishQueue, {});
   assert.deepEqual(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.sealed, []);
+});
+
+test('Task 7B: evaluator는 전 redacted hand와 stats만 받고 종합자는 결과와 players로 review를 원자 게시한 뒤 done 정리한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const playersPath = path.join(gameDir, 'players.json');
+  const players = readJson(playersPath);
+  const opponent = players.find((player) => player.playerId !== 'user');
+  opponent.archetype = 'PRIVATE_ARCHETYPE_SENTINEL';
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+  const evaluatorText = '표본 2핸드는 참고용입니다. TRACE_ONLY_SENTINEL 결정은 공개 정보 기준으로 과도했습니다.';
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: evaluatorText }],
+    synthesizerRounds: [{ raw: VALID_REVIEW }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { handNo: 2 },
+  });
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'discard-on-done', createdAt: '2026-08-31T00:00:00.000Z' },
+  }));
+
+  await loop.resume();
+  const completed = await loop.run();
+
+  assert.equal(completed.phase, 'done');
+  assert.match(completed.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(upper.evaluatorStarts.length, 1);
+  assert.equal(upper.synthesizerStarts.length, 1);
+  for (const start of [...upper.evaluatorStarts, ...upper.synthesizerStarts]) {
+    assert.equal(start.tier, 'upper');
+    assert.equal(start.timeoutMs, 300_000);
+  }
+  const evaluatorPrompt = upper.evaluatorStarts[0].prompt;
+  assert.match(evaluatorPrompt, /hand 1 \(redacted\):/);
+  assert.match(evaluatorPrompt, /hand 2 \(redacted\):/);
+  assert.match(evaluatorPrompt, /TRACE_ONLY_SENTINEL/);
+  assert.match(evaluatorPrompt, /"sample":2/);
+  assert.equal(evaluatorPrompt.includes('PRIVATE_ARCHETYPE_SENTINEL'), false);
+  assert.equal(evaluatorPrompt.includes('"result":"lose"'), false);
+  const synthesizerPrompt = upper.synthesizerStarts[0].prompt;
+  assert.match(synthesizerPrompt, new RegExp(evaluatorText));
+  assert.match(synthesizerPrompt, /"result":"lose"/);
+  assert.match(synthesizerPrompt, /PRIVATE_ARCHETYPE_SENTINEL/);
+  assert.equal(synthesizerPrompt.includes('TRACE_ONLY_SENTINEL'), true, 'evaluator output was not preserved verbatim');
+
+  assert.equal(fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8'), VALID_REVIEW);
+  assert.deepEqual(readJson(path.join(gameDir, '.review.json')), { review: VALID_REVIEW });
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.equal(state.reviewSha256, sha256Text(VALID_REVIEW));
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  assert.equal(upper.disposed, 1);
+});
+
+test('Task 7B: 종합자 heading 검증이 두 번 실패하면 각 attempt를 종료하고 REVIEW_FAILED로 원본 게임과 코치를 보존한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: '참고용 과정 평가' }],
+    synthesizerRounds: [
+      { raw: '필수 heading이 없는 첫 출력' },
+      { raw: '## 내 성향 통계\n나머지 세 heading이 없는 두 번째 출력' },
+    ],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  const engineBefore = fs.readFileSync(path.join(gameDir, 'state.json'));
+
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBefore);
+  assert.equal(upper.evaluatorStarts.length, 1);
+  assert.equal(upper.synthesizerStarts.length, 2);
+  assert.deepEqual(upper.synthesizerStarts.map((start) => start.timeoutMs), [300_000, 300_000]);
+  assert.equal(upper.synthesizerStarts[0].prompt, upper.synthesizerStarts[1].prompt);
+  assert.deepEqual(
+    upper.reviewTerminations.filter((entry) => entry.stage === 'synthesizer').map((entry) => entry.result.confirmed),
+    [true, true],
+  );
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'finalizing');
+  assert.equal(state.halt.code, 'REVIEW_FAILED');
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).coach.length, 1);
+});
+
+test('Task 7B: 실패한 evaluator 종료를 확인하지 못하면 retry나 종합자를 시작하지 않는다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [
+      { raw: '', terminate: { confirmed: false } },
+      { raw: '종료 확인 없이 시작하면 안 되는 evaluator retry' },
+    ],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+
+  assert.equal(upper.evaluatorStarts.length, 1);
+  assert.equal(upper.synthesizerStarts.length, 0);
+  assert.deepEqual(upper.reviewTerminations.map((entry) => entry.result.confirmed), [false]);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
+});
+
+test('Task 7B: review_generated resume은 모델을 재호출하지 않고 file envelope만 게시해 done으로 간다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({ p1: { sessionId: 'old' } }));
+  const upper = makeCoachAdapter();
+  const engineCalls = [];
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper, notices: [] };
+    },
+    opts: {
+      port: 0,
+      onEngineInvoke: (args) => engineCalls.push(args),
+      onPublishInvoke: (args) => publishCalls.push(args),
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const completed = await loop.run();
+
+  assert.equal(completed.phase, 'done');
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+  assert.equal(engineCalls.some((args) => args[0] === 'init' || args.includes('--new-hand')), false);
+  assert.equal(publishCalls.length, 1);
+  assert.equal(flagValue(publishCalls[0], '--from'), path.join(gameDir, '.review.json'));
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+});
+
+test('Task 7B: review ack 뒤 phase 전이 전 crash는 snapshot digest로 이중 게시를 생략한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 4,
+    publishId: 4,
+    view: { gameOver: true, result: 'lose' },
+    log: [],
+    coach: [],
+    review: VALID_REVIEW,
+    history: [],
+  }));
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  const upper = makeCoachAdapter();
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: { port: 0, onPublishInvoke: (args) => publishCalls.push(args) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const completed = await loop.run();
+
+  assert.equal(completed.phase, 'done');
+  assert.equal(publishCalls.length, 0);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 4);
+});
+
+test('Task 7B: review ack 뒤 attempt 삭제 전 crash는 recorded body를 --retry로 청소하고 새 publishId를 만들지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    publishId: 1,
+    view: { gameOver: true, result: 'lose' },
+    log: [],
+    coach: [],
+    review: VALID_REVIEW,
+    history: [],
+  }));
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify({
+    body: { publishId: 1, review: VALID_REVIEW },
+    expectedGameEpoch: gameEpochOf(init.sessionToken),
+  }));
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: { port: 0, onPublishInvoke: (args) => publishCalls.push(args) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+
+  assert.equal(publishCalls.length, 1);
+  assert.equal(publishCalls[0].includes('--retry'), true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 1);
+});
+
+test('Task 7B: review_generated의 pending attempt는 --retry로 exact body를 해소한 뒤 done으로 간다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 0,
+    publishId: 0,
+    view: { gameOver: true, result: 'lose' },
+    log: [],
+    coach: [],
+    history: [],
+  }));
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify({
+    body: { publishId: 1, review: VALID_REVIEW },
+    expectedGameEpoch: gameEpochOf(init.sessionToken),
+  }));
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  const upper = makeCoachAdapter();
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: { port: 0, onPublishInvoke: (args) => publishCalls.push(args) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const completed = await loop.run();
+
+  assert.equal(completed.phase, 'done');
+  assert.equal(publishCalls.length, 1);
+  assert.equal(publishCalls[0].includes('--retry'), true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
+});
+
+test('Task 7B: review_published resume은 게시·모델·new-hand 없이 finishedAt과 session cleanup만 완료한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_published',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({ p1: { sessionId: 'old' } }));
+  const upper = makeCoachAdapter();
+  const engineCalls = [];
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper, notices: [] };
+    },
+    opts: {
+      port: 0,
+      onEngineInvoke: (args) => engineCalls.push(args),
+      onPublishInvoke: (args) => publishCalls.push(args),
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await loop.resume();
+  const completed = await loop.run();
+
+  assert.equal(completed.phase, 'done');
+  assert.match(completed.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(publishCalls.length, 0);
+  assert.equal(engineCalls.some((args) => args[0] === 'init' || args.includes('--new-hand')), false);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+});
+
+test('Task 7B: gameOver resume phase 유도는 loop-state 유무와 무관하게 init/new-hand 없이 종료한다', { timeout: 40_000 }, async (t) => {
+  for (const existingPhase of [null, 'playing']) {
+    await t.test(existingPhase ?? 'missing-loop-state', { timeout: 20_000 }, async (st) => {
+      const gameDir = tmpGame();
+      const init = await seedFinishedGame(gameDir);
+      if (existingPhase) writeLoopStateFixture(gameDir, init.sessionToken, { phase: existingPhase });
+      const upper = makeCoachAdapter();
+      const engineCalls = [];
+      const loop = createGameLoop({
+        gameDir,
+        resolver: async ({ need }) => {
+          assert.equal(need, 'upper-only');
+          return { player: null, upper, notices: [] };
+        },
+        opts: { port: 0, onEngineInvoke: (args) => engineCalls.push(args) },
+      });
+      st.after(() => loop.requestStop().catch(() => {}));
+
+      const resumed = await loop.resume();
+      assert.equal(resumed.phase, 'finalizing');
+      const completed = await loop.run();
+
+      assert.equal(completed.phase, 'done');
+      assert.equal(engineCalls.some((args) => args[0] === 'init' || args.includes('--new-hand')), false);
+    });
+  }
 });
 
 test('CLI parser covers the full surface and halt errors map to stable process exits', () => {

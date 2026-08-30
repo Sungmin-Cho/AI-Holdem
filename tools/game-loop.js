@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,6 +28,12 @@ const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const COACH_GENERATION_MS = 120_000;
 const REVIEW_GENERATION_MS = 300_000;
+const REVIEW_HEADING_PATTERNS = Object.freeze([
+  /^#{1,6}[ \t]+내 성향 통계(?:[ \t]|$)/m,
+  /^#{1,6}[ \t]+결정적 핸드(?:[ \t]|$)/m,
+  /^#{1,6}[ \t]+각 AI의 실제 아키타입 공개[ \t]*\+[ \t]*읽기 평가(?:[ \t]|$)/m,
+  /^#{1,6}[ \t]+다음 게임에서 연습할 것(?:[ \t]|$)/m,
+]);
 const COACH_PRIVATE_FIELDS = ['archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne'];
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
@@ -163,6 +169,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sha256Text(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function writeTextAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(temporary, value, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporary, filePath);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch { /* absent or preserved original failure */ }
+    throw error;
+  }
+}
+
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid < 1) return false;
   try {
@@ -252,6 +274,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
   const sessionsPath = path.join(root, '.player-sessions.json');
+  const reviewPath = path.join(root, 'review.md');
+  const reviewEnvelopePath = path.join(root, '.review.json');
+  const publishAttemptPath = path.join(root, '.publish-attempt.json');
   const lockPath = path.join(root, 'lock.json');
   const canaries = new Set();
   const activeChildren = new Set();
@@ -2781,6 +2806,278 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return handoff;
   };
 
+  const validateReviewOutput = (raw, { requireHeadings = false } = {}) => {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+    }
+    const text = raw.trim();
+    if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
+      throw codedError('INVALID_REVIEW_OUTPUT', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
+    }
+    return text;
+  };
+
+  const terminateReviewAttempt = async (handle) => {
+    if (!handle) return { confirmed: true, reason: 'NOT_SPAWNED' };
+    if (typeof handle.terminate !== 'function') {
+      return { confirmed: false, reason: 'TERMINATE_UNAVAILABLE' };
+    }
+    try {
+      const result = await handle.terminate();
+      return result && typeof result === 'object'
+        ? result
+        : { confirmed: false, reason: 'BAD_TERMINATE_RESULT' };
+    } catch (error) {
+      return { confirmed: false, reason: error.code ?? 'TERMINATE_FAILED' };
+    }
+  };
+
+  const runReviewStage = async ({ stage, prompt, requireHeadings = false }) => {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let handle = null;
+      let failure = null;
+      try {
+        handle = upperAdapter.oneshotStart({
+          tier: 'upper',
+          prompt,
+          timeoutMs: REVIEW_GENERATION_MS,
+        });
+        if (!handle || !handle.done || typeof handle.done.then !== 'function') {
+          throw codedError('INVALID_REVIEW_HANDLE', `${stage} oneshot handle 계약이 올바르지 않습니다.`);
+        }
+        const completed = await handle.done;
+        return validateReviewOutput(completed?.raw, { requireHeadings });
+      } catch (error) {
+        failure = error;
+      }
+
+      // Each failed attempt owns a distinct child and distinct 300-second adapter timer.
+      // A second child may start only after the first child has positively terminated.
+      const termination = await terminateReviewAttempt(handle);
+      log('review-attempt-failed', {
+        stage,
+        attempt,
+        code: failure?.code ?? 'ERROR',
+        terminationConfirmed: termination.confirmed === true,
+      });
+      if (attempt === 1 && termination.confirmed === true) continue;
+      if (attempt === 1) {
+        throw codedError(
+          'REVIEW_TERMINATION_UNCONFIRMED',
+          `${stage} 첫 시도 종료를 확인하지 못해 교체 시도를 시작하지 않습니다.`,
+          { cause: failure },
+        );
+      }
+      throw codedError(
+        'REVIEW_ATTEMPTS_EXHAUSTED',
+        `${stage} 출력이 두 번 모두 계약을 만족하지 못했습니다.`,
+        { cause: failure },
+      );
+    }
+    throw codedError('REVIEW_ATTEMPTS_EXHAUSTED', `${stage} 시도를 완료하지 못했습니다.`);
+  };
+
+  const buildEvaluatorPrompt = ({ completed, hands, statsRaw }) => [
+    '역할: 격리 evaluator',
+    '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
+    '각 결정 시점에 사용자가 볼 수 있었던 공개 정보만으로 과정 품질을 한국어로 평가하라.',
+    '실제 게임 결과와 players.json/상대 아키타입은 제공되지 않았으며 추측하거나 언급하지 마라.',
+    '표본이 30핸드 미만이면 반드시 참고용이라고 명시하라.',
+    '',
+    `completed hands: ${completed}`,
+    ...hands.flatMap(({ handNo, raw }) => [
+      '',
+      `hand ${handNo} (redacted):`,
+      raw,
+    ]),
+    '',
+    'stats:',
+    statsRaw,
+    '',
+    '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
+  ].join('\n');
+
+  const buildSynthesizerPrompt = ({ evaluator, result, playersRaw }) => [
+    '역할: 종합자',
+    '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
+    'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
+    '결과가 좋았다고 나쁜 과정을 칭찬하거나 결과가 나쁘다고 좋은 과정을 비난하지 마라.',
+    '',
+    'evaluator output:',
+    evaluator,
+    '',
+    'game result:',
+    JSON.stringify({ result }),
+    '',
+    'players.json:',
+    playersRaw,
+    '',
+    '마크다운 본문에 다음 네 heading을 모두 그대로 포함하라:',
+    '## 내 성향 통계',
+    '## 결정적 핸드 2~3개 리플레이',
+    '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
+    '## 다음 게임에서 연습할 것',
+    '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
+  ].join('\n');
+
+  const generateReview = async ({ completed, statsRaw }) => {
+    try {
+      const hands = [];
+      for (let handNo = 1; handNo <= completed; handNo += 1) {
+        const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--redacted']));
+        hands.push({ handNo, raw: JSON.stringify(captured) });
+      }
+      const evaluatorPrompt = buildEvaluatorPrompt({ completed, hands, statsRaw });
+      const evaluator = await runReviewStage({
+        stage: 'evaluator',
+        prompt: evaluatorPrompt,
+      });
+
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const players = readJsonOptional(playersPath, 'PLAYERS');
+      if (!engine || engine.gameOver !== true || typeof engine.result !== 'string') {
+        throw codedError('BAD_REVIEW_RESULT', '종합 리뷰에 필요한 종료 결과가 없습니다.');
+      }
+      if (!Array.isArray(players)) {
+        throw codedError('BAD_PLAYERS', '종합 리뷰에 필요한 players.json이 배열이 아닙니다.');
+      }
+      const synthesizerPrompt = buildSynthesizerPrompt({
+        evaluator,
+        result: engine.result,
+        playersRaw: JSON.stringify(players),
+      });
+      return await runReviewStage({
+        stage: 'synthesizer',
+        prompt: synthesizerPrompt,
+        requireHeadings: true,
+      });
+    } catch (error) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        `종합 리뷰 생성을 완료하지 못했습니다(${error.code ?? 'ERROR'}). 게임 상태와 코치 노트는 그대로 남습니다.`,
+      );
+    }
+  };
+
+  const checkpointGeneratedReview = (review) => {
+    writeTextAtomic(reviewPath, review);
+    const persisted = fs.readFileSync(reviewPath, 'utf8');
+    const reviewSha256 = sha256Text(persisted);
+    return writeLoopState({
+      phase: 'review_generated',
+      reviewSha256,
+      halt: undefined,
+    });
+  };
+
+  const readGeneratedReview = () => {
+    const state = readLoopState();
+    let review;
+    try {
+      review = fs.readFileSync(reviewPath, 'utf8');
+    } catch (error) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        `review_generated 체크포인트의 review.md를 읽지 못했습니다(${error.code ?? 'ERROR'}). 재생성하지 않습니다.`,
+      );
+    }
+    let validated;
+    try {
+      validated = validateReviewOutput(review, { requireHeadings: true });
+    } catch (error) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        `review_generated 체크포인트의 review.md가 검증에 실패했습니다(${error.code ?? 'ERROR'}). 재생성하지 않습니다.`,
+      );
+    }
+    if (validated !== review || state?.reviewSha256 !== sha256Text(review)) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        'review_generated 체크포인트의 review.md digest가 일치하지 않아 재생성·게시하지 않습니다.',
+      );
+    }
+    return { review, reviewSha256: state.reviewSha256 };
+  };
+
+  const snapshotReviewStatus = (reviewSha256) => {
+    const snapshot = readJsonOptional(coachSnapshotPath, 'UI_SNAPSHOT');
+    const matches = typeof snapshot?.review === 'string'
+      && sha256Text(snapshot.review) === reviewSha256;
+    return {
+      matches,
+      publishId: Number.isInteger(snapshot?.publishId) ? snapshot.publishId : null,
+    };
+  };
+
+  const checkpointReviewPublished = ({ publishId = null } = {}) => writeLoopState({
+    phase: 'review_published',
+    ...(Number.isInteger(publishId) ? { lastPublishId: publishId } : {}),
+    halt: undefined,
+  });
+
+  const publishGeneratedReview = async () => {
+    const generated = readGeneratedReview();
+    writeJsonAtomic(reviewEnvelopePath, { review: generated.review });
+
+    // One loop step resolves either an already-recorded exact body or creates the review
+    // attempt. Before every new body, compare the durable snapshot digest so an ack that
+    // landed before the phase write never burns a second publishId.
+    for (let step = 0; step < 4; step += 1) {
+      const retry = fs.existsSync(publishAttemptPath);
+      if (!retry) {
+        const before = snapshotReviewStatus(generated.reviewSha256);
+        if (before.matches) {
+          // postPublish() persists the snapshot before publish.js removes its attempt.
+          // Recheck that no recorded body appeared across the digest read; such a body
+          // must be retried (same publishId) rather than abandoned at done.
+          if (fs.existsSync(publishAttemptPath)) continue;
+          return checkpointReviewPublished({ publishId: before.publishId });
+        }
+      }
+      let published;
+      try {
+        published = await executePublish([
+          '--from', reviewEnvelopePath,
+          ...(retry ? ['--retry'] : []),
+        ]);
+      } catch (error) {
+        // A publisher may win the attempt-file race after the check above. The next loop
+        // iteration sees that record and resolves it with --retry before our review body.
+        if (error.code === 'ATTEMPT_PENDING') continue;
+        throw haltFinalization(
+          'REVIEW_FAILED',
+          `종합 리뷰 게시를 완료하지 못했습니다(${error.code ?? 'ERROR'}). review_generated에서 재개할 수 있습니다.`,
+        );
+      }
+      if (Number.isInteger(published?.publishId)) writeLoopState({ lastPublishId: published.publishId });
+    }
+
+    const after = snapshotReviewStatus(generated.reviewSha256);
+    if (!after.matches) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        '종합 리뷰 게시 응답 뒤 ui-snapshot digest를 확인하지 못해 review_generated에서 멈춥니다.',
+      );
+    }
+    return checkpointReviewPublished({ publishId: after.publishId });
+  };
+
+  const finishDoneLifecycle = async () => {
+    try { fs.unlinkSync(sessionsPath); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    playerSessions = null;
+    restoredPlayerSessions.clear();
+    const current = readLoopState();
+    const checkpoint = writeLoopState({
+      phase: 'done',
+      finishedAt: current?.finishedAt ?? isoNow(now),
+      halt: undefined,
+    });
+    await requestStop();
+    return readLoopState() ?? checkpoint;
+  };
+
   const abortExpiredFinalization = () => {
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
@@ -2810,8 +3107,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const finalize = async () => {
     if (readLoopState()?.phase !== 'finalizing') {
       throw codedError(
-        'REVIEW_GENERATION_TASK_7B',
-        'evaluator·종합자 리뷰 생성과 게시는 Task 7B에서 구현됩니다.',
+        'BAD_LOOP_PHASE',
+        'finalize는 finalizing phase에서만 실행할 수 있습니다.',
       );
     }
     // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
@@ -2935,10 +3232,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       );
     }
     await enterReviewGenerationScope(completed);
-    throw codedError(
-      'REVIEW_GENERATION_TASK_7B',
-      'evaluator·종합자 리뷰 생성과 게시는 Task 7B에서 구현됩니다.',
-    );
+    const review = await generateReview({ completed, statsRaw: stats.raw });
+    return checkpointGeneratedReview(review);
   };
 
   const checkArchivePending = async (out) => {
@@ -3376,7 +3671,18 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const runFinalization = async () => {
     try {
-      return await finalize();
+      let state = readLoopState();
+      if (state?.phase === 'finalizing') {
+        await finalize();
+        state = readLoopState();
+      }
+      if (state?.phase === 'review_generated') {
+        await publishGeneratedReview();
+        state = readLoopState();
+      }
+      if (state?.phase === 'review_published') return finishDoneLifecycle();
+      if (state?.phase === 'done') return finishDoneLifecycle();
+      throw codedError('BAD_LOOP_PHASE', `종료 시퀀스를 재개할 수 없는 phase: ${state?.phase ?? '없음'}`);
     } catch (error) {
       throw translateFinalizationDeadline(error);
     }
@@ -3388,7 +3694,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
     if (FINAL_PHASES.has(state.phase)) return runFinalization();
-    if (state.phase === 'done') return state;
+    if (state.phase === 'done') return finishDoneLifecycle();
     if (state.phase !== 'playing') {
       throw codedError('BOOTSTRAP_INCOMPLETE', `run할 수 없는 phase: ${state.phase}`);
     }
