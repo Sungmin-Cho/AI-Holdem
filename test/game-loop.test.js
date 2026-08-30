@@ -11,6 +11,8 @@ import {
   exitCodeFor,
   parseGameLoopArgs,
 } from '../tools/game-loop.js';
+import { RUNTIME_TABLE } from '../tools/player-runtime.js';
+import { gameEpochOf } from '../publish-contract.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,15 +53,22 @@ async function initGame(gameDir, extra = []) {
   return JSON.parse(stdout.trim());
 }
 
-function makeAdapter({ kind = 'fake', delayMs = 0, onWarmup = null } = {}) {
+function makeAdapter({
+  kind = 'fake',
+  delayMs = 0,
+  onWarmup = null,
+  onDecide = null,
+  watchdog = { t1Ms: 25, t2Ms: 15 },
+} = {}) {
   let inFlight = 0;
   let maxInFlight = 0;
   let disposed = 0;
   const calls = [];
-  return {
+  const decideCalls = [];
+  const adapter = {
     kind,
-    watchdog: { t1Ms: 25, t2Ms: 15 },
     calls,
+    decideCalls,
     get maxInFlight() { return maxInFlight; },
     get disposed() { return disposed; },
     async warmup(input) {
@@ -71,8 +80,16 @@ function makeAdapter({ kind = 'fake', delayMs = 0, onWarmup = null } = {}) {
       inFlight -= 1;
       return { sessionId: `session-${input.playerId}`, raw: 'ready' };
     },
+    async decide(input) {
+      decideCalls.push(input);
+      if (onDecide) return onDecide(input, decideCalls.length);
+      const decisionId = /decisionId:\s*([^\s]+)/.exec(input.message)?.[1];
+      return { raw: JSON.stringify({ decisionId, action: 'fold' }) };
+    },
     async dispose() { disposed += 1; },
   };
+  if (watchdog) adapter.watchdog = { ...watchdog };
+  return adapter;
 }
 
 function resolverFor(adapter, inspect = null) {
@@ -179,6 +196,55 @@ async function withFakePs(scriptBody, fn) {
   }
 }
 
+function putAiFirst(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  state.button = 0;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+}
+
+function decisionIdOfMessage(message) {
+  return /decisionId:\s*([^\s]+)/.exec(message)?.[1] ?? null;
+}
+
+function chipTotal(state) {
+  const stacks = state.seats.reduce((sum, seat) => sum + seat.stack, 0);
+  const committed = Object.values(state.hand?.contribs ?? {}).reduce((sum, value) => sum + value, 0);
+  return stacks + committed;
+}
+
+function readLoopLog(gameDir) {
+  return fs.readFileSync(path.join(gameDir, 'loop.log'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function setupAiFirst(t, {
+  adapter,
+  ai = 1,
+  stack = 100,
+  loopOpts = {},
+} = {}) {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, ...loopOpts },
+  });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai, stack });
+  putAiFirst(gameDir);
+  return { gameDir, loop };
+}
+
+async function runUntilUserStub(loop) {
+  await assert.rejects(
+    loop.run(),
+    (error) => error.code === 'USER_HAND_LOOP_TASK_5C',
+  );
+}
+
 test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const focusSource = path.join(os.tmpdir(), `holdem-focus-${process.pid}-${Date.now()}.json`);
@@ -247,7 +313,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt },
     p3: { runtime: 'fake', sessionId: 'session-p3', createdAt: state.startedAt },
   });
-  await assert.rejects(loop.run(), (error) => error.code === 'HAND_LOOP_TASK_5B');
+  await assert.rejects(loop.run(), (error) => error.code === 'USER_HAND_LOOP_TASK_5C');
 
   await loop.requestStop();
   await waitUntilDead(lock.serverPid);
@@ -744,6 +810,194 @@ test('resume derives a missing loop state from engine state, but an entirely abs
   assert.equal(adapter.calls.length, 2);
 });
 
+test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => ({
+      raw: `결정입니다.\n\`\`\`json\n${JSON.stringify({
+        decisionId: decisionIdOfMessage(message),
+        action: 'fold',
+      })}\n\`\`\``,
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+
+  await runUntilUserStub(loop);
+
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(chipTotal(engine), 200);
+  assert.equal(engine.lastHand.actions[0].playerId, 'p1');
+  assert.equal(engine.lastHand.actions[0].action, 'fold');
+  assert.equal(adapter.decideCalls.length, 1);
+  assert.equal(state.metrics.length, 1);
+  assert.equal(state.metrics[0].outcome, 'accepted');
+  assert.equal(state.lastPublishId >= 3, true, 'first hand/action/next hand were not all published');
+});
+
+test('watchdog resends the identical AI summary once, then force-defaults and records the timeout outcome', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter({
+    onDecide: async () => new Promise(() => {}),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter,
+    loopOpts: { watchdog: { t1Ms: 20, t2Ms: 15 } },
+  });
+
+  await runUntilUserStub(loop);
+
+  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
+  assert.equal(adapter.decideCalls[0].sessionId, adapter.decideCalls[1].sessionId);
+  assert.deepEqual(adapter.decideCalls.map((call) => call.timeoutMs), [20, 15]);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics[0];
+  assert.equal(metric.outcome, 'forced_default');
+  assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].action, 'fold');
+});
+
+test('malformed, mismatched, and illegal AI decisions each get one retry before force-default', { timeout: 20_000 }, async (t) => {
+  const cases = [
+    ['malformed', () => 'not-json'],
+    ['decision-mismatch', () => JSON.stringify({ decisionId: 'stale-decision', action: 'fold' })],
+    ['illegal-action', ({ message }) => JSON.stringify({
+      decisionId: decisionIdOfMessage(message),
+      action: 'check',
+    })],
+  ];
+
+  for (const [label, response] of cases) {
+    await t.test(label, async (st) => {
+      const adapter = makeAdapter({
+        onDecide: async (input) => ({ raw: response(input) }),
+      });
+      const { gameDir, loop } = await setupAiFirst(st, { adapter });
+      await runUntilUserStub(loop);
+      assert.equal(adapter.decideCalls.length, 2);
+      assert.equal(adapter.decideCalls[0].message, adapter.decideCalls[1].message);
+      assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'forced_default');
+    });
+  }
+});
+
+test('a valid second response after parse failure is recorded as retried_accepted', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter({
+    onDecide: async ({ message }, attempt) => ({
+      raw: attempt === 1
+        ? 'garbage'
+        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+
+  await runUntilUserStub(loop);
+
+  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics[0].outcome, 'retried_accepted');
+});
+
+test('adapter runtime watchdog is used when opts.watchdog is absent', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter({
+    kind: 'codex',
+    watchdog: null,
+    onDecide: async () => ({ raw: 'invalid' }),
+  });
+  const { loop } = await setupAiFirst(t, { adapter });
+
+  await runUntilUserStub(loop);
+
+  assert.deepEqual(
+    adapter.decideCalls.map((call) => call.timeoutMs),
+    [RUNTIME_TABLE.codex.watchdog.t1Ms, RUNTIME_TABLE.codex.watchdog.t2Ms],
+  );
+});
+
+test('zero-delay AI metrics include every timing field and keep non-model overhead under one second', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter();
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+
+  await runUntilUserStub(loop);
+
+  const [metric] = readJson(path.join(gameDir, 'loop-state.json')).metrics;
+  assert.deepEqual(Object.keys(metric).sort(), [
+    'decisionId', 'elapsedMs', 'modelMs', 'outcome', 'parseMs',
+    'playerId', 'publishMs', 'runtime', 'stepMs',
+  ]);
+  for (const field of ['elapsedMs', 'modelMs', 'parseMs', 'stepMs', 'publishMs']) {
+    assert.equal(Number.isFinite(metric[field]) && metric[field] >= 0, true, `${field} is invalid`);
+  }
+  assert.equal(metric.parseMs + metric.stepMs + metric.publishMs <= 1_000, true);
+});
+
+test('archivePending runs resume-check once and repair_failed halts before a new hand', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter();
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  fs.mkdirSync(path.join(gameDir, 'hands', 'hand-0001.json'), { recursive: true });
+
+  await assert.rejects(loop.run(), (error) => error.code === 'repair_failed');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.code, 'repair_failed');
+  assert.equal(state.handNo, 1);
+  assert.equal(
+    readLoopLog(gameDir).filter((entry) => entry.event === 'archive-resume-check').length,
+    1,
+  );
+});
+
+test('VERSION_MISMATCH discards the stale model decision, resynchronizes with an argumentless step, and continues', { timeout: 10_000 }, async (t) => {
+  let gameDir = null;
+  const adapter = makeAdapter({
+    onDecide: async ({ playerId, message }, attempt) => {
+      if (attempt === 1) {
+        const version = readJson(path.join(gameDir, 'state.json')).stateVersion;
+        await execFileAsync(process.execPath, [
+          CLI, 'step', playerId, 'fold', '--expect-version', String(version), '--game-dir', gameDir,
+        ], { encoding: 'utf8', timeout: 5_000 });
+      }
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const setup = await setupAiFirst(t, { adapter });
+  gameDir = setup.gameDir;
+
+  await runUntilUserStub(setup.loop);
+
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).metrics.length, 0);
+  assert.equal(
+    readLoopLog(gameDir).filter((entry) => entry.event === 'version-resync').length,
+    1,
+  );
+  assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].playerId, 'p1');
+});
+
+test('ATTEMPT_PENDING is retried before the current AI transition publish', { timeout: 10_000 }, async (t) => {
+  const adapter = makeAdapter();
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify({
+    body: { publishId: 1, messages: [{ type: 'narration', text: 'pending-before-loop' }] },
+    expectedGameEpoch: gameEpochOf(engine.sessionToken),
+  }));
+
+  await runUntilUserStub(loop);
+
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).lastPublishId >= 4, true);
+});
+
+test('PUBLISH_FAILED after the owned server dies restarts it and retries the recorded attempt', { timeout: 20_000 }, async (t) => {
+  const adapter = makeAdapter();
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  const oldPid = loop.serverPid;
+  process.kill(oldPid, 'SIGKILL');
+  await waitUntilDead(oldPid);
+
+  await runUntilUserStub(loop);
+
+  assert.notEqual(loop.serverPid, oldPid);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'), true);
+});
+
 test('finalizing resume resolves upper-only with a live canary and exposes an explicit Task 7 stub', async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
@@ -801,5 +1055,5 @@ test('CLI parser covers the full surface and halt errors map to stable process e
   assert.equal(exitCodeFor({ code: 'repair_failed' }), 2);
   assert.equal(exitCodeFor({ code: 'REVIEW_FAILED' }), 3);
   assert.equal(exitCodeFor({ code: 'NO_PLAYER_RUNTIME' }), 4);
-  assert.equal(exitCodeFor({ code: 'HAND_LOOP_TASK_5B' }), 5);
+  assert.equal(exitCodeFor({ code: 'USER_HAND_LOOP_TASK_5C' }), 5);
 });

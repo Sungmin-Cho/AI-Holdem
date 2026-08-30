@@ -13,11 +13,14 @@ import {
 } from '../engine/state.js';
 import {
   buildPlayerPrompt,
+  extractJsonLine,
+  RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
+const PUBLISH_CLI = path.join(ROOT, 'tools/publish.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
@@ -126,6 +129,37 @@ function processAlive(pid) {
   }
 }
 
+function legalFromMessage(message) {
+  if (typeof message !== 'string') return null;
+  const match = /legal 수치: canCheck=(true|false) callAmount=(\d+) canRaise=(true|false) minRaiseTo=(\d+) maxRaiseTo=(\d+)/.exec(message);
+  if (!match) return null;
+  return {
+    canCheck: match[1] === 'true',
+    callAmount: Number(match[2]),
+    canRaise: match[3] === 'true',
+    minRaiseTo: Number(match[4]),
+    maxRaiseTo: Number(match[5]),
+  };
+}
+
+function validatedDecision(raw, next) {
+  const parsed = extractJsonLine(raw);
+  const legal = legalFromMessage(next.message);
+  if (!parsed || !legal || parsed.decisionId !== next.decisionId) return null;
+  if (parsed.action === 'fold') return { action: 'fold' };
+  if (parsed.action === 'check') return legal.canCheck ? { action: 'check' } : null;
+  if (parsed.action === 'call') {
+    return !legal.canCheck && legal.callAmount > 0 ? { action: 'call' } : null;
+  }
+  if (parsed.action !== 'raise' || !legal.canRaise || !Number.isInteger(parsed.amount)) return null;
+  if (legal.minRaiseTo > legal.maxRaiseTo) {
+    return parsed.amount === legal.maxRaiseTo ? { action: 'raise', amount: parsed.amount } : null;
+  }
+  return parsed.amount >= legal.minRaiseTo && parsed.amount <= legal.maxRaiseTo
+    ? { action: 'raise', amount: parsed.amount }
+    : null;
+}
+
 export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
@@ -137,6 +171,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const serverStartMs = opts.serverStartMs ?? 5_000;
   const childTimeoutMs = opts.childTimeoutMs ?? 30_000;
   const osVerifyMs = opts.osVerifyMs ?? 1_000;
+  const waitMs = opts.waitMs ?? 0;
+  const monotonicNow = opts.monotonicNow ?? (() => performance.now());
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
@@ -146,6 +182,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const canaries = new Set();
   const activeChildren = new Set();
   const adapters = new Set();
+  const archiveCheckedHands = new Set();
 
   let lockHandle = null;
   let serverChild = null;
@@ -155,6 +192,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let logFd = null;
   let playerAdapter = null;
   let upperAdapter = null;
+  let playerSessions = null;
+  let resumeEntryPending = false;
   let stopRequested = false;
   let stopPromise = null;
 
@@ -274,6 +313,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   });
 
   const runCli = (args) => runJsonChild(ENGINE_CLI, args);
+  const runPublish = (args) => runJsonChild(PUBLISH_CLI, args);
 
   const serverHealthy = async (port) => {
     if (!Number.isInteger(port) || port < 1) return false;
@@ -502,6 +542,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     const rows = settled.map((result) => result.value);
     const sessions = Object.fromEntries(rows);
     writeJsonAtomic(sessionsPath, sessions);
+    playerSessions = sessions;
     return sessions;
   };
 
@@ -580,6 +621,179 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     serverIdentity = null;
     serverPid = null;
     serverAdopted = false;
+  };
+
+  const currentWatchdog = () => {
+    const profile = opts.watchdog
+      ?? playerAdapter?.watchdog
+      ?? RUNTIME_TABLE[playerAdapter?.kind]?.watchdog;
+    if (
+      !profile
+      || !Number.isFinite(profile.t1Ms)
+      || profile.t1Ms < 0
+      || !Number.isFinite(profile.t2Ms)
+      || profile.t2Ms < 0
+    ) {
+      throw codedError('BAD_WATCHDOG', `런타임 ${playerAdapter?.kind ?? '?'}의 watchdog이 없습니다.`);
+    }
+    return profile;
+  };
+
+  const decideOnce = async (input, timeoutMs) => {
+    const started = monotonicNow();
+    let timer = null;
+    const decision = Promise.resolve().then(() => playerAdapter.decide({ ...input, timeoutMs }));
+    decision.catch(() => {});
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(codedError('TIMEOUT', `AI 결정이 ${timeoutMs}ms를 넘었습니다.`)), timeoutMs);
+    });
+    try {
+      const result = await Promise.race([decision, deadline]);
+      return { ok: true, raw: result?.raw, modelMs: Math.max(0, monotonicNow() - started) };
+    } catch (error) {
+      return { ok: false, error, modelMs: Math.max(0, monotonicNow() - started) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const decideWithWatchdog = async (next) => {
+    if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
+      throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
+    }
+    playerSessions ??= readJsonOptional(sessionsPath, 'PLAYER_SESSIONS');
+    const session = playerSessions?.[next.toAct];
+    if (!session || typeof session.sessionId !== 'string' || session.sessionId === '') {
+      throw codedError('NO_SESSION', `플레이어 ${next.toAct} 세션이 없습니다.`);
+    }
+    const watchdog = currentWatchdog();
+    const timeouts = [watchdog.t1Ms, watchdog.t2Ms];
+    const startedAt = monotonicNow();
+    let modelMs = 0;
+    let parseMs = 0;
+    for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
+      const round = await decideOnce({
+        playerId: next.toAct,
+        sessionId: session.sessionId,
+        message: next.message,
+      }, timeouts[attempt]);
+      modelMs += round.modelMs;
+      if (!round.ok) continue;
+      const parseStarted = monotonicNow();
+      const action = validatedDecision(round.raw, next);
+      parseMs += Math.max(0, monotonicNow() - parseStarted);
+      if (action) {
+        return {
+          action,
+          outcome: attempt === 0 ? 'accepted' : 'retried_accepted',
+          startedAt,
+          modelMs,
+          parseMs,
+        };
+      }
+    }
+    return {
+      action: null,
+      outcome: 'forced_default',
+      startedAt,
+      modelMs,
+      parseMs,
+    };
+  };
+
+  const recoverServerForPublish = async () => {
+    if (stopRequested) throw codedError('STOPPING', '정지 중에는 서버를 재기동하지 않습니다.');
+    const expected = readServerLock();
+    if (expected && await serverHealthy(expected.port)) return expected.port;
+    if (expected && processAlive(expected.serverPid)) {
+      if (expected.serverPid !== serverPid) {
+        throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 server lock 소유자가 바뀌었습니다.');
+      }
+      await stopServer();
+    } else if (serverChild?.pid === expected?.serverPid) {
+      serverChild = null;
+      serverIdentity = null;
+      serverPid = null;
+      serverAdopted = false;
+    }
+
+    const current = readServerLock();
+    if (current) {
+      if (
+        !expected
+        || current.serverPid !== expected.serverPid
+        || current.port !== expected.port
+        || current.sessionToken !== expected.sessionToken
+      ) {
+        throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 server lock이 교체됐습니다.');
+      }
+      if (processAlive(current.serverPid)) {
+        throw codedError('SERVER_STOP_UNCONFIRMED', '기존 서버가 살아 있어 lock을 지울 수 없습니다.');
+      }
+      fs.unlinkSync(lockPath);
+    }
+    const sessionToken = readLoopState()?.sessionToken;
+    if (typeof sessionToken !== 'string' || sessionToken === '') {
+      throw codedError('NO_GAME', '게시 복구에 필요한 sessionToken이 없습니다.');
+    }
+    const port = await ensureServer(sessionToken);
+    writeLoopState({ port });
+    log('server-recovered', { port, serverPid });
+    return port;
+  };
+
+  const executePublish = async (args) => {
+    try {
+      return await runPublish(args);
+    } catch (error) {
+      if (error.code !== 'PUBLISH_FAILED') throw error;
+      await recoverServerForPublish();
+      const retryArgs = args.includes('--retry') ? args : [...args, '--retry'];
+      return runPublish(retryArgs);
+    }
+  };
+
+  const turnPath = path.join(root, '.turn.json');
+  const publishEnvelope = async (envelope, flags = []) => {
+    writeJsonAtomic(turnPath, envelope);
+    const args = ['--from', turnPath, ...flags];
+    let out;
+    try {
+      out = await executePublish(args);
+    } catch (error) {
+      if (error.code !== 'ATTEMPT_PENDING') throw error;
+      await executePublish(['--from', turnPath, '--retry']);
+      out = await executePublish(args);
+    }
+    const patch = {};
+    if (Number.isInteger(out.publishId)) patch.lastPublishId = out.publishId;
+    if (Number.isInteger(out.handNo)) patch.handNo = out.handNo;
+    if (Object.keys(patch).length) writeLoopState(patch);
+    return out;
+  };
+
+  const waitFlags = () => ['--wait', '--wait-ms', String(waitMs)];
+
+  const checkArchivePending = async (out) => {
+    if (!out?.archivePending) return;
+    const handNo = Number(out.handNo);
+    if (archiveCheckedHands.has(handNo)) return;
+    archiveCheckedHands.add(handNo);
+    const checked = await runCli(['resume-check']);
+    log('archive-resume-check', { handNo, archiveStatus: checked.archiveStatus });
+    if (checked.archiveStatus !== 'repair_failed') return;
+    const message = `핸드 ${handNo} 아카이브 복구에 실패해 새 핸드를 시작하지 않습니다.`;
+    writeLoopState({
+      handNo,
+      halt: { code: 'repair_failed', message },
+    });
+    throw codedError('repair_failed', message);
+  };
+
+  const appendMetric = (metric) => {
+    const state = readLoopState();
+    const metrics = Array.isArray(state?.metrics) ? [...state.metrics, metric] : [metric];
+    writeLoopState({ metrics });
   };
 
   const requestStop = () => {
@@ -750,6 +964,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         state = writeLoopState({ phase });
       }
       const resumed = await resolveForPhase(phase, engineState, state);
+      resumeEntryPending = resumed.phase === 'playing';
       log('resume-ready', { phase: resumed.phase });
       return resumed;
     } catch (error) {
@@ -759,17 +974,116 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const run = async () => {
-    const state = readLoopState();
+    let state = readLoopState();
     if (!state) throw codedError('NOT_BOOTSTRAPPED', 'bootstrap 또는 resume이 필요합니다.');
     if (state.halt?.code) throw codedError(state.halt.code, state.halt.message);
-    if (state.phase === 'playing') {
-      throw codedError('HAND_LOOP_TASK_5B', 'AI/user hand loop는 Task 5B/5C에서 구현됩니다.');
-    }
     if (FINAL_PHASES.has(state.phase)) {
       throw codedError('FINALIZATION_TASK_7', 'finalization은 Task 7에서 구현됩니다.');
     }
     if (state.phase === 'done') return state;
-    throw codedError('BOOTSTRAP_INCOMPLETE', `run할 수 없는 phase: ${state.phase}`);
+    if (state.phase !== 'playing') {
+      throw codedError('BOOTSTRAP_INCOMPLETE', `run할 수 없는 phase: ${state.phase}`);
+    }
+
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    if (!engine) throw codedError('NO_GAME', 'engine state가 없습니다.');
+    if (engine.gameOver) {
+      writeLoopState({ phase: 'finalizing', handNo: engine.handNo ?? state.handNo });
+      throw codedError('FINALIZATION_TASK_7', 'finalization은 Task 7에서 구현됩니다.');
+    }
+
+    let out;
+    if (resumeEntryPending) {
+      const current = await runCli(['step']);
+      if (fs.existsSync(path.join(root, '.publish-attempt.json'))) {
+        await publishEnvelope(current, ['--retry']);
+      }
+      const checked = await runCli(['resume-check']);
+      log('resume-archive-check', { archiveStatus: checked.archiveStatus });
+      if (checked.archiveStatus === 'repair_failed') {
+        const message = 'resume 중 아카이브 복구에 실패해 게임을 중단합니다.';
+        writeLoopState({ halt: { code: 'repair_failed', message } });
+        throw codedError('repair_failed', message);
+      }
+      const synchronized = await runCli(['step']);
+      out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
+      resumeEntryPending = false;
+    } else if (engine.hand) {
+      const synchronized = await runCli(['step']);
+      out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
+    } else {
+      const started = await runCli(['step', '--new-hand']);
+      out = await publishEnvelope(started, waitFlags());
+    }
+
+    while (!stopRequested) {
+      await checkArchivePending(out);
+      if (out.handOver) {
+        log('coach-task-6-stub', { handNo: out.handNo });
+        const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
+        if (out.gameOver || userBusted) {
+          state = writeLoopState({ phase: 'finalizing', handNo: out.handNo });
+          throw codedError('FINALIZATION_TASK_7', 'finalization은 Task 7에서 구현됩니다.');
+        }
+        const started = await runCli(['step', '--new-hand']);
+        const narration = started.events?.find((event) => event.type === 'level_up');
+        const flags = narration
+          ? ['--narration', `블라인드 ${narration.sb}/${narration.bb}`, ...waitFlags()]
+          : waitFlags();
+        out = await publishEnvelope(started, flags);
+        continue;
+      }
+
+      if (out.next?.kind === 'user') {
+        throw codedError('USER_HAND_LOOP_TASK_5C', 'user wait/action 경로는 Task 5C에서 구현됩니다.');
+      }
+      if (out.next?.kind !== 'ai') {
+        throw codedError('BAD_NEXT', '다음 행동자 계약이 ai/user가 아닙니다.');
+      }
+
+      const next = out.next;
+      const decision = await decideWithWatchdog(next);
+      const stepArgs = ['step', next.toAct];
+      if (decision.action === null) {
+        stepArgs.push('--force-default');
+      } else {
+        stepArgs.push(decision.action.action);
+        if (decision.action.action === 'raise') stepArgs.push(String(decision.action.amount));
+      }
+      stepArgs.push('--expect-version', String(out.stateVersion));
+
+      const stepStarted = monotonicNow();
+      let envelope;
+      try {
+        envelope = await runCli(stepArgs);
+      } catch (error) {
+        if (error.code !== 'VERSION_MISMATCH') throw error;
+        const synchronized = await runCli(['step']);
+        log('version-resync', {
+          staleDecisionId: next.decisionId,
+          stateVersion: synchronized.stateVersion,
+        });
+        out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
+        continue;
+      }
+      const stepMs = Math.max(0, monotonicNow() - stepStarted);
+      const elapsedMs = Math.max(0, monotonicNow() - decision.startedAt);
+      const publishStarted = monotonicNow();
+      out = await publishEnvelope(envelope, waitFlags());
+      const publishMs = Math.max(0, monotonicNow() - publishStarted);
+      appendMetric({
+        playerId: next.toAct,
+        decisionId: next.decisionId,
+        runtime: playerAdapter.kind,
+        outcome: decision.outcome,
+        elapsedMs,
+        modelMs: decision.modelMs,
+        parseMs: decision.parseMs,
+        stepMs,
+        publishMs,
+      });
+    }
+    return readLoopState();
   };
 
   return {
