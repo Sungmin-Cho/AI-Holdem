@@ -239,6 +239,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   let serverPid = null;
   let serverIdentity = null;
   let serverAdopted = false;
+  let serverStartupIdentityMissing = false;
   let logFd = null;
   let playerAdapter = null;
   let upperAdapter = null;
@@ -369,31 +370,52 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     }
 
     if (!movedMatches) {
-      // replacement가 이동됐다. lock path가 아직 비어 있을 때만 원래 이름으로 복구하고,
-      // 그 사이 또 다른 lock이 생겼다면 둘 다 보존(quarantine + live path)한 채 중단한다.
-      let occupied = true;
+      // replacement가 이동됐다. rename은 destination을 조용히 덮어쓰므로 복구에 쓰지
+      // 않는다. 같은-directory hard link는 EEXIST로 두 파일을 모두 보존하며, 성공 시
+      // source/destination이 같은 inode임을 증명한 뒤에만 quarantine 이름을 제거한다.
       try {
-        fs.lstatSync(lockPath);
+        fs.linkSync(quarantinePath, lockPath);
       } catch (error) {
-        if (error.code === 'ENOENT') occupied = false;
-        else throw codedError('SERVER_LOCK_REPLACED', 'replacement lock 복구 경계를 확인할 수 없습니다.', {
-          cause: error,
-          quarantinePath,
-        });
-      }
-      if (!occupied) {
-        try {
-          fs.renameSync(quarantinePath, lockPath);
-        } catch (error) {
-          throw codedError('SERVER_LOCK_REPLACED', '이동된 replacement lock을 quarantine에 보존했습니다.', {
+        if (error.code === 'EEXIST') {
+          throw codedError('SERVER_LOCK_REPLACED', '새 server lock이 있어 quarantine replacement를 함께 보존합니다.', {
             cause: error,
             quarantinePath,
           });
         }
+        throw codedError('SERVER_LOCK_REPLACED', 'quarantine replacement를 non-clobber 복구하지 못했습니다.', {
+          cause: error,
+          quarantinePath,
+        });
       }
-      throw codedError('SERVER_LOCK_REPLACED', 'retirement 직전 server lock inode 또는 bytes가 교체됐습니다.', {
-        ...(occupied ? { quarantinePath } : {}),
-      });
+
+      let quarantineStat;
+      let restoredStat;
+      try {
+        quarantineStat = fs.lstatSync(quarantinePath, { bigint: true });
+        restoredStat = fs.lstatSync(lockPath, { bigint: true });
+      } catch (error) {
+        throw codedError('SERVER_LOCK_REPLACED', '복구된 replacement identity를 확인할 수 없어 두 경로를 보존합니다.', {
+          cause: error,
+          quarantinePath,
+        });
+      }
+      if (
+        quarantineStat.dev !== restoredStat.dev
+        || quarantineStat.ino !== restoredStat.ino
+      ) {
+        throw codedError('SERVER_LOCK_REPLACED', '복구 경로가 quarantine replacement와 다른 inode라 둘 다 보존합니다.', {
+          quarantinePath,
+        });
+      }
+      try {
+        fs.unlinkSync(quarantinePath);
+      } catch (error) {
+        throw codedError('SERVER_LOCK_REPLACED', '복구 성공 뒤 quarantine 이름을 제거하지 못해 두 경로를 보존합니다.', {
+          cause: error,
+          quarantinePath,
+        });
+      }
+      throw codedError('SERVER_LOCK_REPLACED', 'retirement 직전 server lock inode 또는 bytes가 교체됐습니다.');
     }
 
     fs.unlinkSync(quarantinePath);
@@ -845,6 +867,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           serverPid = existing.serverPid;
           serverIdentity = { pid: existing.serverPid, startTime };
           serverAdopted = serverChild === null;
+          serverStartupIdentityMissing = false;
           return existing.port;
         }
 
@@ -871,17 +894,17 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       serverChild = child;
       serverPid = child.pid ?? null;
       serverAdopted = false;
+      serverStartupIdentityMissing = false;
+      serverIdentity = null;
       let spawnError = null;
       child.once('error', (error) => { spawnError = error; });
       const spawnedStartTime = serverPid === null ? null : processStartTime(serverPid);
       if (spawnedStartTime === null) {
         // spawn handle은 이미 우리 소유다. identity를 세울 수 없는 자식은 첫 await 전에
-        // 즉시 KILL하고 close를 확인해 unowned startup child를 남기지 않는다.
-        try { child.kill('SIGKILL'); } catch { /* requestStop이 동일 handle을 재확인한다 */ }
-        await waitForChildExit(child, 500);
-        serverChild = null;
-        serverPid = null;
-        serverIdentity = null;
+        // 즉시 KILL+exit 확인한다. 확인 실패면 handle을 유지해 bootstrap catch의
+        // requestStop이 같은 직접 자식을 다시 종료하고 확인하게 한다.
+        serverStartupIdentityMissing = true;
+        await terminateUnidentifiedDirectServerChild(500);
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '새 server child startTime을 spawn 직후 확인할 수 없습니다.');
       }
       serverIdentity = { pid: serverPid, startTime: spawnedStartTime };
@@ -1071,9 +1094,38 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return repaired;
   };
 
+  const clearDirectServerOwnership = () => {
+    serverChild = null;
+    serverIdentity = null;
+    serverPid = null;
+    serverAdopted = false;
+    serverStartupIdentityMissing = false;
+  };
+
+  const terminateUnidentifiedDirectServerChild = async (timeoutMs = 500) => {
+    const child = serverChild;
+    if (!child) return true;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      clearDirectServerOwnership();
+      return true;
+    }
+    try { child.kill('SIGKILL'); } catch { /* exit confirmation below remains authoritative */ }
+    if (await waitForChildExit(child, timeoutMs)) {
+      clearDirectServerOwnership();
+      return true;
+    }
+    return false;
+  };
+
   const stopDirectServerChild = async () => {
     const child = serverChild;
     if (!child) return;
+    if (serverStartupIdentityMissing) {
+      if (!await terminateUnidentifiedDirectServerChild(500)) {
+        throw codedError('SERVER_STOP_UNCONFIRMED', 'identity 미확인 startup server child 종료를 확인하지 못했습니다.');
+      }
+      return;
+    }
     const signalDirectChild = (signal) => {
       if (child.exitCode !== null || child.signalCode !== null || !processAlive(child.pid)) return false;
       const identity = serverIdentity;
@@ -1109,9 +1161,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         throw codedError('SERVER_STOP_UNCONFIRMED', '직접 server child 종료를 확인하지 못했습니다.');
       }
     }
-    serverChild = null;
-    serverIdentity = null;
-    serverPid = null;
+    clearDirectServerOwnership();
   };
 
   const adoptedIdentityStatus = () => {
@@ -1363,6 +1413,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           serverIdentity = null;
           serverPid = null;
           serverAdopted = false;
+          serverStartupIdentityMissing = false;
         }
 
         const confirmed = assertPinnedServerLock(pin);

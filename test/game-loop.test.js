@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { ChildProcess, execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -570,6 +570,61 @@ async function withServerLockSwapAtRetirement(lockPath, replacementPath, fn) {
   } finally {
     fs.unlinkSync = originalUnlink;
     fs.renameSync = originalRename;
+  }
+}
+
+async function withSecondServerLockBeforeRestore({
+  lockPath,
+  firstReplacementPath,
+  secondRaw,
+}, fn) {
+  const originalUnlink = fs.unlinkSync;
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let firstSwapped = false;
+  let secondInserted = false;
+  let secondStat = null;
+  let quarantinePath = null;
+  const swapFirst = (candidate) => {
+    if (firstSwapped || path.resolve(String(candidate)) !== path.resolve(lockPath)) return;
+    firstSwapped = true;
+    originalRename(firstReplacementPath, lockPath);
+  };
+  const insertSecondBeforeRestore = (from, to) => {
+    if (
+      secondInserted
+      || path.resolve(String(to)) !== path.resolve(lockPath)
+      || !path.basename(String(from)).startsWith('.lock.json.retired-')
+    ) return;
+    secondInserted = true;
+    quarantinePath = String(from);
+    fs.writeFileSync(lockPath, secondRaw, { flag: 'wx' });
+    secondStat = fs.lstatSync(lockPath);
+  };
+  fs.unlinkSync = function unlinkWithFirstSwap(candidate, ...args) {
+    swapFirst(candidate);
+    return originalUnlink.call(fs, candidate, ...args);
+  };
+  fs.renameSync = function renameWithDoubleSwap(from, to, ...args) {
+    swapFirst(from);
+    insertSecondBeforeRestore(from, to);
+    return originalRename.call(fs, from, to, ...args);
+  };
+  fs.linkSync = function linkWithSecondInsert(from, to, ...args) {
+    insertSecondBeforeRestore(from, to);
+    return originalLink.call(fs, from, to, ...args);
+  };
+  try {
+    return await fn(() => ({
+      firstSwapped,
+      secondInserted,
+      secondStat,
+      quarantinePath,
+    }));
+  } finally {
+    fs.unlinkSync = originalUnlink;
+    fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
   }
 }
 
@@ -2384,7 +2439,7 @@ test('user timeouts repeat wait-only indefinitely and never force-default before
 
 test('wait-only child supervision exceeds waitMs plus network margin (the default 60s wait is not capped at 30s)', { timeout: 10_000 }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, {
-    loopOpts: { waitMs: 300, childTimeoutMs: 150, waitNetworkMarginMs: 100 },
+    loopOpts: { waitMs: 2_000, childTimeoutMs: 1_000, waitNetworkMarginMs: 500 },
   });
   const started = Date.now();
   const running = startRun(loop);
@@ -2396,13 +2451,13 @@ test('wait-only child supervision exceeds waitMs plus network margin (the defaul
     waitFor(
       () => readLoopLog(gameDir).some((entry) => entry.event === 'user-wait-timeout'),
       'declared user wait did not reach its own timeout',
-      2_000,
+      5_000,
     ).then(() => ({ type: 'wait-timeout' })),
   ]);
   if (outcome.type === 'wait-timeout') await stopRun(loop, running);
 
   assert.equal(outcome.type, 'wait-timeout');
-  assert.equal(Date.now() - started >= 250, true, 'child supervisor killed wait before waitMs');
+  assert.equal(Date.now() - started >= 1_800, true, 'child supervisor killed wait before waitMs');
 });
 
 test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않고 같은 결정을 다시 기다린다', { timeout: 15_000 }, async (t) => {
@@ -2828,6 +2883,56 @@ test('D9 atomic retirement restores an identical-byte inode swapped at the retir
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
 });
 
+test('D9 quarantine restore never clobbers a second lock created immediately before restore', { timeout: 15_000, concurrency: false }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  const lockPath = path.join(gameDir, 'lock.json');
+  const firstRaw = fs.readFileSync(lockPath, 'utf8');
+  const original = JSON.parse(firstRaw);
+  process.kill(original.serverPid, 'SIGKILL');
+  await waitUntilDead(original.serverPid);
+  const firstReplacementPath = `${lockPath}.first-restore-swap`;
+  fs.writeFileSync(firstReplacementPath, firstRaw);
+  const firstStat = fs.lstatSync(firstReplacementPath);
+  const secondRaw = JSON.stringify({ ...original, startedAt: 'second-lock-must-survive' });
+
+  let running;
+  const outcome = await withSecondServerLockBeforeRestore({
+    lockPath,
+    firstReplacementPath,
+    secondRaw,
+  }, async (inspect) => {
+    running = startRun(loop);
+    const observed = await Promise.race([
+      running.then(
+        () => ({ type: 'resolved' }),
+        (error) => ({ type: 'rejected', error }),
+      ),
+      waitFor(
+        () => readLoopLog(gameDir).some((entry) => entry.event === 'server-recovered'),
+        'double replacement neither rejected nor recovered',
+        5_000,
+      ).then(() => ({ type: 'recovered' })),
+    ]);
+    return { ...observed, race: inspect() };
+  });
+  if (outcome.type === 'recovered') await stopRun(loop, running);
+
+  assert.equal(outcome.type, 'rejected');
+  assert.equal(outcome.error.code, 'SERVER_LOCK_REPLACED');
+  assert.equal(outcome.race.firstSwapped, true);
+  assert.equal(outcome.race.secondInserted, true, 'test never reached the restore primitive');
+  const finalStat = fs.lstatSync(lockPath);
+  assert.equal(finalStat.dev, outcome.race.secondStat.dev);
+  assert.equal(finalStat.ino, outcome.race.secondStat.ino, 'restore clobbered the second lock');
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), secondRaw);
+  assert.equal(fs.existsSync(outcome.race.quarantinePath), true, 'first replacement quarantine was deleted');
+  const quarantinedStat = fs.lstatSync(outcome.race.quarantinePath);
+  assert.equal(quarantinedStat.dev, firstStat.dev);
+  assert.equal(quarantinedStat.ino, firstStat.ino);
+  assert.equal(fs.readFileSync(outcome.race.quarantinePath, 'utf8'), firstRaw);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+});
+
 test('D9 stop checkpoints fence retirement, spawn, and recorded-body retry interleavings', { timeout: 30_000 }, async (t) => {
   for (const boundary of ['before-retire', 'before-spawn', 'before-retry']) {
     await t.test(boundary, async (st) => {
@@ -2990,6 +3095,87 @@ test('SIGTERM during direct server startup owns and reaps the child before healt
   assert.deepEqual(outcome, { code: 0, signal: null });
   await waitUntilDead(serverPid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('initial server startTime failure retains ownership after a failed kill and requestStop confirms retry cleanup', { timeout: 15_000, concurrency: false }, async () => {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  const originalKill = ChildProcess.prototype.kill;
+  let serverHandle = null;
+  const killAttempts = [];
+  ChildProcess.prototype.kill = function failFirstStartupKill(signal) {
+    if (signal === 'SIGKILL' && this.spawnargs?.includes(SERVER)) {
+      serverHandle = this;
+      killAttempts.push(signal);
+      if (killAttempts.length === 1) return false;
+    }
+    return originalKill.call(this, signal);
+  };
+  try {
+    await withFakePs(
+      `if [ "$2" != "${process.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
+      async () => assert.rejects(
+        loop.bootstrap({ ai: 1, stack: 100 }),
+        (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+      ),
+    );
+
+    assert.equal(killAttempts.length, 2, 'requestStop did not retry the failed startup SIGKILL');
+    assert.equal(serverHandle !== null, true);
+    await waitUntilDead(serverHandle.pid);
+    assert.equal(loop.serverPid, null);
+    assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  } finally {
+    ChildProcess.prototype.kill = originalKill;
+    if (serverHandle && serverHandle.exitCode === null && serverHandle.signalCode === null) {
+      originalKill.call(serverHandle, 'SIGKILL');
+      await waitUntilDead(serverHandle.pid).catch(() => {});
+    }
+  }
+});
+
+test('unsettled startup identity cleanup keeps the child handle owned and requestStop fails closed', { timeout: 15_000, concurrency: false }, async () => {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  const originalKill = ChildProcess.prototype.kill;
+  let serverHandle = null;
+  let killAttempts = 0;
+  ChildProcess.prototype.kill = function rejectStartupKills(signal) {
+    if (signal === 'SIGKILL' && this.spawnargs?.includes(SERVER)) {
+      serverHandle = this;
+      killAttempts += 1;
+      return false;
+    }
+    return originalKill.call(this, signal);
+  };
+  try {
+    await withFakePs(
+      `if [ "$2" != "${process.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
+      async () => assert.rejects(
+        loop.bootstrap({ ai: 1, stack: 100 }),
+        (error) => error.code === 'SERVER_STOP_UNCONFIRMED',
+      ),
+    );
+
+    assert.equal(killAttempts >= 2, true, 'requestStop did not retry unsettled startup cleanup');
+    assert.equal(loop.serverPid, serverHandle.pid, 'unsettled child ownership was discarded');
+    assert.doesNotThrow(() => process.kill(serverHandle.pid, 0));
+    await assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_STOP_UNCONFIRMED');
+  } finally {
+    ChildProcess.prototype.kill = originalKill;
+    if (serverHandle && serverHandle.exitCode === null && serverHandle.signalCode === null) {
+      originalKill.call(serverHandle, 'SIGKILL');
+      await waitUntilDead(serverHandle.pid).catch(() => {});
+    }
+  }
 });
 
 test('SIGTERM waits for the real in-flight publish, records stop state, and removes its server child', { timeout: 20_000 }, async (t) => {
