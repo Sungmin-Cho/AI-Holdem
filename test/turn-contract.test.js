@@ -1,5 +1,10 @@
-// SKILL.md의 턴 명령을 문면 그대로 이어 붙여 실제로 한 판이 돌아가는지 본다.
-// 단위 테스트가 각 조각을 보장해도, 딜러가 문서만 읽고 따라 했을 때 막히는 자리는 여기서만 드러난다.
+// 사이드카가 실제로 잇는 자식 프로세스 시퀀스의 통합 계약이다:
+//   engine/cli.js step … → .turn.json → tools/publish.js --from … --wait → 다음 step …
+// tools/game-loop.js는 이 왕복을 execFile 인자 배열로(셸 미경유) 돌리고, publish stdout의
+// next·stateVersion만 보고 다음 자식 argv를 만든다. 여기서 검증하는 것은 그 이음매다 —
+// step이 다음 행동자 요약을 자족적으로 주는가, publish가 public 필터를 지키는가,
+// stateVersion이 다음 --expect-version으로 그대로 이어지는가.
+// 단위 테스트가 각 조각을 보장해도 왕복이 막히는 자리는 여기서만 드러난다.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -19,37 +24,26 @@ function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-turn-'));
 }
 
+// 사이드카의 runCli/runPublish와 같은 형태 — 셸을 거치지 않는 인자 배열 자식 호출.
 async function node(args) {
   const { stdout } = await execFileAsync(process.execPath, args, { encoding: 'utf8', timeout: 30000 });
-  return stdout;
+  return JSON.parse(stdout.trim());
 }
 
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'\\''`)}'`;
-}
-
-// SKILL의 턴 명령을 셸에 그대로 넘긴다 — 리다이렉트와 &&의 의미까지 계약의 일부다.
-async function sh(script) {
-  const { stdout } = await execFileAsync('/bin/sh', ['-c', script], { encoding: 'utf8', timeout: 30000 });
-  return stdout;
-}
-
+// step envelope는 사이드카가 `<gameDir>/.turn.json`에 원자 기록하고 publish가 --from으로 읽는다.
+// 자식 argv에는 항상 --game-dir이 붙는다(기본 game/에 기대지 않는다).
 async function turn(dir, stepArgs, publishArgs = []) {
-  const step = [process.execPath, CLI, 'step', ...stepArgs, '--game-dir', dir].map(shellQuote).join(' ');
-  const publish = [process.execPath, TOOL, '--from', path.join(dir, '.turn.json'), '--game-dir', dir, ...publishArgs]
-    .map(shellQuote).join(' ');
-  const out = await sh(`${step} > ${shellQuote(path.join(dir, '.turn.json'))} && ${publish}`);
-  return JSON.parse(out.trim());
+  const envelope = await node([CLI, 'step', ...stepArgs, '--game-dir', dir]);
+  fs.writeFileSync(path.join(dir, '.turn.json'), JSON.stringify(envelope));
+  return node([TOOL, '--from', path.join(dir, '.turn.json'), '--game-dir', dir, ...publishArgs]);
 }
 
-// publish만 — step을 끼우지 않는다(SKILL의 --wait-only 문면 그대로).
+// publish만 — step을 끼우지 않는다(사용자 대기 반복 경로).
 async function publishOnly(dir, publishArgs) {
-  const publish = [process.execPath, TOOL, '--from', path.join(dir, '.turn.json'), '--game-dir', dir, ...publishArgs]
-    .map(shellQuote).join(' ');
-  return JSON.parse((await sh(publish)).trim());
+  return node([TOOL, '--from', path.join(dir, '.turn.json'), '--game-dir', dir, ...publishArgs]);
 }
 
-// 플레이어가 하는 일: 받은 message만 읽고 합법 액션 하나를 고른다. 요약이 자족적이지
+// 플레이어 런타임이 하는 일: 받은 message만 읽고 합법 액션 하나를 고른다. 요약이 자족적이지
 // 않으면 여기서 파싱이 깨지므로, 이 파서 자체가 자족성 검증이다.
 function decideFromMessage(message) {
   const numbers = /canCheck=(true|false) callAmount=(\d+) canRaise=(true|false) minRaiseTo=(\d+) maxRaiseTo=(\d+)/.exec(message);
@@ -76,12 +70,11 @@ async function pressUser(port, token, decisionId) {
   throw new Error('사용자 뷰가 게시되지 않았습니다');
 }
 
-test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다', async () => {
+test('턴 계약: step→publish 시퀀스만으로 두 핸드가 끝까지 돌아간다', async () => {
   const dir = tmpGame();
-  const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '400', '--game-dir', dir])).trim());
+  const init = await node([CLI, 'init', '--ai', '2', '--stack', '400', '--game-dir', dir]);
   const token = init.sessionToken;
   const started = await startServer({ gameDir: dir, port: 0, token });
-  fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '결정은 최종 출력으로 반환한다.');
 
   try {
     let handsPlayed = 0;
@@ -116,9 +109,9 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
         } else {
           sawAiTurn = true;
           const rawStep = JSON.parse(fs.readFileSync(path.join(dir, '.turn.json'), 'utf8'));
+          // 어댑터에 stdin으로 넘어가는 것이 이 문자열이다 — publish는 아무것도 덧붙이지 않는다.
           assert.equal(next.message, rawStep.next.summary);
-          assert.equal(next.message.includes('결정은 최종 출력으로 반환한다.'), false);
-          // 딜러는 legal을 따로 부르지 않는다 — 플레이어처럼 message만으로 결정한다.
+          // 사이드카는 legal을 따로 부르지 않는다 — 플레이어처럼 message만으로 결정한다.
           const decided = decideFromMessage(next.message);
           assert.equal(decided.decisionId, next.decisionId, '요약의 decisionId가 next와 다르다');
           out = await turn(
@@ -129,7 +122,7 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
         }
       }
 
-      // §4c 코칭은 백그라운드 결과가 도착한 뒤 별도 게시
+      // 코치 파이프라인은 비차단 — 결과가 도착한 뒤 별도 envelope로 게시된다.
       fs.writeFileSync(path.join(dir, '.coach.json'), JSON.stringify({
         coach: [{ handNo: out.handNo ?? handsPlayed, text: '팟 오즈를 보라.' }],
       }));
@@ -146,6 +139,7 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
     assert.equal(snap.coach.length, coachPublished, '코치 노트가 유실됐다');
     assert.equal(snap.log.some((entry) => entry.type === 'deal_hole'), false, 'deal_hole이 게시됐다');
     assert.equal(snap.log.some((entry) => entry.visibility && entry.visibility !== 'public'), false);
+    assert.equal(snap.log.some((entry) => entry.type === 'talk'), false, 'talk 항목이 게시됐다');
     assert.ok(snap.history.every((entry) => entry.at), 'at 타임스탬프 누락');
 
     // 핸드별 구간에서 그 핸드의 비공개 홀카드가 보이면 안 된다.
@@ -168,7 +162,7 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
       }
     }
 
-    // §7 resume: 인자 없는 step + --view-only 재게시는 로그를 늘리지 않는다
+    // 재진입 체크리스트 3: 인자 없는 step + --view-only 재게시는 로그를 늘리지 않는다.
     const before = snap.log.length;
     await turn(dir, [], ['--view-only']);
     const after = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
@@ -181,7 +175,7 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
 test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..sample', async () => {
   const { createCoachControl } = await import('../tools/coach-control.js');
   const dir = tmpGame();
-  const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '2000', '--game-dir', dir])).trim());
+  const init = await node([CLI, 'init', '--ai', '2', '--stack', '2000', '--game-dir', dir]);
   const token = init.sessionToken;
   const started = await startServer({ gameDir: dir, port: 0, token });
   const owner = '11111111-1111-4111-8111-111111111111';
@@ -217,7 +211,8 @@ test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..samp
         }
       }
 
-      const stats = JSON.parse((await node([CLI, 'stats', '--game-dir', dir])).trim());
+      // 사이드카 코치 파이프라인 순서: stats 캡처가 reserve(begin-owner)보다 앞이다.
+      const stats = await node([CLI, 'stats', '--game-dir', dir]);
       fs.writeFileSync(statsFile, JSON.stringify(stats));
       const begun = await cc.beginOwner({
         gameDir: dir, owner, completed: handsPlayed, statsFile, snapshotFile,
