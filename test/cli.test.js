@@ -309,6 +309,7 @@ test('init CLI: live loop identity unknown이면 force 여부와 무관하게 �
 
 test('init CLI: partial/malformed/unreadable loop.lock.d는 부재가 아니라 unknown이다', async (t) => {
   const cases = [
+    ['empty-dir', () => {}],
     ['partial', (lockDir) => fs.writeFileSync(path.join(lockDir, 'pid'), '')],
     ['malformed', (lockDir) => fs.writeFileSync(path.join(lockDir, 'pid'), '1\nstart\nextra')],
     ['unreadable', (lockDir) => fs.mkdirSync(path.join(lockDir, 'pid'))],
@@ -853,6 +854,15 @@ test('resume-check: unknown/mismatch/malformed loop identity는 loopPidAlive fal
     } finally {
       await terminateChild(holder);
     }
+  });
+
+  await t.test('dead', async () => {
+    const dir = tmpGame();
+    initGame(dir, ['--ai', '2']);
+    const holder = spawnLockHolder(dir);
+    await waitForPath(path.join(dir, 'loop.lock.d', 'pid'), holder);
+    await terminateChild(holder);
+    assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
   });
 
   for (const [label, record] of [

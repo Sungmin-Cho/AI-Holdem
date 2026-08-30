@@ -225,6 +225,17 @@ test('readOwnedLock: 락 없음 → null, 자기 자신 → alive true·startTim
   releaseOwnedLock(h);
 });
 
+test('readOwnedLock: 기존 빈 lock 디렉터리는 부재가 아니라 unknown이다', () => {
+  const dir = tmpDir();
+  fs.mkdirSync(path.join(dir, 'loop.lock.d'));
+  assert.deepEqual(readOwnedLock(dir, 'loop.lock.d'), {
+    pid: null,
+    startTime: null,
+    alive: false,
+    status: 'unknown',
+  });
+});
+
 test('기존 1줄 pid 기록(단명 락)의 staleness 판정은 그대로다', () => {
   const alive = tmpDir();
   const aliveLockDir = path.join(alive, 'loop.lock.d');

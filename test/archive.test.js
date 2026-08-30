@@ -16,6 +16,7 @@ import {
 const STATE_MODULE_URL = pathToFileURL(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/state.js'),
 ).href;
+const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 
 function delegateFs(overrides = {}) {
   return {
@@ -33,6 +34,20 @@ function delegateFs(overrides = {}) {
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-archive-'));
+}
+
+function withFakePs(scriptBody, fn) {
+  const binDir = tmpGame();
+  const psPath = path.join(binDir, 'ps');
+  fs.writeFileSync(psPath, `#!/bin/sh\n${scriptBody}\n`);
+  fs.chmodSync(psPath, 0o755);
+  const original = process.env.PATH;
+  process.env.PATH = `${binDir}:${original}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = original;
+  }
 }
 
 function jumpingNow() {
@@ -497,6 +512,73 @@ test('initGameDir: 서버 시그널 직전 생긴 loop를 재검사해 서버를
     assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
   } finally {
     if (holder) releaseOwnedLock(holder);
+  }
+});
+
+test('initGameDir: SIGTERM 뒤 SIGKILL 직전 생긴 loop는 KILL 없이 LOOP_ALIVE로 중단한다', () => {
+  const dir = tmpGame();
+  const first = initGameDir(dir, { aiCount: 2 });
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: 42, port: 8877, sessionToken: first.sessionToken, startedAt: new Date().toISOString(),
+  }));
+  const before = fs.readFileSync(path.join(dir, 'state.json'));
+  let holder;
+  const signals = [];
+  let aliveCalls = 0;
+  try {
+    assert.throws(
+      () => initGameDir(dir, { aiCount: 2, force: true }, {
+        callerPpid: 0,
+        isAlive() {
+          aliveCalls += 1;
+          // init preflight(1), stopServer의 TERM 전 확인(2)은 loop 없음. TERM 뒤
+          // KILL 여부를 결정하는 확인(3)에서 loop가 등장한다.
+          if (aliveCalls === 3) holder = acquireOwnedLock(dir, 'loop.lock.d');
+          return true;
+        },
+        kill(pid, signal) { signals.push([pid, signal]); },
+        sleepSync() {},
+        now: jumpingNow(),
+      }),
+      (error) => error.code === 'LOOP_ALIVE'
+        && error.message === '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
+    );
+    assert.deepEqual(signals, [[42, 'SIGTERM']]);
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'state.json')), before);
+    assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+  } finally {
+    if (holder) releaseOwnedLock(holder);
+  }
+});
+
+test('initGameDir: callerPpid와 pid가 같아도 identity unknown이면 parent bypass하지 않는다', () => {
+  const dir = tmpGame();
+  const first = initGameDir(dir, { aiCount: 2 });
+  const before = fs.readFileSync(path.join(dir, 'state.json'));
+  const holder = acquireOwnedLock(dir, 'loop.lock.d');
+  try {
+    withFakePs(
+      `if [ "$2" = "${process.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
+      () => {
+        for (const [force, code, message] of [
+          [false, 'ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.'],
+          [true, 'LOOP_ALIVE', '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.'],
+        ]) {
+          assert.throws(
+            () => initGameDir(dir, { aiCount: 2, force }, { callerPpid: process.pid }),
+            (error) => error.code === code && error.message === message,
+          );
+          assert.deepEqual(fs.readFileSync(path.join(dir, 'state.json')), before);
+          assert.equal(
+            JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).sessionToken,
+            first.sessionToken,
+          );
+          assert.equal(fs.existsSync(path.join(dir, 'archive')), false);
+        }
+      },
+    );
+  } finally {
+    releaseOwnedLock(holder);
   }
 });
 
