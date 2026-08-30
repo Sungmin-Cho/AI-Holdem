@@ -1896,6 +1896,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const terminatePersistedCoachAttempt = async (attempt, deadlineNs, {
     allowCurrentReservedWithoutHandle = false,
+    identityDeadlineNs = deadlineNs,
   } = {}) => {
     if (
       allowCurrentReservedWithoutHandle
@@ -1909,7 +1910,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (!identity) {
       return { confirmed: false, reason: 'IDENTITY_UNAVAILABLE', cleanupState: 'termination_unconfirmed' };
     }
-    let state = await waitForPersistedCoachIdentity(identity, deadlineNs);
+    let state = await waitForPersistedCoachIdentity(identity, identityDeadlineNs);
     if (state === 'dead') return { confirmed: true, cleanupState: 'released' };
     // A different startTime proves that the recorded process identity is gone. Never
     // signal the replacement pid; close the stale record as cancelled instead.
@@ -1973,7 +1974,6 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         status: hand.status,
         agentHandle: hand.agentHandle,
         cleanupAuthorized: true,
-        authorityCovered: Boolean(auth.publishQueue?.[handKey] || auth.publishedSeals?.[handKey]),
       });
     }
     for (const row of auth.retiredAttempts ?? []) {
@@ -1990,9 +1990,6 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         status: row.cleanupState,
         agentHandle: row.agentHandle,
         cleanupAuthorized: reclaimable,
-        authorityCovered: Boolean(
-          auth.publishQueue?.[String(row.handNo)] || auth.publishedSeals?.[String(row.handNo)]
-        ),
       });
     }
     return { owner, attempts };
@@ -2000,6 +1997,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
 
   const closePersistedCoachWorkers = async ({ allowCurrentReservedWithoutHandle = false } = {}) => {
     const deadlineNs = ensureFinalizationDeadline();
+    // Unknown identity probing belongs to the result-wait window. Preserve the residual
+    // budget for durable fence/cleanup/adapter-disable/recovery work.
+    const identityDeadlineNs = finalizeResultWaitCutoffNs ?? deadlineNs;
     const { owner, attempts } = persistedCoachAttempts();
     if (attempts.length === 0) return { confirmed: true, owner: null, unresolved: [] };
     if (typeof owner !== 'string' || owner === '') {
@@ -2009,6 +2009,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       attempt,
       result: await terminatePersistedCoachAttempt(attempt, deadlineNs, {
         allowCurrentReservedWithoutHandle,
+        identityDeadlineNs,
       }),
     })));
 
@@ -2028,12 +2029,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           if (error.code !== 'STALE_GENERATION') throw error;
         }
       }
-      const coveredDeadRetired = attempt.source === 'retired'
-        && attempt.status === 'pending'
-        && attempt.authorityCovered
-        && result.confirmed === true
-        && ['released', 'cancelled'].includes(result.cleanupState);
-      if (attempt.cleanupAuthorized && !coveredDeadRetired) {
+      if (attempt.cleanupAuthorized) {
         await runCoach([
           'cleanup-result', '--owner', owner,
           '--hand', String(attempt.handNo),
@@ -2932,13 +2928,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         `코치 봉인이 1..${completed} 핸드를 덮지 못해(누락 ${missing.join(',') || '불명'}) 리뷰를 시작하지 않습니다.`,
       );
     }
-    await enterReviewGenerationScope(completed);
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
       throw haltFinalization(
         'REVIEW_FAILED',
         '상위 모델 런타임이 없어 종합 리뷰를 만들지 않습니다. 게임 상태와 코치 노트는 그대로 남습니다.',
       );
     }
+    await enterReviewGenerationScope(completed);
     throw codedError(
       'REVIEW_GENERATION_TASK_7B',
       'evaluator·종합자 리뷰 생성과 게시는 Task 7B에서 구현됩니다.',

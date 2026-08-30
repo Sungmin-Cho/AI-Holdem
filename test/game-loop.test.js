@@ -5383,6 +5383,52 @@ test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 �
   await waitUntilDead(orphan.pid);
 });
 
+test('Task 7A r3: permanently unknown persisted identity는 result-wait cutoff에서 polling을 끝내고 durable recovery를 남긴다', { timeout: 15_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const countPath = path.join(os.tmpdir(), `holdem-always-unknown-ps-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(countPath, '0');
+  t.after(() => { try { fs.unlinkSync(countPath); } catch { /* absent */ } });
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 2_200,
+      finalizeCutoffLeadMs: 1_100,
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  await withFakePs(
+    `if [ "$2" = "${orphan.pid}" ]; then n=$(cat "${countPath}"); echo $((n + 1)) > "${countPath}"; exit 1; fi\nexec ${REAL_PS} "$@"`,
+    async () => assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED'),
+  );
+
+  assert.equal(Number(fs.readFileSync(countPath, 'utf8')) > 1, true);
+  assert.deepEqual(signals, []);
+  assert.equal(coachInvocations(calls, 'fence').length, 1);
+  assert.equal(coachInvocations(calls, 'cleanup-result').length, 1);
+  assert.equal(coachInvocations(calls, 'adapter-disable').length, 1);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authority.adapterState, 'disabled');
+  assert.equal(authority.hands['1'], undefined);
+  assert.equal(authority.retiredAttempts[0].cleanupState, 'termination_unconfirmed');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.finalization.cutoff.reason, 'persisted_worker_unresolved');
+  assert.equal(state.halt.recovery.code, 'COACH_HANDLE_UNRESOLVED');
+  assert.equal(upper.starts.length, 0);
+});
+
 test('Task 7A r2: handle-less persisted generation은 owner 교대 전에 recovery argv와 함께 abort되고 cancelled 뒤 재개된다', { timeout: 30_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -5472,7 +5518,7 @@ test('Task 7A r2: persisted authority fence/cleanup은 shared deadline 아래 ha
   await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
 });
 
-test('Task 7A r2: Q로 이미 봉인되고 pid가 죽은 retired attempt는 cleanup child 없이 안전하게 건너뛴다', { timeout: 20_000 }, async (t) => {
+test('Task 7A r3: Q로 이미 봉인되고 pid가 죽은 retired attempt는 cleanup released를 durable 기록한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -5490,7 +5536,13 @@ test('Task 7A r2: Q로 이미 봉인되고 pid가 죽은 retired attempt는 clea
   });
 
   await loop.resume();
-  assert.equal(coachInvocations(calls, 'cleanup-result').length, 0, 'covered dead attempt에 per-hand cleanup child를 띄웠다');
+  const cleanups = coachInvocations(calls, 'cleanup-result');
+  assert.equal(cleanups.length, 1);
+  assert.equal(flagValue(cleanups[0], '--cleanup-state'), 'released');
+  assert.equal(
+    readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts[0].cleanupState,
+    'released',
+  );
   assert.equal(upper.starts.length, 0);
   await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_GENERATION_TASK_7B');
 });
@@ -5761,6 +5813,9 @@ test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FA
   assert.equal(loopState.finalization.budgetMs, 20_000, '기본 finalization 예산은 20초다');
   assert.equal(loopState.finalization.resultWaitMs, 10_000);
   assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
+  assert.equal(Object.hasOwn(loopState.finalization, 'deadlineScope'), false);
+  assert.equal(Object.hasOwn(loopState.finalization, 'reviewHandoff'), false);
+  assert.equal(coachInvocations(calls, 'completeness').length, 0);
   assert.equal(loopState.notices.some((notice) => notice.includes('리뷰')), true);
   assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
   assert.equal(coachInvocations(calls, 'reserve').length, 0);

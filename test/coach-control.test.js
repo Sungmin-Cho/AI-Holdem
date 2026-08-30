@@ -118,6 +118,39 @@ async function reserveAll(cc, { dir, owner, completed, statsFile, snapshotFile }
   });
 }
 
+test('cleanupState cancelled는 reclaimableHandles에서 영구 제외되는 terminal 상태다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0 } } }));
+  const begun = await reserveAll(cc, { dir, owner, completed: 1, statsFile, snapshotFile });
+  const descriptor = begun.descriptors[0];
+  await cc.bindHandle({
+    gameDir: dir,
+    owner,
+    handNo: 1,
+    generation: descriptor.generation,
+    handle: '4242:recorded-start',
+  });
+  await cc.fence({
+    gameDir: dir,
+    owner,
+    handNo: 1,
+    generation: descriptor.generation,
+    reason: 'operator-cancel-test',
+  });
+  assert.equal(cc.reclaimableHandles(dir).length, 1);
+
+  await cc.recordCleanup({
+    gameDir: dir,
+    owner,
+    handNo: 1,
+    generation: descriptor.generation,
+    cleanupState: 'cancelled',
+  });
+
+  assert.deepEqual(cc.reclaimableHandles(dir), []);
+  assert.equal(cc.loadAuthority(dir).retiredAttempts[0].cleanupState, 'cancelled');
+});
+
 test('Gate A: cutoff는 live publisher lock 해제 후 missing 전체를 한 transaction으로 unavailable Q seal', async () => {
   const { dir, owner, cc, snapshotFile, statsFile } = setup();
   fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 2, vpip: 0.3 } } }));

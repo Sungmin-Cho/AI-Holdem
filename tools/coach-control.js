@@ -1035,7 +1035,7 @@ export function createCoachControl(deps = {}) {
       && (row.resultState === 'consumed' || row.resultState === 'discarded')
       && typeof row.agentHandle === 'string'
       && row.agentHandle.length > 0
-      && !['released', 'termination_unconfirmed', 'release_failed'].includes(row.cleanupState)
+      && !['cancelled', 'released', 'termination_unconfirmed', 'release_failed'].includes(row.cleanupState)
     ));
   }
 
