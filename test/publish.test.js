@@ -112,8 +112,7 @@ test('publish: 다음 행동자와 보낼 메시지를 stdout으로 돌려준다
     const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
     assert.equal(out.next.agentHandle, 'player-p1');
     assert.equal(out.next.kind, 'ai');
-    assert.ok(out.next.message.includes('요약 본문'));
-    assert.ok(out.next.message.includes('SendMessage로 to:"main"에 보낸다.'));
+    assert.equal(out.next.message, '요약 본문');
     // 같은 본문을 두 번 돌려주면 딜러가 매 턴 두 배로 읽는다.
     assert.equal(out.next.summary, undefined);
   } finally {
@@ -121,17 +120,13 @@ test('publish: 다음 행동자와 보낼 메시지를 stdout으로 돌려준다
   }
 });
 
-test('publish: talk은 메시지로 게시된다', async () => {
+test('--talk-from은 더 이상 존재하지 않는 옵션이다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
-    await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk', 'p2:좋은 패네요']);
-    const snap = await snapshotOf(started.port);
-    const talk = snap.log.find((entry) => entry.type === 'talk');
-    assert.deepEqual(talk, { type: 'talk', playerId: 'p2', text: '좋은 패네요' });
-  } finally {
-    await started.close();
-  }
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk-from', 'x.json']).catch((e) => e);
+    assert.match(String(out.stdout ?? out.message), /USAGE|알 수 없는 옵션/);
+  } finally { await started.close(); }
 });
 
 test('publish --view-only: 이벤트 없이 뷰만 재게시한다', async () => {
@@ -283,19 +278,14 @@ test('publish --view-only: 이벤트는 빼되 안내 메시지는 싣는다', a
   }
 });
 
-test('publish --talk-from: 따옴표가 든 한마디도 셸을 거치지 않고 게시된다', async () => {
+test('reply-channel.txt가 있어도 next.message는 summary 원문이다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
-    const talkFile = path.join(dir, '.talk.json');
-    const text = `'; rm -rf ~ ;' "그래도" 콜`;
-    fs.writeFileSync(talkFile, JSON.stringify({ playerId: 'p3', text }));
-    await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk-from', talkFile]);
-    const talk = (await snapshotOf(started.port)).log.find((entry) => entry.type === 'talk');
-    assert.deepEqual(talk, { type: 'talk', playerId: 'p3', text });
-  } finally {
-    await started.close();
-  }
+    fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '이 문장이 붙으면 실패');
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(out.next.message, '요약 본문');
+  } finally { await started.close(); }
 });
 
 test('publish: view는 있는데 사용자 관점 표식이 없으면 거부한다', async () => {

@@ -81,7 +81,6 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
   const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '400', '--game-dir', dir])).trim());
   const token = init.sessionToken;
   const started = await startServer({ gameDir: dir, port: 0, token });
-  fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '결정은 최종 출력으로 반환한다.');
 
   try {
     let handsPlayed = 0;
@@ -115,18 +114,14 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
           out = await turn(dir, [...args, '--expect-version', String(stateVersion)], ['--wait', '--wait-ms', '400']);
         } else {
           sawAiTurn = true;
-          assert.ok(next.message.includes('결정은 최종 출력으로 반환한다.'), '회신 경로가 붙지 않았다');
+          assert.equal(next.message, next.summary ?? next.message);
           // 딜러는 legal을 따로 부르지 않는다 — 플레이어처럼 message만으로 결정한다.
           const decided = decideFromMessage(next.message);
           assert.equal(decided.decisionId, next.decisionId, '요약의 decisionId가 next와 다르다');
-          // 모델이 만든 talk은 파일 API로 쓴다 — SKILL의 Write 도구 경계를 그대로 흉내낸다.
-          // 셸을 통과시키면 따옴표·역슬래시·개행·단독 종료자 줄이 전부 위험해진다.
-          const talkText = ['\'"콜"\' 갑니다', 'HEREDOC_EOF', '뒷줄 $(echo 위험) `whoami`'].join('\n');
-          fs.writeFileSync(path.join(dir, '.talk.json'), JSON.stringify({ playerId: next.toAct, text: talkText }));
           out = await turn(
             dir,
             [next.toAct, decided.action, '--expect-version', String(stateVersion)],
-            ['--wait', '--wait-ms', '400', '--talk-from', path.join(dir, '.talk.json')],
+            ['--wait', '--wait-ms', '400'],
           );
         }
       }
@@ -149,13 +144,6 @@ test('턴 계약: SKILL의 명령만으로 두 핸드가 끝까지 돌아간다'
     assert.equal(snap.log.some((entry) => entry.type === 'deal_hole'), false, 'deal_hole이 게시됐다');
     assert.equal(snap.log.some((entry) => entry.visibility && entry.visibility !== 'public'), false);
     assert.ok(snap.history.every((entry) => entry.at), 'at 타임스탬프 누락');
-    const talk = snap.log.find((entry) => entry.type === 'talk');
-    assert.ok(talk, 'talk이 게시되지 않았다');
-    // 종료자와 같은 줄, 셸 메타문자, 여러 줄이 모두 원문 그대로 살아 있어야 한다
-    assert.ok(talk.text.includes('"콜"'));
-    assert.ok(talk.text.includes('HEREDOC_EOF'));
-    assert.ok(talk.text.includes('$(echo 위험)'));
-    assert.equal(talk.text.split('\n').length, 3);
 
     // 핸드별 구간에서 그 핸드의 비공개 홀카드가 보이면 안 된다.
     const segments = [];
@@ -193,7 +181,6 @@ test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..samp
   const init = JSON.parse((await node([CLI, 'init', '--ai', '2', '--stack', '2000', '--game-dir', dir])).trim());
   const token = init.sessionToken;
   const started = await startServer({ gameDir: dir, port: 0, token });
-  fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '결정은 최종 출력으로 반환한다.');
   const owner = '11111111-1111-4111-8111-111111111111';
   const cc = createCoachControl();
   const snapshotFile = path.join(dir, 'ui-snapshot.json');

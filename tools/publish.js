@@ -41,7 +41,7 @@ function bail(code, message) {
 
 function parseArgs(argv) {
   const out = {
-    gameDir: 'game', from: null, talks: [], talkFiles: [], narrations: [],
+    gameDir: 'game', from: null, narrations: [],
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
     printGameEpoch: false, deadlineMonotonicNs: null,
@@ -61,8 +61,6 @@ function parseArgs(argv) {
     };
     if (arg === '--game-dir') out.gameDir = needsValue(arg);
     else if (arg === '--from') out.from = needsValue(arg);
-    else if (arg === '--talk') out.talks.push(needsValue(arg));
-    else if (arg === '--talk-from') out.talkFiles.push(needsValue(arg));
     else if (arg === '--narration') out.narrations.push(needsValue(arg));
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
@@ -105,23 +103,6 @@ function readLock(gameDir) {
     bail('NO_LOCK', 'game/lock.json에서 포트·토큰을 읽지 못했습니다. 서버가 떠 있습니까?');
   }
   return { port, sessionToken: lock.sessionToken };
-}
-
-function parseTalk(raw) {
-  const at = raw.indexOf(':');
-  if (at <= 0) bail('USAGE', `--talk은 "<playerId>:<한마디>" 형식이어야 합니다: ${raw}`);
-  return { type: 'talk', playerId: raw.slice(0, at).trim(), text: raw.slice(at + 1).trim() };
-}
-
-function readTalkFile(file) {
-  const parsed = readJson(file, 'BAD_TALK', 'talk 파일');
-  const entries = Array.isArray(parsed) ? parsed : [parsed];
-  return entries.map((entry) => {
-    if (!entry || typeof entry.playerId !== 'string' || typeof entry.text !== 'string') {
-      bail('BAD_TALK', `talk 파일은 {playerId, text} 형태여야 합니다: ${file}`);
-    }
-    return { type: 'talk', playerId: entry.playerId, text: entry.text };
-  });
 }
 
 // Fail closed: a malformed or rejected envelope must never consume a publishId.
@@ -170,8 +151,6 @@ function buildBody(envelope, opts) {
   }
   const messages = [
     ...opts.narrations.map((text) => ({ type: 'narration', text })),
-    ...opts.talks.map(parseTalk),
-    ...opts.talkFiles.flatMap(readTalkFile),
   ];
   if (messages.length) body.messages = messages;
   if (Array.isArray(envelope.coach) && envelope.coach.length) body.coach = envelope.coach;
@@ -196,11 +175,7 @@ function nextForDealer(gameDir, envelope) {
   if (!next) return null;
   const { summary, ...out } = next;
   if (next.kind !== 'ai') return out;
-  let channel = '';
-  try {
-    channel = fs.readFileSync(path.join(gameDir, 'reply-channel.txt'), 'utf8').trim();
-  } catch { /* host without a stored channel */ }
-  out.message = channel ? `${summary}\n${channel}` : summary;
+  out.message = summary;
   return out;
 }
 
