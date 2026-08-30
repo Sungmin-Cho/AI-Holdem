@@ -1934,17 +1934,47 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     if (exactEnvelopePath && !stopRequested) await executeCoachPublish(handNo, exactEnvelopePath);
   };
 
-  const drainQueuedCoachPublications = async () => {
+  const drainQueuedCoachPublications = async ({ reconcileOnly = false } = {}) => {
     const attemptPath = path.join(root, '.publish-attempt.json');
+    // begin-owner also reconciles under the authority lock, but keep this boundary
+    // explicit: no queued envelope may reach the network before the latest snapshot has
+    // had a reconcile-only chance to prove it was already published.
+    await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
     for (;;) {
       const auth = readCoachAuthority();
       const queued = Object.values(auth?.publishQueue ?? {})
         .sort((left, right) => left.handNo - right.handNo)[0];
       if (!queued) return;
+      if (reconcileOnly) {
+        throw codedError(
+          'COACH_RECONCILE_PENDING',
+          `핸드 ${queued.handNo} 코치 Q의 reconcile 증명을 아직 확인하지 못했습니다.`,
+        );
+      }
       if (fs.existsSync(attemptPath)) {
+        let attemptedCoachQueueId = null;
+        try {
+          const record = JSON.parse(fs.readFileSync(attemptPath, 'utf8'));
+          if (typeof record?.coachAuthority?.queueId === 'string') {
+            attemptedCoachQueueId = record.coachAuthority.queueId;
+          }
+        } catch {
+          // publish.js owns malformed/stale attempt classification and recovery codes.
+        }
         // The recorded body owns the current publishId regardless of which queued hand
         // supplied --from. Retry it first, then re-read authority before choosing a Q.
         await executePublish(['--from', queued.exactEnvelopePath, '--retry']);
+        await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
+        if (attemptedCoachQueueId) {
+          const pending = Object.values(readCoachAuthority()?.publishQueue ?? {})
+            .find((item) => item.queueId === attemptedCoachQueueId);
+          if (pending) {
+            throw codedError(
+              'COACH_RECONCILE_PENDING',
+              `핸드 ${pending.handNo} 코치 게시는 응답했지만 reconcile 증명을 확인하지 못했습니다.`,
+            );
+          }
+        }
         continue;
       }
       await executeCoachPublish(queued.handNo, queued.exactEnvelopePath);
@@ -1955,8 +1985,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       if (remaining?.queueId === queued.queueId) {
         throw codedError(
-          'COACH_QUEUE_NOT_SEALED',
-          `핸드 ${queued.handNo} 코치 Q 게시 후 seal을 확인하지 못했습니다.`,
+          'COACH_RECONCILE_PENDING',
+          `핸드 ${queued.handNo} 코치 Q 게시 후 reconcile 증명을 확인하지 못했습니다.`,
         );
       }
     }
@@ -1965,6 +1995,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const beginCoachOwner = async (completed) => {
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
+    const reconcileOnly = readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING';
     const hands = new Map();
     for (let handNo = 1; handNo <= completed; handNo += 1) {
       hands.set(handNo, await captureCoachHand(handNo));
@@ -1983,7 +2014,22 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     // begin-owner has already reconciled the snapshot and atomically selected missing
     // descriptors. Existing owner-neutral Q must become visible before any new worker or
     // turn publication can overtake it; sealedSkipped is never a spawn list.
-    await drainQueuedCoachPublications();
+    try {
+      await drainQueuedCoachPublications({ reconcileOnly });
+    } catch (error) {
+      if (error.code === 'COACH_RECONCILE_PENDING') {
+        writeLoopState({
+          halt: {
+            code: 'COACH_RECONCILE_PENDING',
+            message: error.message,
+          },
+        });
+      }
+      throw error;
+    }
+    if (readLoopState()?.halt?.code === 'COACH_RECONCILE_PENDING') {
+      writeLoopState({ halt: undefined });
+    }
     for (const descriptor of begun.descriptors ?? []) {
       launchCoachPipeline(descriptor.handNo, {
         descriptor,
@@ -2444,9 +2490,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         phase = 'finalizing';
         state = writeLoopState({ phase });
       }
-      const resumed = await resolveForPhase(phase, engineState, state);
+      let resumed = await resolveForPhase(phase, engineState, state);
       if (resumed.phase === 'playing') {
         await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
+        resumed = readLoopState();
       }
       resumeEntryPending = resumed.phase === 'playing';
       log('resume-ready', { phase: resumed.phase });

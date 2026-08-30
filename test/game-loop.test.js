@@ -3187,6 +3187,122 @@ test('playing resume은 기존 coach Q를 descriptor·turn 전에 exact path로 
   }
 });
 
+test('pending coach retry 후 reconcile가 일시 불가능하면 새 publishId 없이 COACH_RECONCILE_PENDING으로 중단하고 다음 resume이 reconcile-only로 해소한다', { timeout: 30_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const initialized = await initGame(gameDir, ['--stack', '100']);
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+
+  const external = await startExternalServer(gameDir, initialized.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const oldOwner = 'coach-owner-before-reconcile-resume';
+  writeLoopStateFixture(gameDir, initialized.sessionToken, {
+    handNo: 1,
+    port: external.lock.port,
+    ownerSessionId: oldOwner,
+  });
+  const queued = await seedQueuedCoach(gameDir, oldOwner, 1);
+  const envelope = readJson(queued.exactEnvelopePath);
+  const attempt = {
+    body: { publishId: 1, coach: envelope.coach },
+    expectedGameEpoch: gameEpochOf(initialized.sessionToken),
+    coachAuthority: envelope.coachAuthority,
+  };
+  const posted = await fetch(
+    `http://127.0.0.1:${external.lock.port}/api/publish?token=${external.lock.sessionToken}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(attempt.body),
+    },
+  );
+  assert.equal(posted.ok, true);
+  const acceptedSnapshotRaw = fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8');
+  const incompleteSnapshot = JSON.parse(acceptedSnapshotRaw);
+  incompleteSnapshot.coach = [];
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify(incompleteSnapshot));
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify(attempt));
+
+  const firstPublishes = [];
+  const firstUpper = makeCoachAdapter();
+  const firstResume = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), firstUpper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onPublishInvoke: (args) => firstPublishes.push(args),
+    },
+  });
+  t.after(() => firstResume.requestStop().catch(() => {}));
+
+  await assert.rejects(
+    firstResume.resume(),
+    (error) => error.code === 'COACH_RECONCILE_PENDING',
+  );
+
+  assert.equal(firstPublishes.length, 1, 'resume resent the same coach envelope with a new publishId');
+  assert.equal(firstPublishes[0].includes('--retry'), true);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 1);
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).publishQueue['1'].queueId, envelope.coachAuthority.queueId);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.code, 'COACH_RECONCILE_PENDING');
+  assert.equal(firstUpper.starts.length, 0);
+
+  const secondPublishes = [];
+  const secondUpper = makeCoachAdapter();
+  const secondResume = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), secondUpper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onPublishInvoke: (args) => secondPublishes.push(args),
+    },
+  });
+  t.after(() => secondResume.requestStop().catch(() => {}));
+
+  await assert.rejects(
+    secondResume.resume(),
+    (error) => error.code === 'COACH_RECONCILE_PENDING',
+  );
+
+  assert.deepEqual(secondPublishes, [], 'reconcile-pending resume performed a network resend');
+  assert.equal(secondUpper.starts.length, 0);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.code, 'COACH_RECONCILE_PENDING');
+  assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).publishQueue['1']);
+
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), acceptedSnapshotRaw);
+  const recoveredPublishes = [];
+  const recoveredUpper = makeCoachAdapter();
+  const recoveredResume = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), recoveredUpper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onPublishInvoke: (args) => recoveredPublishes.push(args),
+    },
+  });
+  t.after(() => recoveredResume.requestStop().catch(() => {}));
+
+  const resumed = await recoveredResume.resume();
+
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(Object.hasOwn(resumed, 'halt'), false);
+  assert.deepEqual(recoveredPublishes, []);
+  assert.equal(recoveredUpper.starts.length, 0);
+  const finalAuthority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(finalAuthority.publishQueue['1'], undefined);
+  assert.ok(finalAuthority.publishedSeals['1']);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 1);
+});
+
 test('heartbeat가 generation을 먼저 retire해도 unconfirmed 종료는 STALE_GENERATION을 fenced로 보고 adapter-disable·current/future unavailable을 완수한다', { timeout: 20_000 }, async (t) => {
   let enteredTerminate;
   const terminateEntered = new Promise((resolve) => { enteredTerminate = resolve; });
