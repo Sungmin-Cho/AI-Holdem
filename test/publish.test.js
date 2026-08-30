@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +100,8 @@ test('publish: publishId를 스냅샷 기준으로 자동 증가시킨다', asyn
     assert.equal(second.revision, first.revision + 1);
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
     assert.equal(persisted.publishId, second.publishId);
+    assert.equal(first.hadCoach, false);
+    assert.equal(first.reconcilePending, false);
   } finally {
     await started.close();
   }
@@ -675,6 +678,8 @@ test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone�
     const envelope = cc.loadAuthority(dir).publishQueue['1'].exactEnvelopePath;
     const out = await run(dir, ['--from', envelope]);
     assert.equal(out.ok, true);
+    assert.equal(out.hadCoach, true);
+    assert.equal(out.reconcilePending, false);
     const snap = await snapshotOf(started.port);
     assert.equal(snap.coach[0].text, '무난한 폴드입니다.');
     assert.ok(snap.coach[0].coachProof);
@@ -683,6 +688,68 @@ test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone�
     assert.ok(auth.publishedSeals['1']);
   } finally {
     await started.close();
+  }
+});
+
+test('publish: coach reconcile가 일시 실패하면 stdout에 hadCoach=true·reconcilePending=true를 반환한다', async () => {
+  const dir = tmpDir();
+  const authPath = path.join(dir, '.coach-authority.json');
+  const attemptPath = path.join(dir, '.publish-attempt.json');
+  let restoreTimer = null;
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || !req.url.startsWith('/api/publish')) {
+      res.writeHead(404).end();
+      return;
+    }
+    const original = fs.readFileSync(authPath, 'utf8');
+    const invalid = { ...JSON.parse(original), schemaVersion: 999 };
+    fs.writeFileSync(authPath, JSON.stringify(invalid));
+    const poll = setInterval(() => {
+      if (fs.existsSync(attemptPath)) return;
+      clearInterval(poll);
+      restoreTimer = setTimeout(() => fs.writeFileSync(authPath, original), 10);
+    }, 1);
+    req.resume();
+    req.once('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, revision: 1 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: process.pid,
+    port,
+    sessionToken: 'tok',
+  }));
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(snapshotFile, JSON.stringify({
+      revision: 0, publishId: 0, view: null, log: [], coach: [], review: null, history: [],
+    }));
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    const owner = '22222222-2222-4222-8222-222222222222';
+    const begun = await cc.beginOwner({ gameDir: dir, owner, completed: 1, statsFile, snapshotFile });
+    fs.writeFileSync(begun.descriptors[0].exactResultPath, JSON.stringify({
+      handNo: 1, text: 'reconcile pending output',
+    }));
+    await cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: begun.descriptors[0].generation,
+    });
+    const envelope = cc.loadAuthority(dir).publishQueue['1'].exactEnvelopePath;
+
+    const out = await run(dir, ['--from', envelope]);
+
+    assert.equal(out.ok, true);
+    assert.equal(out.hadCoach, true);
+    assert.equal(out.reconcilePending, true);
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    if (restoreTimer) clearTimeout(restoreTimer);
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

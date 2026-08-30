@@ -3364,7 +3364,9 @@ test('live coach publish는 pending이 retry 직전 사라지고 reconcile이 pe
   }));
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 0,
-    publishId: 0,
+    // Proves the old recorded body by publishId so the live branch cannot pass via
+    // recordedBodyProven; it must consume retry stdout hadCoach/reconcilePending.
+    publishId: 1,
     view: null,
     log: [],
     coach: [],

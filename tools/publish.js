@@ -445,6 +445,8 @@ async function main() {
   if (published) {
     out.publishId = published.publishId;
     out.revision = published.revision;
+    out.hadCoach = published.hadCoach === true;
+    out.reconcilePending = published.reconcilePending === true;
   }
   // The dealer never reopens the envelope file, so its next command's inputs ship here.
   if (envelope.stateVersion !== undefined) out.stateVersion = envelope.stateVersion;
