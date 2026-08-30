@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable } from '../engine/state.js';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime } from '../engine/state.js';
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
 
@@ -146,4 +146,76 @@ test('staleness를 넘긴 pid-없는 mutex는 회수된다', () => {
   assert.equal(r.state.ok, true);
   assert.equal(loadState(d).ok, true);
   assert.equal(fs.existsSync(mutex), false);
+});
+
+test('owned lock: 살아 있는 소유자는 6초가 지나도 회수되지 않는다', async () => {
+  const dir = tmpDir();
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  // mtime을 과거로 밀어도 (utimesSync) 두 번째 acquire는 LOCKED
+  const lockDir = path.join(dir, 'loop.lock.d');
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockDir, past, past);
+  assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+  releaseOwnedLock(h);
+});
+
+test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회수된다', () => {
+  const dir = tmpDir();
+  const lockDir = path.join(dir, 'loop.lock.d');
+  fs.mkdirSync(lockDir);
+  // 살아 있는 pid(자기 자신)를 기록하되 startTime을 조작한다
+  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n다른-시각-문자열`);
+  const seen = readOwnedLock(dir, 'loop.lock.d');
+  assert.equal(seen.alive, false); // 시그널 금지 판정의 근거
+  const h = acquireOwnedLock(dir, 'loop.lock.d'); // 회수 후 선점 성공
+  releaseOwnedLock(h);
+});
+
+test('owned lock: 죽은 pid는 회수된다', () => {
+  const dir = tmpDir();
+  const lockDir = path.join(dir, 'loop.lock.d');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), '99999999\n어떤-시각');
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  releaseOwnedLock(h);
+});
+
+test('readOwnedLock: 락 없음 → null, 자기 자신 → alive true·startTime 일치', () => {
+  const dir = tmpDir();
+  assert.equal(readOwnedLock(dir, 'loop.lock.d'), null);
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  const seen = readOwnedLock(dir, 'loop.lock.d');
+  assert.equal(seen.pid, process.pid);
+  assert.equal(seen.alive, true);
+  assert.equal(seen.startTime, processStartTime(process.pid));
+  assert.equal(seen.startTime, h.startTime);
+  releaseOwnedLock(h);
+});
+
+test('기존 1줄 pid 기록(단명 락)의 staleness 판정은 그대로다', () => {
+  const alive = tmpDir();
+  const aliveLockDir = path.join(alive, 'loop.lock.d');
+  fs.mkdirSync(aliveLockDir);
+  fs.writeFileSync(path.join(aliveLockDir, 'pid'), String(process.pid));
+  assert.throws(() => acquireOwnedLock(alive, 'loop.lock.d'), /LOCKED/);
+
+  const dead = tmpDir();
+  const deadLockDir = path.join(dead, 'loop.lock.d');
+  fs.mkdirSync(deadLockDir);
+  fs.writeFileSync(path.join(deadLockDir, 'pid'), '99999999');
+  const h = acquireOwnedLock(dead, 'loop.lock.d');
+  releaseOwnedLock(h);
+});
+
+test('owned lock 디렉터리에 pid 외 파일이 생겨도 fail-closed: 외부 파일을 지우지 않고 LOCKED', () => {
+  const dir = tmpDir();
+  const lockDir = path.join(dir, 'loop.lock.d');
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  fs.writeFileSync(path.join(lockDir, 'extra'), 'x');
+  releaseOwnedLock(h); // pid 파일만 지우고 rmdir는 ENOTEMPTY로 삼켜진다 — 디렉터리·잡파일은 남는다
+  assert.ok(fs.existsSync(lockDir));
+  assert.equal(fs.readFileSync(path.join(lockDir, 'extra'), 'utf8'), 'x');
+  assert.equal(fs.existsSync(path.join(lockDir, 'pid')), false);
+  assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+  assert.equal(fs.readFileSync(path.join(lockDir, 'extra'), 'utf8'), 'x');
 });
