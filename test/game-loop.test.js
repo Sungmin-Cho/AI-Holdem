@@ -1091,6 +1091,105 @@ test('playing resume recreates only missing, corrupt, or runtime-mismatched sess
   });
 });
 
+test('a remotely rejected restored session recreates only that player once, persists it, and retries without overlap', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  putAiFirst(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  const oldCreatedAt = '2026-08-29T01:00:00.000Z';
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'expired-p1', createdAt: oldCreatedAt },
+    p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt },
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const adapter = makeAdapter({
+    onDecide: async ({ sessionId, message }) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (sessionId === 'expired-p1') {
+          const error = new Error('remote session expired');
+          error.code = 'CLI_FAILED';
+          throw error;
+        }
+        return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+      } finally {
+        active -= 1;
+      }
+    },
+  });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+
+  await runUntilUserBoundary(loop, gameDir);
+
+  assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1'], 'valid p2 was unnecessarily recreated');
+  assert.deepEqual(
+    adapter.decideCalls.filter((call) => call.playerId === 'p1').map((call) => call.sessionId),
+    ['expired-p1', 'session-p1'],
+  );
+  assert.equal(maxActive, 1, 'old and repaired session calls overlapped');
+  const sessions = readJson(path.join(gameDir, '.player-sessions.json'));
+  assert.equal(sessions.p1.runtime, 'fake');
+  assert.equal(sessions.p1.sessionId, 'session-p1');
+  assert.notEqual(sessions.p1.createdAt, oldCreatedAt);
+  assert.deepEqual(sessions.p2, { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt });
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics
+    .find((entry) => entry.playerId === 'p1');
+  assert.equal(metric.outcome, 'retried_accepted');
+  assert.equal(metric.sessionRepaired, true);
+});
+
+test('a repaired fresh session is never recreated again and its bounded failures reach force-default', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'init', '--ai', '1', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  putAiFirst(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'expired-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const adapter = makeAdapter({
+    onDecide: async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const error = new Error('session call rejected');
+        error.code = 'CLI_FAILED';
+        throw error;
+      } finally {
+        active -= 1;
+      }
+    },
+  });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 } },
+  });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+
+  await runUntilUserBoundary(loop, gameDir);
+
+  assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1']);
+  assert.deepEqual(adapter.decideCalls.slice(0, 3).map((call) => call.sessionId), [
+    'expired-p1', 'session-p1', 'session-p1',
+  ]);
+  assert.equal(adapter.decideCalls.length, 3, 'fresh session failure entered an unbounded recreate loop');
+  assert.equal(maxActive, 1);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics[0];
+  assert.equal(metric.outcome, 'forced_default');
+  assert.equal(metric.sessionRepaired, true);
+});
+
 test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const original = createGameLoop({
@@ -1948,6 +2047,172 @@ test('ATTEMPT_PENDING is retried before the current AI transition publish', { ti
 
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).lastPublishId >= 4, true);
+});
+
+test('nested ATTEMPT_PENDING retry errors re-enter the bounded publish matrix with exact argv and artifact order', { timeout: 120_000 }, async (t) => {
+  const cases = [
+    {
+      code: 'BAD_ATTEMPT',
+      mutate: async ({ attemptPath }) => fs.writeFileSync(attemptPath, '{broken-attempt'),
+      expectedSuffixes: [
+        ['--wait', '--wait-ms', '0'],
+        ['--retry'],
+        ['--view-only', '--wait', '--wait-ms', '0'],
+      ],
+      assertNested(observation) {
+        assert.equal(observation.attemptRaw, '{broken-attempt');
+      },
+    },
+    {
+      code: 'BAD_SNAPSHOT',
+      mutate: async ({ attemptPath, snapshotPath }) => {
+        fs.unlinkSync(attemptPath);
+        fs.writeFileSync(snapshotPath, '{broken-snapshot');
+      },
+      expectedSuffixes: [
+        ['--wait', '--wait-ms', '0'],
+        ['--retry'],
+        ['--retry'],
+      ],
+      assertNested(observation) {
+        assert.equal(observation.attemptRaw, null);
+        assert.equal(observation.snapshotRaw, '{broken-snapshot');
+      },
+    },
+    {
+      code: 'LOCK_TIMEOUT',
+      mutate: async (fixture) => {
+        fixture.held = await holdNamedLock(fixture.gameDir, 'publish.lock.d');
+        fixture.releaseTimer = setTimeout(() => fixture.held.release(), 20_500);
+      },
+      expectedSuffixes: [
+        ['--wait', '--wait-ms', '0'],
+        ['--retry'],
+        ['--retry'],
+        ['--wait', '--wait-ms', '0'],
+      ],
+      assertNested(observation, seedRaw) {
+        assert.equal(observation.attemptRaw, seedRaw);
+      },
+    },
+    {
+      code: 'NO_LOCK',
+      mutate: async ({ attemptPath, lockPath, loop }) => {
+        const oldPid = loop.serverPid;
+        process.kill(oldPid, 'SIGKILL');
+        await waitUntilDead(oldPid);
+        fs.unlinkSync(lockPath);
+        assert.equal(fs.existsSync(attemptPath), true);
+      },
+      expectedSuffixes: [
+        ['--wait', '--wait-ms', '0'],
+        ['--retry'],
+        ['--retry'],
+        ['--wait', '--wait-ms', '0'],
+      ],
+      assertNested(observation, seedRaw) {
+        assert.equal(observation.attemptRaw, seedRaw);
+        assert.equal(observation.lockPresent, false);
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.code, { timeout: 35_000 }, async (st) => {
+      let loopRef = null;
+      let checkpointCalls = 0;
+      const invocations = [];
+      const fixture = {
+        gameDir: null,
+        loop: null,
+        attemptPath: null,
+        snapshotPath: null,
+        lockPath: null,
+        held: null,
+        releaseTimer: null,
+      };
+      const setup = await setupAiFirst(st, {
+        adapter: makeAdapter(),
+        loopOpts: {
+          waitMs: 0,
+          onPublishInvoke(args) {
+            invocations.push({
+              args: [...args],
+              attemptRaw: fs.existsSync(fixture.attemptPath)
+                ? fs.readFileSync(fixture.attemptPath, 'utf8')
+                : null,
+              snapshotRaw: fs.existsSync(fixture.snapshotPath)
+                ? fs.readFileSync(fixture.snapshotPath, 'utf8')
+                : null,
+              lockPresent: fs.existsSync(fixture.lockPath),
+            });
+          },
+          async attemptPendingCheckpoint() {
+            checkpointCalls += 1;
+            await scenario.mutate(fixture);
+          },
+        },
+      });
+      loopRef = setup.loop;
+      Object.assign(fixture, {
+        gameDir: setup.gameDir,
+        loop: loopRef,
+        attemptPath: path.join(setup.gameDir, '.publish-attempt.json'),
+        snapshotPath: path.join(setup.gameDir, 'ui-snapshot.json'),
+        lockPath: path.join(setup.gameDir, 'lock.json'),
+      });
+      st.after(async () => {
+        if (fixture.releaseTimer) clearTimeout(fixture.releaseTimer);
+        if (fixture.held) {
+          fixture.held.release();
+          await fixture.held.done.catch(() => {});
+        }
+      });
+      const engine = readJson(path.join(setup.gameDir, 'state.json'));
+      const seed = {
+        body: { publishId: 1, messages: [{ type: 'narration', text: `pending-${scenario.code}` }] },
+        expectedGameEpoch: gameEpochOf(engine.sessionToken),
+      };
+      const seedRaw = JSON.stringify(seed);
+      fs.writeFileSync(fixture.attemptPath, seedRaw);
+      const turnPath = path.join(setup.gameDir, '.turn.json');
+      const running = startRun(loopRef);
+      const outcome = await Promise.race([
+        running.then(
+          () => ({ type: 'resolved' }),
+          (error) => ({ type: 'rejected', error }),
+        ),
+        waitForUserSnapshot(setup.gameDir, 27_000).then(() => ({ type: 'continued' })),
+      ]);
+      if (outcome.type === 'continued') await stopRun(loopRef, running);
+
+      assert.equal(checkpointCalls, 1, `${scenario.code} did not cross the nested retry checkpoint exactly once`);
+      assert.equal(outcome.type, 'continued', `${scenario.code} escaped instead of re-entering the matrix`);
+      const expectedArgs = scenario.expectedSuffixes.map((suffix) => ['--from', turnPath, ...suffix]);
+      assert.deepEqual(invocations.slice(0, expectedArgs.length).map((entry) => entry.args), expectedArgs);
+      scenario.assertNested(invocations[1], seedRaw);
+      assert.equal(fs.existsSync(fixture.attemptPath), false, `${scenario.code} left an unresolved attempt`);
+      const history = readJson(fixture.snapshotPath).history ?? [];
+      const recordedPendingBodies = history.filter((entry) => (
+        entry.payload?.messages?.some((message) => message.text === `pending-${scenario.code}`)
+      ));
+      const pendingBodyShouldPublish = scenario.code === 'LOCK_TIMEOUT' || scenario.code === 'NO_LOCK';
+      assert.equal(
+        recordedPendingBodies.length,
+        pendingBodyShouldPublish ? 1 : 0,
+        `${scenario.code} published the pending body an incorrect number of times`,
+      );
+      if (pendingBodyShouldPublish) {
+        assert.deepEqual(recordedPendingBodies[0].payload, {
+          messages: [{ type: 'narration', text: `pending-${scenario.code}` }],
+        });
+      }
+      const metric = readJson(path.join(setup.gameDir, 'loop-state.json')).metrics
+        .find((entry) => entry.playerId === 'p1');
+      assert.equal(metric.outcome, 'accepted');
+      assert.equal(Object.hasOwn(metric, 'publishError'), false, `${scenario.code} polluted the recovered metric`);
+    });
+  }
 });
 
 test('BAD_ATTEMPT deletes only the corrupt record, resyncs state, and republishes view-only', { timeout: 10_000 }, async (t) => {

@@ -39,6 +39,13 @@ const FATAL_RUNTIME_CODES = new Set([
   'RUNTIME_DISPOSING',
   'SIGNAL_FAILED',
 ]);
+const RESTORED_SESSION_REJECTION_CODES = new Set([
+  'CLI_FAILED',
+  'INVALID_SESSION',
+  'NO_SESSION',
+  'SESSION_EXPIRED',
+  'SESSION_NOT_FOUND',
+]);
 
 function isFatalRuntimeFailure(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
@@ -225,6 +232,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const adapters = new Set();
   const adapterDisposals = new Map();
   const archiveCheckedHands = new Set();
+  const restoredPlayerSessions = new Set();
 
   let lockHandle = null;
   let serverChild = null;
@@ -492,7 +500,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   });
 
   const runCli = (args) => runJsonChild(ENGINE_CLI, args);
-  const runPublish = (args) => runJsonChild(PUBLISH_CLI, args);
+  const runPublish = (args) => {
+    opts.onPublishInvoke?.([...args]);
+    return runJsonChild(PUBLISH_CLI, args);
+  };
 
   const serverHealthy = async (port, { stopAware = false } = {}) => {
     if (!Number.isInteger(port) || port < 1) return false;
@@ -978,6 +989,19 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
+  const createPlayerSession = async (persona, createdAt) => {
+    const prompt = buildPlayerPrompt({ persona });
+    const result = await playerAdapter.warmup({ playerId: persona.playerId, prompt });
+    if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
+      throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
+    }
+    return {
+      runtime: playerAdapter.kind,
+      sessionId: result.sessionId,
+      createdAt,
+    };
+  };
+
   const preparePlayerSessions = async ({ reuseExisting = false } = {}) => {
     if (!playerAdapter) throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
     const players = readJsonOptional(playersPath, 'PLAYERS');
@@ -995,6 +1019,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         existing = {};
       }
     }
+    restoredPlayerSessions.clear();
     const settled = await Promise.allSettled(aiPlayers.map(async (persona) => {
       const prior = existing[persona.playerId];
       if (
@@ -1008,22 +1033,15 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         && typeof prior.createdAt === 'string'
         && prior.createdAt !== ''
       ) {
+        restoredPlayerSessions.add(persona.playerId);
         return [persona.playerId, {
           runtime: prior.runtime,
           sessionId: prior.sessionId,
           createdAt: prior.createdAt,
         }];
       }
-      const prompt = buildPlayerPrompt({ persona });
-      const result = await playerAdapter.warmup({ playerId: persona.playerId, prompt });
-      if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
-        throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
-      }
-      return [persona.playerId, {
-        runtime: playerAdapter.kind,
-        sessionId: result.sessionId,
-        createdAt,
-      }];
+      restoredPlayerSessions.delete(persona.playerId);
+      return [persona.playerId, await createPlayerSession(persona, createdAt)];
     }));
     const failed = settled.find((result) => result.status === 'rejected');
     if (failed) throw failed.reason;
@@ -1035,6 +1053,23 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
   const warmPlayers = () => preparePlayerSessions({ reuseExisting: false });
   const restorePlayers = () => preparePlayerSessions({ reuseExisting: true });
+
+  const repairRestoredPlayerSession = async (playerId) => {
+    if (!restoredPlayerSessions.has(playerId)) return null;
+    // consume-before-await prevents a rejected warmup or fresh-session call from recursively
+    // recreating the same player. A later process resume may try the still-persisted old entry.
+    restoredPlayerSessions.delete(playerId);
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    const persona = Array.isArray(players)
+      ? players.find((player) => player?.playerId === playerId && playerId !== 'user')
+      : null;
+    if (!persona) throw codedError('BAD_PLAYERS', `복구할 플레이어 ${playerId} 페르소나가 없습니다.`);
+    const repaired = await createPlayerSession(persona, isoNow(now));
+    playerSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
+    writeJsonAtomic(sessionsPath, playerSessions);
+    log('player-session-recreated', { playerId, runtime: repaired.runtime });
+    return repaired;
+  };
 
   const stopDirectServerChild = async () => {
     const child = serverChild;
@@ -1182,7 +1217,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
     }
     playerSessions ??= readJsonOptional(sessionsPath, 'PLAYER_SESSIONS');
-    const session = playerSessions?.[next.toAct];
+    let session = playerSessions?.[next.toAct];
     if (!session || typeof session.sessionId !== 'string' || session.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${next.toAct} 세션이 없습니다.`);
     }
@@ -1192,6 +1227,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     let modelMs = 0;
     let parseMs = 0;
     let stepMs = 0;
+    let sessionRepaired = false;
     const applyDecision = async (action) => {
       const stepArgs = ['step', next.toAct];
       if (action === null) {
@@ -1214,12 +1250,34 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
     };
     for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
-      const round = await decideOnce({
+      let round = await decideOnce({
         playerId: next.toAct,
         sessionId: session.sessionId,
         message: next.message,
       }, timeouts[attempt]);
       modelMs += round.modelMs;
+      if (
+        !round.ok
+        && !isFatalRuntimeFailure(round.error)
+        && RESTORED_SESSION_REJECTION_CODES.has(round.error?.code)
+        && restoredPlayerSessions.has(next.toAct)
+      ) {
+        const repaired = await repairRestoredPlayerSession(next.toAct);
+        if (repaired) {
+          session = repaired;
+          sessionRepaired = true;
+          round = await decideOnce({
+            playerId: next.toAct,
+            sessionId: session.sessionId,
+            message: next.message,
+          }, timeouts[attempt]);
+          modelMs += round.modelMs;
+        }
+      } else if (round.ok) {
+        // A successful call proves the restored remote session is usable; later transient
+        // failures must follow the ordinary watchdog rather than trigger recreation.
+        restoredPlayerSessions.delete(next.toAct);
+      }
       if (!round.ok) {
         if (isFatalRuntimeFailure(round.error)) throw round.error;
         continue;
@@ -1238,7 +1296,8 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         return {
           envelope: applied.envelope,
           atomicUnit: applied.atomicUnit,
-          outcome: attempt === 0 ? 'accepted' : 'retried_accepted',
+          outcome: attempt === 0 && !sessionRepaired ? 'accepted' : 'retried_accepted',
+          sessionRepaired,
           startedAt,
           modelMs,
           parseMs,
@@ -1251,6 +1310,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       envelope: applied.envelope,
       atomicUnit: applied.atomicUnit,
       outcome: 'forced_default',
+      sessionRepaired,
       startedAt,
       modelMs,
       parseMs,
@@ -1343,12 +1403,24 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const turnPath = path.join(root, '.turn.json');
   const publishEnvelope = async (envelope, flags = []) => {
     writeJsonAtomic(turnPath, envelope);
-    let args = ['--from', turnPath, ...flags];
+    let currentArgs = ['--from', turnPath, ...flags];
+    let args = currentArgs;
+    let resolvingPending = false;
     const recovered = new Set();
     let out;
     for (;;) {
       try {
+        // A retry with a still-present record publishes the old exact body; once that
+        // succeeds the current transition must still publish. If the record vanished
+        // before invocation, --retry publishes the current turn itself and is terminal.
+        const resolvingRecordedBody = resolvingPending
+          && fs.existsSync(path.join(root, '.publish-attempt.json'));
         out = await executePublish(args);
+        if (resolvingPending && resolvingRecordedBody) {
+          resolvingPending = false;
+          args = currentArgs;
+          continue;
+        }
         break;
       } catch (error) {
         const code = error.code;
@@ -1356,8 +1428,10 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         if (code === 'ATTEMPT_PENDING') {
           recovered.add(code);
           assertNotStopping();
-          await executePublish(['--from', turnPath, '--retry']);
+          await opts.attemptPendingCheckpoint?.();
           assertNotStopping();
+          resolvingPending = true;
+          args = ['--from', turnPath, '--retry'];
           continue;
         }
         if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
@@ -1372,7 +1446,9 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
           assertNotStopping();
           writeJsonAtomic(turnPath, synchronized);
           const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
-          args = ['--from', turnPath, '--view-only', ...recoveryFlags];
+          currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
+          args = currentArgs;
+          resolvingPending = false;
           log('publish-recovery', { code, mode: 'view-only-resync' });
           continue;
         }
@@ -1893,6 +1969,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         modelMs: decision.modelMs,
         parseMs: decision.parseMs,
         stepMs: decision.stepMs,
+        ...(decision.sessionRepaired ? { sessionRepaired: true } : {}),
       };
       try {
         out = await publishEnvelope(decision.envelope, waitFlags());
