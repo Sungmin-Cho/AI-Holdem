@@ -131,7 +131,7 @@ playing → finalizing → review_generated → review_published → done
 - **finalizing**: 마지막 핸드 코치를 재-reserve하지 않고, 20초 절대 예산 안에서 result 소비 → cutoff → `finalize-cutoff`(missing 전체를 한 transaction에서 fence + unavailable seal) → 잔여 pending Q 게시.
 - **review_generated**: evaluator(redacted 트레이스+stats만) → 종합자(evaluator 출력+결과+아키타입 공개)로 리뷰를 만들고 `game/review.md`와 그 sha256을 **먼저** 기록한다. 이후 재개는 재생성하지 않고 이 산출물을 재사용한다. 두 번 실패하면 리뷰를 지어내지 않고 `halt.code = REVIEW_FAILED`다.
 - **review_published**: 게시 전에 `ui-snapshot.json`의 review digest를 대조해 이중 게시를 생략한다.
-- **done**: `finishedAt` 기록 후 정리·exit 0.
+- **done**: 세션·adapter·서버 정리가 성공한 뒤 `finishedAt`과 `phase: "done"`을 기록하고 exit 0.
 
 `--resume`은 **어떤 경로에서도 `init`을 부르지 않는다.** 기록된 phase(없으면 엔진 상태로 유도)부터 멱등 재개하고, 종료 국면이면 플레이어 probe·워밍업을 생략한다. 재개 여부의 분기는 `resume-check`의 `loopPidAlive` 하나다 — 참이면 사이드카를 다시 띄우지 않고 attach(관찰만), 거짓일 때만 `--resume`으로 기동한다. 종료 정리가 실패하면(`loop-state.json`의 `cleanupFailedAt`) 그 프로세스는 이미 끝났으므로 복구는 새 `--resume` 프로세스가 한다.
 
@@ -145,6 +145,6 @@ playing → finalizing → review_generated → review_published → done
 - [ ] **런타임별 §2 수치 판정(최소 3핸드 + AI 결정 20개):** `game/loop-state.json`의 `metrics`로 중앙값·p95·`forced_default` 비율·오버헤드(`parseMs+stepMs+publishMs`)를 계산해 위 「턴 지연」 표와 대조한다. 딜러 전사에 핸드 안 tool call이 없음도 함께 확인한다.
 - [ ] **컨테인먼트 부정 probe 실측:** 기동 로그(`game/loop.log`)에서 런타임별 probe 판정을 확인한다. 카나리 센티널이 자식 출력에 나타난 런타임은 부적격으로 기록됐어야 한다. 실패한 런타임은 실패 그대로 기록한다(다른 호스트 결과를 일반화하지 않는다).
 - [ ] **코치 노트:** 모든 완료 `handNo`가 Published 또는 Pending이고 `text`가 비어 있지 않거나 `unavailable` 표식이 있다. 코치가 다음 핸드를 막지 않는다. 코치 문구에 비공개 홀카드·아키타입이 없다. resume은 missing만 백필하고 Q를 재스폰하지 않는다. late old epoch/owner callback이 새 게임을 오염시키지 않는다.
-- [ ] **리뷰 오버레이:** 게임 종료 후 UI 리뷰 오버레이와 `game/review.md`. `loop-state.json`의 `phase`가 `done`이고 `finishedAt`이 있다. Pending이 있으면 리뷰에 `handNo`·`noteKind`를 명시하고 UI 게시 완료를 주장하지 않는다.
+- [ ] **리뷰 오버레이:** 게임 종료 후 UI 리뷰 오버레이와 `game/review.md`. `loop-state.json`의 `phase`가 `done`이고 `finishedAt`이 있다. 잔여 코치 Pending Q가 있으면 리뷰로 진행하지 않고 finalization이 halt해야 한다.
 - [ ] **레거시 talk 스냅샷:** 이전 버전에서 만들어진 `ui-snapshot.json`을 열었을 때 talk 말풍선·로그 라인이 보이지 않고 narration은 그대로 보이는지.
 - [ ] **notices 보고:** 런타임 폴백이나 상위 모델 부재가 있었다면 딜러가 그것을 한 줄로 보고했는지.

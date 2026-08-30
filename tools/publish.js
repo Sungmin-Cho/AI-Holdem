@@ -287,15 +287,13 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       const epoch = gameEpochOf(lock.sessionToken);
       const auth = readAuthority(gameDir);
       assertSupportedAuthority(auth);
-      if (auth?.noNewPlayTimePublishers && opts.deadlineMonotonicNs == null
-        && !opts.viewOnly && !opts.retry && envelope.review === undefined) {
-        bail('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시는 중단됐습니다.');
-      }
-
       let body = null;
       let coachAuthority = envelope.coachAuthority ?? null;
       const pendingPath = attemptPath(gameDir);
       const pending = fs.existsSync(pendingPath);
+      if (opts.retry && !pending) {
+        bail('NO_ATTEMPT', '재시도할 기록된 게시 시도가 없습니다.');
+      }
       if (pending) {
         const record = readJson(pendingPath, 'BAD_ATTEMPT', '직전 게시 시도');
         const stale = staleAttemptReason(record, epoch, auth);
@@ -318,6 +316,13 @@ async function publishOnce(gameDir, lock, envelope, opts) {
             bail('BAD_ATTEMPT', '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
           }
         }
+      }
+      const cutoffBodyAllowed = opts.viewOnly
+        || envelope.review !== undefined
+        || coachAuthority !== null
+        || (body && (body.viewOnly === true || body.review !== undefined));
+      if (auth?.noNewPlayTimePublishers && !cutoffBodyAllowed) {
+        bail('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시는 중단됐습니다.');
       }
       if (!body) {
         const snapshotPath = path.join(gameDir, 'ui-snapshot.json');

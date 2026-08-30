@@ -1684,6 +1684,11 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         break;
       } catch (error) {
         const code = error.code;
+        if (code === 'NO_ATTEMPT' && resolvingPending) {
+          resolvingPending = false;
+          args = currentArgs;
+          continue;
+        }
         if (recovered.has(code)) throw error;
         if (code === 'ATTEMPT_PENDING') {
           recovered.add(code);
@@ -2214,7 +2219,16 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         attemptedCoachQueueId = record?.coachAuthority?.queueId ?? null;
         attemptedPublishId = Number.isInteger(record?.body?.publishId) ? record.body.publishId : null;
       } catch { /* publish.js owns malformed/stale attempt classification */ }
-      const retried = await executePublish([...args, '--retry']);
+      let retried;
+      try {
+        retried = await executePublish([...args, '--retry']);
+      } catch (retryError) {
+        if (retryError.code !== 'NO_ATTEMPT') throw retryError;
+        throw codedError(
+          'COACH_RECONCILE_PENDING',
+          `핸드 ${handNo} 코치 retry 직전 attempt가 사라져 반영 여부를 확인하지 못했습니다.`,
+        );
+      }
       await runCoach(['reconcile', '--snapshot-file', coachSnapshotPath]);
       const auth = readCoachAuthority();
       if (auth?.publishedSeals?.[String(handNo)]) return { ok: true, reconciled: true };
@@ -3893,6 +3907,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       }
       if (state?.phase === 'review_published') return finishDoneLifecycle();
       if (state?.phase === 'done') return finishDoneLifecycle();
+      if (stopRequested) return readLoopState() ?? state;
       throw codedError('BAD_LOOP_PHASE', `종료 시퀀스를 재개할 수 없는 phase: ${state?.phase ?? '없음'}`);
     } catch (error) {
       throw translateFinalizationDeadline(error);
@@ -3924,7 +3939,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
         await publishEnvelope(current, ['--retry']);
       }
       const checked = await runCli(['resume-check']);
-      const checkedHandNo = Number(current.view?.handNo ?? state.handNo);
+      const checkedHandNo = Number(engine.lastHand?.handNo ?? 0);
       if (Number.isSafeInteger(checkedHandNo) && checkedHandNo >= 0) {
         archiveCheckedHands.add(checkedHandNo);
       }

@@ -464,6 +464,18 @@ test('publish --retry: 서버에 닿지 못했던 게시는 재시도로 이벤�
   }
 });
 
+test('publish --retry: 기록된 attempt가 없으면 새 publishId를 만들지 않는다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(failed.json.code, 'NO_ATTEMPT');
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+  } finally {
+    await started.close();
+  }
+});
+
 function userTurn() {
   return sampleTurn({
     view: { handNo: 1, toAct: 'user', legal: { decisionId: 'd-1-preflop-2' } },
@@ -910,6 +922,11 @@ test('publish: cutoff 이후 review와 view-only는 되고 새 turn은 막힌다
     assert.equal(viewOnly.ok, true);
     const blocked = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
     assert.equal(blocked.json.code, 'PLAYTIME_PUBLISH_STOPPED');
+    const deadlineBypass = await runFailing(dir, [
+      '--from', turnFile(dir, sampleTurn()),
+      '--deadline-monotonic-ns', String(process.hrtime.bigint() + 5_000_000_000n),
+    ]);
+    assert.equal(deadlineBypass.json.code, 'PLAYTIME_PUBLISH_STOPPED');
   } finally {
     await started.close();
   }
