@@ -6,7 +6,6 @@ const ui = { view: null, log: [], coach: [], review: undefined };
 let pendingAction = false;
 let raiseTo = 0;
 let lastDecisionId = null;
-let lastTalk = {};
 let overlayDismissed = false;
 
 const $ = (id) => document.getElementById(id);
@@ -78,13 +77,11 @@ function revealedCards() {
     if (item.type === 'hand_start') {
       for (const key of Object.keys(map)) delete map[key];
       mucks.clear();
-      lastTalk = {};
     }
     if (item.type === 'showdown') {
       for (const reveal of item.reveals ?? []) map[reveal.playerId] = reveal;
       for (const pid of item.mucks ?? []) mucks.add(pid);
     }
-    if (item.type === 'talk' && item.playerId && item.text) lastTalk[item.playerId] = item.text;
   }
   return { map, mucks };
 }
@@ -121,8 +118,6 @@ function formatLogItem(item) {
       return `${playerName(item.playerId)} 탈락`;
     case 'game_over':
       return `게임 종료: ${item.result === 'win' ? '우승' : item.result === 'lose' ? '패배' : item.result}`;
-    case 'talk':
-      return `${playerName(item.playerId)}: ${item.text ?? ''}`;
     case 'narration':
       return item.text ?? '';
     default:
@@ -285,13 +280,6 @@ function paintSeats(view) {
     badge.textContent = seat.allIn ? '올인' : seat.folded ? '폴드' : '';
 
     el.append(cards, body, bet, badge);
-    const talk = lastTalk[seat.playerId];
-    if (talk) {
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble';
-      bubble.textContent = talk;
-      el.append(bubble);
-    }
     root.append(el);
   }
 }
@@ -375,6 +363,7 @@ function paintLog() {
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
   list.replaceChildren();
   for (const item of ui.log) {
+    if (item.type === 'talk') continue;
     const row = document.createElement('div');
     row.className = `log-item log-${item.type || 'event'}`;
     row.textContent = formatLogItem(item);

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const MUTEX_RETRY_MS = 100;
 const MUTEX_TIMEOUT_MS = 3000;
@@ -72,6 +73,7 @@ function isProcessAlive(pid) {
 
 // pid 파일을 fd로 읽어 내용과 inode를 함께 얻는다. 이후 unlink는 이 inode가
 // 그대로일 때만 하므로, 경로가 다른 락의 pid 파일로 바뀐 경우를 걸러낼 수 있다.
+// 형식은 1줄(기존 단명 락: pid만) 또는 2줄(owned 락: pid\nstartTime) 둘 다 허용한다.
 function readPidFile(dir) {
   let fd;
   try {
@@ -82,12 +84,19 @@ function readPidFile(dir) {
   }
   try {
     const st = fs.fstatSync(fd, { bigint: true });
-    const parsed = Number(fs.readFileSync(fd, 'utf8').trim());
-    return {
-      dev: st.dev,
-      ino: st.ino,
-      pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null,
-    };
+    const lines = fs.readFileSync(fd, 'utf8').split('\n');
+    const base = { dev: st.dev, ino: st.ino };
+    if (lines.length === 1) {
+      const parsed = Number(lines[0].trim());
+      return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: null };
+    }
+    if (lines.length === 2 && lines[0].trim() !== '' && lines[1].trim() !== '') {
+      const parsed = Number(lines[0].trim());
+      return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: lines[1].trim() };
+    }
+    // 3줄 이상이거나 2줄이지만 빈 줄이 섞인 기록은 legacy도 owned도 아닌 malformed —
+    // pid-less 취급(mtime staleness 경로)으로 fail-closed, 절대 owned·alive로 해석하지 않는다.
+    return { ...base, pid: null, startTime: null };
   } finally {
     fs.closeSync(fd);
   }
@@ -127,8 +136,27 @@ function mutexIdentity(dir) {
   }
 }
 
+// pid+startTime identity의 3상태 판정. read-time에 ps가 실패하면(현재 startTime을
+// 알 수 없음) 생존도 사망도 증명되지 않은 'unknown'이다 — 이 경우를 죽음과
+// 같이 취급하면(예: null !== recordedStartTime) 살아 있는 소유자가 회수되는
+// fail-open이 생긴다. isIdentityStale·readOwnedLock 양쪽 모두 'unknown'을
+// 'dead'가 아닌 별도 상태로 다뤄야 한다.
+function ownedIdentityStatus(pid, recordedStartTime) {
+  if (!isProcessAlive(pid)) return 'dead';
+  const current = processStartTime(pid);
+  if (current === null) return 'unknown';
+  return current === recordedStartTime ? 'alive' : 'dead';
+}
+
 function isIdentityStale(id) {
-  if (id.pid !== null) return !isProcessAlive(id.pid);
+  if (id.pid !== null) {
+    // owned 락(2줄 기록)은 startTime이 남아 있다: pid 생존만으로는 재사용된
+    // pid를 원래 소유자로 오판할 수 있으므로 pid+startTime 일치까지 재검증한다.
+    // 기존 1줄 기록(startTime 없음)의 판정은 이전과 동일하게 pid 생존만 본다.
+    const startTime = id.pidFile ? id.pidFile.startTime : null;
+    if (startTime !== null) return ownedIdentityStatus(id.pid, startTime) === 'dead';
+    return !isProcessAlive(id.pid);
+  }
   return Date.now() - id.mtimeMs >= MUTEX_STALE_MS;
 }
 
@@ -207,6 +235,49 @@ function reclaimMutex(dir) {
     fs.rmdirSync(dir);
   } catch (error) {
     if (error.code === 'ENOENT') return true; // another reclaimer finished the job
+    if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return false;
+    throw error;
+  }
+  return true;
+}
+
+// Lifetime-owned locks require a complete pid+startTime identity. They never use
+// the generic pid-less/legacy mtime fallback: an unknown owned record may belong
+// to a live process whose metadata is partial or temporarily unreadable.
+function ownedIdentityIsDead(id) {
+  const pidFile = id?.pidFile;
+  return Boolean(
+    pidFile
+    && pidFile.pid !== null
+    && pidFile.startTime !== null
+    && ownedIdentityStatus(pidFile.pid, pidFile.startTime) === 'dead'
+  );
+}
+
+function sameOwnedIdentity(expected, current) {
+  if (!expected || !current || !sameInode(expected, current)) return false;
+  const a = expected.pidFile;
+  const b = current.pidFile;
+  return Boolean(
+    a
+    && b
+    && a.dev === b.dev
+    && a.ino === b.ino
+    && a.pid === b.pid
+    && a.startTime === b.startTime
+  );
+}
+
+function reclaimOwnedMutex(dir) {
+  const decided = mutexIdentity(dir);
+  if (!ownedIdentityIsDead(decided)) return false;
+  const confirmed = mutexIdentity(dir);
+  if (!sameOwnedIdentity(decided, confirmed) || !ownedIdentityIsDead(confirmed)) return false;
+  if (!unlinkStalePidFile(dir, confirmed.pidFile)) return false;
+  try {
+    fs.rmdirSync(dir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
     if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return false;
     throw error;
   }
@@ -323,4 +394,108 @@ export async function withNamedLock(gameDir, name, fn, options) {
   } finally {
     releaseMutex(dir, mine);
   }
+}
+
+// 로컬 ps 호출 — 서버·네트워크와 무관하므로 sync 허용. pid는 재사용되지만
+// (pid, 기동시각) 쌍은 사실상 유일하므로 owned 락의 identity로 쓴다.
+export function processStartTime(pid) {
+  try {
+    const out = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' });
+    const trimmed = out.trim();
+    return trimmed || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락 경로가
+ * 없을 때만 null이다. 기록이 partial/legacy/malformed/unreadable이면 존재는 하지만
+ * identity를 증명할 수 없으므로 `{ alive:false, status:'unknown' }`을 돌려준다.
+ * 유효한 2줄 기록은 `status: 'alive'|'dead'|'unknown'`으로 3상태를 보존한다.
+ * 기존 호출자를 위해 pid/startTime/alive 필드는 그대로 유지하며, `alive`는
+ * `ownedIdentityStatus`가 'alive'로 **긍정 증명**했을 때만 true다.
+ */
+export function readOwnedLock(gameDir, name) {
+  const dir = path.join(gameDir, name);
+  let pidFile;
+  try {
+    pidFile = readPidFile(dir);
+  } catch {
+    return { pid: null, startTime: null, alive: false, status: 'unknown' };
+  }
+  if (!pidFile) {
+    if (!inodeKey(dir)) return null;
+    return { pid: null, startTime: null, alive: false, status: 'unknown' };
+  }
+  if (pidFile.pid === null || pidFile.startTime === null) {
+    return {
+      pid: pidFile.pid,
+      startTime: pidFile.startTime,
+      alive: false,
+      status: 'unknown',
+    };
+  }
+  const status = ownedIdentityStatus(pidFile.pid, pidFile.startTime);
+  return {
+    pid: pidFile.pid,
+    startTime: pidFile.startTime,
+    alive: status === 'alive',
+    status,
+  };
+}
+
+function tryCreateOwnedLock(dir, startTime) {
+  try {
+    fs.mkdirSync(dir);
+  } catch (error) {
+    if (error.code === 'EEXIST') return null;
+    throw error;
+  }
+  const mine = inodeKey(dir);
+  try {
+    fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime}`);
+  } catch (error) {
+    undoOwnMutex(dir, mine);
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  return { dir, pid: process.pid, startTime, dev: mine.dev, ino: mine.ino };
+}
+
+/**
+ * 기존 mkdir+pid 원시를 수명 보유(lifetime-owned) 락으로 확장한다: 기록은
+ * pid 파일 한 개에 `pid\nstartTime` 2줄뿐(비재귀 rmdir 계약을 지키기 위해
+ * 그 외 파일은 절대 만들지 않는다), staleness는 mtime이 아니라 `readOwnedLock`의
+ * `alive` 판정 하나로만 결정된다 — 살아 있는 소유자는 시간이 얼마나 지나도
+ * 회수되지 않는다. 죽은 것으로 판정되면 기존 reclaim 경로(inode 검증
+ * unlink+rmdir)를 그대로 재사용해 회수하고 한 번만 재시도한다.
+ *
+ * 자기 자신의 startTime을 mkdir보다 먼저 확인한다: ps 실패로 null이면 identity를
+ * 세울 수 없으므로 디렉터리·pid 파일을 아예 만들지 않고 실패한다. `LOCKED`와
+ * 혼동되지 않도록 별도 코드(`IDENTITY_UNAVAILABLE`)로 던진다 — 상대측 회수 로직이
+ * "내가 owner인데 락을 못 세웠다"를 "누가 락을 쥐고 있다"와 구별할 수 있어야 한다.
+ */
+export function acquireOwnedLock(gameDir, name) {
+  const dir = path.join(gameDir, name);
+  const startTime = processStartTime(process.pid);
+  if (startTime === null) {
+    const error = new Error('IDENTITY_UNAVAILABLE');
+    error.code = 'IDENTITY_UNAVAILABLE';
+    throw error;
+  }
+
+  let handle = tryCreateOwnedLock(dir, startTime);
+  if (handle) return handle;
+
+  const owner = readOwnedLock(gameDir, name);
+  if (!owner || owner.status !== 'dead') throwLocked();
+  if (!reclaimOwnedMutex(dir)) throwLocked();
+  handle = tryCreateOwnedLock(dir, startTime);
+  if (!handle) throwLocked();
+  return handle;
+}
+
+export function releaseOwnedLock(handle) {
+  releaseMutex(handle.dir, { dev: handle.dev, ino: handle.ino });
 }

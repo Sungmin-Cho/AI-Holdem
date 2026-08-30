@@ -10,6 +10,13 @@ function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-srv-'));
 }
 
+test('UI는 레거시 talk를 렌더링하지 않고 narration은 유지한다', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), 'server/public/app.js'), 'utf8');
+  assert.equal(source.includes("case 'talk'"), false);
+  assert.match(source, /item\.type === 'talk'\) continue/);
+  assert.match(source, /case 'narration'/);
+});
+
 async function start(gameDir, token = 'tok-test') {
   return startServer({ gameDir, port: 0, token });
 }

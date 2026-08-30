@@ -137,7 +137,7 @@ function sequence() {
       },
     },
     {
-      label: 'AI 액션 1 + talk',
+      label: 'AI 액션 1 + narration',
       body: {
         publishId: 3,
         view: view({
@@ -153,12 +153,12 @@ function sequence() {
         ],
         messages: [
           { type: 'narration', text: '당신이 콜했습니다.' },
-          { type: 'talk', playerId: 'p1', text: '일단 보고 가죠.' },
+          { type: 'narration', text: '일단 보고 가죠.' },
         ],
       },
     },
     {
-      label: 'AI 액션 2 + talk',
+      label: 'AI 액션 2 + narration',
       body: {
         publishId: 4,
         view: view({
@@ -173,12 +173,12 @@ function sequence() {
           ev(3, 'action', { playerId: 'p1', action: 'call', street: 'preflop' }),
         ],
         messages: [
-          { type: 'talk', playerId: 'p2', text: '큰 건 아닌 듯하네요.' },
+          { type: 'narration', text: '큰 건 아닌 듯하네요.' },
         ],
       },
     },
     {
-      label: 'AI 액션 3 + talk',
+      label: 'AI 액션 3 + narration',
       body: {
         publishId: 5,
         view: view({
@@ -193,7 +193,7 @@ function sequence() {
           ev(4, 'action', { playerId: 'p2', action: 'call', street: 'preflop' }),
         ],
         messages: [
-          { type: 'talk', playerId: 'p3', text: '체크할게요.' },
+          { type: 'narration', text: '체크할게요.' },
         ],
       },
     },

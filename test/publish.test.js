@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +100,8 @@ test('publish: publishId를 스냅샷 기준으로 자동 증가시킨다', asyn
     assert.equal(second.revision, first.revision + 1);
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
     assert.equal(persisted.publishId, second.publishId);
+    assert.equal(first.hadCoach, false);
+    assert.equal(first.reconcilePending, false);
   } finally {
     await started.close();
   }
@@ -112,8 +115,7 @@ test('publish: 다음 행동자와 보낼 메시지를 stdout으로 돌려준다
     const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
     assert.equal(out.next.agentHandle, 'player-p1');
     assert.equal(out.next.kind, 'ai');
-    assert.ok(out.next.message.includes('요약 본문'));
-    assert.ok(out.next.message.includes('SendMessage로 to:"main"에 보낸다.'));
+    assert.equal(out.next.message, '요약 본문');
     // 같은 본문을 두 번 돌려주면 딜러가 매 턴 두 배로 읽는다.
     assert.equal(out.next.summary, undefined);
   } finally {
@@ -121,17 +123,36 @@ test('publish: 다음 행동자와 보낼 메시지를 stdout으로 돌려준다
   }
 });
 
-test('publish: talk은 메시지로 게시된다', async () => {
+test('--talk-from은 더 이상 존재하지 않는 옵션이다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
-    await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk', 'p2:좋은 패네요']);
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk-from', 'x.json']).catch((e) => e);
+    assert.match(String(out.stdout ?? out.message), /USAGE|알 수 없는 옵션/);
+  } finally { await started.close(); }
+});
+
+test('--talk도 더 이상 존재하지 않는 옵션이다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk', 'p1:안녕']).catch((e) => e);
+    assert.match(String(out.stdout ?? out.message), /USAGE|알 수 없는 옵션/);
+  } finally { await started.close(); }
+});
+
+test('talk가 실린 구버전 pending attempt는 --retry로 동일 본문 재전송된다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const body = { publishId: 1, view: sampleTurn().view, viewOnly: true,
+      messages: [{ type: 'talk', playerId: 'p1', text: '레거시 한마디' }] };
+    fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({ body, expectedGameEpoch: gameEpochOf('tok') }));
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(out.publishId, 1);
     const snap = await snapshotOf(started.port);
-    const talk = snap.log.find((entry) => entry.type === 'talk');
-    assert.deepEqual(talk, { type: 'talk', playerId: 'p2', text: '좋은 패네요' });
-  } finally {
-    await started.close();
-  }
+    assert.ok(JSON.stringify(snap).includes('레거시 한마디'));
+  } finally { await started.close(); }
 });
 
 test('publish --view-only: 이벤트 없이 뷰만 재게시한다', async () => {
@@ -283,19 +304,14 @@ test('publish --view-only: 이벤트는 빼되 안내 메시지는 싣는다', a
   }
 });
 
-test('publish --talk-from: 따옴표가 든 한마디도 셸을 거치지 않고 게시된다', async () => {
+test('reply-channel.txt가 있어도 next.message는 summary 원문이다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
-    const talkFile = path.join(dir, '.talk.json');
-    const text = `'; rm -rf ~ ;' "그래도" 콜`;
-    fs.writeFileSync(talkFile, JSON.stringify({ playerId: 'p3', text }));
-    await run(dir, ['--from', turnFile(dir, sampleTurn()), '--talk-from', talkFile]);
-    const talk = (await snapshotOf(started.port)).log.find((entry) => entry.type === 'talk');
-    assert.deepEqual(talk, { type: 'talk', playerId: 'p3', text });
-  } finally {
-    await started.close();
-  }
+    fs.writeFileSync(path.join(dir, 'reply-channel.txt'), '이 문장이 붙으면 실패');
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(out.next.message, '요약 본문');
+  } finally { await started.close(); }
 });
 
 test('publish: view는 있는데 사용자 관점 표식이 없으면 거부한다', async () => {
@@ -443,6 +459,18 @@ test('publish --retry: 서버에 닿지 못했던 게시는 재시도로 이벤�
     const snap = await snapshotOf(started.port);
     assert.equal(snap.log.filter((entry) => entry.type === 'hand_start').length, 1, '이벤트가 유실됐다');
     assert.equal(snap.log.some((entry) => entry.type === 'deal_hole'), false);
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish --retry: 기록된 attempt가 없으면 새 publishId를 만들지 않는다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(failed.json.code, 'NO_ATTEMPT');
+    assert.equal((await snapshotOf(started.port)).revision, 0);
   } finally {
     await started.close();
   }
@@ -662,6 +690,8 @@ test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone�
     const envelope = cc.loadAuthority(dir).publishQueue['1'].exactEnvelopePath;
     const out = await run(dir, ['--from', envelope]);
     assert.equal(out.ok, true);
+    assert.equal(out.hadCoach, true);
+    assert.equal(out.reconcilePending, false);
     const snap = await snapshotOf(started.port);
     assert.equal(snap.coach[0].text, '무난한 폴드입니다.');
     assert.ok(snap.coach[0].coachProof);
@@ -670,6 +700,68 @@ test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone�
     assert.ok(auth.publishedSeals['1']);
   } finally {
     await started.close();
+  }
+});
+
+test('publish: coach reconcile가 일시 실패하면 stdout에 hadCoach=true·reconcilePending=true를 반환한다', async () => {
+  const dir = tmpDir();
+  const authPath = path.join(dir, '.coach-authority.json');
+  const attemptPath = path.join(dir, '.publish-attempt.json');
+  let restoreTimer = null;
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || !req.url.startsWith('/api/publish')) {
+      res.writeHead(404).end();
+      return;
+    }
+    const original = fs.readFileSync(authPath, 'utf8');
+    const invalid = { ...JSON.parse(original), schemaVersion: 999 };
+    fs.writeFileSync(authPath, JSON.stringify(invalid));
+    const poll = setInterval(() => {
+      if (fs.existsSync(attemptPath)) return;
+      clearInterval(poll);
+      restoreTimer = setTimeout(() => fs.writeFileSync(authPath, original), 10);
+    }, 1);
+    req.resume();
+    req.once('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, revision: 1 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: process.pid,
+    port,
+    sessionToken: 'tok',
+  }));
+  try {
+    const { createCoachControl } = await import('../tools/coach-control.js');
+    const cc = createCoachControl();
+    const snapshotFile = path.join(dir, 'ui-snapshot.json');
+    const statsFile = path.join(dir, 'stats.json');
+    fs.writeFileSync(snapshotFile, JSON.stringify({
+      revision: 0, publishId: 0, view: null, log: [], coach: [], review: null, history: [],
+    }));
+    fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+    const owner = '22222222-2222-4222-8222-222222222222';
+    const begun = await cc.beginOwner({ gameDir: dir, owner, completed: 1, statsFile, snapshotFile });
+    fs.writeFileSync(begun.descriptors[0].exactResultPath, JSON.stringify({
+      handNo: 1, text: 'reconcile pending output',
+    }));
+    await cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: begun.descriptors[0].generation,
+    });
+    const envelope = cc.loadAuthority(dir).publishQueue['1'].exactEnvelopePath;
+
+    const out = await run(dir, ['--from', envelope]);
+
+    assert.equal(out.ok, true);
+    assert.equal(out.hadCoach, true);
+    assert.equal(out.reconcilePending, true);
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    if (restoreTimer) clearTimeout(restoreTimer);
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 
@@ -830,6 +922,11 @@ test('publish: cutoff 이후 review와 view-only는 되고 새 turn은 막힌다
     assert.equal(viewOnly.ok, true);
     const blocked = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
     assert.equal(blocked.json.code, 'PLAYTIME_PUBLISH_STOPPED');
+    const deadlineBypass = await runFailing(dir, [
+      '--from', turnFile(dir, sampleTurn()),
+      '--deadline-monotonic-ns', String(process.hrtime.bigint() + 5_000_000_000n),
+    ]);
+    assert.equal(deadlineBypass.json.code, 'PLAYTIME_PUBLISH_STOPPED');
   } finally {
     await started.close();
   }

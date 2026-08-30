@@ -172,16 +172,6 @@ main {
   letter-spacing: 0.02em;
   color: #f0d78c;
 }
-.bubble {
-  max-width: 160px;
-  font-size: 12px;
-  background: #fff;
-  color: #222;
-  padding: 4px 8px;
-  border-radius: 8px 8px 8px 2px;
-  box-shadow: 0 4px 10px var(--shadow);
-}
-
 .card {
   width: 52px; height: 74px;
   border-radius: 7px;
@@ -290,7 +280,6 @@ main {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
 }
-.log-talk { background: rgba(212, 180, 90, 0.12); }
 .log-narration { color: var(--muted); font-style: italic; }
 .log-empty, .coach-empty { color: var(--muted); font-size: 13px; padding: 12px; }
 .coach-note .hn { color: var(--gold-soft); font-size: 12px; font-weight: 700; margin-bottom: 4px; }

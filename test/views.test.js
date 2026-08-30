@@ -158,6 +158,7 @@ test('turnSummary: 자기 홀카드만 담고 legal 수치를 전부 문면에 �
   const st = setup3(5000, 5000, 5000);
   const legal = legalFor(st);
   const text = turnSummary(st, legal.toAct);
+  assert.equal(text.includes('talk'), false);
   assert.ok(text.includes(legal.decisionId));
   assert.ok(text.includes(`callAmount=${legal.callAmount}`));
   assert.ok(text.includes(`minRaiseTo=${legal.minRaiseTo}`));

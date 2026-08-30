@@ -150,7 +150,7 @@ export function turnSummary(state, playerId) {
   if (legal.canRaise && legal.minRaiseTo > legal.maxRaiseTo) {
     lines.push(`minRaiseTo>maxRaiseTo 이므로 합법 레이즈는 ${legal.maxRaiseTo}(올인)뿐이다.`);
   }
-  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?,"talk":"짧은 한마디(선택)"}`);
+  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?}`);
   return lines.join('\n');
 }
 
