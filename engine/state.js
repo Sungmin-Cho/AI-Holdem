@@ -497,5 +497,18 @@ export function acquireOwnedLock(gameDir, name) {
 }
 
 export function releaseOwnedLock(handle) {
-  releaseMutex(handle.dir, { dev: handle.dev, ino: handle.ino });
+  const current = mutexIdentity(handle.dir);
+  const pidFile = current?.pidFile;
+  if (
+    !sameInode(handle, current)
+    || !pidFile
+    || pidFile.pid !== handle.pid
+    || pidFile.startTime !== handle.startTime
+  ) return;
+  if (!unlinkStalePidFile(handle.dir, pidFile)) return;
+  try {
+    fs.rmdirSync(handle.dir);
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY') throw error;
+  }
 }

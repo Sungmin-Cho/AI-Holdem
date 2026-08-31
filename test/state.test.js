@@ -379,3 +379,13 @@ test('releaseOwnedLock: 디렉터리가 교체되면(inode 불일치) 교체본�
   assert.ok(fs.existsSync(lockDir));
   assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), '12345\n대체-소유자-시각');
 });
+
+test('releaseOwnedLock: 같은 디렉터리 inode의 owner 기록이 교체돼도 교체본을 보존한다', () => {
+  const dir = tmpDir();
+  const h = acquireOwnedLock(dir, 'loop.lock.d');
+  const lockDir = path.join(dir, 'loop.lock.d');
+  fs.writeFileSync(path.join(lockDir, 'pid'), '12345\n대체-소유자-시각');
+  releaseOwnedLock(h);
+  assert.ok(fs.existsSync(lockDir));
+  assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), '12345\n대체-소유자-시각');
+});
