@@ -1,7 +1,7 @@
 # 게임 세션 Store Foundation 설계
 
 날짜: 2026-08-31
-상태: READY_FOR_PLAN — CRITICAL review 수렴, compensated depth human-approved
+상태: READY_FOR_PLAN_WITH_GATES — lifecycle amendment R8 상한, final findings 반영, compensated continuation human-approved
 상위 방향: 게임은 init 시 영구 홈을 얻고 완료 시 이동·복사되지 않는다.
 
 ## 1. 범위
@@ -612,6 +612,9 @@ API를 쓴다. 임의 path writer가 아니다. runtime mutation writer로의 �
 requiredExtensions entry를 찾는다. `resolveStagingSession`과 pinned `.extensions/`
 directory를 재검증하고 size cap, exact lowercase filename, current uid/mode를 확인한
 뒤 exclusive same-directory temp→rename으로 `.extensions/<relativePath>`를 쓴다.
+`content`는 JSON object이며 foundation이 `stableJson(content)`를 정확히 한 번 적용한
+bytes를 쓴다. size cap과 receipt digest는 serialization 후 bytes 기준이다. caller가 미리
+stringify한 문자열을 넘기면 schema error로 거부해 double encoding을 허용하지 않는다.
 write 전후 `.extensions` pathname inode를 확인하고 outside path를 쓰지 않는다.
 반환 receipt는 `{name,relativePath,sha256,bytes}`다. lifecycle이 임의 fs writer로
 extension을 만들지 않는다.
@@ -664,6 +667,9 @@ staging/final/recovery descendant면 marker 존재 전에도 legacy
 재사용하고 manifest/readiness 검사는 defense in depth다. 새 코드의
 destructive archive entry가 첫 mutation 전에 호출한다. 구버전 rollback binary의
 우회 방지는 compatibility launcher 설계 책임이다.
+또한 capsule current가 `layout:'legacy-root'`이고 selected concrete realpath가 store root와
+같으면 그 store root도 destructive archive target으로 거부한다. capsule/sessions 이름만
+보존하고 legacy live state/review/hands를 이동하는 우회는 허용하지 않는다.
 
 ### `resolveLegacyConcreteSession(input)`
 
@@ -878,6 +884,52 @@ legacy binding semantic schema/행동은 lifecycle이 정하지만 pointer write
 허용하지 않는다. current 검증 뒤 last-operation outcome `legacy-selected`를 기록한다.
 response loss는 same operation current+capability+last receipt digest로 멱등 반환한다.
 
+### `writeLifecycleArtifact(input)` / `removeLifecycleArtifact(input)`
+
+`{storeDir,name,expectedSha256,value}`를 받아 name이 `^lifecycle-[a-z0-9-]+(?:-[0-9a-f-]{36})?\.json$`
+인지 검증한다. strict transaction mutex 안에서 **target lifecycle artifact**의 current sha
+CAS(`absent` sentinel 포함),
+foundation stableJson, `.foundation-tmp-*` secure atomic writer, fd/nlink/uid/mode 검증을
+사용한다. write는 `{sha256,idempotent}`, remove는 expected digest가 맞을 때만 unlink하고
+`{removed,idempotent}`를 반환한다. lifecycle이 capsule에 자체 temp writer를 만들지 않는다.
+
+`readLifecycleArtifact(storeDir,name)`은 lock 없는 read-only fd 검증+digest를 반환한다.
+foundation은 lifecycle schema 의미를 해석하지 않고 namespace/identity/CAS만 소유한다.
+
+### `transitionLifecycleArtifacts(input)`
+
+lifecycle이 transaction mutex를 직접 획득하거나 재구현하지 않도록 하는 유일한
+다중-artifact 전이 표면이다.
+
+```js
+transitionLifecycleArtifacts({
+  storeDir,
+  expectedCurrentSha256,
+  descriptorProof: { layout, gameId, operationId, manifestSha256, currentSha256 },
+  preconditions: [{ name, expectedSha256 }],
+  mutations: [
+    { op: 'write', name, expectedSha256, value },
+    { op: 'remove', name, expectedSha256 }
+  ]
+})
+```
+
+foundation은 strict transaction 하나 안에서 current와 native manifest/legacy capability를
+descriptorProof에 다시 결합하고, 모든 lifecycle artifact digest precondition을 먼저
+검증한 뒤 `mutations`를 배열 순서대로 secure writer로 적용한다. schema 의미는 해석하지
+않으며 lifecycle namespace/name/CAS만 검증한다. 반환값은 각 mutation의 post-write digest와
+transaction 전후 capsule generation이다. precondition 하나라도 다르면 아무 mutation도
+시작하지 않고 `CURRENT_CHANGED` 또는 `LIFECYCLE_ARTIFACT_CHANGED`다.
+
+`descriptorProof`는 selected native/legacy session 전이에 필수다. layout:none의 pre-session
+launch 기록은 single-artifact `writeLifecycleArtifact`와 expected target digest/current none
+digest를 사용하며 이 multi-artifact API를 호출하지 않는다.
+
+이 API의 원자성은 동시 실행 배제와 all-preconditions-before-first-write를 뜻한다. 여러
+rename을 crash-atomic이라고 주장하지 않는다. lifecycle journal이 항상 첫 write이고 cold
+recovery가 나머지를 roll-forward한다. callback, child spawn, network, signal, session mutex
+대기는 API 안에서 허용하지 않는다. 단일 artifact API도 내부적으로 같은 primitive를 쓴다.
+
 ## 11. 생성과 recovery truth table
 
 | 관찰 상태 | action | mutation owner |
@@ -959,6 +1011,7 @@ ARCHITECTURE.md codemap/상태 불변식/락 재사용 문면을 이 예외와 s
 | `STALE_SESSION_CAPABILITY` | throw | gameId/manifest/path/capability 불일치 |
 | `SESSION_CREATION_IN_PROGRESS` | throw | 다른 pending operation 존재 |
 | `CURRENT_CHANGED` | throw | expected current CAS 실패 |
+| `LIFECYCLE_ARTIFACT_CHANGED` | throw | lifecycle transition target/precondition digest CAS 실패 |
 | `SESSION_STORE_FAILED` | throw | secure mkdir/write/rename I/O 실패 |
 | `UNSAFE_LOCK_PATH` | throw | transaction lock이 capsule 밖/symlink/foreign path |
 | `UNSAFE_STORE_PATH` | throw | store root가 foreign owner 또는 unsafe type |
@@ -1128,8 +1181,11 @@ lifecycle은 다음 precondition을 책임진다.
   engine/publisher/coach/server writer를 quiesce한다는 precondition. current 변경 뒤 old
   child capability가 실패하는 것은 의도된 fence다.
 - store lifetime lock을 보유한 단일 실행자만 한 operationId의 engine/extension 구간을
-  진행한다는 **foundation 밖의 unenforced precondition**. foundation digest/CAS는 일부
-  충돌을 탐지하지만 두 writer가 만든 자기정합적 결과까지 fence한다고 주장하지 않는다.
+  진행하고, published mutation child/server는 lifecycle-issued generation-bound execution
+  lease를 제시한다는 **foundation 밖의 precondition**. play/server lease는 open generation에서
+  발급되고 terminal/rollback admission이 그 generation을 nonreplayable seal한다. foundation digest/CAS 자체가 두
+  writer를 fence한다고 주장하지 않으며, lifecycle §5.10의 nonreplayable lease가 이를
+  기계적으로 집행한다.
 - `expectedCurrentSha256`
 - validated init config
 - required extension 목록과 receipt
