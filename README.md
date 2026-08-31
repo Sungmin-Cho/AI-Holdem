@@ -26,7 +26,7 @@ AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤�
 
 부수 효과가 더 크다. 사이드카는 detached라 **딜러 세션이 죽어도 게임은 계속 돈다.** 호스트 세션이 하는 일은 사전 점검 → 기동 → 보고 셋뿐이다.
 
-판정 근거는 지어내지 않는다. 사이드카가 모든 AI 결정을 `game/loop-state.json`의 `metrics`에 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`로 남긴다. `outcome`이 `forced_default`(워치독 타임아웃)인 결정도 소요 시간 그대로 분포에 들어간다 — 타임아웃을 분포에서 숨기지 않는다.
+판정 근거는 지어내지 않는다. 사이드카가 모든 AI 결정을 선택된 session의 `loop-state.json` `metrics`에 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`로 남긴다. `outcome`이 `forced_default`(워치독 타임아웃)인 결정도 소요 시간 그대로 분포에 들어간다 — 타임아웃을 분포에서 숨기지 않는다.
 
 ## LLM은 어디에만 있나
 
@@ -57,31 +57,35 @@ AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤�
 스킬 없이 같은 게임을 띄울 때. `init`과 서버 기동은 사이드카가 하므로 직접 부르지 않는다.
 
 ```bash
-nohup node tools/game-loop.js --game-dir game --ai 3 --player-runtime claude \
+nohup node tools/game-loop.js --store-dir game --ai 3 --player-runtime claude \
   > /tmp/ai-holdem-boot.log 2>&1 &
-# game/loop-state.json을 폴링해 phase가 bootstrap을 지나면 port·sessionToken으로
+# game/.session-store/current.json의 sessionRel을 해석한 concrete session의
+# loop-state.json을 폴링해 phase가 bootstrap을 지나면 port·sessionToken으로
 open "http://127.0.0.1:<port>/?token=<t>"
 ```
 
 재개는 `--ai` 대신 `--resume`.
 
-### 엔진·서버만 (LLM 없이)
+### 엔진·서버만 (LLM 없이, legacy 개발 디렉터리)
 
-```bash
-node engine/cli.js init --ai 3          # stdout의 sessionToken
-nohup node server/server.js --game-dir game --port 8877 --token <t> > game/server.log 2>&1 &
-open "http://127.0.0.1:8877/?token=<t>"
-```
-
-UI만 보고 싶으면 서버를 `--token dev`로 띄운 뒤 `node test/helpers/dev-drive.js --port <p> --token dev`.
+session store root인 `game/`에는 engine `init`을 직접 실행하지 않는다. 독립 임시 directory를
+`--game-dir`로 명시한 legacy 개발 흐름만 허용하며 production은 위 사이드카 명령을 쓴다.
 
 ## 게임 중에 볼 것
 
-`game/loop-state.json` 하나다. phase·port·notices·`metrics`·halt가 전부 여기 모인다.
+선택된 `game/.session-store/sessions/<gameId>/loop-state.json` 하나다. phase·port·notices·`metrics`·halt가 전부 여기 모인다.
 
-활성 게임의 정의는 **서버 pid와 loop 락 pid 동격**이다. `node engine/cli.js resume-check`가 `serverPidAlive`·`loopPidAlive`를 함께 준다. 둘 중 하나라도 살아 있으면 `init`은 `ACTIVE_GAME`으로 거부하고, `--force`여도 남의 살아 있는 사이드카를 엔진이 죽이지는 않는다(`LOOP_ALIVE`) — 정지는 부트스트랩·롤백 절차의 소관이고 순서는 **사이드카 → 서버**다. 아카이브는 둘 다 사망을 확인한 뒤에만 일어나며 `archive/`는 지우지 않는다.
+새 게임은 처음부터 `game/.session-store/sessions/<gameId>/`에 생성된다. 다음 게임을
+시작해도 이전 session directory를 archive로 이동·복사·삭제하지 않는다.
+engine init 뒤 runtime/server 기동이 실패해도 그 새 session은 current로 남아 `--resume`으로
+재시도한다. current가 가리키는 directory는 수동 삭제하지 않는다. `.<gameId>.creating`은
+init 실패 보존물이며 자동 선택되지 않는다.
 
-`game/`은 gitignore 런타임 상태다. `game/state.json`은 엔진만 읽고 쓴다.
+활성 게임의 정의는 **선택된 session의 서버 pid와 store loop 락 pid 동격**이다.
+`resume-check --game-dir "$SESSION_DIR" --lock-dir game`가 둘을 함께 보고한다. store MVP의
+`--force`는 `FORCE_UNAVAILABLE`이며, 먼저 기존 게임을 정상 정지·재개해야 한다.
+
+`game/`은 gitignore 런타임 store다. 엔진 상태는 선택된 concrete session 아래에만 있다.
 
 ## 끝날 때와 이어서 할 때
 
@@ -92,7 +96,7 @@ playing → finalizing → review_generated → review_published → done
 ```
 
 - **finalizing** — 마지막 핸드 코치를 재-reserve하지 않고 20초 절대 예산 안에서 정리하고, 잔여 pending 게시를 비운다.
-- **review_generated** — evaluator(redacted 트레이스+stats만) → 종합자(evaluator 출력+결과+아키타입 공개)로 리뷰를 만들고 `game/review.md`와 그 sha256을 **먼저** 기록한다. 이후 재개는 재생성하지 않고 이 산출물을 재사용한다. 두 번 실패하면 리뷰를 지어내지 않고 `halt.code = REVIEW_FAILED`다.
+- **review_generated** — evaluator(redacted 트레이스+stats만) → 종합자(evaluator 출력+결과+아키타입 공개)로 리뷰를 만들고 선택된 session의 `review.md`와 그 sha256을 **먼저** 기록한다. 이후 재개는 재생성하지 않고 이 산출물을 재사용한다. 두 번 실패하면 리뷰를 지어내지 않고 `halt.code = REVIEW_FAILED`다.
 - **review_published** — 게시 전에 `ui-snapshot.json`의 review digest를 대조해 이중 게시를 생략한다.
 - **done** — 세션·adapter·서버 정리가 성공한 뒤 `finishedAt`과 `phase: "done"`을 기록하고 exit 0.
 

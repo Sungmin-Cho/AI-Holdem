@@ -28,11 +28,16 @@ metadata:
 ## 1. 사전 점검
 
 1. `node --version` — major ≥ 20이어야 한다. 미달이면 중단하고 사용자에게 알린다.
-2. **연습 포커스**: `game/review.md`가 있으면 새 게임이 그것을 지우기 전에 '다음 게임에서 연습할 것' 항목을 읽는다. 그것이 이번 세션의 practiceFocus다 — **`game/` 밖 경로**(예: `/tmp/ai-holdem-practice-focus.md`)에 Write 도구로 저장하고 그 경로를 `--practice-focus-file`로 넘긴다. `game/` 안에 쓰면 부트스트랩의 vacate가 아카이브로 쓸어 간다. 없으면 생략한다.
+2. **영구 세션**: 새 게임은 `game/.session-store/sessions/<gameId>/`에 처음부터 생성된다. 이전 세션은 다음 init 때 이동·복사·삭제되지 않는다. 이번 MVP에서는 이전 review 자동 전달은 하지 않는다.
 3. **잔여 게임 판정** — `game/`에 상태가 남아 있으면:
 
 ```bash
-node engine/cli.js resume-check --game-dir game
+if [ -f game/.session-store/current.json ]; then
+  SESSION_DIR=$(node -e 'const fs=require("fs"),p=require("path"); const c=JSON.parse(fs.readFileSync("game/.session-store/current.json")); process.stdout.write(p.join("game/.session-store",c.sessionRel))')
+  node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game
+else
+  echo '{"ok":true,"current":null}'
+fi
 # {ok, serverPidAlive, loopPidAlive, port, sessionToken, stateVersion, phase, toAct,
 #  archiveRepaired, archiveStatus: "healthy"|"repaired"|"repair_failed"}
 ```
@@ -50,19 +55,21 @@ node engine/cli.js resume-check --game-dir game
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 
 ```bash
-nohup node tools/game-loop.js --game-dir game --ai <n> \
+nohup node tools/game-loop.js --store-dir game --ai <n> \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
-  [--stack N] [--level-every N] [--blinds SB/BB] [--force] \
-  [--practice-focus-file <game/ 밖 경로>] \
+  [--stack N] [--level-every N] [--blinds SB/BB] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 
-살아 있는 게임이 있는데 `--force` 없이 기동하면 사이드카가 `ACTIVE_GAME`으로 즉시 종료한다. 새 게임으로 덮어쓰기로 사용자가 정했을 때만 `--force`를 붙인다(정지 순서 사이드카 → 서버, 아카이브는 둘 다 사망 확인 후. 남의 살아 있는 loop는 엔진이 죽이지 않는다).
+살아 있는 게임이 있으면 사이드카가 `ACTIVE_GAME`으로 즉시 종료한다. session-store MVP의
+`--force`는 `FORCE_UNAVAILABLE`로 fail-closed하므로 먼저 기존 게임을 정상 정지/재개한다.
 
-그다음 약 250ms 간격으로 `game/loop-state.json`과 아래 명령을 함께 폴링한다.
+current가 생기면 `game/.session-store/current.json`의 `sessionRel`을
+`game/.session-store/<sessionRel>`에 결합해 `SESSION_DIR`로 고정한다. 그다음 약 250ms
+간격으로 `$SESSION_DIR/loop-state.json`과 아래 명령을 함께 폴링한다.
 
 ```bash
-node engine/cli.js resume-check --game-dir game
+node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game
 ```
 
 **종료 조건은 벽시계가 아니라 셋 중 하나다:**
@@ -81,7 +88,9 @@ open "http://127.0.0.1:<port>/?token=<sessionToken>"
 
 macOS `open`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
 
-마지막으로 `loop-state.json`의 `archivedTo`가 문자열이면 그 아카이브 경로를, `notices`에 항목이 있으면 각각을 **한 줄씩** 사용자에게 보고한다. `notices`는 런타임 폴백(요청한 `--player-runtime`이 부적격이라 다른 CLI를 쓰는 중), 상위 모델 부재(코치가 unavailable 경로만 밟고 종합 리뷰를 만들 수 없음) 같은 고지가 담기는 **유일한 경로**다.
+마지막으로 선택된 `gameId`와 영구 `SESSION_DIR`을 보고하고, `notices`에 항목이 있으면 각각을 **한 줄씩** 사용자에게 보고한다. 새 init의 `archivedTo`는 더 이상 사용하지 않는다.
+engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 current로 남으므로,
+오류를 고친 뒤 `/start-game resume`으로 같은 gameId를 재시도한다.
 
 ---
 
@@ -89,23 +98,23 @@ macOS `open`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
 
 **딜러는 개입하지 않는다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 **0회**이고, 그것이 이 구조의 성공 기준이다. 액션 전달·워치독·코치 스폰·게시·서버 재기동은 전부 사이드카가 한다.
 
-사용자가 진행 상황을 물으면 **`game/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `outcome`이 `forced_default`인 결정이 잦으면 워치독이 자주 걸린다는 뜻이니 한 줄로 알린다. 상세 로그는 `game/loop.log`다.
+사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `outcome`이 `forced_default`인 결정이 잦으면 워치독이 자주 걸린다는 뜻이니 한 줄로 알린다. 상세 로그는 `$SESSION_DIR/loop.log`다.
 
 ---
 
 ## 4. 종료 보고
 
-종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM 정지를 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `game/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.
+종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM을 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `$SESSION_DIR/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.
 
 `halt`가 기록돼 있으면 `halt.code`로 분기해 **한 줄씩** 안내한다.
 
 | `halt.code` | 사용자 안내 |
 |---|---|
 | `REVIEW_FAILED` | 게임은 끝났고 상태·코치 노트는 온전하지만 종합 리뷰 생성이 두 번 실패했습니다. 상위 모델 CLI 인증을 확인한 뒤 `/start-game resume`으로 리뷰 단계부터 다시 시도합니다 |
-| `repair_failed` | 직전 핸드 아카이브를 쓰지 못해 멈췄습니다. 그 핸드는 코치·리뷰가 읽을 수 없습니다. `game/hands/` 상태를 확인해야 합니다 |
+| `repair_failed` | 직전 핸드 아카이브를 쓰지 못해 멈췄습니다. 그 핸드는 코치·리뷰가 읽을 수 없습니다. `$SESSION_DIR/hands/` 상태를 확인해야 합니다 |
 | `NO_PLAYER_RUNTIME` | 적격 플레이어 런타임이 하나도 없어 게임을 시작(또는 재개)하지 않았습니다. `notices`의 probe 실패 내역대로 CLI 인증·설치를 고친 뒤 다시 시도합니다 |
 
-그 밖의 `halt.code`는 코드와 `message`를 그대로 전하고 `game/loop.log`를 가리킨다. 딜러가 원인을 추측해 지어내지 않는다.
+그 밖의 `halt.code`는 코드와 `message`를 그대로 전하고 `$SESSION_DIR/loop.log`를 가리킨다. 딜러가 원인을 추측해 지어내지 않는다.
 
 ---
 
@@ -117,7 +126,7 @@ macOS `open`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
 - **`loopPidAlive: false` → `--resume` 기동.** 새 게임 기동과 같은 문면이되 `--ai`·`--force` 자리에 `--resume`이 온다.
 
 ```bash
-nohup node tools/game-loop.js --game-dir game --resume \
+nohup node tools/game-loop.js --store-dir game --resume \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
@@ -133,13 +142,13 @@ nohup node tools/game-loop.js --game-dir game --resume \
 사용자가 게임을 접겠다고 하면 사이드카를 먼저 정지하고(아래 1단계와 같이 identity 재검증 → SIGTERM → 사망 확인) 중단을 마킹한다.
 
 ```bash
-node engine/cli.js end --result abort --game-dir game
+node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 ```
 
 **이 변경을 되돌리거나(revert) 새 버전을 얹기 전에는 아래 3단계를 순서대로 밟는다.** detached 사이드카는 revert 뒤에도 메모리에 올린 코드로 계속 돌기 때문에 revert 단독으로는 부족하다.
 
-1. **정지.** 정지 전에 `game/loop-state.json`의 `port`·`sessionToken`을 보관한다. `game/loop.lock.d/`의 pid를 읽어 **pid+startTime identity를 그 행위 직전에 재검증한 뒤에만** SIGTERM을 보내고 사망을 확인한다. 불일치(pid 재사용)면 죽은 것으로 취급하고 **절대 시그널하지 않는다.** 사이드카 사망 확인 후 `game/lock.json`을 다시 읽어 그 `serverPid`를 정지한다(순서는 사이드카 → 서버. 반대로 하면 사이드카가 새 서버를 띄운다).
-2. **미해소 게시 해소.** 사이드카 정지는 서버도 닫으므로, 1단계에서 보관한 port·sessionToken으로 **임시 relay만** 다시 띄우고 token-authenticated snapshot을 확인한다: `nohup node server/server.js --game-dir game --port <port> --token <sessionToken> > /tmp/ai-holdem-rollback-server.log 2>&1 &`. `game/.publish-attempt.json`이 남아 있으면 `node tools/publish.js --from game/.turn.json --game-dir game --retry`로 기록된 exact body를 끝낸다. 그 다음 `DEADLINE_NS=$(node -e 'process.stdout.write(String(process.hrtime.bigint()+30000000000n))')`를 한 번 계산하고 코치 `publishQueue` 각 행의 `exactEnvelopePath`를 `publish.js --from <exactEnvelopePath> --deadline-monotonic-ns "$DEADLINE_NS"`로 게시한다. `node tools/coach-control.js rollback-guard --game-dir game`이 **`{"ok":true}`**를 반환해야만 계속한다. `ROLLBACK_REFUSED`면 revert하지 말고 active/queued/attempt와 retired cleanup 미확인 행을 먼저 해소한다. 성공 후 임시 relay pid identity를 재검증해 정지하고 사망을 확인한다.
+1. **정지.** 정지 전에 `$SESSION_DIR/loop-state.json`의 `port`·`sessionToken`을 보관한다. `game/loop.lock.d/`의 pid를 읽어 **pid+startTime identity를 그 행위 직전에 재검증한 뒤에만** SIGTERM을 보내고 사망을 확인한다. 불일치(pid 재사용)면 죽은 것으로 취급하고 **절대 시그널하지 않는다.** 사이드카 사망 확인 후 `$SESSION_DIR/lock.json`을 다시 읽어 그 `serverPid`를 정지한다(순서는 사이드카 → 서버. 반대로 하면 사이드카가 새 서버를 띄운다).
+2. **미해소 게시 해소.** 사이드카 정지는 서버도 닫으므로, 1단계에서 보관한 port·sessionToken으로 **임시 relay만** 다시 띄우고 token-authenticated snapshot을 확인한다: `nohup node server/server.js --game-dir "$SESSION_DIR" --port <port> --token <sessionToken> > /tmp/ai-holdem-rollback-server.log 2>&1 &`. `$SESSION_DIR/.publish-attempt.json`이 남아 있으면 `node tools/publish.js --from "$SESSION_DIR/.turn.json" --game-dir "$SESSION_DIR" --retry`로 기록된 exact body를 끝낸다. 그 다음 `DEADLINE_NS=$(node -e 'process.stdout.write(String(process.hrtime.bigint()+30000000000n))')`를 한 번 계산하고 코치 `publishQueue` 각 행의 `exactEnvelopePath`를 `publish.js --from <exactEnvelopePath> --deadline-monotonic-ns "$DEADLINE_NS"`로 게시한다. `node tools/coach-control.js rollback-guard --game-dir "$SESSION_DIR"`이 **`{"ok":true}`**를 반환해야만 계속한다. `ROLLBACK_REFUSED`면 revert하지 말고 active/queued/attempt와 retired cleanup 미확인 행을 먼저 해소한다. 성공 후 임시 relay pid identity를 재검증해 정지하고 사망을 확인한다.
 3. **그 다음에** `git revert`. "revert로 충분"은 정지 확인이 끝난 **quiescent** 게임에만 성립한다.
 
 종료 정리가 실패하면(`loop-state.json`에 `cleanupFailedAt`·`cleanupError`가 남고 프로세스가 비정상 종료) 그 프로세스는 이미 끝났으므로 **같은 프로세스에서 재시도되지 않는다.** 복구는 **새 `--resume` 프로세스**가 한다 — 락·서버·미해소 게시를 다시 들고 정리한다. 원인(자식 종료 미확인·디스크 오류 등)을 먼저 해소한 뒤 §5의 `--resume`을 띄운다.
@@ -166,10 +175,10 @@ node engine/cli.js end --result abort --game-dir game
 
 | 명령 | 역할 |
 |---|---|
-| `node engine/cli.js resume-check --game-dir game` | 사전 점검·resume 분기 (`serverPidAlive`·`loopPidAlive` 동격, `archiveStatus`) |
-| `node tools/game-loop.js --game-dir game --ai <n> …` | 새 게임 기동 (§2) |
-| `node tools/game-loop.js --game-dir game --resume …` | 재개 기동 (§5) |
-| `node engine/cli.js end --result abort --game-dir game` | 중단 마킹 (§6) |
+| `node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game` | 사전 점검·resume 분기 (`serverPidAlive`·`loopPidAlive` 동격, `archiveStatus`) |
+| `node tools/game-loop.js --store-dir game --ai <n> …` | 영구 session 새 게임 기동 (§2) |
+| `node tools/game-loop.js --store-dir game --resume …` | current session 재개 기동 (§5) |
+| `node engine/cli.js end --result abort --game-dir "$SESSION_DIR"` | 중단 마킹 (§6) |
 | `node tools/publish.js … --retry` · `node tools/coach-control.js rollback-guard` | 롤백 2단계에서만 (§6) |
 
-관찰 지점: `game/loop-state.json`(phase·port·sessionToken·archivedTo·notices·metrics·halt·finishedAt), `game/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태(`game/state.json`)와 게시 경로는 딜러가 열지 않는다.
+관찰 지점: `$SESSION_DIR/loop-state.json`(phase·port·sessionToken·notices·metrics·halt·finishedAt), `$SESSION_DIR/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태와 게시 경로는 딜러가 열지 않는다.

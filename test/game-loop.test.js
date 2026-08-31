@@ -6662,6 +6662,92 @@ test('Task 7B: gameOver resume phase 유도는 loop-state 유무와 무관하게
   }
 });
 
+test('production --store-dir creates permanent sessions and resume reuses current', { timeout: 60_000, concurrency: false }, async (t) => {
+  const storeDir = tmpGame();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-store-main-bin-'));
+  const claudePath = path.join(binDir, 'claude');
+  fs.writeFileSync(claudePath, `#!/usr/bin/env node
+    const fs = require('node:fs');
+    const args = process.argv.slice(2);
+    fs.readFileSync(0, 'utf8');
+    if (args.includes('stream-json')) {
+      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],hooks:[]}) + '\\n');
+      process.stdout.write(JSON.stringify({type:'result',result:'ok'}) + '\\n');
+    } else {
+      process.stdout.write('ready\\n');
+    }
+  `);
+  fs.chmodSync(claudePath, 0o755);
+  const children = new Set();
+  t.after(async () => {
+    await Promise.all([...children].map((child) => terminateIfAlive(child)));
+  });
+
+  const launch = async (mode, expectedPreviousGameId = null) => {
+    const argv = [GAME_LOOP, '--store-dir', storeDir, '--player-runtime', 'claude'];
+    if (mode === 'resume') argv.push('--resume');
+    else argv.push('--ai', '1', '--stack', '100');
+    const child = spawn(process.execPath, argv, {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+      stdio: 'ignore',
+    });
+    children.add(child);
+    const selected = await waitFor(() => {
+      try {
+        const current = readJson(path.join(storeDir, '.session-store', 'current.json'));
+        if (mode === 'new' && expectedPreviousGameId !== null && current.gameId === expectedPreviousGameId) return null;
+        if (mode === 'resume' && expectedPreviousGameId !== null && current.gameId !== expectedPreviousGameId) return null;
+        const sessionDir = path.join(storeDir, '.session-store', current.sessionRel);
+        const loopState = readJson(path.join(sessionDir, 'loop-state.json'));
+        if (loopState.phase !== 'playing') return null;
+        return { current, sessionDir, loopState };
+      } catch {
+        return null;
+      }
+    }, `store ${mode} did not reach playing`, 10_000);
+    const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    child.kill('SIGTERM');
+    let outcome = await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 2_000)),
+    ]);
+    if (outcome.timeout) {
+      child.kill('SIGKILL');
+      outcome = await exited;
+    }
+    assert.equal(
+      (outcome.code === 0 && outcome.signal === null) || outcome.signal === 'SIGTERM' || outcome.signal === 'SIGKILL',
+      true,
+      JSON.stringify(outcome),
+    );
+    try {
+      const lock = readJson(path.join(selected.sessionDir, 'lock.json'));
+      if (Number.isInteger(lock.serverPid)) {
+        try { process.kill(lock.serverPid, 'SIGTERM'); } catch { /* already dead */ }
+        await waitUntilDead(lock.serverPid).catch(() => {});
+      }
+    } catch { /* graceful requestStop already removed the lock */ }
+    children.delete(child);
+    return selected;
+  };
+
+  const first = await launch('new');
+  const firstStatePath = path.join(first.sessionDir, 'state.json');
+  const firstBytes = fs.readFileSync(firstStatePath);
+  const firstInode = fs.statSync(first.sessionDir).ino;
+  const second = await launch('new', first.current.gameId);
+  assert.notEqual(second.current.gameId, first.current.gameId);
+  assert.equal(fs.statSync(first.sessionDir).ino, firstInode);
+  assert.deepEqual(fs.readFileSync(firstStatePath), firstBytes);
+  assert.equal(fs.existsSync(path.join(first.sessionDir, 'archive')), false);
+
+  const tokenBeforeResume = readJson(path.join(second.sessionDir, 'state.json')).sessionToken;
+  const resumed = await launch('resume', second.current.gameId);
+  assert.equal(resumed.current.gameId, second.current.gameId);
+  assert.equal(readJson(path.join(resumed.sessionDir, 'state.json')).sessionToken, tokenBeforeResume);
+});
+
 test('CLI parser covers the full surface and halt errors map to stable process exits', () => {
   assert.deepEqual(parseGameLoopArgs([
     '--game-dir', '/tmp/g', '--ai', '3', '--stack', '900', '--level-every', '4',
@@ -6679,6 +6765,11 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     practiceFocusFile: '/tmp/focus.json',
   });
   assert.equal(parseGameLoopArgs(['--resume', '--game-dir', '/tmp/g']).resume, true);
+  assert.equal(parseGameLoopArgs(['--store-dir', '/tmp/store', '--ai', '2']).storeDir, '/tmp/store');
+  assert.throws(
+    () => parseGameLoopArgs(['--store-dir', '/tmp/store', '--game-dir', '/tmp/game', '--ai', '2']),
+    (error) => error.code === 'USAGE',
+  );
   assert.throws(() => parseGameLoopArgs(['--unknown']), (error) => error.code === 'USAGE');
   assert.throws(() => parseGameLoopArgs(['--ai']), (error) => error.code === 'USAGE');
   assert.equal(exitCodeFor(null), 0);

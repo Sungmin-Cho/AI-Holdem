@@ -12,7 +12,7 @@ import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
 const VALUE_FLAGS = new Set([
-  'game-dir', 'ai', 'stack', 'blinds', 'level-every',
+  'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck',
 ]);
 
@@ -338,10 +338,10 @@ function cmdEnd(gameDir, flags) {
   succeed(envelope);
 }
 
-function cmdResumeCheck(gameDir) {
+function cmdResumeCheck(gameDir, lockDir = gameDir) {
   const state = requireState(loadState(gameDir));
   const lock = readLock(gameDir);
-  const loop = readOwnedLock(gameDir, 'loop.lock.d');
+  const loop = readOwnedLock(lockDir, 'loop.lock.d');
   let archiveRepaired = false;
   // `false` alone cannot say whether the archive was already fine or the repair failed,
   // and the caller must block the next hand only in the second case.
@@ -402,7 +402,7 @@ function main() {
         cmdEnd(gameDir, flags);
         break;
       case 'resume-check':
-        cmdResumeCheck(gameDir);
+        cmdResumeCheck(gameDir, path.resolve(flags['lock-dir'] ?? gameDir));
         break;
       default:
         usage(`알 수 없는 명령: ${cmd}`);

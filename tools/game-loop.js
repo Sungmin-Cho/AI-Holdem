@@ -19,6 +19,13 @@ import {
 } from './player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
+import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
+import {
+  commitSession,
+  ensureSessionStore,
+  prepareSession,
+  resolveCurrentSession,
+} from '../engine/session-catalog.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -94,6 +101,34 @@ function readJsonOptional(filePath, label) {
   }
 }
 
+function readStrictServerLock(gameDir) {
+  const lockPath = path.join(gameDir, 'lock.json');
+  let fd;
+  try {
+    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw codedError('BAD_SERVER_LOCK', '이전 session server lock을 안전하게 열 수 없습니다.', { cause: error });
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) throw codedError('BAD_SERVER_LOCK', '이전 session server lock inode가 올바르지 않습니다.');
+    const lock = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    if (
+      !lock || typeof lock !== 'object' || Array.isArray(lock)
+      || !Number.isInteger(lock.serverPid) || lock.serverPid <= 0
+      || !Number.isInteger(lock.port) || lock.port <= 0
+      || typeof lock.sessionToken !== 'string' || lock.sessionToken === ''
+    ) throw codedError('BAD_SERVER_LOCK', '이전 session server lock schema가 올바르지 않습니다.');
+    return lock;
+  } catch (error) {
+    if (error.code === 'BAD_SERVER_LOCK') throw error;
+    throw codedError('BAD_SERVER_LOCK', '이전 session server lock을 읽을 수 없습니다.', { cause: error });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function integerValue(value, flag) {
   if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 양의 정수여야 합니다.`);
   const parsed = Number(value);
@@ -119,6 +154,7 @@ export function parseGameLoopArgs(argv) {
   ]);
   const values = new Map([
     ['--game-dir', 'gameDir'],
+    ['--store-dir', 'storeDir'],
     ['--ai', 'ai'],
     ['--stack', 'stack'],
     ['--level-every', 'levelEvery'],
@@ -126,6 +162,7 @@ export function parseGameLoopArgs(argv) {
     ['--player-runtime', 'playerRuntime'],
     ['--practice-focus-file', 'practiceFocusFile'],
   ]);
+  let sawGameDir = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -139,13 +176,17 @@ export function parseGameLoopArgs(argv) {
     const value = argv[index + 1];
     if (value == null || value.startsWith('--')) throw codedError('USAGE', `${arg}의 값이 필요합니다.`);
     index += 1;
+    if (valueName === 'gameDir') sawGameDir = true;
     if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery') {
       parsed[valueName] = integerValue(value, arg);
-    } else if (valueName === 'gameDir' || valueName === 'practiceFocusFile') {
+    } else if (valueName === 'gameDir' || valueName === 'storeDir' || valueName === 'practiceFocusFile') {
       parsed[valueName] = path.resolve(value);
     } else {
       parsed[valueName] = value;
     }
+  }
+  if (parsed.storeDir !== undefined && sawGameDir) {
+    throw codedError('USAGE', '--store-dir와 --game-dir는 함께 사용할 수 없습니다.');
   }
   return parsed;
 }
@@ -242,11 +283,12 @@ function validatedUserAction(raw) {
   return { action: raw.action };
 }
 
-export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} }) {
+export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = resolveRuntimes, opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
 
   const root = path.resolve(gameDir);
+  const lockRoot = path.resolve(lockDir);
   const now = opts.now ?? (() => new Date());
   const requestedPort = opts.port ?? 8877;
   const pollMs = opts.pollMs ?? 20;
@@ -287,7 +329,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   const archiveCheckedHands = new Set();
   const restoredPlayerSessions = new Set();
 
-  let lockHandle = null;
+  let lockHandle = initialLockHandle;
   let serverChild = null;
   let serverPid = null;
   let serverIdentity = null;
@@ -613,17 +655,17 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     // acquireOwnedLock은 일반 pid-less mutex와의 호환 때문에 오래된 unknown 기록을
     // mtime으로 회수할 수 있다. loop 락은 init의 파괴 경계를 보호하므로 더 엄격하다:
     // 존재하지만 identity가 불명인 기록은 나이와 무관하게 먼저 fail-closed한다.
-    const observed = readOwnedLock(root, LOOP_LOCK);
+    const observed = readOwnedLock(lockRoot, LOOP_LOCK);
     if (observed?.status === 'unknown') {
       throw codedError('LOOP_LOCK_UNKNOWN', 'loop 락 identity를 확인할 수 없어 중단합니다.');
     }
     try {
-      lockHandle = acquireOwnedLock(root, LOOP_LOCK);
+      lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK);
       return;
     } catch (error) {
       if (error.code === 'IDENTITY_UNAVAILABLE') throw error;
       if (error.code !== 'LOCKED') throw error;
-      const owner = readOwnedLock(root, LOOP_LOCK);
+      const owner = readOwnedLock(lockRoot, LOOP_LOCK);
       if (owner?.status === 'unknown') {
         throw codedError('LOOP_LOCK_UNKNOWN', 'loop 락 identity를 확인할 수 없어 중단합니다.');
       }
@@ -633,7 +675,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (mode === 'bootstrap') {
         if (force) {
           await stopExistingLoopForForce(owner);
-          lockHandle = acquireOwnedLock(root, LOOP_LOCK);
+          lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK);
           return;
         }
         throw codedError('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
@@ -708,7 +750,13 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     });
   };
 
-  const runCli = (args, supervisor) => runJsonChild(ENGINE_CLI, args, supervisor);
+  const runCli = (args, supervisor) => runJsonChild(
+    ENGINE_CLI,
+    args[0] === 'resume-check' && lockRoot !== root
+      ? [...args, '--lock-dir', lockRoot]
+      : args,
+    supervisor,
+  );
   const runCoach = (args, supervisor) => runJsonChild(COACH_CLI, args, supervisor);
   const resultWaitSupervisor = () => (
     finalizeResultWaitCutoffNs === null
@@ -892,7 +940,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 
   const assertSameLoopOwner = (expected) => {
-    const current = readOwnedLock(root, LOOP_LOCK);
+    const current = readOwnedLock(lockRoot, LOOP_LOCK);
     if (
       current?.status !== 'alive'
       || current.pid !== expected.pid
@@ -3696,8 +3744,14 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     blinds,
     force = false,
     practiceFocusFile,
+    preinitialized,
+    skipLock = false,
   } = {}) => {
-    await acquireLoopLock({ mode: 'bootstrap', force });
+    if (skipLock) {
+      if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
+    } else {
+      await acquireLoopLock({ mode: 'bootstrap', force });
+    }
     try {
       if (force) {
         // force는 loop 유무와 무관하게 sidecar의 pid+startTime+listener+token
@@ -3713,7 +3767,7 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
       if (blinds !== undefined) initArgs.push('--blinds', String(blinds));
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
-      const initialized = await runCli(initArgs);
+      const initialized = preinitialized ?? await runCli(initArgs);
       openLog();
       const startedAt = isoNow(now);
       writeLoopState({
@@ -3815,8 +3869,12 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
     return writeLoopState({ phase: 'playing' });
   };
 
-  const resume = async () => {
-    await acquireLoopLock({ mode: 'resume' });
+  const resume = async ({ skipLock = false } = {}) => {
+    if (skipLock) {
+      if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
+    } else {
+      await acquireLoopLock({ mode: 'resume' });
+    }
     let lifecycleStarted = false;
     try {
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
@@ -4066,8 +4124,35 @@ export function createGameLoop({ gameDir, resolver = resolveRuntimes, opts = {} 
   };
 }
 
+function initializePreparedSession(gameDir, args) {
+  const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir];
+  if (args.stack !== undefined) initArgs.push('--stack', String(args.stack));
+  if (args.levelEvery !== undefined) initArgs.push('--level-every', String(args.levelEvery));
+  if (args.blinds !== undefined) initArgs.push('--blinds', String(args.blinds));
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, [ENGINE_CLI, ...initArgs], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      maxBuffer: 4 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      let envelope = null;
+      try { envelope = JSON.parse(String(stdout).trim()); } catch { /* classified below */ }
+      if (error || envelope?.ok !== true) {
+        reject(codedError(
+          envelope?.code ?? error?.code ?? 'CHILD_FAILED',
+          envelope?.message || String(stderr).trim() || 'engine init이 실패했습니다.',
+          { cause: error, envelope },
+        ));
+        return;
+      }
+      resolve(envelope);
+    });
+  });
+}
+
 async function main() {
   let loop = null;
+  let preparedInitialization = null;
   let caught = null;
   let handlingSignal = false;
   let signalStopPromise = null;
@@ -4081,7 +4166,51 @@ async function main() {
       preferred: args.playerRuntime ?? null,
       onAdapterCreated: registerAdapter,
     });
-    loop = createGameLoop({ gameDir: args.gameDir, resolver });
+    if (args.storeDir !== undefined) {
+      if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
+      ensureSessionStore(args.storeDir);
+      let storeLockHandle;
+      try {
+        storeLockHandle = acquireOwnedLock(args.storeDir, LOOP_LOCK);
+      } catch (error) {
+        if (error.code === 'LOCKED') throw codedError('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
+        throw error;
+      }
+      try {
+        if (args.resume) {
+          const current = resolveCurrentSession(args.storeDir);
+          if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
+          loop = createGameLoop({
+            gameDir: current.sessionDir,
+            lockDir: args.storeDir,
+            initialLockHandle: storeLockHandle,
+            resolver,
+          });
+        } else {
+          const previous = resolveCurrentSession(args.storeDir);
+          const previousServer = previous ? readStrictServerLock(previous.sessionDir) : null;
+          if (previousServer && isAlive(previousServer.serverPid)) {
+            throw codedError('ACTIVE_GAME', '이전 session server가 아직 실행 중입니다.');
+          }
+          const prepared = prepareSession(args.storeDir);
+          const initialized = await initializePreparedSession(prepared.stagingDir, args);
+          preparedInitialization = initialized;
+          const committed = commitSession(args.storeDir, prepared);
+          loop = createGameLoop({
+            gameDir: committed.sessionDir,
+            lockDir: args.storeDir,
+            initialLockHandle: storeLockHandle,
+            resolver,
+          });
+        }
+      } catch (error) {
+        if (!loop) releaseOwnedLock(storeLockHandle);
+        throw error;
+      }
+    } else {
+      assertNotSessionCatalogTarget(args.gameDir);
+      loop = createGameLoop({ gameDir: args.gameDir, resolver });
+    }
     process.once('SIGTERM', () => {
       if (handlingSignal) return;
       handlingSignal = true;
@@ -4089,7 +4218,7 @@ async function main() {
         signalStopError = error;
       });
     });
-    if (args.resume) await loop.resume();
+    if (args.resume) await loop.resume({ skipLock: args.storeDir !== undefined });
     else await loop.bootstrap({
       ai: args.ai,
       stack: args.stack,
@@ -4097,6 +4226,8 @@ async function main() {
       blinds: args.blinds,
       force: args.force,
       practiceFocusFile: args.practiceFocusFile,
+      preinitialized: preparedInitialization,
+      skipLock: args.storeDir !== undefined,
     });
     await loop.run();
   } catch (error) {
