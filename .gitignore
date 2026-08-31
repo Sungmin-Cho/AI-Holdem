@@ -1,9 +1,36 @@
+# Runtime state
 game/
 *.log
+coverage/
+.nyc_output/
+
+# Local configuration and dependencies
 .DS_Store
 .env
 .env.*
+!.env.example
 node_modules/
+.worktrees/
+
+# Agent runtime and review artifacts
 .superpowers/
+.deep-loop/
+.deep-memory/
+.deep-docs/
 .claude/.sensor-detection-cache.json
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/routines/.state/
+.claude/worktrees/
+.claude/checkpoints/
+.claude/mailbox/
+.claude/agent-registry.json
+.claude/agent-memory-local
+.claude/first-run
+.claude/assistant-daemon-state.json
+HANDOFF.md
 docs/superpowers/
+docs/handoff/
+docs/design/
+docs/*-review/
+docs/sidecar-probe-notes.md

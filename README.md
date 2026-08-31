@@ -119,3 +119,7 @@ node --test
 | [`AGENTS.md`](AGENTS.md) | 호스트 중립 에이전트 지침과 호스트별 스킬 경로 |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code 고유 사항 (`AGENTS.md`를 import) |
 | [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md) | 딜러 절차 정본 (SSOT) |
+
+## 라이선스
+
+[Apache License 2.0](LICENSE)에 따라 사용할 수 있다.
