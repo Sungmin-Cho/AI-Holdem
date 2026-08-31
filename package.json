@@ -3,5 +3,8 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "scripts": { "test": "node --test" }
+  "scripts": {
+    "test": "node --test",
+    "test:ci": "node --test --test-concurrency=1"
+  }
 }
