@@ -3,309 +3,443 @@
 - 분석일: 2026-08-31
 - 기준 브랜치: `main`
 - 기준 커밋: `443dd9cabc5f46e91af29b0d1002a926ad54298b`
-- 상위 이슈: #17
+- 대상: 엔진, 사이드카, LLM 런타임, 코치/리뷰, 게시 서버, 브라우저 UI, 테스트와 운영 문서
+- 상위 추적 이슈: #17
 
 ## 1. 결론
 
-AI-Holdem은 이미 다음 기반을 갖춘 완성도 높은 **AI 홀덤 플레이 시스템**이다.
+현재 AI-Holdem은 **정확한 홀덤 규칙 엔진 위에서 LLM 페르소나와 대결하고, 핸드별 코칭과 종료 리뷰를 받는 시스템**으로는 이미 강한 기반을 갖고 있다. 특히 다음 설계는 그대로 유지할 가치가 크다.
 
-- 네트워크와 LLM을 모르는 순수 규칙 엔진
-- detached sidecar가 소유하는 게임 생명주기
-- 사용자 관점 redaction과 private-card containment
-- LLM player session 유지, watchdog, runtime fallback
-- 핸드별 비동기 코칭
-- 결과를 모르는 evaluator와 결과·persona를 나중에 결합하는 종합 리뷰
-- crash/resume, archive repair, publication idempotence, process identity 검증
+- `engine/`이 네트워크와 LLM을 모르는 순수 상태 전이 계층이다.
+- `tools/game-loop.js`가 detached sidecar로 게임 생명주기를 소유한다.
+- LLM 호출은 `tools/player-runtime.js` 한 표면으로 격리된다.
+- 사용자 관점 redaction, 상대 홀카드 비공개, tool-less runtime containment가 계약으로 고정돼 있다.
+- 코치와 종합 리뷰가 게임 진행과 비동기로 분리되고, 결과를 모르는 evaluator와 결과를 아는 synthesizer가 나뉜다.
+- 게시가 `publishId`, exact retry body, authority/proof, atomic snapshot으로 멱등성을 확보한다.
+- 이전 리뷰의 연습 포커스를 다음 게임으로 넘기는 최소 학습 루프가 이미 있다.
 
-현재 실력 향상 기능의 병목은 플레이 경험이나 LLM 품질이 아니라 **전략 평가의 기계적 정답지와 장기 학습 상태가 없다는 점**이다. 현재 코치는 공개된 핸드 기록과 기본 통계를 읽고 자연어로 판단하지만, 추천 액션 빈도·action EV·EV loss의 출처가 되는 strategy provider 또는 solver가 없다.
-
-따라서 다음 구조로 확장하는 것이 가장 안전하다.
+그러나 **사용자의 홀덤 실력을 검증 가능하게 높이는 시스템**으로 발전하려면 핵심 권한을 다음처럼 바꿔야 한다.
 
 ```text
 현재
-Hand → LLM Coach → 자연어 평가
+Hand / Stats
+  → LLM Coach
+  → 자연어 평가
 
 목표
-Hand
-  → Canonical Decision Snapshot
-  → Strategy Provider / Solver
+Canonical Decision Snapshot
+  → Versioned Strategy Provider / Solver
   → Machine Decision Evaluation
-  → LLM Explanation
-  → Skill Profile / Leak Detector
-  → Spot Drill / Mistake Review
-  → 다음 게임
+  → EV loss / frequency / source / unsupported reason
+  → LLM explanation
+  → Skill Profile / Leak Detector / Drill / Review
 ```
 
-핵심 원칙은 **LLM이 정답을 생성하지 않는 것**이다. LLM은 출처·버전·라이선스가 명확한 machine evaluation을 설명하는 역할만 맡는다.
+가장 중요한 원칙은 하나다.
 
----
+> **LLM은 전략 정답과 수치를 생성하지 않는다.**
+> 전략 데이터 또는 solver가 만든 기계 평가를 설명하고 개인화하는 역할만 맡는다.
 
-## 2. 현재 코드 구조 분석
+구현 우선순위는 다음 순서가 적절하다.
 
-### 2.1 엔진 계층
+1. `cash-training` 6-max 100BB 고정 환경
+2. 사용자 결정 시점의 canonical snapshot
+3. 지원 범위가 좁고 검증 가능한 preflop provider/evaluator
+4. 구조화된 평가를 코치·게시·UI·리뷰에 연결
+5. 기회 기반 Skill Profile, Leak Detector
+6. Spot Drill, Mistake Bank, Spaced Repetition
+7. Persona와 deterministic Strategy Policy 분리
+8. GTO와 exploit 평가 분리
+9. postflop solver adapter와 range view
+10. 표준 hand-history export
 
-주요 파일:
+## 2. 현재 시스템 구조
 
-- `engine/hand.js`
-- `engine/views.js`
-- `engine/cli.js`
-- `engine/state.js`
-- `engine/game-archive.js`
-- `engine/personas.js`
-
-`engine/hand.js`는 게임 생성, 블라인드 상승, 핸드 시작, legal action, action 적용, street 전이, showdown, pot 분배, 탈락과 게임 종료를 소유한다. 현재 `createGame()`의 핵심 설정은 다음과 같다.
+### 2.1 실행 계층
 
 ```text
-aiCount
-startStack
-blinds0
-levelEvery
+Browser UI
+  ↕ SSE / action / snapshot
+server/server.js
+  ↑ public publish only
+ tools/publish.js
+  ↑
+tools/game-loop.js  ── lifecycle owner
+  ├─ engine/cli.js child
+  ├─ server/server.js child
+  ├─ tools/coach-control.js child
+  └─ tools/player-runtime.js
+        └─ Claude / Codex / Grok tool-less CLI child
 ```
 
-기본 블라인드는 25/50이고, `levelEvery` 기본값은 8이다. 핸드 번호에 따라 블라인드가 상승하며 stack이 0인 좌석은 `out` 처리된다. 사용자가 bust되거나 모든 AI가 bust되면 게임이 종료된다. 즉 현재 엔진은 명확한 토너먼트 모델이다.
+현재 경계의 장점은 명확하다.
 
-`applyAction()`은 각 액션에 다음 정보를 저장한다.
+- 규칙 엔진의 상태 변경은 `engine/cli.js`와 `withMutation()`을 거친다.
+- 서버는 게임 규칙을 모르며 durable UI relay만 담당한다.
+- sidecar가 죽거나 재개될 때도 engine state, archive, publish attempt, coach authority를 근거로 복구한다.
+- LLM 자식은 저장소와 `game/` 밖의 임시 cwd에서 실행되고, `HOME`과 `PATH`만 상속한다.
 
-```text
-decisionId
-playerId
-action
-amount
-street
-potTotal
-callAmount
-minRaiseTo
-maxRaiseTo
-board
-stacks
+새 학습 기능도 이 경계를 깨지 않아야 한다.
+
+### 2.2 게임 상태와 핸드 기록
+
+`engine/hand.js`의 `createGame()`은 현재 다음 설정을 소유한다.
+
+```js
+config: {
+  aiCount,
+  startStack,
+  blinds0,
+  levelEvery,
+}
 ```
 
-이 기록은 강한 출발점이지만 GTO spot을 재현하기에는 부족하다. 특히 position, actor hole cards, effective stack, contribution, fold/all-in 상태, 전체 선행 액션과 게임 mode가 결정 시점 snapshot으로 고정되어 있지 않다. 핸드가 끝난 뒤 final state에서 역산하면 uncalled return, fold, all-in, street reset 때문에 오차가 생길 수 있다.
+`startHand()`는 핸드 번호에 따라 레벨을 계산하고, `finishHand()`는 다음을 수행한다.
 
-`engine/views.js`는 다음 책임을 갖는다.
+- uncalled chip 반환
+- runout과 showdown
+- pot/side-pot 분배
+- VPIP/PFR/AF 관련 raw counter 갱신
+- `lastHand` 생성
+- stack 0 좌석 bust 처리
+- 사용자 bust 또는 모든 AI 탈락 시 게임 종료
 
-- 사용자/AI별 공개 view
+따라서 현재 게임은 본질적으로 **블라인드 상승과 탈락이 있는 토너먼트형 세션**이다. 같은 포지션·스택 깊이의 결정을 반복 측정하기에는 변수가 많다.
+
+`applyAction()`은 상태 변경 전에 다음 정보를 action record에 저장한다.
+
+```js
+{
+  decisionId,
+  playerId,
+  action,
+  amount,
+  street,
+  potTotal,
+  callAmount,
+  minRaiseTo,
+  maxRaiseTo,
+  board,
+  stacks,
+}
+```
+
+이 기록은 좋은 출발점이지만 GTO spot 재현에 필요한 다음 정보가 부족하거나 여러 위치에서 역산돼야 한다.
+
+- position과 active seat order
+- actor hole cards
+- effective stack의 명시적 정의와 값
+- actor bet/current bet/contribution 구분
+- folded/all-in/out 상태를 포함한 공개 seat snapshot
+- 전체 prior action tree와 raise-size 단위
+- mode, ante/rake, stack depth, provider tree에 필요한 context
+- snapshot schema/version
+
+핸드 종료 상태에서 이를 역산하면 uncalled return, bust, stack 이동, 공개 시점 차이 때문에 오류가 생길 수 있다. 따라서 action을 적용하기 직전 snapshot을 만들어야 한다.
+
+### 2.3 공개 view와 redaction
+
+`engine/views.js`는 다음을 제공한다.
+
+- `viewFor(state, playerId)`
+- `turnSummary(state, playerId)`
+- `redactRecord(record, viewerId)`
+- `statsReport(state)`
 - position label 계산
-- AI turn summary
-- hand record redaction
-- 기본 통계
 
-현재 통계는 VPIP, PFR, AF, showdown win, net, sample이다. 플레이 스타일 요약에는 유용하지만, `BTN RFI 기회`, `BB vs BTN open 방어`, `vs 3-bet` 같은 opportunity denominator와 decision quality를 알 수 없다.
+현재 사용자 view는 본인 카드, 보드, pot, 공개 seat 상태와 legal action만 포함한다. `redactRecord()`는 사용자 홀카드만 기본적으로 남기고, showdown에서 실제 reveal된 상대 카드만 공개한다. 이 정보 경계는 decision snapshot과 training result에도 동일하게 적용돼야 한다.
 
-`engine/game-archive.js`는 새 게임 시작 시 `game/`의 기존 runtime 산출물을 archive로 이동한다. 따라서 여러 세션에 걸친 skill profile과 mistake bank를 `game/` 안에 두면 새 게임마다 archive된다. 장기 데이터는 별도 로컬 디렉터리로 분리해야 한다.
+position 계산은 현재 `views.js` 안에 있어 UI summary에만 가깝게 사용된다. 앞으로 snapshot, spot normalizer, export, drill이 같은 정의를 사용하려면 별도 순수 모듈로 이동하는 편이 맞다.
 
-### 2.2 sidecar와 LLM 계층
+### 2.4 현재 통계의 한계
 
-주요 파일:
+현재 `statsReport()`가 공개하는 지표는 다음과 같다.
 
-- `tools/game-loop.js`
-- `tools/player-runtime.js`
-- `tools/player-prompt.md`
-- `tools/coach-control.js`
-- `tools/publish.js`
+- VPIP
+- PFR
+- AF
+- Showdown Win
+- Net
+- Sample
 
-`tools/game-loop.js`는 bootstrap부터 playing, finalizing, review, done까지 전체 lifecycle을 소유한다. AI action은 LLM player adapter를 통해 수행하며, 사용자 action은 relay에서 받아 engine CLI에 적용한다.
+이 지표는 플레이 스타일을 설명하지만 학습 진단에는 부족하다. 예를 들어 다음을 알 수 없다.
 
-현재 핸드 코치 입력은 다음 세 가지다.
+- BTN RFI 기회가 몇 번이었고 올바른 선택을 얼마나 했는가
+- BB vs BTN open에서 누적 EV loss가 얼마인가
+- 3-bet에 직면한 기회 중 지나치게 fold했는가
+- 특정 leak이 표본 부족인지 반복적 손실인지
+- provider가 지원하지 않은 결정이 전체의 몇 %인지
 
-1. 사용자 관점으로 redacted된 hand record
-2. 기본 stats
-3. 이전 review에서 전달된 `practiceFocus`
+학습 통계는 action count가 아니라 **opportunity denominator + machine evaluation**을 기준으로 설계해야 한다.
 
-코치 프롬프트는 사용자의 주요 결정 1~2개를 1~2줄로 평가하도록 요구하고, 상대 range나 숫자를 지어내지 말라고 제한한다. 이 제한은 좋지만, 반대로 말하면 코치에게 실제 GTO frequency 또는 action EV가 제공되지 않는다.
+### 2.5 현재 코칭과 리뷰
 
-종합 리뷰는 두 단계다.
+`tools/game-loop.js`의 코치 입력은 다음으로 구성된다.
 
-1. evaluator: 실제 결과와 상대 archetype을 모른 채 redacted hand와 stats로 과정 평가
-2. synthesizer: evaluator 결과에 게임 결과와 실제 AI archetype을 나중에 결합
+- 해당 핸드의 redacted archive
+- 같은 시점에 캡처한 stats
+- 이전 리뷰에서 전달된 `practiceFocus`
+- 제한적으로 허용되는 overfold 코멘트
 
-결과 편향을 줄이는 구조는 유지해야 한다. 향후 machine evaluation은 1단계 evaluator의 근거로 들어가고, 실제 opponent policy와 exploit 해석은 2단계에서 별도 구획으로 결합하는 것이 맞다.
+코치 프롬프트는 상대 카드·archetype·스타일을 추정하지 말고, 공개 근거만 사용하도록 잘 제한돼 있다. 하지만 전략 provider나 solver를 조회하지 않으므로 다음을 검증할 객관적 근거가 없다.
 
-`tools/player-runtime.js`는 LLM CLI를 부르는 유일한 표면이며, cwd/env/tool containment와 process lifecycle을 강하게 검증한다. strategy provider 또는 solver는 이 파일에 억지로 합치지 말고 별도 runtime/adapter로 분리해야 한다.
+- 권장 action frequency
+- action별 EV
+- 사용자의 EV loss
+- mixed strategy에서 선택의 허용 범위
+- 지원되지 않는 spot 여부
 
-### 2.3 AI persona
+현재 overfold 탐지도 `sample >= 12 && vpip < 0.12`라는 전체 VPIP heuristic이다. position과 opportunity를 구분하지 않으므로 실제 leak taxonomy로 쓰기 어렵다.
+
+종합 리뷰는 더 좋은 구조를 가지고 있다.
+
+1. evaluator: redacted hands + stats만 보고 결과 독립적 과정 평가
+2. synthesizer: evaluator output + game result + 실제 players/archetype으로 최종 해석
+
+향후에는 evaluator 입력에 **machine evaluation aggregate**를 추가하고, synthesizer는 결과와 상대 policy를 별도 구획에서 해석해야 한다.
+
+### 2.6 AI 상대 모델의 한계
 
 `engine/personas.js`는 다음 archetype을 생성한다.
 
-```text
-TAG
-LAG
-Nit
-CallingStation
-Maniac
-Trickster
-```
+- TAG
+- LAG
+- Nit
+- CallingStation
+- Maniac
+- Trickster
 
-각 profile에는 `bluffFreq`, `threeBetFreq`, `tiltProne` 등이 있고, `tools/player-prompt.md`를 통해 LLM에게 전달된다.
+각 persona에는 `bluffFreq`, `threeBetFreq`, `tiltProne`이 있고 `tools/player-prompt.md`로 LLM 플레이어에게 전달된다. 그러나 prompt에 적힌 빈도는 실제 opportunity 기준 행동 분포를 보장하지 않는다.
 
-문제는 이 숫자가 실제 opportunity별 행동 확률을 보장하지 않는다는 점이다. `threeBetFreq: 0.30`이라는 prompt가 장기적으로 30% 3-bet을 의미하지는 않는다. exploit trainer를 만들려면 캐릭터 표현인 Persona와 실제 행동 분포인 Strategy Policy를 분리해야 한다.
+예를 들어 `threeBetFreq: 0.30`은 다음을 보장하지 않는다.
 
-### 2.4 게시와 UI
+- 3-bet 기회 중 정확히 30%에 가까운 행동
+- 같은 seed/state에서 같은 action 재현
+- 특정 spot에서 baseline 대비 deviation의 크기
+- crash/resume 뒤 같은 결정 유지
 
-주요 파일:
-
-- `publish-contract.js`
-- `tools/publish.js`
-- `server/server.js`
-- `server/public/index.html`
-- `server/public/app.js`
-- `server/public/style.css`
-
-현재 공개 상태는 대체로 다음 구조다.
+따라서 exploit trainer를 만들려면 다음을 분리해야 한다.
 
 ```text
-view
-log/events/messages
-coach
-review
+Persona
+- 이름
+- 말투
+- 성격
+- UI 표현
+
+Strategy Policy
+- policy id/version
+- action distribution
+- baseline 대비 deviation
+- fallback
+- deterministic seed
 ```
 
-서버 snapshot도 `view`, `log`, `coach`, `review`, `publishId`, `history`를 저장한다. coach note는 hand number와 text 중심이며, UI는 이벤트 로그/코치 탭과 최종 review overlay를 제공한다.
+### 2.7 게시·서버·UI 계약
 
-구조화된 decision evaluation을 추가하려면 `training` payload 계약과 merge/idempotence 규칙이 필요하다. 모든 range matrix를 SSE body에 넣으면 현재 65,536-byte publish 상한을 넘을 수 있으므로 summary와 detail artifact를 분리해야 한다.
+현재 공개 상태는 사실상 다음 네 축이다.
 
-### 2.5 테스트와 운영 안정성
+```js
+{
+  view,
+  log,
+  coach,
+  review,
+}
+```
 
-현재 테스트는 engine 단위 테스트뿐 아니라 process, lock, publication, resume, coach fault matrix까지 폭넓게 다룬다. 특히 `tools/game-loop.js`와 관련 테스트는 이미 매우 큰 lifecycle state machine이다.
+`tools/publish.js`는 사용자 view만 게시하고, public event만 필터링하며, exact retry body와 `publishId`를 통해 at-most-once처럼 보이는 멱등 동작을 만든다.
 
-따라서 새 학습 기능은 다음 방식으로 격리해야 한다.
+`server/server.js`는 다음 특성을 갖는다.
 
-- pure transformation은 `training/`
-- child process 경계는 `training/cli.js`, `tools/solver-runtime.js` 등
-- durable queue/profile은 전용 control/store
-- `tools/game-loop.js`는 호출과 lifecycle 조정만 담당
-- engine은 canonical fact를 기록하고 전략 판단은 하지 않음
+- snapshot atomic write
+- publishId 단조 증가
+- 이전 publishId 재시도 skip
+- coach handNo merge와 proof 검증
+- SSE history 재생
+- stale decision action 거부
 
----
+`server/public/app.js`는 현재 다음을 렌더링한다.
 
-## 3. 핵심 격차
+- 테이블, 카드, pot, 좌석, action bar
+- 이벤트 로그
+- 핸드별 자연어 coach note
+- 게임 종료 review overlay
 
-### 3.1 비교 가능한 학습 환경 부재
+구조화된 decision evaluation을 넣으려면 server snapshot과 UI state에 `training` 계열을 추가해야 한다. 다만 postflop range matrix 전체를 publish body에 넣으면 현재 65,536-byte 상한을 넘을 수 있으므로 summary/detail 분리가 필요하다.
 
-토너먼트에서는 stack depth, player count, blind level이 계속 바뀐다. 장기 정확도와 EV loss를 비교하려면 고정된 6-max 100BB cash-training preset이 필요하다.
+### 2.8 테스트와 CI
 
-해결: #18
+프로젝트는 외부 npm 의존성 없이 `node --test`를 사용한다. CI는 Node 20.x와 22.x에서 `npm run test:ci`를 실행하며, 파일 단위 concurrency를 1로 제한한다.
 
-### 3.2 decision-time ground truth 입력 부재
+현재 테스트는 다음 경계를 폭넓게 고정한다.
 
-현재 action record는 많은 정보를 담지만 결정 당시 전체 public state를 자기완결적으로 재현하지 못한다.
+- cards/evaluator/sidepots
+- hand setup, betting, showdown
+- CLI와 archive
+- state lock과 pid identity
+- server/publish/turn contract
+- player runtime containment
+- coach authority/fault matrix
+- detached game-loop와 finalization/resume
+- 운영 문서 계약
 
-해결: #19
+학습 기능은 새 모듈의 pure unit test만 추가하는 것으로 끝나지 않는다. 특히 다음 통합 경계를 테스트해야 한다.
 
-### 3.3 전략 provider와 EV evaluator 부재
+- decision snapshot이 action 전 상태를 보존하는가
+- archive/redaction에서 비공개 정보가 새지 않는가
+- evaluation이 crash/resume 후 중복 반영되지 않는가
+- publish retry와 profile aggregation이 같은 평가를 두 번 세지 않는가
+- finalization budget과 기존 coach/review gate를 침범하지 않는가
 
-현재 코치 판단은 LLM 자연어 reasoning이며 action frequency/EV source가 없다.
+## 3. 핵심 문제 정의
 
-해결: #20
+### 문제 A — 게임 결과가 실력 지표가 아니다
 
-### 3.4 machine evaluation을 공개하는 durable 계약 부재
+짧은 세션 chip net은 분산이 크다. 좋은 결정을 하고도 질 수 있고, 나쁜 결정을 하고도 이길 수 있다. 현재 review가 과정과 결과를 분리하려고 하지만 기계적인 과정 점수가 없다.
 
-현재 coach/review 계약만 있어 structured evaluation을 안전하게 게시·resume·merge할 수 없다.
+해결:
 
-해결: #21
+- action별 frequency/EV를 가진 provider 결과
+- `EV Loss / 100 supported decisions`
+- position/spot별 opportunity와 누적 loss
+- unsupported coverage 별도 표기
 
-### 3.5 장기 skill state 부재
+### 문제 B — LLM 평가에 검증 가능한 정답지가 없다
 
-기본 stats는 스타일 통계이며 opportunity, coverage, EV loss, mastery, confidence를 저장하지 않는다.
+자연어 코치는 유용하지만 수치와 range를 만들 권한이 없어야 한다.
 
-해결: #22
+해결:
 
-### 3.6 반복 학습 루프 부재
+- provider/solver source, version, license, digest
+- machine evaluation을 immutable evidence로 전달
+- LLM 출력은 `evaluationId + explanation`만 허용
+- unsupported spot에는 정답 수치를 생성하지 않음
 
-자연어 `practiceFocus`는 있지만 mistake bank, drill queue, spaced repetition이 없다.
+### 문제 C — 현재 세션은 반복 측정 환경이 아니다
 
-해결: #23
+블라인드가 상승하고 좌석이 탈락하며 stack depth가 매 핸드 바뀐다.
 
-### 3.7 상대 전략의 ground truth 부재
+해결:
 
-LLM persona prompt는 실제 행동 분포를 보장하지 않아 상대별 exploit 평가가 불가능하다.
+- 기본 tournament 동작 유지
+- 별도 `cash-training` mode
+- 6-max, fixed blind, 100BB top-up, hand limit
+- 누적 net과 table stack 분리
 
-해결: #24, #25
+### 문제 D — 특정 leak을 반복 교정할 수 없다
 
-### 3.8 postflop 전략 계산과 range UI 부재
+현재 `practiceFocus`는 자연어 조언이며 문제 생성/복습 일정과 연결되지 않는다.
 
-postflop은 정적 chart로 해결할 수 없으며 solver tree, range, EV가 필요하다.
+해결:
 
-해결: #26
+- Skill Profile
+- Leak Detector
+- Mistake Bank
+- Spot Drill
+- Spaced Repetition
 
-### 3.9 외부 학습 도구 연결 부재
+### 문제 E — exploit의 ground truth가 없다
 
-완료 hand는 JSON archive로 남지만 표준 hand history export가 없다.
+LLM persona의 성향 파라미터는 실제 policy가 아니다.
 
-해결: #27
+해결:
 
----
+- deterministic Strategy Policy
+- explicit deviation
+- policy ID/version/seed
+- 종료 전 redaction, 종료 후 공개
+- GTO evaluation과 exploit evaluation 분리
 
 ## 4. 목표 아키텍처
 
 ```text
-┌──────────────────────────── Engine ────────────────────────────┐
-│ legal state transition                                        │
-│ canonical hand/action/decision facts                          │
-│ private/public information boundary                           │
-└───────────────────────┬────────────────────────────────────────┘
-                        │ completed hand / decision snapshot
-                        ▼
-┌────────────────────── Training ────────────────────────────────┐
-│ spot normalizer                                                │
-│ strategy provider interface                                    │
-│ preflop JSON provider / postflop solver adapter                │
-│ decision evaluator                                             │
-│ opportunity classifier / profile / leak detector               │
-│ mistake bank / drill / spaced repetition                       │
-│ exploit evaluator                                              │
-└───────────────┬──────────────────────┬──────────────────────────┘
-                │ machine evidence     │ persistent local profile
-                ▼                      ▼
-┌──────────────────────── Tools/Sidecar ─────────────────────────┐
-│ durable training-control queue                                 │
-│ coach explanation generation                                  │
-│ lifecycle, resume, publication                                 │
-└───────────────────────┬────────────────────────────────────────┘
-                        │ public summary + detail digest
-                        ▼
-┌────────────────────── Server/UI ───────────────────────────────┐
-│ training summary merge                                        │
-│ authenticated detail endpoint                                 │
-│ decision review / range view / skill profile / drill           │
-└────────────────────────────────────────────────────────────────┘
+                         ┌──────────────────────┐
+                         │ engine/              │
+                         │ rules + snapshots    │
+                         └──────────┬───────────┘
+                                    │ completed hand / decision snapshot
+                                    ▼
+                         ┌──────────────────────┐
+                         │ training/            │
+                         │ pure contracts       │
+                         │ normalizers          │
+                         │ providers/evaluator  │
+                         └──────┬────────┬──────┘
+                                │        │
+                    evaluation │        │ opportunity/profile events
+                                ▼        ▼
+                   ┌────────────────┐  ┌─────────────────────┐
+                   │ tools/         │  │ .ai-holdem/         │
+                   │ training ctrl  │  │ profile/mistakes    │
+                   │ solver runtime │  │ long-lived local    │
+                   └───────┬────────┘  └──────────┬──────────┘
+                           │                       │
+                           ▼                       ▼
+                  coach/review evidence      drill generator
+                           │                       │
+                           └──────────┬────────────┘
+                                      ▼
+                           publish/server/browser
 ```
 
-### 4.1 소유권 원칙
+### 4.1 책임 배치
 
-#### Engine이 소유할 것
+#### `engine/`
 
-- 실제 게임 상태와 legal action
-- 액션 적용 전 canonical decision snapshot
-- 완료 hand archive
-- redaction에 필요한 공개 사실
+허용:
 
-#### Training이 소유할 것
+- game mode와 정확한 규칙 상태 전이
+- action 직전 canonical decision snapshot
+- position과 public state projection
+- archive schema/version
 
-- spot normalization
-- baseline/solver provider
-- frequency/EV/grade 계산
+금지:
+
+- 전략 데이터 파일 로드
+- solver 실행
+- 네트워크/API 호출
+- LLM 설명 생성
+- 장기 profile 관리
+
+#### `training/`
+
+새로운 순수 학습 계층이다.
+
+- starting hand normalization
+- preflop spot normalization
+- strategy provider contract
+- action matching, EV loss, grade
 - opportunity taxonomy
-- skill profile와 leak
-- drill과 mistake review
+- profile aggregate와 leak scoring pure functions
+- drill/spaced repetition pure functions
+- postflop problem/result normalization
 
-#### LLM이 소유할 것
+가능하면 파일 I/O와 child lifecycle은 넣지 않는다.
 
-- machine result를 한국어로 설명
-- 실제 숫자를 수정하지 않는 코칭 문장
-- 결과와 과정이 분리된 narrative synthesis
+#### `tools/`
 
-#### Server/UI가 소유할 것
+- training CLI/control authority
+- provider dataset load
+- profile store atomic I/O
+- solver child lifecycle
+- sidecar integration
+- durable pending/retry/resume
 
-- 공개 가능한 summary 저장과 전달
-- 상세 range artifact의 인증된 조회
-- 사용자의 decision review 경험
+`tools/game-loop.js`는 이미 책임이 크므로 학습 세부 로직을 직접 추가하지 않고 별도 control/CLI에 위임한다.
 
----
+#### `server/`와 UI
+
+- public training summary merge
+- evaluation ID/digest conflict 검증
+- authenticated detail artifact 조회
+- decision review, profile, drill UI
+
+서버가 strategy를 계산하거나 profile을 직접 수정하지 않는다.
 
 ## 5. 핵심 데이터 계약
 
-### 5.1 DecisionSnapshot
+### 5.1 Canonical Decision Snapshot
 
 ```json
 {
@@ -328,417 +462,540 @@ postflop은 정적 chart로 해결할 수 없으며 solver tree, range, EV가 �
   "effectiveStack": 10000,
   "publicSeats": [],
   "priorActions": [],
-  "chosenAction": { "action": "raise", "amount": 250 }
+  "chosenAction": {
+    "action": "raise",
+    "amount": 250
+  }
 }
 ```
 
-정보 경계:
+불변식:
 
-- actor가 user라면 user hole cards만 포함
-- 상대 private cards/persona/policy 제외
-- 이후 showdown 정보를 과거 snapshot에 역으로 추가하지 않음
+- action 적용 직전 state를 나타낸다.
+- 사용자 snapshot에는 사용자 hole cards만 있다.
+- showdown에서 나중에 공개된 정보가 과거 snapshot에 역으로 들어가지 않는다.
+- raise amount는 engine과 동일하게 raise-to다.
+- 칩 단위 정수를 저장하고 evaluator가 BB 단위로 바꾼다.
+- 기존 archive에 snapshot이 없어도 읽을 수 있다.
 
-### 5.2 DecisionEvaluation
+### 5.2 Decision Evaluation
 
 ```json
 {
   "schemaVersion": 1,
-  "evaluationId": "<gameEpoch>:<decisionId>:<provider-version>",
-  "decisionId": "d-17-preflop-3",
+  "evaluationId": "<gameEpoch>:<decisionId>:<providerVersion>",
   "status": "supported",
+  "street": "preflop",
   "spotKey": "6max-100bb-btn-rfi-unopened",
   "handClass": "AJo",
-  "recommended": [],
-  "chosen": {},
+  "recommended": [
+    {
+      "action": "raise",
+      "sizeBb": 2.5,
+      "frequency": 0.96,
+      "evBb": 0.28
+    },
+    {
+      "action": "fold",
+      "frequency": 0.04,
+      "evBb": 0.0
+    }
+  ],
+  "chosen": {
+    "action": "fold",
+    "frequency": 0.04,
+    "evBb": 0.0
+  },
   "bestEvBb": 0.28,
   "evLossBb": 0.28,
   "grade": "mistake",
   "source": {
     "id": "local-preflop-baseline",
     "version": "1.0.0",
-    "license": "declared",
+    "license": "declared-license",
     "contentSha256": "..."
   }
 }
 ```
 
-정확성 규칙:
+불변식:
 
-- provider에 EV가 없으면 EV 필드는 `null`
-- frequency를 EV로 변환하지 않음
-- unsupported spot은 명시적 reason code
-- source/version/license/digest 필수
+- EV가 provider에 없으면 EV 관련 필드는 `null`이다.
+- frequency를 EV로 환산하지 않는다.
+- 지원 범위 밖은 `unsupported`와 reason code로 남긴다.
+- 같은 snapshot/provider version은 같은 결과를 만든다.
+- source/version/license/digest가 없는 dataset은 fail-closed한다.
 
-### 5.3 SkillProfile
+### 5.3 장기 Skill Profile
 
-장기 데이터는 `.ai-holdem/`에 두고 `game/` archive lifecycle과 분리한다.
+장기 profile은 `game/`이 아니라 기본적으로 `.ai-holdem/`에 둔다. `game/`은 새 게임 시작 시 archive/vacate되기 때문이다.
 
-멱등 키는 `evaluationId`, conflict 판정은 payload digest로 한다.
+핵심 필드:
 
-### 5.4 공개 TrainingSummary
+- processed evaluation ID와 digest
+- supported/unsupported coverage
+- total EV loss와 EV loss/100
+- skill key별 opportunities
+- provider/version segment
+- mastery와 confidence
+- 설명 가능한 leak 구성 요소
 
-SSE에는 작은 summary만 보낸다.
+멱등성:
 
-- chosen/recommended action
-- frequency
-- EV loss/grade, 존재할 때만
+- 동일 ID + 동일 digest: no-op
+- 동일 ID + 다른 digest: conflict
+- event stream으로 aggregate rebuild 가능
+
+### 5.4 Public Summary와 Detail Artifact
+
+일반 publish에는 다음만 포함한다.
+
+- 선택과 추천 action
+- frequency와 가능한 경우 EV loss
+- grade
 - source ID/version
-- explanation
-- detail digest/endpoint reference
+- 짧은 explanation
+- detail digest/reference
 
-13×13 matrix와 combo range는 인증된 detail endpoint에서 요청 시 조회한다.
-
----
-
-## 6. 전략 데이터와 라이선스
-
-이 로드맵에서 가장 큰 비코드 의존성은 preflop baseline dataset이다.
-
-필수 조건:
-
-1. 데이터 출처가 명시되어야 한다.
-2. repo와 사용자 용도에 맞는 라이선스여야 한다.
-3. 지원 player count, stack, ante, rake, raise-size tree가 문서화되어야 한다.
-4. action frequency만 있는지 action EV도 있는지 구분해야 한다.
-5. content digest와 version으로 평가 재현성이 있어야 한다.
-
-금지:
-
-- proprietary chart 복제
-- GTO Wizard 화면/결과 scraping
-- 유료 서비스 비공식 API reverse engineering
-- LLM이 누락된 range/EV를 생성
-
-합법적인 실제 dataset이 확정되기 전에는 작은 synthetic fixture로 provider 계약과 테스트를 먼저 구현할 수 있다. synthetic fixture 결과는 사용자에게 실제 GTO 데이터로 표시해서는 안 된다.
-
----
-
-## 7. 단계별 로드맵과 GitHub 이슈
-
-### Phase 0 — 학습 가능한 상태 만들기
-
-- #18 `[GTO-01] 고정 100BB 6-max Cash Training Mode를 추가한다`
-- #19 `[GTO-02] 사용자 결정 시점의 canonical decision snapshot을 영속화한다`
-
-Phase 0 완료 조건:
-
-- 동일한 100BB 환경에서 반복 플레이 가능
-- 모든 사용자 decision을 사후 재현 가능
-- 기존 tournament mode와 redaction 회귀 없음
-
-### Phase 1 — Preflop GTO MVP
-
-- #20 `[GTO-03] Preflop baseline provider와 EV-aware decision evaluator를 추가한다`
-- #21 `[GTO-04] 구조화된 GTO 평가를 코치·게시 계약·UI·리뷰에 연결한다`
-
-Phase 1 완료 조건:
-
-- 지원 preflop spot에서 machine evaluation 생성
-- 핸드 종료 후 UI에 recommended action/frequency/EV loss 표시
-- unsupported와 missing EV를 정직하게 표시
-- LLM failure와 무관하게 machine result 유지
-
-### Phase 2 — 개인화 학습
-
-- #22 `[GTO-05] 기회 기반 통계, Skill Profile, Leak Detector를 추가한다`
-- #23 `[GTO-06] Spot Drill, Mistake Bank, Spaced Repetition 학습 루프를 추가한다`
-
-Phase 2 완료 조건:
-
-- 여러 세션에 걸친 skill profile
-- 상위 leak과 confidence
-- leak 기반 drill queue
-- 실제 mistake의 반복 복습
-
-### Phase 3 — Exploit 학습
-
-- #24 `[GTO-07] AI Persona와 deterministic Strategy Policy를 분리한다`
-- #25 `[GTO-08] GTO 기준과 상대별 exploit 기준을 함께 평가한다`
-
-Phase 3 완료 조건:
-
-- 상대의 실제 deviation이 재현 가능
-- GTO 품질과 상대별 exploit 품질을 분리 평가
-- game 중 정책 정보 비공개, 종료 후 공개
-- exact/simulated/heuristic 근거 수준 표시
-
-### Phase 4 — Postflop 및 외부 연결
-
-- #26 `[GTO-09] Postflop solver adapter와 range/EV 시각화를 추가한다`
-- #27 `[GTO-10] 표준 Hand History export와 외부 분석기 연동을 추가한다`
-
-Phase 4 완료 조건:
-
-- 지원 heads-up postflop tree에서 solver-backed 평가
-- range matrix detail UI
-- 표준 hand history export와 privacy 검증
-
----
-
-## 8. 의존성 그래프
+큰 range matrix와 solver tree는 다음처럼 분리한다.
 
 ```text
-#18 Cash Training ──────────────┐
-                               ├── 통합 학습 환경
-#19 Decision Snapshot ──┬──────┘
-                        ├── #20 Preflop Evaluator ──┬── #21 UI/Coach
-                        │                            ├── #22 Profile ── #23 Drill
-                        │                            └── #26 Postflop Solver
-                        └── #27 HH Export
-
-#18 + #20 ── #24 Deterministic Policy ── #25 Exploit Evaluation
-#26 ──────────────────────────────────────┘ exact postflop 확장
+game/training/details/<evaluation-id>.json
 ```
 
-권장 구현 순서:
+브라우저가 필요할 때 authenticated endpoint로 조회하고 summary의 digest와 비교한다.
+
+## 6. GTO 정확성 범위
+
+"GTO"는 하나의 보편적 표가 아니다. 다음 조건에 따라 solution이 달라진다.
+
+- player count
+- stack depth
+- ante/rake
+- open/3-bet/4-bet size tree
+- position definition
+- postflop bet tree
+- multiway 여부
+
+따라서 MVP는 다음으로 제한한다.
+
+- 6-max
+- 100BB
+- ante/rake 없음
+- 합의된 preflop size tree
+- local versioned dataset
+
+다음은 조용히 근사하지 않는다.
+
+- 다른 stack depth
+- 다른 player count
+- multiway branch
+- unsupported raise size
+- tournament/ICM
+- provider에 없는 EV
+
+사용자에게는 unsupported 비율을 숨기지 않는다.
+
+## 7. 단계별 로드맵과 이슈
+
+### Phase 0 — 측정 가능한 기반
+
+#### #18 `cash-training` 100BB 6-max mode
+
+목적:
+
+- 고정 blind/stack 환경
+- hand limit 기반 세션
+- hand 사이 top-up
+- tournament 기본 동작 회귀 없음
+
+주요 파일:
+
+- `engine/hand.js`
+- `engine/cli.js`
+- `engine/game-archive.js`
+- `engine/views.js`
+- `tools/game-loop.js`
+- 실행 문서와 관련 테스트
+
+#### #19 canonical decision snapshot
+
+목적:
+
+- action 전 상태를 자기완결적으로 보존
+- position/effective stack/public seat/prior actions/hole cards 계약
+- redaction과 archive compatibility
+
+주요 파일:
+
+- 신규 `engine/positions.js`
+- 신규 `engine/decision.js`
+- `engine/hand.js`
+- `engine/views.js`
+- `engine/state.js`
+- archive/CLI/hand tests
+
+### Phase 1 — Preflop Ground Truth
+
+#### #20 Preflop provider와 evaluator
+
+목적:
+
+- 169 starting hand normalization
+- supported spot canonical key
+- frequency/EV-aware 평가
+- dataset provenance와 unsupported 처리
+
+주요 신규 영역:
+
+- `training/`
+- `training/providers/`
+- `training/data/`
+- `training/cli.js`
+
+#### #21 코치·게시·UI·리뷰 연결
+
+목적:
+
+- machine evaluation과 LLM explanation 권한 분리
+- durable training authority와 evaluationId 멱등성
+- 핸드 종료 후 structured feedback
+- final review에 aggregate 연결
+
+주의:
+
+- 기존 coach authority와 training authority를 하나로 합치지 않는다.
+- `tools/game-loop.js`에 세부 상태기계를 직접 누적하지 않는다.
+- 기존 reliability 이슈 #7–#11과 같은 lifecycle 영역을 건드리므로 통합 전 충돌 검토가 필요하다.
+
+### Phase 2 — Adaptive Learning
+
+#### #22 Opportunity Stats, Skill Profile, Leak Detector
+
+목적:
+
+- opportunity denominator
+- EV Loss / 100
+- position/spot taxonomy
+- confidence와 source version segment
+- 다음 세션 structured practice focus
+
+#### #23 Spot Drill, Mistake Bank, Spaced Repetition
+
+목적:
+
+- 실전 mistake를 복습 항목으로 저장
+- leak/mistake/due/free drill
+- mixed strategy를 단순 정오답으로 왜곡하지 않음
+- provider version pinned feedback
+
+### Phase 3 — Exploit Training
+
+#### #24 Persona와 deterministic Strategy Policy 분리
+
+목적:
+
+- 캐릭터 표현과 실제 행동 분포 분리
+- policy ID/version/seed
+- reproducible action sampling
+- training mode를 LLM runtime 없이 실행 가능
+
+#### #25 GTO와 exploit 병렬 평가
+
+목적:
+
+- GTO baseline 품질과 상대별 exploit 품질 분리
+- exact/simulated/heuristic 근거 수준
+- heuristic에 가짜 EV 금지
+- opponent note와 실제 read 정확도 평가
+
+### Phase 4 — 확장과 외부 연동
+
+#### #26 Postflop solver adapter와 range/EV view
+
+목적:
+
+- provider-neutral child-process solver adapter
+- heads-up supported tree
+- timeout/memory/output limit
+- range matrix detail artifact
+- solver 라이선스/배포 경계
+
+#### #27 Hand History export
+
+목적:
+
+- canonical JSON export
+- PokerStars-style play-money text export
+- side pot, short all-in, uncalled return, showdown/muck 정확성
+- private card/policy/session token 유출 방지
+
+이 이슈는 기본 export만 먼저 병렬 개발할 수 있고, #19–#21이 완료되면 학습 metadata를 확장할 수 있다.
+
+## 8. 의존성
 
 ```text
-#19 → #18 → #20 → #21 → #22 → #23 → #24 → #25 → #27 → #26
+#18 cash-training ───────────────────────────────┐
+                                                 │
+#19 decision snapshot ──> #20 preflop evaluator ─┼─> #21 UI/coach/review
+                              │                  │
+                              ├─> #22 profile ──> #23 drill
+                              │
+                              └─> #24 policy ──> #25 exploit
+
+#19 + #20 + #21 ──> #26 postflop solver
+
+#27 export: 기본 기능은 독립, decision/evaluation 포함은 #19–#21 후속
 ```
+
+권장 merge 순서:
+
+1. #19
+2. #18
+3. #20
+4. #22의 pure taxonomy/store 기반
+5. #21 durable integration
+6. #23
+7. #24
+8. #25
+9. #27 기본 export
+10. #26
+
+#18과 #19는 병렬 개발할 수 있지만 archive/config 충돌을 줄이려면 작은 PR로 순차 merge하는 편이 안전하다.
+
+## 9. 파일별 영향 분석
+
+| 파일/영역 | 현재 책임 | 학습 시스템 영향 | 권장 방향 |
+|---|---|---|---|
+| `engine/hand.js` | 규칙 상태 전이, 기록, stats, game over | mode와 decision snapshot이 필요 | snapshot 생성과 mode 규칙만 추가; provider 로직 금지 |
+| `engine/views.js` | public view, summary, redaction, stats | position 재사용, decision redaction | position helper 분리; public decision projection 추가 |
+| `engine/cli.js` | engine 유일 외부 표면 | mode flags, hand decision output | 옵션/validation 추가; training 계산은 별도 CLI |
+| `engine/game-archive.js` | vacate/archive, game init, personas | mode config, player/policy metadata | 공개 persona와 비공개 policy metadata 분리 |
+| `engine/state.js` | atomic state/hand I/O와 locks | archive schema compatibility | generic atomic helper 재사용, profile storage 책임은 넣지 않음 |
+| `engine/personas.js` | persona+frequency hint 생성 | exploit ground truth 부족 | persona schema와 policy assignment 분리 |
+| `tools/player-prompt.md` | LLM player persona/action 계약 | deterministic policy와 역할 중복 | LLM mode는 표현/legacy용으로 명확화 |
+| `tools/player-runtime.js` | LLM child containment | solver/policy와 lifecycle 유사 | solver는 별도 runtime; LLM adapter 계약 오염 금지 |
+| `tools/game-loop.js` | 전체 lifecycle와 orchestration | 학습 pipeline 연결점 | 별도 training control/CLI 호출만; 내부 로직 최소화 |
+| `tools/coach-control.js` | coach authority와 exact publication | training 결과와 유사한 멱등 문제 | authority를 합치지 말고 패턴만 재사용 |
+| `publish-contract.js` | byte/digest/proof 공용 계약 | training summary/digest 필요 | schema별 canonicalizer 추가; coach 계약 회귀 금지 |
+| `tools/publish.js` | public filter, attempt/retry, publishId | training summary publish | side payload validation 추가; exact retry 보존 |
+| `server/server.js` | snapshot/SSE/action relay | training merge/detail endpoint | evaluationId/digest conflict와 token 인증 |
+| `server/public/app.js` | table/coach/review UI | structured decision feedback | formatter를 pure module로 분리해 Node test 가능하게 |
+| `test/game-loop.test.js` | detached lifecycle 통합 | 직접 확대 시 유지비 급증 | training control fake와 focused integration test로 분산 |
+| `.agents/skills/start-game/SKILL.md` | 운영 절차 정본 | 새 mode/profile/review 안내 | 실제 자동화와 문면을 함께 갱신 |
+
+## 10. 주요 리스크와 대응
+
+### 10.1 전략 데이터 라이선스
+
+리스크:
+
+- proprietary chart 또는 유료 서비스 결과를 복제할 수 있다.
+- 공개 repository에 재배포할 권리가 없는 dataset일 수 있다.
+
+대응:
+
+- source/version/license/digest 필수
+- `training/data/README.md`에서 생성법과 지원 tree 문서화
+- GTO Wizard scraping/reverse engineering 금지
+- 재배포 불가능한 solver/data는 사용자 설치형 adapter로 분리
+
+### 10.2 EV가 없는 데이터
+
+리스크:
+
+- frequency만 있는 chart로 가짜 EV loss를 만들 수 있다.
+
+대응:
+
+- EV 필드를 nullable로 정의
+- frequency-based feedback와 EV-based grade를 별도 체계로 표시
+- LLM이 숫자를 보완하지 못하도록 validator 적용
+
+### 10.3 지원 범위 오인
+
+리스크:
+
+- 6-max 100BB chart를 multiway/tournament에 적용할 수 있다.
+
+대응:
+
+- strict spot normalizer
+- `UNSUPPORTED_SPOT`, `UNSUPPORTED_SIZE`, `UNSUPPORTED_STACK` 명시
+- coverage를 UI/profile에 노출
+
+### 10.4 resume와 중복 집계
+
+리스크:
+
+- hand 재개, publish retry, finalization 재진입에서 profile과 mistake bank가 두 번 증가할 수 있다.
+
+대응:
+
+- `evaluationId` + digest
+- durable control queue
+- 같은 ID/같은 digest no-op
+- 같은 ID/다른 digest fail-closed
+- event replay/rebuild test
+
+### 10.5 finalization 시간과 solver 비용
+
+리스크:
+
+- 현재 coach cutoff/review gate에 느린 solver를 묶으면 종료가 불안정해진다.
+
+대응:
+
+- preflop lookup은 빠른 local path
+- postflop solve는 durable deferred task
+- finalization에서 무한 대기하지 않음
+- pending/timeout/unsupported를 정직하게 표시
+
+### 10.6 비공개 정보 누출
+
+리스크:
+
+- decision snapshot, solver problem, export, exploit review에 상대 hole cards나 숨겨진 policy가 섞일 수 있다.
+
+대응:
+
+- user snapshot에 user cards만
+- play-time public payload에서 opponent policy 숨김
+- post-game 공개 시점 명시
+- forbidden literal/redaction 회귀 테스트 확대
+
+### 10.7 `tools/game-loop.js` 비대화
+
+리스크:
+
+- 현재도 lifecycle, runtime, coach, review, recovery가 집중돼 있다.
+
+대응:
+
+- `training-control.js`, `profile-cli.js`, `solver-runtime.js` 등으로 책임 분리
+- game loop는 child orchestration과 phase checkpoint만 소유
+- 새 상태기계를 기존 coach-control 안에 억지로 합치지 않음
+
+## 11. 테스트 전략
+
+### 11.1 Pure unit tests
+
+- 169 hand-class normalization
+- position/seat order
+- spot key normalization
+- action-size matching
+- EV loss/grade
+- opportunity taxonomy
+- mastery/confidence/leak priority
+- spaced repetition
+- deterministic policy RNG/deviation
+- postflop problem/result normalization
+
+### 11.2 Contract tests
+
+- snapshot schema round-trip
+- provider metadata와 digest
+- unsupported/error codes
+- public training redaction
+- summary/detail digest
+- profile event idempotency
+- export schema와 text semantics
+
+### 11.3 Engine integration
+
+- action 적용 전 snapshot
+- fold/check/call/raise/short all-in
+- heads-up/3–9인 position
+- side-pot 직전 public state
+- cash top-up의 정확히 한 번 적용
+- tournament 기본 동작 회귀
+
+### 11.4 Lifecycle integration
+
+- sidecar crash → resume → evaluation exactly once
+- unresolved publish attempt 후 training body retry
+- coach와 training queue ordering
+- finalization 중 pending evaluation
+- profile write failure와 rebuild
+- solver timeout/kill/malformed output
+
+### 11.5 Security/privacy
+
+- 상대 private card literal 미포함
+- persona/policy/deviation의 공개 시점
+- session token/internal path 미포함
+- detail endpoint token 검사
+- export symlink/path traversal/overwrite fail-closed
+
+### 11.6 CI
+
+- 현재 Node 20/22 matrix 유지
+- 외부 solver 없이 fake deterministic adapter로 전체 CI 통과
+- process-heavy integration은 기존 `test:ci` 직렬 정책 유지
+- 실제 solver와 실제 LLM은 별도 opt-in smoke test로 분리
+
+## 12. MVP 완료 정의
+
+최소한 다음 닫힌 루프가 증명돼야 한다.
+
+```text
+cash-training 6-max 100BB 플레이
+  → user decision snapshot
+  → supported preflop evaluation
+  → hand 종료 후 UI feedback
+  → profile aggregate
+  → top leak 선택
+  → spot drill 생성
+  → drill 결과로 mastery 갱신
+  → 다음 세션 practice focus 반영
+```
+
+정량 완료 조건:
+
+- 100개 이상의 supported user decisions를 중복 없이 집계
+- overall 및 skill별 `EV Loss / 100 supported decisions`
+- unsupported coverage 표시
+- 상위 leak 1–3개 생성
+- mistake/due drill queue 생성
+- crash/resume/publish retry 뒤 byte-stable 또는 semantic-stable 결과
+- 기존 tournament game, coach proof, final review, archive 동작 회귀 없음
+
+## 13. 범위 밖
+
+이 로드맵은 다음을 목표로 하지 않는다.
+
+- 온라인 포커 클라이언트의 실시간 조언/HUD
+- 상대의 비공개 정보를 이용한 분석
+- 유료 서비스 API reverse engineering
+- GTO Wizard 전체 재구현
+- multiway postflop full solving
+- ICM/MTT payout 모델
+- 실제 화폐, 결제, 도박 서비스
+- 사람 상대 데이터 자동 수집
+
+## 14. 이슈 인덱스
+
+- [ ] #18 `[GTO-01] 고정 100BB 6-max Cash Training Mode를 추가한다`
+- [ ] #19 `[GTO-02] 사용자 결정 시점의 canonical decision snapshot을 영속화한다`
+- [ ] #20 `[GTO-03] Preflop baseline provider와 EV-aware decision evaluator를 추가한다`
+- [ ] #21 `[GTO-04] 구조화된 GTO 평가를 코치·게시 계약·UI·리뷰에 연결한다`
+- [ ] #22 `[GTO-05] 기회 기반 통계, Skill Profile, Leak Detector를 추가한다`
+- [ ] #23 `[GTO-06] Spot Drill, Mistake Bank, Spaced Repetition 학습 루프를 추가한다`
+- [ ] #24 `[GTO-07] AI Persona와 deterministic Strategy Policy를 분리한다`
+- [ ] #25 `[GTO-08] GTO 기준과 상대별 exploit 기준을 함께 평가한다`
+- [ ] #26 `[GTO-09] Postflop solver adapter와 range/EV 시각화를 추가한다`
+- [ ] #27 `[GTO-10] 표준 Hand History export와 외부 분석기 연동을 추가한다`
+
+## 15. 최종 권고
+
+첫 구현 PR은 #19 canonical decision snapshot이 가장 적절하다.
 
 이유:
 
-- #19는 모든 평가 기능의 데이터 기반이다.
-- #18은 통합 측정 환경이지만 #19와 병렬 개발 가능하다.
-- #20/#21이 첫 사용자 가치인 preflop 피드백을 만든다.
-- #22/#23이 개인화 학습의 닫힌 루프를 완성한다.
-- #26은 비용·라이선스·범위가 가장 커서 마지막이 안전하다.
-- #27은 비교적 독립적이라 필요에 따라 앞당길 수 있다.
-
----
-
-## 9. 파일 영향 지도
-
-| 영역 | 현재 파일 | 권장 변화 |
-|---|---|---|
-| 게임 모드 | `engine/hand.js`, `engine/cli.js`, `engine/game-archive.js` | tournament/cash-training 규칙 분리 |
-| 결정 기록 | `engine/hand.js`, `engine/views.js` | `engine/decision.js`, `engine/positions.js` 추가 |
-| Preflop 평가 | 없음 | `training/preflop-spot.js`, provider, evaluator, CLI |
-| 학습 publication | coach/review 전용 | `tools/training-control.js`, training publish contract |
-| 장기 profile | 없음 | `.ai-holdem/`, profile store/aggregator/leak detector |
-| Drill | 없음 | drill generator/evaluator/UI/server 또는 route module |
-| AI 전략 | `engine/personas.js`, LLM prompt | persona/policy schema 분리, deterministic policy adapter |
-| Exploit | 없음 | policy model, comparative evaluator, opponent notes |
-| Postflop | 없음 | problem builder, solver runtime, range view |
-| Export | hand JSON archive | export-neutral normalizer와 text renderer |
-| UI | log/coach/review | decision review, profile, drill, range detail |
-
-### `tools/game-loop.js` 비대화 방지
-
-새 기능을 모두 sidecar 파일에 직접 넣으면 lifecycle과 학습 로직이 결합된다. 다음 함수 수준의 adapter만 sidecar에 남기는 것이 좋다.
-
-```text
-launchTrainingForHand(handNo)
-drainTrainingPublications()
-applyEvaluationsToProfile()
-loadPracticeFocus()
-```
-
-spot normalization, evaluation, profile 계산, scheduling은 별도 모듈/CLI가 담당한다.
-
----
-
-## 10. 테스트 전략
-
-### 10.1 Pure unit tests
-
-- position/hand-class/spot key normalization
-- EV loss와 grade
-- unsupported reason
-- opportunity taxonomy
-- profile aggregation
-- leak severity 구성 요소
-- spaced repetition schedule
-- deterministic policy sampling
-- export rendering
-
-### 10.2 Contract tests
-
-- snapshot schema
-- provider schema/license/digest
-- evaluation schema
-- public redaction
-- publish body size
-- same ID/same digest no-op
-- same ID/different digest fail-closed
-
-### 10.3 Lifecycle integration tests
-
-- hand completion → evaluation → coach → publish
-- crash before/after evaluation write
-- crash before/after publish acknowledgement
-- resume에서 duplicate evaluation/profile increment 없음
-- finalization 중 pending training task 처리
-- provider/solver timeout에도 game lifecycle 보존
-
-### 10.4 Security/privacy tests
-
-- 상대 private hole-card forbidden literal
-- persona/policy metadata pre-game 공개 금지
-- internal dataset/solver path 공개 금지
-- sessionToken export 금지
-- authenticated detail endpoint
-
-### 10.5 Statistical/reproducibility tests
-
-- deterministic seed로 동일 action
-- 여러 independent decision key에서 target deviation 오차 범위
-- simulated exploit 결과의 seed/sample metadata
-- provider/version 변경 시 profile 혼합 방지
-
----
-
-## 11. 성공 지표
-
-기술 지표:
-
-- evaluation coverage: supported / total user decisions
-- duplicate evaluation/profile event: 0
-- private information leak: 0
-- unsupported spot에서 fabricated numeric result: 0
-- 기존 lifecycle/engine 테스트 회귀: 0
-
-학습 지표:
-
-- supported decisions 기준 EV Loss / 100
-- skill별 opportunity와 mastery
-- 상위 leak의 누적 EV impact와 confidence
-- drill 후 동일 skill의 최근 EV loss 변화
-- mistake recurrence/lapse 감소
-
-사용자에게는 session result와 learning result를 분리해서 보여 줘야 한다.
-
-```text
-게임 결과: +38BB
-의사결정 품질: EV Loss 6.2BB / 100
-가장 큰 leak: BB vs BTN open
-```
-
-좋은 결과가 나쁜 decision을 가리거나, 나쁜 결과가 좋은 decision을 비난하지 않게 한다.
-
----
-
-## 12. 주요 위험과 완화
-
-### 전략 데이터 라이선스
-
-위험: 합법적으로 배포할 수 있는 preflop frequency/EV 데이터가 없을 수 있다.
-
-완화:
-
-- provider interface부터 구현
-- source/license 필수
-- synthetic fixture를 실제 GTO로 표시하지 않음
-- local user-supplied licensed dataset 지원
-
-### false precision
-
-위험: frequency-only 또는 heuristic 결과를 정확한 EV처럼 표시할 수 있다.
-
-완화:
-
-- nullable EV
-- `exact/simulated/heuristic` 근거 수준
-- LLM의 numeric field 수정 금지
-
-### sidecar 복잡도 증가
-
-위험: training lifecycle이 기존 finalization/publication 안정성을 깨뜨린다.
-
-완화:
-
-- 전용 control/queue
-- 작은 sidecar adapter
-- finalization gate와 profile failure policy를 명시
-- fault-matrix 테스트 확장
-
-### publish body 증가
-
-위험: range matrix가 body byte 상한을 초과한다.
-
-완화:
-
-- summary/detail 분리
-- authenticated detail endpoint
-- digest 검증
-
-### profile corruption/duplication
-
-위험: crash/resume에서 같은 decision이 여러 번 반영된다.
-
-완화:
-
-- `evaluationId + digest`
-- append-only event 또는 rebuild 가능한 event map
-- atomic write
-
-### deterministic policy의 인위성
-
-위험: 재현성을 얻는 대신 실제 사람 같은 전략이 약해질 수 있다.
-
-완화:
-
-- training policy와 entertainment LLM mode 분리
-- policy deviation을 명시적으로 측정
-- persona 표현은 유지
-
----
-
-## 13. 첫 구현 슬라이스 권장안
-
-가장 작은 end-to-end vertical slice는 다음과 같다.
-
-1. #19에서 unopened preflop user decision snapshot만 기록
-2. #18에서 6-max 100BB fixed training session 생성
-3. #20에서 BTN RFI 한 spot과 synthetic/test provider 지원
-4. #21에서 핸드 종료 후 structured evaluation 한 건을 UI에 표시
-
-이 슬라이스의 성공 화면:
-
-```text
-핸드 7 · BTN · AJo
-내 선택: Fold
-추천: Raise 96%
-EV 데이터 없음 · Low-frequency action
-Source: test-provider 0.1
-```
-
-실제 라이선스가 확인된 EV dataset을 연결한 뒤에만 다음처럼 표시한다.
-
-```text
-Mistake · EV Loss 0.28BB
-```
-
-그 다음 #22/#23으로 확장하면 `play → measure → diagnose → drill → retest`의 첫 완전한 학습 루프가 된다.
-
----
-
-## 14. 범위 밖 및 윤리적 경계
-
-이 로드맵은 사용자가 AI-Holdem 내부 또는 사후 hand history로 공부하는 기능을 위한 것이다.
-
-포함하지 않는다.
-
-- 실제 온라인 포커 게임 중 실시간 solver 조언
-- 다른 client의 화면/메모리/네트워크에서 hand를 자동 수집하는 기능
-- 상대 HUD 데이터 무단 수집
-- collusion 또는 부정행위 지원
-- 실제 화폐 결제·베팅 기능
-
-모든 machine feedback은 AI-Holdem 내부 훈련 또는 사후 review를 기준으로 설계한다.
-
----
-
-## 15. 추적 이슈
-
-- #17 Epic
-- #18 Cash Training Mode
-- #19 Canonical Decision Snapshot
-- #20 Preflop Provider/Evaluator
-- #21 Structured Evaluation UI/Coach/Publication
-- #22 Skill Profile/Leak Detector
-- #23 Spot Drill/Mistake Bank/Spaced Repetition
-- #24 Persona/Strategy Policy Separation
-- #25 GTO vs Exploit Evaluation
-- #26 Postflop Solver/Range UI
-- #27 Hand History Export
+- 이후 evaluator/profile/drill/export가 모두 소비하는 공통 계약이다.
+- 전략 dataset 라이선스 결정을 기다리지 않고 구현할 수 있다.
+- engine action 기록과 redaction의 정확성을 먼저 고정할 수 있다.
+- cash-training mode와 병렬 개발이 가능하다.
+- 잘못 설계된 snapshot 위에 학습 계층을 쌓는 재작업을 피할 수 있다.
+
+그다음 #18과 #20을 완료해 **재현 가능한 6-max 100BB preflop 학습 MVP**를 만든 뒤, #21–#23으로 닫힌 개인화 학습 루프를 완성하는 순서를 권장한다.
