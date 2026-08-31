@@ -1,18 +1,38 @@
 # AI 홀덤
 
-AI 에이전트 상대와 웹 UI로 즐기는 노리밋 텍사스 홀덤. 게임 루프는 노드 사이드카, 규칙은 순수 Node 엔진, 서버는 중계만 한다.
+AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤이다. 사람이 한 자리에 앉고 나머지 좌석은 페르소나를 가진 LLM이 채운다. 핸드가 끝날 때마다 코치가 방금 플레이를 짚어 주고, 게임이 끝나면 전체 리뷰가 나온다.
 
-요구: Node ≥ 20, 외부 npm 의존성 없음. 게임 런타임은 **Claude Code · Codex · Grok** 셋 다 지원한다.
+요구: Node ≥ 20, 외부 npm 의존성 없음. 플레이어 런타임은 Claude Code · Codex · Grok을 지원한다.
 
-## 누가 무엇을 소유하는가
+## 어떻게 생겼나
 
-**사이드카(`tools/game-loop.js`)가 게임 전체를 소유한다.** 부트스트랩(loop 락 → `init` → 서버 기동)부터 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스까지 그 detached 노드 프로세스 안에서 돈다. `engine/cli.js`·`tools/publish.js`·`tools/coach-control.js`를 `execFile` 자식으로 그대로 부르므로 엔진·게시 계약은 바뀌지 않는다.
+세 프로세스가 각각 아는 것이 다르다.
 
-**딜러 세션(LLM)은 사전 점검 → 기동 → 보고만 한다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 0회다. 호스트 세션이 죽어도 사이드카와 서버는 detached라 게임은 계속 돈다.
+- **엔진**(`engine/`) — 덱·핸드 전이·사이드팟·핸드 평가. 네트워크도 LLM도 모른다.
+- **사이드카**(`tools/game-loop.js`) — 게임 진행 전체를 소유하는 detached 노드 프로세스. 부트스트랩부터 핸드 안 액션 루프, 워치독, 코치, 종합 리뷰, 종료까지.
+- **서버**(`server/`) — SSE와 액션 대기만 중계한다. 게임 규칙을 모른다.
 
-**LLM은 플레이어 결정·코치·리뷰만 만든다.** 전부 `tools/player-runtime.js`가 부르는 무도구 CLI 자식이고, 플레이어는 CLI 세션 resume으로 대화 하나를 게임 내내 이어 간다(페르소나 기억). 프롬프트는 stdin, 응답은 stdout, 게시 본문은 파일 — 모델 문자열은 argv에 들어가지 않는다.
+계층 경계와 불변식은 [`ARCHITECTURE.md`](ARCHITECTURE.md)에 있다.
 
-### 런타임 어댑터
+## 왜 사이드카인가
+
+이전 구조에서는 딜러 역할을 맡은 LLM 세션이 루프를 직접 돌렸다. AI 한 명이 액션할 때마다 딜러 LLM 왕복이 한 번씩 끼어들었고, 그게 게임 속도를 지배했다. 지금은 그 루프가 노드 프로세스 안으로 들어갔다.
+
+| 기준 | 값 |
+|---|---|
+| 핸드 안 AI 액션 경로의 딜러 LLM 라운드 | **0회** |
+| 남는 지연 | 플레이어 CLI 왕복 1회 + 노드 오버헤드 |
+| 사이드카 오버헤드(`parseMs+stepMs+publishMs`, LLM 제외) | ≤ 1s/액션 |
+
+부수 효과가 더 크다. 사이드카는 detached라 **딜러 세션이 죽어도 게임은 계속 돈다.** 호스트 세션이 하는 일은 사전 점검 → 기동 → 보고 셋뿐이다.
+
+판정 근거는 지어내지 않는다. 사이드카가 모든 AI 결정을 `game/loop-state.json`의 `metrics`에 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`로 남긴다. `outcome`이 `forced_default`(워치독 타임아웃)인 결정도 소요 시간 그대로 분포에 들어간다 — 타임아웃을 분포에서 숨기지 않는다.
+
+## LLM은 어디에만 있나
+
+플레이어 결정·코치 노트·종합 리뷰 셋뿐이다. 전부 `tools/player-runtime.js`가 부르는 **무도구 CLI 자식**이고, 이 파일이 LLM을 부르는 유일한 표면이다. 플레이어는 CLI 세션 resume으로 대화 하나를 게임 내내 이어 가서 자기 페르소나를 기억한다. 프롬프트 정본은 `tools/player-prompt.md` 한 곳이고, 회신 규약은 "JSON 한 줄을 최종 출력으로"다.
+
+**컨테인먼트**가 이 설계의 핵심이다. 자식은 도구 없이, 레포와 `game/` 밖의 빈 임시 디렉터리에서, `HOME`/`PATH`만 상속한 채 돈다. 프롬프트는 stdin으로만 가고 argv에 실리는 런타임 값은 세션 id 하나뿐이다. 플레이어 에이전트가 남의 홀카드를 파일에서 읽어 오는 경로 자체를 없앤 것이다. 기동할 때마다 게임 디렉터리에 카나리를 심어 자식이 그걸 읽어 오지 **못하는지** 부정 검증하고, 읽어 오면 그 런타임은 부적격 처리한다.
 
 | 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 워치독 1차/재전송 |
 |---|---|---|---|
@@ -20,21 +40,21 @@ AI 에이전트 상대와 웹 UI로 즐기는 노리밋 텍사스 홀덤. 게임
 | `codex` | `gpt-5.6-luna` | `gpt-5.6-sol` | 25s / 15s |
 | `grok` | `grok-4.6` | `grok-4.6` | 60s / 30s |
 
-기본 런타임은 `/start-game`을 실행한 호스트다 — 딜러가 `--player-runtime`으로 명시한다. 기동 probe가 런타임마다 셋을 검증한다: ① 플레이어 모델 왕복 ② 상위 모델 왕복 ③ **컨테인먼트 부정 검증**(게임 디렉터리에 심은 카나리를 자식이 읽어 오지 못해야 적격). ①·③ 실패면 그 런타임은 부적격이고 폴백 사다리(claude → codex → grok)가 돈다. ②만 실패면 플레이어와 코치·리뷰를 다른 런타임으로 갈라 쓴다. 전부 부적격이면 게임을 시작하지 않는다(`halt.code = NO_PLAYER_RUNTIME`).
+기본 런타임은 `/start-game`을 실행한 호스트이고, 딜러가 `--player-runtime`으로 명시한다. 플레이어 모델 왕복이나 컨테인먼트 검증에 실패한 런타임은 부적격이 되어 폴백 사다리(claude → codex → grok)가 돌고, 상위 모델만 실패하면 플레이어와 코치·리뷰를 다른 런타임으로 갈라 쓴다. 전부 부적격이면 게임을 시작하지 않는다(`halt.code = NO_PLAYER_RUNTIME`).
 
-## 실행
+## 시작하기
 
 저장소 루트에서.
 
 ### 스킬 (권장)
 
-Claude Code 세션을 이 저장소에서 열고 `/start-game` (AI 1~8명, 기본 3). 옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`. 중단 재개: `/start-game resume`.
+이 저장소에서 Claude Code 세션을 열고 `/start-game` (AI 1~8명, 기본 3). 옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`. 중단 재개는 `/start-game resume`.
 
-절차 정본: [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md). 호스트 포인터는 [`AGENTS.md`](AGENTS.md).
+절차 정본은 [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md), 호스트 포인터는 [`AGENTS.md`](AGENTS.md)다.
 
-### 수동 (사이드카 직접 기동)
+### 사이드카 직접 기동
 
-스킬 없이 같은 게임을 띄울 때. `init`·서버 기동은 사이드카가 한다.
+스킬 없이 같은 게임을 띄울 때. `init`과 서버 기동은 사이드카가 하므로 직접 부르지 않는다.
 
 ```bash
 nohup node tools/game-loop.js --game-dir game --ai 3 --player-runtime claude \
@@ -43,84 +63,27 @@ nohup node tools/game-loop.js --game-dir game --ai 3 --player-runtime claude \
 open "http://127.0.0.1:<port>/?token=<t>"
 ```
 
-재개는 `--ai` 대신 `--resume`. 종료 코드 `0`은 SIGTERM을 포함한 정상 프로세스 정리이며 게임 완료를 뜻하지 않는다. 완료는 오직 `loop-state.json`의 `phase: "done"` + `finishedAt`으로 판정한다. 비정상 종료 코드는 `2` repair_failed/USAGE, `3` REVIEW_FAILED, `4` NO_PLAYER_RUNTIME, `5` 기타 halt다.
+재개는 `--ai` 대신 `--resume`.
 
-### 수동 (엔진·서버만)
-
-LLM 없이 서버와 CLI만 띄울 때:
+### 엔진·서버만 (LLM 없이)
 
 ```bash
 node engine/cli.js init --ai 3          # stdout의 sessionToken
 nohup node server/server.js --game-dir game --port 8877 --token <t> > game/server.log 2>&1 &
-# health 확인 후
 open "http://127.0.0.1:8877/?token=<t>"
 ```
 
-UI 시연(가짜 딜러): 서버를 `--token dev`로 띄운 뒤 `node test/helpers/dev-drive.js --port <p> --token dev`.
+UI만 보고 싶으면 서버를 `--token dev`로 띄운 뒤 `node test/helpers/dev-drive.js --port <p> --token dev`.
 
-**활성 게임의 정의는 서버 pid와 loop 락 pid 동격이다.** `resume-check`가 `serverPidAlive`·`loopPidAlive`를 함께 준다. 둘 중 하나라도 살아 있으면 `init`은 `ACTIVE_GAME`으로 거부하고, `--force`여도 남의 살아 있는 사이드카는 엔진이 죽이지 않는다(`LOOP_ALIVE`) — 정지는 부트스트랩·롤백 절차의 소관이고 순서는 **사이드카 → 서버**다. 아카이브는 둘 다 사망을 확인한 뒤에만 일어나며 `archive/`는 지우지 않는다.
+## 게임 중에 볼 것
+
+`game/loop-state.json` 하나다. phase·port·notices·`metrics`·halt가 전부 여기 모인다.
+
+활성 게임의 정의는 **서버 pid와 loop 락 pid 동격**이다. `node engine/cli.js resume-check`가 `serverPidAlive`·`loopPidAlive`를 함께 준다. 둘 중 하나라도 살아 있으면 `init`은 `ACTIVE_GAME`으로 거부하고, `--force`여도 남의 살아 있는 사이드카를 엔진이 죽이지는 않는다(`LOOP_ALIVE`) — 정지는 부트스트랩·롤백 절차의 소관이고 순서는 **사이드카 → 서버**다. 아카이브는 둘 다 사망을 확인한 뒤에만 일어나며 `archive/`는 지우지 않는다.
 
 `game/`은 gitignore 런타임 상태다. `game/state.json`은 엔진만 읽고 쓴다.
 
-## 테스트
-
-```bash
-node --test
-```
-
-인자 없이 실행한다. **`node --test test/`처럼 디렉토리 인자를 주면 Node v26에서 실패하므로 금지.** 단건은 `node --test test/<파일>.test.js`.
-
-## 파일 구조
-
-```
-engine/                 # 순수 포커 엔진 CLI (네트워크·LLM 없음)
-  cli.js                # step/init/new-hand/legal/apply/view/hand/stats/end/resume-check
-  state.js              # 상태 I/O + 수명 보유 owned lock (pid+startTime identity)
-tools/
-  game-loop.js          # 사이드카: 부트스트랩·핸드 루프·워치독·코치·리뷰·resume
-  player-runtime.js     # LLM CLI 어댑터 (probe·워밍업·결정·1회성 상위 모델 호출)
-  player-prompt.md      # 플레이어 프롬프트 정본 (페르소나 카드 + JSON 한 줄 회신)
-  publish.js            # 게시 도구 (public 필터·publishId·사용자 액션 대기)
-  coach-control.js      # 코치 authority·queue/tombstone·owner/generation
-publish-contract.js     # 공유 body-byte/publishId 상한
-server/
-  server.js             # 중계 (SSE, wait-action, publish, 토큰)
-  public/               # 한국어 포커 테이블 UI
-test/                   # node --test
-  game-loop.test.js     # 사이드카 통합 (fake 어댑터로 완주·워치독·resume·종료 시퀀스)
-  player-runtime.test.js # 어댑터 계약 (세션 지속·컨테인먼트·관용 파서)
-  turn-contract.test.js # 사이드카가 잇는 step→publish 시퀀스의 통합 계약
-  tempo-skill-contract.test.js # 스킬·README·AGENTS 문면 계약
-  helpers/fake-cli.js   # 스크립트化 가짜 LLM CLI
-  helpers/dev-drive.js  # UI 시연용 가짜 딜러
-.agents/skills/start-game/SKILL.md   # 딜러 절차 정본 (SSOT)
-.claude/skills/start-game            # → 정본 심볼릭 링크
-.grok/skills/start-game              # → 정본 심볼릭 링크
-AGENTS.md                            # Codex 등 호스트 포인터
-game/                   # 런타임 (gitignore)
-  loop-state.json       # phase·port·notices·metrics·halt — 딜러의 유일한 관찰 지점
-  loop.lock.d/          # 사이드카 수명 보유 락 (pid+startTime)
-  loop.log              # 사이드카 로그
-```
-
-호스트별 플레이어 에이전트 정의 파일은 없다 — 플레이어 프롬프트 정본은 `tools/player-prompt.md` 한 곳이고 회신 규약은 "JSON 한 줄을 최종 출력으로" 하나다.
-
-## 턴 지연
-
-게임 속도를 지배하는 것은 **딜러 LLM 왕복**이었다. 사이드카가 루프를 가져가면서 그 왕복은 액션당 0회가 됐고, 남는 것은 플레이어 CLI 왕복 하나와 노드 오버헤드뿐이다.
-
-| 기준 | 값 |
-|---|---|
-| 핸드 안 AI 액션 경로의 딜러 세션 LLM 라운드 | **0회** |
-| AI 결정 `elapsedMs` 중앙값 — claude(haiku)·codex(gpt-5.6-luna) | ≤ 10s |
-| AI 결정 `elapsedMs` 중앙값 — grok(grok-4.6) | ≤ 27s |
-| AI 결정 `elapsedMs` p95 | ≤ 워치독 1차 한도(claude·codex 25s, grok 60s) |
-| `forced_default` 비율 | < 10% |
-| 사이드카 오버헤드(step+publish+파싱, LLM 제외) | ≤ 1s/액션 |
-
-판정 근거는 사이드카가 **모든 AI 결정**에 대해 `game/loop-state.json`의 `metrics`에 남기는 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`다. `outcome ∈ {accepted, retried_accepted, forced_default}`이고 `forced_default`도 소요 시간 그대로 분포에 들어간다(타임아웃을 분포에서 숨기지 않는다). 오버헤드는 총 `elapsedMs`가 아니라 `parseMs+stepMs+publishMs`로 판정한다. 백분위는 nearest-rank, 판정 표본은 3핸드 이상 **그리고** AI 결정 20개 이상. 게시 시각은 `game/ui-snapshot.json`의 `history[].at`으로 교차 확인한다.
-
-## 종료 시퀀스와 재개
+## 끝날 때와 이어서 할 때
 
 게임이 끝나면(`gameOver` 또는 사용자 bust) 사이드카가 phase 체크포인트를 밟는다.
 
@@ -128,23 +91,31 @@ game/                   # 런타임 (gitignore)
 playing → finalizing → review_generated → review_published → done
 ```
 
-- **finalizing**: 마지막 핸드 코치를 재-reserve하지 않고, 20초 절대 예산 안에서 result 소비 → cutoff → `finalize-cutoff`(missing 전체를 한 transaction에서 fence + unavailable seal) → 잔여 pending Q 게시.
-- **review_generated**: evaluator(redacted 트레이스+stats만) → 종합자(evaluator 출력+결과+아키타입 공개)로 리뷰를 만들고 `game/review.md`와 그 sha256을 **먼저** 기록한다. 이후 재개는 재생성하지 않고 이 산출물을 재사용한다. 두 번 실패하면 리뷰를 지어내지 않고 `halt.code = REVIEW_FAILED`다.
-- **review_published**: 게시 전에 `ui-snapshot.json`의 review digest를 대조해 이중 게시를 생략한다.
-- **done**: 세션·adapter·서버 정리가 성공한 뒤 `finishedAt`과 `phase: "done"`을 기록하고 exit 0.
+- **finalizing** — 마지막 핸드 코치를 재-reserve하지 않고 20초 절대 예산 안에서 정리하고, 잔여 pending 게시를 비운다.
+- **review_generated** — evaluator(redacted 트레이스+stats만) → 종합자(evaluator 출력+결과+아키타입 공개)로 리뷰를 만들고 `game/review.md`와 그 sha256을 **먼저** 기록한다. 이후 재개는 재생성하지 않고 이 산출물을 재사용한다. 두 번 실패하면 리뷰를 지어내지 않고 `halt.code = REVIEW_FAILED`다.
+- **review_published** — 게시 전에 `ui-snapshot.json`의 review digest를 대조해 이중 게시를 생략한다.
+- **done** — 세션·adapter·서버 정리가 성공한 뒤 `finishedAt`과 `phase: "done"`을 기록하고 exit 0.
 
-`--resume`은 **어떤 경로에서도 `init`을 부르지 않는다.** 기록된 phase(없으면 엔진 상태로 유도)부터 멱등 재개하고, 종료 국면이면 플레이어 probe·워밍업을 생략한다. 재개 여부의 분기는 `resume-check`의 `loopPidAlive` 하나다 — 참이면 사이드카를 다시 띄우지 않고 attach(관찰만), 거짓일 때만 `--resume`으로 기동한다. 종료 정리가 실패하면(`loop-state.json`의 `cleanupFailedAt`) 그 프로세스는 이미 끝났으므로 복구는 새 `--resume` 프로세스가 한다.
+**종료 코드로 완료를 판정하지 마라.** 종료 코드 `0`은 SIGTERM을 포함한 정상 프로세스 정리이며 게임 완료를 뜻하지 않는다. 완료는 오직 `phase: "done"` + `finishedAt`이다. 비정상 종료 코드는 `2` repair_failed/USAGE, `3` REVIEW_FAILED, `4` NO_PLAYER_RUNTIME, `5` 기타 halt다.
 
-## 구현 후 확인 체크리스트
+`--resume`은 **어떤 경로에서도 `init`을 부르지 않는다.** 기록된 phase부터 멱등 재개하고, 종료 국면이면 플레이어 probe·워밍업을 생략한다. 재개 여부의 분기는 `loopPidAlive` 하나다 — 참이면 사이드카를 다시 띄우지 않고 attach해 관찰만 하고, 거짓일 때만 `--resume`으로 기동한다. 종료 정리가 실패하면(`cleanupFailedAt`) 그 프로세스는 이미 끝났으므로 복구는 새 `--resume` 프로세스가 한다.
 
-호스트별 스킬 **인식 실측**과 첫 게임은 이 저장소를 연 세션에서 직접 확인한다(구현 세션에서는 스킬 메뉴를 검증하지 않음).
+## 테스트
 
-- [ ] **Claude Code:** 이 저장소에서 세션을 열고 `/start-game`이 슬래시 메뉴에 보이는지. 안 되면 폴백: `.claude/skills/start-game/SKILL.md`를 정본을 참조하는 얇은 래퍼 파일로 바꾼다(심볼릭 링크 미인식 시).
-- [ ] **Codex:** `$start-game` / 스킬 목록에 `.agents/skills/start-game`이 보이는지. 안 되면 `AGENTS.md` 포인터를 읽고 그 경로의 `SKILL.md`를 연다. `.codex/skills/` 심볼릭 링크는 Codex가 심볼릭 디렉터리를 무시하므로 두지 않았다.
-- [ ] **Grok:** `/start-game` 또는 `/local:start-game`이 보이는지(`.grok/skills` 또는 `.agents/skills`). 안 되면 `AGENTS.md` 포인터.
-- [ ] **런타임별 §2 수치 판정(최소 3핸드 + AI 결정 20개):** `game/loop-state.json`의 `metrics`로 중앙값·p95·`forced_default` 비율·오버헤드(`parseMs+stepMs+publishMs`)를 계산해 위 「턴 지연」 표와 대조한다. 딜러 전사에 핸드 안 tool call이 없음도 함께 확인한다.
-- [ ] **컨테인먼트 부정 probe 실측:** 기동 로그(`game/loop.log`)에서 런타임별 probe 판정을 확인한다. 카나리 센티널이 자식 출력에 나타난 런타임은 부적격으로 기록됐어야 한다. 실패한 런타임은 실패 그대로 기록한다(다른 호스트 결과를 일반화하지 않는다).
-- [ ] **코치 노트:** 모든 완료 `handNo`가 Published 또는 Pending이고 `text`가 비어 있지 않거나 `unavailable` 표식이 있다. 코치가 다음 핸드를 막지 않는다. 코치 문구에 비공개 홀카드·아키타입이 없다. resume은 missing만 백필하고 Q를 재스폰하지 않는다. late old epoch/owner callback이 새 게임을 오염시키지 않는다.
-- [ ] **리뷰 오버레이:** 게임 종료 후 UI 리뷰 오버레이와 `game/review.md`. `loop-state.json`의 `phase`가 `done`이고 `finishedAt`이 있다. 잔여 코치 Pending Q가 있으면 리뷰로 진행하지 않고 finalization이 halt해야 한다.
-- [ ] **레거시 talk 스냅샷:** 이전 버전에서 만들어진 `ui-snapshot.json`을 열었을 때 talk 말풍선·로그 라인이 보이지 않고 narration은 그대로 보이는지.
-- [ ] **notices 보고:** 런타임 폴백이나 상위 모델 부재가 있었다면 딜러가 그것을 한 줄로 보고했는지.
+```bash
+node --test
+```
+
+인자 없이 실행한다. **`node --test test/`처럼 디렉터리 인자를 주면 Node v26에서 실패하므로 금지.** 단건은 `node --test test/<파일>.test.js`.
+
+`test/tempo-skill-contract.test.js`는 코드가 아니라 **문서 문면**을 검사한다. 이 README와 `AGENTS.md`, 스킬 정본이 옛 딜러 루프를 다시 가리키지 않도록 고정하는 계약이라, 문서를 고치면 이 테스트를 함께 돌려야 한다.
+
+## 문서 지도
+
+| 문서 | 담당 |
+|---|---|
+| `README.md` | 이 문서 — 프로젝트 소개와 실행 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 소유권 경계, 계층 규칙, 아키텍처 불변식 |
+| [`AGENTS.md`](AGENTS.md) | 호스트 중립 에이전트 지침과 호스트별 스킬 경로 |
+| [`CLAUDE.md`](CLAUDE.md) | Claude Code 고유 사항 (`AGENTS.md`를 import) |
+| [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md) | 딜러 절차 정본 (SSOT) |
