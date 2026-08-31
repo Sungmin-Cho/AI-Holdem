@@ -39,7 +39,8 @@ test('스킬 frontmatter는 그대로다 — 슬래시 명령 인식의 계약',
 
 test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있다', () => {
   const skill = read(SKILL);
-  assert.match(skill, /node tools\/game-loop\.js --game-dir game --ai/);
+  assert.match(skill, /node tools\/game-loop\.js --store-dir game --ai/);
+  assert.doesNotMatch(skill, /node tools\/game-loop\.js --game-dir game/);
   assert.match(skill, /--player-runtime/);
   // 폴링 종료 조건 셋 — 벽시계가 아니다.
   assert.match(skill, /halt/);
@@ -57,15 +58,14 @@ test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있�
   }
 });
 
-test('사전 점검: node ≥ 20, practiceFocus는 game/ 밖, 잔여 게임 판정은 두 pid 동격', () => {
+test('사전 점검: node ≥ 20, 영구 세션, 잔여 게임 판정은 두 pid 동격', () => {
   const pre = section(read(SKILL), '## 1. 사전 점검');
   assert.match(pre, /node --version/);
   assert.match(pre, /20/);
-  assert.match(pre, /review\.md/);
-  assert.match(pre, /practiceFocus/);
-  // init의 vacate가 지우기 전에 game/ 안에 쓰면 소실된다 (스펙 D6)
-  assert.match(pre, /game\/ 밖/);
+  assert.match(pre, /\.session-store\/sessions/);
+  assert.match(pre, /이동·복사·삭제되지 않는다/);
   assert.match(pre, /resume-check/);
+  assert.match(pre, /--lock-dir game/);
   assert.match(pre, /serverPidAlive/);
   assert.match(pre, /loopPidAlive/);
   assert.match(pre, /동격/);
@@ -79,7 +79,8 @@ test('시작: 활성 게임은 --force 없이는 ACTIVE_GAME이고 init·서버 
   assert.match(start, /loop-state\.json/);
   assert.match(start, /resume-check/);
   assert.match(start, /loopPidAlive:false/);
-  assert.match(start, /archivedTo/);
+  assert.match(start, /SESSION_DIR/);
+  assert.match(start, /archivedTo.*사용하지 않는다/);
   assert.match(start, /notices/);
   assert.match(start, /open "http:\/\/127\.0\.0\.1:/);
   // 부트스트랩은 사이드카 소관 — 딜러가 init·서버를 직접 띄우지 않는다.
@@ -133,7 +134,7 @@ test('resume: loopPidAlive가 참이면 attach, 거짓일 때만 --resume 기동
   assert.match(resume, /attach/i);
   assert.match(resume, /다시 띄우지 않는다|재기동하지 않는다|스폰하지 않는다/);
   // 거짓일 때의 기동은 --ai 대신 --resume이다.
-  assert.match(resume, /node tools\/game-loop\.js --game-dir game --resume/);
+  assert.match(resume, /node tools\/game-loop\.js --store-dir game --resume/);
 });
 
 test('중단·롤백: 정지 → 미해소 게시 해소 → revert 3단계가 순서대로 있다', () => {

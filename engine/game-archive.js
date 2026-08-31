@@ -34,6 +34,26 @@ function throwCoded(code, message) {
   throw error;
 }
 
+export function assertNotSessionCatalogTarget(gameDir) {
+  let resolved = path.resolve(gameDir);
+  try { resolved = fs.realpathSync.native(resolved); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (fs.existsSync(path.join(resolved, '.session-store'))) {
+    throwCoded('BAD_DIRECTORY_MODE', 'session store root는 archive 대상으로 사용할 수 없습니다.');
+  }
+  const parts = resolved.split(path.sep);
+  const catalogIndex = parts.lastIndexOf('.session-store');
+  if (catalogIndex < 0) return;
+  const relative = parts.slice(catalogIndex + 1);
+  if (relative.length === 0 || relative[0] !== 'sessions' || relative.length === 1) {
+    throwCoded('BAD_DIRECTORY_MODE', 'session catalog은 archive 대상으로 사용할 수 없습니다.');
+  }
+  const sessionName = relative[1];
+  if (/^\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.creating$/.test(sessionName) && relative.length === 2) return;
+  throwCoded('BAD_DIRECTORY_MODE', '관리되는 session directory는 archive 대상으로 사용할 수 없습니다.');
+}
+
 function assertLoopAllowsInit(gameDir, callerPpid, force) {
   const loop = readOwnedLock(gameDir, 'loop.lock.d');
   if (!loop || loop.status === 'dead') return;
@@ -60,7 +80,7 @@ export function throwArchiveFailed() {
 }
 
 export function isReservedName(name) {
-  return name === 'archive' || name === '.mutex' || name.endsWith('.lock.d');
+  return name === 'archive' || name === '.mutex' || name === '.session-store' || name.endsWith('.lock.d');
 }
 
 export function archiveTag(state) {
@@ -176,6 +196,7 @@ function promotePartial(disk, gameDir, partialName, id) {
 }
 
 export function closeOpenPartial(gameDir, io = { fs, now }) {
+  assertNotSessionCatalogTarget(gameDir);
   const disk = io.fs;
   const names = readArchiveNames(gameDir, disk);
   if (names == null) return null;
@@ -196,6 +217,7 @@ export function closeOpenPartial(gameDir, io = { fs, now }) {
 }
 
 export function vacateLive(gameDir, io = { fs, now }) {
+  assertNotSessionCatalogTarget(gameDir);
   const disk = io.fs;
   if (!shouldArchive(gameDir, io)) {
     for (const name of listLiveEntries(gameDir, io)) {
@@ -269,6 +291,7 @@ export function stopServer(pid, deps = {}) {
 }
 
 export function initGameDir(gameDir, flags, deps = {}) {
+  assertNotSessionCatalogTarget(gameDir);
   const disk = deps.fs ?? fs;
   const alive = deps.isAlive ?? isAlive;
   const clock = deps.now ?? now;

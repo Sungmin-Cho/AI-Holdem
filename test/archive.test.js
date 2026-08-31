@@ -10,7 +10,7 @@ import {
 } from '../engine/state.js';
 import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
-  closeOpenPartial, vacateLive, initGameDir, stopServer,
+  closeOpenPartial, vacateLive, initGameDir, stopServer, assertNotSessionCatalogTarget,
 } from '../engine/game-archive.js';
 
 const STATE_MODULE_URL = pathToFileURL(
@@ -642,4 +642,33 @@ test('stopServer: now가 마감을 넘기면 sleep 없이 SIGTERM 후 SIGKILL한
     now: jumpingNow(),
   });
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+});
+
+test('managed final session is never an archive target while staging remains initializable', () => {
+  const store = tmpGame();
+  const sessions = path.join(store, '.session-store', 'sessions');
+  const finalDir = path.join(sessions, '00000000-0000-4000-8000-000000000000');
+  const stagingDir = path.join(sessions, '.00000000-0000-4000-8000-000000000000.creating');
+  fs.mkdirSync(finalDir, { recursive: true });
+  fs.mkdirSync(stagingDir);
+  fs.writeFileSync(path.join(finalDir, 'state.json'), '{"sentinel":true}');
+
+  assert.throws(() => assertNotSessionCatalogTarget(finalDir), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  assert.throws(() => vacateLive(finalDir), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  assert.equal(fs.readFileSync(path.join(finalDir, 'state.json'), 'utf8'), '{"sentinel":true}');
+  assert.doesNotThrow(() => assertNotSessionCatalogTarget(stagingDir));
+
+  assert.throws(() => initGameDir(finalDir, { aiCount: 1, force: true }, {
+    isAlive() { assert.fail('managed target must fail before liveness or signalling'); },
+  }), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  assert.throws(() => vacateLive(path.join(store, '.session-store')), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  assert.throws(() => vacateLive(sessions), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  const catalogInode = fs.statSync(path.join(store, '.session-store')).ino;
+  assert.throws(() => initGameDir(store, { aiCount: 1 }), (error) => error.code === 'BAD_DIRECTORY_MODE');
+  assert.equal(fs.statSync(path.join(store, '.session-store')).ino, catalogInode);
+  assert.equal(fs.readFileSync(path.join(finalDir, 'state.json'), 'utf8'), '{"sentinel":true}');
+
+  const alias = path.join(store, 'session-alias');
+  fs.symlinkSync(finalDir, alias);
+  assert.throws(() => vacateLive(alias), (error) => error.code === 'BAD_DIRECTORY_MODE');
 });

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
+import { acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 const STATE_MODULE_URL = pathToFileURL(
@@ -881,5 +882,19 @@ test('resume-check: unknown/mismatch/malformed loop identity는 loopPidAlive fal
       fs.writeFileSync(path.join(lockDir, 'pid'), record);
       assert.equal(assertOk(cli(dir, ['resume-check'])).loopPidAlive, false);
     });
+  }
+});
+
+test('resume-check --lock-dir reports the store-level loop owner', () => {
+  const gameDir = tmpGame();
+  const storeDir = tmpGame();
+  initGame(gameDir, ['--ai', '1']);
+  const handle = acquireOwnedLock(storeDir, 'loop.lock.d');
+  try {
+    const checked = cli(gameDir, ['resume-check', '--lock-dir', storeDir]);
+    assert.equal(checked.status, 0, checked.stderr);
+    assert.equal(checked.json.loopPidAlive, true);
+  } finally {
+    releaseOwnedLock(handle);
   }
 });
