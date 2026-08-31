@@ -4,30 +4,44 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 홀덤</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- 폰트는 진행을 막지 않는다. 오프라인이면 시스템 폰트 스택으로 그대로 렌더된다. -->
+  <link rel="stylesheet" media="print" onload="this.media='all'"
+        href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">AI 홀덤</div>
-    <div class="meta">
-      <span>핸드 <strong id="hand-no">—</strong></span>
-      <span>레벨 <strong id="level">—</strong></span>
-      <span>블라인드 <strong id="blinds">—</strong></span>
-      <span>다음 레벨까지 <strong id="level-left">—</strong>핸드</span>
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#suit-s"></use></svg>
+      <span class="brand-name">AI 홀덤</span>
     </div>
-    <div id="conn" class="conn off" aria-live="polite">연결 중…</div>
+    <div class="topbar-sep" aria-hidden="true"></div>
+    <div class="meta">
+      <div class="meta-seg"><span class="meta-label">핸드</span><span class="meta-value num" id="hand-no">—</span></div>
+      <div class="meta-seg"><span class="meta-label">레벨</span><span class="meta-value num" id="level">—</span></div>
+      <div class="meta-seg"><span class="meta-label">블라인드</span><span class="meta-value num" id="blinds">—</span></div>
+      <div class="meta-seg"><span class="meta-label">다음 레벨까지</span><span class="meta-value"><span class="num" id="level-left">—</span>핸드</span></div>
+    </div>
+    <div id="conn" class="conn off" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span id="conn-text">연결 중…</span></div>
   </header>
 
   <main>
     <section class="stage">
       <div class="table-wrap">
         <div class="table" id="table" aria-label="포커 테이블">
-          <div class="felt">
-            <div class="center">
-              <div id="board" class="board" aria-label="커뮤니티 카드"></div>
-              <div id="pots" class="pots">팟 0</div>
-            </div>
+          <div class="rail" aria-hidden="true"></div>
+          <div class="rail-line" aria-hidden="true"></div>
+          <div class="felt" aria-hidden="true">
+            <div class="felt-line"></div>
+            <svg class="felt-mark" viewBox="0 0 24 24"><use href="#suit-s"></use></svg>
           </div>
+          <div class="center">
+            <div id="board" class="board" aria-label="커뮤니티 카드"></div>
+            <div id="pots" class="pots" aria-label="팟"></div>
+          </div>
+          <div id="bets" class="bets" aria-hidden="true"></div>
           <div id="seats" class="seats"></div>
         </div>
       </div>
@@ -36,56 +50,81 @@
       <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
 
       <div id="action-bar" class="action-bar" hidden>
-        <button type="button" id="btn-fold">폴드</button>
-        <button type="button" id="btn-check">체크</button>
-        <button type="button" id="btn-call">콜</button>
-        <div id="raise-panel" class="raise-panel">
-          <div class="raise-row">
-            <input id="raise-slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액">
-            <button type="button" id="btn-raise">레이즈</button>
-          </div>
-          <div class="presets">
-            <button type="button" data-preset="min">최소</button>
-            <button type="button" data-preset="half">½팟</button>
-            <button type="button" data-preset="pot">팟</button>
-            <button type="button" data-preset="allin">올인</button>
-          </div>
+        <div class="act-group">
+          <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
+          <button type="button" id="btn-check" class="btn btn-neutral">체크</button>
+          <button type="button" id="btn-call" class="btn btn-neutral">콜</button>
         </div>
-        <button type="button" id="btn-allin-only" hidden>올인</button>
+        <div id="act-sep" class="act-sep" aria-hidden="true"></div>
+        <div id="raise-panel" class="raise-panel">
+          <div class="raise-top">
+            <div class="presets">
+              <button type="button" class="preset" data-preset="min">최소</button>
+              <button type="button" class="preset" data-preset="half">½ 팟</button>
+              <button type="button" class="preset" data-preset="pot">팟</button>
+              <button type="button" class="preset" data-preset="allin">올인</button>
+            </div>
+            <div class="amount-field">
+              <label class="amount-label" for="raise-amount">금액</label>
+              <input id="raise-amount" class="amount-input num" type="text" inputmode="numeric"
+                     autocomplete="off" spellcheck="false" aria-label="레이즈 금액 직접 입력">
+            </div>
+          </div>
+          <input id="raise-slider" class="slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액 슬라이더">
+          <p id="raise-range" class="raise-range num"></p>
+        </div>
+        <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
+        <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
       </div>
     </section>
 
     <aside class="side">
       <div class="tabs" role="tablist">
-        <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true">이벤트 로그</button>
-        <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false">코치</button>
+        <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
+        <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치</button>
       </div>
-      <div id="panel-log" class="panel" role="tabpanel">
+      <div id="panel-log" class="panel" role="tabpanel" aria-labelledby="tab-log">
         <div id="log-list" class="log-list" aria-live="polite"></div>
       </div>
-      <div id="panel-coach" class="panel" role="tabpanel" hidden>
+      <div id="panel-coach" class="panel" role="tabpanel" aria-labelledby="tab-coach" hidden>
         <div id="coach-list" class="coach-list"></div>
       </div>
     </aside>
   </main>
 
   <div id="review-overlay" class="overlay" hidden>
-    <div class="review-card" role="dialog" aria-labelledby="review-title">
+    <div class="review-card" role="dialog" aria-modal="true" aria-labelledby="review-title">
       <div class="review-head">
+        <svg class="review-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#suit-s"></use></svg>
         <h1 id="review-title">종합 리뷰</h1>
         <p id="review-result" class="review-result"></p>
-        <button type="button" id="review-close">닫기</button>
+        <button type="button" id="review-close" class="btn btn-ghost">닫기</button>
       </div>
+      <div class="review-rule" aria-hidden="true"></div>
       <div id="review-body" class="review-body"></div>
     </div>
   </div>
 
   <div id="boot-error" class="overlay" hidden>
-    <div class="review-card">
-      <h1>접속할 수 없습니다</h1>
-      <p id="boot-error-text"></p>
+    <div class="review-card review-card--tight" role="dialog" aria-modal="true" aria-labelledby="boot-error-title">
+      <h1 id="boot-error-title">접속할 수 없습니다</h1>
+      <p id="boot-error-text" class="boot-error-text"></p>
     </div>
   </div>
+
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <path id="suit-s" d="M12 2C9.2 6.6 4.5 9.3 4.5 13.2 4.5 15.6 6.3 17.2 8.4 17.2 9.6 17.2 10.6 16.7 11.3 15.9 11.1 17.8 10.3 19.3 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.7 19.3 12.9 17.8 12.7 15.9 13.4 16.7 14.4 17.2 15.6 17.2 17.7 17.2 19.5 15.6 19.5 13.2 19.5 9.3 14.8 6.6 12 2Z"></path>
+      <path id="suit-h" d="M12 21.1 10.55 19.78C5.4 15.11 2 12.03 2 8.25 2 5.17 4.42 2.75 7.5 2.75 9.24 2.75 10.91 3.56 12 4.84 13.09 3.56 14.76 2.75 16.5 2.75 19.58 2.75 22 5.17 22 8.25 22 12.03 18.6 15.11 13.45 19.78L12 21.1Z"></path>
+      <path id="suit-d" d="M12 2.2 19.2 12 12 21.8 4.8 12Z"></path>
+      <path id="suit-c" d="M12 2.5C10 2.5 8.4 4.1 8.4 6.1 8.4 6.9 8.7 7.7 9.2 8.3 8.8 8.2 8.5 8.1 8.1 8.1 6.1 8.1 4.5 9.7 4.5 11.7 4.5 13.7 6.1 15.3 8.1 15.3 9.4 15.3 10.5 14.7 11.2 13.7 11 16 10.2 18.9 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.8 18.9 13 16 12.8 13.7 13.5 14.7 14.6 15.3 15.9 15.3 17.9 15.3 19.5 13.7 19.5 11.7 19.5 9.7 17.9 8.1 15.9 8.1 15.5 8.1 15.2 8.2 14.8 8.3 15.3 7.7 15.6 6.9 15.6 6.1 15.6 4.1 14 2.5 12 2.5Z"></path>
+      <g id="chip">
+        <circle cx="10" cy="10" r="8.6" fill="#C9A860"></circle>
+        <circle cx="10" cy="10" r="8.6" fill="none" stroke="#F4E6BF" stroke-width="2.2" stroke-dasharray="3.4 4.2"></circle>
+        <circle cx="10" cy="10" r="4.8" fill="none" stroke="rgba(0,0,0,0.25)" stroke-width="1"></circle>
+      </g>
+    </defs>
+  </svg>
 
   <script src="/app.js"></script>
 </body>
