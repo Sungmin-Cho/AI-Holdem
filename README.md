@@ -108,6 +108,8 @@ node --test
 
 인자 없이 실행한다. **`node --test test/`처럼 디렉터리 인자를 주면 Node v26에서 실패하므로 금지.** 단건은 `node --test test/<파일>.test.js`.
 
+CI는 프로세스·락 통합 테스트끼리의 교차 부하를 피하기 위해 테스트 파일만 직렬화하는 `npm run test:ci`를 사용한다. 각 테스트가 내부에서 만드는 동시성·race는 그대로 검증한다.
+
 `test/tempo-skill-contract.test.js`는 코드가 아니라 **문서 문면**을 검사한다. 이 README와 `AGENTS.md`, 스킬 정본이 옛 딜러 루프를 다시 가리키지 않도록 고정하는 계약이라, 문서를 고치면 이 테스트를 함께 돌려야 한다.
 
 ## 문서 지도
