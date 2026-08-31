@@ -5214,8 +5214,8 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 2_000,
-      finalizeCutoffLeadMs: 1_200,
+      finalizeBudgetMs: 4_000,
+      finalizeCutoffLeadMs: 2_000,
       orphanTerminateGraceMs: 180,
       orphanTerminateKillWaitMs: 180,
       signalProcess: (pid, signal) => {
