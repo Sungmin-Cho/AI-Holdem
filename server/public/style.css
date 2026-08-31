@@ -909,11 +909,27 @@ main {
   .topbar { height: auto; gap: 12px; padding: 10px 14px; flex-wrap: wrap; }
   .meta { gap: 16px; }
 
-  main { grid-template-columns: 1fr; grid-template-rows: minmax(340px, 1fr) minmax(220px, 40vh); }
+  /* 세로가 귀하다. 테이블에 먼저 배분하고 로그는 스크롤로 밀어 둔다. */
+  main { grid-template-columns: 1fr; grid-template-rows: minmax(430px, 1fr) minmax(190px, 32vh); }
   .side { border-left: 0; border-top: 1px solid var(--line); }
 
   .stage { padding: 8px 10px 12px; }
-  .table { aspect-ratio: 1.35 / 1; --tw: min(560px, 100cqw, 100cqh * 1.35); }
+  .table-wrap { padding-bottom: 28px; }
+  /* 폰에서는 테이블이 작으므로 데스크톱의 35% 보드 비율로는 랭크가 안 읽힌다.
+     펠트에서 보드가 차지하는 몫을 키운다. */
+  .table {
+    aspect-ratio: 1.6 / 1;
+    --tw: min(560px, 100cqw, 100cqh * 1.6);
+    --ch: calc(var(--tw) * 0.115);
+    --cw: calc(var(--tw) * 0.081);
+    --card-gap: calc(var(--tw) * 0.0115);
+  }
+  .table.is-crowded { --ch: calc(var(--tw) * 0.095); --cw: calc(var(--tw) * 0.067); }
+  .card--hero { --ch: calc(var(--tw) * 0.130); --cw: calc(var(--tw) * 0.092); }
+  .card--sm { --ch: calc(var(--tw) * 0.078); --cw: calc(var(--tw) * 0.056); }
+  .card--back.card--sm { --ch: calc(var(--tw) * 0.058); --cw: calc(var(--tw) * 0.042); }
+  /* 합법 범위는 슬라이더 양 끝과 입력 필드로 충분하다 — 한 줄을 테이블에 넘긴다. */
+  .raise-range { display: none; }
 
   .plate { min-width: 0; gap: 6px; padding: 4px 9px 4px 5px; }
   .avatar, .seat.is-hero .avatar { width: 26px; height: 26px; font-size: 11px; }
