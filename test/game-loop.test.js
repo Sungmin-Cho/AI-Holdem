@@ -1545,10 +1545,12 @@ test('a remotely rejected restored session recreates only that player once, pers
   await runUntilUserBoundary(loop, gameDir);
 
   assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1'], 'valid p2 was unnecessarily recreated');
+  assert.equal(adapter.calls[0].timeoutMs > 0 && adapter.calls[0].timeoutMs <= 25, true);
   assert.deepEqual(
     adapter.decideCalls.filter((call) => call.playerId === 'p1').map((call) => call.sessionId),
     ['expired-p1', 'session-p1'],
   );
+  assert.equal(adapter.decideCalls[1].timeoutMs > 0 && adapter.decideCalls[1].timeoutMs < 25, true);
   assert.equal(maxActive, 1, 'old and repaired session calls overlapped');
   const sessions = readJson(path.join(gameDir, '.player-sessions.json'));
   assert.equal(sessions.p1.runtime, 'fake');
@@ -1606,6 +1608,41 @@ test('a repaired fresh session is never recreated again and its bounded failures
   const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics[0];
   assert.equal(metric.outcome, 'forced_default');
   assert.equal(metric.sessionRepaired, true);
+});
+
+test('restored-session repair의 RUNTIME_CLOSED는 비치명으로 격리되어 force-default로 수렴한다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  putAiFirst(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'expired-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+    p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: '2026-08-29T01:00:00.000Z' },
+  }));
+  const adapter = makeAdapter({
+    onDecide: async () => {
+      throw Object.assign(new Error('remote session expired'), { code: 'CLI_FAILED' });
+    },
+  });
+  adapter.warmup = async (input) => {
+    adapter.calls.push(input);
+    throw Object.assign(new Error('runtime closed during repair'), { code: 'RUNTIME_CLOSED' });
+  };
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 } },
+  });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+
+  await runUntilUserBoundary(loop, gameDir);
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.metrics[0].outcome, 'forced_default');
+  assert.equal(readLoopLog(gameDir).some((row) => (
+    row.event === 'player-session-repair-failed' && row.code === 'RUNTIME_CLOSED'
+  )), true);
 });
 
 test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 }, async (t) => {
