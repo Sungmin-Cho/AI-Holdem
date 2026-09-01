@@ -17,6 +17,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
+| `training/` | 엔진 밖 학습 계층. Preflop baseline lookup과 frequency grade. 파일 I/O는 CLI만. 전략 데이터를 engine이 로드하지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
 | `engine/state.js` | `state.json` 원자적 I/O(`loadState`/`saveState`)와 이 저장소 전체가 재사용하는 pid(+startTime) identity 기반 owned-lock 프리미티브(`withMutation`/`withNamedLock`/`acquireOwnedLock`). |

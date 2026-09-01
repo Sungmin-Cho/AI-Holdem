@@ -1,0 +1,84 @@
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
+
+const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
+const SEMVER_RE = /^\d+\.\d+\.\d+$/;
+
+export function hashDataset(raw) {
+  return createHash('sha256').update(raw).digest('hex');
+}
+
+export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset 파일을 읽을 수 없습니다.');
+  }
+  const contentSha256 = hashDataset(raw);
+  if (expectedSha256 && expectedSha256 !== contentSha256) {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset digest mismatch');
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset JSON이 아닙니다.');
+  }
+  validateDataset(data);
+  return { data, contentSha256, raw };
+}
+
+export function validateDataset(data) {
+  if (!data || data.schemaVersion !== 1) throw coded(ERRORS.DATASET_INVALID, 'schemaVersion');
+  if (!PROVIDER_ID_RE.test(data.id ?? '')) throw coded(ERRORS.DATASET_INVALID, 'id');
+  if (!SEMVER_RE.test(data.version ?? '')) throw coded(ERRORS.DATASET_INVALID, 'version');
+  if (typeof data.license !== 'string' || data.license.length < 1) {
+    throw coded(ERRORS.DATASET_INVALID, 'license');
+  }
+  if (!data.spots || typeof data.spots !== 'object') throw coded(ERRORS.DATASET_INVALID, 'spots');
+  for (const [spotKey, hands] of Object.entries(data.spots)) {
+    if (typeof spotKey !== 'string' || !hands || typeof hands !== 'object') {
+      throw coded(ERRORS.DATASET_INVALID, `spot ${spotKey}`);
+    }
+    for (const [handClass, actions] of Object.entries(hands)) {
+      if (!Array.isArray(actions) || actions.length === 0) {
+        throw coded(ERRORS.DATASET_INVALID, `${spotKey} ${handClass}`);
+      }
+      for (const action of actions) {
+        if (typeof action.action !== 'string') throw coded(ERRORS.DATASET_INVALID, 'action');
+        if (typeof action.frequency !== 'number' || action.frequency < 0 || action.frequency > 1) {
+          throw coded(ERRORS.DATASET_INVALID, 'frequency');
+        }
+        if (action.evBb != null) throw coded(ERRORS.DATASET_INVALID, 'MVP EV must be absent or null');
+      }
+      if (!frequenciesSumToOne(actions)) {
+        throw coded(ERRORS.DATASET_INVALID, `frequency sum ${spotKey} ${handClass}`);
+      }
+    }
+  }
+}
+
+export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
+  const source = {
+    id: data.id,
+    version: data.version,
+    license: data.license,
+    contentSha256,
+  };
+  const hands = data.spots[spotKey];
+  if (!hands || !hands[handClass]) {
+    return { status: 'unsupported', reason: 'spot or hand missing', source };
+  }
+  return {
+    status: 'supported',
+    actions: hands[handClass].map((action) => ({
+      action: action.action,
+      ...(action.sizeBb != null ? { sizeBb: action.sizeBb } : {}),
+      frequency: action.frequency,
+      evBb: null,
+    })),
+    source,
+  };
+}
