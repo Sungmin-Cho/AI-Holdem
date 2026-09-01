@@ -8,7 +8,7 @@ import {
 
 // Game-directory archive (init vacate), not the per-hand writeHandArchive.
 
-const RESULT_TAGS = new Set(['abort', 'win', 'lose']);
+const RESULT_TAGS = new Set(['abort', 'win', 'lose', 'completed']);
 const HAND_FILE = /^hand-.*\.json$/;
 const PARTIAL_NAME = /^\..+\.partial$/;
 const PARTIAL_STAMP = /^\.(\d{8}T\d{6}Z)-.+\.partial$/;
@@ -297,7 +297,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const alive = deps.isAlive ?? isAlive;
   const clock = deps.now ?? now;
   const callerPpid = deps.callerPpid ?? process.ppid;
-  const { aiCount, startStack, blinds0, levelEvery, force } = flags;
+  const { aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit } = flags;
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
   // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
@@ -339,6 +339,9 @@ export function initGameDir(gameDir, flags, deps = {}) {
       blinds0,
       levelEvery,
       names: personas.map((persona) => persona.name),
+      mode,
+      startStackBb,
+      handLimit,
     });
     const players = [
       { playerId: 'user', seat: 0, name: '나' },

@@ -16,6 +16,7 @@ import {
   createGameLoop,
   exitCodeFor,
   parseGameLoopArgs,
+  engineInitFlags,
 } from '../tools/game-loop.js';
 import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -7006,7 +7007,14 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     resume: false,
     playerRuntime: 'codex',
     practiceFocusFile: '/tmp/focus.json',
+    mode: undefined,
+    stackBb: undefined,
+    hands: undefined,
   });
+  assert.deepEqual(
+    engineInitFlags({ mode: 'cash-training', stackBb: 100, hands: 20, blinds: '50/100' }),
+    ['--blinds', '50/100', '--mode', 'cash-training', '--stack-bb', '100', '--hands', '20'],
+  );
   assert.equal(parseGameLoopArgs(['--resume', '--game-dir', '/tmp/g']).resume, true);
   assert.equal(parseGameLoopArgs(['--store-dir', '/tmp/store', '--ai', '2']).storeDir, '/tmp/store');
   assert.throws(

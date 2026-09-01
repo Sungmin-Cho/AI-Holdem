@@ -62,6 +62,9 @@ export function viewFor(state, playerId) {
 
   if (state.hand && legal?.toAct === playerId) view.legal = structuredClone(legal);
   if (state.result != null) view.result = state.result;
+  if (state.config?.mode) view.mode = state.config.mode;
+  if (state.config?.handLimit != null) view.handLimit = state.config.handLimit;
+  if (state.sessionNet) view.sessionNet = structuredClone(state.sessionNet);
   return view;
 }
 

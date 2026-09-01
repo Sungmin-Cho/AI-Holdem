@@ -537,7 +537,10 @@ function logNode(item, verb) {
     case 'bust':
       return el('div', 'log-row', `${playerName(item.playerId)} 탈락`);
     case 'game_over': {
-      const label = item.result === 'win' ? '우승' : item.result === 'lose' ? '패배' : item.result;
+      const label = item.result === 'win' ? '우승'
+        : item.result === 'lose' ? '패배'
+          : item.result === 'completed' ? '세션 완료'
+            : item.result;
       const row = el('div', 'log-divider');
       row.append(
         el('div', 'log-divider-rule'),
@@ -593,7 +596,10 @@ function paintReview(view) {
   overlay.hidden = !show;
   if (!show) return;
   const result = $('review-result');
-  result.textContent = view.result === 'win' ? '우승' : view.result === 'lose' ? '패배' : '';
+  result.textContent = view.result === 'win' ? '우승'
+    : view.result === 'lose' ? '패배'
+      : view.result === 'completed' ? '세션 완료'
+        : '';
   result.classList.toggle('is-win', view.result === 'win');
   result.classList.toggle('is-lose', view.result === 'lose');
   $('review-body').innerHTML = renderMarkdown(reviewBody(ui.review));

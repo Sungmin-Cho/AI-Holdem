@@ -48,7 +48,7 @@ AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤�
 
 ### 스킬 (권장)
 
-이 저장소에서 Claude Code 세션을 열고 `/start-game` (AI 1~8명, 기본 3). 옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`. 중단 재개는 `/start-game resume`.
+이 저장소에서 Claude Code 세션을 열고 `/start-game` (AI 1~8명, 기본 3). 옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`. cash-training은 `--mode cash-training --stack-bb 100 --hands N`을 `--store-dir game` 기동에 붙인다. 중단 재개는 `/start-game resume`.
 
 절차 정본은 [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md), 호스트 포인터는 [`AGENTS.md`](AGENTS.md)다.
 
