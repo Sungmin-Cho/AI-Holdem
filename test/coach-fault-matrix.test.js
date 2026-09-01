@@ -39,6 +39,7 @@ function setup({ owner = '11111111-1111-4111-8111-111111111111', token = 'tok-fa
   const cc = createCoachControl({ now: () => fakeClock.now() });
   const snapshotFile = path.join(dir, 'ui-snapshot.json');
   writeJsonAtomic(snapshotFile, { revision: 1, view: null, log: [], coach: [] });
+  writeJsonAtomic(path.join(dir, 'loop-state.json'), { phase: 'done' });
   const statsFile = path.join(dir, 'stats.json');
   writeJsonAtomic(statsFile, { perPlayer: { user: { sample: 1, vpip: 0.2 } } });
   return { dir, owner, token, clock: fakeClock, cc, snapshotFile, statsFile };
@@ -430,10 +431,10 @@ test('rollback guard는 retired cleanup이 released가 아니면 거부한다', 
     generation: started.descriptors[0].generation,
     cleanupState: 'termination_unconfirmed',
   });
-  assert.deepEqual(await first.cc.assertRollbackAllowed(first.dir), {
-    ok: false,
-    code: 'ROLLBACK_REFUSED',
-  });
+  const firstGuard = await first.cc.assertRollbackAllowed(first.dir);
+  assert.equal(firstGuard.ok, false);
+  assert.equal(firstGuard.code, 'ROLLBACK_REFUSED');
+  assert.equal(firstGuard.reasons[0].code, 'retired_unresolved');
 
   const second = setup({ token: 'tok-roll-retired-pending' });
   await second.cc.beginOwner({
@@ -449,11 +450,82 @@ test('rollback guard는 retired cleanup이 released가 아니면 거부한다', 
     cleanupState: 'pending',
     agentHandle: null,
   });
-  writeJsonAtomic(authPath, auth);
-  assert.deepEqual(await second.cc.assertRollbackAllowed(second.dir), {
+  writeJsonAtomic(authPath, JSON.parse(JSON.stringify(auth, (_, value) => (
+    typeof value === 'bigint' ? value.toString() : value
+  ))));
+  const secondGuard = await second.cc.assertRollbackAllowed(second.dir);
+  assert.equal(secondGuard.ok, false);
+  assert.equal(secondGuard.code, 'ROLLBACK_REFUSED');
+  assert.equal(secondGuard.reasons[0].code, 'retired_unreclaimed');
+});
+
+test('rollback guard는 loop-state가 없으면 fail closed reason을 반환한다', async () => {
+  const { dir, cc } = setup({ token: 'tok-roll-loop-state-missing' });
+  fs.unlinkSync(path.join(dir, 'loop-state.json'));
+  const guard = await cc.assertRollbackAllowed(dir);
+  assert.deepEqual(guard, {
     ok: false,
     code: 'ROLLBACK_REFUSED',
+    reasons: [
+      { code: 'coach_authority_missing', detail: { completedHands: 1 } },
+      { code: 'loop_state_unreadable', detail: { error: 'LOOP_STATE_MISSING' } },
+    ],
   });
+});
+
+test('rollback guard는 authority 부재를 완료 핸드 근거로 판정한다', async () => {
+  const safe = setup({ token: 'tok-roll-authority-absent-safe' });
+  writeJsonAtomic(path.join(safe.dir, 'state.json'), { lastHand: null });
+  assert.deepEqual(await safe.cc.assertRollbackAllowed(safe.dir), { ok: true });
+
+  const unsafe = setup({ token: 'tok-roll-authority-absent-unsafe' });
+  const guard = await unsafe.cc.assertRollbackAllowed(unsafe.dir);
+  assert.equal(guard.ok, false);
+  assert.equal(guard.reasons.some((reason) => reason.code === 'coach_authority_missing'), true);
+});
+
+test('rollback guard는 parseable partial authority와 unknown phase를 fail closed한다', async () => {
+  const partial = setup({ token: 'tok-roll-partial-authority' });
+  writeJsonAtomic(path.join(partial.dir, '.coach-authority.json'), { schemaVersion: 2 });
+  writeJsonAtomic(path.join(partial.dir, 'state.json'), { lastHand: null });
+  const partialGuard = await partial.cc.assertRollbackAllowed(partial.dir);
+  assert.equal(partialGuard.reasons.some((reason) => reason.code === 'coach_authority_unreadable'), true);
+
+  const phase = setup({ token: 'tok-roll-unknown-phase' });
+  writeJsonAtomic(path.join(phase.dir, 'state.json'), { lastHand: null });
+  writeJsonAtomic(path.join(phase.dir, 'loop-state.json'), { phase: 'mystery' });
+  const phaseGuard = await phase.cc.assertRollbackAllowed(phase.dir);
+  assert.equal(phaseGuard.reasons.some((reason) => reason.code === 'loop_state_unreadable'), true);
+});
+
+test('rollback guard는 복합 위반 reasons를 고정 순서와 서로소 retired 분류로 반환한다', async () => {
+  const fixture = setup({ token: 'tok-roll-composite' });
+  await fixture.cc.beginOwner({
+    gameDir: fixture.dir, owner: fixture.owner, completed: 1,
+    statsFile: fixture.statsFile, snapshotFile: fixture.snapshotFile,
+  });
+  const authPath = path.join(fixture.dir, '.coach-authority.json');
+  const auth = fixture.cc.loadAuthority(fixture.dir);
+  auth.publishQueue['9'] = { handNo: 9 };
+  auth.retiredAttempts.push(
+    { handNo: 2, generation: 1, cleanupState: 'termination_unconfirmed', agentHandle: '2:x' },
+    { handNo: 3, generation: 1, cleanupState: 'pending', agentHandle: '3:x' },
+    { handNo: 4, generation: 1, cleanupState: 'cancelled', agentHandle: null },
+  );
+  writeJsonAtomic(authPath, JSON.parse(JSON.stringify(auth, (_, value) => (
+    typeof value === 'bigint' ? value.toString() : value
+  ))));
+  writeJsonAtomic(path.join(fixture.dir, 'loop-state.json'), {
+    phase: 'finalizing', cleanupError: { code: 'STOP_FAILED' },
+  });
+  fs.writeFileSync(path.join(fixture.dir, '.publish-attempt.json'), '{}');
+
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.deepEqual(guard.reasons.map((reason) => reason.code), [
+    'attempt_pending', 'active_hands', 'publish_queue',
+    'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
+    'cleanup_error', 'phase_incomplete',
+  ]);
 });
 
 test('game-over remaining 5,001ms는 교체 가능, 4,999ms는 불가', () => {

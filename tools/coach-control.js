@@ -1065,19 +1065,73 @@ export function createCoachControl(deps = {}) {
 
   async function assertRollbackAllowed(gameDir) {
     return withLock(gameDir, () => {
-      const auth = loadAuthorityFile(gameDir);
+      const reasons = [];
+      const loopStatePath = path.join(gameDir, 'loop-state.json');
+      if (!fs.existsSync(loopStatePath)) {
+        reasons.push({ code: 'loop_state_unreadable', detail: { error: 'LOOP_STATE_MISSING' } });
+      }
+      let loopState = null;
+      if (fs.existsSync(loopStatePath)) {
+        try { loopState = readJsonFile(loopStatePath); } catch {
+          reasons.push({ code: 'loop_state_unreadable', detail: { error: 'LOOP_STATE_UNREADABLE' } });
+        }
+      }
+      if (loopState) {
+        const phases = new Set(['bootstrap', 'playing', 'finalizing', 'review_generated', 'review_published', 'done']);
+        if (!phases.has(loopState.phase)) reasons.push({ code: 'loop_state_unreadable', detail: { error: 'UNKNOWN_PHASE' } });
+        if (loopState.cleanupError) reasons.push({ code: 'cleanup_error', detail: { code: loopState.cleanupError.code ?? null } });
+        if (['finalizing', 'review_generated', 'review_published'].includes(loopState.phase)) {
+          reasons.push({ code: 'phase_incomplete', detail: { phase: loopState.phase } });
+        }
+      }
+      let auth = null;
+      const authorityPath = authPath(gameDir);
+      if (fs.existsSync(authorityPath)) {
+        try {
+          auth = loadAuthorityFile(gameDir);
+          if (!auth || typeof auth.gameEpoch !== 'string' || !auth.hands || !Array.isArray(auth.retiredAttempts)
+            || !auth.publishQueue || !auth.publishedSeals) throw new Error('minimum schema');
+        } catch (error) {
+          reasons.push({ code: 'coach_authority_unreadable', detail: { error: error.code ?? 'INVALID_SCHEMA' } });
+          auth = null;
+        }
+      } else {
+        let completedHands = 1;
+        try {
+          const engine = readJsonFile(path.join(gameDir, 'state.json'));
+          completedHands = engine?.lastHand === null ? 0 : Number(engine?.lastHand?.handNo ?? 1);
+        } catch { completedHands = 1; }
+        if (completedHands >= 1) reasons.push({ code: 'coach_authority_missing', detail: { completedHands } });
+      }
       const attemptPending = fs.existsSync(path.join(gameDir, '.publish-attempt.json'));
-      const active = Object.values(auth?.hands ?? {}).some((hand) => (
+      if (attemptPending) reasons.unshift({ code: 'attempt_pending', detail: {} });
+      const activeHands = Object.entries(auth?.hands ?? {}).filter(([, hand]) => (
         hand.status === 'reserved'
         || hand.status === 'running'
         || (hand.status === 'terminal' && hand.resultState === 'unread')
-      ));
-      const queued = Object.keys(auth?.publishQueue ?? {}).length > 0;
-      const retiredUnreleased = (auth?.retiredAttempts ?? []).some((row) => (
-        row?.cleanupState !== 'released'
-      ));
-      if (active || queued || attemptPending || retiredUnreleased) {
-        return { ok: false, code: 'ROLLBACK_REFUSED' };
+      )).map(([handNo]) => Number(handNo));
+      if (activeHands.length) reasons.push({ code: 'active_hands', detail: { handNos: activeHands } });
+      const queued = Object.keys(auth?.publishQueue ?? {}).map(Number);
+      if (queued.length) reasons.push({ code: 'publish_queue', detail: { handNos: queued } });
+      const unresolved = (auth?.retiredAttempts ?? []).filter((row) => ['termination_unconfirmed', 'release_failed'].includes(row.cleanupState));
+      const unresolvedSet = new Set(unresolved);
+      if (unresolved.length) reasons.push({ code: 'retired_unresolved', detail: unresolved.map(({ handNo, generation, cleanupState }) => ({ handNo, generation, cleanupState })) });
+      const reclaimable = (auth?.retiredAttempts ?? []).filter((row) => !unresolvedSet.has(row)
+        && row.cleanupState !== 'released' && typeof row.agentHandle === 'string' && row.agentHandle.length > 0);
+      const reclaimableSet = new Set(reclaimable);
+      if (reclaimable.length) reasons.push({ code: 'retired_reclaimable', detail: reclaimable.map(({ handNo, generation, cleanupState }) => ({ handNo, generation, cleanupState })) });
+      const unreclaimed = (auth?.retiredAttempts ?? []).filter((row) => row.cleanupState !== 'released'
+        && !unresolvedSet.has(row) && !reclaimableSet.has(row));
+      if (unreclaimed.length) reasons.push({ code: 'retired_unreclaimed', detail: unreclaimed.map(({ handNo, generation, cleanupState, agentHandle }) => ({ handNo, generation, cleanupState, hasHandle: typeof agentHandle === 'string' && agentHandle.length > 0 })) });
+      if (reasons.length) {
+        const order = [
+          'attempt_pending', 'active_hands', 'publish_queue',
+          'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
+          'coach_authority_missing', 'coach_authority_unreadable',
+          'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
+        ];
+        reasons.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
+        return { ok: false, code: 'ROLLBACK_REFUSED', reasons };
       }
       return { ok: true };
     });
