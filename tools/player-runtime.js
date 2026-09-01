@@ -27,6 +27,14 @@ export const RUNTIME_TABLE = {
   grok: { player: 'grok-4.6', upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
 };
 
+export const SESSION_ID_MAX_LENGTH = 128;
+export const isArgvSafeSessionId = (id) => (
+  typeof id === 'string'
+  && id.length >= 1
+  && id.length <= SESSION_ID_MAX_LENGTH
+  && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)
+);
+
 const LADDER = ['claude', 'codex', 'grok'];
 const ENV_ALLOWLIST = ['HOME', 'PATH'];
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -624,6 +632,9 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (!captured) {
         throw runtimeError('NO_SESSION', `NO_SESSION: ${kind} 세션 id를 캡처하지 못했습니다.`, { playerId });
       }
+      if (!isArgvSafeSessionId(captured)) {
+        throw runtimeError('INVALID_SESSION_ID', `INVALID_SESSION_ID: ${kind} 세션 id 형식이 안전하지 않습니다.`, { playerId });
+      }
       const raw = parseResponse(result.format, result.stdout);
       if (raw !== 'ready') {
         throw runtimeError('NOT_READY', `NOT_READY: ${kind} 워밍업 응답이 정확한 ready가 아닙니다.`, { playerId });
@@ -635,6 +646,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     async decide({ playerId, sessionId, message, timeoutMs = table.watchdog.t1Ms }) {
       if (typeof sessionId !== 'string' || sessionId === '') {
         throw runtimeError('NO_SESSION', 'NO_SESSION: 세션 id 없이 결정을 요청할 수 없습니다.', { playerId });
+      }
+      if (!isArgvSafeSessionId(sessionId)) {
+        throw runtimeError('INVALID_SESSION_ID', 'INVALID_SESSION_ID: 안전하지 않은 세션 id로 결정을 요청할 수 없습니다.', { playerId });
       }
       const result = await runOnce({ purpose: 'resume', model: table.player, sessionId, input: message, timeoutMs });
       const raw = parseResponse(result.format, result.stdout);

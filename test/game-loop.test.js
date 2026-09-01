@@ -1254,6 +1254,21 @@ test('warmup failure waits for every sibling to settle before adapter cleanup an
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
+test('fresh warmup returning an argv-unsafe session ID rejects with INVALID_SESSION_ID before persistence', async (t) => {
+  const gameDir = tmpGame();
+  const adapter = {
+    kind: 'fake',
+    watchdog: { t1Ms: 25, t2Ms: 15 },
+    async warmup() { return { sessionId: '--evil', raw: 'ready' }; },
+    async dispose() {},
+  };
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
+  t.after(() => loop.requestStop());
+
+  await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'INVALID_SESSION_ID');
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+});
+
 test('a live owner rejects a second bootstrap and resume without re-running init', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
@@ -1459,13 +1474,13 @@ test('playing resume reuses every valid matching player session without warmup',
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).startedAt, state.startedAt);
 });
 
-test('playing resume recreates only missing, corrupt, or runtime-mismatched session entries', { timeout: 10_000 }, async (t) => {
+test('playing resume recreates only missing, corrupt, runtime-mismatched, or argv-unsafe session entries', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   const state = writeLoopStateFixture(gameDir, init.sessionToken);
   fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
     p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
-    p2: { runtime: 'other-runtime', sessionId: '', createdAt: null },
+    p2: { runtime: 'fake', sessionId: '--evil', createdAt: state.startedAt },
     ghost: { runtime: 'fake', sessionId: 'ghost', createdAt: state.startedAt },
   }));
   const adapter = makeAdapter();
