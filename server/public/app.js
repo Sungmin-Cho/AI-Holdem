@@ -616,6 +616,7 @@ function paintTraining() {
     box.append(summary);
     const body = el('div', 'training-body');
     if (card.note && !card.forced) body.append(el('div', 'training-note', card.note));
+    if (card.exploit) body.append(el('div', 'training-exploit', card.exploit));
     if (card.explanation) body.append(el('div', 'training-explain', card.explanation));
     if (card.source) body.append(el('div', 'training-source', card.source));
     if (Array.isArray(item.recommended)) {

@@ -16,6 +16,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/personas.js` | AI 좌석의 표현 필드(이름·말투·성격·아키타입)만 생성. 빈도 파라미터는 `training/policies/`가 소유한다. |
 | `training/policies/` | deterministic strategy policy와 RNG. 엔진은 정책 모듈을 import하지 않는다. |
 | `tools/policy-player.js` | `--opponent-runtime policy`일 때 인프로세스 결정. LLM 워밍업을 생략한다. |
+| `training/exploit/` | 종료 후 heuristic exploit 비교. EV 숫자는 만들지 않는다. |
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
