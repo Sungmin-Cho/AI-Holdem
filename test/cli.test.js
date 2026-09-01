@@ -375,7 +375,8 @@ test('init stdout에 archetype/bluffFreq 미노출', () => {
   assert.equal(players[1].playerId, 'p1');
   assert.equal(players[1].seat, 1);
   assert.ok(players[1].archetype);
-  assert.ok('bluffFreq' in players[1]);
+  assert.equal('bluffFreq' in players[1], false);
+  assert.equal('policy' in players[1], false);
 });
 
 test('과거 핸드 조회: 두 핸드 진행 후 hand 1 --redacted', () => {

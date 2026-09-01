@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`). 기본 AI 3명(4인 테이블). 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 기본 AI 3명(4인 테이블). 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -58,7 +58,7 @@ fi
 nohup node tools/game-loop.js --store-dir game --ai <n> \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   [--stack N] [--level-every N] [--blinds SB/BB] \
-  [--mode cash-training] [--stack-bb N] [--hands N] \
+  [--mode cash-training] [--stack-bb N] [--hands N] [--opponent-runtime llm|policy] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 

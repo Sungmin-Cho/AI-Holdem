@@ -4,7 +4,7 @@ import { generatePersonas, ARCHETYPES } from '../engine/personas.js';
 
 const PERSONA_KEYS = [
   'playerId', 'seat', 'name', 'agentHandle', 'speech', 'personality',
-  'archetype', 'bluffFreq', 'threeBetFreq', 'tiltProne',
+  'archetype',
 ];
 
 test('필드는 닫힌 목록이고 이름 중복 없음', () => {
@@ -23,9 +23,8 @@ test('아키타입은 6종 안에서만', () => {
   assert.deepEqual(new Set(personas.map((persona) => persona.archetype)), new Set(ARCHETYPES));
   for (const persona of personas) {
     assert.ok(ARCHETYPES.includes(persona.archetype));
-    assert.ok(persona.bluffFreq >= 0 && persona.bluffFreq <= 1);
-    assert.ok(persona.threeBetFreq >= 0 && persona.threeBetFreq <= 1);
-    assert.equal(typeof persona.tiltProne, 'boolean');
+    assert.equal('bluffFreq' in persona, false);
+    assert.equal('policy' in persona, false);
   }
 });
 

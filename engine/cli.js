@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { newDeck } from './cards.js';
 import { initGameDir, isAlive, readLock } from './game-archive.js';
-import { applyAction, forceDefault, legalFor, startHand } from './hand.js';
+import { snapshotDecision } from './decision.js';
+import { applyAction, blindsForLevel, forceDefault, legalFor, startHand } from './hand.js';
 import {
   loadState, readHand, readOwnedLock, withMutation, writeHandArchive,
 } from './state.js';
@@ -14,6 +15,7 @@ const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
 const VALUE_FLAGS = new Set([
   'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
+  'opponent-runtime', 'policy-meta',
 ]);
 
 const FAIL_MESSAGES = {
@@ -212,6 +214,7 @@ function cmdInit(gameDir, flags) {
     mode: cash ? 'cash-training' : undefined,
     startStackBb: cash ? startStackBb : undefined,
     handLimit,
+    opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
   });
   succeed({
     stateVersion: result.stateVersion,
@@ -257,7 +260,7 @@ function cmdApply(gameDir, flags, rest) {
     }
     const result = flags['force-default']
       ? forceDefault(state, playerId)
-      : applyAction(state, playerId, action, amount);
+      : applyAction(state, playerId, action, amount, { policyMeta: parsePolicyMeta(flags['policy-meta']) });
     return { state: result.state, response: applyEnvelope(result.state, result.events) };
   });
   succeed(envelope);
@@ -342,7 +345,9 @@ function cmdStep(gameDir, flags, rest) {
     } else if (flags['force-default']) {
       result = forceDefault(state, playerId);
     } else {
-      result = applyAction(state, playerId, action, amount);
+      result = applyAction(state, playerId, action, amount, {
+        policyMeta: parsePolicyMeta(flags['policy-meta']),
+      });
     }
     return { state: result.state, response: stepEnvelope(gameDir, result.state, result.events) };
   });
@@ -379,6 +384,43 @@ function cmdEnd(gameDir, flags) {
     };
   });
   succeed(envelope);
+}
+
+function parseOpponentRuntime(value) {
+  if (value == null) return undefined;
+  if (value !== 'llm' && value !== 'policy') usage('--opponent-runtime는 llm 또는 policy입니다.');
+  return value;
+}
+
+function parsePolicyMeta(raw) {
+  if (raw == null) return null;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch {
+    usage('--policy-meta는 JSON 객체여야 합니다.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    usage('--policy-meta는 JSON 객체여야 합니다.');
+  }
+  return parsed;
+}
+
+function cmdDecisionPeek(gameDir, flags) {
+  if (flags.for == null) usage('decision-peek에는 --for가 필요합니다.');
+  const state = requireState(loadState(gameDir));
+  const expectVersion = flags['expect-version'] != null
+    ? parseIntArg(flags['expect-version'], '--expect-version')
+    : null;
+  if (expectVersion != null && state.stateVersion !== expectVersion) throwCoded('VERSION_MISMATCH');
+  const legal = legalFor(state);
+  if (legal.toAct !== flags.for) throwCoded('SNAPSHOT_INVALID', '지금 행동자가 아닙니다.');
+  const snapshot = snapshotDecision(state, flags.for, null, {
+    blinds: blindsForLevel(state.level, state.config.blinds0),
+  });
+  succeed({
+    stateVersion: state.stateVersion,
+    snapshot,
+    legal: structuredClone(legal),
+  });
 }
 
 function cmdResumeCheck(gameDir, lockDir = gameDir) {
@@ -446,6 +488,9 @@ function main() {
         break;
       case 'resume-check':
         cmdResumeCheck(gameDir, path.resolve(flags['lock-dir'] ?? gameDir));
+        break;
+      case 'decision-peek':
+        cmdDecisionPeek(gameDir, flags);
         break;
       default:
         usage(`알 수 없는 명령: ${cmd}`);

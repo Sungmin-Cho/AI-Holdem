@@ -12,51 +12,28 @@ const PROFILES = {
   TAG: {
     speech: '좋은 패만으로 차분하게 압박할게요.',
     personality: '신중하고 공격적인 정석파',
-    bluffFreq: 0.22,
-    threeBetFreq: 0.3,
-    tiltChance: 0.18,
   },
   LAG: {
     speech: '기회가 보이면 과감하게 들어가죠.',
     personality: '활발하고 공격적인 모험가',
-    bluffFreq: 0.5,
-    threeBetFreq: 0.42,
-    tiltChance: 0.32,
   },
   Nit: {
     speech: '확실하지 않으면 기다리는 편이에요.',
     personality: '극도로 신중한 안전주의자',
-    bluffFreq: 0.08,
-    threeBetFreq: 0.12,
-    tiltChance: 0.1,
   },
   CallingStation: {
     speech: '일단 끝까지 확인해 볼게요.',
     personality: '잘 포기하지 않는 낙천가',
-    bluffFreq: 0.12,
-    threeBetFreq: 0.1,
-    tiltChance: 0.45,
   },
   Maniac: {
     speech: '이번 판은 제가 크게 흔들어 볼게요.',
     personality: '속도와 변동성을 즐기는 광인',
-    bluffFreq: 0.72,
-    threeBetFreq: 0.68,
-    tiltChance: 0.58,
   },
   Trickster: {
     speech: '겉으로 보이는 게 전부는 아니랍니다.',
     personality: '상대를 읽고 함정을 파는 책략가',
-    bluffFreq: 0.58,
-    threeBetFreq: 0.38,
-    tiltChance: 0.25,
   },
 };
-
-function varied(value) {
-  const variation = (randomInt(17) - 8) / 100;
-  return Math.min(1, Math.max(0, Number((value + variation).toFixed(2))));
-}
 
 function shuffledNames(count) {
   const names = [...NAMES];
@@ -97,9 +74,6 @@ export function generatePersonas(n) {
       speech: profile.speech,
       personality: profile.personality,
       archetype,
-      bluffFreq: varied(profile.bluffFreq),
-      threeBetFreq: varied(profile.threeBetFreq),
-      tiltProne: Math.random() < profile.tiltChance,
     };
   });
 }

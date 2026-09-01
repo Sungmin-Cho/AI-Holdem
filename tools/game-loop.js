@@ -21,6 +21,8 @@ import {
 import { gameEpochOf } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl } from './training-control.js';
+import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
+import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import {
   ingestHand,
   isTrainingEnabled,
@@ -58,7 +60,10 @@ const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+각 AI의 실제 아키타입 공개[ \t]*\+[ \t]*읽기 평가(?:[ \t]|$)/m,
   /^#{1,6}[ \t]+다음 게임에서 연습할 것(?:[ \t]|$)/m,
 ]);
-const COACH_PRIVATE_FIELDS = ['archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne'];
+const COACH_PRIVATE_FIELDS = [
+  'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
+  'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
+];
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
 const FINALIZE_BUDGET_MS = 20_000;
@@ -171,6 +176,7 @@ export function engineInitFlags(args = {}) {
   if (args.mode !== undefined) extra.push('--mode', String(args.mode));
   if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
   if (args.hands !== undefined) extra.push('--hands', String(args.hands));
+  if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
   return extra;
 }
 
@@ -188,6 +194,7 @@ export function parseGameLoopArgs(argv) {
     mode: undefined,
     stackBb: undefined,
     hands: undefined,
+    opponentRuntime: undefined,
   };
   const bools = new Map([
     ['--force', 'force'],
@@ -205,6 +212,7 @@ export function parseGameLoopArgs(argv) {
     ['--mode', 'mode'],
     ['--stack-bb', 'stackBb'],
     ['--hands', 'hands'],
+    ['--opponent-runtime', 'opponentRuntime'],
   ]);
   let sawGameDir = false;
 
@@ -232,6 +240,9 @@ export function parseGameLoopArgs(argv) {
   }
   if (parsed.storeDir !== undefined && sawGameDir) {
     throw codedError('USAGE', '--store-dir와 --game-dir는 함께 사용할 수 없습니다.');
+  }
+  if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
+    throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
   }
   return parsed;
 }
@@ -331,6 +342,7 @@ function validatedUserAction(raw) {
 export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = resolveRuntimes, opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
+  const requestedOpponentRuntime = opts.opponentRuntime === 'policy' ? 'policy' : 'llm';
 
   const root = path.resolve(gameDir);
   const lockRoot = path.resolve(lockDir);
@@ -530,6 +542,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const readLoopState = () => readJsonOptional(loopStatePath, 'LOOP_STATE');
+  const opponentRuntimeOf = () => readLoopState()?.opponentRuntime ?? requestedOpponentRuntime;
   const parseServerLock = (raw) => {
     let lock;
     try {
@@ -1596,6 +1609,53 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const decideWithPolicy = async (next, stateVersion) => {
+    const peek = await runCli([
+      'decision-peek', '--for', next.toAct, '--expect-version', String(stateVersion),
+    ]);
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    if (!engine?.policySeed) throw codedError('NO_POLICY_SEED', 'policySeed가 없습니다.');
+    if (!Array.isArray(players)) throw codedError('BAD_PLAYERS', 'players.json이 배열이 아닙니다.');
+    const seat = players.find((player) => player.playerId === next.toAct);
+    if (!seat?.policy) throw codedError('NO_POLICY', `플레이어 ${next.toAct}에 policy가 없습니다.`);
+    const startedAt = monotonicNow();
+    const choice = decidePolicy({
+      snapshot: peek.snapshot,
+      legal: peek.legal,
+      policy: seat.policy,
+      policySeed: engine.policySeed,
+      gameEpoch: gameEpochOf(engine.sessionToken),
+    });
+    const stepArgs = ['step', next.toAct, choice.action];
+    if (choice.action === 'raise') stepArgs.push(String(choice.amount));
+    stepArgs.push('--expect-version', String(stateVersion));
+    stepArgs.push('--policy-meta', JSON.stringify({
+      policyId: choice.policyId,
+      policyVersion: choice.policyVersion,
+      sampledProbability: choice.sampledProbability,
+      reasonCode: choice.reasonCode,
+    }));
+    const stepStarted = monotonicNow();
+    const atomicUnit = beginAtomicTransition();
+    try {
+      const envelope = await runCli(stepArgs);
+      return {
+        envelope,
+        atomicUnit,
+        startedAt,
+        outcome: 'policy_accepted',
+        modelMs: 0,
+        parseMs: 0,
+        stepMs: Math.max(0, monotonicNow() - stepStarted),
+        sessionRepaired: false,
+      };
+    } catch (error) {
+      atomicUnit.finish();
+      throw error;
+    }
+  };
+
   const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
@@ -2101,7 +2161,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const value = player?.[field];
         if (value !== undefined && value !== null && String(value).length > 0) values.push(String(value));
       }
+      if (player?.policy && typeof player.policy === 'object') {
+        values.push(JSON.stringify(player.policy));
+        for (const value of Object.values(player.policy)) {
+          if (value !== undefined && value !== null && typeof value !== 'object') values.push(String(value));
+        }
+      }
     }
+    const enginePrivate = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    if (enginePrivate?.policySeed) values.push(String(enginePrivate.policySeed));
     const record = fullHandRecord(handNo);
     const publicCards = new Set(
       (record?.showdown?.reveals ?? []).flatMap((reveal) => reveal?.cards ?? []),
@@ -3434,8 +3502,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
   ].join('\n');
 
+  const machineReview = ({ statsRaw, players, result }) => [
+    '## 내 성향 통계',
+    statsRaw || 'unavailable',
+    '## 결정적 핸드 2~3개 리플레이',
+    'machine-only: LLM review unavailable',
+    '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
+    JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
+    `result: ${result}`,
+    '## 다음 게임에서 연습할 것',
+    'machine-only fallback',
+  ].join('\n');
+
   const generateReview = async ({ completed, statsRaw }) => {
     try {
+      const engineEarly = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const playersEarly = readJsonOptional(playersPath, 'PLAYERS');
+      if (!upperAdapter && opponentRuntimeOf() === 'policy') {
+        return machineReview({
+          statsRaw,
+          players: playersEarly,
+          result: engineEarly?.result,
+        });
+      }
       const hands = [];
       for (let handNo = 1; handNo <= completed; handNo += 1) {
         const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--redacted']));
@@ -3458,7 +3547,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const synthesizerPrompt = buildSynthesizerPrompt({
         evaluator,
         result: engine.result,
-        playersRaw: JSON.stringify(players),
+        playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
       });
       return await runReviewStage({
         stage: 'synthesizer',
@@ -3853,13 +3942,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         `코치 봉인이 1..${completed} 핸드를 덮지 못해(누락 ${missing.join(',') || '불명'}) 리뷰를 시작하지 않습니다.`,
       );
     }
-    if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
+    const policyMachineOnly = opponentRuntimeOf() === 'policy'
+      && (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function');
+    if (!policyMachineOnly && (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function')) {
       throw haltFinalization(
         'REVIEW_FAILED',
         '상위 모델 런타임이 없어 종합 리뷰를 만들지 않습니다. 게임 상태와 코치 노트는 그대로 남습니다.',
       );
     }
-    await enterReviewGenerationScope(completed);
+    if (!policyMachineOnly) await enterReviewGenerationScope(completed);
     const review = await generateReview({ completed, statsRaw: stats.raw });
     return checkpointGeneratedReview(review);
   };
@@ -4109,6 +4200,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     practiceFocusFile,
     preinitialized,
     skipLock = false,
+    opponentRuntime,
   } = {}) => {
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
@@ -4126,6 +4218,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       readServerLock();
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
+        opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
       })];
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
@@ -4138,6 +4231,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         port: null,
         sessionToken: initialized.sessionToken,
         gameEpoch: gameEpochOf(initialized.sessionToken),
+        opponentRuntime: opponentRuntimeOf(),
         ownerSessionId: randomUUID(),
         lastPublishId: null,
         playerRuntime: null,
@@ -4149,15 +4243,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       });
       log('bootstrap-initialized', { sessionToken: initialized.sessionToken });
 
-      const resolved = await createCanaryAndResolve('player+upper');
+      const policyMode = opponentRuntimeOf() === 'policy';
+      if (policyMode) stampPlayerPolicies(root);
+      const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
       const notices = Array.isArray(resolved?.notices) ? resolved.notices : [];
       selectAdapters(resolved ?? {});
       writeLoopState({
         notices,
         playerRuntime: playerAdapter?.kind ?? null,
         upperRuntime: upperAdapter?.kind ?? null,
+        opponentRuntime: opponentRuntimeOf(),
       });
-      if (!playerAdapter) await haltNoPlayer(notices);
+      if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
 
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
@@ -4169,7 +4266,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           fs.copyFileSync(autoFocus, path.join(root, '.practice-focus.json'));
         }
       }
-      await warmPlayers();
+      if (!policyMode) await warmPlayers();
       const state = writeLoopState({ phase: 'playing' });
       log('bootstrap-playing', { port });
       return state;
@@ -4216,7 +4313,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
 
-    const resolved = await createCanaryAndResolve('player+upper');
+    const policyMode = opponentRuntimeOf() === 'policy' || existingState.opponentRuntime === 'policy';
+    const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
     selectAdapters(resolved ?? {});
     const notices = [
       ...(Array.isArray(existingState.notices) ? existingState.notices : []),
@@ -4226,16 +4324,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       notices,
       playerRuntime: playerAdapter?.kind ?? null,
       upperRuntime: upperAdapter?.kind ?? null,
+      opponentRuntime: policyMode ? 'policy' : (existingState.opponentRuntime ?? 'llm'),
       ...(existingState.halt?.code === 'NO_PLAYER_RUNTIME' && playerAdapter ? { halt: undefined } : {}),
     });
-    if (!playerAdapter) await haltNoPlayer(notices);
+    if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
     const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
       ? existingState.port
       : requestedPort;
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
-    if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
-    await restorePlayers();
+    if (!policyMode) {
+      if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
+      await restorePlayers();
+    }
     return writeLoopState({ phase: 'playing' });
   };
 
@@ -4283,6 +4384,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           startedAt: isoNow(now),
           notices: [],
           metrics: [],
+          opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
         });
       } else {
         state = writeLoopState({ ownerSessionId, stopping: false });
@@ -4457,7 +4559,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const next = out.next;
       let decision;
       try {
-        decision = await decideWithWatchdog(next, out.stateVersion);
+        decision = opponentRuntimeOf() === 'policy'
+          ? await decideWithPolicy(next, out.stateVersion)
+          : await decideWithWatchdog(next, out.stateVersion);
       } catch (error) {
         if (stopRequested && error.code !== 'STOPPING') break;
         if (error.code !== 'VERSION_MISMATCH') throw error;
@@ -4474,7 +4578,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const metric = {
         playerId: next.toAct,
         decisionId: next.decisionId,
-        runtime: playerAdapter.kind,
+        runtime: opponentRuntimeOf() === 'policy' ? 'policy' : playerAdapter.kind,
         outcome: decision.outcome,
         elapsedMs,
         modelMs: decision.modelMs,
@@ -4571,7 +4675,11 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
-            opts: { trainingEnabled: true, storeDir: args.storeDir },
+            opts: {
+              trainingEnabled: true,
+              storeDir: args.storeDir,
+              opponentRuntime: args.opponentRuntime,
+            },
           });
         } else {
           const previous = resolveCurrentSession(args.storeDir);
@@ -4588,7 +4696,11 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
-            opts: { trainingEnabled: true, storeDir: args.storeDir },
+            opts: {
+              trainingEnabled: true,
+              storeDir: args.storeDir,
+              opponentRuntime: args.opponentRuntime,
+            },
           });
         }
       } catch (error) {
@@ -4597,7 +4709,11 @@ async function main() {
       }
     } else {
       assertNotSessionCatalogTarget(args.gameDir);
-      loop = createGameLoop({ gameDir: args.gameDir, resolver });
+      loop = createGameLoop({
+        gameDir: args.gameDir,
+        resolver,
+        opts: { opponentRuntime: args.opponentRuntime },
+      });
     }
     process.once('SIGTERM', () => {
       if (handlingSignal) return;
@@ -4619,6 +4735,7 @@ async function main() {
       practiceFocusFile: args.practiceFocusFile,
       preinitialized: preparedInitialization,
       skipLock: args.storeDir !== undefined,
+      opponentRuntime: args.opponentRuntime,
     });
     await loop.run();
   } catch (error) {
