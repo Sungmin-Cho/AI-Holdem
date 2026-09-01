@@ -59,6 +59,7 @@ function emptyState() {
     view: null,
     log: [],
     coach: [],
+    training: [],
     review: undefined,
     publishId: undefined,
     history: [],
@@ -73,6 +74,7 @@ function loadUiState(gameDir) {
       view: raw.view ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
       coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
+      training: Array.isArray(raw.training) ? raw.training : [],
       review: raw.review,
       publishId: raw.publishId,
       history: Array.isArray(raw.history) ? raw.history : [],
@@ -133,6 +135,28 @@ function validateIncomingCoach(existing, incoming, gameDir) {
 // Coaching runs in the background, so notes arrive out of order and sometimes twice.
 // Keyed by handNo and sorted, the array reads the same however they arrive — including
 // when an older snapshot written before this rule is loaded back.
+function mergeTraining(existing, incoming) {
+  const merged = [...existing];
+  for (const item of incoming) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.evaluationId !== 'string'
+      || typeof item.payloadSha256 !== 'string') {
+      return { error: 'TRAINING_PROOF_REQUIRED' };
+    }
+    const at = merged.findIndex((row) => row.evaluationId === item.evaluationId);
+    if (at === -1) {
+      merged.push(item);
+      continue;
+    }
+    if (merged[at].payloadSha256 !== item.payloadSha256) {
+      return { error: 'TRAINING_CONFLICT' };
+    }
+  }
+  merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0)
+    || String(a.evaluationId).localeCompare(String(b.evaluationId)));
+  return { merged };
+}
+
 function mergeCoach(existing, incoming) {
   const merged = [...existing];
   for (const note of incoming) {
@@ -157,6 +181,7 @@ function publicSnapshot(state) {
     view: state.view,
     log: state.log,
     coach: state.coach,
+    training: state.training ?? [],
   };
   if (state.review !== undefined) snap.review = state.review;
   return snap;
@@ -168,6 +193,7 @@ function persistUiState(gameDir, state) {
     view: state.view,
     log: state.log,
     coach: state.coach,
+    training: state.training ?? [],
     publishId: state.publishId,
     history: state.history,
   };
@@ -332,6 +358,7 @@ export function startServer({ gameDir, port = 8877, token }) {
       view: state.view,
       log: state.log,
       coach: state.coach,
+      training: state.training ?? [],
       review: state.review,
       history: state.history,
     };
@@ -361,6 +388,15 @@ export function startServer({ gameDir, port = 8877, token }) {
     if (body.review !== undefined) {
       next.review = body.review;
       payload.review = body.review;
+    }
+    if (Array.isArray(body.training) && body.training.length) {
+      const merged = mergeTraining(next.training, body.training);
+      if (merged.error) {
+        sendJson(res, 400, { ok: false, code: merged.error });
+        return;
+      }
+      next.training = merged.merged;
+      payload.training = body.training;
     }
 
     // Stamped for turn-latency measurement; kept off the payload so clients see no change.

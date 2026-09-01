@@ -1105,6 +1105,33 @@ export function createCoachControl(deps = {}) {
       }
       const attemptPending = fs.existsSync(path.join(gameDir, '.publish-attempt.json'));
       if (attemptPending) reasons.unshift({ code: 'attempt_pending', detail: {} });
+      let trainingAttemptPending = false;
+      if (attemptPending) {
+        try {
+          const attempt = readJsonFile(path.join(gameDir, '.publish-attempt.json'));
+          if (attempt?.trainingAuthority) trainingAttemptPending = true;
+        } catch { /* malformed attempt already covered by attempt_pending */ }
+      }
+      if (trainingAttemptPending) {
+        reasons.push({ code: 'training_attempt_pending', detail: {} });
+      }
+      const trainingAuthPath = path.join(gameDir, 'training', '.training-authority.json');
+      if (fs.existsSync(trainingAuthPath)) {
+        try {
+          const trainingAuth = readJsonFile(trainingAuthPath);
+          const pending = Object.values(trainingAuth?.items ?? {}).filter((item) => (
+            item?.status === 'pending' || item?.status === 'evaluated'
+          ));
+          if (pending.length) {
+            reasons.push({
+              code: 'pending_training',
+              detail: { evaluationIds: pending.map((item) => item.evaluationId) },
+            });
+          }
+        } catch {
+          reasons.push({ code: 'pending_training', detail: { error: 'UNREADABLE' } });
+        }
+      }
       const activeHands = Object.entries(auth?.hands ?? {}).filter(([, hand]) => (
         hand.status === 'reserved'
         || hand.status === 'running'
@@ -1129,6 +1156,7 @@ export function createCoachControl(deps = {}) {
           'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
           'coach_authority_missing', 'coach_authority_unreadable',
           'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
+          'pending_training', 'training_attempt_pending',
         ];
         reasons.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
         return { ok: false, code: 'ROLLBACK_REFUSED', reasons };

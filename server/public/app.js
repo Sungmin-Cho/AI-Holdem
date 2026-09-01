@@ -1,3 +1,5 @@
+import { formatTrainingCard } from './training-format.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
   s: { id: 'suit-s', name: '스페이드', red: false },
@@ -8,7 +10,7 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { view: null, log: [], coach: [], review: undefined };
+const ui = { view: null, log: [], coach: [], training: [], review: undefined };
 let pendingAction = false;
 let raiseTo = 0;
 let lastDecisionId = null;
@@ -590,6 +592,44 @@ function paintCoach() {
   }
 }
 
+function paintTraining() {
+  const list = $('training-list');
+  if (!list) return;
+  if (!ui.training.length) {
+    list.replaceChildren(el('div', 'coach-empty', '핸드가 끝나면 결정 리뷰가 쌓입니다.'));
+    return;
+  }
+  list.replaceChildren();
+  for (const item of ui.training) {
+    const card = formatTrainingCard(item);
+    const box = el('details', 'training-card');
+    if (item.status === 'unsupported') box.classList.add('is-unsupported');
+    if (card.grade) box.classList.add(`grade-${card.grade}`);
+    if (card.forced) box.classList.add('is-forced');
+    const summary = el('summary', 'training-summary');
+    summary.append(
+      el('div', 'training-title', card.title),
+      el('div', 'training-choice', card.choice),
+      el('div', 'training-rec', card.recommendation),
+      el('div', 'training-grade', card.forced ? card.note : (card.grade ?? card.note)),
+    );
+    box.append(summary);
+    const body = el('div', 'training-body');
+    if (card.note && !card.forced) body.append(el('div', 'training-note', card.note));
+    if (card.explanation) body.append(el('div', 'training-explain', card.explanation));
+    if (card.source) body.append(el('div', 'training-source', card.source));
+    if (Array.isArray(item.recommended)) {
+      for (const action of item.recommended) {
+        const freq = action.frequency != null ? ` ${(action.frequency * 100).toFixed(0)}%` : '';
+        const size = action.sizeBb != null ? ` ${action.sizeBb}bb` : '';
+        body.append(el('div', 'training-action', `${action.action}${size}${freq}`));
+      }
+    }
+    box.append(body);
+    list.append(box);
+  }
+}
+
 function paintReview(view) {
   const overlay = $('review-overlay');
   const show = Boolean(view?.gameOver && ui.review) && !overlayDismissed;
@@ -615,6 +655,7 @@ function paint() {
   paintActionBar(view);
   paintLog();
   paintCoach();
+  paintTraining();
   paintReview(view);
 }
 
@@ -622,6 +663,7 @@ function renderSnapshot(snap) {
   ui.view = snap.view ?? null;
   ui.log = Array.isArray(snap.log) ? snap.log.slice() : [];
   ui.coach = Array.isArray(snap.coach) ? snap.coach.slice() : [];
+  ui.training = Array.isArray(snap.training) ? snap.training.slice() : [];
   ui.review = snap.review;
   pendingAction = false;
   lastDecisionId = null;
@@ -644,6 +686,15 @@ function render(m) {
       else ui.coach[at] = note;
     }
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
+  }
+  if (Array.isArray(m.training) && m.training.length) {
+    for (const item of m.training) {
+      const at = ui.training.findIndex((existing) => existing.evaluationId === item.evaluationId);
+      if (at === -1) ui.training.push(item);
+      else if (ui.training[at].payloadSha256 === item.payloadSha256) { /* same digest no-op */ }
+      else ui.training[at] = item;
+    }
+    ui.training.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (m.review !== undefined) {
     ui.review = m.review;
@@ -735,17 +786,18 @@ $('raise-amount').addEventListener('keydown', (ev) => {
 });
 
 function selectTab(which) {
-  const isLog = which === 'log';
-  $('tab-log').classList.toggle('on', isLog);
-  $('tab-coach').classList.toggle('on', !isLog);
-  $('tab-log').setAttribute('aria-selected', String(isLog));
-  $('tab-coach').setAttribute('aria-selected', String(!isLog));
-  $('panel-log').hidden = !isLog;
-  $('panel-coach').hidden = isLog;
+  for (const name of ['log', 'coach', 'training']) {
+    const on = name === which;
+    $(`tab-${name}`)?.classList.toggle('on', on);
+    $(`tab-${name}`)?.setAttribute('aria-selected', String(on));
+    const panel = $(`panel-${name}`);
+    if (panel) panel.hidden = !on;
+  }
 }
 
 $('tab-log').addEventListener('click', () => selectTab('log'));
 $('tab-coach').addEventListener('click', () => selectTab('coach'));
+$('tab-training')?.addEventListener('click', () => selectTab('training'));
 
 $('review-close').addEventListener('click', () => {
   overlayDismissed = true;
