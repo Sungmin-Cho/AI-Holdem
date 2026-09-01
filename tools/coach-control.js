@@ -1073,7 +1073,10 @@ export function createCoachControl(deps = {}) {
         || (hand.status === 'terminal' && hand.resultState === 'unread')
       ));
       const queued = Object.keys(auth?.publishQueue ?? {}).length > 0;
-      if (active || queued || attemptPending) {
+      const retiredUnreleased = (auth?.retiredAttempts ?? []).some((row) => (
+        row?.cleanupState !== 'released'
+      ));
+      if (active || queued || attemptPending || retiredUnreleased) {
         return { ok: false, code: 'ROLLBACK_REFUSED' };
       }
       return { ok: true };

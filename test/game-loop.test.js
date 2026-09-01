@@ -139,6 +139,19 @@ async function seedReservedCoach(gameDir, owner, handNo = 1) {
   ]);
 }
 
+async function seedEmptyCoachAuthority(gameDir, owner) {
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, '.seed-empty-coach-stats.json');
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  return runCoachCli(gameDir, [
+    'begin-owner', '--owner', owner, '--completed', '0',
+    '--stats-file', statsPath,
+    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+  ]);
+}
+
 async function acceptRunningCoach(gameDir, owner, reserved, handNo = reserved.handNo) {
   fs.writeFileSync(reserved.exactResultPath, JSON.stringify({
     handNo,
@@ -2065,6 +2078,10 @@ test('playing resume seeds the checked hand so its archive is checked exactly on
     '--expect-version', String(envelope.stateVersion), '--game-dir', gameDir,
   ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
   assert.equal(envelope.handOver, true);
+  await seedEmptyCoachAuthority(
+    gameDir,
+    readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId,
+  );
   const archive = path.join(gameDir, 'hands', 'hand-0001.json');
   fs.unlinkSync(archive);
   await original.requestStop();
@@ -3425,6 +3442,138 @@ test('playing resume은 기존 coach Q를 descriptor·turn 전에 exact path로 
   }
 });
 
+test('playing resume은 handle 없는 persisted coach reservation을 replacement 전에 halt한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  await seedReservedCoach(gameDir, oldOwner, 1);
+  await first.requestStop();
+
+  const player = makeAdapter();
+  const upper = makeCoachAdapter();
+  const calls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(player, upper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => calls.push(args),
+      resumeReclaimResidualMs: 50,
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  await assert.rejects(resumed.resume(), (error) => error.code === 'COACH_HANDLE_UNRESOLVED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.code, 'COACH_HANDLE_UNRESOLVED');
+  assert.equal(Object.hasOwn(state, 'finalization'), false);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
+  assert.equal(player.calls.length, 0, 'player restore ran before persisted coach reclamation');
+  assert.equal(upper.starts.length, 0, 'replacement coach started before persisted reservation was settled');
+
+  const recovery = state.halt.recovery.commands[0];
+  const released = JSON.parse((await execFileAsync(recovery.program, recovery.args, {
+    encoding: 'utf8', timeout: 5_000,
+  })).stdout.trim());
+  assert.equal(released.cleanupState, 'released');
+
+  const secondCalls = [];
+  const second = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()),
+    opts: { port: 0, waitMs: 0, onCoachInvoke: (args) => secondCalls.push(args) },
+  });
+  t.after(() => second.requestStop().catch(() => {}));
+  const recovered = await second.resume();
+  assert.equal(recovered.phase, 'playing');
+  assert.equal(Object.hasOwn(recovered, 'halt'), false);
+  assert.equal(secondCalls.filter((args) => args[0] === 'begin-owner').length, 1);
+});
+
+test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, oldOwner, 1, orphan);
+  await first.requestStop();
+
+  const calls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      pollMs: 10,
+      orphanTerminateGraceMs: 500,
+      orphanTerminateKillWaitMs: 200,
+      resumeReclaimResidualMs: 200,
+      onCoachInvoke: (args) => calls.push(args),
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  const state = await resumed.resume();
+
+  assert.equal(state.phase, 'playing');
+  await waitUntilDead(orphan.pid);
+  const cleanupIndex = calls.findIndex((args) => args[0] === 'cleanup-result');
+  const beginIndex = calls.findIndex((args) => args[0] === 'begin-owner');
+  assert.equal(cleanupIndex >= 0, true);
+  assert.equal(beginIndex > cleanupIndex, true, 'begin-owner ran before persisted cleanup completed');
+  assert.equal(
+    readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts[0].cleanupState,
+    'released',
+  );
+});
+
+test('playing resume은 완료 핸드가 있는데 coach authority가 없으면 fail closed한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  await first.requestStop();
+
+  const calls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()),
+    opts: { port: 0, waitMs: 0, onCoachInvoke: (args) => calls.push(args) },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  await assert.rejects(resumed.resume(), (error) => error.code === 'COACH_HANDLE_UNRESOLVED');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.recovery.attempts.some((row) => row.reason === 'AUTHORITY_MISSING'), true);
+  assert.equal(Object.hasOwn(state, 'finalization'), false);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
+});
+
 test('pending coach retry 후 reconcile가 일시 불가능하면 새 publishId 없이 COACH_RECONCILE_PENDING으로 중단하고 다음 resume이 reconcile-only로 해소한다', { timeout: 30_000 }, async (t) => {
   const gameDir = tmpGame();
   const initialized = await initGame(gameDir, ['--stack', '100']);
@@ -3885,6 +4034,10 @@ test('playing resume descriptor에 upper adapter interface가 없으면 해당 g
     CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
     '--game-dir', gameDir,
   ], { encoding: 'utf8', timeout: 5_000 });
+  await seedEmptyCoachAuthority(
+    gameDir,
+    readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId,
+  );
   await first.requestStop();
 
   const coachCalls = [];
@@ -4641,8 +4794,24 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
     resolver: resolverFor(makeAdapter()),
     opts: { port: 0, waitMs: 0 },
   });
-  await recovery.resume();
-  await recovery.requestStop();
+  let recoveredLoop = recovery;
+  try {
+    await recovery.resume();
+  } catch (error) {
+    if (error.code !== 'COACH_HANDLE_UNRESOLVED') throw error;
+    const halted = readJson(path.join(gameDir, 'loop-state.json'));
+    assert.equal(halted.halt.recovery.commands.length > 0, true);
+    for (const command of halted.halt.recovery.commands) {
+      await execFileAsync(command.program, command.args, { encoding: 'utf8', timeout: 5_000 });
+    }
+    recoveredLoop = createGameLoop({
+      gameDir,
+      resolver: resolverFor(makeAdapter()),
+      opts: { port: 0, waitMs: 0 },
+    });
+    await recoveredLoop.resume();
+  }
+  await recoveredLoop.requestStop();
   await waitUntilDead(serverPid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
@@ -5787,6 +5956,28 @@ test('Task 7A full review: handle-less persisted generation은 owner 교대 전�
   await second.resume();
   assert.equal((await second.run()).phase, 'done');
   assert.equal(coachInvocations(secondCalls, 'begin-owner').length, 1);
+});
+
+test('Task 7A: non-deadline coach-control child failure는 raw 탈출 없이 durable recovery halt로 수렴한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  t.after(async () => { held.release(); await held.done; });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: { childTimeoutMs: 100, finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 1_000 },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.finalization.cutoff.reason, 'persisted_worker_unresolved');
+  assert.equal(state.halt.recovery.attempts.some((row) => row.reason === 'FENCE_CHILD_FAILED'), true);
+  assert.deepEqual(state.halt.recovery.commands, []);
 });
 
 test('Task 7A r2: persisted authority fence/cleanup은 shared deadline 아래 hand별로 동시에 시작한다', { timeout: 20_000 }, async (t) => {

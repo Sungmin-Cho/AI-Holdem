@@ -310,6 +310,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   );
   const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? 5_000;
   const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? 2_000;
+  const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? 5_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
@@ -2094,7 +2095,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const persistedCoachAttempts = () => {
     const auth = readCoachAuthority();
-    if (!auth) return { owner: null, attempts: [] };
+    if (!auth) return { owner: null, attempts: [], authorityPresent: false };
     const owner = auth.activeOwnerSessionId;
     let canonicalEpoch;
     try {
@@ -2150,19 +2151,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         cleanupAuthorized: reclaimable,
       });
     }
-    return { owner, attempts };
+    return { owner, attempts, authorityPresent: true };
   };
 
-  const closePersistedCoachWorkers = async ({ allowCurrentReservedWithoutHandle = false } = {}) => {
-    const deadlineNs = ensureFinalizationDeadline();
-    // Unknown identity probing belongs to the result-wait window. Preserve the residual
-    // budget for durable fence/cleanup/adapter-disable/recovery work.
-    const identityDeadlineNs = finalizeResultWaitCutoffNs ?? deadlineNs;
-    const { owner, attempts, authorityError } = persistedCoachAttempts();
+  const closePersistedCoachWorkersCore = async ({
+    deadlineNs,
+    identityDeadlineNs,
+    deadlineError,
+    reasonPrefix,
+    allowCurrentReservedWithoutHandle,
+  }) => {
+    const { owner, attempts, authorityError, authorityPresent = true } = persistedCoachAttempts();
     if (authorityError) {
       return {
         confirmed: false,
         owner,
+        authorityPresent,
         unresolved: [{
           handNo: null,
           generation: null,
@@ -2171,9 +2175,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }],
       };
     }
-    if (attempts.length === 0) return { confirmed: true, owner: null, unresolved: [] };
+    if (attempts.length === 0) {
+      return { confirmed: true, owner, unresolved: [], authorityPresent };
+    }
     if (typeof owner !== 'string' || owner === '') {
-      throw codedError('NO_COACH_OWNER', 'persisted 코치 worker를 정리할 owner가 없습니다.');
+      return {
+        confirmed: false,
+        owner,
+        authorityPresent,
+        unresolved: [{
+          handNo: null,
+          generation: null,
+          reason: 'NO_COACH_OWNER',
+          cleanupAuthorized: false,
+        }],
+      };
     }
     const outcomes = await Promise.all(attempts.map(async (attempt) => ({
       attempt,
@@ -2187,34 +2203,51 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // The authority lock serializes its tiny critical sections while the parent keeps one
     // absolute deadline instead of multiplying child timeouts by the hand count.
     const closed = await Promise.all(outcomes.map(async ({ attempt, result }) => {
+      let childFailure = null;
       if (attempt.source === 'active') {
         try {
           await runCoach([
             'fence', '--owner', owner,
             '--hand', String(attempt.handNo),
             '--generation', String(attempt.generation),
-            '--reason', result.confirmed ? 'finalize-persisted-closed' : 'finalize-persisted-unconfirmed',
-          ]);
+            '--reason', result.confirmed ? `${reasonPrefix}-closed` : `${reasonPrefix}-unconfirmed`,
+          ], { deadlineNs, deadlineError });
         } catch (error) {
-          if (error.code !== 'STALE_GENERATION') throw error;
+          if (error.code === deadlineError().code) throw error;
+          if (error.code !== 'STALE_GENERATION') {
+            childFailure = { reason: 'FENCE_CHILD_FAILED', cleanupAuthorized: false };
+          }
         }
       }
-      if (attempt.cleanupAuthorized) {
-        await runCoach([
-          'cleanup-result', '--owner', owner,
-          '--hand', String(attempt.handNo),
-          '--generation', String(attempt.generation),
-          '--cleanup-state', result.cleanupState,
-        ]);
+      if (attempt.cleanupAuthorized && childFailure === null) {
+        try {
+          await runCoach([
+            'cleanup-result', '--owner', owner,
+            '--hand', String(attempt.handNo),
+            '--generation', String(attempt.generation),
+            '--cleanup-state', result.cleanupState,
+          ], { deadlineNs, deadlineError });
+        } catch (error) {
+          if (error.code === deadlineError().code) throw error;
+          childFailure = { reason: 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+        }
       }
-      if (result.confirmed !== true) {
-        log('finalize-persisted-unconfirmed', {
+      const effectiveResult = childFailure === null
+        ? result
+        : {
+            confirmed: false,
+            reason: childFailure.reason,
+            cleanupState: 'termination_unconfirmed',
+            cleanupAuthorized: childFailure.cleanupAuthorized,
+          };
+      if (effectiveResult.confirmed !== true) {
+        log(`${reasonPrefix}-unconfirmed`, {
           handNo: attempt.handNo,
           generation: attempt.generation,
-          reason: result.reason,
+          reason: effectiveResult.reason,
         });
       }
-      return { attempt, result };
+      return { attempt, result: effectiveResult };
     }));
     const unresolved = closed
       .filter(({ result }) => result.confirmed !== true)
@@ -2222,17 +2255,85 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         handNo: attempt.handNo,
         generation: attempt.generation,
         reason: result.reason,
-        cleanupAuthorized: attempt.cleanupAuthorized,
+        cleanupAuthorized: result.cleanupAuthorized ?? attempt.cleanupAuthorized,
       }));
     const confirmed = unresolved.length === 0;
     if (!confirmed) {
-      await runCoach([
-        'adapter-disable', '--owner', owner,
-        '--reason', 'finalize-persisted-termination-unconfirmed',
-      ]);
-      coachAdapterDisabled = true;
+      try {
+        await runCoach([
+          'adapter-disable', '--owner', owner,
+          '--reason', `${reasonPrefix}-termination-unconfirmed`,
+        ], { deadlineNs, deadlineError });
+        coachAdapterDisabled = true;
+      } catch (error) {
+        if (error.code === deadlineError().code) throw error;
+        unresolved.push({
+          handNo: null,
+          generation: null,
+          reason: 'ADAPTER_DISABLE_CHILD_FAILED',
+          cleanupAuthorized: false,
+        });
+      }
     }
-    return { confirmed, owner, unresolved };
+    return { confirmed: unresolved.length === 0, owner, unresolved, authorityPresent };
+  };
+
+  const closePersistedCoachWorkers = async ({ allowCurrentReservedWithoutHandle = false } = {}) => {
+    const deadlineNs = ensureFinalizationDeadline();
+    return closePersistedCoachWorkersCore({
+      deadlineNs,
+      identityDeadlineNs: finalizeResultWaitCutoffNs ?? deadlineNs,
+      deadlineError: finalizationDeadlineError,
+      reasonPrefix: 'finalize-persisted',
+      allowCurrentReservedWithoutHandle,
+    });
+  };
+
+  const resumeReclaimDeadlineError = () => codedError(
+    'RESUME_RECLAIM_DEADLINE_EXCEEDED',
+    'playing resume persisted coach 회수 deadline이 만료됐습니다.',
+  );
+
+  const reclaimPersistedCoachWorkersForResume = async (completedHands) => {
+    const budgetMs = orphanTerminateGraceMs + orphanTerminateKillWaitMs + resumeReclaimResidualMs;
+    const deadlineNs = monotonicNs() + BigInt(budgetMs) * 1_000_000n;
+    const identityDeadlineNs = deadlineNs - BigInt(resumeReclaimResidualMs) * 1_000_000n;
+    let result;
+    try {
+      result = await closePersistedCoachWorkersCore({
+        deadlineNs,
+        identityDeadlineNs,
+        deadlineError: resumeReclaimDeadlineError,
+        reasonPrefix: 'resume-persisted',
+        allowCurrentReservedWithoutHandle: false,
+      });
+    } catch (error) {
+      if (error.code !== 'RESUME_RECLAIM_DEADLINE_EXCEEDED') throw error;
+      result = {
+        confirmed: false,
+        owner: persistedCoachAttempts().owner,
+        authorityPresent: persistedCoachAttempts().authorityPresent ?? false,
+        unresolved: [{
+          handNo: null,
+          generation: null,
+          reason: error.code,
+          cleanupAuthorized: false,
+        }],
+      };
+    }
+    if (result.authorityPresent === false && completedHands >= 1) {
+      return {
+        ...result,
+        confirmed: false,
+        unresolved: [...result.unresolved, {
+          handNo: null,
+          generation: null,
+          reason: 'AUTHORITY_MISSING',
+          cleanupAuthorized: false,
+        }],
+      };
+    }
+    return result;
   };
 
   const coachEnvelopePathFor = (handNo, fallback = null) => (
@@ -2890,7 +2991,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return codedError(code, message);
   };
 
-  const haltForPersistedCoachRecovery = ({ owner, unresolved }) => {
+  const persistedCoachRecovery = ({ owner, unresolved }) => {
     const commands = unresolved
       .filter((attempt) => attempt.cleanupAuthorized)
       .map((attempt) => ({
@@ -2904,7 +3005,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           '--game-dir', root,
         ],
       }));
-    const recovery = {
+    return {
       code: 'COACH_HANDLE_UNRESOLVED',
       owner,
       attempts: unresolved,
@@ -2914,6 +3015,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       },
       commands,
     };
+  };
+
+  const haltForPersistedCoachRecovery = ({ owner, unresolved }) => {
+    const recovery = persistedCoachRecovery({ owner, unresolved });
+    const commands = recovery.commands;
     const message = commands.length > 0
       ? 'persisted 코치 handle identity를 확인할 수 없어 owner 교대를 중단합니다. 같은 sessionToken의 인증 server lock을 복구하고 halt.recovery.commands를 검토·실행한 뒤 resume하세요.'
       : 'persisted 코치 handle identity와 cleanup owner를 확인할 수 없어 owner 교대를 중단합니다. authority 수동 복구가 필요합니다.';
@@ -2935,6 +3041,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     });
     log('finalize-halt', { code: 'FINALIZATION_ABORTED', reason: 'persisted_worker_unresolved' });
     return codedError('FINALIZATION_ABORTED', message, { recovery });
+  };
+
+  const haltForPlayingCoachRecovery = ({ owner, unresolved }) => {
+    const recovery = persistedCoachRecovery({ owner, unresolved });
+    const message = recovery.commands.length > 0
+      ? 'persisted 코치 handle identity를 확인할 수 없어 playing owner 교대를 중단합니다. 인증 server lock 아래 cleanup-result를 검토·실행한 뒤 resume하세요.'
+      : 'persisted 코치 authority 또는 handle을 확인할 수 없어 playing owner 교대를 중단합니다. 수동 복구가 필요합니다.';
+    appendNotice(message);
+    writeLoopState({ halt: { code: 'COACH_HANDLE_UNRESOLVED', message, recovery } });
+    log('resume-halt', { code: 'COACH_HANDLE_UNRESOLVED' });
+    return codedError('COACH_HANDLE_UNRESOLVED', message, { recovery });
+  };
+
+  const clearPlayingCoachRecoveryHalt = () => {
+    if (readLoopState()?.halt?.code === 'COACH_HANDLE_UNRESOLVED') {
+      writeLoopState({ halt: undefined });
+    }
   };
 
   const baseFinalizationCheckpoint = () => ({
@@ -3819,7 +3942,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const resolveForPhase = async (phase, engineState, existingState) => {
+  const resolveForPhase = async (phase, engineState, existingState, {
+    beforePlayerRestore = null,
+  } = {}) => {
     if (FINAL_PHASES.has(phase)) {
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const resolved = await createCanaryAndResolve('upper-only');
@@ -3872,6 +3997,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : requestedPort;
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
+    if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
     await restorePlayers();
     return writeLoopState({ phase: 'playing' });
   };
@@ -3930,7 +4056,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         phase = 'finalizing';
         state = writeLoopState({ phase });
       }
-      let resumed = await resolveForPhase(phase, engineState, state);
+      const priorPlayingRecoveryHalt = state.halt?.code === 'COACH_HANDLE_UNRESOLVED';
+      let resumed = await resolveForPhase(phase, engineState, state, {
+        beforePlayerRestore: phase === 'playing'
+          ? async () => {
+            const persisted = await reclaimPersistedCoachWorkersForResume(
+              Number(engineState.lastHand?.handNo ?? 0),
+            );
+            if (!persisted.confirmed) throw haltForPlayingCoachRecovery(persisted);
+            if (priorPlayingRecoveryHalt && persisted.authorityPresent !== true) {
+              throw codedError(
+                'COACH_HANDLE_UNRESOLVED',
+                readLoopState()?.halt?.message ?? 'persisted coach recovery evidence가 부족합니다.',
+              );
+            }
+            clearPlayingCoachRecoveryHalt();
+          }
+          : null,
+      });
       // §5 finalizing 1: --resume으로 종료 국면에 들어온 경우에만 owner를 교체한다.
       // begin-owner가 seal/Q에 없는 핸드만 새 descriptor로 돌려주므로, 살아 있는
       // generation이 없는 크래시 재개에서만 그 핸드를 다시 스폰한다.
