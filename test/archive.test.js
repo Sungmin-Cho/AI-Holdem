@@ -114,12 +114,35 @@ test('runExclusive는 throw 후에도 락을 푼다', () => {
   assert.equal(fs.existsSync(path.join(dir, '.mutex')), false);
 });
 
-test('isReservedName: archive, .mutex, publish.lock.d', () => {
+test('isReservedName: archive, .mutex, publish.lock.d, .training', () => {
   assert.equal(isReservedName('archive'), true);
   assert.equal(isReservedName('.mutex'), true);
   assert.equal(isReservedName('publish.lock.d'), true);
+  assert.equal(isReservedName('.training'), true);
   assert.equal(isReservedName('state.json'), false);
   assert.equal(isReservedName('hands'), false);
+});
+
+test('vacateLive: .training 은 보관·삭제하지 않고 라이브에 남긴다', () => {
+  const dir = tmpGame();
+  fs.mkdirSync(path.join(dir, '.training'));
+  fs.writeFileSync(path.join(dir, '.training', 'marker'), 'keep');
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({
+    handNo: 0, lastHand: null, hand: null, gameOver: false,
+  }));
+  assert.equal(vacateLive(dir), null);
+  assert.equal(fs.existsSync(path.join(dir, 'state.json')), false);
+  assert.equal(fs.readFileSync(path.join(dir, '.training', 'marker'), 'utf8'), 'keep');
+
+  const archived = tmpGame();
+  fs.mkdirSync(path.join(archived, '.training'));
+  fs.writeFileSync(path.join(archived, '.training', 'marker'), 'keep');
+  fs.writeFileSync(path.join(archived, 'ui-snapshot.json'), '{}');
+  const io = { fs, now: () => new Date('2026-08-27T13:36:51Z') };
+  const archivedTo = vacateLive(archived, io);
+  assert.equal(archivedTo, 'archive/20260827T133651Z-in-progress');
+  assert.equal(fs.readFileSync(path.join(archived, '.training', 'marker'), 'utf8'), 'keep');
+  assert.equal(fs.existsSync(path.join(archived, archivedTo, '.training')), false);
 });
 
 test('shouldArchive: 빈 init은 false, ui-snapshot만 있으면 true', () => {

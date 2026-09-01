@@ -1,5 +1,6 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { newDeck, shuffle } from './cards.js';
+import { snapshotDecision } from './decision.js';
 import { compareScore, evaluate7 } from './evaluator.js';
 import { awardPots, buildPots } from './sidepots.js';
 
@@ -191,6 +192,7 @@ export function startHand(state, options = {}) {
     reopenEligible: true,
     acted: [],
     actions: [],
+    decisions: [],
     startStacks,
     vpipped: [],
     pfrd: [],
@@ -485,6 +487,7 @@ function finishHand(state, events) {
     folded: [...hand.folded],
     allIn: [...hand.allIn],
     actions: structuredClone(hand.actions),
+    decisions: structuredClone(hand.decisions ?? []),
     pots: potRecords,
     showdown,
     startStacks: { ...hand.startStacks },
@@ -611,7 +614,7 @@ function markActed(hand, pid) {
   if (!hand.acted.includes(pid)) hand.acted.push(pid);
 }
 
-export function applyAction(state, playerId, action, amount) {
+export function applyAction(state, playerId, action, amount, { forced = false } = {}) {
   const legal = legalSnapshot(state);
   if (legal.toAct !== playerId) throwIllegal('not your turn');
   if (action !== 'fold' && action !== 'check' && action !== 'call' && action !== 'raise') {
@@ -648,6 +651,16 @@ export function applyAction(state, playerId, action, amount) {
     board: [...hand.board],
     stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
   };
+  if (playerId === 'user') {
+    if (!hand.decisions) hand.decisions = [];
+    hand.decisions.push(snapshotDecision(next, playerId, {
+      action,
+      amount: record.amount,
+    }, {
+      forced,
+      blinds: blindsForLevel(next.level, next.config.blinds0),
+    }));
+  }
   hand.actions.push(record);
 
   if (action === 'fold') {
@@ -696,6 +709,6 @@ export function applyAction(state, playerId, action, amount) {
 export function forceDefault(state, playerId) {
   const legal = legalSnapshot(state);
   if (legal.toAct !== playerId) throwIllegal('not your turn');
-  if (legal.canCheck) return applyAction(state, playerId, 'check');
-  return applyAction(state, playerId, 'fold');
+  if (legal.canCheck) return applyAction(state, playerId, 'check', undefined, { forced: true });
+  return applyAction(state, playerId, 'fold', undefined, { forced: true });
 }

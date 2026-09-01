@@ -1,4 +1,5 @@
 import { blindsForLevel, legalFor } from './hand.js';
+import { seatedFromButton, positionsOf } from './positions.js';
 import { buildPots } from './sidepots.js';
 
 function currentHandData(state) {
@@ -70,33 +71,6 @@ export function userView(state) {
 
 const STREET_KO = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION_KO = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈' };
-
-// Clockwise from the button over seats still in the game (busted seats carry out:true).
-function seatedFromButton(state) {
-  const n = state.seats.length;
-  const order = [];
-  for (let step = 0; step < n; step += 1) {
-    const seat = state.seats[(state.button + step) % n];
-    if (!seat.out) order.push(seat);
-  }
-  return order;
-}
-
-export function positionsOf(state) {
-  const order = seatedFromButton(state);
-  const labels = {};
-  if (order.length === 2) {
-    labels[order[0].playerId] = 'BTN/SB';
-    labels[order[1].playerId] = 'BB';
-    return labels;
-  }
-  const head = ['BTN', 'SB', 'BB'];
-  order.forEach((seat, i) => {
-    labels[seat.playerId] = i < 3 ? head[i] : `UTG${i === 3 ? '' : `+${i - 3}`}`;
-  });
-  if (order.length >= 5) labels[order[order.length - 1].playerId] = 'CO';
-  return labels;
-}
 
 export function turnSummary(state, playerId) {
   const legal = legalFor(state);
@@ -192,6 +166,15 @@ export function redactRecord(record, viewerId = 'user') {
     };
   } else {
     result.showdown = null;
+  }
+  if (Array.isArray(record.decisions)) {
+    result.decisions = record.decisions
+      .filter((snap) => snap.actorId === viewerId)
+      .map((snap) => {
+        const copy = structuredClone(snap);
+        copy.priorActions = (copy.priorActions ?? []).map(safeAction);
+        return copy;
+      });
   }
   return result;
 }

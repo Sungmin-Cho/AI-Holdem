@@ -80,7 +80,8 @@ export function throwArchiveFailed() {
 }
 
 export function isReservedName(name) {
-  return name === 'archive' || name === '.mutex' || name === '.session-store' || name.endsWith('.lock.d');
+  return name === 'archive' || name === '.mutex' || name === '.session-store'
+    || name === '.training' || name.endsWith('.lock.d');
 }
 
 export function archiveTag(state) {

@@ -26,6 +26,7 @@ const FAIL_MESSAGES = {
   ARCHIVE_FAILED: '직전 게임을 보관하지 못했습니다.',
   SERVER_ALIVE: '게임 서버가 아직 종료되지 않았습니다.',
   HAND_NOT_FOUND: '핸드를 찾을 수 없습니다.',
+  SNAPSHOT_INVALID: '결정 스냅샷을 만들 수 없습니다.',
   LOOP_ALIVE: '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
 };
 
