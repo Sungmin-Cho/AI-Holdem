@@ -154,6 +154,16 @@ test('중단·롤백: 정지 → 미해소 게시 해소 → revert 3단계가 �
   assert.match(stop, /cleanupFailedAt|정리 실패/);
   assert.match(stop, /새 .*--resume|--resume.*새로/);
   assert.match(stop, /end --result abort/);
+  assert.match(stop, /store root/);
+  assert.match(stop, /RELAY_PID=\$!/);
+  assert.match(stop, /RELAY_START_TIME/);
+  assert.match(stop, /relay identity 불일치 시 kill 금지/);
+  for (const code of [
+    'attempt_pending', 'active_hands', 'publish_queue',
+    'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
+    'coach_authority_missing', 'coach_authority_unreadable',
+    'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
+  ]) assert.ok(stop.includes(code), code);
 });
 
 test('호스트 표: 기동 문면은 공통이고 갈리는 것은 --player-runtime과 종료 인지뿐', () => {

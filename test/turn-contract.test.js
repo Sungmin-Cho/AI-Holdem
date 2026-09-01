@@ -269,6 +269,7 @@ test('롤백 계약: 정지된 relay를 같은 token으로 복구하면 recorded
     const retried = await node([TOOL, '--from', turnPath, '--game-dir', dir, '--retry']);
     assert.equal(retried.ok, true);
     assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+    fs.writeFileSync(path.join(dir, 'loop-state.json'), JSON.stringify({ phase: 'playing' }));
     const guard = await node([COACH, 'rollback-guard', '--game-dir', dir]);
     assert.deepEqual(guard, { ok: true });
   } finally {
