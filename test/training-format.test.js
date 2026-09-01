@@ -43,4 +43,17 @@ test('formatter: collapsed card, unsupported reason, forced is not a mistake', (
   });
   assert.equal(unsupported.grade, null);
   assert.match(unsupported.note, /지원되지/);
+
+  const exploit = formatTrainingCard({
+    handNo: 44,
+    status: 'supported',
+    grade: 'preferred',
+    chosen: { action: 'raise' },
+    exploit: {
+      accuracy: 'heuristic',
+      adjustment: { bluff: 'decrease', thinValue: 'increase' },
+    },
+  });
+  assert.match(exploit.exploit, /heuristic/);
+  assert.equal(exploit.exploit.includes('0.80'), false);
 });

@@ -23,6 +23,7 @@ import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
+import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import {
   ingestHand,
   isTrainingEnabled,
@@ -3479,7 +3480,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
 
-  const buildSynthesizerPrompt = ({ evaluator, result, playersRaw }) => [
+  const exploitReveal = (players) => Object.entries(modelsFromPlayers(players)).map(([playerId, model]) => ({
+    playerId,
+    opponentModelId: model.opponentModelId,
+    policyVersion: model.policyVersion,
+    deviations: (model.deviations ?? []).map((row) => ({
+      street: row.selector?.street ?? null,
+      from: row.from,
+      to: row.to,
+    })),
+  }));
+
+  const buildSynthesizerPrompt = ({ evaluator, result, playersRaw, exploitRaw }) => [
     '역할: 종합자',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
@@ -3493,6 +3505,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '',
     'players.json:',
     playersRaw,
+    '',
+    'exploit policies (post-game only, heuristic, no EV):',
+    exploitRaw ?? '[]',
     '',
     '마크다운 본문에 다음 네 heading을 모두 그대로 포함하라:',
     '## 내 성향 통계',
@@ -3509,6 +3524,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'machine-only: LLM review unavailable',
     '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
     JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
+    JSON.stringify(exploitReveal(players)),
     `result: ${result}`,
     '## 다음 게임에서 연습할 것',
     'machine-only fallback',
@@ -3548,6 +3564,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         evaluator,
         result: engine.result,
         playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
+        exploitRaw: JSON.stringify(exploitReveal(players)),
       });
       return await runReviewStage({
         stage: 'synthesizer',

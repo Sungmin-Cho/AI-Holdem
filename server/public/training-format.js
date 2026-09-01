@@ -29,7 +29,12 @@ export function formatTrainingCard(item) {
     explanation: item.explanation ?? '',
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     status: item.status ?? null,
+    exploit: '',
   };
+  if (item.exploit?.accuracy === 'heuristic' && item.exploit.adjustment) {
+    const adj = item.exploit.adjustment;
+    card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue} (heuristic, EV 없음)`;
+  }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {
     card.note = item.reason ? `지원되지 않는 스팟 (${item.reason})` : '지원되지 않는 스팟';
