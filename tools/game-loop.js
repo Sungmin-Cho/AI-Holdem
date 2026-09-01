@@ -87,6 +87,15 @@ function isFatalRuntimeFailure(error) {
     || code.endsWith('_STOP_UNCONFIRMED');
 }
 
+function isFatalRepairFailure(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  return code === 'CLOSE_UNSETTLED'
+    || code.includes('IDENTITY_')
+    || code.includes('SIGNAL_')
+    || code.endsWith('_CLOSE_UNCONFIRMED')
+    || code.endsWith('_STOP_UNCONFIRMED');
+}
+
 function codedError(code, message, extra = {}) {
   const error = new Error(message ?? code);
   error.code = code;
@@ -311,6 +320,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? 5_000;
   const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? 2_000;
   const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? 5_000;
+  const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
@@ -1267,9 +1277,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
-  const createPlayerSession = async (persona, createdAt) => {
+  const createPlayerSession = async (persona, createdAt, { deadlineAt = null } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
-    const result = await playerAdapter.warmup({ playerId: persona.playerId, prompt });
+    const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
+    if (timeoutMs !== null && timeoutMs <= 0) {
+      throw codedError('TIMEOUT', `플레이어 ${persona.playerId} 세션 복구 예산이 만료됐습니다.`);
+    }
+    const result = await playerAdapter.warmup({
+      playerId: persona.playerId,
+      prompt,
+      ...(timeoutMs === null ? {} : { timeoutMs }),
+    });
     if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
     }
@@ -1334,7 +1352,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const warmPlayers = () => preparePlayerSessions({ reuseExisting: false });
   const restorePlayers = () => preparePlayerSessions({ reuseExisting: true });
 
-  const repairRestoredPlayerSession = async (playerId) => {
+  const repairRestoredPlayerSession = async (playerId, { deadlineAt }) => {
     if (!restoredPlayerSessions.has(playerId)) return null;
     // consume-before-await prevents a rejected warmup or fresh-session call from recursively
     // recreating the same player. A later process resume may try the still-persisted old entry.
@@ -1344,7 +1362,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ? players.find((player) => player?.playerId === playerId && playerId !== 'user')
       : null;
     if (!persona) throw codedError('BAD_PLAYERS', `복구할 플레이어 ${playerId} 페르소나가 없습니다.`);
-    const repaired = await createPlayerSession(persona, isoNow(now));
+    const repaired = await createPlayerSession(persona, isoNow(now), { deadlineAt });
     playerSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
     writeJsonAtomic(sessionsPath, playerSessions);
     log('player-session-recreated', { playerId, runtime: repaired.runtime });
@@ -1560,6 +1578,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     };
     for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
+      const attemptDeadlineAt = monotonicNow() + timeouts[attempt];
       let round = await decideOnce({
         playerId: next.toAct,
         sessionId: session.sessionId,
@@ -1572,16 +1591,34 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && RESTORED_SESSION_REJECTION_CODES.has(round.error?.code)
         && restoredPlayerSessions.has(next.toAct)
       ) {
-        const repaired = await repairRestoredPlayerSession(next.toAct);
+        const minRepairMs = Math.min(minRepairFloorMs, Math.ceil(timeouts[attempt] / 8));
+        const remainingBeforeRepair = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+        if (remainingBeforeRepair < minRepairMs) continue;
+        let repaired = null;
+        try {
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt: attemptDeadlineAt });
+        } catch (error) {
+          if (isFatalRepairFailure(error)) throw error;
+          log('player-session-repair-failed', {
+            playerId: next.toAct,
+            code: error.code ?? 'REPAIR_FAILED',
+          });
+          continue;
+        }
         if (repaired) {
           session = repaired;
           sessionRepaired = true;
-          round = await decideOnce({
-            playerId: next.toAct,
-            sessionId: session.sessionId,
-            message: next.message,
-          }, timeouts[attempt]);
-          modelMs += round.modelMs;
+          const remainingBeforeRetry = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+          if (remainingBeforeRetry > 0) {
+            round = await decideOnce({
+              playerId: next.toAct,
+              sessionId: session.sessionId,
+              message: next.message,
+            }, remainingBeforeRetry);
+            modelMs += round.modelMs;
+          } else {
+            round = { ok: false, error: codedError('TIMEOUT', 'session repair 뒤 재결정 예산이 만료됐습니다.'), modelMs: 0 };
+          }
         }
       } else if (round.ok) {
         // A successful call proves the restored remote session is usable; later transient
