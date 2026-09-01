@@ -15,6 +15,8 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/sidepots.js` | 컨트리뷰션·폴드 집합으로부터 사이드팟을 구성(`buildPots`)하고 승자에게 분배(`awardPots`). |
 | `engine/personas.js` | AI 좌석의 아키타입(TAG/LAG/Nit/CallingStation/Maniac/Trickster) 생성(`generatePersonas`). |
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. |
+| `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
+| `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
 | `engine/state.js` | `state.json` 원자적 I/O(`loadState`/`saveState`)와 이 저장소 전체가 재사용하는 pid(+startTime) identity 기반 owned-lock 프리미티브(`withMutation`/`withNamedLock`/`acquireOwnedLock`). |
@@ -40,6 +42,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 - `--resume`은 어떤 경로로도 `init`을 호출하면 안 된다.
 - 종료 phase 체크포인트는 역행하면 안 된다: `playing → finalizing → review_generated → review_published → done`. `review_generated` 이후 재개는 선택된 session의 `review.md`를 다시 만들지 않고, 먼저 기록해 둔 sha256으로 그 산출물을 재사용해야 한다.
 - 오래된 `gameEpoch`/`activeOwnerSessionId`의 코치 콜백이 새 게임의 상태를 오염시키면 안 된다.
+- decision snapshot은 `engine/` 소유이며, redacted 핸드·코치 입력은 viewer 자신의 스냅샷만 남기고 `decisions[].priorActions`를 최상위 액션과 같은 허용 키로 다시 걸러 상대 홀카드·비공개 정책 필드가 새면 안 된다.
 
 ## 4. 레이어 경계
 

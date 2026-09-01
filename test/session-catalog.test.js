@@ -21,6 +21,17 @@ test('empty store has no current session', () => {
   assert.equal(resolveCurrentSession(storeDir), null);
 });
 
+test('store-dir catalog init does not sweep .training at the store root', () => {
+  const storeDir = tmpStore();
+  fs.mkdirSync(path.join(storeDir, '.training'));
+  fs.writeFileSync(path.join(storeDir, '.training', 'marker'), 'keep');
+  ensureSessionStore(storeDir);
+  const prepared = prepareSession(storeDir);
+  commitSession(storeDir, prepared);
+  assert.equal(fs.readFileSync(path.join(storeDir, '.training', 'marker'), 'utf8'), 'keep');
+  assert.equal(fs.existsSync(path.join(storeDir, '.session-store')), true);
+});
+
 test('prepareSession creates only a staging directory under sessions/', () => {
   const storeDir = tmpStore();
   ensureSessionStore(storeDir);

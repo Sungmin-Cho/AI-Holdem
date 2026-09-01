@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
 import { fixedDeck, setup3 } from './helpers/fixtures.js';
-import { positionsOf, redactRecord, statsReport, turnSummary, userView, viewFor } from '../engine/views.js';
+import { redactRecord, statsReport, turnSummary, userView, viewFor } from '../engine/views.js';
+import { positionsOf } from '../engine/positions.js';
 
 function holeOf(state, playerId) {
   return state.hand?.holes[playerId] ?? state.lastHand?.holes[playerId];
