@@ -50,7 +50,7 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 AI 수 `n=3`. 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다.
+인자가 없으면 AI 수 `n=3`. 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 skill profile은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 

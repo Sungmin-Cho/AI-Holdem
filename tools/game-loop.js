@@ -29,6 +29,12 @@ import {
   unpublishedEnvelope,
   writeTrainingEnvelope,
 } from './training-pipeline.js';
+import {
+  applyEvaluation,
+  defaultPracticeFocusFile,
+  writePracticeFocus,
+} from './profile-cli.js';
+import { createProfileStore } from '../training/profile-store.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -353,6 +359,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
+  const storeDir = opts.storeDir ?? null;
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
@@ -1801,6 +1808,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       for (const item of envelope.training) {
         try {
           await tc.markPublished(root, item.evaluationId, item.payloadSha256);
+          if (storeDir) {
+            try {
+              await applyEvaluation(storeDir, item);
+            } catch (error) {
+              log('profile-apply-error', { code: error.code ?? 'ERROR' });
+            }
+          }
         } catch (error) {
           log('training-mark-published', { code: error.code ?? 'ERROR' });
         }
@@ -3568,6 +3582,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const finishDoneLifecycle = async () => {
     const current = readLoopState();
+    if (storeDir) {
+      try {
+        const profile = await createProfileStore(storeDir).show();
+        writePracticeFocus(storeDir, profile);
+      } catch (error) {
+        log('practice-focus-error', { code: error.code ?? 'ERROR' });
+      }
+    }
     try {
       fs.unlinkSync(sessionsPath);
     } catch (error) {
@@ -4135,6 +4157,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       writeLoopState({ port });
       if (practiceFocusFile !== undefined) {
         fs.copyFileSync(path.resolve(practiceFocusFile), path.join(root, '.practice-focus.json'));
+      } else if (storeDir) {
+        const autoFocus = defaultPracticeFocusFile(storeDir);
+        if (autoFocus) {
+          fs.copyFileSync(autoFocus, path.join(root, '.practice-focus.json'));
+        }
       }
       await warmPlayers();
       const state = writeLoopState({ phase: 'playing' });
@@ -4538,7 +4565,7 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
-            opts: { trainingEnabled: true },
+            opts: { trainingEnabled: true, storeDir: args.storeDir },
           });
         } else {
           const previous = resolveCurrentSession(args.storeDir);
@@ -4555,7 +4582,7 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
-            opts: { trainingEnabled: true },
+            opts: { trainingEnabled: true, storeDir: args.storeDir },
           });
         }
       } catch (error) {

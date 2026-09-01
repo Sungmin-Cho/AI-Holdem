@@ -49,7 +49,7 @@ function openNoFollow(filePath, flags, mode) {
   return fs.openSync(filePath, flags | NOFOLLOW, mode);
 }
 
-export function writeJsonSecure(filePath, obj) {
+export function writeTextSecure(filePath, text) {
   ensureDir(path.dirname(filePath));
   assertRegularFileOrAbsent(filePath);
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
@@ -60,7 +60,7 @@ export function writeJsonSecure(filePath, obj) {
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
       FILE_MODE,
     );
-    fs.writeFileSync(fd, JSON.stringify(obj));
+    fs.writeFileSync(fd, text);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
@@ -74,6 +74,10 @@ export function writeJsonSecure(filePath, obj) {
     try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
     throw error;
   }
+}
+
+export function writeJsonSecure(filePath, obj) {
+  writeTextSecure(filePath, JSON.stringify(obj));
 }
 
 export function readJsonSecure(filePath) {

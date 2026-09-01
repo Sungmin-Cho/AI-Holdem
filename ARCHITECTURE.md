@@ -19,6 +19,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
 | `training/` | 엔진 밖 학습 계층. Preflop baseline lookup과 frequency grade. 파일 I/O는 CLI와 `tools/training-store.js`만. 전략 데이터를 engine이 로드하지 않는다. |
 | `tools/training-control.js` | 세션 스코프 training authority·평가 멱등·reconcile. 코치 authority와 파일을 합치지 않는다. |
+| `training/profile-store.js` | 장기 skill profile. 저장은 `<store>/.training/`이며 `tools/training-store.js`만 I/O한다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
 | `engine/state.js` | `state.json` 원자적 I/O(`loadState`/`saveState`)와 이 저장소 전체가 재사용하는 pid(+startTime) identity 기반 owned-lock 프리미티브(`withMutation`/`withNamedLock`/`acquireOwnedLock`). |
