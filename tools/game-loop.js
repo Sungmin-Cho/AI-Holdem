@@ -14,6 +14,7 @@ import {
 import {
   buildPlayerPrompt,
   extractJsonLine,
+  isArgvSafeSessionId,
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
@@ -71,6 +72,7 @@ const FATAL_RUNTIME_CODES = new Set([
 const RESTORED_SESSION_REJECTION_CODES = new Set([
   'CLI_FAILED',
   'INVALID_SESSION',
+  'INVALID_SESSION_ID',
   'NO_SESSION',
   'SESSION_EXPIRED',
   'SESSION_NOT_FOUND',
@@ -1270,6 +1272,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
     }
+    if (!isArgvSafeSessionId(result.sessionId)) {
+      throw codedError('INVALID_SESSION_ID', `플레이어 ${persona.playerId} 세션 id 형식이 안전하지 않습니다.`);
+    }
     return {
       runtime: playerAdapter.kind,
       sessionId: result.sessionId,
@@ -1303,8 +1308,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && typeof prior === 'object'
         && !Array.isArray(prior)
         && prior.runtime === playerAdapter.kind
-        && typeof prior.sessionId === 'string'
-        && prior.sessionId !== ''
+        && isArgvSafeSessionId(prior.sessionId)
         && typeof prior.createdAt === 'string'
         && prior.createdAt !== ''
       ) {
@@ -1522,6 +1526,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let session = playerSessions?.[next.toAct];
     if (!session || typeof session.sessionId !== 'string' || session.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${next.toAct} 세션이 없습니다.`);
+    }
+    if (!isArgvSafeSessionId(session.sessionId)) {
+      throw codedError('INVALID_SESSION_ID', `플레이어 ${next.toAct} 세션 id 형식이 안전하지 않습니다.`);
     }
     const watchdog = currentWatchdog();
     const timeouts = [watchdog.t1Ms, watchdog.t2Ms];

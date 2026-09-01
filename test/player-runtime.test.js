@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   RUNTIME_TABLE,
+  SESSION_ID_MAX_LENGTH,
+  isArgvSafeSessionId,
   extractJsonLine,
   buildPlayerPrompt,
   createPlayerRuntime,
@@ -1117,6 +1119,83 @@ test('warmup(codex): thread 뒤 error-only 스트림은 세션을 반환하지 �
     );
   } finally {
     errorOnly.cleanup();
+  }
+});
+
+test('isArgvSafeSessionId: 경계값 — 길이 1·128 통과, 129 거부, 구두점 조합·실측 codex UUID 통과, 선행 . / - 거부', () => {
+  assert.equal(isArgvSafeSessionId('a'), true, '길이 1은 통과');
+  assert.equal(isArgvSafeSessionId('a'.repeat(SESSION_ID_MAX_LENGTH)), true, '길이 128은 통과');
+  assert.equal(isArgvSafeSessionId('a'.repeat(SESSION_ID_MAX_LENGTH + 1)), false, '길이 129는 거부');
+  assert.equal(isArgvSafeSessionId('a.b-c_d'), true, '구두점 조합은 통과');
+  assert.equal(isArgvSafeSessionId('.a'), false, '선행 .은 거부');
+  assert.equal(isArgvSafeSessionId('-a'), false, '선행 -는 거부');
+  assert.equal(isArgvSafeSessionId('01a05ae0-10a9-7223-8db1-8839a5afe23b'), true, '실측 codex UUID는 통과');
+  assert.equal(isArgvSafeSessionId(''), false, '빈 문자열은 거부');
+  assert.equal(isArgvSafeSessionId('--resume'), false, 'option-like id는 거부');
+  assert.equal(isArgvSafeSessionId('a b'), false, '제어문자 포함은 거부');
+  assert.equal(isArgvSafeSessionId(null), false, 'null은 거부');
+});
+
+test('warmup(codex): thread_id가 option-like/제어문자/129자면 INVALID_SESSION_ID — create spawn 1회, resume spawn 0회, 세션 미반환', async () => {
+  const ready = { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } };
+  const cases = [
+    ['--resume', '--resume'],
+    ['제어문자', 'th--ctrl'],
+    ['129자', 'a'.repeat(SESSION_ID_MAX_LENGTH + 1)],
+  ];
+  for (const [label, threadId] of cases) {
+    const f = fakeRuntime('codex', {
+      default: { reply: jsonl({ type: 'thread.started', thread_id: threadId }, ready) },
+    });
+    try {
+      await assert.rejects(
+        f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+        (error) => error.code === 'INVALID_SESSION_ID',
+        `${label}: warmup은 INVALID_SESSION_ID로 거부해야 한다`,
+      );
+      assert.equal(f.calls().length, 1, `${label}: create spawn은 정확히 1회`);
+      assert.ok(!f.last().argv.includes('resume'), `${label}: resume spawn은 발생하지 않는다`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('warmup: 빈 캡처는 기존 NO_SESSION을 유지한다 (grammar 검사로 대체되지 않음)', async () => {
+  const f = fakeRuntime('codex', { default: { reply: 'JSONL이 아닌 산문 출력' } });
+  try {
+    await assert.rejects(
+      f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 }),
+      (error) => error.code === 'NO_SESSION',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('decide: option-like sessionId는 INVALID_SESSION_ID로 거부하고 spawn하지 않는다', async () => {
+  const f = fakeRuntime('claude');
+  try {
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: '--evil', message: 'm', timeoutMs: 5000 }),
+      (error) => error.code === 'INVALID_SESSION_ID',
+    );
+    assert.equal(f.calls().length, 0, 'grammar 위반이면 spawn이 전혀 발생하지 않는다');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('decide: 빈 sessionId는 기존 NO_SESSION을 유지한다', async () => {
+  const f = fakeRuntime('claude');
+  try {
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: '', message: 'm', timeoutMs: 5000 }),
+      (error) => error.code === 'NO_SESSION',
+    );
+    assert.equal(f.calls().length, 0);
+  } finally {
+    f.cleanup();
   }
 });
 
