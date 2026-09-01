@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`). 기본 AI 3명(4인 테이블). 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`). 기본 AI 3명(4인 테이블). 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -50,7 +50,7 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 AI 수 `n=3`. 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만.
+인자가 없으면 AI 수 `n=3`. 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 
@@ -58,6 +58,7 @@ fi
 nohup node tools/game-loop.js --store-dir game --ai <n> \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   [--stack N] [--level-every N] [--blinds SB/BB] \
+  [--mode cash-training] [--stack-bb N] [--hands N] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 

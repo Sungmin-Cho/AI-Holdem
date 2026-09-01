@@ -147,6 +147,17 @@ function integerValue(value, flag) {
   return parsed;
 }
 
+export function engineInitFlags(args = {}) {
+  const extra = [];
+  if (args.stack !== undefined) extra.push('--stack', String(args.stack));
+  if (args.levelEvery !== undefined) extra.push('--level-every', String(args.levelEvery));
+  if (args.blinds !== undefined) extra.push('--blinds', String(args.blinds));
+  if (args.mode !== undefined) extra.push('--mode', String(args.mode));
+  if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
+  if (args.hands !== undefined) extra.push('--hands', String(args.hands));
+  return extra;
+}
+
 export function parseGameLoopArgs(argv) {
   const parsed = {
     gameDir: path.resolve('game'),
@@ -158,6 +169,9 @@ export function parseGameLoopArgs(argv) {
     resume: false,
     playerRuntime: undefined,
     practiceFocusFile: undefined,
+    mode: undefined,
+    stackBb: undefined,
+    hands: undefined,
   };
   const bools = new Map([
     ['--force', 'force'],
@@ -172,6 +186,9 @@ export function parseGameLoopArgs(argv) {
     ['--blinds', 'blinds'],
     ['--player-runtime', 'playerRuntime'],
     ['--practice-focus-file', 'practiceFocusFile'],
+    ['--mode', 'mode'],
+    ['--stack-bb', 'stackBb'],
+    ['--hands', 'hands'],
   ]);
   let sawGameDir = false;
 
@@ -188,7 +205,8 @@ export function parseGameLoopArgs(argv) {
     if (value == null || value.startsWith('--')) throw codedError('USAGE', `${arg}의 값이 필요합니다.`);
     index += 1;
     if (valueName === 'gameDir') sawGameDir = true;
-    if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery') {
+    if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery'
+      || valueName === 'stackBb' || valueName === 'hands') {
       parsed[valueName] = integerValue(value, arg);
     } else if (valueName === 'gameDir' || valueName === 'storeDir' || valueName === 'practiceFocusFile') {
       parsed[valueName] = path.resolve(value);
@@ -3952,6 +3970,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     stack,
     levelEvery,
     blinds,
+    mode,
+    stackBb,
+    hands,
     force = false,
     practiceFocusFile,
     preinitialized,
@@ -3971,10 +3992,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
-      const initArgs = ['init', '--ai', String(ai)];
-      if (stack !== undefined) initArgs.push('--stack', String(stack));
-      if (levelEvery !== undefined) initArgs.push('--level-every', String(levelEvery));
-      if (blinds !== undefined) initArgs.push('--blinds', String(blinds));
+      const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
+        stack, levelEvery, blinds, mode, stackBb, hands,
+      })];
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
       const initialized = preinitialized ?? await runCli(initArgs);
@@ -4355,10 +4375,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 }
 
 function initializePreparedSession(gameDir, args) {
-  const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir];
-  if (args.stack !== undefined) initArgs.push('--stack', String(args.stack));
-  if (args.levelEvery !== undefined) initArgs.push('--level-every', String(args.levelEvery));
-  if (args.blinds !== undefined) initArgs.push('--blinds', String(args.blinds));
+  const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [ENGINE_CLI, ...initArgs], {
       encoding: 'utf8',
@@ -4454,6 +4471,9 @@ async function main() {
       stack: args.stack,
       levelEvery: args.levelEvery,
       blinds: args.blinds,
+      mode: args.mode,
+      stackBb: args.stackBb,
+      hands: args.hands,
       force: args.force,
       practiceFocusFile: args.practiceFocusFile,
       preinitialized: preparedInitialization,

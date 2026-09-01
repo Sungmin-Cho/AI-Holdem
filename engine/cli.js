@@ -13,7 +13,7 @@ import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
 const VALUE_FLAGS = new Set([
   'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
-  'expect-version', 'for', 'result', 'deck',
+  'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
 ]);
 
 const FAIL_MESSAGES = {
@@ -27,6 +27,7 @@ const FAIL_MESSAGES = {
   SERVER_ALIVE: '게임 서버가 아직 종료되지 않았습니다.',
   HAND_NOT_FOUND: '핸드를 찾을 수 없습니다.',
   SNAPSHOT_INVALID: '결정 스냅샷을 만들 수 없습니다.',
+  BAD_CONFIG: '게임 설정이 올바르지 않습니다.',
   LOOP_ALIVE: '게임 루프가 아직 실행 중입니다. 사이드카를 먼저 정지하세요.',
 };
 
@@ -160,17 +161,58 @@ function rebuildArchive(gameDir, state) {
   return true;
 }
 
+function parseSafePositive(value, label) {
+  const n = parseIntArg(value, label);
+  if (!Number.isSafeInteger(n) || n < 1) usage(`${label}는 양의 안전 정수여야 합니다.`);
+  return n;
+}
+
 function cmdInit(gameDir, flags) {
   if (flags.ai == null) usage('--ai가 필요합니다.');
   const aiCount = parseAi(flags.ai);
-  const startStack = flags.stack != null ? parseIntArg(flags.stack, '--stack') : 5000;
+  const mode = flags.mode;
+  if (mode != null && mode !== 'tournament' && mode !== 'cash-training') {
+    usage('--mode는 tournament 또는 cash-training이어야 합니다.');
+  }
+  const cash = mode === 'cash-training';
+  if (!cash && (flags['stack-bb'] != null || flags.hands != null)) {
+    usage('--stack-bb와 --hands는 cash-training에서만 쓸 수 있습니다.');
+  }
+  if (cash && flags['level-every'] != null) {
+    usage('cash-training은 --level-every를 쓰지 않습니다.');
+  }
+  if (cash && flags.stack != null && flags['stack-bb'] != null) {
+    usage('--stack과 --stack-bb는 함께 쓸 수 없습니다.');
+  }
   const blinds0 = flags.blinds != null ? parseBlinds(flags.blinds) : [25, 50];
-  const levelEvery = flags['level-every'] != null
-    ? parseIntArg(flags['level-every'], '--level-every')
-    : 8;
-  if (startStack < 1) usage('--stack은 1 이상이어야 합니다.');
-  if (levelEvery < 1) usage('--level-every는 1 이상이어야 합니다.');
-  const result = initGameDir(gameDir, { aiCount, startStack, blinds0, levelEvery, force: flags.force });
+  let startStack;
+  let startStackBb;
+  let levelEvery;
+  let handLimit;
+  if (cash) {
+    if (flags['stack-bb'] != null) {
+      startStackBb = parseSafePositive(flags['stack-bb'], '--stack-bb');
+      startStack = startStackBb * blinds0[1];
+    } else {
+      startStack = flags.stack != null ? parseSafePositive(flags.stack, '--stack') : 100 * blinds0[1];
+      startStackBb = startStack / blinds0[1];
+    }
+    levelEvery = null;
+    if (flags.hands != null) handLimit = parseSafePositive(flags.hands, '--hands');
+  } else {
+    startStack = flags.stack != null ? parseIntArg(flags.stack, '--stack') : 5000;
+    levelEvery = flags['level-every'] != null
+      ? parseIntArg(flags['level-every'], '--level-every')
+      : 8;
+    if (startStack < 1) usage('--stack은 1 이상이어야 합니다.');
+    if (levelEvery < 1) usage('--level-every는 1 이상이어야 합니다.');
+  }
+  const result = initGameDir(gameDir, {
+    aiCount, startStack, blinds0, levelEvery, force: flags.force,
+    mode: cash ? 'cash-training' : undefined,
+    startStackBb: cash ? startStackBb : undefined,
+    handLimit,
+  });
   succeed({
     stateVersion: result.stateVersion,
     sessionToken: result.sessionToken,

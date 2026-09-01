@@ -43,13 +43,40 @@ function emptyStats() {
   };
 }
 
+function throwBadConfig(message) {
+  const error = new Error(message);
+  error.code = 'BAD_CONFIG';
+  throw error;
+}
+
 export function createGame({
   aiCount,
   startStack = 5000,
   blinds0 = DEFAULT_BLINDS,
   levelEvery = 8,
   names,
+  mode,
+  startStackBb,
+  handLimit,
 } = {}) {
+  const resolvedMode = mode ?? 'tournament';
+  if (resolvedMode !== 'tournament' && resolvedMode !== 'cash-training') {
+    throwBadConfig('mode는 tournament 또는 cash-training이어야 합니다.');
+  }
+  if (resolvedMode === 'tournament') {
+    if (!Number.isInteger(levelEvery) || levelEvery < 1) {
+      throwBadConfig('tournament의 levelEvery는 1 이상 정수여야 합니다.');
+    }
+  } else if (levelEvery != null) {
+    throwBadConfig('cash-training의 levelEvery는 null이어야 합니다.');
+  }
+  if (handLimit != null && (!Number.isSafeInteger(handLimit) || handLimit < 1)) {
+    throwBadConfig('handLimit은 양의 안전 정수여야 합니다.');
+  }
+  if (resolvedMode === 'tournament' && handLimit != null) {
+    throwBadConfig('handLimit은 cash-training 전용입니다.');
+  }
+
   const seats = [{ playerId: 'user', name: '나', stack: startStack, out: false }];
   for (let i = 1; i <= aiCount; i += 1) {
     seats.push({
@@ -62,15 +89,22 @@ export function createGame({
   const stats = {};
   for (const seat of seats) stats[seat.playerId] = emptyStats();
 
+  const config = {
+    aiCount,
+    startStack,
+    blinds0: [...blinds0],
+    levelEvery: resolvedMode === 'cash-training' ? null : levelEvery,
+  };
+  if (resolvedMode === 'cash-training') {
+    config.mode = 'cash-training';
+    if (startStackBb != null) config.startStackBb = startStackBb;
+    if (handLimit != null) config.handLimit = handLimit;
+  }
+
   return {
     schemaVersion: 1,
     stateVersion: 0,
-    config: {
-      aiCount,
-      startStack,
-      blinds0: [...blinds0],
-      levelEvery,
-    },
+    config,
     sessionToken: randomBytes(16).toString('hex'),
     level: 0,
     handNo: 0,
@@ -83,6 +117,9 @@ export function createGame({
     gameOver: false,
     result: null,
     bustedPlayerIds: [],
+    ...(resolvedMode === 'cash-training'
+      ? { sessionNet: Object.fromEntries(seats.map((seat) => [seat.playerId, 0])) }
+      : {}),
   };
 }
 
@@ -109,14 +146,33 @@ function emit(events, visibility, type, payload) {
   events.push({ seq: events.length, visibility, type, ...payload });
 }
 
+function isCashTraining(state) {
+  return state.config?.mode === 'cash-training';
+}
+
+function handLimitReached(state) {
+  const limit = state.config?.handLimit;
+  return Number.isInteger(limit) && limit >= 1 && state.handNo >= limit;
+}
+
 export function startHand(state, options = {}) {
   const user = state.seats.find((seat) => seat.playerId === 'user');
-  if (state.gameOver || !user || user.stack <= 0) throwGameOver();
+  const cash = isCashTraining(state);
+  if (state.gameOver) throwGameOver();
+  if (!cash && (!user || user.stack <= 0)) throwGameOver();
+  if (cash && handLimitReached(state)) {
+    const next = structuredClone(state);
+    next.gameOver = true;
+    next.result = 'completed';
+    const events = [];
+    emit(events, 'public', 'game_over', { result: 'completed' });
+    return { state: next, events };
+  }
 
   const next = structuredClone(state);
   next.handNo += 1;
   const previousLevel = next.level;
-  next.level = Math.floor((next.handNo - 1) / next.config.levelEvery);
+  next.level = cash ? 0 : Math.floor((next.handNo - 1) / next.config.levelEvery);
   const [sb, bb] = blindsForLevel(next.level, next.config.blinds0);
 
   next.button = nextLiveIndex(next.seats, next.button);
@@ -494,27 +550,46 @@ function finishHand(state, events) {
     endStacks,
   };
 
-  const bustedPlayerIds = [];
-  for (const seat of state.seats) {
-    if (!seat.out && seat.stack === 0) {
-      seat.out = true;
-      bustedPlayerIds.push(seat.playerId);
-      emit(events, 'public', 'bust', { playerId: seat.playerId });
+  if (isCashTraining(state)) {
+    const startStack = state.config.startStack;
+    if (!state.sessionNet) state.sessionNet = {};
+    for (const seat of state.seats) {
+      state.sessionNet[seat.playerId] = (state.sessionNet[seat.playerId] ?? 0)
+        + endStacks[seat.playerId] - startStack;
     }
-  }
+    if (handLimitReached(state)) {
+      state.gameOver = true;
+      state.result = 'completed';
+      emit(events, 'public', 'game_over', { result: 'completed' });
+    } else {
+      for (const seat of state.seats) {
+        seat.stack = startStack;
+        seat.out = false;
+      }
+    }
+  } else {
+    const bustedPlayerIds = [];
+    for (const seat of state.seats) {
+      if (!seat.out && seat.stack === 0) {
+        seat.out = true;
+        bustedPlayerIds.push(seat.playerId);
+        emit(events, 'public', 'bust', { playerId: seat.playerId });
+      }
+    }
 
-  const user = state.seats.find((seat) => seat.playerId === 'user');
-  const aiAlive = state.seats.some((seat) => seat.playerId !== 'user' && !seat.out);
-  if (!user || user.stack <= 0) {
-    state.gameOver = true;
-    state.result = 'lose';
-    state.bustedPlayerIds = bustedPlayerIds;
-    emit(events, 'public', 'game_over', { result: 'lose', bustedPlayerIds });
-  } else if (!aiAlive) {
-    state.gameOver = true;
-    state.result = 'win';
-    state.bustedPlayerIds = bustedPlayerIds;
-    emit(events, 'public', 'game_over', { result: 'win', bustedPlayerIds });
+    const user = state.seats.find((seat) => seat.playerId === 'user');
+    const aiAlive = state.seats.some((seat) => seat.playerId !== 'user' && !seat.out);
+    if (!user || user.stack <= 0) {
+      state.gameOver = true;
+      state.result = 'lose';
+      state.bustedPlayerIds = bustedPlayerIds;
+      emit(events, 'public', 'game_over', { result: 'lose', bustedPlayerIds });
+    } else if (!aiAlive) {
+      state.gameOver = true;
+      state.result = 'win';
+      state.bustedPlayerIds = bustedPlayerIds;
+      emit(events, 'public', 'game_over', { result: 'win', bustedPlayerIds });
+    }
   }
 
   state.phase = 'idle';
