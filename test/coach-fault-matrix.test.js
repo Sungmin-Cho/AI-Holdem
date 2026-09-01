@@ -414,6 +414,48 @@ test('rollback rehearsal: pending Q 또는 unresolved attempt면 거부', async 
   assert.equal(guard.ok, true);
 });
 
+test('rollback guard는 retired cleanup이 released가 아니면 거부한다', async () => {
+  const first = setup({ token: 'tok-roll-retired-unconfirmed' });
+  const started = await first.cc.beginOwner({
+    gameDir: first.dir, owner: first.owner, completed: 1,
+    statsFile: first.statsFile, snapshotFile: first.snapshotFile,
+  });
+  await first.cc.fence({
+    gameDir: first.dir, owner: first.owner, handNo: 1,
+    generation: started.descriptors[0].generation,
+    reason: 'termination_unconfirmed',
+  });
+  await first.cc.recordCleanup({
+    gameDir: first.dir, owner: first.owner, handNo: 1,
+    generation: started.descriptors[0].generation,
+    cleanupState: 'termination_unconfirmed',
+  });
+  assert.deepEqual(await first.cc.assertRollbackAllowed(first.dir), {
+    ok: false,
+    code: 'ROLLBACK_REFUSED',
+  });
+
+  const second = setup({ token: 'tok-roll-retired-pending' });
+  await second.cc.beginOwner({
+    gameDir: second.dir, owner: second.owner, completed: 0,
+    statsFile: second.statsFile, snapshotFile: second.snapshotFile,
+  });
+  const authPath = path.join(second.dir, '.coach-authority.json');
+  const auth = second.cc.loadAuthority(second.dir);
+  auth.retiredAttempts.push({
+    ownerSessionId: second.owner,
+    handNo: 1,
+    generation: 1,
+    cleanupState: 'pending',
+    agentHandle: null,
+  });
+  writeJsonAtomic(authPath, auth);
+  assert.deepEqual(await second.cc.assertRollbackAllowed(second.dir), {
+    ok: false,
+    code: 'ROLLBACK_REFUSED',
+  });
+});
+
 test('game-over remaining 5,001ms는 교체 가능, 4,999ms는 불가', () => {
   const cutoff = 10_000_000_000n;
   assert.equal(canStartReplacement(cutoff - 5_001_000_000n, cutoff), true);
