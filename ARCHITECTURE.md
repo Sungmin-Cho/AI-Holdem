@@ -13,7 +13,9 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/cards.js` | 표준 52장 덱 생성·셔플·순위 값(`newDeck`/`shuffle`/`rankValue`). |
 | `engine/evaluator.js` | 7장 중 최고 5장 핸드 평가(`evaluate7`)와 점수 비교(`compareScore`). |
 | `engine/sidepots.js` | 컨트리뷰션·폴드 집합으로부터 사이드팟을 구성(`buildPots`)하고 승자에게 분배(`awardPots`). |
-| `engine/personas.js` | AI 좌석의 아키타입(TAG/LAG/Nit/CallingStation/Maniac/Trickster) 생성(`generatePersonas`). |
+| `engine/personas.js` | AI 좌석의 표현 필드(이름·말투·성격·아키타입)만 생성. 빈도 파라미터는 `training/policies/`가 소유한다. |
+| `training/policies/` | deterministic strategy policy와 RNG. 엔진은 정책 모듈을 import하지 않는다. |
+| `tools/policy-player.js` | `--opponent-runtime policy`일 때 인프로세스 결정. LLM 워밍업을 생략한다. |
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
@@ -25,7 +27,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
 | `engine/state.js` | `state.json` 원자적 I/O(`loadState`/`saveState`)와 이 저장소 전체가 재사용하는 pid(+startTime) identity 기반 owned-lock 프리미티브(`withMutation`/`withNamedLock`/`acquireOwnedLock`). |
-| `engine/cli.js` | 엔진의 유일한 외부 표면 — `init`/`new-hand`/`legal`/`apply`/`view`/`step`/`hand`/`stats`/`end`/`resume-check` 서브커맨드. |
+| `engine/cli.js` | 엔진의 유일한 외부 표면 — `init`/`new-hand`/`legal`/`apply`/`view`/`step`/`hand`/`stats`/`end`/`resume-check`/`decision-peek` 서브커맨드. |
 | `engine/session-catalog.js` | store의 영구 `sessions/<gameId>` namespace와 atomic current selector. normal resolve는 directory scan을 하지 않는다. |
 | `tools/game-loop.js` | 사이드카 본체 — 부트스트랩(loop 락 → `init` → 서버 기동), 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스를 한 detached 프로세스에서 오케스트레이션. |
 | `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). |

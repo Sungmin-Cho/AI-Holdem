@@ -689,7 +689,7 @@ function markActed(hand, pid) {
   if (!hand.acted.includes(pid)) hand.acted.push(pid);
 }
 
-export function applyAction(state, playerId, action, amount, { forced = false } = {}) {
+export function applyAction(state, playerId, action, amount, { forced = false, policyMeta = null } = {}) {
   const legal = legalSnapshot(state);
   if (legal.toAct !== playerId) throwIllegal('not your turn');
   if (action !== 'fold' && action !== 'check' && action !== 'call' && action !== 'raise') {
@@ -726,6 +726,11 @@ export function applyAction(state, playerId, action, amount, { forced = false } 
     board: [...hand.board],
     stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
   };
+  if (policyMeta && playerId !== 'user') {
+    for (const key of ['policyId', 'policyVersion', 'sampledProbability', 'reasonCode']) {
+      if (policyMeta[key] !== undefined) record[key] = policyMeta[key];
+    }
+  }
   if (playerId === 'user') {
     if (!hand.decisions) hand.decisions = [];
     hand.decisions.push(snapshotDecision(next, playerId, {

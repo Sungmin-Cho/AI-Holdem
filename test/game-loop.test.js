@@ -7010,10 +7010,16 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     mode: undefined,
     stackBb: undefined,
     hands: undefined,
+    opponentRuntime: undefined,
   });
+  assert.equal(parseGameLoopArgs(['--ai', '1', '--opponent-runtime', 'policy']).opponentRuntime, 'policy');
   assert.deepEqual(
     engineInitFlags({ mode: 'cash-training', stackBb: 100, hands: 20, blinds: '50/100' }),
     ['--blinds', '50/100', '--mode', 'cash-training', '--stack-bb', '100', '--hands', '20'],
+  );
+  assert.deepEqual(
+    engineInitFlags({ opponentRuntime: 'policy' }),
+    ['--opponent-runtime', 'policy'],
   );
   assert.equal(parseGameLoopArgs(['--resume', '--game-dir', '/tmp/g']).resume, true);
   assert.equal(parseGameLoopArgs(['--store-dir', '/tmp/store', '--ai', '2']).storeDir, '/tmp/store');

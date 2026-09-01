@@ -6,9 +6,6 @@
 - 말투: {{speech}}
 - 성격: {{personality}}
 - 아키타입: {{archetype}}
-- 블러프 빈도: {{bluffFreq}}
-- 3벳 성향: {{threeBetFreq}}
-- 틸트 성향: {{tiltProne}}
 
 # 하는 일
 

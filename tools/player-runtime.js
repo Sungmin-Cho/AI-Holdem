@@ -303,7 +303,7 @@ function parseResponse(format, stdout) {
 
 // ── 플레이어 프롬프트 정본 ───────────────────────────────────────────────────
 
-const PERSONA_FIELDS = ['name', 'speech', 'personality', 'archetype', 'bluffFreq', 'threeBetFreq', 'tiltProne'];
+const PERSONA_FIELDS = ['name', 'speech', 'personality', 'archetype'];
 const DEFAULT_SUMMARY_PLACEHOLDER = '요약은 이 대화의 다음 메시지로 온다. 요약 밖의 정보를 찾지 않는다.';
 let promptTemplate = null;
 
@@ -321,7 +321,6 @@ export function buildPlayerPrompt({ persona, summaryPlaceholder = DEFAULT_SUMMAR
   if (promptTemplate === null) promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
   const values = {
     ...Object.fromEntries(PERSONA_FIELDS.map((f) => [f, String(persona[f])])),
-    tiltProne: persona.tiltProne ? '있음' : '없음',
     summaryPlaceholder: String(summaryPlaceholder),
   };
   const filled = promptTemplate.replace(/\{\{(\w+)\}\}/g, (match, key) => (

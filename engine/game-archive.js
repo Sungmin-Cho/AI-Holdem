@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createGame } from './hand.js';
@@ -297,7 +298,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const alive = deps.isAlive ?? isAlive;
   const clock = deps.now ?? now;
   const callerPpid = deps.callerPpid ?? process.ppid;
-  const { aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit } = flags;
+  const { aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit, opponentRuntime } = flags;
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
   // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
@@ -343,6 +344,9 @@ export function initGameDir(gameDir, flags, deps = {}) {
       startStackBb,
       handLimit,
     });
+    if (opponentRuntime === 'policy') {
+      state.policySeed = randomBytes(32).toString('hex');
+    }
     const players = [
       { playerId: 'user', seat: 0, name: '나' },
       ...personas,
