@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { processStartTime, withNamedLock, writeJsonAtomic } from '../engine/state.js';
 import {
   MAX_PUBLISH_BODY_BYTES,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
@@ -1115,6 +1115,12 @@ export function createCoachControl(deps = {}) {
       if (trainingAttemptPending) {
         reasons.push({ code: 'training_attempt_pending', detail: {} });
       }
+      try {
+        const rec = JSON.parse(fs.readFileSync(path.join(gameDir, '.solver-child.json'), 'utf8'));
+        if (rec?.pid && rec.startTime && processStartTime(rec.pid) === rec.startTime) {
+          reasons.push({ code: 'solver_child_live', detail: { pid: rec.pid } });
+        }
+      } catch { /* absent or dead */ }
       const trainingAuthPath = path.join(gameDir, 'training', '.training-authority.json');
       if (fs.existsSync(trainingAuthPath)) {
         try {
@@ -1156,7 +1162,7 @@ export function createCoachControl(deps = {}) {
           'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
           'coach_authority_missing', 'coach_authority_unreadable',
           'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
-          'pending_training', 'training_attempt_pending',
+          'pending_training', 'training_attempt_pending', 'solver_child_live',
         ];
         reasons.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
         return { ok: false, code: 'ROLLBACK_REFUSED', reasons };
