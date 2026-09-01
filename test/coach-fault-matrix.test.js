@@ -528,6 +528,24 @@ test('rollback guard는 복합 위반 reasons를 고정 순서와 서로소 reti
   ]);
 });
 
+test('rollback guard는 pending training을 ROLLBACK_REFUSED 허용 예외로 반환한다', async () => {
+  const fixture = setup({ token: 'tok-roll-training' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  fs.mkdirSync(path.join(fixture.dir, 'training'));
+  writeJsonAtomic(path.join(fixture.dir, 'training', '.training-authority.json'), {
+    schemaVersion: 1,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: fixture.owner,
+    items: {
+      'eval-1': { evaluationId: 'eval-1', status: 'evaluated', handNo: 1 },
+    },
+    publishQueue: {},
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'pending_training'), true);
+});
+
 test('game-over remaining 5,001ms는 교체 가능, 4,999ms는 불가', () => {
   const cutoff = 10_000_000_000n;
   assert.equal(canStartReplacement(cutoff - 5_001_000_000n, cutoff), true);

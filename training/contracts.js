@@ -4,7 +4,11 @@ export const ERRORS = Object.freeze({
   UNSUPPORTED_STACK: 'UNSUPPORTED_STACK',
   DATASET_INVALID: 'DATASET_INVALID',
   SNAPSHOT_INVALID: 'SNAPSHOT_INVALID',
+  EVALUATION_ID_INVALID: 'EVALUATION_ID_INVALID',
 });
+
+const EVALUATION_ID_RE = /^([0-9a-f]{64}):(d-\d+-[a-z]+-\d+):([a-z0-9-]{1,64})@(\d+\.\d+\.\d+)$/;
+const EVALUATION_ID_MAX = 256;
 
 const FREQ_EPS = 1e-6;
 
@@ -30,4 +34,13 @@ export function frequenciesSumToOne(actions, { tolerance = 0.01 } = {}) {
 
 export function evaluationIdOf({ gameEpoch, decisionId, providerId, providerVersion }) {
   return `${gameEpoch}:${decisionId}:${providerId}@${providerVersion}`;
+}
+
+export function assertEvaluationId(evaluationId) {
+  if (typeof evaluationId !== 'string'
+    || evaluationId.length > EVALUATION_ID_MAX
+    || !EVALUATION_ID_RE.test(evaluationId)) {
+    throw coded(ERRORS.EVALUATION_ID_INVALID, 'evaluationId가 계약 문법을 벗어났습니다.');
+  }
+  return evaluationId;
 }

@@ -9,6 +9,7 @@ import {
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
+  SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   gameEpochOf,
   payloadSha256,
   utf8ByteLength,
@@ -114,12 +115,14 @@ function checkEnvelope(envelope, file) {
     bail('BAD_ENVELOPE', `거부된 envelope입니다(code=${envelope.code ?? '?'}). 게시하지 않았습니다.`);
   }
   const hasView = envelope.view !== undefined;
-  const isSide = Array.isArray(envelope.coach) || envelope.review !== undefined;
+  const isSide = Array.isArray(envelope.coach)
+    || envelope.review !== undefined
+    || Array.isArray(envelope.training);
   // A step envelope always carries the user view — that is the whole point of it.
   // Accepting one without it lets an empty publish burn a publishId and hand the
   // dealer `next: null`, which its rules read as "hand over".
   if (!hasView && !isSide) {
-    bail('BAD_ENVELOPE', `${file}는 step envelope도 coach/review도 아닙니다.`);
+    bail('BAD_ENVELOPE', `${file}는 step envelope도 coach/review/training도 아닙니다.`);
   }
   // A non-user view would publish that player's hole cards to everyone. An absent
   // marker is not a pass: only an envelope that positively claims the user's view
@@ -155,6 +158,7 @@ function buildBody(envelope, opts) {
   if (messages.length) body.messages = messages;
   if (Array.isArray(envelope.coach) && envelope.coach.length) body.coach = envelope.coach;
   if (envelope.review !== undefined) body.review = envelope.review;
+  if (Array.isArray(envelope.training) && envelope.training.length) body.training = envelope.training;
   return body;
 }
 
@@ -198,6 +202,29 @@ function readAuthority(gameDir) {
   return null;
 }
 
+function readTrainingAuthority(gameDir) {
+  const file = path.join(gameDir, 'training', '.training-authority.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    bail('BAD_TRAINING_AUTHORITY', 'training authority를 읽지 못했습니다.');
+  }
+  return null;
+}
+
+function assertTrainingQueue(trainingAuth, trainingAuthority, epoch) {
+  if (!trainingAuthority) return;
+  if (trainingAuthority.expectedGameEpoch !== epoch) bail('STALE_TRAINING_AUTHORITY');
+  if (trainingAuth && !SUPPORTED_TRAINING_AUTHORITY_SCHEMAS.includes(trainingAuth.schemaVersion)) {
+    bail('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${trainingAuth.schemaVersion}`);
+  }
+  const queued = trainingAuth?.publishQueue?.[trainingAuthority.evaluationId];
+  if (!queued || queued.payloadSha256 !== trainingAuthority.payloadSha256) {
+    bail('STALE_TRAINING_AUTHORITY');
+  }
+}
+
 function assertSupportedAuthority(auth) {
   if (!auth) return;
   if (!SUPPORTED_COACH_AUTHORITY_SCHEMAS.includes(auth.schemaVersion)) {
@@ -205,7 +232,7 @@ function assertSupportedAuthority(auth) {
   }
 }
 
-function staleAttemptReason(record, epoch, auth) {
+function staleAttemptReason(record, epoch, auth, trainingAuth) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return 'BAD_ATTEMPT';
   if (!Object.prototype.hasOwnProperty.call(record, 'expectedGameEpoch')) return 'BAD_ATTEMPT_VERSION';
   if (record.expectedGameEpoch !== epoch) return 'STALE_GAME_ATTEMPT';
@@ -217,6 +244,13 @@ function staleAttemptReason(record, epoch, auth) {
       || queued.exactEnvelopePath !== itemAuth.exactEnvelopePath
       || queued.payloadSha256 !== itemAuth.payloadSha256) {
       return 'STALE_COACH_AUTHORITY';
+    }
+  }
+  const trainingItem = record.trainingAuthority;
+  if (trainingItem) {
+    const queued = trainingAuth?.publishQueue?.[trainingItem.evaluationId];
+    if (!queued || queued.payloadSha256 !== trainingItem.payloadSha256) {
+      return 'STALE_TRAINING_AUTHORITY';
     }
   }
   return null;
@@ -286,9 +320,11 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       Object.assign(lock, liveLock);
       const epoch = gameEpochOf(lock.sessionToken);
       const auth = readAuthority(gameDir);
+      const trainingAuth = readTrainingAuthority(gameDir);
       assertSupportedAuthority(auth);
       let body = null;
       let coachAuthority = envelope.coachAuthority ?? null;
+      let trainingAuthority = envelope.trainingAuthority ?? null;
       const pendingPath = attemptPath(gameDir);
       const pending = fs.existsSync(pendingPath);
       if (opts.retry && !pending) {
@@ -296,7 +332,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       }
       if (pending) {
         const record = readJson(pendingPath, 'BAD_ATTEMPT', '직전 게시 시도');
-        const stale = staleAttemptReason(record, epoch, auth);
+        const stale = staleAttemptReason(record, epoch, auth, trainingAuth);
         if (stale === 'BAD_ATTEMPT' || stale === 'BAD_ATTEMPT_VERSION') {
           bail(stale, '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
         }
@@ -310,6 +346,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         } else {
           body = record.body;
           coachAuthority = record.coachAuthority ?? null;
+          trainingAuthority = record.trainingAuthority ?? null;
           if (!body || typeof body !== 'object' || Array.isArray(body)
             || !Number.isInteger(body.publishId) || body.publishId < 1
             || body.publishId > MAX_PUBLISH_ID) {
@@ -320,6 +357,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       const cutoffBodyAllowed = opts.viewOnly
         || envelope.review !== undefined
         || coachAuthority !== null
+        || trainingAuthority !== null
         || (body && (body.viewOnly === true || body.review !== undefined));
       if (auth?.noNewPlayTimePublishers && !cutoffBodyAllowed) {
         bail('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시는 중단됐습니다.');
@@ -336,6 +374,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         body = { publishId: nextId, ...buildBody(envelope, opts) };
       }
       assertCoachQueue(auth, coachAuthority, epoch);
+      assertTrainingQueue(trainingAuth, trainingAuthority, epoch);
       if (coachAuthority && !opts.retry) {
         const fromPath = path.resolve(opts.from);
         if (path.resolve(coachAuthority.exactEnvelopePath) !== fromPath) {
@@ -370,8 +409,19 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       if (utf8ByteLength(serialized) > MAX_PUBLISH_BODY_BYTES) {
         bail('PAYLOAD_TOO_LARGE', '게시 본문이 공유 상한을 넘습니다.');
       }
+      if (trainingAuthority) {
+        const notes = body.training;
+        if (!Array.isArray(notes) || notes.length === 0) {
+          bail('STALE_TRAINING_AUTHORITY', 'training body shape이 올바르지 않습니다.');
+        }
+        const match = notes.find((note) => note.evaluationId === trainingAuthority.evaluationId);
+        if (!match || match.payloadSha256 !== trainingAuthority.payloadSha256) {
+          bail('STALE_TRAINING_AUTHORITY', 'envelope semantic digest가 queue와 일치하지 않습니다.');
+        }
+      }
       const attemptRecord = { body, expectedGameEpoch: epoch };
       if (coachAuthority) attemptRecord.coachAuthority = coachAuthority;
+      if (trainingAuthority) attemptRecord.trainingAuthority = trainingAuthority;
       writeAttempt(gameDir, attemptRecord);
       const afterLock = remainingMs(opts.deadlineMonotonicNs);
       if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');

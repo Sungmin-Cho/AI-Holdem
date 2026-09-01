@@ -82,12 +82,16 @@
       <div class="tabs" role="tablist">
         <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
         <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치</button>
+        <button type="button" id="tab-training" class="tab" role="tab" aria-selected="false" aria-controls="panel-training">학습</button>
       </div>
       <div id="panel-log" class="panel" role="tabpanel" aria-labelledby="tab-log">
         <div id="log-list" class="log-list" aria-live="polite"></div>
       </div>
       <div id="panel-coach" class="panel" role="tabpanel" aria-labelledby="tab-coach" hidden>
         <div id="coach-list" class="coach-list"></div>
+      </div>
+      <div id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
+        <div id="training-list" class="training-list"></div>
       </div>
     </aside>
   </main>
@@ -126,6 +130,6 @@
     </defs>
   </svg>
 
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

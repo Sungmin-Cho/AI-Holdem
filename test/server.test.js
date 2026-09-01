@@ -17,6 +17,26 @@ test('UI는 레거시 talk를 렌더링하지 않고 narration은 유지한다',
   assert.match(source, /case 'narration'/);
 });
 
+test('UI는 ESM module로 로드되고 training formatter를 import한다', async () => {
+  const html = fs.readFileSync(path.join(process.cwd(), 'server/public/index.html'), 'utf8');
+  assert.match(html, /<script type="module" src="\/app\.js">/);
+  assert.match(html, /id="tab-training"/);
+  const app = fs.readFileSync(path.join(process.cwd(), 'server/public/app.js'), 'utf8');
+  assert.match(app, /from '\.\/training-format\.js'/);
+  const gameDir = tmpDir();
+  const srv = await start(gameDir, 'tok-mod');
+  try {
+    const page = await req(srv.port, '/index.html', { token: 'tok-mod' });
+    assert.equal(page.status, 200);
+    const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
+    assert.equal(js.status, 200);
+    assert.match(js.text, /formatTrainingCard/);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
 async function start(gameDir, token = 'tok-test') {
   return startServer({ gameDir, port: 0, token });
 }

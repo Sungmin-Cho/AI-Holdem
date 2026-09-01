@@ -821,6 +821,33 @@ main {
 .coach-text { font-size: 13px; line-height: 1.6; color: var(--ink-2); }
 .coach-note.is-unavailable .coach-text { color: var(--muted); font-style: italic; }
 
+.training-list { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
+.training-card {
+  padding: 11px 13px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.training-card.grade-preferred { border-color: rgba(110, 180, 130, 0.45); }
+.training-card.grade-off-policy { border-color: rgba(200, 90, 80, 0.45); }
+.training-card.is-forced { opacity: 0.72; }
+.training-card.is-unsupported { border-style: dashed; }
+.training-summary { cursor: pointer; list-style: none; }
+.training-summary::-webkit-details-marker { display: none; }
+.training-title {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--gold-2);
+}
+.training-choice, .training-rec, .training-grade, .training-note, .training-explain, .training-source, .training-action {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.training-body { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+
 /* ── 오버레이 ────────────────────────────────────────── */
 
 .overlay {

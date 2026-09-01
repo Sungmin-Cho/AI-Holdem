@@ -20,6 +20,15 @@ import {
 } from './player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
+import { createTrainingControl } from './training-control.js';
+import {
+  ingestHand,
+  isTrainingEnabled,
+  reconcileSession,
+  trainingAggregate,
+  unpublishedEnvelope,
+  writeTrainingEnvelope,
+} from './training-pipeline.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -343,6 +352,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
+  const trainingOn = isTrainingEnabled(opts);
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
@@ -1774,6 +1784,94 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return port;
     } finally {
       closeServerLockPin(pin);
+    }
+  };
+
+  const flushTrainingPublish = async () => {
+    if (!trainingOn) return;
+    const loop = readLoopState();
+    const envelope = unpublishedEnvelope(root, { gameEpoch: loop?.gameEpoch });
+    if (!envelope) return;
+    const file = writeTrainingEnvelope(root, envelope);
+    const flags = ['--from', file];
+    if (publishDeadlineNs != null) flags.push('--deadline-monotonic-ns', String(publishDeadlineNs));
+    try {
+      await executePublish(flags);
+      const tc = createTrainingControl();
+      for (const item of envelope.training) {
+        try {
+          await tc.markPublished(root, item.evaluationId, item.payloadSha256);
+        } catch (error) {
+          log('training-mark-published', { code: error.code ?? 'ERROR' });
+        }
+      }
+    } catch (error) {
+      log('training-publish-error', { code: error.code ?? 'ERROR' });
+    }
+  };
+
+  const reconcileTrainingNow = async () => {
+    if (!trainingOn) return;
+    try {
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const loop = readLoopState();
+      await reconcileSession({
+        sessionDir: root,
+        gameEpoch: loop.gameEpoch,
+        owner: loop.ownerSessionId,
+        lastHand: engine?.lastHand ?? null,
+      });
+      await flushTrainingPublish();
+    } catch (error) {
+      log('training-reconcile-error', { code: error.code ?? 'ERROR' });
+    }
+  };
+
+  const runTrainingForHand = async (handNo) => {
+    if (!trainingOn) return;
+    try {
+      const loop = readLoopState();
+      const explain = upperAdapter?.oneshotStart
+        ? async (evaluation) => {
+          const handle = upperAdapter.oneshotStart({
+            tier: 'upper',
+            prompt: [
+              '역할: 학습 해설',
+              'JSON 한 줄만 출력하라: {"evaluationId":"...","explanation":"..."}',
+              'evaluator 수치를 바꾸지 마라. 새 숫자를 만들지 마라.',
+              evaluation.status !== 'supported' ? 'unsupported를 정답처럼 설명하지 마라.' : '',
+              JSON.stringify({
+                evaluationId: evaluation.evaluationId,
+                status: evaluation.status,
+                grade: evaluation.grade,
+                chosen: evaluation.chosen,
+                recommended: evaluation.recommended,
+                code: evaluation.code,
+                reason: evaluation.reason,
+              }),
+            ].filter(Boolean).join('\n'),
+            timeoutMs: 20_000,
+          });
+          const completed = await handle.done;
+          const parsed = JSON.parse(String(completed?.raw ?? '').trim());
+          if (parsed.evaluationId !== evaluation.evaluationId) return null;
+          return parsed.explanation;
+        }
+        : null;
+      const result = await ingestHand({
+        sessionDir: root,
+        handNo,
+        gameEpoch: loop.gameEpoch,
+        owner: loop.ownerSessionId,
+        explain,
+      });
+      if (!result.ok) {
+        log('training-evaluate-failed', { handNo, code: result.code });
+        return;
+      }
+      await flushTrainingPublish();
+    } catch (error) {
+      log('training-error', { handNo, code: error.code ?? 'ERROR' });
     }
   };
 
@@ -3274,6 +3372,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '각 결정 시점에 사용자가 볼 수 있었던 공개 정보만으로 과정 품질을 한국어로 평가하라.',
     '실제 게임 결과와 players.json/상대 아키타입은 제공되지 않았으며 추측하거나 언급하지 마라.',
     '표본이 30핸드 미만이면 반드시 참고용이라고 명시하라.',
+    ...(trainingOn ? [
+      '',
+      'training aggregate (frequency grades, independent of chip result):',
+      JSON.stringify(trainingAggregate(root)),
+    ] : []),
     '',
     `completed hands: ${completed}`,
     ...hands.flatMap(({ handNo, raw }) => [
@@ -3603,6 +3706,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const checkpoint = baseFinalizationCheckpoint();
     writeLoopState({ finalization: checkpoint });
     log('finalize-start', { budgetMs: finalizeBudgetMs, resultWaitMs: checkpoint.resultWaitMs });
+    await reconcileTrainingNow();
 
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') {
@@ -4179,6 +4283,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // generation이 없는 크래시 재개에서만 그 핸드를 다시 스폰한다.
       if (resumed.phase === 'playing') {
         await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
+        await reconcileTrainingNow();
         resumed = readLoopState();
       } else if (resumed.phase === 'finalizing') {
         ensureFinalizationResultWaitCutoff();
@@ -4277,6 +4382,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
         const ending = out.gameOver || userBusted;
         if (ending) ensureFinalizationResultWaitCutoff();
+        await runTrainingForHand(out.handNo);
         try {
           await heartbeatCoach();
         } catch (error) {
@@ -4432,6 +4538,7 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
+            opts: { trainingEnabled: true },
           });
         } else {
           const previous = resolveCurrentSession(args.storeDir);
@@ -4448,6 +4555,7 @@ async function main() {
             lockDir: args.storeDir,
             initialLockHandle: storeLockHandle,
             resolver,
+            opts: { trainingEnabled: true },
           });
         }
       } catch (error) {

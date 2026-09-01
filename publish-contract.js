@@ -51,3 +51,42 @@ export function publishBodyByteLength(tuple, proof, publishId = MAX_PUBLISH_ID) 
 export function gameEpochOf(sessionToken) {
   return sha256Hex(sessionToken);
 }
+
+export const SUPPORTED_TRAINING_AUTHORITY_SCHEMAS = Object.freeze([1]);
+
+const TRAINING_SUMMARY_KEYS = Object.freeze([
+  'evaluationId',
+  'handNo',
+  'decisionId',
+  'status',
+  'street',
+  'spotKey',
+  'handClass',
+  'chosen',
+  'recommended',
+  'evLossBb',
+  'grade',
+  'forced',
+  'source',
+  'explanation',
+  'detailRef',
+  'detailSha256',
+  'code',
+  'reason',
+]);
+
+export function detailRefOf(evaluationId) {
+  return sha256Hex(String(evaluationId));
+}
+
+export function canonicalTrainingJson(summary) {
+  const out = {};
+  for (const key of TRAINING_SUMMARY_KEYS) {
+    if (summary?.[key] !== undefined) out[key] = summary[key];
+  }
+  return JSON.stringify(out);
+}
+
+export function trainingPayloadSha256(summary) {
+  return sha256Hex(canonicalTrainingJson(summary));
+}
