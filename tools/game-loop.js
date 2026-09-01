@@ -35,6 +35,7 @@ import {
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from '../training/profile-store.js';
+import { createMistakeBank } from '../training/mistake-bank.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -1811,6 +1812,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (storeDir) {
             try {
               await applyEvaluation(storeDir, item);
+              try {
+                await createMistakeBank(storeDir).collect(item);
+              } catch (error) {
+                log('mistake-bank-error', { code: error.code ?? 'ERROR' });
+              }
             } catch (error) {
               log('profile-apply-error', { code: error.code ?? 'ERROR' });
             }

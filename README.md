@@ -14,7 +14,7 @@ AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤�
 
 계층 경계와 불변식은 [`ARCHITECTURE.md`](ARCHITECTURE.md)에 있다.
 
-Preflop 학습 평가는 `training/`에 있다. MVP는 6-max 100BB frequency-only baseline이며 EV 숫자는 만들지 않는다. `--store-dir` 세션은 핸드 종료 후 평가를 게시하고 UI 학습 탭에 표시한다. 장기 skill profile은 `<store>/.training/`에 남고 `node tools/profile-cli.js apply|rebuild|show|reset|sweep --store-dir game`으로 관리한다. 레거시 `--game-dir`에서는 training이 꺼진다. 데이터 출처는 [`training/data/README.md`](training/data/README.md).
+Preflop 학습 평가는 `training/`에 있다. MVP는 6-max 100BB frequency-only baseline이며 EV 숫자는 만들지 않는다. `--store-dir` 세션은 핸드 종료 후 평가를 게시하고 UI 학습 탭에 표시한다. 장기 skill profile은 `<store>/.training/`에 남고 `node tools/profile-cli.js apply|rebuild|show|reset|sweep --store-dir game`으로 관리한다. 스팟 드릴은 `node tools/drill-cli.js start --store-dir game --mode leak|mistake-review|daily|free` 또는 `node server/drill-server.js --store-dir game`(게임 세션 토큰과 다른 전용 토큰)이다. 레거시 `--game-dir`에서는 training이 꺼진다. 데이터 출처는 [`training/data/README.md`](training/data/README.md).
 
 ## 왜 사이드카인가
 
