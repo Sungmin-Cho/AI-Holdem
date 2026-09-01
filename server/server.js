@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -271,6 +271,35 @@ async function readJsonBody(req, res) {
   }
 }
 
+function readTrainingDetail(root, ref, expectedSha) {
+  const nofollow = fs.constants.O_NOFOLLOW ?? 0;
+  const dirFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | nofollow;
+  let trainingFd;
+  let detailsFd;
+  let fileFd;
+  try {
+    trainingFd = fs.openSync(path.join(root, 'training'), dirFlags);
+    detailsFd = fs.openSync(path.join(root, 'training', 'details'), dirFlags);
+    fileFd = fs.openSync(
+      path.join(root, 'training', 'details', `${ref}.json`),
+      fs.constants.O_RDONLY | nofollow,
+    );
+    const st = fs.fstatSync(fileFd);
+    if (!st.isFile() || st.size > 1_000_000) throw new Error('bad-detail');
+    const buf = Buffer.alloc(st.size);
+    fs.readSync(fileFd, buf, 0, st.size, 0);
+    const digest = createHash('sha256').update(buf).digest('hex');
+    if (digest !== expectedSha) throw new Error('digest');
+    return JSON.parse(buf.toString('utf8'));
+  } finally {
+    for (const fd of [fileFd, detailsFd, trainingFd]) {
+      if (fd != null) {
+        try { fs.closeSync(fd); } catch { /* closed */ }
+      }
+    }
+  }
+}
+
 function serveStatic(pathname, res) {
   const rel = pathname === '/' ? '/index.html' : pathname;
   const abs = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -521,6 +550,27 @@ export function startServer({ gameDir, port = 8877, token }) {
     if (req.method === 'GET' && pathname === '/api/snapshot') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
       sendJson(res, 200, publicSnapshot(state));
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/training-detail') {
+      if (!checkToken(url.searchParams.get('token'), res)) return;
+      const ref = url.searchParams.get('ref') ?? '';
+      if (!/^[0-9a-f]{64}$/.test(ref)) {
+        sendJson(res, 400, { ok: false, code: 'BAD_DETAIL_REF' });
+        return;
+      }
+      const item = (state.training ?? []).find((row) => row.detailRef === ref);
+      if (!item?.detailSha256) {
+        sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        return;
+      }
+      try {
+        const detail = readTrainingDetail(root, ref, item.detailSha256);
+        sendJson(res, 200, { ok: true, detail });
+      } catch {
+        sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      }
       return;
     }
 

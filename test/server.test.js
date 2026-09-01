@@ -722,3 +722,33 @@ test('wait-action: view-only 재게시는 액션 처리 확인이 아니므로 �
     fs.rmSync(gameDir, { recursive: true, force: true });
   }
 });
+
+test('training-detail GET is token-first and digest-checked', async () => {
+  const { createHash } = await import('node:crypto');
+  const gameDir = tmpDir();
+  const token = 'tok-detail';
+  const ref = 'ab'.repeat(32);
+  const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
+  const raw = JSON.stringify(payload);
+  const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  fs.mkdirSync(path.join(gameDir, 'training', 'details'), { recursive: true });
+  fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+  }));
+  const srv = await start(gameDir, token);
+  try {
+    const denied = await req(srv.port, `/api/training-detail?ref=${ref}`);
+    assert.equal(denied.status, 401);
+    const ok = await req(srv.port, `/api/training-detail?ref=${ref}`, { token });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.ok, true);
+    fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), '{"tampered":true}');
+    const bad = await req(srv.port, `/api/training-detail?ref=${ref}`, { token });
+    assert.equal(bad.status, 404);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});

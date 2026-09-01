@@ -546,6 +546,19 @@ test('rollback guard는 pending training을 ROLLBACK_REFUSED 허용 예외로 �
   assert.equal(guard.reasons.some((reason) => reason.code === 'pending_training'), true);
 });
 
+test('rollback guard refuses a live solver child', async () => {
+  const { processStartTime } = await import('../engine/state.js');
+  const fixture = setup({ token: 'tok-solver-live' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writeJsonAtomic(path.join(fixture.dir, '.solver-child.json'), {
+    pid: process.pid,
+    startTime: processStartTime(process.pid),
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'solver_child_live'), true);
+});
+
 test('game-over remaining 5,001ms는 교체 가능, 4,999ms는 불가', () => {
   const cutoff = 10_000_000_000n;
   assert.equal(canStartReplacement(cutoff - 5_001_000_000n, cutoff), true);
