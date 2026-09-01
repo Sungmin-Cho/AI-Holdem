@@ -430,6 +430,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const assertAndBoundFinalizationMs = (ms) => {
+    if (finalizationDeadlineNs === null) return ms;
+    const remaining = remainingMsUntil(finalizationDeadlineNs);
+    if (remaining <= 0) throw finalizationDeadlineError();
+    return Math.min(ms, remaining);
+  };
+
   const settleOrTimeout = async (promise, ms) => {
     let timer = null;
     try {
@@ -471,6 +478,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const d9Checkpoint = (name) => {
     opts.d9Checkpoint?.(name);
     assertNotStopping();
+    assertFinalizationDeadline();
   };
 
   const log = (event, fields = {}) => {
@@ -795,7 +803,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const serverHealthy = async (port, { stopAware = false } = {}) => {
     if (!Number.isInteger(port) || port < 1) return false;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 500);
+    const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(500));
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
       if (stopAware) assertNotStopping();
@@ -819,7 +827,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '-nP', '-a', '-p', String(pid), `-iTCP:${port}`, '-sTCP:LISTEN', '-Fptn',
     ], {
       encoding: 'utf8',
-      timeout: osVerifyMs,
+      timeout: assertAndBoundFinalizationMs(osVerifyMs),
       killSignal: 'SIGKILL',
       maxBuffer: 64 * 1024,
     }, (error, stdout, stderr) => {
@@ -845,7 +853,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const assertAuthenticatedServer = async (port, sessionToken, { stopAware = false } = {}) => {
     const requestSnapshot = async (token) => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 500);
+      const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(500));
       try {
         const response = await fetch(
           `http://127.0.0.1:${port}/api/snapshot?token=${encodeURIComponent(token)}`,
@@ -1140,7 +1148,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (processAlive(confirmed.serverPid)) {
           throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server pid가 확인 중 다시 살아났습니다.');
         }
-        if (stopAware) assertNotStopping();
+        if (recovery) d9Checkpoint('before-retire-existing');
+        else if (stopAware) assertNotStopping();
         retirePinnedServerLock(pin);
       }
 
@@ -1177,7 +1186,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
       const deadline = Date.now() + serverStartMs;
       while (Date.now() < deadline) {
-        if (stopAware) assertNotStopping();
+        if (recovery) d9Checkpoint('startup-iteration');
+        else if (stopAware) assertNotStopping();
         if (spawnError) throw codedError('SERVER_START_FAILED', spawnError.message, { cause: spawnError });
         if (child.exitCode !== null || child.signalCode !== null) {
           throw codedError('SERVER_START_FAILED', `서버 자식이 조기 종료했습니다: ${child.exitCode ?? child.signalCode}`);
@@ -1202,8 +1212,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
           return lock.port;
         }
-        await sleep(pollMs);
-        if (stopAware) assertNotStopping();
+        await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
+        if (recovery) d9Checkpoint('after-startup-sleep');
+        else if (stopAware) assertNotStopping();
       }
       throw codedError('SERVER_START_TIMEOUT', '서버 health 확인 시간이 초과됐습니다.');
     } finally {
@@ -1392,7 +1403,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return false;
   };
 
-  const stopDirectServerChild = async () => {
+  const stopDirectServerChild = async ({ boundToFinalizationDeadline = false } = {}) => {
     const child = serverChild;
     if (!child) return;
     if (serverStartupIdentityMissing) {
@@ -1427,10 +1438,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         resolve();
       }));
       signalDirectChild('SIGTERM');
-      await Promise.race([exit, sleep(1_000)]);
+      await Promise.race([
+        exit,
+        sleep(boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000),
+      ]);
       if (!exited && child.exitCode === null && child.signalCode === null) {
+        if (boundToFinalizationDeadline) assertFinalizationDeadline();
         signalDirectChild('SIGKILL');
-        await Promise.race([exit, sleep(1_000)]);
+        await Promise.race([
+          exit,
+          sleep(boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000),
+        ]);
       }
       if (!exited && child.exitCode === null && child.signalCode === null) {
         throw codedError('SERVER_STOP_UNCONFIRMED', '직접 server child 종료를 확인하지 못했습니다.');
@@ -1473,17 +1491,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const stopServer = async () => {
+  const stopServer = async ({ boundToFinalizationDeadline = false } = {}) => {
     if (!serverAdopted) {
-      await stopDirectServerChild();
+      await stopDirectServerChild({ boundToFinalizationDeadline });
       return;
     }
     if (adoptedIdentityStatus() === 'dead') return;
     signalAdoptedServer('SIGTERM');
-    if (!await waitForAdoptedDeath(1_000)) {
+    if (!await waitForAdoptedDeath(
+      boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000,
+    )) {
       // pid+startTime을 KILL 직전에 다시 확인한다. unknown/mismatch면 신호 없이 실패한다.
+      if (boundToFinalizationDeadline) assertFinalizationDeadline();
       signalAdoptedServer('SIGKILL');
-      if (!await waitForAdoptedDeath(1_000)) {
+      if (!await waitForAdoptedDeath(
+        boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000,
+      )) {
         throw codedError('SERVER_STOP_UNCONFIRMED', '재사용 서버 종료를 확인하지 못했습니다.');
       }
     }
@@ -1703,7 +1726,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 검증하지 못한 server lock 소유자가 살아 있습니다.');
           }
           assertPinnedServerLock(pin);
-          await stopServer();
+          await stopServer({ boundToFinalizationDeadline: true });
           d9Checkpoint('after-stop-server');
         } else if (serverChild?.pid === expected.serverPid) {
           serverChild = null;
@@ -1741,7 +1764,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return await runPublish(args);
     } catch (error) {
       if (error.code !== 'PUBLISH_FAILED' && error.code !== 'PUBLISH_REJECTED') throw error;
-      await recoverServerForPublish();
+      if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
+        throw codedError(
+          'FINALIZATION_DEADLINE_EXCEEDED',
+          'finalization 공통 deadline이 만료됐습니다.',
+          { cause: error },
+        );
+      }
+      try {
+        await recoverServerForPublish();
+      } catch (recoveryError) {
+        if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
+          throw codedError(
+            'FINALIZATION_DEADLINE_EXCEEDED',
+            'finalization 공통 deadline이 만료됐습니다.',
+            { cause: recoveryError },
+          );
+        }
+        throw recoveryError;
+      }
       d9Checkpoint('before-retry');
       const retryArgs = args.includes('--retry') ? args : [...args, '--retry'];
       return runPublish(retryArgs);
@@ -3021,11 +3062,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       && coachTasks.size === 0;
   };
 
-  const haltFinalization = (code, message) => {
+  const haltFinalization = (code, message, extra = {}) => {
     appendNotice(message);
-    writeLoopState({ halt: { code, message } });
+    writeLoopState({ halt: { code, message, ...extra } });
     log('finalize-halt', { code });
-    return codedError(code, message);
+    return codedError(code, message, extra);
   };
 
   const persistedCoachRecovery = ({ owner, unresolved }) => {
@@ -3426,7 +3467,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return readLoopState() ?? current;
   };
 
-  const abortExpiredFinalization = () => {
+  const abortExpiredFinalization = ({ cause = null } = {}) => {
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
       finalization: {
@@ -3436,6 +3477,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           at: isoNow(now),
           terminationConfirmed: false,
           reason: 'deadline_exceeded',
+          cause: cause?.code ?? null,
           reviewGate: 'closed',
         },
       },
@@ -3443,6 +3485,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return haltFinalization(
       'FINALIZATION_ABORTED',
       'finalization 공통 deadline이 만료돼 리뷰 게이트를 열지 않습니다.',
+      { causeCode: cause?.code ?? null },
     );
   };
 
@@ -3522,7 +3565,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const translateFinalizationDeadline = (error) => {
     if (error?.code === 'FINALIZATION_RESULT_WAIT_CUTOFF') return abortResultWaitCutoff();
     if (error?.code !== 'FINALIZATION_DEADLINE_EXCEEDED') return error;
-    return abortExpiredFinalization();
+    return abortExpiredFinalization({ cause: error.cause ?? null });
   };
 
   // 종료 시퀀스 §5/§9.2. Phase는 이미 finalizing이고, 각 단계가 loop-state 체크포인트다.
