@@ -14,6 +14,8 @@ AI 에이전트 여럿과 브라우저에서 두는 노리밋 텍사스 홀덤�
 
 계층 경계와 불변식은 [`ARCHITECTURE.md`](ARCHITECTURE.md)에 있다.
 
+Preflop 학습 평가는 `training/`에 있다. MVP는 6-max 100BB frequency-only baseline이며 EV 숫자는 만들지 않는다. 데이터 출처는 [`training/data/README.md`](training/data/README.md).
+
 ## 왜 사이드카인가
 
 이전 구조에서는 딜러 역할을 맡은 LLM 세션이 루프를 직접 돌렸다. AI 한 명이 액션할 때마다 딜러 LLM 왕복이 한 번씩 끼어들었고, 그게 게임 속도를 지배했다. 지금은 그 루프가 노드 프로세스 안으로 들어갔다.
