@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveExportDir } from '../export/hand-normalizer.js';
 import { buildCanonical, buildText } from '../export/manifest.js';
+import { ensureDir, writeContained } from './training-store.js';
 
 function fail(code, message) {
   fs.writeSync(1, `${JSON.stringify({ ok: false, code, message })}\n`);
@@ -23,33 +24,90 @@ function parseArgs(argv) {
   return flags;
 }
 
-function assertSafeOut(outPath) {
+function resolveContainedOutput(outPath) {
   const resolved = path.resolve(outPath);
-  let st;
-  try { st = fs.lstatSync(resolved); } catch (error) {
-    if (error.code === 'ENOENT') return resolved;
-    throw error;
+  const fileName = path.basename(resolved);
+  if (!fileName || fileName === '.' || fileName === '..') {
+    const err = new Error('출력 파일명이 올바르지 않습니다.');
+    err.code = 'BAD_SEGMENT';
+    throw err;
   }
-  if (st.isSymbolicLink()) fail('UNSAFE_PATH', 'symlink 출력 경로는 거부합니다.');
-  if (st.isFile()) fail('EXISTS', '이미 있는 파일을 덮어쓰지 않습니다.');
-  return resolved;
+  const parsed = path.parse(resolved);
+  const parts = resolved.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current = parsed.root;
+  let index = 0;
+  let seenRealDir = false;
+  while (index < parts.length) {
+    const next = path.join(current, parts[index]);
+    let st;
+    try {
+      st = fs.lstatSync(next);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      break;
+    }
+    if (st.isSymbolicLink()) {
+      if (seenRealDir) break;
+      current = fs.realpathSync(next);
+      index += 1;
+      continue;
+    }
+    if (st.isDirectory()) {
+      seenRealDir = true;
+      current = next;
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const segments = parts.slice(index);
+  if (segments.length === 0) {
+    const err = new Error('출력 경로가 안전하지 않습니다.');
+    err.code = 'UNSAFE_PATH';
+    throw err;
+  }
+  let made = current;
+  for (const segment of segments.slice(0, -1)) {
+    made = path.join(made, segment);
+    ensureDir(made);
+  }
+  return { root: current, segments };
 }
 
 function main() {
-  const flags = parseArgs(process.argv.slice(2));
-  const gameDir = resolveExportDir({ gameDir: flags['game-dir'], storeDir: flags['store-dir'] });
-  const format = flags.format ?? 'canonical-json';
-  const exportedAt = flags['exported-at'] ?? new Date().toISOString();
-  const canonical = buildCanonical(gameDir, { exportedAt });
-  let body;
-  if (format === 'canonical-json') body = `${JSON.stringify(canonical, null, 2)}\n`;
-  else if (format === 'pokerstars') body = `${buildText(canonical, { exportedAt }).text}\n`;
-  else fail('USAGE', 'format은 canonical-json 또는 pokerstars입니다.');
-  const out = flags.out ?? path.join(gameDir, 'exports', format === 'pokerstars' ? 'session.txt' : 'session.json');
-  const safe = assertSafeOut(out);
-  fs.mkdirSync(path.dirname(safe), { recursive: true });
-  fs.writeFileSync(safe, body, { flag: 'wx' });
-  fs.writeSync(1, `${JSON.stringify({ ok: true, out: safe, hands: canonical.hands.length, warnings: canonical.warnings })}\n`);
+  try {
+    const flags = parseArgs(process.argv.slice(2));
+    const gameDir = resolveExportDir({ gameDir: flags['game-dir'], storeDir: flags['store-dir'] });
+    const gameSt = fs.lstatSync(gameDir);
+    if (gameSt.isSymbolicLink() || !gameSt.isDirectory()) {
+      fail('UNSAFE_PATH', '입력 경로가 안전하지 않습니다.');
+    }
+    const format = flags.format ?? 'canonical-json';
+    const exportedAt = flags['exported-at'] ?? new Date().toISOString();
+    const canonical = buildCanonical(gameDir, { exportedAt });
+    let body;
+    let warnings = canonical.warnings;
+    if (format === 'canonical-json') {
+      body = `${JSON.stringify(canonical, null, 2)}\n`;
+    } else if (format === 'pokerstars') {
+      const rendered = buildText(canonical, { exportedAt });
+      body = rendered.text.endsWith('\n') ? rendered.text : `${rendered.text}\n`;
+      warnings = rendered.warnings;
+    } else {
+      fail('USAGE', 'format은 canonical-json 또는 pokerstars입니다.');
+    }
+    const out = flags.out ?? path.join(
+      gameDir,
+      'exports',
+      format === 'pokerstars' ? 'session.txt' : 'session.json',
+    );
+    const { root, segments } = resolveContainedOutput(out);
+    writeContained(root, segments, body, { mode: 'create' });
+    const safe = path.join(root, ...segments);
+    fs.writeSync(1, `${JSON.stringify({ ok: true, out: safe, hands: canonical.hands.length, warnings })}\n`);
+  } catch (error) {
+    fail(error.code ?? 'EXPORT_FAILED', error.message);
+  }
 }
 
 const thisFile = fileURLToPath(import.meta.url);
