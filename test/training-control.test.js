@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { evaluationIdOf } from '../training/contracts.js';
-import { createTrainingControl } from '../tools/training-control.js';
+import { createTrainingControl, writeCutoffMarkerUnlocked } from '../tools/training-control.js';
 import { readJsonl } from '../tools/training-store.js';
 
 function tmp() {
@@ -145,3 +145,98 @@ test('unknown authority schema is fail-closed', async () => {
     { code: 'UNSUPPORTED_TRAINING_AUTHORITY' },
   );
 });
+
+test('cutoff marker then late ready seal becomes unavailable', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  assert.equal(typeof tc.writeCutoffMarker, 'function');
+  const evaluation = evalOf();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  await tc.writeCutoffMarker(dir);
+  const sealed = await tc.sealAnnotation(dir, evaluation.evaluationId, 'explanation', '늦은 해설');
+  assert.equal(sealed.ok, true);
+  const auth = tc.loadAuthority(dir);
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+});
+
+test('cutoff marker already-present file is EXISTS reuse; non-file dest fails closed', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  const evaluation = evalOf();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const first = await tc.writeCutoffMarker(dir);
+  assert.equal(first.reused, false);
+  const second = await tc.writeCutoffMarker(dir);
+  assert.equal(second.reused, true);
+  fs.unlinkSync(path.join(dir, 'training', '.cutoff'));
+  fs.mkdirSync(path.join(dir, 'training', '.cutoff'));
+  await assert.rejects(
+    () => tc.writeCutoffMarker(dir),
+    (error) => error.code === 'UNSAFE_PATH',
+  );
+});
+
+test('writeCutoffMarker EXISTS reuse re-lstats and rejects a non-file dest', () => {
+  const dir = tmp();
+  const dest = path.join(dir, 'training', '.cutoff');
+  assert.throws(
+    () => writeCutoffMarkerUnlocked(dir, {
+      write() {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.mkdirSync(dest);
+        const error = new Error('exists');
+        error.code = 'EXISTS';
+        throw error;
+      },
+    }),
+    (error) => error.code === 'UNSAFE_PATH',
+  );
+  assert.equal(fs.lstatSync(dest).isDirectory(), true);
+});
+
+test('writeCutoffMarker EXISTS reuse re-lstats and accepts a regular file', () => {
+  const dir = tmp();
+  const dest = path.join(dir, 'training', '.cutoff');
+  const result = writeCutoffMarkerUnlocked(dir, {
+    write() {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, JSON.stringify({ at: 'already' }));
+      const error = new Error('exists');
+      error.code = 'EXISTS';
+      throw error;
+    },
+  });
+  assert.equal(result.reused, true);
+  assert.equal(fs.lstatSync(dest).isFile(), true);
+});
+
+test('process-local explanation cutoff fences ready without a marker file', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  const evaluation = evalOf();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const { enterExplanationCutoff } = await import('../tools/training-control.js');
+  assert.equal(typeof enterExplanationCutoff, 'function');
+  enterExplanationCutoff(dir);
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.cutoff')), false);
+  const sealed = await tc.sealAnnotation(dir, evaluation.evaluationId, 'explanation', '늦은 해설');
+  assert.equal(sealed.ok, true);
+  const auth = tc.loadAuthority(dir);
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+});
+

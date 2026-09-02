@@ -61,6 +61,67 @@ export function annotationExactSegments(detailRef, field) {
   return ['annotations', `${detailRef}.${field}.json`];
 }
 
+export function cutoffMarkerPath(sessionDir) {
+  return path.join(trainingDir(sessionDir), '.cutoff');
+}
+
+const explanationCutoffSessions = new Set();
+
+export function enterExplanationCutoff(sessionDir) {
+  explanationCutoffSessions.add(path.resolve(sessionDir));
+}
+
+export function hasCutoffMarker(sessionDir) {
+  try {
+    return fs.lstatSync(cutoffMarkerPath(sessionDir)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export function hasExplanationCutoff(sessionDir) {
+  return explanationCutoffSessions.has(path.resolve(sessionDir)) || hasCutoffMarker(sessionDir);
+}
+
+function inspectCutoffMarker(file) {
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isFile()) return { reused: true };
+    throw coded('UNSAFE_PATH', `${file}는 안전한 일반 파일이 아닙니다.`);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export function writeCutoffMarkerUnlocked(sessionDir, { write = writeContained } = {}) {
+  ensureDir(trainingDir(sessionDir));
+  const file = cutoffMarkerPath(sessionDir);
+  const existing = inspectCutoffMarker(file);
+  if (existing) {
+    enterExplanationCutoff(sessionDir);
+    return existing;
+  }
+  try {
+    write(
+      sessionDir,
+      ['training', '.cutoff'],
+      JSON.stringify({ at: new Date().toISOString() }),
+      { mode: 'create' },
+    );
+    enterExplanationCutoff(sessionDir);
+    return { reused: false };
+  } catch (error) {
+    if (error.code !== 'EXISTS') throw error;
+    const reused = inspectCutoffMarker(file);
+    if (reused) {
+      enterExplanationCutoff(sessionDir);
+      return reused;
+    }
+    throw coded('UNSAFE_PATH', `${file}는 안전한 일반 파일이 아닙니다.`);
+  }
+}
+
 function emptyAuth({ gameEpoch, owner }) {
   return {
     schemaVersion: 2,
@@ -617,14 +678,22 @@ export function createTrainingControl({ storeDir } = {}) {
     });
   }
 
+  async function writeCutoffMarker(sessionDir) {
+    return withLock(sessionDir, () => writeCutoffMarkerUnlocked(sessionDir));
+  }
+
   async function sealAnnotation(sessionDir, evaluationId, field, valueOrUnavailable) {
     return withLock(sessionDir, () => {
       const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
       if (!auth) return { ok: false, code: 'NO_TRAINING_ITEM' };
       const item = auth.items[evaluationId];
       if (!item) return { ok: false, code: 'NO_TRAINING_ITEM' };
-      const status = valueOrUnavailable === 'unavailable' ? 'unavailable' : 'ready';
-      const value = status === 'unavailable' ? null : valueOrUnavailable;
+      let status = valueOrUnavailable === 'unavailable' ? 'unavailable' : 'ready';
+      let value = status === 'unavailable' ? null : valueOrUnavailable;
+      if (field === 'explanation' && status === 'ready' && hasExplanationCutoff(sessionDir)) {
+        status = 'unavailable';
+        value = null;
+      }
       const existing = item.annotations?.[field];
       if (existing?.status === 'unavailable') {
         return { ok: true, discarded: true };
@@ -666,7 +735,29 @@ export function createTrainingControl({ storeDir } = {}) {
         published: false,
       };
       persistAuth(sessionDir, auth);
-      return { ok: true, annotation: item.annotations[field] };
+      return { ok: true, annotation: item.annotations[field], converted: status === 'unavailable' && valueOrUnavailable !== 'unavailable' };
+    });
+  }
+
+  async function markAnnotationPublished(sessionDir, evaluationId, field, valueSha256) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
+      const item = auth.items[evaluationId];
+      if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
+      const annotation = item.annotations?.[field];
+      if (!annotation) throw coded('NO_TRAINING_ITEM', `${evaluationId}:${field}`);
+      if (annotation.valueSha256 !== valueSha256) {
+        throw coded('ANNOTATION_CONFLICT', '같은 annotation에 다른 digest가 있습니다.');
+      }
+      annotation.published = true;
+      const queued = auth.annotationQueue[evaluationId];
+      if (queued) {
+        delete queued[field];
+        if (Object.keys(queued).length === 0) delete auth.annotationQueue[evaluationId];
+      }
+      persistAuth(sessionDir, auth);
+      return item;
     });
   }
 
@@ -713,6 +804,8 @@ export function createTrainingControl({ storeDir } = {}) {
     markConsumer,
     recordPending,
     sealAnnotation,
+    markAnnotationPublished,
+    writeCutoffMarker,
     consumeTrainingItems,
     withLock,
   };

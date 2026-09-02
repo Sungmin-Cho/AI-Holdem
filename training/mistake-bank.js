@@ -44,11 +44,19 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
       const data = load();
       if (!collectable(evaluation)) return { added: false, item: null };
       const existingId = data.items.find((item) => item.mistakeId === evaluation.evaluationId);
-      if (existingId) return { added: false, item: existingId };
+      if (existingId) {
+        existingId.evidenceIds = existingId.evidenceIds ?? [existingId.mistakeId];
+        return { added: false, item: existingId };
+      }
       const sig = signatureOf(evaluation);
       const sameSpot = data.items.find((item) => item.spotSignature === sig);
       if (sameSpot) {
-        sameSpot.evidence = (sameSpot.evidence ?? 1) + 1;
+        sameSpot.evidenceIds = sameSpot.evidenceIds ?? [sameSpot.mistakeId];
+        if (sameSpot.evidenceIds.includes(evaluation.evaluationId)) {
+          return { added: false, item: sameSpot };
+        }
+        sameSpot.evidenceIds.push(evaluation.evaluationId);
+        sameSpot.evidence = sameSpot.evidenceIds.length;
         sameSpot.lastSeenAt = now();
         writeJsonSecure(file, data);
         return { added: false, item: sameSpot };
@@ -68,6 +76,7 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
         correctStreak: 0,
         lapses: 0,
         evidence: 1,
+        evidenceIds: [evaluation.evaluationId],
       };
       data.items.push(item);
       writeJsonSecure(file, data);
