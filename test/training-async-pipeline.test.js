@@ -118,12 +118,25 @@ function cannedEvaluation(decisionId, gameEpoch) {
   };
 }
 
-function userDecision(sessionDir, handNo) {
+function handRecord(sessionDir, handNo) {
   const state = readJson(path.join(sessionDir, 'state.json'));
-  const record = state.lastHand?.handNo === handNo
-    ? state.lastHand
-    : JSON.parse(fs.readFileSync(path.join(sessionDir, 'hands', `hand-${String(handNo).padStart(4, '0')}.json`), 'utf8'));
-  return (record.decisions ?? []).find((snap) => snap.actorId === 'user') ?? null;
+  if (state.lastHand?.handNo === handNo) return state.lastHand;
+  try {
+    return JSON.parse(fs.readFileSync(
+      path.join(sessionDir, 'hands', `hand-${String(handNo).padStart(4, '0')}.json`),
+      'utf8',
+    ));
+  } catch {
+    return null;
+  }
+}
+
+function userDecisions(sessionDir, handNo) {
+  return (handRecord(sessionDir, handNo)?.decisions ?? []).filter((snap) => snap.actorId === 'user');
+}
+
+function userDecision(sessionDir, handNo) {
+  return userDecisions(sessionDir, handNo)[0] ?? null;
 }
 
 function handleOf(result, { delayMs = 0, gate = null, onTerminate, terminateResult = { confirmed: true } } = {}) {
@@ -165,11 +178,11 @@ function makeEvaluate({ delayMs = 0, failTimes = 0, gate = null, calls } = {}) {
     }
     return handleOf(() => {
       const state = readJson(path.join(sessionDir, 'state.json'));
-      const snap = userDecision(sessionDir, handNo);
-      if (!snap) return { ok: false, code: 'NO_DECISION' };
+      const snaps = userDecisions(sessionDir, handNo);
+      if (!snaps.length) return { ok: false, code: 'NO_DECISION' };
       return {
         ok: true,
-        evaluations: [cannedEvaluation(snap.decisionId, gameEpochOf(state.sessionToken))],
+        evaluations: snaps.map((snap) => cannedEvaluation(snap.decisionId, gameEpochOf(state.sessionToken))),
       };
     }, { delayMs: delayMs || 40, gate });
   };
@@ -874,11 +887,18 @@ test('resume of a published last hand does not re-evaluate', { timeout: 40_000 }
   const { running } = await playUntil(first, gameDir, {
     until: () => {
       const auth = createTrainingControl().loadAuthority(gameDir);
-      const item = Object.values(auth?.items ?? {})[0];
-      const explained = item?.annotations?.explanation?.status;
-      return Boolean(item)
-        && (item.status === 'published' || item.status === 'evaluated')
-        && (explained === 'ready' || explained === 'unavailable');
+      const items = Object.values(auth?.items ?? {});
+      if (!items.length) return false;
+      const handNo = items[0].handNo;
+      const handItems = items.filter((item) => item.handNo === handNo);
+      let snaps = [];
+      try { snaps = userDecisions(gameDir, handNo); } catch { /* archive may lag */ }
+      if (snaps.length && handItems.length < snaps.length) return false;
+      return handItems.every((item) => (
+        (item.status === 'published' || item.status === 'evaluated')
+        && (item.annotations?.explanation?.status === 'ready'
+          || item.annotations?.explanation?.status === 'unavailable')
+      ));
     },
   });
   await first.requestStop().catch(() => {});

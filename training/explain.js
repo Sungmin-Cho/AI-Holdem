@@ -18,14 +18,18 @@ function clausesOf(text) {
   return text.split(/(?:(?<!\d)\.(?!\d)|[!?。\n])+/);
 }
 
-function clauseAt(text, index) {
+function clauseRangeAt(text, index) {
   let start = 0;
   for (const clause of clausesOf(text)) {
     const end = start + clause.length;
-    if (index >= start && index <= end) return clause;
+    if (index >= start && index <= end) return { clause, start, end };
     start = end + 1;
   }
-  return text;
+  return { clause: text, start: 0, end: text.length };
+}
+
+function clauseAt(text, index) {
+  return clauseRangeAt(text, index).clause;
 }
 
 function aliasSpans(text) {
@@ -76,6 +80,11 @@ function actionNearest(spans, index, tokenLen) {
   return best;
 }
 
+function actionInClause(spans, index, tokenLen, range) {
+  const local = spans.filter((span) => span.start >= range.start && span.end <= range.end);
+  return actionNearest(local, index, tokenLen);
+}
+
 function afterToken(text, index, token) {
   return text.slice(index + token.length);
 }
@@ -122,7 +131,8 @@ export function validateExplanation(evaluation, explanation) {
     const token = match[0];
     if (numberCoveredByAlias(spans, match.index, token.length)) continue;
     const num = Number(token);
-    const clause = clauseAt(explanation, match.index);
+    const range = clauseRangeAt(explanation, match.index);
+    const clause = range.clause;
     const rest = afterToken(explanation, match.index, token);
     const isPercent = /^\s*%/.test(rest);
     const isBb = /^\s*(?:bb|BB)/.test(rest);
@@ -133,7 +143,7 @@ export function validateExplanation(evaluation, explanation) {
     }
 
     if (isPercent) {
-      const action = actionNearest(spans, match.index, token.length);
+      const action = actionInClause(spans, match.index, token.length, range);
       const expected = action ? freqByAction.get(action) : undefined;
       if (expected == null || Math.abs(num - expected * 100) > 0.5) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
@@ -148,7 +158,7 @@ export function validateExplanation(evaluation, explanation) {
     }
     if (isHandNo) continue;
     if (num >= 0 && num <= 1) {
-      const action = actionNearest(spans, match.index, token.length);
+      const action = actionInClause(spans, match.index, token.length, range);
       const expected = action ? freqByAction.get(action) : undefined;
       if (expected != null && Math.abs(num - expected) <= 0.005) continue;
     }

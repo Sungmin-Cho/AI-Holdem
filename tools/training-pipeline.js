@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createTrainingControl,
-  hasCutoffMarker,
+  hasExplanationCutoff,
   readAnnotationExactFile,
 } from './training-control.js';
 import { validateExplanation } from '../training/explain.js';
@@ -24,6 +24,15 @@ import {
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/cli.js');
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
 const handPipelineTail = new Map();
+const explainTail = new Map();
+
+function withExplainLock(sessionDir, work) {
+  const key = path.resolve(sessionDir);
+  const prev = explainTail.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(work);
+  explainTail.set(key, run.then(() => {}, () => {}));
+  return run;
+}
 
 export function isTrainingEnabled(opts = {}) {
   return opts.trainingEnabled === true || opts.storeDir !== undefined;
@@ -152,10 +161,12 @@ function userDecisionsOf(record) {
 }
 
 async function recordEvaluateFailure(tc, sessionDir, {
-  handNo, gameEpoch, owner, code,
+  handNo, gameEpoch, owner, code, decisionIds,
 }) {
   const snaps = userDecisionsOf(loadHandRecord(sessionDir, handNo));
-  const ids = snaps.length ? snaps.map((snap) => snap.decisionId) : [`hand-${handNo}`];
+  const ids = decisionIds?.length
+    ? decisionIds
+    : (snaps.length ? snaps.map((snap) => snap.decisionId) : [`hand-${handNo}`]);
   for (const decisionId of ids) {
     await tc.recordPending(sessionDir, decisionId, {
       handNo,
@@ -179,10 +190,23 @@ function loadEvaluationDetail(sessionDir, item) {
 
 function itemsCoveringHand(tc, sessionDir, handNo) {
   const auth = tc.loadAuthority(sessionDir);
-  if (!auth) return null;
-  const items = Object.values(auth.items).filter((item) => item.handNo === handNo);
-  if (items.length === 0) return null;
-  return items;
+  if (!auth) return [];
+  return Object.values(auth.items).filter((item) => item.handNo === handNo);
+}
+
+function uncoveredDecisionIds(tc, sessionDir, handNo, existing) {
+  const coveredIds = new Set(existing.map((item) => item.decisionId));
+  const snaps = userDecisionsOf(loadHandRecord(sessionDir, handNo));
+  const missing = snaps
+    .map((snap) => snap.decisionId)
+    .filter((id) => !coveredIds.has(id));
+  const auth = tc.loadAuthority(sessionDir);
+  for (const [decisionId, entry] of Object.entries(auth?.pending ?? {})) {
+    if (Number(entry?.handNo) !== Number(handNo)) continue;
+    if (coveredIds.has(decisionId)) continue;
+    if (!missing.includes(decisionId)) missing.push(decisionId);
+  }
+  return missing;
 }
 
 async function runHandPipelineUnlocked({
@@ -191,16 +215,15 @@ async function runHandPipelineUnlocked({
 }) {
   const tc = createTrainingControl({ storeDir });
   const existing = itemsCoveringHand(tc, sessionDir, handNo);
-  let acceptedItems;
-  let evaluations;
+  const missingIds = uncoveredDecisionIds(tc, sessionDir, handNo, existing);
+  const skipEvaluate = existing.length > 0 && missingIds.length === 0;
+  let acceptedItems = existing;
+  let evaluations = existing.map((item) => loadEvaluationDetail(sessionDir, item));
   let evalHandle = {
     promise: Promise.resolve(null),
     terminate: async () => ({ confirmed: true }),
   };
-  if (existing) {
-    acceptedItems = existing;
-    evaluations = existing.map((item) => loadEvaluationDetail(sessionDir, item));
-  } else {
+  if (!skipEvaluate) {
     evalHandle = typeof evaluate === 'function'
       ? toRunnerHandle(evaluate(sessionDir, handNo))
       : defaultEvaluate(sessionDir, handNo);
@@ -213,7 +236,7 @@ async function runHandPipelineUnlocked({
     if (!evaluated?.ok) {
       const code = evaluated?.code ?? 'EVALUATE_FAILED';
       await recordEvaluateFailure(tc, sessionDir, {
-        handNo, gameEpoch, owner, code,
+        handNo, gameEpoch, owner, code, decisionIds: missingIds,
       });
       return {
         ok: false, code, evaluations: [], handle: evalHandle,
@@ -225,8 +248,14 @@ async function runHandPipelineUnlocked({
       handNo,
       evaluations: evaluated.evaluations ?? [],
     });
-    acceptedItems = accepted.accepted ?? [];
-    evaluations = evaluated.evaluations ?? [];
+    const byId = new Map(existing.map((item) => [item.evaluationId, item]));
+    for (const item of accepted.accepted ?? []) byId.set(item.evaluationId, item);
+    acceptedItems = [...byId.values()];
+    const details = new Map(evaluations.map((row) => [row.evaluationId, row]));
+    for (const row of evaluated.evaluations ?? []) {
+      if (row?.evaluationId) details.set(row.evaluationId, row);
+    }
+    evaluations = [...details.values()];
   }
 
   if (typeof publish === 'function') await publish('machine');
@@ -234,9 +263,14 @@ async function runHandPipelineUnlocked({
     try { await consume(); } catch { /* consumers retry independently */ }
   }
 
+  const sealExplanation = async (item, value) => {
+    await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', value);
+    if (typeof publish === 'function') await publish('annotation');
+  };
+
   for (const item of acceptedItems) {
-    if (hasCutoffMarker(sessionDir)) {
-      await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', 'unavailable');
+    if (hasExplanationCutoff(sessionDir)) {
+      await sealExplanation(item, 'unavailable');
       continue;
     }
     const existingAnn = item.annotations?.explanation
@@ -247,10 +281,8 @@ async function runHandPipelineUnlocked({
       sealedExisting = readAnnotationExactFile(sessionDir, item.detailRef, 'explanation');
     } catch { /* first attempt */ }
     if (sealedExisting) {
-      await tc.sealAnnotation(
-        sessionDir,
-        item.evaluationId,
-        'explanation',
+      await sealExplanation(
+        item,
         sealedExisting.status === 'unavailable' ? 'unavailable' : sealedExisting.value,
       );
       continue;
@@ -261,22 +293,24 @@ async function runHandPipelineUnlocked({
       evaluationId: item.evaluationId,
     };
     if (typeof explain !== 'function') continue;
-    const explainHandle = toRunnerHandle(explain(evaluation));
     let text = null;
-    try {
-      text = await explainHandle.promise;
-    } catch { text = null; }
-    if (hasCutoffMarker(sessionDir)) {
-      await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', 'unavailable');
+    await withExplainLock(sessionDir, async () => {
+      if (hasExplanationCutoff(sessionDir)) return;
+      const explainHandle = toRunnerHandle(explain(evaluation));
+      try {
+        text = await explainHandle.promise;
+      } catch { text = null; }
+    });
+    if (hasExplanationCutoff(sessionDir)) {
+      await sealExplanation(item, 'unavailable');
       continue;
     }
     if (typeof text !== 'string' || !text.trim()) continue;
     const check = validateExplanation(evaluation, text);
     if (!check.ok) continue;
-    await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', text);
+    await sealExplanation(item, text);
   }
 
-  if (typeof publish === 'function') await publish('annotation');
   return {
     ok: true,
     evaluations,

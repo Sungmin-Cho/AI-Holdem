@@ -65,6 +65,12 @@ export function cutoffMarkerPath(sessionDir) {
   return path.join(trainingDir(sessionDir), '.cutoff');
 }
 
+const explanationCutoffSessions = new Set();
+
+export function enterExplanationCutoff(sessionDir) {
+  explanationCutoffSessions.add(path.resolve(sessionDir));
+}
+
 export function hasCutoffMarker(sessionDir) {
   try {
     return fs.lstatSync(cutoffMarkerPath(sessionDir)).isFile();
@@ -73,27 +79,46 @@ export function hasCutoffMarker(sessionDir) {
   }
 }
 
-export function writeCutoffMarkerUnlocked(sessionDir) {
-  ensureDir(trainingDir(sessionDir));
-  const file = cutoffMarkerPath(sessionDir);
+export function hasExplanationCutoff(sessionDir) {
+  return explanationCutoffSessions.has(path.resolve(sessionDir)) || hasCutoffMarker(sessionDir);
+}
+
+function inspectCutoffMarker(file) {
   try {
     const st = fs.lstatSync(file);
     if (st.isFile()) return { reused: true };
     throw coded('UNSAFE_PATH', `${file}는 안전한 일반 파일이 아닙니다.`);
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export function writeCutoffMarkerUnlocked(sessionDir, { write = writeContained } = {}) {
+  ensureDir(trainingDir(sessionDir));
+  const file = cutoffMarkerPath(sessionDir);
+  const existing = inspectCutoffMarker(file);
+  if (existing) {
+    enterExplanationCutoff(sessionDir);
+    return existing;
   }
   try {
-    writeContained(
+    write(
       sessionDir,
       ['training', '.cutoff'],
       JSON.stringify({ at: new Date().toISOString() }),
       { mode: 'create' },
     );
+    enterExplanationCutoff(sessionDir);
     return { reused: false };
   } catch (error) {
-    if (error.code === 'EXISTS') return { reused: true };
-    throw error;
+    if (error.code !== 'EXISTS') throw error;
+    const reused = inspectCutoffMarker(file);
+    if (reused) {
+      enterExplanationCutoff(sessionDir);
+      return reused;
+    }
+    throw coded('UNSAFE_PATH', `${file}는 안전한 일반 파일이 아닙니다.`);
   }
 }
 
@@ -665,7 +690,7 @@ export function createTrainingControl({ storeDir } = {}) {
       if (!item) return { ok: false, code: 'NO_TRAINING_ITEM' };
       let status = valueOrUnavailable === 'unavailable' ? 'unavailable' : 'ready';
       let value = status === 'unavailable' ? null : valueOrUnavailable;
-      if (field === 'explanation' && status === 'ready' && hasCutoffMarker(sessionDir)) {
+      if (field === 'explanation' && status === 'ready' && hasExplanationCutoff(sessionDir)) {
         status = 'unavailable';
         value = null;
       }

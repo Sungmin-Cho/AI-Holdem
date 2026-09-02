@@ -20,7 +20,7 @@ import {
 } from './player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
-import { createTrainingControl } from './training-control.js';
+import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
@@ -4047,17 +4047,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     await sealExploitAtCutoff();
     let trainingTerminationConfirmed = true;
     if (trainingOn) {
+      enterExplanationCutoff(root);
       try {
         await createTrainingControl({ storeDir }).writeCutoffMarker(root);
       } catch (error) {
-        if (error.code !== 'EXISTS') {
-          await terminateTrainingChildren(finalDeadlineNs);
-          throw haltFinalization(
-            'FINALIZATION_ABORTED',
-            'training cutoff marker를 기록하지 못해 종료를 중단합니다.',
-            { cause: error.code ?? 'ERROR' },
-          );
+        await sealUnfinishedExplanations();
+        try {
+          trainingTerminationConfirmed = await terminateTrainingChildren(finalDeadlineNs);
+        } catch (terminateError) {
+          trainingTerminationConfirmed = false;
+          log('training-terminate-error', { code: terminateError.code ?? 'ERROR' });
         }
+        throw haltFinalization(
+          'FINALIZATION_ABORTED',
+          'training cutoff marker를 기록하지 못해 종료를 중단합니다.',
+          { cause: error.code ?? 'ERROR' },
+        );
       }
       log('training-cutoff-marker', { at: isoNow(now) });
       await sealUnfinishedExplanations();
