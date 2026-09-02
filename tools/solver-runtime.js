@@ -80,17 +80,19 @@ function pidAlive(pid) {
 
 function occupancyOf(pid, startTime, startTimeOf) {
   const leaderStart = startTimeOf(pid);
-  if (startTime != null && startTime !== '' && leaderStart === startTime) {
+  if (isStartTime(startTime) && leaderStart === startTime) {
     return { live: true, readable: true };
   }
   const group = processGroupPids(pid);
   if (!group.ok) return { live: true, readable: false };
   const descendants = group.pids.filter((member) => member !== pid);
   if (descendants.length) return { live: true, readable: true };
-  if (startTime == null || startTime === '') {
-    if (leaderStart != null || pidAlive(pid) || group.pids.length > 0) {
-      return { live: true, readable: false };
-    }
+  const leaderPresent = group.pids.includes(pid) || pidAlive(pid);
+  if (leaderStart == null && leaderPresent) {
+    return { live: true, readable: false };
+  }
+  if (!isStartTime(startTime)) {
+    if (leaderStart != null || leaderPresent) return { live: true, readable: false };
     return { live: false, readable: true };
   }
   return { live: false, readable: true };

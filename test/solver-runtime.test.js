@@ -235,6 +235,27 @@ test('killGroup does not signal when startTime cannot be re-read', async (t) => 
   process.kill(dummy.pid, 0);
 });
 
+test('reread startTime failure on a live leader stays unreadable', async (t) => {
+  const dir = tmpSolver();
+  const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  dummy.unref();
+  t.after(async () => {
+    killTree(dummy.pid);
+    await cleanupSolverDir(dir);
+  });
+  const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
+  fs.writeFileSync(persistPath(dir), JSON.stringify({ pid: dummy.pid, startTime: realStart }));
+  assert.equal(readPersistedSolver(dir, { processStartTime: () => null })?.state, 'unreadable');
+  await assert.rejects(
+    () => runSolver({ gameDir: dir, timeoutMs: 500, processStartTime: () => null }),
+    (error) => error.code === 'SOLVER_BUSY',
+  );
+  process.kill(dummy.pid, 0);
+});
+
 test('non-string startTime on a live pid is unreadable', async (t) => {
   const dir = tmpSolver();
   const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
