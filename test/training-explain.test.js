@@ -56,6 +56,8 @@ test('R11 binds 3-bet/3벳 aliases before leftover numbers and nearest action pe
 test('R11 binds frequency to the action alias in the same clause only', () => {
   assert.equal(validateExplanation(supported, 'fold 4%. unrelated 96%. raise').ok, false);
   assert.equal(validateExplanation(supported, 'raise 96%. stack 0.96.').ok, false);
+  assert.equal(validateExplanation(supported, 'stack 0.96. raise').ok, false);
+  assert.equal(validateExplanation(supported, 'x!! 96% raise').ok, true);
   assert.equal(validateExplanation(supported, 'Raise 96%').ok, true);
   assert.equal(validateExplanation(supported, '레이즈 96%').ok, true);
   assert.equal(validateExplanation(supported, 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.').ok, true);

@@ -389,6 +389,17 @@ test('partial hand with one item and one pending still evaluates the missing dec
     gameEpoch,
     owner: 'owner-1',
   });
+  const originalSha = tc.loadAuthority(dir).items[first.evaluationId].payloadSha256;
+  const mutatedFirst = {
+    ...first,
+    source: { id: 'local-preflop-baseline', version: '9.9.9' },
+    evaluationId: evaluationIdOf({
+      gameEpoch,
+      decisionId: 'd-1-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '9.9.9',
+    }),
+  };
   let evaluateCalls = 0;
   const result = await pipeline.runHandPipeline({
     sessionDir: dir,
@@ -397,13 +408,15 @@ test('partial hand with one item and one pending still evaluates the missing dec
     owner: 'owner-1',
     evaluate: () => {
       evaluateCalls += 1;
-      return handleOf({ ok: true, evaluations: [first, second] });
+      return handleOf({ ok: true, evaluations: [mutatedFirst, second] });
     },
   });
   assert.equal(result.ok, true);
   assert.equal(evaluateCalls, 1);
   const auth = tc.loadAuthority(dir);
   assert.equal(auth.items[first.evaluationId].decisionId, 'd-1-preflop-0');
+  assert.equal(auth.items[first.evaluationId].payloadSha256, originalSha);
+  assert.equal(auth.items[mutatedFirst.evaluationId], undefined);
   assert.equal(auth.items[second.evaluationId].decisionId, 'd-1-flop-0');
   assert.equal(auth.pending['d-1-flop-0'], undefined);
   assert.equal(Object.keys(auth.items).length, 2);

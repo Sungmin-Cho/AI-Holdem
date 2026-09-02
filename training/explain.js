@@ -14,16 +14,22 @@ const ALIAS_ROWS = Object.freeze(
 const EV_WORDS = /EV|손실|loss|이득/i;
 const MAX_EXPLANATION = 600;
 
-function clausesOf(text) {
-  return text.split(/(?:(?<!\d)\.(?!\d)|[!?。\n])+/);
+const CLAUSE_SEP = /(?:(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s|$)|[!?。\n])+/g;
+
+function clauseRanges(text) {
+  const ranges = [];
+  let start = 0;
+  for (const match of text.matchAll(CLAUSE_SEP)) {
+    ranges.push({ clause: text.slice(start, match.index), start, end: match.index });
+    start = match.index + match[0].length;
+  }
+  ranges.push({ clause: text.slice(start), start, end: text.length });
+  return ranges;
 }
 
 function clauseRangeAt(text, index) {
-  let start = 0;
-  for (const clause of clausesOf(text)) {
-    const end = start + clause.length;
-    if (index >= start && index <= end) return { clause, start, end };
-    start = end + 1;
+  for (const range of clauseRanges(text)) {
+    if (index >= range.start && index <= range.end) return range;
   }
   return { clause: text, start: 0, end: text.length };
 }

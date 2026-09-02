@@ -2047,15 +2047,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const sealUnfinishedExplanations = async () => {
     if (!trainingOn) return;
-    const tc = createTrainingControl({ storeDir });
-    const auth = tc.loadAuthority(root);
+    let auth;
+    try {
+      auth = createTrainingControl({ storeDir }).loadAuthority(root);
+    } catch (error) {
+      log('training-unavailable-seal-error', { code: error.code ?? 'ERROR' });
+      return;
+    }
     if (!auth) return;
     for (const item of Object.values(auth.items)) {
       if (item.status !== 'evaluated' && item.status !== 'published') continue;
       const status = item.annotations?.explanation?.status;
       if (status === 'ready' || status === 'unavailable') continue;
       try {
-        await tc.sealAnnotation(root, item.evaluationId, 'explanation', 'unavailable');
+        await createTrainingControl({ storeDir }).sealAnnotation(
+          root,
+          item.evaluationId,
+          'explanation',
+          'unavailable',
+        );
       } catch (error) {
         log('training-unavailable-seal-error', { code: error.code ?? 'ERROR' });
       }

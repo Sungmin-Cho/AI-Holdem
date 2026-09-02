@@ -242,11 +242,15 @@ async function runHandPipelineUnlocked({
         ok: false, code, evaluations: [], handle: evalHandle,
       };
     }
+    const incoming = evaluated.evaluations ?? [];
+    const toAccept = existing.length === 0
+      ? incoming
+      : incoming.filter((row) => missingIds.includes(row.decisionId));
     const accepted = await tc.acceptEvaluations(sessionDir, {
       gameEpoch,
       owner,
       handNo,
-      evaluations: evaluated.evaluations ?? [],
+      evaluations: toAccept,
     });
     const byId = new Map(existing.map((item) => [item.evaluationId, item]));
     for (const item of accepted.accepted ?? []) byId.set(item.evaluationId, item);
