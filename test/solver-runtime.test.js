@@ -70,11 +70,16 @@ async function waitFor(predicate, message, timeoutMs = 2_000) {
   assert.fail(message);
 }
 
-function cleanupSolverDir(dir) {
+async function cleanupSolverDir(dir) {
+  let pid = null;
   try {
-    const rec = JSON.parse(fs.readFileSync(persistPath(dir), 'utf8'));
-    killTree(rec?.pid);
+    pid = JSON.parse(fs.readFileSync(persistPath(dir), 'utf8'))?.pid ?? null;
   } catch { /* absent */ }
+  killTree(pid);
+  await waitFor(() => {
+    if (pid && processGroupPids(pid).length) return false;
+    return !hasLiveSolverChild();
+  }, 'solver child did not exit after cleanup', 2_000);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
@@ -152,9 +157,9 @@ test('PID reuse with a different startTime does not kill the reused process', as
     stdio: 'ignore',
   });
   dummy.unref();
-  t.after(() => {
+  t.after(async () => {
     killTree(dummy.pid);
-    cleanupSolverDir(dir);
+    await cleanupSolverDir(dir);
   });
   const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
   assert.notEqual(realStart, 'Mon Jan  1 00:00:00 2001');
@@ -192,9 +197,9 @@ test('leader gone with a descendant still in the process group is live', async (
   });
   const pid = leader.pid;
   const startTime = await waitFor(() => processStartTime(pid), 'leader startTime');
-  t.after(() => {
+  t.after(async () => {
     killTree(pid);
-    cleanupSolverDir(dir);
+    await cleanupSolverDir(dir);
   });
   await waitFor(() => {
     try {

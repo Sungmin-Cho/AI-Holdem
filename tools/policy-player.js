@@ -67,6 +67,19 @@ export function stampPlayerPolicies(gameDir) {
   }
   for (const player of players) {
     if (player.playerId === 'user') continue;
+    if (player.policy) {
+      const catalog = policyById(player.policy.policyId);
+      if (
+        !catalog
+        || catalog.policyVersion !== player.policy.policyVersion
+        || catalog.configDigest !== player.policy.configDigest
+      ) {
+        const error = new Error('players.json policy가 catalog와 일치하지 않습니다.');
+        error.code = 'POLICY_CONFIG_MISMATCH';
+        throw error;
+      }
+      continue;
+    }
     player.policy = assignmentFor(player.archetype);
   }
   writeJsonAtomic(file, players);
