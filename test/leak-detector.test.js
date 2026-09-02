@@ -5,7 +5,7 @@ import { masteryOf } from '../training/mastery.js';
 
 test('small samples are low confidence; leaks keep components', () => {
   assert.ok(masteryOf({ preferredActionRate: 0.9, opportunities: 3 }) < masteryOf({ preferredActionRate: 0.9, opportunities: 40 }));
-  const leaks = detectLeaks({
+  const { leaks } = detectLeaks({
     'preflop.bbDefense.vsRaise': {
       opportunities: 31,
       supported: 29,

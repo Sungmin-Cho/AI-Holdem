@@ -17,24 +17,29 @@ function run(args) {
   return JSON.parse(execFileSync(process.execPath, [CLI, ...args], { encoding: 'utf8' }).trim());
 }
 
-test('profile-cli apply/show/rebuild/reset/sweep', () => {
+test('profile-cli apply/show/rebuild/reset/sweep', async () => {
   const storeDir = tmp();
   const sessionDir = path.join(storeDir, '.session-store', 'sessions', '11111111-1111-4111-8111-111111111111');
   const evaluation = {
+    schemaVersion: 1,
     evaluationId: evaluationIdOf({
       gameEpoch: 'ab'.repeat(32),
       decisionId: 'd-1-preflop-0',
       providerId: 'local-preflop-baseline',
       providerVersion: '1.0.0',
     }),
+    decisionId: 'd-1-preflop-0',
     payloadSha256: 'aa'.repeat(32),
     status: 'supported',
     street: 'preflop',
     spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AJo',
     grade: 'off-policy',
     forced: false,
     evLossBb: null,
     source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    chosen: { action: 'fold', frequency: 0.15, evBb: null },
   };
   const file = path.join(storeDir, 'eval.json');
   fs.writeFileSync(file, JSON.stringify(evaluation));
@@ -46,7 +51,7 @@ test('profile-cli apply/show/rebuild/reset/sweep', () => {
   const rebuilt = run(['rebuild', '--store-dir', storeDir]);
   assert.equal(JSON.stringify(rebuilt.profile.overall), JSON.stringify(shown.profile.overall));
   fs.mkdirSync(path.join(sessionDir, 'training'), { recursive: true });
-  fs.writeFileSync(path.join(sessionDir, 'training', 'evaluations.jsonl'), `${JSON.stringify({
+  const second = {
     ...evaluation,
     evaluationId: evaluationIdOf({
       gameEpoch: 'ab'.repeat(32),
@@ -54,9 +59,17 @@ test('profile-cli apply/show/rebuild/reset/sweep', () => {
       providerId: 'local-preflop-baseline',
       providerVersion: '1.0.0',
     }),
+    decisionId: 'd-9-preflop-0',
     payloadSha256: 'ff'.repeat(32),
     grade: 'preferred',
-  })}\n`);
+  };
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  await createTrainingControl({ storeDir }).acceptEvaluations(sessionDir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 9,
+    evaluations: [second],
+  });
   const swept = run(['sweep', '--store-dir', storeDir]);
   assert.equal(swept.applied >= 1, true);
   const reset = run(['reset', '--store-dir', storeDir]);

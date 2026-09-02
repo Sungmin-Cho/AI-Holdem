@@ -32,6 +32,7 @@ function eventFromEvaluation(evaluation, appliedAt) {
     providerId: classified.providerId,
     providerVersion: classified.providerVersion,
     appliedAt,
+    ...(evaluation.origin === 'drill' ? { origin: 'drill' } : {}),
   };
 }
 
@@ -62,9 +63,12 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withLock(() => {
       const appliedAt = now();
       const event = eventFromEvaluation(evaluation, appliedAt);
+      if (typeof event.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
+        throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
+      }
       let profile = loadProfile();
       const seen = profile.processed[event.evaluationId];
-      if (seen === event.payloadSha256) {
+      if (seen && seen === event.payloadSha256) {
         return { applied: false, profile };
       }
       profile = applyEvent(profile, event);

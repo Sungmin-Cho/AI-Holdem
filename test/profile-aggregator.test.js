@@ -88,8 +88,8 @@ test('provider version is a separate segment', () => {
   }));
   assert.ok(profile.segments['local-preflop-baseline@1.0.0']);
   assert.ok(profile.segments['local-preflop-baseline@2.0.0']);
-  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].evaluatedDecisions, 1);
-  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
 });
 
 test('mixed provider versions are never summed at the top level', () => {

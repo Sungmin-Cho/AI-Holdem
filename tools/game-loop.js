@@ -40,6 +40,7 @@ import {
   completeSessionStoreMigrations,
   installPracticeFocus,
   readInstalledPracticeFocus,
+  sweepStore,
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from '../training/profile-store.js';
@@ -4459,9 +4460,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
+      let sweepNotices = [];
       if (storeDir) {
         await completeSessionStoreMigrations(storeDir);
-        await consumeTrainingNow();
+        try {
+          const swept = await sweepStore(storeDir, {
+            evaluate: (sessionDir, handNo) => evaluateForPipeline(sessionDir, handNo),
+            solve: typeof trainingHooks.solve === 'function' ? trainingHooks.solve : undefined,
+          });
+          sweepNotices = swept.notices ?? [];
+        } catch (error) {
+          sweepNotices = [`profile sweep 실패: ${error.code ?? 'ERROR'}`];
+          log('profile-sweep-error', { code: error.code ?? 'ERROR' });
+        }
       }
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
@@ -4493,7 +4504,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const policyMode = opponentRuntimeOf() === 'policy';
       if (policyMode) stampPlayerPolicies(root);
       const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
-      const notices = Array.isArray(resolved?.notices) ? resolved.notices : [];
+      const notices = [
+        ...(Array.isArray(resolved?.notices) ? resolved.notices : []),
+        ...sweepNotices,
+      ];
       selectAdapters(resolved ?? {});
       writeLoopState({
         notices,

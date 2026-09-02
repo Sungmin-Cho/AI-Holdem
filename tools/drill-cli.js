@@ -105,6 +105,7 @@ function profileEventOf(session, question, attemptNo, result) {
     forced: false,
     evLossBb: null,
     source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    origin: 'drill',
   };
 }
 
