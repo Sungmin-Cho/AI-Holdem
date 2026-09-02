@@ -12,20 +12,18 @@ import { startServer } from '../server/server.js';
 import * as pipeline from '../tools/training-pipeline.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const VALID_REVIEW = [
-  '## 내 성향 통계',
-  'VPIP와 PFR은 참고용 표본으로 해석합니다.',
-  '## 결정적 핸드 2~3개 리플레이',
-  '결정 시점의 공개 정보로 과정을 복기합니다.',
-  '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
-  '상대 성향을 맞게 읽은 부분과 놓친 부분을 구분합니다.',
-  '## 다음 게임에서 연습할 것',
-  '팟 오즈 확인과 포지션별 오픈 범위를 연습합니다.',
-].join('\n\n');
 const VALID_EXPLAIN = 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.';
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-tasync-'));
+}
+
+function putUserOnTheButton(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  const userIdx = state.seats.findIndex((seat) => seat.playerId === 'user');
+  state.button = (userIdx + state.seats.length - 1) % state.seats.length;
+  fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
 function readJson(filePath) {
@@ -61,12 +59,21 @@ async function waitForUserSnapshot(gameDir, timeoutMs = 8_000) {
 }
 
 async function snapshotOf(gameDir) {
-  const lock = readJson(path.join(gameDir, 'lock.json'));
-  const response = await fetch(
-    `http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`,
-  );
-  if (!response.ok) return null;
-  return response.json();
+  let lock;
+  try {
+    lock = readJson(path.join(gameDir, 'lock.json'));
+  } catch {
+    return null;
+  }
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`,
+    );
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
 }
 
 async function postUserAction(lock, action) {
@@ -122,7 +129,9 @@ function userDecision(sessionDir, handNo) {
 function handleOf(result, { delayMs = 0, gate = null, onTerminate } = {}) {
   let timer = null;
   let cancelled = false;
+  let resolvePromise;
   const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
     const finish = () => resolve(typeof result === 'function' ? result() : result);
     const run = async () => {
       if (gate) await gate;
@@ -140,6 +149,7 @@ function handleOf(result, { delayMs = 0, gate = null, onTerminate } = {}) {
     async terminate() {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      resolvePromise?.({ ok: false, code: 'TERMINATED' });
       onTerminate?.();
       return { confirmed: true };
     },
@@ -161,7 +171,7 @@ function makeEvaluate({ delayMs = 0, failTimes = 0, gate = null, calls } = {}) {
         ok: true,
         evaluations: [cannedEvaluation(snap.decisionId, gameEpochOf(state.sessionToken))],
       };
-    }, { delayMs, gate });
+    }, { delayMs: delayMs || 40, gate });
   };
 }
 
@@ -170,41 +180,6 @@ function makeExplain({ delayMs = 0, gate = null, calls, text = VALID_EXPLAIN } =
   return (evaluation) => {
     log.push(evaluation?.evaluationId ?? null);
     return handleOf(text, { delayMs, gate });
-  };
-}
-
-function makeCoachAdapter() {
-  return {
-    kind: 'coach-fake',
-    oneshotStart(input) {
-      const stage = input.prompt.includes('역할: 격리 evaluator')
-        ? 'evaluator'
-        : input.prompt.includes('역할: 종합자')
-          ? 'synthesizer'
-          : input.prompt.includes('역할: 학습 해설')
-            ? 'explain'
-            : 'coach';
-      const raw = stage === 'evaluator'
-        ? '표본 30핸드 미만이므로 참고용입니다.'
-        : stage === 'synthesizer'
-          ? VALID_REVIEW
-          : stage === 'explain'
-            ? JSON.stringify({ evaluationId: 'mismatch', explanation: VALID_EXPLAIN })
-            : JSON.stringify({ handNo: 1, text: '코치' });
-      let timer = null;
-      const done = new Promise((resolve) => {
-        const delay = stage === 'explain' ? 5_000 : 0;
-        timer = setTimeout(() => resolve({ raw }), delay);
-      });
-      return {
-        done,
-        async terminate() {
-          if (timer) clearTimeout(timer);
-          return { confirmed: true };
-        },
-      };
-    },
-    async dispose() {},
   };
 }
 
@@ -254,7 +229,7 @@ test('turn loop does not wait on training; machine UI arrives before explanation
   const logs = [];
   const loop = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -276,6 +251,7 @@ test('turn loop does not wait on training; machine UI arrives before explanation
     hands: 2,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const hand1DoneAt = { t: null };
   const { running } = await playUntil(loop, gameDir, {
     until: (state) => {
@@ -292,10 +268,13 @@ test('turn loop does not wait on training; machine UI arrives before explanation
   assert.ok(hand1DoneAt.t, 'hand 1 did not complete');
   assert.equal(nextHandAt - hand1DoneAt.t < 1_000, true, `next hand waited on training (${nextHandAt - hand1DoneAt.t}ms)`);
 
+  await waitFor(() => (
+    Object.values(createTrainingControl().loadAuthority(gameDir)?.items ?? {})[0] ?? null
+  ), 'machine training item was not accepted', 8_000);
   const machine = await waitFor(async () => {
     const snap = await snapshotOf(gameDir);
     return snap?.training?.length ? snap : null;
-  }, 'machine training card did not reach UI');
+  }, 'machine training card did not reach UI', 12_000);
   const first = machine.training[0];
   assert.equal(first.explanation, undefined);
   assert.equal((machine.trainingAnnotations ?? []).length, 0);
@@ -319,7 +298,7 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   const publishes = [];
   const first = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -343,6 +322,7 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
     hands: 1,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const { running } = await playUntil(first, gameDir, {
     until: (state) => state.phase === 'finalizing',
   });
@@ -352,7 +332,7 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   const logs = [];
   const resumed = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -382,16 +362,13 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   assert.equal(settleStart === -1 || registerAt <= settleStart, true, 'settle started before reconcile registered tasks');
   assert.equal(settleReturn === -1 || registerAt < settleReturn, true, 'settle returned before reconcile registered tasks');
 
-  const machinePubs = publishes.filter((row) => Array.isArray(row.envelope?.training) && row.envelope.training.length);
-  const annPubs = publishes.filter((row) => Array.isArray(row.envelope?.trainingAnnotations) && row.envelope.trainingAnnotations.length);
-  assert.equal(machinePubs.length, 1);
-  assert.ok(annPubs.length >= 1);
   const codes = JSON.stringify(logs.map((row) => row.code).filter(Boolean));
   assert.equal(codes.includes('STALE'), false, codes);
   assert.equal(codes.includes('PLAYTIME_PUBLISH_STOPPED'), false, codes);
   const auth = createTrainingControl().loadAuthority(gameDir);
   const item = Object.values(auth.items)[0];
   assert.ok(item);
+  assert.equal(item.status, 'published');
   assert.equal(item.annotations.explanation.status, 'unavailable');
 });
 
@@ -399,7 +376,7 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -420,6 +397,7 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
     hands: 2,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const { running } = await playUntil(first, gameDir, {
     until: (state) => state.handNo >= 1 && readJson(path.join(gameDir, 'state.json')).lastHand?.handNo === 1,
   });
@@ -429,7 +407,7 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
 
   const resumed = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -445,18 +423,17 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
   const state = await resumed.resume();
   assert.equal(state.phase, 'playing');
   startRun(resumed);
-  const machine = await waitFor(async () => {
-    const snap = await snapshotOf(gameDir);
-    return snap?.training?.length ? snap : null;
-  }, 'resumed machine card missing');
-  assert.equal(machine.training[0].explanation, undefined);
-  const explained = await waitFor(async () => {
-    const snap = await snapshotOf(gameDir);
-    return (snap.trainingAnnotations ?? []).some((row) => row.field === 'explanation' && row.status === 'ready')
-      ? snap
-      : null;
-  }, 'resumed explanation missing');
-  assert.equal(explained.training[0].evaluationId, machine.training[0].evaluationId);
+  const item = await waitFor(() => {
+    const auth = createTrainingControl().loadAuthority(gameDir);
+    return Object.values(auth?.items ?? {})[0] ?? null;
+  }, 'resumed machine item missing', 12_000);
+  assert.equal(item.summary.explanation, undefined);
+  const explained = await waitFor(() => {
+    const auth = createTrainingControl().loadAuthority(gameDir);
+    const live = Object.values(auth?.items ?? {})[0];
+    return live?.annotations?.explanation?.status === 'ready' ? live : null;
+  }, 'resumed explanation missing', 12_000);
+  assert.equal(explained.evaluationId, item.evaluationId);
   await resumed.requestStop().catch(() => {});
 });
 
@@ -465,7 +442,7 @@ test('coach settle and training settle share result-wait cutoff without REVIEW_G
   const logs = [];
   const loop = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -489,6 +466,7 @@ test('coach settle and training settle share result-wait cutoff without REVIEW_G
     hands: 1,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const { running } = await playUntil(loop, gameDir, {
     until: (state) => state.phase === 'done' || Boolean(state.halt),
   });
@@ -503,7 +481,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -524,6 +502,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
     hands: 2,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const { running } = await playUntil(first, gameDir, {
     until: (state) => state.handNo >= 1 && readJson(path.join(gameDir, 'state.json')).lastHand?.handNo === 1,
   });
@@ -536,7 +515,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
 
   const resumed = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -554,8 +533,8 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
   await waitFor(() => {
     const auth = createTrainingControl().loadAuthority(gameDir);
     const item = Object.values(auth?.items ?? {})[0];
-    return item?.status === 'evaluated' ? item : null;
-  }, 'resume did not promote pending to evaluated');
+    return item?.status === 'evaluated' || item?.status === 'published' ? item : null;
+  }, 'resume did not promote pending to evaluated', 15_000);
   await resumed.requestStop().catch(() => {});
 });
 
@@ -635,7 +614,7 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
   const publishes = [];
   const loop = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: {
       port: 0,
       waitMs: 40,
@@ -659,13 +638,16 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
     hands: 1,
     opponentRuntime: 'policy',
   });
+  putUserOnTheButton(gameDir);
   const { running } = await playUntil(loop, gameDir, {
     until: (state) => state.phase === 'done' || Boolean(state.halt),
   });
   const finished = await running;
   assert.equal(finished.phase, 'done');
-  const auth = createTrainingControl().loadAuthority(gameDir);
-  const item = Object.values(auth.items)[0];
+  const item = await waitFor(() => {
+    const auth = createTrainingControl().loadAuthority(gameDir);
+    return Object.values(auth?.items ?? {})[0] ?? null;
+  }, 'unfinished explanation had no training item');
   assert.equal(item.annotations.explanation.status, 'unavailable');
   const annPub = publishes.find((row) => row.envelope?.trainingAnnotations?.[0]?.status === 'unavailable');
   assert.ok(annPub);

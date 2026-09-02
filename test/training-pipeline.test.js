@@ -113,7 +113,9 @@ function cannedEvaluation(decisionId, gameEpoch) {
 function handleOf(result, { delayMs = 0, onTerminate } = {}) {
   let timer = null;
   let cancelled = false;
+  let resolvePromise;
   const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
     const finish = () => resolve(cancelled ? { ok: false, code: 'TERMINATED' } : result);
     if (delayMs > 0) timer = setTimeout(finish, delayMs);
     else finish();
@@ -123,6 +125,7 @@ function handleOf(result, { delayMs = 0, onTerminate } = {}) {
     async terminate() {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      resolvePromise?.({ ok: false, code: 'TERMINATED' });
       onTerminate?.();
       return { confirmed: true };
     },

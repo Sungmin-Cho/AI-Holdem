@@ -25,22 +25,24 @@ import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js'
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import {
-  ingestHand,
+  buildExplanationPrompt,
+  defaultEvaluate,
+  flushAnnotationPublish as flushAnnotationEnvelope,
+  flushMachinePublish,
   isTrainingEnabled,
   reconcileSession,
+  retryUnresolvedTrainingAttempt as retryTrainingAttempt,
+  runHandPipeline,
+  toRunnerHandle,
   trainingAggregate,
-  unpublishedEnvelope,
-  writeTrainingEnvelope,
 } from './training-pipeline.js';
 import {
-  applyEvaluation,
   completeSessionStoreMigrations,
   installPracticeFocus,
   readInstalledPracticeFocus,
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from '../training/profile-store.js';
-import { createMistakeBank } from '../training/mistake-bank.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -390,6 +392,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const adapterDisposals = new Map();
   const coachTasks = new Set();
   const coachAttempts = new Map();
+  const trainingTasks = new Set();
+  const trainingAttempts = new Map();
+  const trainingInFlightHands = new Set();
+  const trainingHooks = opts.training && typeof opts.training === 'object' ? opts.training : {};
+  let trainingProducerOpen = false;
   const archiveCheckedHands = new Set();
   const restoredPlayerSessions = new Set();
 
@@ -1858,119 +1865,263 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const profileConsumerReady = () => {
-    if (!storeDir) return false;
-    const markerFile = path.join(root, 'training', '.migration-v2.json');
-    if (!fs.existsSync(markerFile)) return true;
+  const consumeTrainingNow = async () => {
+    if (!trainingOn || !storeDir) return;
     try {
-      const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-      return marker.status === 'complete';
-    } catch {
-      return false;
+      await createTrainingControl({ storeDir }).consumeTrainingItems(root, { storeDir });
+    } catch (error) {
+      log('training-consume-error', { code: error.code ?? 'ERROR' });
     }
   };
+
+  const bindTrainingAttempt = (key, handle) => {
+    if (!handle || typeof handle.terminate !== 'function') return handle;
+    trainingAttempts.set(key, handle);
+    Promise.resolve(handle.promise)
+      .catch(() => {})
+      .finally(() => {
+        if (trainingAttempts.get(key) === handle) trainingAttempts.delete(key);
+      });
+    return handle;
+  };
+
+  const publishStopped = () => (
+    finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0
+  );
 
   const flushTrainingPublish = async () => {
     if (!trainingOn) return;
     const loop = readLoopState();
-    const envelope = unpublishedEnvelope(root, { gameEpoch: loop?.gameEpoch });
-    if (!envelope) return;
-    const file = writeTrainingEnvelope(root, envelope);
-    const flags = ['--from', file];
-    if (publishDeadlineNs != null) flags.push('--deadline-monotonic-ns', String(publishDeadlineNs));
     try {
-      await executePublish(flags);
-      const tc = createTrainingControl({ storeDir });
-      for (const item of envelope.training) {
-        try {
-          await tc.markPublished(root, item.evaluationId, item.payloadSha256);
-          if (storeDir && profileConsumerReady()) {
-            try {
-              await applyEvaluation(storeDir, item);
-              try {
-                await createMistakeBank(storeDir).collect(item);
-              } catch (error) {
-                log('mistake-bank-error', { code: error.code ?? 'ERROR' });
-              }
-            } catch (error) {
-              log('profile-apply-error', { code: error.code ?? 'ERROR' });
-            }
-          }
-        } catch (error) {
-          log('training-mark-published', { code: error.code ?? 'ERROR' });
-        }
-      }
+      await flushMachinePublish(root, {
+        gameEpoch: loop?.gameEpoch,
+        storeDir,
+        shouldStop: publishStopped,
+        executePublish,
+      });
     } catch (error) {
       log('training-publish-error', { code: error.code ?? 'ERROR' });
     }
   };
 
+  const flushAnnotationPublish = async () => {
+    if (!trainingOn) return;
+    const loop = readLoopState();
+    try {
+      await flushAnnotationEnvelope(root, {
+        gameEpoch: loop?.gameEpoch,
+        storeDir,
+        shouldStop: publishStopped,
+        executePublish,
+      });
+    } catch (error) {
+      log('training-annotation-publish-error', { code: error.code ?? 'ERROR' });
+    }
+  };
+
+  const retryUnresolvedTrainingAttempt = async () => {
+    try {
+      await retryTrainingAttempt(root, { executePublish, storeDir });
+    } catch (error) {
+      if (error.code === 'NO_ATTEMPT') return;
+      log('training-attempt-retry-error', { code: error.code ?? 'ERROR' });
+    }
+  };
+
+  const trackTrainingTask = (handNo, work) => {
+    let task;
+    task = Promise.resolve()
+      .then(() => (typeof work === 'function' ? work() : work))
+      .catch((error) => {
+        log('training-error', { handNo, code: error.code ?? 'ERROR' });
+      })
+      .finally(() => trainingTasks.delete(task));
+    trainingTasks.add(task);
+    return task;
+  };
+
+  const evaluateForPipeline = (sessionDir, handNo) => {
+    const raw = typeof trainingHooks.evaluate === 'function'
+      ? trainingHooks.evaluate(sessionDir, handNo)
+      : defaultEvaluate(sessionDir, handNo);
+    return bindTrainingAttempt(`${handNo}:evaluate`, toRunnerHandle(raw));
+  };
+
+  const explainForPipeline = (evaluation) => {
+    if (typeof trainingHooks.explain === 'function') {
+      return bindTrainingAttempt(
+        `${evaluation.evaluationId}:explain`,
+        toRunnerHandle(trainingHooks.explain(evaluation)),
+      );
+    }
+    if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
+      return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
+    }
+    const handle = upperAdapter.oneshotStart({
+      tier: 'upper',
+      prompt: buildExplanationPrompt(evaluation),
+      timeoutMs: 20_000,
+    });
+    const wrapped = {
+      promise: Promise.resolve(handle.done).then((completed) => {
+        try {
+          const parsed = JSON.parse(String(completed?.raw ?? '').trim());
+          if (parsed.evaluationId !== evaluation.evaluationId) return null;
+          return parsed.explanation;
+        } catch {
+          return null;
+        }
+      }),
+      terminate: async () => {
+        if (typeof handle.terminate !== 'function') return { confirmed: true };
+        return handle.terminate();
+      },
+    };
+    return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, wrapped);
+  };
+
+  const runTrainingPipeline = async (handNo) => {
+    const loop = readLoopState();
+    const result = await runHandPipeline({
+      sessionDir: root,
+      handNo,
+      gameEpoch: loop.gameEpoch,
+      owner: loop.ownerSessionId,
+      storeDir,
+      evaluate: evaluateForPipeline,
+      explain: explainForPipeline,
+      publish: async (kind) => {
+        if (kind === 'machine') await flushTrainingPublish();
+        if (kind === 'annotation') await flushAnnotationPublish();
+      },
+      consume: consumeTrainingNow,
+    });
+    if (!result.ok) log('training-evaluate-failed', { handNo, code: result.code });
+    return result;
+  };
+
+  const launchTrainingPipeline = (handNo) => {
+    if (!trainingOn) return;
+    if (trainingInFlightHands.has(handNo)) return;
+    trainingInFlightHands.add(handNo);
+    trackTrainingTask(handNo, async () => {
+      try {
+        return await runTrainingPipeline(handNo);
+      } finally {
+        trainingInFlightHands.delete(handNo);
+      }
+    });
+  };
+
+  const settleTrainingTasks = async (deadlineNs) => {
+    log('training-settle-start', {
+      size: trainingTasks.size,
+      producerOpen: trainingProducerOpen,
+    });
+    for (;;) {
+      if (!trainingProducerOpen && trainingTasks.size === 0) {
+        log('training-settle-return', { empty: true });
+        return true;
+      }
+      const remaining = remainingMsUntil(deadlineNs);
+      if (remaining <= 0) {
+        log('training-settle-return', { timeout: true, pending: trainingTasks.size });
+        return false;
+      }
+      if (trainingProducerOpen && trainingTasks.size === 0) {
+        await settleOrTimeout(sleep(20), remaining);
+        continue;
+      }
+      await settleOrTimeout(Promise.allSettled([...trainingTasks]), remaining);
+    }
+  };
+
+  const sealExploitAtCutoff = async () => {
+    if (typeof trainingHooks.exploit !== 'function') return;
+    try {
+      await trainingHooks.exploit({ sessionDir: root });
+    } catch (error) {
+      log('training-exploit-stub-error', { code: error.code ?? 'ERROR' });
+    }
+  };
+
+  const sealUnfinishedExplanations = async () => {
+    if (!trainingOn) return;
+    const tc = createTrainingControl({ storeDir });
+    const auth = tc.loadAuthority(root);
+    if (!auth) return;
+    for (const item of Object.values(auth.items)) {
+      if (item.status !== 'evaluated' && item.status !== 'published') continue;
+      const status = item.annotations?.explanation?.status;
+      if (status === 'ready' || status === 'unavailable') continue;
+      try {
+        await tc.sealAnnotation(root, item.evaluationId, 'explanation', 'unavailable');
+      } catch (error) {
+        log('training-unavailable-seal-error', { code: error.code ?? 'ERROR' });
+      }
+    }
+  };
+
+  const terminateTrainingChildren = async (deadlineNs) => {
+    const handles = [...trainingAttempts.values()];
+    await Promise.all(handles.map(async (handle) => {
+      try {
+        await settleValueBeforeDeadline(handle.terminate(), deadlineNs);
+      } catch (error) {
+        log('training-terminate-error', { code: error.code ?? 'ERROR' });
+      }
+    }));
+    await settleTrainingTasks(deadlineNs);
+  };
+
   const reconcileTrainingNow = async () => {
     if (!trainingOn) return;
+    trainingProducerOpen = true;
     try {
+      await retryUnresolvedTrainingAttempt();
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const loop = readLoopState();
-      await reconcileSession({
+      const recon = await reconcileSession({
         sessionDir: root,
         gameEpoch: loop.gameEpoch,
         owner: loop.ownerSessionId,
         lastHand: engine?.lastHand ?? null,
       });
-      await flushTrainingPublish();
+      const pendingHands = new Set();
+      for (const miss of recon?.missing ?? []) {
+        if (Number.isInteger(miss.handNo)) pendingHands.add(miss.handNo);
+      }
+      const pendingMap = recon?.pending ?? recon?.authority?.pending ?? {};
+      for (const entry of Object.values(pendingMap)) {
+        if (Number.isInteger(entry?.handNo)) pendingHands.add(entry.handNo);
+      }
+      const lastHandNo = engine?.lastHand?.handNo;
+      if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
+      for (const handNo of pendingHands) launchTrainingPipeline(handNo);
+      log('training-reconcile-registered', { hands: [...pendingHands] });
+      await consumeTrainingNow();
     } catch (error) {
       log('training-reconcile-error', { code: error.code ?? 'ERROR' });
+    } finally {
+      trainingProducerOpen = false;
     }
   };
 
-  const runTrainingForHand = async (handNo) => {
-    if (!trainingOn) return;
-    try {
-      const loop = readLoopState();
-      const explain = upperAdapter?.oneshotStart
-        ? async (evaluation) => {
-          const handle = upperAdapter.oneshotStart({
-            tier: 'upper',
-            prompt: [
-              '역할: 학습 해설',
-              'JSON 한 줄만 출력하라: {"evaluationId":"...","explanation":"..."}',
-              'evaluator 수치를 바꾸지 마라. 새 숫자를 만들지 마라.',
-              evaluation.status !== 'supported' ? 'unsupported를 정답처럼 설명하지 마라.' : '',
-              JSON.stringify({
-                evaluationId: evaluation.evaluationId,
-                status: evaluation.status,
-                grade: evaluation.grade,
-                chosen: evaluation.chosen,
-                recommended: evaluation.recommended,
-                code: evaluation.code,
-                reason: evaluation.reason,
-              }),
-            ].filter(Boolean).join('\n'),
-            timeoutMs: 20_000,
-          });
-          const completed = await handle.done;
-          const parsed = JSON.parse(String(completed?.raw ?? '').trim());
-          if (parsed.evaluationId !== evaluation.evaluationId) return null;
-          return parsed.explanation;
-        }
-        : null;
-      const result = await ingestHand({
-        sessionDir: root,
-        handNo,
-        gameEpoch: loop.gameEpoch,
-        owner: loop.ownerSessionId,
-        explain,
-      });
-      if (!result.ok) {
-        log('training-evaluate-failed', { handNo, code: result.code });
-        return;
-      }
-      await flushTrainingPublish();
-    } catch (error) {
-      log('training-error', { handNo, code: error.code ?? 'ERROR' });
-    }
-  };
-
+  let publishTail = Promise.resolve();
   const executePublish = async (args) => {
+    let release;
+    const slot = new Promise((resolve) => { release = resolve; });
+    const prev = publishTail;
+    publishTail = slot;
+    await prev.catch(() => {});
+    try {
+      return await executePublishUnlocked(args);
+    } finally {
+      release();
+    }
+  };
+
+  const executePublishUnlocked = async (args) => {
     try {
       return await runPublish(args);
     } catch (error) {
@@ -3539,16 +3690,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'machine-only fallback',
   ].join('\n');
 
+  const appendTrainingPendingToReview = (text) => {
+    if (!trainingOn) return text;
+    const pending = trainingAggregate(root).pending ?? 0;
+    return `${text}\n\n학습 평가 pending: ${pending}`;
+  };
+
   const generateReview = async ({ completed, statsRaw }) => {
     try {
       const engineEarly = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const playersEarly = readJsonOptional(playersPath, 'PLAYERS');
       if (!upperAdapter && opponentRuntimeOf() === 'policy') {
-        return machineReview({
+        return appendTrainingPendingToReview(machineReview({
           statsRaw,
           players: playersEarly,
           result: engineEarly?.result,
-        });
+        }));
       }
       const hands = [];
       for (let handNo = 1; handNo <= completed; handNo += 1) {
@@ -3575,11 +3732,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
       });
-      return await runReviewStage({
+      const synthesized = await runReviewStage({
         stage: 'synthesizer',
         prompt: synthesizerPrompt,
         requireHeadings: true,
       });
+      return appendTrainingPendingToReview(synthesized);
     } catch (error) {
       throw haltFinalization(
         'REVIEW_FAILED',
@@ -3865,13 +4023,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     if (stopRequested) return readLoopState();
 
-    // (2) running generation은 cutoff까지만 기다린다.
-    const settled = await settleCoachTasks(resultWaitCutoffNs);
+    // (2) running generation과 training settle은 같은 result-wait cutoff를 공유한다.
+    const [settled, trainingSettled] = await Promise.all([
+      settleCoachTasks(resultWaitCutoffNs),
+      settleTrainingTasks(resultWaitCutoffNs),
+    ]);
     log('finalize-coach-settled', { settled, pending: coachTasks.size });
+    log('finalize-training-settled', { settled: trainingSettled, pending: trainingTasks.size });
     if (stopRequested) return readLoopState();
 
     // (3) cutoff: 새 play-time publisher 금지 + live worker 종료 확인.
     finalizationCutoff = true;
+    await sealExploitAtCutoff();
+    if (trainingOn) {
+      try {
+        await createTrainingControl({ storeDir }).writeCutoffMarker(root);
+      } catch (error) {
+        log('training-cutoff-marker-error', { code: error.code ?? 'ERROR' });
+      }
+      await sealUnfinishedExplanations();
+      await terminateTrainingChildren(finalDeadlineNs);
+    }
     const signalAuthority = persistedCoachAttempts();
     if (signalAuthority.authorityError) {
       throw haltForPersistedCoachRecovery({
@@ -3947,7 +4119,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // (5) 그 다음에만 남은 예산으로 attempt/Q를 해소한다.
     publishDeadlineNs = finalDeadlineNs;
     try {
+      await retryUnresolvedTrainingAttempt();
       await drainQueuedCoachPublications();
+      await flushTrainingPublish();
+      await flushAnnotationPublish();
+      await consumeTrainingNow();
     } catch (error) {
       if (error.code === 'COACH_RECONCILE_PENDING') {
         writeLoopState({
@@ -3959,6 +4135,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       publishDeadlineNs = null;
     }
     log('finalize-drained', { remainingMs: remainingMsUntil(finalDeadlineNs) });
+    const leftoverPending = trainingOn ? (trainingAggregate(root).pending ?? 0) : 0;
+    if (leftoverPending > 0) appendNotice(`학습 평가 미완 ${leftoverPending}건`);
 
     // (6) missing handNo를 성공처럼 숨기지 않는다.
     if ((cutoff.reviewGate ?? 'closed') !== 'open') {
@@ -4145,7 +4323,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (disposalFailure) stopError ??= disposalFailure.reason;
       // Coach work is nonblocking only with respect to the next hand. Shutdown still owns
       // every task until the upper adapter has cancelled it and its authority/file work settles.
+      for (const handle of trainingAttempts.values()) {
+        try { handle.terminate(); } catch { /* best-effort */ }
+      }
       await Promise.allSettled([...coachTasks]);
+      await Promise.allSettled([...trainingTasks]);
       try {
         await terminateActiveChildren();
       } catch (error) {
@@ -4242,7 +4424,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
-      if (storeDir) await completeSessionStoreMigrations(storeDir);
+      if (storeDir) {
+        await completeSessionStoreMigrations(storeDir);
+        await consumeTrainingNow();
+      }
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
@@ -4375,7 +4560,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     let lifecycleStarted = false;
     try {
-      if (storeDir) await completeSessionStoreMigrations(storeDir);
+      if (storeDir) {
+        await completeSessionStoreMigrations(storeDir);
+        await consumeTrainingNow();
+      }
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
       if (!engineState) throw codedError('NO_GAME', 'resume할 engine 상태가 없습니다.');
@@ -4545,7 +4733,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
         const ending = out.gameOver || userBusted;
         if (ending) ensureFinalizationResultWaitCutoff();
-        await runTrainingForHand(out.handNo);
+        launchTrainingPipeline(out.handNo);
+        consumeTrainingNow().catch(() => {});
         try {
           await heartbeatCoach();
         } catch (error) {
