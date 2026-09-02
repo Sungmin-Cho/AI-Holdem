@@ -5,8 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
-import { readJsonl, readJsonSecure } from '../tools/training-store.js';
-import { detailRefOf } from '../publish-contract.js';
+import { readJsonl } from '../tools/training-store.js';
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-tctrl-'));
@@ -70,7 +69,7 @@ test('accept is idempotent on same digest and fail-closed on digest conflict', a
   );
 });
 
-test('reconcile uses lastHand when archive is missing and is a no-op after archive repair', async () => {
+test('reconcile records pending when archive is missing and does not evaluate (R2 producer-closed barrier)', async () => {
   const dir = tmp();
   const tc = createTrainingControl();
   const snapshot = {
@@ -102,8 +101,10 @@ test('reconcile uses lastHand when archive is missing and is a no-op after archi
     handsDir: path.join(dir, 'hands'),
     evaluate,
   });
-  assert.equal(first.created, 1);
-  assert.equal(calls, 1);
+  assert.equal(calls, 0);
+  assert.equal(first.created ?? 0, 0);
+  const pendingAuth = tc.loadAuthority(dir);
+  assert.equal(pendingAuth.pending['d-1-preflop-0'] != null, true);
   fs.mkdirSync(path.join(dir, 'hands'));
   fs.writeFileSync(path.join(dir, 'hands', 'hand-0001.json'), JSON.stringify(lastHand));
   const second = await tc.reconcile(dir, {
@@ -113,13 +114,12 @@ test('reconcile uses lastHand when archive is missing and is a no-op after archi
     handsDir: path.join(dir, 'hands'),
     evaluate,
   });
-  assert.equal(second.created, 0);
-  assert.equal(calls, 1);
+  assert.equal(second.created ?? 0, 0);
+  assert.equal(calls, 0);
   const id = evalOf().evaluationId;
   const auth = tc.loadAuthority(dir);
-  assert.equal(auth.items[id].status, 'evaluated');
-  const detail = readJsonSecure(path.join(dir, 'training', 'details', `${detailRefOf(id)}.json`));
-  assert.equal(detail.evaluationId, id);
+  assert.equal(auth.items[id], undefined);
+  assert.equal(auth.pending['d-1-preflop-0'].handNo, 1);
 });
 
 test('unknown authority schema is fail-closed', async () => {

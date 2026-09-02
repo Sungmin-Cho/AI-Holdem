@@ -12,6 +12,8 @@ import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   gameEpochOf,
   payloadSha256,
+  projectTrainingAnnotation,
+  projectTrainingSummary,
   utf8ByteLength,
 } from '../publish-contract.js';
 import { createCoachControl } from './coach-control.js';
@@ -114,10 +116,17 @@ function checkEnvelope(envelope, file) {
   if (envelope.ok === false) {
     bail('BAD_ENVELOPE', `거부된 envelope입니다(code=${envelope.code ?? '?'}). 게시하지 않았습니다.`);
   }
+  if (Array.isArray(envelope.training) && envelope.training.length === 0) {
+    bail('BAD_ENVELOPE', 'training: []은 게시할 수 없습니다.');
+  }
+  if (Array.isArray(envelope.trainingAnnotations) && envelope.trainingAnnotations.length === 0) {
+    bail('BAD_ENVELOPE', 'trainingAnnotations: []은 게시할 수 없습니다.');
+  }
   const hasView = envelope.view !== undefined;
   const isSide = Array.isArray(envelope.coach)
     || envelope.review !== undefined
-    || Array.isArray(envelope.training);
+    || (Array.isArray(envelope.training) && envelope.training.length > 0)
+    || (Array.isArray(envelope.trainingAnnotations) && envelope.trainingAnnotations.length > 0);
   // A step envelope always carries the user view — that is the whole point of it.
   // Accepting one without it lets an empty publish burn a publishId and hand the
   // dealer `next: null`, which its rules read as "hand over".
@@ -159,6 +168,9 @@ function buildBody(envelope, opts) {
   if (Array.isArray(envelope.coach) && envelope.coach.length) body.coach = envelope.coach;
   if (envelope.review !== undefined) body.review = envelope.review;
   if (Array.isArray(envelope.training) && envelope.training.length) body.training = envelope.training;
+  if (Array.isArray(envelope.trainingAnnotations) && envelope.trainingAnnotations.length) {
+    body.trainingAnnotations = envelope.trainingAnnotations;
+  }
   return body;
 }
 
@@ -219,9 +231,26 @@ function assertTrainingQueue(trainingAuth, trainingAuthority, epoch) {
   if (trainingAuth && !SUPPORTED_TRAINING_AUTHORITY_SCHEMAS.includes(trainingAuth.schemaVersion)) {
     bail('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${trainingAuth.schemaVersion}`);
   }
-  const queued = trainingAuth?.publishQueue?.[trainingAuthority.evaluationId];
-  if (!queued || queued.payloadSha256 !== trainingAuthority.payloadSha256) {
-    bail('STALE_TRAINING_AUTHORITY');
+  const items = trainingAuthority.items;
+  if (!Array.isArray(items) || items.length === 0) bail('STALE_TRAINING_AUTHORITY');
+  for (const entry of items) {
+    const queued = trainingAuth?.publishQueue?.[entry.evaluationId];
+    if (!queued || queued.payloadSha256 !== entry.payloadSha256) {
+      bail('STALE_TRAINING_AUTHORITY');
+    }
+  }
+}
+
+function assertAnnotationQueue(trainingAuth, annotationAuthority, epoch) {
+  if (!annotationAuthority) return;
+  if (annotationAuthority.expectedGameEpoch !== epoch) bail('STALE_ANNOTATION_AUTHORITY');
+  const items = annotationAuthority.items;
+  if (!Array.isArray(items) || items.length === 0) bail('STALE_ANNOTATION_AUTHORITY');
+  for (const entry of items) {
+    const queued = trainingAuth?.annotationQueue?.[entry.evaluationId]?.[entry.field];
+    if (!queued || queued.valueSha256 !== entry.valueSha256) {
+      bail('STALE_ANNOTATION_AUTHORITY');
+    }
   }
 }
 
@@ -248,9 +277,24 @@ function staleAttemptReason(record, epoch, auth, trainingAuth) {
   }
   const trainingItem = record.trainingAuthority;
   if (trainingItem) {
-    const queued = trainingAuth?.publishQueue?.[trainingItem.evaluationId];
-    if (!queued || queued.payloadSha256 !== trainingItem.payloadSha256) {
-      return 'STALE_TRAINING_AUTHORITY';
+    if (!Array.isArray(trainingItem.items)) return 'STALE_TRAINING_AUTHORITY';
+    for (const entry of trainingItem.items) {
+      const queued = trainingAuth?.publishQueue?.[entry.evaluationId];
+      if (!queued || queued.payloadSha256 !== entry.payloadSha256) {
+        return 'STALE_TRAINING_AUTHORITY';
+      }
+    }
+  }
+  const annotationItem = record.annotationAuthority;
+  if (annotationItem) {
+    if (!Array.isArray(annotationItem.items) || annotationItem.items.length === 0) {
+      return 'STALE_ANNOTATION_AUTHORITY';
+    }
+    for (const entry of annotationItem.items) {
+      const queued = trainingAuth?.annotationQueue?.[entry.evaluationId]?.[entry.field];
+      if (!queued || queued.valueSha256 !== entry.valueSha256) {
+        return 'STALE_ANNOTATION_AUTHORITY';
+      }
     }
   }
   return null;
@@ -325,6 +369,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       let body = null;
       let coachAuthority = envelope.coachAuthority ?? null;
       let trainingAuthority = envelope.trainingAuthority ?? null;
+      let annotationAuthority = envelope.annotationAuthority ?? null;
       const pendingPath = attemptPath(gameDir);
       const pending = fs.existsSync(pendingPath);
       if (opts.retry && !pending) {
@@ -347,6 +392,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
           body = record.body;
           coachAuthority = record.coachAuthority ?? null;
           trainingAuthority = record.trainingAuthority ?? null;
+          annotationAuthority = record.annotationAuthority ?? null;
           if (!body || typeof body !== 'object' || Array.isArray(body)
             || !Number.isInteger(body.publishId) || body.publishId < 1
             || body.publishId > MAX_PUBLISH_ID) {
@@ -358,7 +404,9 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         || envelope.review !== undefined
         || coachAuthority !== null
         || trainingAuthority !== null
-        || (body && (body.viewOnly === true || body.review !== undefined));
+        || annotationAuthority !== null
+        || (body && (body.viewOnly === true || body.review !== undefined
+          || Array.isArray(body.trainingAnnotations)));
       if (auth?.noNewPlayTimePublishers && !cutoffBodyAllowed) {
         bail('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시는 중단됐습니다.');
       }
@@ -375,6 +423,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       }
       assertCoachQueue(auth, coachAuthority, epoch);
       assertTrainingQueue(trainingAuth, trainingAuthority, epoch);
+      assertAnnotationQueue(trainingAuth, annotationAuthority, epoch);
       if (coachAuthority && !opts.retry) {
         const fromPath = path.resolve(opts.from);
         if (path.resolve(coachAuthority.exactEnvelopePath) !== fromPath) {
@@ -412,16 +461,56 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       if (trainingAuthority) {
         const notes = body.training;
         if (!Array.isArray(notes) || notes.length === 0) {
-          bail('STALE_TRAINING_AUTHORITY', 'training body shape이 올바르지 않습니다.');
+          bail('BAD_ENVELOPE', 'training body shape이 올바르지 않습니다.');
         }
-        const match = notes.find((note) => note.evaluationId === trainingAuthority.evaluationId);
-        if (!match || match.payloadSha256 !== trainingAuthority.payloadSha256) {
-          bail('STALE_TRAINING_AUTHORITY', 'envelope semantic digest가 queue와 일치하지 않습니다.');
+        if (!Array.isArray(trainingAuthority.items) || trainingAuthority.items.length !== notes.length) {
+          bail('STALE_TRAINING_AUTHORITY', 'trainingAuthority.items가 body와 일치하지 않습니다.');
+        }
+        for (const note of notes) {
+          let projected;
+          try {
+            projected = projectTrainingSummary(note);
+          } catch {
+            bail('STALE_TRAINING_AUTHORITY', 'training 항목을 투영하지 못했습니다.');
+          }
+          const bound = trainingAuthority.items.find((entry) => entry.evaluationId === note.evaluationId);
+          if (!bound
+            || projected.payloadSha256 !== bound.payloadSha256
+            || projected.payloadSha256 !== note.payloadSha256) {
+            bail('STALE_TRAINING_AUTHORITY', 'envelope semantic digest가 queue와 일치하지 않습니다.');
+          }
+        }
+      }
+      if (annotationAuthority) {
+        const notes = body.trainingAnnotations;
+        if (!Array.isArray(notes) || notes.length === 0) {
+          bail('BAD_ENVELOPE', 'trainingAnnotations body shape이 올바르지 않습니다.');
+        }
+        if (!Array.isArray(annotationAuthority.items)
+          || annotationAuthority.items.length !== notes.length) {
+          bail('STALE_ANNOTATION_AUTHORITY', 'annotationAuthority.items가 body와 일치하지 않습니다.');
+        }
+        for (const note of notes) {
+          let projected;
+          try {
+            projected = projectTrainingAnnotation(note);
+          } catch {
+            bail('STALE_ANNOTATION_AUTHORITY', 'annotation 항목을 투영하지 못했습니다.');
+          }
+          const bound = annotationAuthority.items.find((entry) => (
+            entry.evaluationId === note.evaluationId && entry.field === note.field
+          ));
+          if (!bound
+            || projected.valueSha256 !== bound.valueSha256
+            || projected.valueSha256 !== note.valueSha256) {
+            bail('STALE_ANNOTATION_AUTHORITY', 'annotation digest가 queue와 일치하지 않습니다.');
+          }
         }
       }
       const attemptRecord = { body, expectedGameEpoch: epoch };
       if (coachAuthority) attemptRecord.coachAuthority = coachAuthority;
       if (trainingAuthority) attemptRecord.trainingAuthority = trainingAuthority;
+      if (annotationAuthority) attemptRecord.annotationAuthority = annotationAuthority;
       writeAttempt(gameDir, attemptRecord);
       const afterLock = remainingMs(opts.deadlineMonotonicNs);
       if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');

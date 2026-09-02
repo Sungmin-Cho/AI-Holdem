@@ -57,3 +57,27 @@ test('formatter: collapsed card, unsupported reason, forced is not a mistake', (
   assert.match(exploit.exploit, /heuristic/);
   assert.equal(exploit.exploit.includes('0.80'), false);
 });
+
+test('formatter merge by evaluationId+field displays unavailable and does not use payloadSha256 no-op for annotations', async () => {
+  const { applyTrainingAnnotation, formatTrainingCard: format } = await import('../server/public/training-format.js');
+  const item = {
+    handNo: 17,
+    evaluationId: 'eval-merge',
+    payloadSha256: 'aa'.repeat(32),
+    spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AJo',
+    chosen: { action: 'fold' },
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.96 }],
+    grade: 'mixed',
+    status: 'supported',
+  };
+  const merged = applyTrainingAnnotation(item, {
+    evaluationId: 'eval-merge',
+    field: 'explanation',
+    status: 'unavailable',
+    value: null,
+    payloadSha256: 'ff'.repeat(32),
+  });
+  const card = format(merged);
+  assert.match(String(card.explanation), /unavailable/i);
+});

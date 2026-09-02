@@ -107,7 +107,7 @@ test('server merge: same digest is a no-op, different digest fail-closed; restar
       training: [{ ...summary, grade: 'off-policy', payloadSha256: 'ff'.repeat(32) }],
     });
     assert.equal(conflict.json.ok, false);
-    assert.equal(conflict.json.code, 'TRAINING_CONFLICT');
+    assert.equal(conflict.json.code, 'TRAINING_PROOF_MISMATCH');
     await a.close();
     a = null;
     b = await startServer({ gameDir: dir, port: 0, token });
@@ -170,8 +170,7 @@ test('cutoff 이후 training authority가 있으면 게시되고 play-time은 �
       training: [summary],
       trainingAuthority: {
         expectedGameEpoch: gameEpochOf('tok'),
-        evaluationId: summary.evaluationId,
-        payloadSha256: summary.payloadSha256,
+        items: [{ evaluationId: summary.evaluationId, payloadSha256: summary.payloadSha256 }],
       },
     }));
     const published = await run(dir, ['--from', trainingFile]);

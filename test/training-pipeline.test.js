@@ -43,6 +43,10 @@ test('ingestHand evaluates a user decision and builds a training envelope', asyn
   assert.equal(envelope.training.length, 1);
   assert.equal(envelope.training[0].handClass, 'AA');
   assert.equal(envelope.training[0].grade, 'preferred');
+  assert.equal(envelope.training[0].explanation, undefined);
+  assert.ok(Array.isArray(envelope.trainingAuthority.items));
+  assert.equal(envelope.trainingAuthority.items.length, 1);
+  assert.equal(envelope.trainingAuthority.items[0].evaluationId, envelope.training[0].evaluationId);
   assert.equal(JSON.stringify(envelope).includes('Ah'), false);
   assert.equal(JSON.stringify(envelope).includes('path'), false);
   assert.equal(envelope.view, undefined);

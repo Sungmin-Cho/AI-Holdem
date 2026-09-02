@@ -1125,13 +1125,24 @@ export function createCoachControl(deps = {}) {
       if (fs.existsSync(trainingAuthPath)) {
         try {
           const trainingAuth = readJsonFile(trainingAuthPath);
-          const pending = Object.values(trainingAuth?.items ?? {}).filter((item) => (
-            item?.status === 'pending' || item?.status === 'evaluated'
-          ));
-          if (pending.length) {
+          const pendingMap = trainingAuth?.pending ?? {};
+          const pendingIds = Object.keys(pendingMap);
+          if (pendingIds.length) {
             reasons.push({
               code: 'pending_training',
-              detail: { evaluationIds: pending.map((item) => item.evaluationId) },
+              detail: { decisionIds: pendingIds },
+            });
+          }
+          const queued = [];
+          for (const [evaluationId, fields] of Object.entries(trainingAuth?.annotationQueue ?? {})) {
+            for (const field of Object.keys(fields ?? {})) {
+              queued.push({ evaluationId, field });
+            }
+          }
+          if (queued.length) {
+            reasons.push({
+              code: 'pending_annotation',
+              detail: { queued },
             });
           }
         } catch {
@@ -1162,7 +1173,7 @@ export function createCoachControl(deps = {}) {
           'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
           'coach_authority_missing', 'coach_authority_unreadable',
           'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
-          'pending_training', 'training_attempt_pending', 'solver_child_live',
+          'pending_training', 'pending_annotation', 'training_attempt_pending', 'solver_child_live',
         ];
         reasons.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
         return { ok: false, code: 'ROLLBACK_REFUSED', reasons };
