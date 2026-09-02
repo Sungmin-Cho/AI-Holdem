@@ -174,6 +174,30 @@ export function projectTrainingSummary(item) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) {
     throw coded('TRAINING_PROOF_MISMATCH', 'training summary must be an object');
   }
+  if (typeof item.evaluationId !== 'string') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'evaluationId must be a string');
+  }
+  if (item.handNo != null && !Number.isInteger(item.handNo)) {
+    throw coded('TRAINING_PROOF_MISMATCH', 'handNo must be an integer');
+  }
+  if (item.decisionId != null && typeof item.decisionId !== 'string') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'decisionId must be a string');
+  }
+  if (item.status != null && typeof item.status !== 'string') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'status must be a string');
+  }
+  if (item.street != null && typeof item.street !== 'string') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'street must be a string');
+  }
+  if (item.evLossBb != null && !Number.isFinite(item.evLossBb)) {
+    throw coded('TRAINING_PROOF_MISMATCH', 'evLossBb must be a finite number');
+  }
+  if (item.grade != null && typeof item.grade !== 'string') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'grade must be a string');
+  }
+  if (item.forced != null && typeof item.forced !== 'boolean') {
+    throw coded('TRAINING_PROOF_MISMATCH', 'forced must be a boolean');
+  }
   assertCappedString(item.reason, TRAINING_SUMMARY_LIMITS.reason, 'reason');
   assertCappedString(item.spotKey, TRAINING_SUMMARY_LIMITS.key, 'spotKey');
   assertCappedString(item.handClass, TRAINING_SUMMARY_LIMITS.key, 'handClass');
@@ -191,7 +215,7 @@ export function projectTrainingSummary(item) {
     recommended,
     evLossBb: item.evLossBb ?? null,
     grade: item.grade ?? null,
-    forced: Boolean(item.forced),
+    forced: item.forced === true,
     source: compactSource(item.source),
   };
   if (item.detailRef !== undefined) out.detailRef = item.detailRef;
@@ -212,17 +236,43 @@ function projectExploitValue(value) {
       if (!row || typeof row !== 'object' || Array.isArray(row)) {
         throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponent must be an object');
       }
+      if (row.opponentId != null && typeof row.opponentId !== 'string') {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponentId must be a string');
+      }
+      if (row.policyId != null && typeof row.policyId !== 'string') {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit policyId must be a string');
+      }
+      let adjustment = row.adjustment;
+      if (adjustment != null) {
+        if (typeof adjustment !== 'object' || Array.isArray(adjustment)) {
+          throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must be an object');
+        }
+        const next = {};
+        for (const [key, amount] of Object.entries(adjustment)) {
+          if (amount != null && typeof amount === 'object') {
+            throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment values must be scalars');
+          }
+          next[key] = amount;
+        }
+        adjustment = next;
+      }
       const out = {
         opponentId: row.opponentId,
         policyId: row.policyId,
-        adjustment: row.adjustment,
+        adjustment,
       };
       if (row.comparison && typeof row.comparison === 'object' && !Array.isArray(row.comparison)) {
+        if (row.comparison.summaryCode != null && typeof row.comparison.summaryCode !== 'string') {
+          throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit comparison.summaryCode must be a string');
+        }
         out.comparison = { summaryCode: row.comparison.summaryCode };
       }
       return out;
     })
     : [];
+  if (value.primary != null && typeof value.primary !== 'string') {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit primary must be a string');
+  }
   return { opponents, primary: value.primary };
 }
 

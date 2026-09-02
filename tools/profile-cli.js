@@ -97,7 +97,8 @@ export async function completeSessionStoreMigrations(storeDir) {
     if (marker.status === 'complete') continue;
     if (marker.status !== 'session-done') continue;
     const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
-    if (fs.existsSync(mapFile)) await migrateStoreV2(storeDir, mapFile);
+    if (!fs.existsSync(mapFile)) continue;
+    await migrateStoreV2(storeDir, mapFile);
     fs.writeFileSync(markerFile, JSON.stringify({
       ...marker,
       status: 'complete',

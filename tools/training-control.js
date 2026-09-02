@@ -174,6 +174,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
   if (auth.schemaVersion === 2) {
     if (marker?.status === 'in-progress') {
       rewriteJsonlFromItems(sessionDir, auth);
+      if (!fs.existsSync(digestMapPath(sessionDir))) return auth;
       writeJsonSecure(markerPath(sessionDir), {
         status: 'session-done',
         at: new Date().toISOString(),
@@ -277,16 +278,17 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
       },
       annotations,
     };
-    if (item.status !== 'published') {
-      newQueue[id] = {
-        evaluationId: id,
-        handNo: item.handNo,
-        payloadSha256: summary.payloadSha256,
-      };
-    }
   }
 
   resolveV1Attempt(sessionDir, newItems);
+  for (const [id, item] of Object.entries(newItems)) {
+    if (item.status === 'published') continue;
+    newQueue[id] = {
+      evaluationId: id,
+      handNo: item.handNo,
+      payloadSha256: item.payloadSha256,
+    };
+  }
 
   const v2 = {
     schemaVersion: 2,

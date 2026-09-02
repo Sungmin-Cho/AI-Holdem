@@ -896,6 +896,15 @@ test('server deep-projects training: nested extra keys 400; object leaf 400; for
     assert.equal(leaf.status, 400);
     assert.equal(leaf.json.code, 'TRAINING_PROOF_MISMATCH');
 
+    const objectStatus = {
+      ...summary,
+      status: { policySeed: 'SECRET' },
+      payloadSha256: summary.payloadSha256,
+    };
+    const statusLeaf = await postPublish(started.port, 'tok', { publishId: 1, training: [objectStatus] });
+    assert.equal(statusLeaf.status, 400);
+    assert.equal(statusLeaf.json.code, 'TRAINING_PROOF_MISMATCH');
+
     const ok = await postPublish(started.port, 'tok', { publishId: 1, training: [summary] });
     assert.equal(ok.json.ok, true);
     const forged = {
@@ -1101,6 +1110,38 @@ test('persist → restart → loadUiState keeps annotations; old snapshot explan
   } finally {
     if (a) await a.close();
     if (b) await b.close();
+  }
+});
+
+test('loadUiState drops forged and orphan persisted annotations', async () => {
+  const dir = tmp();
+  const summary = toPublicSummary(evaluation(), { handNo: 1, detailSha256: 'ab'.repeat(32) });
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    training: [summary],
+    trainingAnnotations: [{
+      evaluationId: summary.evaluationId,
+      payloadSha256: summary.payloadSha256,
+      field: 'explanation',
+      status: 'ready',
+      value: { nested: 'secret' },
+    }, {
+      evaluationId: 'orphan:id',
+      payloadSha256: summary.payloadSha256,
+      field: 'explanation',
+      status: 'ready',
+      value: '고아',
+    }],
+    publishId: 1,
+    history: [],
+  }));
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const snap = await (await fetch(`http://127.0.0.1:${started.port}/api/snapshot?token=tok`)).json();
+    assert.equal(snap.training.length, 1);
+    assert.equal((snap.trainingAnnotations ?? []).length, 0);
+  } finally {
+    await started.close();
   }
 
   const dir2 = tmp();

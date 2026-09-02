@@ -175,16 +175,24 @@ function loadUiState(gameDir) {
     for (const [id, fields] of Object.entries(migrated.split)) {
       annotationMap[id] = { ...fields, ...(annotationMap[id] ?? {}) };
     }
+    const trainingIds = new Set(migrated.training.map((row) => row.evaluationId));
     const restoredAnnotations = {};
     for (const [id, fields] of Object.entries(annotationMap)) {
+      if (!trainingIds.has(id)) continue;
+      const machine = migrated.training.find((row) => row.evaluationId === id);
       restoredAnnotations[id] = {};
       for (const [field, row] of Object.entries(fields ?? {})) {
         try {
-          restoredAnnotations[id][field] = projectTrainingAnnotation(row);
+          const projected = projectTrainingAnnotation(row);
+          if (machine && projected.payloadSha256 && projected.payloadSha256 !== machine.payloadSha256) {
+            continue;
+          }
+          restoredAnnotations[id][field] = projected;
         } catch {
-          restoredAnnotations[id][field] = row;
+          /* drop malformed persisted annotation */
         }
       }
+      if (!Object.keys(restoredAnnotations[id]).length) delete restoredAnnotations[id];
     }
     return {
       revision: Number(raw.revision) || 0,
