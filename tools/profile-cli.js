@@ -165,17 +165,18 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   const tc = createTrainingControl({ storeDir });
   const runEvaluate = evaluate ?? defaultEvaluate;
   for (const sessionDir of listTrainingSessions(storeDir)) {
-    const pendingOut = await retryPendingMap(sessionDir, {
-      evaluate: runEvaluate,
-      solve,
-      storeDir,
-    });
-    for (const notice of pendingOut.notices) {
-      notices.push(notice);
-      onNotice?.(notice);
-    }
-    pendingRetried += pendingOut.retried;
     try {
+      const pendingOut = await retryPendingMap(sessionDir, {
+        evaluate: runEvaluate,
+        solve,
+        storeDir,
+      });
+      for (const notice of pendingOut.notices) {
+        notices.push(notice);
+        onNotice?.(notice);
+      }
+      pendingRetried += pendingOut.retried;
+      await completeSessionStoreMigration(storeDir, sessionDir);
       const consume = await tc.consumeTrainingItems(sessionDir, { storeDir });
       applied += consume.applied ?? 0;
       profiled += consume.profiled ?? 0;
@@ -233,31 +234,35 @@ export async function migrateStoreV2(storeDir, digestMapFile) {
   return profile;
 }
 
+export async function completeSessionStoreMigration(storeDir, sessionDir) {
+  const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
+  if (!fs.existsSync(markerFile)) return { completed: false };
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  } catch {
+    return { completed: false };
+  }
+  if (marker.status === 'complete') return { completed: false };
+  if (marker.status !== 'session-done') return { completed: false };
+  const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
+  if (!fs.existsSync(mapFile)) return { completed: false };
+  await migrateStoreV2(storeDir, mapFile);
+  fs.writeFileSync(markerFile, JSON.stringify({
+    ...marker,
+    status: 'complete',
+    completedAt: new Date().toISOString(),
+  }));
+  return { completed: true };
+}
+
 export async function completeSessionStoreMigrations(storeDir) {
   const sessionsRoot = path.join(storeDir, '.session-store', 'sessions');
   if (!fs.existsSync(sessionsRoot)) return { completed: 0 };
   let completed = 0;
   for (const name of fs.readdirSync(sessionsRoot)) {
-    const sessionDir = path.join(sessionsRoot, name);
-    const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
-    if (!fs.existsSync(markerFile)) continue;
-    let marker;
-    try {
-      marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-    } catch {
-      continue;
-    }
-    if (marker.status === 'complete') continue;
-    if (marker.status !== 'session-done') continue;
-    const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
-    if (!fs.existsSync(mapFile)) continue;
-    await migrateStoreV2(storeDir, mapFile);
-    fs.writeFileSync(markerFile, JSON.stringify({
-      ...marker,
-      status: 'complete',
-      completedAt: new Date().toISOString(),
-    }));
-    completed += 1;
+    const result = await completeSessionStoreMigration(storeDir, path.join(sessionsRoot, name));
+    if (result.completed) completed += 1;
   }
   return { completed };
 }

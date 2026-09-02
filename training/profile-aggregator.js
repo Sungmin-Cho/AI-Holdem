@@ -2,6 +2,7 @@ import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
+export const PROFILE_SCHEMA_VERSION = 2;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -24,7 +25,7 @@ function emptyOverall() {
 
 export function emptyProfile() {
   return {
-    schemaVersion: 1,
+    schemaVersion: PROFILE_SCHEMA_VERSION,
     updatedAt: null,
     processed: {},
     overall: emptyOverall(),
@@ -141,7 +142,7 @@ function hasGameEventsOf(profile) {
   return Object.keys(profile.processed ?? {}).length > 0;
 }
 
-function projectActive(profile) {
+export function projectActive(profile) {
   const key = profile.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
   const seg = profile.segments?.[key];
   if (!seg) {
@@ -165,11 +166,12 @@ export function applyEvent(profile, event) {
     throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
   }
   const next = clone(profile);
+  next.schemaVersion = PROFILE_SCHEMA_VERSION;
   next.segments = next.segments ?? {};
   next.hasGameEvents = hasGameEventsOf(next);
   next.activeSegmentId = next.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
   const seen = next.processed[event.evaluationId];
-  if (seen === event.payloadSha256) return next;
+  if (seen === event.payloadSha256) return projectActive(next);
   if (seen && seen !== event.payloadSha256) {
     throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
   }
