@@ -45,7 +45,8 @@ function loadSession(storeDir) {
 }
 
 function lookupStrategy(question) {
-  const { data, contentSha256 } = loadPreflopJson(DATASET);
+  const expectedSha256 = fs.readFileSync(DATASET.replace(/\.json$/, '.sha256'), 'utf8').trim();
+  const { data, contentSha256 } = loadPreflopJson(DATASET, { expectedSha256 });
   return lookup({ data, contentSha256 }, {
     spotKey: question.prompt.spotKey,
     handClass: question.prompt.handClass,

@@ -13,8 +13,8 @@ test('engine 6max UTG+1 → HJ, HU BTN/SB → BTN', () => {
   assert.equal(trainingPosition('BTN/SB', { seated: 2 }), 'BTN');
 });
 
-test('RFI unopened and vs-single-raise keys; multiway/size/stack rejected', () => {
-  const base = {
+function baseSpot(over = {}) {
+  return {
     schemaVersion: 1,
     decisionId: 'd-1-preflop-0',
     street: 'preflop',
@@ -25,7 +25,12 @@ test('RFI unopened and vs-single-raise keys; multiway/size/stack rejected', () =
     publicSeats: sixSeats(),
     priorActions: [],
     chosenAction: { action: 'raise', amount: 250 },
+    ...over,
   };
+}
+
+test('RFI unopened and vs-single-raise keys; multiway/size/stack rejected', () => {
+  const base = baseSpot();
   const rfi = normalizePreflopSpot(base);
   assert.equal(rfi.ok, true);
   assert.equal(rfi.spotKey, '6max-100bb-btn-rfi-unopened');
@@ -46,4 +51,69 @@ test('RFI unopened and vs-single-raise keys; multiway/size/stack rejected', () =
     ...base,
     priorActions: [{ action: 'raise', amount: 250 }, { action: 'raise', amount: 850 }],
   }).code, 'UNSUPPORTED_SPOT');
+});
+
+test('prior call (limp or cold-call) is UNSUPPORTED_SPOT', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({
+    priorActions: [{ action: 'call', amount: 100 }],
+    chosenAction: { action: 'raise', amount: 250 },
+  })).code, 'UNSUPPORTED_SPOT');
+  assert.equal(normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }, { action: 'call', amount: 250 }],
+    chosenAction: { action: 'fold' },
+  })).code, 'UNSUPPORTED_SPOT');
+});
+
+test('facing size is prior raise amount, independent of hero fold/call', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 500 }],
+    chosenAction: { action: 'fold' },
+  })).code, 'UNSUPPORTED_SIZE');
+  const foldVs25 = normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }],
+    chosenAction: { action: 'fold' },
+  }));
+  assert.equal(foldVs25.ok, true);
+  const callVs25 = normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }],
+    chosenAction: { action: 'call', amount: 250 },
+  }));
+  assert.equal(callVs25.ok, true);
+});
+
+test('hero 10bb 3bet vs 2.5bb open is UNSUPPORTED_SIZE', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }],
+    chosenAction: { action: 'raise', amount: 1000 },
+  })).code, 'UNSUPPORTED_SIZE');
+});
+
+test('NaN or non-finite stack is UNSUPPORTED_STACK', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({ effectiveStack: Number.NaN })).code, 'UNSUPPORTED_STACK');
+});
+
+test('NaN hero raise amount is UNSUPPORTED_SIZE', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({
+    chosenAction: { action: 'raise', amount: Number.NaN },
+  })).code, 'UNSUPPORTED_SIZE');
+  assert.equal(normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }],
+    chosenAction: { action: 'raise', amount: Number.POSITIVE_INFINITY },
+  })).code, 'UNSUPPORTED_SIZE');
+});
+
+test('6-max engine labels map to training positions', () => {
+  assert.equal(trainingPosition('UTG', { seated: 6 }), 'UTG');
+  assert.equal(trainingPosition('UTG+1', { seated: 6 }), 'HJ');
+  assert.equal(trainingPosition('HJ', { seated: 6 }), 'HJ');
+  assert.equal(trainingPosition('CO', { seated: 6 }), 'CO');
+  assert.equal(trainingPosition('BTN', { seated: 6 }), 'BTN');
+  assert.equal(trainingPosition('SB', { seated: 6 }), 'SB');
+  assert.equal(trainingPosition('BB', { seated: 6 }), 'BB');
 });

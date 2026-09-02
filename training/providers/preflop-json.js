@@ -10,6 +10,9 @@ export function hashDataset(raw) {
 }
 
 export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
+  if (typeof expectedSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(expectedSha256)) {
+    throw coded(ERRORS.DATASET_INVALID, 'expectedSha256 required');
+  }
   let raw;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
@@ -17,7 +20,7 @@ export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset 파일을 읽을 수 없습니다.');
   }
   const contentSha256 = hashDataset(raw);
-  if (expectedSha256 && expectedSha256 !== contentSha256) {
+  if (expectedSha256.toLowerCase() !== contentSha256) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset digest mismatch');
   }
   let data;
