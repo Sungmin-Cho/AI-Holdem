@@ -34,7 +34,8 @@ import {
 } from './training-pipeline.js';
 import {
   applyEvaluation,
-  defaultPracticeFocusFile,
+  installPracticeFocus,
+  readInstalledPracticeFocus,
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from '../training/profile-store.js';
@@ -2195,12 +2196,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
-    let practiceFocus = '없음';
-    try {
-      practiceFocus = fs.readFileSync(path.join(root, '.practice-focus.json'), 'utf8');
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    const practiceFocus = readInstalledPracticeFocus(root) ?? '없음';
     const prompt = [
       '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
       '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
@@ -4275,14 +4271,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
-      if (practiceFocusFile !== undefined) {
-        fs.copyFileSync(path.resolve(practiceFocusFile), path.join(root, '.practice-focus.json'));
-      } else if (storeDir) {
-        const autoFocus = defaultPracticeFocusFile(storeDir);
-        if (autoFocus) {
-          fs.copyFileSync(autoFocus, path.join(root, '.practice-focus.json'));
-        }
-      }
+      installPracticeFocus({
+        destRoot: root,
+        storeDir,
+        practiceFocusFile,
+        onNotice: appendNotice,
+      });
       if (!policyMode) await warmPlayers();
       const state = writeLoopState({ phase: 'playing' });
       log('bootstrap-playing', { port });

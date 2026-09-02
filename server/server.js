@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MAX_PUBLISH_BODY_BYTES, MAX_PUBLISH_ID, payloadSha256 } from '../publish-contract.js';
+import { openContained } from '../tools/training-store.js';
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 const HEARTBEAT_MS = 15_000;
@@ -272,32 +273,10 @@ async function readJsonBody(req, res) {
 }
 
 function readTrainingDetail(root, ref, expectedSha) {
-  const nofollow = fs.constants.O_NOFOLLOW ?? 0;
-  const dirFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | nofollow;
-  let trainingFd;
-  let detailsFd;
-  let fileFd;
-  try {
-    trainingFd = fs.openSync(path.join(root, 'training'), dirFlags);
-    detailsFd = fs.openSync(path.join(root, 'training', 'details'), dirFlags);
-    fileFd = fs.openSync(
-      path.join(root, 'training', 'details', `${ref}.json`),
-      fs.constants.O_RDONLY | nofollow,
-    );
-    const st = fs.fstatSync(fileFd);
-    if (!st.isFile() || st.size > 1_000_000) throw new Error('bad-detail');
-    const buf = Buffer.alloc(st.size);
-    fs.readSync(fileFd, buf, 0, st.size, 0);
-    const digest = createHash('sha256').update(buf).digest('hex');
-    if (digest !== expectedSha) throw new Error('digest');
-    return JSON.parse(buf.toString('utf8'));
-  } finally {
-    for (const fd of [fileFd, detailsFd, trainingFd]) {
-      if (fd != null) {
-        try { fs.closeSync(fd); } catch { /* closed */ }
-      }
-    }
-  }
+  const buf = openContained(root, ['training', 'details', `${ref}.json`], { maxBytes: 1_000_000 });
+  const digest = createHash('sha256').update(buf).digest('hex');
+  if (digest !== expectedSha) throw new Error('digest');
+  return JSON.parse(buf.toString('utf8'));
 }
 
 function serveStatic(pathname, res) {

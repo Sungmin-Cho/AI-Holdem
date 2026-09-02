@@ -1162,6 +1162,82 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
   assert.equal(adapter.disposed, 1);
 });
 
+test('bootstrap auto-select ignores a symlink practice-focus and records a notice', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const storeDir = tmpGame();
+  const training = path.join(storeDir, '.training');
+  fs.mkdirSync(training, { recursive: true });
+  const outside = path.join(storeDir, 'pwned.json');
+  fs.writeFileSync(outside, JSON.stringify({
+    schemaVersion: 1,
+    leaks: [],
+    focus: 'PWNED_FOCUS',
+  }));
+  fs.symlinkSync(outside, path.join(training, 'practice-focus.json'));
+  const adapter = makeAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(async () => {
+    await loop.requestStop();
+  });
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  assert.equal(fs.existsSync(path.join(gameDir, '.practice-focus.json')), false);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(
+    (state.notices ?? []).some((notice) => String(notice).includes('UNSAFE_PATH')),
+    true,
+    JSON.stringify(state.notices),
+  );
+});
+
+test('bootstrap auto-select rejects an oversized practice-focus', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const storeDir = tmpGame();
+  const training = path.join(storeDir, '.training');
+  fs.mkdirSync(training, { recursive: true });
+  fs.writeFileSync(path.join(training, 'practice-focus.json'), JSON.stringify({
+    schemaVersion: 1,
+    leaks: [],
+    focus: 'x'.repeat(5000),
+  }));
+  const adapter = makeAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+  });
+  await assert.rejects(() => loop.bootstrap({ ai: 1, stack: 100 }), { code: 'TOO_LARGE' });
+  assert.equal(fs.existsSync(path.join(gameDir, '.practice-focus.json')), false);
+});
+
+test('bootstrap auto-select rejects a practice-focus schema mismatch', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const storeDir = tmpGame();
+  const training = path.join(storeDir, '.training');
+  fs.mkdirSync(training, { recursive: true });
+  fs.writeFileSync(path.join(training, 'practice-focus.json'), JSON.stringify({
+    focus: 'x',
+    extra: true,
+  }));
+  const adapter = makeAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+  });
+  await assert.rejects(() => loop.bootstrap({ ai: 1, stack: 100 }), { code: 'BAD_PRACTICE_FOCUS' });
+  assert.equal(fs.existsSync(path.join(gameDir, '.practice-focus.json')), false);
+});
+
 test('requestStop holds the loop lock until an in-flight resolver settles and disposes every registered adapter', { timeout: 10_000 }, async () => {
   const gameDir = tmpGame();
   let resolverEntered;
