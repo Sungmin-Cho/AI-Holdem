@@ -1,9 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { gameEpochOf } from '../publish-contract.js';
 import { createGameLoop } from '../tools/game-loop.js';
+import { decide, stampPlayerPolicies } from '../tools/policy-player.js';
+import { assignmentFor } from '../training/policies/catalog.js';
+
+const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-policy-loop-'));
@@ -75,6 +82,76 @@ test('policy bootstrap skips player warmup, stamps policy, hides seed from view'
   assert.match(state.policySeed, /^[0-9a-f]{64}$/);
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(loopState.opponentRuntime, 'policy');
+});
+
+test('policy resume re-stamps seats missing after init crash and reproduces init actions', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmp();
+  const init = JSON.parse(execFileSync(process.execPath, [
+    ENGINE, 'init', '--ai', '2', '--opponent-runtime', 'policy', '--game-dir', gameDir,
+  ], { encoding: 'utf8' }).trim());
+  const unstamped = readJson(path.join(gameDir, 'players.json'));
+  assert.equal(unstamped.some((player) => player.playerId !== 'user' && player.policy), false);
+  const expected = unstamped.map((player) => (
+    player.playerId === 'user' ? player : { ...player, policy: assignmentFor(player.archetype) }
+  ));
+
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap',
+    sessionToken: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: '00000000-0000-4000-8000-000000000000',
+    opponentRuntime: 'policy',
+    startedAt: '2026-09-02T00:00:00.000Z',
+    notices: [],
+    metrics: [],
+  }));
+
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 0, opponentRuntime: 'policy' },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  const resumed = await loop.resume();
+  assert.equal(resumed.phase, 'playing');
+
+  const stamped = readJson(path.join(gameDir, 'players.json'));
+  for (const player of stamped.filter((row) => row.playerId !== 'user')) {
+    assert.deepEqual(player.policy, assignmentFor(player.archetype));
+  }
+  assert.deepEqual(
+    stamped.filter((row) => row.playerId !== 'user').map((row) => row.policy),
+    expected.filter((row) => row.playerId !== 'user').map((row) => row.policy),
+  );
+
+  const seed = readJson(path.join(gameDir, 'state.json')).policySeed;
+  const epoch = gameEpochOf(init.sessionToken);
+  const snapshot = {
+    schemaVersion: 1,
+    decisionId: 'd-1-preflop-0',
+    street: 'preflop',
+    holeCards: ['Ah', 'Ad'],
+    board: [],
+    blinds: [50, 100],
+    toCall: 0,
+    position: 'UTG',
+    publicSeats: stamped.map((player) => ({ playerId: player.playerId, out: false })),
+    priorActions: [],
+    effectiveStack: 10000,
+  };
+  const legal = {
+    canCheck: false, canRaise: true, callAmount: 50, minRaiseTo: 200, maxRaiseTo: 10000,
+  };
+  const seat = stamped.find((player) => player.playerId === 'p1');
+  const fromResume = decide({
+    snapshot, legal, policy: seat.policy, policySeed: seed, gameEpoch: epoch,
+  });
+  const fromInit = decide({
+    snapshot, legal, policy: assignmentFor(seat.archetype), policySeed: seed, gameEpoch: epoch,
+  });
+  assert.deepEqual(fromResume, fromInit);
+  stampPlayerPolicies(gameDir);
+  assert.deepEqual(readJson(path.join(gameDir, 'players.json')), stamped);
 });
 
 test('policy mode reaches done without an LLM player runtime', { timeout: 40_000 }, async (t) => {
