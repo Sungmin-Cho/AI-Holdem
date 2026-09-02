@@ -97,6 +97,17 @@ test('NaN or non-finite stack is UNSUPPORTED_STACK', () => {
   assert.equal(normalizePreflopSpot(baseSpot({ effectiveStack: Number.NaN })).code, 'UNSUPPORTED_STACK');
 });
 
+test('NaN hero raise amount is UNSUPPORTED_SIZE', () => {
+  assert.equal(normalizePreflopSpot(baseSpot({
+    chosenAction: { action: 'raise', amount: Number.NaN },
+  })).code, 'UNSUPPORTED_SIZE');
+  assert.equal(normalizePreflopSpot(baseSpot({
+    position: 'BB',
+    priorActions: [{ action: 'raise', amount: 250 }],
+    chosenAction: { action: 'raise', amount: Number.POSITIVE_INFINITY },
+  })).code, 'UNSUPPORTED_SIZE');
+});
+
 test('6-max engine labels map to training positions', () => {
   assert.equal(trainingPosition('UTG', { seated: 6 }), 'UTG');
   assert.equal(trainingPosition('UTG+1', { seated: 6 }), 'HJ');

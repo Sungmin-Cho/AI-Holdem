@@ -29,8 +29,9 @@ function bbOf(snapshot) {
 function sizeBb(snapshot) {
   const bb = bbOf(snapshot);
   if (!bb) return null;
-  const amount = snapshot.chosenAction?.amount ?? 0;
+  const amount = snapshot.chosenAction?.amount;
   if (snapshot.chosenAction?.action !== 'raise') return null;
+  if (!Number.isFinite(amount)) return null;
   return amount / bb;
 }
 
