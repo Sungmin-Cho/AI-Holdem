@@ -603,6 +603,17 @@ test('rollback guard refuses leftover annotationQueue independently', async () =
   assert.equal(guard.reasons.some((reason) => reason.code === 'pending_annotation'), true);
 });
 
+test('rollback guard refuses empty-object annotationQueue leftovers', async () => {
+  const fixture = setup({ token: 'tok-roll-annotation-empty' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writePublishedTraining(fixture.dir, {
+    annotationQueue: { 'eval-1': {} },
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'pending_annotation'), true);
+});
+
 test('rollback guard refuses live solveTasks independently', async () => {
   const fixture = setup({ token: 'tok-roll-solve-tasks' });
   writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });

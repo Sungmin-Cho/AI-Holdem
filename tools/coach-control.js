@@ -46,14 +46,9 @@ function collectionHasEntries(value) {
 }
 
 function queueHasLeftovers(queue) {
-  if (!isPlainMap(queue)) return false;
-  return Object.keys(queue).some((key) => {
-    const fields = queue[key];
-    if (fields == null) return false;
-    if (typeof fields !== 'object') return true;
-    if (Array.isArray(fields)) return fields.length > 0;
-    return Object.keys(fields).length > 0;
-  });
+  if (queue == null) return false;
+  if (!isPlainMap(queue)) return true;
+  return Object.keys(queue).length > 0;
 }
 
 function authPath(gameDir) {

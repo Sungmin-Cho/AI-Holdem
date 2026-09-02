@@ -59,14 +59,13 @@ function processGroupPids(pgid) {
   try {
     const out = execFileSync('ps', ['-o', 'pid=', '-g', String(pgid)], { encoding: 'utf8' });
     return { ok: true, pids: parsePidList(out) };
-  } catch (error) {
-    const stdout = String(error.stdout ?? '').trim();
-    const stderr = String(error.stderr ?? '').trim();
-    if (!stdout && (!stderr || /process group too large/i.test(stderr))) {
-      return { ok: true, pids: [] };
-    }
+  } catch {
     return { ok: false, pids: [] };
   }
+}
+
+function isStartTime(value) {
+  return typeof value === 'string' && value.length > 0;
 }
 
 function pidAlive(pid) {
@@ -97,12 +96,20 @@ function occupancyOf(pid, startTime, startTimeOf) {
   return { live: false, readable: true };
 }
 
-async function killGroup(pid, startTime, startTimeOf) {
-  if (startTime == null || startTime === '') {
+export async function killGroup(pid, startTime, startTimeOf) {
+  if (!isStartTime(startTime)) {
     return { confirmed: false, reason: 'termination_unconfirmed' };
   }
   const current = startTimeOf(pid);
-  if (current != null && current !== startTime) {
+  if (current == null) {
+    const group = processGroupPids(pid);
+    if (!group.ok) return { confirmed: false, reason: 'termination_unconfirmed' };
+    if (group.pids.includes(pid) || group.pids.some((member) => member !== pid)) {
+      return { confirmed: false, reason: 'termination_unconfirmed' };
+    }
+    return { confirmed: true };
+  }
+  if (current !== startTime) {
     const group = processGroupPids(pid);
     if (!group.ok) return { confirmed: false, reason: 'termination_unconfirmed' };
     if (group.pids.some((member) => member !== pid)) {
@@ -171,10 +178,13 @@ export function readPersistedSolver(gameDir, { processStartTime: startTimeOf = p
     return { state: 'unreadable', record: rec };
   }
   const startTime = rec.startTime;
-  if (startTime == null || startTime === '') {
-    const occupancy = occupancyOf(pid, startTime, startTimeOf);
-    if (!occupancy.readable) return { state: 'unreadable', record: rec };
-    return { state: occupancy.live ? 'unreadable' : 'dead', record: rec };
+  if (!isStartTime(startTime)) {
+    if (startTime == null || startTime === '') {
+      const occupancy = occupancyOf(pid, startTime, startTimeOf);
+      if (!occupancy.readable) return { state: 'unreadable', record: rec };
+      return { state: occupancy.live ? 'unreadable' : 'dead', record: rec };
+    }
+    return { state: 'unreadable', record: rec };
   }
   const occupancy = occupancyOf(pid, startTime, startTimeOf);
   if (!occupancy.readable) return { state: 'unreadable', record: rec };

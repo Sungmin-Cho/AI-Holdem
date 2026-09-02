@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { processStartTime, writeJsonAtomic } from '../engine/state.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import {
-  FAKE_CHILD, hasLiveSolverChild, readPersistedSolver, runSolver,
+  FAKE_CHILD, hasLiveSolverChild, killGroup, readPersistedSolver, runSolver,
 } from '../tools/solver-runtime.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -215,6 +215,39 @@ test('leader gone with a descendant still in the process group is live', async (
   );
   fs.writeFileSync(persistPath(dir), JSON.stringify({ pid, startTime }));
   assert.equal(readPersistedSolver(dir)?.state, 'live');
+  await assert.rejects(
+    () => runSolver({ gameDir: dir, timeoutMs: 500 }),
+    (error) => error.code === 'SOLVER_BUSY',
+  );
+});
+
+test('killGroup does not signal when startTime cannot be re-read', async (t) => {
+  const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  dummy.unref();
+  t.after(() => killTree(dummy.pid));
+  const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
+  const result = await killGroup(dummy.pid, realStart, () => null);
+  assert.equal(result.confirmed, false);
+  assert.equal(result.reason, 'termination_unconfirmed');
+  process.kill(dummy.pid, 0);
+});
+
+test('non-string startTime on a live pid is unreadable', async (t) => {
+  const dir = tmpSolver();
+  const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  dummy.unref();
+  t.after(async () => {
+    killTree(dummy.pid);
+    await cleanupSolverDir(dir);
+  });
+  fs.writeFileSync(persistPath(dir), JSON.stringify({ pid: dummy.pid, startTime: false }));
+  assert.equal(readPersistedSolver(dir)?.state, 'unreadable');
   await assert.rejects(
     () => runSolver({ gameDir: dir, timeoutMs: 500 }),
     (error) => error.code === 'SOLVER_BUSY',
