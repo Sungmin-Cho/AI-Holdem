@@ -1,3 +1,5 @@
+import { assertSnapshot } from './contracts.js';
+
 const ENGINE_TO_TRAINING_6MAX = Object.freeze({
   UTG: 'UTG',
   'UTG+1': 'HJ',
@@ -40,7 +42,15 @@ function priorRaises(snapshot) {
   return (snapshot.priorActions ?? []).filter((action) => action.action === 'raise');
 }
 
+function facingSizeBb(snapshot, bb) {
+  const raises = priorRaises(snapshot);
+  const amount = raises[raises.length - 1]?.amount;
+  if (!Number.isFinite(amount) || !bb) return null;
+  return amount / bb;
+}
+
 export function normalizePreflopSpot(snapshot) {
+  assertSnapshot(snapshot);
   if (snapshot.street !== 'preflop') {
     return { ok: false, code: 'UNSUPPORTED_SPOT', reason: 'preflop only' };
   }
@@ -51,11 +61,16 @@ export function normalizePreflopSpot(snapshot) {
   const bb = bbOf(snapshot);
   if (!bb) return { ok: false, code: 'UNSUPPORTED_STACK', reason: 'blinds missing' };
   const stackBb = snapshot.effectiveStack / bb;
-  if (Math.abs(stackBb - 100) > 1) {
+  if (!Number.isFinite(stackBb) || stackBb <= 0 || Math.abs(stackBb - 100) > 1) {
     return { ok: false, code: 'UNSUPPORTED_STACK', reason: '100bb only' };
   }
   const pos = trainingPosition(snapshot.position, { seated: 6 });
   if (!pos) return { ok: false, code: 'UNSUPPORTED_SPOT', reason: 'unknown position' };
+
+  const priors = snapshot.priorActions ?? [];
+  if (priors.some((action) => action.action === 'call')) {
+    return { ok: false, code: 'UNSUPPORTED_SPOT', reason: 'limped/multiway tree' };
+  }
 
   const raises = priorRaises(snapshot);
   const chosen = snapshot.chosenAction?.action;
@@ -70,6 +85,10 @@ export function normalizePreflopSpot(snapshot) {
     }
   } else if (raises.length === 1) {
     context = 'vs-single-raise';
+    const facing = facingSizeBb(snapshot, bb);
+    if (facing == null || Math.abs(facing - 2.5) > SIZE_TOLERANCE_BB) {
+      return { ok: false, code: 'UNSUPPORTED_SIZE', reason: 'open size must be 2.5bb' };
+    }
     if (chosen === 'raise') {
       const size = sizeBb(snapshot);
       if (size == null || Math.abs(size - 8.5) > SIZE_TOLERANCE_BB) {

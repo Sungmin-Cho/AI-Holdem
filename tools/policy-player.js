@@ -1,10 +1,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writeJsonAtomic } from '../engine/state.js';
 import { assignmentFor, policyById } from '../training/policies/catalog.js';
 import { validatePolicyOutput } from '../training/policies/contracts.js';
 import { applyDeviations } from '../training/policies/deviation.js';
+import { loadPreflopJson } from '../training/providers/preflop-json.js';
 import { baselineDistribution } from '../training/policies/baseline.js';
+
+const BASELINE_JSON = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../training/data/preflop-baseline-v1.json',
+);
+
+function loadPinnedBaseline() {
+  const shaPath = BASELINE_JSON.replace(/\.json$/, '.sha256');
+  const expectedSha256 = fs.readFileSync(shaPath, 'utf8').trim();
+  return loadPreflopJson(BASELINE_JSON, { expectedSha256 });
+}
+
+let pinnedBaseline = null;
+function baselineDataset() {
+  if (!pinnedBaseline) pinnedBaseline = loadPinnedBaseline();
+  return pinnedBaseline;
+}
 import { deriveUnit, sampleWeighted } from '../training/policies/rng.js';
 import { ruleBasedDistribution } from '../training/policies/rule-based.js';
 
@@ -17,7 +36,7 @@ export function distributionFor(snapshot, legal, policy) {
   }
   const bb = snapshot?.blinds?.[1];
   const base = config.base === 'baseline-v1' || config.policyId === 'baseline-v1' || config.base == null
-    ? baselineDistribution(snapshot, legal, { config: config.frequencies })
+    ? baselineDistribution(snapshot, legal, { dataset: baselineDataset(), config: config.frequencies })
     : ruleBasedDistribution(legal, config.frequencies, { bb });
   const shifted = applyDeviations(base, config.deviations, snapshot, legal, { bb });
   return shifted.length ? shifted : base;

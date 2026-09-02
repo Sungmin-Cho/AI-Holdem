@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,5 +107,8 @@ const dataset = {
 };
 
 const out = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'preflop-baseline-v1.json');
-fs.writeFileSync(out, `${JSON.stringify(dataset)}\n`);
+const body = `${JSON.stringify(dataset)}\n`;
+fs.writeFileSync(out, body);
+const digest = createHash('sha256').update(body).digest('hex');
+fs.writeFileSync(`${out.replace(/\.json$/, '.sha256')}`, `${digest}\n`);
 process.stdout.write(`${out}\n`);

@@ -1,27 +1,32 @@
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import { handClassOf } from '../cards.js';
 import { normalizePreflopSpot } from '../preflop-spot.js';
-import { loadPreflopJson, lookup } from '../providers/preflop-json.js';
+import { lookup } from '../providers/preflop-json.js';
 import { fallbackLegal, legalizeEntries } from './contracts.js';
 import { ruleBasedDistribution } from './rule-based.js';
 
-const DATASET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/preflop-baseline-v1.json');
-
-let cached = null;
-
-export function loadBaselineDataset(filePath = DATASET) {
-  if (cached && filePath === DATASET) return cached;
-  const loaded = loadPreflopJson(filePath);
-  if (filePath === DATASET) cached = loaded;
-  return loaded;
+export function createBaselinePolicy({ dataset } = {}) {
+  if (!dataset) {
+    const error = new Error('baseline dataset is required');
+    error.code = 'DATASET_INVALID';
+    throw error;
+  }
+  return {
+    distribution(snapshot, legal, { config } = {}) {
+      return baselineDistribution(snapshot, legal, { dataset, config });
+    },
+  };
 }
 
 export function baselineDistribution(snapshot, legal, { dataset, config } = {}) {
+  if (!dataset) {
+    const error = new Error('baseline dataset is required');
+    error.code = 'DATASET_INVALID';
+    throw error;
+  }
   const bb = snapshot?.blinds?.[1];
   const spot = snapshot ? normalizePreflopSpot(snapshot) : { ok: false };
   if (spot.ok) {
-    const source = dataset ?? loadBaselineDataset();
+    const source = dataset;
     const strategy = lookup(source, {
       spotKey: spot.spotKey,
       handClass: handClassOf(snapshot.holeCards),

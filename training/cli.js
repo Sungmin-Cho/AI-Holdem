@@ -51,6 +51,14 @@ function loadHand(gameDir, n) {
 }
 
 function main() {
+  try {
+    runEvaluate();
+  } catch (error) {
+    fail(error.code ?? 'EVALUATION_FAILED', error.message);
+  }
+}
+
+function runEvaluate() {
   const { flags, positional } = parseArgs(process.argv.slice(2));
   const cmd = positional[0];
   if (cmd !== 'evaluate') fail('USAGE', 'evaluate만 지원합니다.');
@@ -65,13 +73,28 @@ function main() {
   } catch (error) {
     fail('HAND_NOT_FOUND', error.message);
   }
-  const { data, contentSha256 } = loadPreflopJson(flags.dataset ?? DATASET);
+  const datasetPath = flags.dataset ?? DATASET;
+  const shaPath = datasetPath.replace(/\.json$/, '.sha256');
+  let expectedSha256;
+  try {
+    expectedSha256 = fs.readFileSync(shaPath, 'utf8').trim();
+  } catch (error) {
+    fail('DATASET_INVALID', error.message);
+  }
+  let data;
+  let contentSha256;
+  try {
+    ({ data, contentSha256 } = loadPreflopJson(datasetPath, { expectedSha256 }));
+  } catch (error) {
+    fail(error.code === 'DATASET_INVALID' ? 'DATASET_INVALID' : 'DATASET_INVALID', error.message);
+  }
   const source = {
     id: data.id,
     version: data.version,
     license: data.license,
     contentSha256,
   };
+  if (!loaded.state?.sessionToken) fail('EVALUATION_ID_INVALID', 'gameEpoch가 없습니다.');
   const gameEpoch = gameEpochOf(loaded.state.sessionToken);
   const decisions = (loaded.record.decisions ?? []).filter((snap) => snap.actorId === 'user');
   const evaluations = decisions.map((snapshot) => {

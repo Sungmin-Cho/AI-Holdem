@@ -8,6 +8,8 @@
 - EV fields are omitted. Evaluators must keep `evBb` / `bestEvBb` / `evLossBb` null.
 - Methodology: written from public general-principle opening-range shape (pairs, Broadway, suited connectors widen by position). **Not** copied from a commercial solver, GTO Wizard export, or proprietary chart.
 
+Digest: `preflop-baseline-v1.sha256` (one hex line). Loaders must pass it as `expectedSha256`.
+
 Rebuild:
 
 ```bash
