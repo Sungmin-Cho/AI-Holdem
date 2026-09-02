@@ -2064,14 +2064,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const terminateTrainingChildren = async (deadlineNs) => {
     const handles = [...trainingAttempts.values()];
-    await Promise.all(handles.map(async (handle) => {
+    const outcomes = await Promise.all(handles.map(async (handle) => {
+      let invocation;
       try {
-        await settleValueBeforeDeadline(handle.terminate(), deadlineNs);
+        invocation = handle.terminate();
       } catch (error) {
-        log('training-terminate-error', { code: error.code ?? 'ERROR' });
+        invocation = Promise.reject(error);
       }
+      const settled = await settleValueBeforeDeadline(invocation, deadlineNs);
+      if (settled.error) {
+        log('training-terminate-error', { code: settled.error.code ?? 'ERROR' });
+      }
+      return {
+        confirmed: settled.settled && !settled.error && settled.value?.confirmed === true,
+      };
     }));
-    await settleTrainingTasks(deadlineNs);
+    const confirmed = outcomes.every((row) => row.confirmed);
+    const tasksSettled = await settleTrainingTasks(deadlineNs);
+    return confirmed && tasksSettled;
   };
 
   const reconcileTrainingNow = async () => {
@@ -4035,14 +4045,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // (3) cutoff: 새 play-time publisher 금지 + live worker 종료 확인.
     finalizationCutoff = true;
     await sealExploitAtCutoff();
+    let trainingTerminationConfirmed = true;
     if (trainingOn) {
       try {
         await createTrainingControl({ storeDir }).writeCutoffMarker(root);
       } catch (error) {
-        log('training-cutoff-marker-error', { code: error.code ?? 'ERROR' });
+        if (error.code !== 'EXISTS') {
+          await terminateTrainingChildren(finalDeadlineNs);
+          throw haltFinalization(
+            'FINALIZATION_ABORTED',
+            'training cutoff marker를 기록하지 못해 종료를 중단합니다.',
+            { cause: error.code ?? 'ERROR' },
+          );
+        }
       }
+      log('training-cutoff-marker', { at: isoNow(now) });
       await sealUnfinishedExplanations();
-      await terminateTrainingChildren(finalDeadlineNs);
+      trainingTerminationConfirmed = await terminateTrainingChildren(finalDeadlineNs);
     }
     const signalAuthority = persistedCoachAttempts();
     if (signalAuthority.authorityError) {
@@ -4063,6 +4082,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const terminationConfirmed = finalizationPriorTerminationConfirmed
       && trackedTerminationConfirmed
       && postCutoffPersisted.confirmed
+      && trainingTerminationConfirmed
       && coachAttempts.size === 0
       && coachTasks.size === 0;
     assertFinalizationDeadline();

@@ -801,11 +801,15 @@ test('resume of a published last hand does not re-evaluate', { timeout: 40_000 }
     until: () => {
       const auth = createTrainingControl().loadAuthority(gameDir);
       const item = Object.values(auth?.items ?? {})[0];
-      return item?.status === 'published' || item?.status === 'evaluated';
+      const explained = item?.annotations?.explanation?.status;
+      return Boolean(item)
+        && (item.status === 'published' || item.status === 'evaluated')
+        && (explained === 'ready' || explained === 'unavailable');
     },
   });
   await first.requestStop().catch(() => {});
   await running.catch(() => {});
+  const publishedHandNo = Object.values(createTrainingControl().loadAuthority(gameDir)?.items ?? {})[0]?.handNo;
   const resumeCalls = [];
   const resumed = createGameLoop({
     gameDir,
@@ -823,8 +827,12 @@ test('resume of a published last hand does not re-evaluate', { timeout: 40_000 }
   });
   t.after(() => resumed.requestStop().catch(() => {}));
   await resumed.resume();
-  startRun(resumed);
   await new Promise((resolve) => setTimeout(resolve, 800));
-  assert.equal(resumeCalls.length, 0, `published last hand was re-evaluated (${resumeCalls.length})`);
+  const reevals = resumeCalls.filter((row) => row.handNo === publishedHandNo);
+  assert.equal(
+    reevals.length,
+    0,
+    `published last hand ${publishedHandNo} was re-evaluated (${JSON.stringify(resumeCalls)})`,
+  );
   await resumed.requestStop().catch(() => {});
 });

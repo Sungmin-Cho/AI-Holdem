@@ -28,12 +28,52 @@ function clauseAt(text, index) {
   return text;
 }
 
-function actionIn(clause) {
-  const lower = String(clause).toLowerCase();
+function aliasSpans(text) {
+  const lower = String(text).toLowerCase();
+  const found = [];
   for (const row of ALIAS_ROWS) {
-    if (lower.includes(row.alias.toLowerCase())) return row.action;
+    const alias = row.alias.toLowerCase();
+    let from = 0;
+    while (from <= lower.length - alias.length) {
+      const idx = lower.indexOf(alias, from);
+      if (idx === -1) break;
+      found.push({
+        start: idx, end: idx + alias.length, action: row.action, len: alias.length,
+      });
+      from = idx + alias.length;
+    }
   }
-  return null;
+  found.sort((left, right) => left.start - right.start || right.len - left.len);
+  const kept = [];
+  for (const span of found) {
+    if (kept.some((row) => span.start >= row.start && span.end <= row.end)) continue;
+    kept.push(span);
+  }
+  return kept;
+}
+
+function numberCoveredByAlias(spans, index, tokenLen) {
+  const end = index + tokenLen;
+  return spans.some((span) => index >= span.start && end <= span.end);
+}
+
+function actionNearest(spans, index, tokenLen) {
+  const start = index;
+  const end = index + tokenLen;
+  let best = null;
+  let bestDist = Infinity;
+  for (const span of spans) {
+    const dist = end < span.start
+      ? span.start - end
+      : start > span.end
+        ? start - span.end
+        : 0;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = span.action;
+    }
+  }
+  return best;
 }
 
 function afterToken(text, index, token) {
@@ -75,10 +115,12 @@ export function validateExplanation(evaluation, explanation) {
     if (action.evBb != null && Number.isFinite(Number(action.evBb))) anyEv = true;
   }
   const handNo = Number(evaluation.handNo);
+  const spans = aliasSpans(explanation);
   const numberRe = /-?\d+(?:\.\d+)?/g;
   let match;
   while ((match = numberRe.exec(explanation))) {
     const token = match[0];
+    if (numberCoveredByAlias(spans, match.index, token.length)) continue;
     const num = Number(token);
     const clause = clauseAt(explanation, match.index);
     const rest = afterToken(explanation, match.index, token);
@@ -91,7 +133,7 @@ export function validateExplanation(evaluation, explanation) {
     }
 
     if (isPercent) {
-      const action = actionIn(clause);
+      const action = actionNearest(spans, match.index, token.length);
       const expected = action ? freqByAction.get(action) : undefined;
       if (expected == null || Math.abs(num - expected * 100) > 0.5) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
@@ -106,7 +148,7 @@ export function validateExplanation(evaluation, explanation) {
     }
     if (isHandNo) continue;
     if (num >= 0 && num <= 1) {
-      const action = actionIn(clause);
+      const action = actionNearest(spans, match.index, token.length);
       const expected = action ? freqByAction.get(action) : undefined;
       if (expected != null && Math.abs(num - expected) <= 0.005) continue;
     }

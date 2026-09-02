@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,7 +9,7 @@ import {
   readAnnotationExactFile,
 } from './training-control.js';
 import { validateExplanation } from '../training/explain.js';
-import { writeJsonSecure } from './training-store.js';
+import { ensureDir, writeContained } from './training-store.js';
 import {
   annotationBodyByteLength,
   gameEpochOf,
@@ -22,6 +23,7 @@ import {
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/cli.js');
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
+const handPipelineTail = new Map();
 
 export function isTrainingEnabled(opts = {}) {
   return opts.trainingEnabled === true || opts.storeDir !== undefined;
@@ -164,49 +166,82 @@ async function recordEvaluateFailure(tc, sessionDir, {
   }
 }
 
-export async function runHandPipeline({
+function loadEvaluationDetail(sessionDir, item) {
+  try {
+    return JSON.parse(fs.readFileSync(
+      path.join(sessionDir, 'training', 'details', `${item.detailRef}.json`),
+      'utf8',
+    ));
+  } catch {
+    return { ...item.summary, evaluationId: item.evaluationId, handNo: item.handNo };
+  }
+}
+
+function itemsCoveringHand(tc, sessionDir, handNo) {
+  const auth = tc.loadAuthority(sessionDir);
+  if (!auth) return null;
+  const items = Object.values(auth.items).filter((item) => item.handNo === handNo);
+  if (items.length === 0) return null;
+  return items;
+}
+
+async function runHandPipelineUnlocked({
   sessionDir, handNo, gameEpoch, owner, storeDir,
   evaluate, explain, publish, consume,
 }) {
   const tc = createTrainingControl({ storeDir });
-  const evalHandle = typeof evaluate === 'function'
-    ? toRunnerHandle(evaluate(sessionDir, handNo))
-    : defaultEvaluate(sessionDir, handNo);
-  let evaluated;
-  try {
-    evaluated = await evalHandle.promise;
-  } catch (error) {
-    evaluated = { ok: false, code: error.code ?? 'EVALUATE_FAILED', message: error.message };
-  }
-  if (!evaluated?.ok) {
-    const code = evaluated?.code ?? 'EVALUATE_FAILED';
-    await recordEvaluateFailure(tc, sessionDir, {
-      handNo, gameEpoch, owner, code,
+  const existing = itemsCoveringHand(tc, sessionDir, handNo);
+  let acceptedItems;
+  let evaluations;
+  let evalHandle = {
+    promise: Promise.resolve(null),
+    terminate: async () => ({ confirmed: true }),
+  };
+  if (existing) {
+    acceptedItems = existing;
+    evaluations = existing.map((item) => loadEvaluationDetail(sessionDir, item));
+  } else {
+    evalHandle = typeof evaluate === 'function'
+      ? toRunnerHandle(evaluate(sessionDir, handNo))
+      : defaultEvaluate(sessionDir, handNo);
+    let evaluated;
+    try {
+      evaluated = await evalHandle.promise;
+    } catch (error) {
+      evaluated = { ok: false, code: error.code ?? 'EVALUATE_FAILED', message: error.message };
+    }
+    if (!evaluated?.ok) {
+      const code = evaluated?.code ?? 'EVALUATE_FAILED';
+      await recordEvaluateFailure(tc, sessionDir, {
+        handNo, gameEpoch, owner, code,
+      });
+      return {
+        ok: false, code, evaluations: [], handle: evalHandle,
+      };
+    }
+    const accepted = await tc.acceptEvaluations(sessionDir, {
+      gameEpoch,
+      owner,
+      handNo,
+      evaluations: evaluated.evaluations ?? [],
     });
-    return {
-      ok: false, code, evaluations: [], handle: evalHandle,
-    };
+    acceptedItems = accepted.accepted ?? [];
+    evaluations = evaluated.evaluations ?? [];
   }
 
-  const accepted = await tc.acceptEvaluations(sessionDir, {
-    gameEpoch,
-    owner,
-    handNo,
-    evaluations: evaluated.evaluations ?? [],
-  });
+  if (typeof publish === 'function') await publish('machine');
   if (typeof consume === 'function') {
     try { await consume(); } catch { /* consumers retry independently */ }
   }
-  if (typeof publish === 'function') await publish('machine');
 
-  for (const item of accepted.accepted ?? []) {
+  for (const item of acceptedItems) {
     if (hasCutoffMarker(sessionDir)) {
       await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', 'unavailable');
       continue;
     }
-    const existing = item.annotations?.explanation
+    const existingAnn = item.annotations?.explanation
       ?? tc.loadAuthority(sessionDir)?.items?.[item.evaluationId]?.annotations?.explanation;
-    if (existing?.status === 'ready' || existing?.status === 'unavailable') continue;
+    if (existingAnn?.status === 'ready' || existingAnn?.status === 'unavailable') continue;
     let sealedExisting = null;
     try {
       sealedExisting = readAnnotationExactFile(sessionDir, item.detailRef, 'explanation');
@@ -221,7 +256,7 @@ export async function runHandPipeline({
       continue;
     }
     const evaluation = {
-      ...((evaluated.evaluations ?? []).find((row) => row.evaluationId === item.evaluationId) ?? item.summary),
+      ...(evaluations.find((row) => row.evaluationId === item.evaluationId) ?? item.summary),
       handNo,
       evaluationId: item.evaluationId,
     };
@@ -244,10 +279,22 @@ export async function runHandPipeline({
   if (typeof publish === 'function') await publish('annotation');
   return {
     ok: true,
-    evaluations: evaluated.evaluations ?? [],
-    accepted: accepted.accepted,
+    evaluations,
+    accepted: acceptedItems,
     handle: evalHandle,
   };
+}
+
+export async function runHandPipeline(opts) {
+  const key = `${opts.sessionDir}\0${opts.handNo}`;
+  const prev = handPipelineTail.get(key) ?? Promise.resolve();
+  const work = prev.catch(() => {}).then(() => runHandPipelineUnlocked(opts));
+  handPipelineTail.set(key, work);
+  try {
+    return await work;
+  } finally {
+    if (handPipelineTail.get(key) === work) handPipelineTail.delete(key);
+  }
 }
 
 export async function ingestHand({
@@ -384,10 +431,16 @@ export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
   };
 }
 
-export function writeTrainingEnvelope(sessionDir, envelope) {
-  const file = path.join(sessionDir, 'training', '.publish-envelope.json');
-  writeJsonSecure(file, envelope);
-  return file;
+export function writeTrainingEnvelope(sessionDir, envelope, { kind = 'mixed' } = {}) {
+  ensureDir(path.join(sessionDir, 'training'));
+  const unique = `${kind}.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}.json`;
+  const name = `.publish-envelope-${unique}`;
+  writeContained(sessionDir, ['training', name], JSON.stringify(envelope), { mode: 'create' });
+  return path.join(sessionDir, 'training', name);
+}
+
+function unlinkEnvelope(file) {
+  try { fs.unlinkSync(file); } catch { /* leftover envelope is non-authoritative */ }
 }
 
 async function publishSideEnvelope(executePublish, file) {
@@ -414,12 +467,16 @@ export async function flushMachinePublish(sessionDir, {
     if (shouldStop?.()) return;
     const envelope = unpublishedEnvelope(sessionDir, { gameEpoch });
     if (!envelope) return;
-    const file = writeTrainingEnvelope(sessionDir, envelope);
-    await publishSideEnvelope(executePublish, file);
-    for (const item of envelope.training) {
-      try {
-        await tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256);
-      } catch { /* already marked or conflict is logged by caller */ }
+    const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'machine' });
+    try {
+      await publishSideEnvelope(executePublish, file);
+      for (const item of envelope.training) {
+        try {
+          await tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256);
+        } catch { /* already marked or conflict is logged by caller */ }
+      }
+    } finally {
+      unlinkEnvelope(file);
     }
   }
 }
@@ -432,12 +489,16 @@ export async function flushAnnotationPublish(sessionDir, {
     if (shouldStop?.()) return;
     const envelope = annotationEnvelope(sessionDir, { gameEpoch });
     if (!envelope) return;
-    const file = writeTrainingEnvelope(sessionDir, envelope);
-    await publishSideEnvelope(executePublish, file);
-    for (const item of envelope.trainingAnnotations) {
-      try {
-        await tc.markAnnotationPublished(sessionDir, item.evaluationId, item.field, item.valueSha256);
-      } catch { /* already marked or conflict is logged by caller */ }
+    const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'annotation' });
+    try {
+      await publishSideEnvelope(executePublish, file);
+      for (const item of envelope.trainingAnnotations) {
+        try {
+          await tc.markAnnotationPublished(sessionDir, item.evaluationId, item.field, item.valueSha256);
+        } catch { /* already marked or conflict is logged by caller */ }
+      }
+    } finally {
+      unlinkEnvelope(file);
     }
   }
 }
@@ -460,8 +521,12 @@ export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublis
       trainingAnnotations: record.body.trainingAnnotations,
       annotationAuthority: record.annotationAuthority,
     };
-  const file = writeTrainingEnvelope(sessionDir, envelope);
-  await executePublish(['--from', file, '--retry']);
+  const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'retry' });
+  try {
+    await executePublish(['--from', file, '--retry']);
+  } finally {
+    unlinkEnvelope(file);
+  }
   const tc = createTrainingControl({ storeDir });
   for (const item of record.body?.training ?? []) {
     try { await tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256); } catch { /* already marked */ }

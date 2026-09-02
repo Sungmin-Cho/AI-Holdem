@@ -66,15 +66,35 @@ export function cutoffMarkerPath(sessionDir) {
 }
 
 export function hasCutoffMarker(sessionDir) {
-  return fs.existsSync(cutoffMarkerPath(sessionDir));
+  try {
+    return fs.lstatSync(cutoffMarkerPath(sessionDir)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function writeCutoffMarkerUnlocked(sessionDir) {
   ensureDir(trainingDir(sessionDir));
   const file = cutoffMarkerPath(sessionDir);
-  if (fs.existsSync(file)) return { reused: true };
-  writeJsonSecure(file, { at: new Date().toISOString() });
-  return { reused: false };
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isFile()) return { reused: true };
+    throw coded('UNSAFE_PATH', `${file}는 안전한 일반 파일이 아닙니다.`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  try {
+    writeContained(
+      sessionDir,
+      ['training', '.cutoff'],
+      JSON.stringify({ at: new Date().toISOString() }),
+      { mode: 'create' },
+    );
+    return { reused: false };
+  } catch (error) {
+    if (error.code === 'EXISTS') return { reused: true };
+    throw error;
+  }
 }
 
 function emptyAuth({ gameEpoch, owner }) {
