@@ -8,6 +8,7 @@ import {
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   payloadSha256,
+  publicProofId,
   projectTrainingAnnotation,
   projectTrainingSummary,
 } from '../publish-contract.js';
@@ -187,6 +188,12 @@ function loadUiState(gameDir) {
           if (machine && projected.payloadSha256 && projected.payloadSha256 !== machine.payloadSha256) {
             continue;
           }
+          if (projected.field === 'explanation' && explanationDenied(projected.value, gameDir)) {
+            continue;
+          }
+          if (projected.field === 'exploit' && raw.view?.gameOver !== true) {
+            continue;
+          }
           restoredAnnotations[id][field] = projected;
         } catch {
           /* drop malformed persisted annotation */
@@ -316,7 +323,8 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, view, gameD
       return { error: error.code ?? 'ANNOTATION_PROOF_MISMATCH', status: 400 };
     }
     if (projected.valueSha256 !== proof.valueSha256
-      || (typeof raw.valueSha256 === 'string' && raw.valueSha256 !== projected.valueSha256)) {
+      || (typeof raw.valueSha256 === 'string' && raw.valueSha256 !== projected.valueSha256)
+      || proof.id !== publicProofId(`${projected.evaluationId}:${projected.field}`)) {
       return { error: 'ANNOTATION_PROOF_MISMATCH', status: 400 };
     }
     const machine = trainingItems.find((row) => row.evaluationId === projected.evaluationId);
