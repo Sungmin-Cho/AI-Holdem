@@ -210,6 +210,24 @@ test('duplicate answerQuestion returns the stored result and applies profile onc
   assert.equal(profileEvents(storeDir).length, 1);
 });
 
+test('drill profile events are tagged origin drill and stay in their provider segment', async () => {
+  const storeDir = tmp();
+  const started = await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'origin-k' });
+  const nxt = await nextQuestion(storeDir);
+  await answerQuestion(storeDir, {
+    action: 'fold',
+    sessionId: started.sessionId,
+    questionId: nxt.question.questionId,
+    attemptNo: nxt.attemptNo,
+  });
+  const events = profileEvents(storeDir);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].origin, 'drill');
+  const { createProfileStore } = await import('../training/profile-store.js');
+  const profile = await createProfileStore(storeDir).show();
+  assert.equal(profile.activeSegmentId, `${events[0].providerId}@${events[0].providerVersion}`);
+});
+
 test('retrying an earlier answer after a later one returns the original next', async () => {
   const storeDir = tmp();
   const started = await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'replay-next-k' });

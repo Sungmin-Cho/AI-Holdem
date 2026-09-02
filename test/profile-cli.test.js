@@ -125,3 +125,136 @@ test('defaultPracticeFocusFile rejects a practice-focus schema mismatch', async 
   writeFocusFile(storeDir, { focus: 'x', extra: true });
   assert.throws(() => defaultPracticeFocusFile(storeDir), { code: 'BAD_PRACTICE_FOCUS' });
 });
+
+function sessionDirOf(storeDir, id = '11111111-1111-4111-8111-111111111111') {
+  const dir = path.join(storeDir, '.session-store', 'sessions', id);
+  fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+  return dir;
+}
+
+function evaluationRow(overrides = {}) {
+  return {
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: overrides.decisionId ?? 'd-1-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '1.0.0',
+    }),
+    payloadSha256: overrides.payloadSha256 ?? 'aa'.repeat(32),
+    status: 'supported',
+    street: 'preflop',
+    spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AJo',
+    grade: 'off-policy',
+    forced: false,
+    evLossBb: null,
+    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    decisionId: overrides.decisionId ?? 'd-1-preflop-0',
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    chosen: { action: 'fold', frequency: 0.15, evBb: null },
+    ...overrides,
+  };
+}
+
+test('sweep is driven by authority consumer flags and does not apply jsonl-only rows', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  assert.equal(typeof sweepStore, 'function');
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir);
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  const tc = createTrainingControl({ storeDir });
+  const evaluation = evaluationRow();
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const jsonlOnly = evaluationRow({
+    decisionId: 'd-9-preflop-0',
+    payloadSha256: 'ff'.repeat(32),
+    grade: 'preferred',
+  });
+  fs.appendFileSync(
+    path.join(sessionDir, 'training', 'evaluations.jsonl'),
+    `${JSON.stringify(jsonlOnly)}\n`,
+  );
+  const swept = await sweepStore(storeDir);
+  assert.equal(swept.applied, 1);
+  assert.equal(swept.profile.overall.evaluatedDecisions, 1);
+  assert.equal(tc.loadAuthority(sessionDir).items[evaluation.evaluationId].consumers.profiled, true);
+  const again = await sweepStore(storeDir);
+  assert.equal(again.applied, 0);
+  assert.equal(again.profile.overall.evaluatedDecisions, 1);
+});
+
+test('sweep re-consumes pending evaluate and adapterId solver entries', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  assert.equal(typeof sweepStore, 'function');
+  const storeDir = tmp();
+  const evalSession = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const solveSession = sessionDirOf(storeDir, '22222222-2222-4222-8222-222222222222');
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  const evalEval = evaluationRow({ decisionId: 'd-1-preflop-0', payloadSha256: 'aa'.repeat(32) });
+  const solveEval = evaluationRow({
+    decisionId: 'd-2-flop-0',
+    payloadSha256: 'bb'.repeat(32),
+  });
+  solveEval.evaluationId = evaluationIdOf({
+    gameEpoch: 'ab'.repeat(32),
+    decisionId: 'd-2-flop-0',
+    providerId: 'local-preflop-baseline',
+    providerVersion: '1.0.0',
+  });
+  fs.writeFileSync(path.join(evalSession, 'training', '.training-authority.json'), JSON.stringify({
+    schemaVersion: 2,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: 'owner-1',
+    items: {},
+    publishQueue: {},
+    pending: {
+      'd-1-preflop-0': {
+        handNo: 1, reason: 'EVALUATE_FAILED', attempts: 1, lastTriedAt: '2026-09-02T00:00:00.000Z',
+      },
+    },
+    annotationQueue: {},
+  }));
+  fs.writeFileSync(path.join(solveSession, 'training', '.training-authority.json'), JSON.stringify({
+    schemaVersion: 2,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: 'owner-1',
+    items: {},
+    publishQueue: {},
+    pending: {
+      'd-2-flop-0': {
+        handNo: 2,
+        reason: 'solve',
+        attempts: 1,
+        lastTriedAt: '2026-09-02T00:00:00.000Z',
+        adapterId: 'fake-solver',
+      },
+    },
+    annotationQueue: {},
+  }));
+  const evaluateCalls = [];
+  const solveCalls = [];
+  const swept = await sweepStore(storeDir, {
+    evaluate: (sessionDir, handNo) => {
+      evaluateCalls.push({ sessionDir, handNo });
+      return { ok: true, evaluations: [evalEval] };
+    },
+    solve: (input) => {
+      solveCalls.push(input);
+      return { ok: true, evaluations: [solveEval] };
+    },
+  });
+  assert.equal(evaluateCalls.length, 1);
+  assert.equal(evaluateCalls[0].handNo, 1);
+  assert.equal(solveCalls.length, 1);
+  assert.equal(solveCalls[0].adapterId, 'fake-solver');
+  const evalAuth = createTrainingControl({ storeDir }).loadAuthority(evalSession);
+  const solveAuth = createTrainingControl({ storeDir }).loadAuthority(solveSession);
+  assert.equal(evalAuth.pending['d-1-preflop-0'], undefined);
+  assert.equal(solveAuth.pending['d-2-flop-0'], undefined);
+  assert.equal(swept.applied, 2);
+});

@@ -44,3 +44,23 @@ test('profile lives under store/.training and survives a torn jsonl tail', async
   await store.apply(evaluation());
   assert.equal((await store.show()).overall.evaluatedDecisions, 1);
 });
+
+test('apply returns {applied}; missing payloadSha256 is PROFILE_EVENT_INVALID', async () => {
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  const first = await store.apply(evaluation());
+  assert.equal(first.applied, true);
+  const again = await store.apply(evaluation());
+  assert.equal(again.applied, false);
+  await assert.rejects(() => store.apply(evaluation({
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: 'd-2-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '1.0.0',
+    }),
+    payloadSha256: undefined,
+  })), {
+    code: 'PROFILE_EVENT_INVALID',
+  });
+});
