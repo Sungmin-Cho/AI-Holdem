@@ -146,7 +146,7 @@ test('unknown authority schema is fail-closed', async () => {
   );
 });
 
-test('cutoff marker then late ready seal becomes unavailable (lock-race)', async () => {
+test('cutoff marker then late ready seal becomes unavailable', async () => {
   const dir = tmp();
   const tc = createTrainingControl();
   assert.equal(typeof tc.writeCutoffMarker, 'function');
@@ -162,5 +162,27 @@ test('cutoff marker then late ready seal becomes unavailable (lock-race)', async
   assert.equal(sealed.ok, true);
   const auth = tc.loadAuthority(dir);
   assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+});
+
+test('cutoff marker already-present file is EXISTS reuse; non-file dest fails closed', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  const evaluation = evalOf();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const first = await tc.writeCutoffMarker(dir);
+  assert.equal(first.reused, false);
+  const second = await tc.writeCutoffMarker(dir);
+  assert.equal(second.reused, true);
+  fs.unlinkSync(path.join(dir, 'training', '.cutoff'));
+  fs.mkdirSync(path.join(dir, 'training', '.cutoff'));
+  await assert.rejects(
+    () => tc.writeCutoffMarker(dir),
+    (error) => error.code !== 'EXISTS',
+  );
 });
 

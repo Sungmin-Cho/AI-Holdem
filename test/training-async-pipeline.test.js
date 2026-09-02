@@ -126,7 +126,7 @@ function userDecision(sessionDir, handNo) {
   return (record.decisions ?? []).find((snap) => snap.actorId === 'user') ?? null;
 }
 
-function handleOf(result, { delayMs = 0, gate = null, onTerminate } = {}) {
+function handleOf(result, { delayMs = 0, gate = null, onTerminate, terminateResult = { confirmed: true } } = {}) {
   let timer = null;
   let cancelled = false;
   let resolvePromise;
@@ -151,7 +151,7 @@ function handleOf(result, { delayMs = 0, gate = null, onTerminate } = {}) {
       if (timer) clearTimeout(timer);
       resolvePromise?.({ ok: false, code: 'TERMINATED' });
       onTerminate?.();
-      return { confirmed: true };
+      return typeof terminateResult === 'function' ? terminateResult() : terminateResult;
     },
   };
 }
@@ -175,11 +175,11 @@ function makeEvaluate({ delayMs = 0, failTimes = 0, gate = null, calls } = {}) {
   };
 }
 
-function makeExplain({ delayMs = 0, gate = null, calls, text = VALID_EXPLAIN } = {}) {
+function makeExplain({ delayMs = 0, gate = null, calls, text = VALID_EXPLAIN, terminateResult } = {}) {
   const log = calls ?? [];
   return (evaluation) => {
     log.push(evaluation?.evaluationId ?? null);
-    return handleOf(text, { delayMs, gate });
+    return handleOf(text, { delayMs, gate, terminateResult });
   };
 }
 
@@ -296,6 +296,7 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   const evalGate = {};
   evalGate.promise = new Promise((resolve) => { evalGate.release = resolve; });
   const publishes = [];
+  const ordered = [];
   const first = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
@@ -306,7 +307,16 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
       trainingEnabled: true,
       finalizeBudgetMs: 6_000,
       finalizeCutoffLeadMs: 2_500,
-      onPublishInvoke: (args) => publishes.push({ args, envelope: envelopeFromPublishArgs(args), at: Date.now() }),
+      onPublishInvoke: (args) => {
+        const envelope = envelopeFromPublishArgs(args);
+        const kind = Array.isArray(envelope?.training) && envelope.training.length
+          ? 'machine'
+          : Array.isArray(envelope?.trainingAnnotations) && envelope.trainingAnnotations.length
+            ? 'annotation'
+            : 'other';
+        publishes.push({ args, envelope, kind, at: Date.now() });
+        if (kind === 'machine' || kind === 'annotation') ordered.push(kind);
+      },
       training: {
         evaluate: makeEvaluate({ gate: evalGate.promise }),
         explain: makeExplain({ delayMs: 20_000 }),
@@ -340,8 +350,20 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
       trainingEnabled: true,
       finalizeBudgetMs: 8_000,
       finalizeCutoffLeadMs: 3_000,
-      log: (record) => logs.push(record),
-      onPublishInvoke: (args) => publishes.push({ args, envelope: envelopeFromPublishArgs(args), at: Date.now() }),
+      log: (record) => {
+        logs.push(record);
+        if (record.event === 'training-cutoff-marker') ordered.push('cutoff');
+      },
+      onPublishInvoke: (args) => {
+        const envelope = envelopeFromPublishArgs(args);
+        const kind = Array.isArray(envelope?.training) && envelope.training.length
+          ? 'machine'
+          : Array.isArray(envelope?.trainingAnnotations) && envelope.trainingAnnotations.length
+            ? 'annotation'
+            : 'other';
+        publishes.push({ args, envelope, kind, at: Date.now() });
+        if (kind === 'machine' || kind === 'annotation') ordered.push(kind);
+      },
       training: {
         evaluate: makeEvaluate(),
         explain: makeExplain({ delayMs: 20_000 }),
@@ -361,6 +383,17 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   assert.notEqual(registerAt, -1, 'reconcile did not register training tasks');
   assert.equal(settleStart === -1 || registerAt <= settleStart, true, 'settle started before reconcile registered tasks');
   assert.equal(settleReturn === -1 || registerAt < settleReturn, true, 'settle returned before reconcile registered tasks');
+
+  const machinePubs = publishes.filter((row) => row.kind === 'machine');
+  const annPubs = publishes.filter((row) => row.kind === 'annotation');
+  assert.equal(machinePubs.length, 1, `expected exactly one machine publish, got ${machinePubs.length}`);
+  assert.ok(annPubs.length >= 1, 'expected annotation publish after cutoff');
+  const cutoffAt = ordered.indexOf('cutoff');
+  const machineAt = ordered.indexOf('machine');
+  const annAt = ordered.indexOf('annotation');
+  assert.notEqual(cutoffAt, -1, 'cutoff marker was not logged');
+  assert.equal(machineAt !== -1 && machineAt < cutoffAt, true, `machine publish was not before cutoff: ${ordered.join(',')}`);
+  assert.equal(annAt !== -1 && annAt > cutoffAt, true, `annotation publish was not after cutoff: ${ordered.join(',')}`);
 
   const codes = JSON.stringify(logs.map((row) => row.code).filter(Boolean));
   assert.equal(codes.includes('STALE'), false, codes);
@@ -653,4 +686,145 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
   assert.ok(annPub);
   const review = fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8');
   assert.match(review, /pending|미완|0/);
+});
+
+test('cutoff-marker write failure stops finalization before late ready seal', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const coachCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      trainingEnabled: true,
+      finalizeBudgetMs: 6_000,
+      finalizeCutoffLeadMs: 2_000,
+      onCoachInvoke: (args) => coachCalls.push(args[0]),
+      training: {
+        evaluate: makeEvaluate(),
+        explain: makeExplain({ delayMs: 30_000 }),
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({
+    ai: 1,
+    mode: 'cash-training',
+    stackBb: 100,
+    blinds: '50/100',
+    hands: 1,
+    opponentRuntime: 'policy',
+  });
+  fs.mkdirSync(path.join(gameDir, 'training', '.cutoff'), { recursive: true });
+  putUserOnTheButton(gameDir);
+  const { running } = await playUntil(loop, gameDir, {
+    until: (state) => Boolean(state.halt) || state.phase === 'done',
+  });
+  const finished = await running.catch((error) => error);
+  const haltCode = finished?.code ?? readJson(path.join(gameDir, 'loop-state.json')).halt?.code;
+  assert.notEqual(haltCode, undefined, 'finalize proceeded after cutoff-marker write failure');
+  assert.notEqual(haltCode, 'REVIEW_GATE_CLOSED');
+  assert.equal(coachCalls.includes('finalize-cutoff'), false, 'finalize-cutoff ran after marker write failure');
+  const auth = createTrainingControl().loadAuthority(gameDir);
+  const item = Object.values(auth?.items ?? {})[0];
+  assert.notEqual(item?.annotations?.explanation?.status, 'ready');
+});
+
+test('unconfirmed training child terminate fails closed', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      trainingEnabled: true,
+      finalizeBudgetMs: 6_000,
+      finalizeCutoffLeadMs: 2_000,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: makeExplain({ delayMs: 30_000, terminateResult: { confirmed: false } }),
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({
+    ai: 1,
+    mode: 'cash-training',
+    stackBb: 100,
+    blinds: '50/100',
+    hands: 1,
+    opponentRuntime: 'policy',
+  });
+  putUserOnTheButton(gameDir);
+  const { running } = await playUntil(loop, gameDir, {
+    until: (state) => Boolean(state.halt) || state.phase === 'done',
+  });
+  const finished = await running.catch((error) => error);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  const haltCode = finished?.code ?? loopState.halt?.code;
+  assert.equal(haltCode, 'FINALIZATION_ABORTED');
+  assert.notEqual(loopState.phase, 'done');
+  assert.equal(loopState.finalization?.cutoff?.terminationConfirmed, false);
+});
+
+test('resume of a published last hand does not re-evaluate', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      trainingEnabled: true,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: makeExplain(),
+      },
+    },
+  });
+  t.after(() => first.requestStop().catch(() => {}));
+  await first.bootstrap({
+    ai: 1,
+    mode: 'cash-training',
+    stackBb: 100,
+    blinds: '50/100',
+    hands: 2,
+    opponentRuntime: 'policy',
+  });
+  putUserOnTheButton(gameDir);
+  const { running } = await playUntil(first, gameDir, {
+    until: () => {
+      const auth = createTrainingControl().loadAuthority(gameDir);
+      const item = Object.values(auth?.items ?? {})[0];
+      return item?.status === 'published' || item?.status === 'evaluated';
+    },
+  });
+  await first.requestStop().catch(() => {});
+  await running.catch(() => {});
+  const resumeCalls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      trainingEnabled: true,
+      training: {
+        evaluate: makeEvaluate({ calls: resumeCalls }),
+        explain: makeExplain(),
+      },
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  await resumed.resume();
+  startRun(resumed);
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(resumeCalls.length, 0, `published last hand was re-evaluated (${resumeCalls.length})`);
+  await resumed.requestStop().catch(() => {});
 });

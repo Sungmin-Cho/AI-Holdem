@@ -148,6 +148,7 @@ test('runHandPipeline publishes machine before explain and seals explanation set
   const gameEpoch = gameEpochOf(token);
   writeLastHand(dir, { token });
   const order = [];
+  let evaluateCalls = 0;
   let explainCalls = 0;
   const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
   const result = await pipeline.runHandPipeline({
@@ -156,6 +157,7 @@ test('runHandPipeline publishes machine before explain and seals explanation set
     gameEpoch,
     owner: 'owner-1',
     evaluate: () => {
+      evaluateCalls += 1;
       order.push('evaluate');
       return handleOf({ ok: true, evaluations: [evaluation] });
     },
@@ -180,13 +182,17 @@ test('runHandPipeline publishes machine before explain and seals explanation set
     handNo: 1,
     gameEpoch,
     owner: 'owner-1',
-    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    evaluate: () => {
+      evaluateCalls += 1;
+      return handleOf({ ok: true, evaluations: [evaluation] });
+    },
     explain: () => {
       explainCalls += 1;
       return handleOf(VALID_EXPLAIN);
     },
   });
   assert.equal(again.ok, true);
+  assert.equal(evaluateCalls, 1);
   assert.equal(explainCalls, 1);
   const sealed = readAnnotationExactFile(dir, item.detailRef, 'explanation');
   assert.equal(sealed.status, 'ready');
@@ -274,6 +280,88 @@ test('in-flight duplicate runHandPipeline of the same digest is a no-op', async 
   });
   const results = await Promise.all([first, second]);
   assert.equal(results.every((row) => row.ok), true);
+  assert.equal(started.length, 1);
   const auth = createTrainingControl().loadAuthority(dir);
   assert.equal(Object.keys(auth.items).length, 1);
+});
+
+test('delayed consume does not delay machine publish', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  let releaseConsume;
+  const consumeGate = new Promise((resolve) => { releaseConsume = resolve; });
+  const order = [];
+  const running = pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    explain: () => handleOf(VALID_EXPLAIN),
+    publish: (kind) => { order.push(`publish:${kind}`); },
+    consume: async () => {
+      order.push('consume-start');
+      await consumeGate;
+      order.push('consume-end');
+    },
+  });
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && !order.includes('publish:machine')) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(order.includes('publish:machine'), true, 'machine publish waited on consume');
+  assert.equal(order.includes('consume-end'), false);
+  releaseConsume();
+  await running;
+  assert.ok(order.indexOf('publish:machine') < order.indexOf('consume-start')
+    || order.indexOf('publish:machine') < order.indexOf('consume-end'));
+});
+
+test('concurrent machine and annotation flushes cannot publish the other producer body', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    explain: () => handleOf(VALID_EXPLAIN),
+  });
+  let inPublish = 0;
+  let releaseBoth;
+  const bothInPublish = new Promise((resolve) => { releaseBoth = resolve; });
+  const seen = [];
+  const executePublish = async (args) => {
+    const file = args[args.indexOf('--from') + 1];
+    const atEnter = JSON.parse(fs.readFileSync(file, 'utf8'));
+    inPublish += 1;
+    if (inPublish >= 2) releaseBoth();
+    await Promise.race([
+      bothInPublish,
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    const atRead = JSON.parse(fs.readFileSync(file, 'utf8'));
+    seen.push({ atEnter, atRead });
+    return { ok: true };
+  };
+  await Promise.all([
+    pipeline.flushMachinePublish(dir, { gameEpoch, executePublish }),
+    pipeline.flushAnnotationPublish(dir, { gameEpoch, executePublish }),
+  ]);
+  assert.equal(seen.length >= 2, true);
+  assert.equal(seen.some((row) => Array.isArray(row.atEnter.training) && row.atEnter.training.length), true);
+  assert.equal(
+    seen.some((row) => Array.isArray(row.atEnter.trainingAnnotations) && row.atEnter.trainingAnnotations.length),
+    true,
+  );
+  for (const row of seen) {
+    assert.deepEqual(row.atRead, row.atEnter);
+  }
 });

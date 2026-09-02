@@ -44,6 +44,15 @@ test('R11 binds action aliases to frequency and sizeBb, and rejects EV numbers w
   );
 });
 
+test('R11 binds 3-bet/3벳 aliases before leftover numbers and nearest action per frequency', () => {
+  assert.equal(validateExplanation(foldHeavy, '3-bet 4%').ok, true);
+  assert.equal(validateExplanation(foldHeavy, '3벳 4%').ok, true);
+  assert.equal(validateExplanation(supported, '3-bet 4%').ok, false);
+  assert.equal(validateExplanation(supported, 'fold 4% raise 96%').ok, true);
+  assert.equal(validateExplanation(supported, 'fold 96% raise 4%').ok, false);
+  assert.equal(validateExplanation(supported, '레이즈 96% 폴드 4%').ok, true);
+});
+
 test('buildExplanationPrompt states allowed number forms, aliases, and no new numbers', () => {
   assert.equal(typeof pipeline.buildExplanationPrompt, 'function');
   const prompt = pipeline.buildExplanationPrompt(supported);
