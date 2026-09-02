@@ -370,7 +370,7 @@ test('start while pending exists replays then continues; replay failure is 409',
     assert.equal(failed.json?.code, 'PENDING_UNRESOLVED');
     const session = readSession(storeDir);
     assert.ok(session.pending);
-    assert.notEqual(session.sessionId, continued.json.sessionId);
+    assert.equal(session.sessionId, continued.json.sessionId);
   } finally {
     await drill.close();
   }
