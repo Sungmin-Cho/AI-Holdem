@@ -130,6 +130,13 @@ export async function killGroup(pid, startTime, startTimeOf) {
     if (group.ok && group.pids.length === 0) return { confirmed: true };
     await sleep(20);
   }
+  const beforeKill = startTimeOf(pid);
+  if (beforeKill !== startTime) {
+    const group = processGroupPids(pid);
+    if (!group.ok) return { confirmed: false, reason: 'termination_unconfirmed' };
+    if (group.pids.length === 0) return { confirmed: true };
+    return { confirmed: false, reason: 'termination_unconfirmed' };
+  }
   try { process.kill(-pid, 'SIGKILL'); } catch (error) {
     if (error.code !== 'ESRCH') {
       try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }

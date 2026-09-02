@@ -41,8 +41,10 @@ function mapKeys(value) {
 }
 
 function collectionHasEntries(value) {
+  if (value == null) return false;
   if (Array.isArray(value)) return value.length > 0;
-  return mapKeys(value).length > 0;
+  if (!isPlainMap(value)) return true;
+  return Object.keys(value).length > 0;
 }
 
 function queueHasLeftovers(queue) {
