@@ -3,7 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProfileStore } from '../training/profile-store.js';
-import { writeJsonSecure } from './training-store.js';
+import { openContained, writeContained, writeJsonSecure } from './training-store.js';
+
+export const PRACTICE_FOCUS_MAX_BYTES = 4096;
+export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
+const PRACTICE_FOCUS_DEST = ['.practice-focus.json'];
+const PRACTICE_FOCUS_KEYS = new Set(['schemaVersion', 'leaks', 'focus']);
+const PRACTICE_FOCUS_LEAK_KEYS = new Set(['id', 'recommendedDrill', 'severity', 'confidence']);
+
+function coded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 
 function fail(code, message) {
   fs.writeSync(1, `${JSON.stringify({ ok: false, code, message })}\n`);
@@ -52,9 +64,110 @@ export function writePracticeFocus(storeDir, profile) {
   return file;
 }
 
+function assertPracticeFocusLeak(leak) {
+  if (leak === null || typeof leak !== 'object' || Array.isArray(leak)) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus leak 항목이 올바르지 않습니다.');
+  }
+  for (const key of Object.keys(leak)) {
+    if (!PRACTICE_FOCUS_LEAK_KEYS.has(key)) {
+      throw coded('BAD_PRACTICE_FOCUS', `practice-focus leak 여분 키: ${key}`);
+    }
+  }
+  if (typeof leak.id !== 'string' || typeof leak.recommendedDrill !== 'string') {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus leak 문자열이 올바르지 않습니다.');
+  }
+  if (!Number.isFinite(leak.severity) || !Number.isFinite(leak.confidence)) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus leak 숫자가 올바르지 않습니다.');
+  }
+}
+
+function assertPracticeFocusSchema(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus JSON 스키마가 올바르지 않습니다.');
+  }
+  for (const key of Object.keys(value)) {
+    if (!PRACTICE_FOCUS_KEYS.has(key)) {
+      throw coded('BAD_PRACTICE_FOCUS', `practice-focus 여분 키: ${key}`);
+    }
+  }
+  if (!Object.prototype.hasOwnProperty.call(value, 'focus')) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.focus가 필요합니다.');
+  }
+  if (value.focus !== null && typeof value.focus !== 'string') {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.focus 타입이 올바르지 않습니다.');
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'schemaVersion') && value.schemaVersion !== 1) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.schemaVersion이 올바르지 않습니다.');
+  }
+  if (Object.prototype.hasOwnProperty.call(value, 'leaks')) {
+    if (!Array.isArray(value.leaks) || value.leaks.length > 3) {
+      throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.leaks가 올바르지 않습니다.');
+    }
+    for (const leak of value.leaks) assertPracticeFocusLeak(leak);
+  }
+}
+
+function readPracticeFocusContained(root, segments) {
+  const bytes = openContained(root, segments, { maxBytes: PRACTICE_FOCUS_MAX_BYTES });
+  let value;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus JSON을 파싱할 수 없습니다.');
+  }
+  assertPracticeFocusSchema(value);
+  return { value, bytes };
+}
+
+export function loadAutoPracticeFocus(storeDir) {
+  try {
+    const { value, bytes } = readPracticeFocusContained(storeDir, PRACTICE_FOCUS_SEGMENTS);
+    return { status: 'ok', value, bytes };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { status: 'absent' };
+    if (error.code === 'UNSAFE_PATH') {
+      return {
+        status: 'ignored',
+        code: 'UNSAFE_PATH',
+        notice: 'practice-focus 자동 선택을 건너뜁니다: UNSAFE_PATH',
+      };
+    }
+    throw error;
+  }
+}
+
 export function defaultPracticeFocusFile(storeDir) {
-  const file = path.join(storeDir, '.training', 'practice-focus.json');
-  return fs.existsSync(file) ? file : null;
+  const loaded = loadAutoPracticeFocus(storeDir);
+  if (loaded.status === 'ok') return path.join(storeDir, ...PRACTICE_FOCUS_SEGMENTS);
+  return null;
+}
+
+export function installPracticeFocus({ destRoot, storeDir, practiceFocusFile, onNotice } = {}) {
+  let bytes;
+  if (practiceFocusFile !== undefined) {
+    const resolved = path.resolve(practiceFocusFile);
+    ({ bytes } = readPracticeFocusContained(path.dirname(resolved), [path.basename(resolved)]));
+  } else if (storeDir) {
+    const loaded = loadAutoPracticeFocus(storeDir);
+    if (loaded.status !== 'ok') {
+      if (loaded.notice && typeof onNotice === 'function') onNotice(loaded.notice);
+      return loaded;
+    }
+    bytes = loaded.bytes;
+  } else {
+    return { status: 'absent' };
+  }
+  writeContained(destRoot, PRACTICE_FOCUS_DEST, bytes, { mode: 'replace' });
+  return { status: 'ok' };
+}
+
+export function readInstalledPracticeFocus(gameDir) {
+  try {
+    return openContained(gameDir, PRACTICE_FOCUS_DEST, { maxBytes: PRACTICE_FOCUS_MAX_BYTES }).toString('utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 async function main() {
