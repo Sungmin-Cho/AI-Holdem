@@ -4462,7 +4462,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       readServerLock();
       let sweepNotices = [];
       if (storeDir) {
-        await completeSessionStoreMigrations(storeDir);
+        try {
+          await completeSessionStoreMigrations(storeDir);
+        } catch (error) {
+          sweepNotices.push(`store migration 실패: ${error.code ?? 'ERROR'}`);
+          log('profile-migration-error', { code: error.code ?? 'ERROR' });
+        }
         try {
           const swept = await sweepStore(storeDir, {
             evaluate: (sessionDir, handNo) => evaluateForPipeline(sessionDir, handNo),
@@ -4610,7 +4615,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let lifecycleStarted = false;
     try {
       if (storeDir) {
-        await completeSessionStoreMigrations(storeDir);
+        try {
+          await completeSessionStoreMigrations(storeDir);
+        } catch (error) {
+          log('profile-migration-error', { code: error.code ?? 'ERROR' });
+        }
         await consumeTrainingNow();
       }
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');

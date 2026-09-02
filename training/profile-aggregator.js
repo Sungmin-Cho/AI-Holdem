@@ -94,6 +94,30 @@ function applyToOverall(overall, event) {
   }
 }
 
+function isSafeMapKey(key) {
+  return typeof key === 'string'
+    && key.length > 0
+    && key !== '__proto__'
+    && key !== 'constructor'
+    && key !== 'prototype';
+}
+
+export function assertProfileEvent(event) {
+  if (typeof event?.evaluationId !== 'string' || event.evaluationId.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 없습니다.');
+  }
+  if (typeof event?.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
+  }
+  if (!isSafeMapKey(event.skillKey)) {
+    throw coded('PROFILE_EVENT_INVALID', 'skillKey가 없습니다.');
+  }
+  if (!isSafeMapKey(event.providerId) || typeof event.providerVersion !== 'string'
+    || event.providerVersion.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'provider가 없습니다.');
+  }
+}
+
 function applyToSkill(skills, event) {
   if (event.forced) return;
   const row = skills[event.skillKey] ?? skillRow();
@@ -108,7 +132,7 @@ function applyToSkill(skills, event) {
 }
 
 function segmentKey(event) {
-  return `${event.providerId ?? 'unknown'}@${event.providerVersion ?? '0.0.0'}`;
+  return `${event.providerId}@${event.providerVersion}`;
 }
 
 function clone(profile) {
@@ -162,9 +186,7 @@ export function projectActive(profile) {
 }
 
 export function applyEvent(profile, event) {
-  if (typeof event?.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
-    throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
-  }
+  assertProfileEvent(event);
   const next = clone(profile);
   next.schemaVersion = PROFILE_SCHEMA_VERSION;
   next.segments = next.segments ?? {};

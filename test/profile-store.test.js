@@ -156,6 +156,51 @@ test('schema 1 load fails closed when events cannot support the nested schema', 
   await assert.rejects(() => store.show(), { code: 'PROFILE_EVENT_INVALID' });
 });
 
+test('schema 1 processed digest mismatch fails closed without writing schema 2', async () => {
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  const row = evaluation();
+  await store.apply(row);
+  fs.writeFileSync(store.profilePath, JSON.stringify({
+    schemaVersion: 1,
+    processed: { [row.evaluationId]: 'ff'.repeat(32) },
+    overall: { evaluatedDecisions: 1 },
+    skills: {},
+    leaks: [],
+    segments: {},
+  }));
+  await assert.rejects(() => store.show(), { code: 'UNSUPPORTED_PROFILE' });
+  const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
+  assert.equal(disk.schemaVersion, 1);
+});
+
+test('schema 1 event with unsafe skillKey fails closed', async () => {
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  const row = evaluation();
+  fs.mkdirSync(path.join(storeDir, '.training'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(store.profilePath, JSON.stringify({
+    schemaVersion: 1,
+    processed: { [row.evaluationId]: row.payloadSha256 },
+    overall: {},
+    skills: {},
+    leaks: [],
+    segments: {},
+  }));
+  fs.writeFileSync(store.eventsPath, `${JSON.stringify({
+    evaluationId: row.evaluationId,
+    payloadSha256: row.payloadSha256,
+    skillKey: '__proto__',
+    status: 'supported',
+    grade: 'preferred',
+    forced: false,
+    providerId: 'local-preflop-baseline',
+    providerVersion: '1.0.0',
+    appliedAt: '2026-09-01T00:00:00.000Z',
+  })}\n`);
+  await assert.rejects(() => store.show(), { code: 'PROFILE_EVENT_INVALID' });
+});
+
 test('schema 2 file is not read as schema 1 mixed totals; duplicate apply projects', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);

@@ -60,7 +60,8 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     }
     const rebuilt = rebuildFromEvents(events);
     for (const id of processedIds) {
-      if (!Object.prototype.hasOwnProperty.call(rebuilt.processed, id)) {
+      if (!Object.prototype.hasOwnProperty.call(rebuilt.processed, id)
+        || rebuilt.processed[id] !== profile.processed[id]) {
         throw coded('UNSUPPORTED_PROFILE', 'schema 1 events cannot support schema 2');
       }
     }
@@ -106,6 +107,12 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
 
   async function migrateDigests({ oldToNew = {}, byEvaluationId = {} } = {}) {
     return withLock(() => {
+      try {
+        const current = readJsonSecure(profilePath);
+        if (current.schemaVersion === 1) migrateSchema1(current);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
       const events = readJsonl(eventsPath).map((event) => {
         const mapped = byEvaluationId[event.evaluationId]?.new
           ?? oldToNew[event.payloadSha256]

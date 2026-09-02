@@ -258,13 +258,18 @@ export async function completeSessionStoreMigration(storeDir, sessionDir) {
 
 export async function completeSessionStoreMigrations(storeDir) {
   const sessionsRoot = path.join(storeDir, '.session-store', 'sessions');
-  if (!fs.existsSync(sessionsRoot)) return { completed: 0 };
+  if (!fs.existsSync(sessionsRoot)) return { completed: 0, notices: [] };
   let completed = 0;
+  const notices = [];
   for (const name of fs.readdirSync(sessionsRoot)) {
-    const result = await completeSessionStoreMigration(storeDir, path.join(sessionsRoot, name));
-    if (result.completed) completed += 1;
+    try {
+      const result = await completeSessionStoreMigration(storeDir, path.join(sessionsRoot, name));
+      if (result.completed) completed += 1;
+    } catch (error) {
+      notices.push(`store migration 실패 (${name}): ${error.code ?? 'ERROR'}`);
+    }
   }
-  return { completed };
+  return { completed, notices };
 }
 
 export function writePracticeFocus(storeDir, profile) {
