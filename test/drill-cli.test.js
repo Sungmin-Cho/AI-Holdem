@@ -206,8 +206,76 @@ test('duplicate answerQuestion returns the stored result and applies profile onc
   const first = await answerQuestion(storeDir, req);
   const second = await answerQuestion(storeDir, req);
   assert.equal(first.ok, true);
-  assert.deepEqual(second.result, first.result);
+  assert.deepEqual(second, first);
   assert.equal(profileEvents(storeDir).length, 1);
+});
+
+test('retrying an earlier answer after a later one returns the original next', async () => {
+  const storeDir = tmp();
+  const started = await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'replay-next-k' });
+  const firstNext = await nextQuestion(storeDir);
+  const firstReq = {
+    action: 'fold',
+    sessionId: started.sessionId,
+    questionId: firstNext.question.questionId,
+    attemptNo: firstNext.attemptNo,
+  };
+  const first = await answerQuestion(storeDir, firstReq);
+  const secondNext = await nextQuestion(storeDir);
+  await answerQuestion(storeDir, {
+    action: 'fold',
+    sessionId: started.sessionId,
+    questionId: secondNext.question.questionId,
+    attemptNo: secondNext.attemptNo,
+  });
+  const replay = await answerQuestion(storeDir, firstReq);
+  assert.deepEqual(replay, first);
+  assert.equal(replay.next?.questionId, first.next?.questionId);
+  assert.notEqual(replay.next?.questionId, readSession(storeDir).queue[readSession(storeDir).index]?.questionId);
+});
+
+test('omitted sessionId on a legacy session without UUID is STALE_QUESTION', async () => {
+  const storeDir = tmp();
+  await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'legacy-k' });
+  const live = readSession(storeDir);
+  const question = live.queue[0];
+  delete live.sessionId;
+  writeSession(storeDir, live);
+  await assert.rejects(
+    () => answerQuestion(storeDir, {
+      action: 'fold',
+      questionId: question.questionId,
+      attemptNo: 0,
+    }),
+    { code: 'STALE_QUESTION' },
+  );
+  assert.equal(profileEvents(storeDir).length, 0);
+});
+
+test('questionId mismatch and attemptNo mismatch are independently STALE_QUESTION', async () => {
+  const storeDir = tmp();
+  const started = await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'mismatch-k' });
+  const nxt = await nextQuestion(storeDir);
+  await assert.rejects(
+    () => answerQuestion(storeDir, {
+      action: 'fold',
+      sessionId: started.sessionId,
+      questionId: 'not-this-question',
+      attemptNo: nxt.attemptNo,
+    }),
+    { code: 'STALE_QUESTION' },
+  );
+  await assert.rejects(
+    () => answerQuestion(storeDir, {
+      action: 'fold',
+      sessionId: started.sessionId,
+      questionId: nxt.question.questionId,
+      attemptNo: nxt.attemptNo + 3,
+    }),
+    { code: 'STALE_QUESTION' },
+  );
+  assert.equal(profileEvents(storeDir).length, 0);
+  assert.equal(readSession(storeDir).index, 0);
 });
 
 test('two sessions with the same seed use distinct attempt keys', async () => {

@@ -17,6 +17,11 @@ const DATASET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../t
 const DRILL_LOCK = 'drill.lock.d';
 const SESSION_SEGMENTS = ['drill-session.json'];
 const SESSION_MAX_BYTES = 1_048_576;
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isSessionId(value) {
+  return typeof value === 'string' && SESSION_ID_RE.test(value);
+}
 
 function fail(code, message) {
   fs.writeSync(1, `${JSON.stringify({ ok: false, code, message })}\n`);
@@ -184,7 +189,7 @@ function storedAnswer(session, questionId, attemptNo) {
   }
   const result = session.answers[attemptNo];
   if (!result) throw coded('STALE_QUESTION', '저장된 답이 없습니다.');
-  return { ok: true, result, next: session.queue[session.index] ?? null };
+  return { ok: true, result, next: session.queue[attemptNo + 1] ?? null };
 }
 
 export async function startDrill(storeDir, { mode = 'free', seed = '0', idempotencyKey } = {}) {
@@ -235,7 +240,8 @@ export async function answerQuestion(storeDir, { action, sizeBb, sessionId, ques
     const session = await loadLiveSession(storeDir);
     if (!session) throw coded('NO_SESSION', 'drill session이 없습니다.');
     const attempt = coerceAttemptNo(attemptNo);
-    if (sessionId !== session.sessionId || attempt == null || typeof questionId !== 'string') {
+    if (!isSessionId(session.sessionId) || !isSessionId(sessionId)
+      || sessionId !== session.sessionId || attempt == null || typeof questionId !== 'string') {
       throw coded('STALE_QUESTION', '문항 요청이 현재 세션과 일치하지 않습니다.');
     }
     if (attempt < session.index) return storedAnswer(session, questionId, attempt);
