@@ -249,6 +249,7 @@ export function startHand(state, options = {}) {
     acted: [],
     actions: [],
     decisions: [],
+    posts,
     startStacks,
     vpipped: [],
     pfrd: [],
@@ -437,19 +438,29 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
 
 function returnUncalled(state) {
   const contribs = state.hand.contribs;
-  let maxLive = 0;
-  for (const pid of inPotPids(state.hand)) {
-    maxLive = Math.max(maxLive, contribs[pid] ?? 0);
+  let max = -1;
+  let second = -1;
+  let maxPid = null;
+  let maxCount = 0;
+  for (const [pid, raw] of Object.entries(contribs)) {
+    const value = raw ?? 0;
+    if (value > max) {
+      second = max;
+      max = value;
+      maxPid = pid;
+      maxCount = 1;
+    } else if (value === max) {
+      maxCount += 1;
+    } else if (value > second) {
+      second = value;
+    }
   }
-  const returned = {};
-  for (const pid of Object.keys(contribs)) {
-    const excess = Math.max(0, (contribs[pid] ?? 0) - maxLive);
-    if (excess <= 0) continue;
-    returned[pid] = excess;
-    contribs[pid] -= excess;
-    state.seats.find((s) => s.playerId === pid).stack += excess;
-  }
-  return returned;
+  if (maxCount !== 1 || maxPid == null || max <= 0) return {};
+  const excess = max - Math.max(0, second);
+  if (excess <= 0) return {};
+  contribs[maxPid] -= excess;
+  state.seats.find((s) => s.playerId === maxPid).stack += excess;
+  return { [maxPid]: excess };
 }
 
 function updateStats(state, hand, inPot, contested, contestedWinners) {
@@ -474,7 +485,7 @@ function finishHand(state, events) {
   const hand = state.hand;
   const inPot = inPotPids(hand);
   const contested = inPot.length >= 2;
-  returnUncalled(state);
+  const uncalledReturns = returnUncalled(state);
   if (contested) runout(state, events);
 
   const pots = buildPots(new Map(Object.entries(hand.contribs)), new Set(hand.folded));
@@ -548,6 +559,8 @@ function finishHand(state, events) {
     showdown,
     startStacks: { ...hand.startStacks },
     endStacks,
+    posts: structuredClone(hand.posts ?? []),
+    uncalledReturns,
   };
 
   if (isCashTraining(state)) {
@@ -723,6 +736,7 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     callAmount: legal.callAmount,
     minRaiseTo: legal.minRaiseTo,
     maxRaiseTo: legal.maxRaiseTo,
+    currentBet: hand.currentBet,
     board: [...hand.board],
     stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
   };

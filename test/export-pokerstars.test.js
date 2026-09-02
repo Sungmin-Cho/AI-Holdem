@@ -12,8 +12,8 @@ test('pokerstars renderer uses raises to, PLAY currency, synthetic id, no fake b
       heroCards: ['Ah', 'Jd'],
       board: [],
       actions: [
-        { playerId: 'user', action: 'raise', amount: 250, street: 'preflop' },
-        { playerId: 'p1', action: 'fold', amount: 0, street: 'preflop' },
+        { playerId: 'user', action: 'raise', amount: 250, street: 'preflop', currentBet: 100 },
+        { playerId: 'p1', action: 'fold', amount: 0, street: 'preflop', currentBet: 250 },
       ],
       pots: [{ amount: 250 }],
       showdown: { reveals: [] },
@@ -22,7 +22,7 @@ test('pokerstars renderer uses raises to, PLAY currency, synthetic id, no fake b
   assert.equal(warnings.length, 0);
   assert.match(text, /PokerStars Hand #AIHabc-3/);
   assert.match(text, /50\/100 PLAY/);
-  assert.match(text, /user: raises to 250/);
+  assert.match(text, /user: raises 150 to 250/);
   assert.equal(text.includes('burn'), false);
   assert.equal(text.includes('raises by'), false);
 });

@@ -134,7 +134,7 @@ export function turnSummary(state, playerId) {
 function safeAction(action) {
   const keys = [
     'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-    'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks',
+    'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
   ];
   const result = {};
   for (const key of keys) {
@@ -146,7 +146,10 @@ function safeAction(action) {
 export function redactRecord(record, viewerId = 'user') {
   if (!record) return null;
   const result = {};
-  for (const key of ['handNo', 'level', 'blinds', 'button', 'board', 'folded', 'allIn', 'startStacks', 'endStacks']) {
+  for (const key of [
+    'handNo', 'level', 'blinds', 'button', 'board', 'folded', 'allIn',
+    'startStacks', 'endStacks', 'posts', 'uncalledReturns',
+  ]) {
     if (key in record) result[key] = structuredClone(record[key]);
   }
   result.holes = {};

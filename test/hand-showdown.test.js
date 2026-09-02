@@ -119,6 +119,8 @@ test('칩 보존: 사이드팟 올인과 레이즈-폴드', () => {
   assert.equal(chipTotal(folded.state), foldBefore);
   const user = folded.state.seats.find((s) => s.playerId === 'user');
   assert.equal(user.stack, 5075);
+  assert.deepEqual(folded.state.lastHand.uncalledReturns, { user: 150 });
+  assert.equal(folded.state.lastHand.pots.reduce((sum, pot) => sum + pot.amount, 0), 125);
 });
 
 test('한 명 남으면 쇼다운 없이 지급·홀카드 비공개', () => {
@@ -132,8 +134,10 @@ test('한 명 남으면 쇼다운 없이 지급·홀카드 비공개', () => {
   assert.equal(awards.length, 1);
   assert.equal(awards[0].visibility, 'public');
   assert.equal(awards[0].potIndex, 0);
-  assert.equal(awards[0].amount, 75);
-  assert.deepEqual(awards[0].winners, [{ playerId: 'p2', share: 75 }]);
+  assert.equal(awards[0].amount, 50);
+  assert.deepEqual(awards[0].winners, [{ playerId: 'p2', share: 50 }]);
+  assert.deepEqual(st.lastHand.uncalledReturns, { p2: 25 });
+  assert.equal(st.lastHand.pots.reduce((sum, pot) => sum + pot.amount, 0), 50);
   const publicJson = JSON.stringify(r.events.filter((e) => e.visibility === 'public'));
   for (const pid of Object.keys(holes)) {
     for (const card of holes[pid]) {
@@ -300,6 +304,7 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
   const required = [
     'handNo', 'level', 'blinds', 'button', 'holes', 'board',
     'folded', 'allIn', 'actions', 'pots', 'showdown', 'startStacks', 'endStacks',
+    'posts', 'uncalledReturns',
   ];
   for (const key of required) assert.ok(key in rec, `missing ${key}`);
   assert.equal(rec.handNo, 1);
@@ -313,6 +318,7 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
   const snapKeys = [
     'decisionId', 'playerId', 'action', 'amount', 'street',
     'potTotal', 'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks',
+    'currentBet',
   ];
   for (const action of rec.actions) {
     for (const key of snapKeys) assert.ok(key in action, `action missing ${key}`);

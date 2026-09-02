@@ -1,24 +1,54 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
+import { openContained } from '../tools/training-store.js';
+import { EXPORT_MAX_BYTES } from './contracts.js';
 
-const FORBIDDEN = ['archetype', 'personality', 'bluffFreq', 'policySeed', 'sessionToken'];
+const FORBIDDEN = [
+  'archetype', 'personality', 'bluffFreq', 'policySeed', 'sessionToken',
+  'policyId', 'configDigest', 'sampledProbability', '.session-store',
+];
+const ABSOLUTE_PATH_RE = /(?:^|["'\s])(?:\/(?:Users|home|tmp|var|private|etc|opt|root)\b|[A-Za-z]:\\)/;
+
+function coded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function readContainedJson(root, segments) {
+  try {
+    const buf = openContained(root, segments, { maxBytes: EXPORT_MAX_BYTES });
+    return JSON.parse(buf.toString('utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
 
 export function listHands(gameDir) {
-  const handsDir = path.join(gameDir, 'hands');
-  const files = fs.existsSync(handsDir)
-    ? fs.readdirSync(handsDir).filter((name) => /^hand-\d+\.json$/.test(name)).sort()
-    : [];
-  const records = files.map((name) => JSON.parse(fs.readFileSync(path.join(handsDir, name), 'utf8')));
+  const root = path.resolve(gameDir);
+  const handsDir = path.join(root, 'hands');
+  let files = [];
   try {
-    const state = JSON.parse(fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8'));
-    if (state.lastHand?.handNo && !records.some((row) => row.handNo === state.lastHand.handNo)) {
-      records.push(state.lastHand);
+    const st = fs.lstatSync(handsDir);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw coded('UNSAFE_PATH', 'hands 디렉터리가 안전하지 않습니다.');
     }
-    return { state, records: records.sort((a, b) => a.handNo - b.handNo) };
-  } catch {
-    return { state: null, records: records.sort((a, b) => a.handNo - b.handNo) };
+    files = fs.readdirSync(handsDir).filter((name) => /^hand-\d+\.json$/.test(name)).sort();
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
   }
+  const records = files.map((name) => {
+    const parsed = readContainedJson(root, ['hands', name]);
+    if (parsed == null) throw coded('UNSAFE_PATH', `${name}을 읽을 수 없습니다.`);
+    return parsed;
+  });
+  const state = readContainedJson(root, ['state.json']);
+  if (state?.lastHand?.handNo && !records.some((row) => row.handNo === state.lastHand.handNo)) {
+    records.push(state.lastHand);
+  }
+  return { state, records: records.sort((a, b) => a.handNo - b.handNo) };
 }
 
 export function resolveExportDir({ gameDir, storeDir }) {
@@ -66,9 +96,11 @@ export function normalizeHand(record, { evaluations = [] } = {}) {
       action: action.action,
       amount: action.amount,
       street: action.street,
+      ...(typeof action.currentBet === 'number' ? { currentBet: action.currentBet } : {}),
     })),
     showdown: {
       reveals: record.showdown?.reveals ?? [],
+      mucks: record.showdown?.mucks ?? [],
     },
     pots: record.pots ?? [],
     decisions: record.decisions ?? [],
@@ -76,6 +108,10 @@ export function normalizeHand(record, { evaluations = [] } = {}) {
     holes: publicHoles(record),
     startStacks: record.startStacks ?? {},
     endStacks: record.endStacks ?? {},
+    posts: structuredClone(record.posts ?? []),
+    uncalledReturns: { ...(record.uncalledReturns ?? {}) },
+    allIn: [...(record.allIn ?? [])],
+    folded: [...(record.folded ?? [])],
   };
 }
 
@@ -83,9 +119,10 @@ export function assertNoSecrets(payload) {
   const json = JSON.stringify(payload);
   for (const key of FORBIDDEN) {
     if (json.includes(key)) {
-      const err = new Error(`forbidden field ${key}`);
-      err.code = 'FORBIDDEN_EXPORT';
-      throw err;
+      throw coded('FORBIDDEN_EXPORT', `forbidden field ${key}`);
     }
+  }
+  if (ABSOLUTE_PATH_RE.test(json)) {
+    throw coded('FORBIDDEN_EXPORT', 'forbidden absolute path');
   }
 }

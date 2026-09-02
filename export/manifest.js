@@ -1,11 +1,40 @@
 import { listHands, normalizeHand, assertNoSecrets } from './hand-normalizer.js';
 import { renderPokerStars } from './pokerstars.js';
+import { validateCanonicalHand } from './contracts.js';
+
+export function mergeWarnings(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    for (const row of list ?? []) {
+      const key = `${row.handNo}:${row.exportStatus}:${row.reason ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+  }
+  return out;
+}
 
 export function buildCanonical(gameDir, { exportedAt = '2026-09-01T00:00:00.000Z', evaluationsByHand = {} } = {}) {
   const { state, records } = listHands(gameDir);
-  const hands = records.map((record) => normalizeHand(record, {
-    evaluations: evaluationsByHand[record.handNo] ?? [],
-  }));
+  const warnings = [];
+  const hands = [];
+  for (const record of records) {
+    const hand = normalizeHand(record, {
+      evaluations: evaluationsByHand[record.handNo] ?? [],
+    });
+    const verdict = validateCanonicalHand(hand);
+    if (verdict.exportStatus !== 'ok') {
+      warnings.push({
+        handNo: hand.handNo,
+        exportStatus: verdict.exportStatus,
+        reason: verdict.reason,
+      });
+    }
+    if (verdict.exportStatus === 'unsupported') continue;
+    hands.push(hand);
+  }
   const payload = {
     schemaVersion: 1,
     exportedAt,
@@ -21,12 +50,16 @@ export function buildCanonical(gameDir, { exportedAt = '2026-09-01T00:00:00.000Z
       tableSize: Object.keys(records[0]?.startStacks ?? {}).length || (state?.seats?.length ?? 0),
     },
     hands,
-    warnings: [],
+    warnings,
   };
   assertNoSecrets(payload);
   return payload;
 }
 
 export function buildText(canonical, opts) {
-  return renderPokerStars(canonical, opts);
+  const rendered = renderPokerStars(canonical, opts);
+  return {
+    text: rendered.text,
+    warnings: mergeWarnings(canonical.warnings, rendered.warnings),
+  };
 }
