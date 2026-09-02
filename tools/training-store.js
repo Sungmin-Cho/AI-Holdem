@@ -285,12 +285,17 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
 
   let fd;
   let tmpId;
+  let published = false;
+  const closeFd = () => {
+    if (fd === undefined) return;
+    try { fs.closeSync(fd); } catch { /* close best-effort */ }
+    fd = undefined;
+  };
   const wipeOpenTmp = () => {
     if (fd === undefined) return;
     try { fs.ftruncateSync(fd, 0); } catch { /* best-effort neutralize */ }
     try { fs.fsyncSync(fd); } catch { /* fsync may be the injected failure */ }
-    try { fs.closeSync(fd); } catch { /* close best-effort */ }
-    fd = undefined;
+    closeFd();
   };
   try {
     try {
@@ -308,28 +313,28 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
     fs.fchmodSync(fd, FILE_MODE);
     fs.fsyncSync(fd);
     reinspectAncestors(ancestors);
-    fs.closeSync(fd);
-    fd = undefined;
     if (mode === 'replace') {
       fs.renameSync(tmpPath, destPath);
+      published = true;
       tmpId = undefined;
     } else {
       try {
         fs.linkSync(tmpPath, destPath);
       } catch (error) {
-        unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
-        tmpId = undefined;
         if (error.code === 'EEXIST') {
           throw coded('EXISTS', `${destPath}가 이미 있습니다.`);
         }
         throw error;
       }
+      published = true;
       unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
       tmpId = undefined;
     }
+    closeFd();
   } catch (error) {
-    wipeOpenTmp();
-    if (tmpId) unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
+    if (published) closeFd();
+    else wipeOpenTmp();
+    if (!published && tmpId) unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
     throw error;
   }
 }

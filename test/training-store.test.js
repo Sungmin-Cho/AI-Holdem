@@ -284,6 +284,88 @@ test('writeContained does not chmod dest by path after publish', () => {
   assert.equal(fs.lstatSync(path.join(root, 'mode.json')).mode & 0o777, 0o600);
 });
 
+test('writeContained wipes tmp when writeFileSync fails before publish', () => {
+  const root = containedRoot();
+  const origWrite = fs.writeFileSync;
+  fs.writeFileSync = (target, data, ...rest) => {
+    if (typeof target === 'number') {
+      throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+    }
+    return origWrite(target, data, ...rest);
+  };
+  try {
+    assert.throws(
+      () => writeContained(root, ['write.json'], 'payload', { mode: 'replace' }),
+      { code: 'EIO' },
+    );
+  } finally {
+    fs.writeFileSync = origWrite;
+  }
+  assert.equal(fs.existsSync(path.join(root, 'write.json')), false);
+  assert.deepEqual(fs.readdirSync(root).filter((name) => name.includes('.tmp')), []);
+});
+
+test('writeContained create EEXIST leaves no tmp beside the original dest', () => {
+  const root = containedRoot();
+  const dest = path.join(root, 'keep.json');
+  fs.writeFileSync(dest, 'original', { mode: 0o600 });
+  assert.throws(
+    () => writeContained(root, ['keep.json'], 'overwrite', { mode: 'create' }),
+    { code: 'EXISTS' },
+  );
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'original');
+  assert.deepEqual(fs.readdirSync(root).filter((name) => name.includes('.tmp')), []);
+});
+
+test('writeContained wipes payload if parent swaps after reinspect before publish', () => {
+  const root = containedRoot();
+  const nested = path.join(root, 'a');
+  fs.mkdirSync(nested, { mode: 0o700 });
+  const outside = tmp();
+  const origRename = fs.renameSync;
+  const origLink = fs.linkSync;
+  const swapOnce = () => {
+    const st = fs.lstatSync(nested);
+    if (st.isSymbolicLink()) return;
+    origRename(nested, `${nested}.real`);
+    fs.symlinkSync(outside, nested);
+  };
+  fs.renameSync = (...args) => {
+    swapOnce();
+    return origRename(...args);
+  };
+  fs.linkSync = (...args) => {
+    swapOnce();
+    return origLink(...args);
+  };
+  try {
+    assert.throws(
+      () => writeContained(root, ['a', 'out.json'], 'payload', { mode: 'replace' }),
+    );
+  } finally {
+    fs.renameSync = origRename;
+    fs.linkSync = origLink;
+  }
+  assert.deepEqual(fs.readdirSync(outside), []);
+  function collectFiles(dir) {
+    const out = [];
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      const st = fs.lstatSync(full);
+      if (st.isDirectory()) out.push(...collectFiles(full));
+      else if (st.isFile()) out.push(full);
+    }
+    return out;
+  }
+  for (const file of collectFiles(root)) {
+    assert.equal(
+      fs.readFileSync(file, 'utf8').includes('payload'),
+      false,
+      `leftover payload in ${file}`,
+    );
+  }
+});
+
 test('writeContained wipes tmp when fsync fails before publish', () => {
   const root = containedRoot();
   const origFsync = fs.fsyncSync;
