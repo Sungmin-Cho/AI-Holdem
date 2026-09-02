@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decide, stampPlayerPolicies } from '../tools/policy-player.js';
-import { sanitizePlayersForReview } from '../training/policies/catalog.js';
+import { assignmentFor, sanitizePlayersForReview } from '../training/policies/catalog.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE = path.join(ROOT, 'engine/cli.js');
@@ -90,4 +90,78 @@ test('sanitized review projection drops configDigest and policySeed', () => {
   const post = sanitizePlayersForReview(players, { gameOver: true });
   assert.equal(post[0].policyId, 'tag-v1');
   assert.equal(JSON.stringify(post).includes('deadbeef'), false);
+});
+
+function snapshot(over = {}) {
+  return {
+    schemaVersion: 1,
+    decisionId: 'd-1-preflop-0',
+    street: 'preflop',
+    holeCards: ['Ah', 'Ad'],
+    board: [],
+    blinds: [50, 100],
+    toCall: 0,
+    position: 'UTG',
+    publicSeats: Array.from({ length: 6 }, (_, i) => ({
+      playerId: i === 0 ? 'user' : `p${i}`,
+      out: false,
+    })),
+    priorActions: [],
+    effectiveStack: 10000,
+    ...over,
+  };
+}
+
+const openLegal = {
+  canCheck: false,
+  canRaise: true,
+  callAmount: 50,
+  minRaiseTo: 200,
+  maxRaiseTo: 10000,
+};
+
+test('stampPlayerPolicies is idempotent for existing seats and fail-closes on catalog mismatch', () => {
+  const dir = tmp();
+  run(['init', '--ai', '2', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  const first = stampPlayerPolicies(dir);
+  const ai = first.filter((player) => player.playerId !== 'user');
+  assert.equal(ai.length, 2);
+  for (const player of ai) {
+    assert.deepEqual(player.policy, assignmentFor(player.archetype));
+  }
+
+  const marked = JSON.parse(fs.readFileSync(path.join(dir, 'players.json'), 'utf8'));
+  const kept = marked.find((player) => player.playerId === 'p1');
+  kept.policy = { ...kept.policy, extra: 'keep' };
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(marked));
+  const restamped = stampPlayerPolicies(dir);
+  const again = restamped.find((player) => player.playerId === 'p1');
+  assert.equal(again.policy.extra, 'keep');
+  assert.deepEqual(
+    { policyId: again.policy.policyId, policyVersion: again.policy.policyVersion, configDigest: again.policy.configDigest },
+    assignmentFor(again.archetype),
+  );
+
+  const seed = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).policySeed;
+  const epoch = 'ab'.repeat(32);
+  const choice1 = decide({
+    snapshot: snapshot(),
+    legal: openLegal,
+    policy: again.policy,
+    policySeed: seed,
+    gameEpoch: epoch,
+  });
+  const choice2 = decide({
+    snapshot: snapshot(),
+    legal: openLegal,
+    policy: assignmentFor(again.archetype),
+    policySeed: seed,
+    gameEpoch: epoch,
+  });
+  assert.deepEqual(choice1, choice2);
+
+  const broken = JSON.parse(fs.readFileSync(path.join(dir, 'players.json'), 'utf8'));
+  broken.find((player) => player.playerId === 'p1').policy.configDigest = '00'.repeat(32);
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(broken));
+  assert.throws(() => stampPlayerPolicies(dir), { code: 'POLICY_CONFIG_MISMATCH' });
 });

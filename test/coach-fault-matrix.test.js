@@ -563,6 +563,79 @@ test('rollback guard refuses a live solver child', async () => {
   assert.equal(guard.reasons.some((reason) => reason.code === 'solver_child_live'), true);
 });
 
+function writePublishedTraining(dir, extra = {}) {
+  fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+  writeJsonAtomic(path.join(dir, 'training', '.training-authority.json'), {
+    schemaVersion: 1,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: '11111111-1111-4111-8111-111111111111',
+    items: {
+      'eval-1': { evaluationId: 'eval-1', status: 'published', handNo: 1 },
+    },
+    publishQueue: {},
+    ...extra,
+  });
+}
+
+test('rollback guard refuses a pending map even when items are published', async () => {
+  const fixture = setup({ token: 'tok-roll-pending-map' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writePublishedTraining(fixture.dir, {
+    pending: {
+      'decision-1': { handNo: 1, reason: 'evaluate', attempts: 1, lastTriedAt: 0 },
+    },
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'pending_training'), true);
+});
+
+test('rollback guard refuses leftover annotationQueue independently', async () => {
+  const fixture = setup({ token: 'tok-roll-annotation-queue' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writePublishedTraining(fixture.dir, {
+    annotationQueue: {
+      'eval-1': { explanation: { status: 'ready' } },
+    },
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'pending_annotation'), true);
+});
+
+test('rollback guard refuses empty-object annotationQueue leftovers', async () => {
+  const fixture = setup({ token: 'tok-roll-annotation-empty' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writePublishedTraining(fixture.dir, {
+    annotationQueue: { 'eval-1': {} },
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'pending_annotation'), true);
+});
+
+test('rollback guard refuses live solveTasks independently', async () => {
+  const fixture = setup({ token: 'tok-roll-solve-tasks' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  writePublishedTraining(fixture.dir, {
+    solveTasks: {
+      'decision-1': { adapterId: 'fake-solver' },
+    },
+  });
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'solver_child_live'), true);
+});
+
+test('rollback guard refuses an unreadable solver record', async () => {
+  const fixture = setup({ token: 'tok-roll-solver-unreadable' });
+  writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
+  fs.writeFileSync(path.join(fixture.dir, '.solver-child.json'), '{');
+  const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
+  assert.equal(guard.code, 'ROLLBACK_REFUSED');
+  assert.equal(guard.reasons.some((reason) => reason.code === 'solver_record_unreadable'), true);
+});
+
 test('game-over remaining 5,001ms는 교체 가능, 4,999ms는 불가', () => {
   const cutoff = 10_000_000_000n;
   assert.equal(canStartReplacement(cutoff - 5_001_000_000n, cutoff), true);

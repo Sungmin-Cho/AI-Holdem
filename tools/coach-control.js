@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { processStartTime, withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { readPersistedSolver } from './solver-runtime.js';
 import {
   MAX_PUBLISH_BODY_BYTES,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
@@ -29,6 +30,27 @@ export class CoachError extends Error {
 
 function fail(code, message) {
   throw new CoachError(code, message);
+}
+
+function isPlainMap(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mapKeys(value) {
+  return isPlainMap(value) ? Object.keys(value) : [];
+}
+
+function collectionHasEntries(value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (!isPlainMap(value)) return true;
+  return Object.keys(value).length > 0;
+}
+
+function queueHasLeftovers(queue) {
+  if (queue == null) return false;
+  if (!isPlainMap(queue)) return true;
+  return Object.keys(queue).length > 0;
 }
 
 function authPath(gameDir) {
@@ -1115,39 +1137,40 @@ export function createCoachControl(deps = {}) {
       if (trainingAttemptPending) {
         reasons.push({ code: 'training_attempt_pending', detail: {} });
       }
-      try {
-        const rec = JSON.parse(fs.readFileSync(path.join(gameDir, '.solver-child.json'), 'utf8'));
-        if (rec?.pid && rec.startTime && processStartTime(rec.pid) === rec.startTime) {
-          reasons.push({ code: 'solver_child_live', detail: { pid: rec.pid } });
-        }
-      } catch { /* absent or dead */ }
+      const solver = readPersistedSolver(gameDir);
+      if (solver.state === 'live') {
+        reasons.push({ code: 'solver_child_live', detail: { pid: solver.record?.pid ?? null } });
+      } else if (solver.state === 'unreadable') {
+        reasons.push({ code: 'solver_record_unreadable', detail: {} });
+      }
       const trainingAuthPath = path.join(gameDir, 'training', '.training-authority.json');
       if (fs.existsSync(trainingAuthPath)) {
         try {
           const trainingAuth = readJsonFile(trainingAuthPath);
-          const pendingMap = trainingAuth?.pending ?? {};
-          const pendingIds = Object.keys(pendingMap);
+          if (trainingAuth?.pending != null && !isPlainMap(trainingAuth.pending)) {
+            reasons.push({ code: 'pending_training', detail: { error: 'INVALID_SHAPE' } });
+          }
+          const pendingIds = mapKeys(trainingAuth?.pending);
           if (pendingIds.length) {
             reasons.push({
               code: 'pending_training',
               detail: { decisionIds: pendingIds },
             });
           }
-          const queued = [];
-          for (const [evaluationId, fields] of Object.entries(trainingAuth?.annotationQueue ?? {})) {
-            for (const field of Object.keys(fields ?? {})) {
-              queued.push({ evaluationId, field });
-            }
-          }
-          if (queued.length) {
+          if (queueHasLeftovers(trainingAuth?.annotationQueue)) {
             reasons.push({
               code: 'pending_annotation',
-              detail: { queued },
+              detail: { evaluationIds: Object.keys(trainingAuth.annotationQueue) },
             });
+          }
+          if (collectionHasEntries(trainingAuth?.solveTasks) || deps.hasLiveSolveTasks?.(gameDir)) {
+            reasons.push({ code: 'solver_child_live', detail: { source: 'solveTasks' } });
           }
         } catch {
           reasons.push({ code: 'pending_training', detail: { error: 'UNREADABLE' } });
         }
+      } else if (deps.hasLiveSolveTasks?.(gameDir)) {
+        reasons.push({ code: 'solver_child_live', detail: { source: 'solveTasks' } });
       }
       const activeHands = Object.entries(auth?.hands ?? {}).filter(([, hand]) => (
         hand.status === 'reserved'
@@ -1173,7 +1196,8 @@ export function createCoachControl(deps = {}) {
           'retired_unresolved', 'retired_reclaimable', 'retired_unreclaimed',
           'coach_authority_missing', 'coach_authority_unreadable',
           'cleanup_error', 'phase_incomplete', 'loop_state_unreadable',
-          'pending_training', 'pending_annotation', 'training_attempt_pending', 'solver_child_live',
+          'pending_training', 'pending_annotation', 'training_attempt_pending',
+          'solver_child_live', 'solver_record_unreadable',
         ];
         reasons.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
         return { ok: false, code: 'ROLLBACK_REFUSED', reasons };

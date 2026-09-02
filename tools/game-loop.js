@@ -4358,7 +4358,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : requestedPort;
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
-    if (!policyMode) {
+    if (policyMode) {
+      stampPlayerPolicies(root);
+    } else {
       if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
       await restorePlayers();
     }
