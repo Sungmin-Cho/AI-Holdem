@@ -1,0 +1,15 @@
+PokerStars Hand #AIH1-1: Hold'em No Limit (25/50 PLAY) - 2026/09/01 0:00:00 ET
+Table 'AI-Holdem' 3-max Seat #3 is the button
+Seat 1: p1 (5000 in chips)
+Seat 2: p2 (5000 in chips)
+Seat 3: user (5000 in chips)
+p1: posts small blind 25
+p2: posts big blind 50
+*** HOLE CARDS ***
+Dealt to user [Ah Kd]
+user: folds
+p1: folds
+Uncalled bet (25) returned to p2
+p2 collected 50 from pot
+*** SUMMARY ***
+Total pot 50 | Rake 0

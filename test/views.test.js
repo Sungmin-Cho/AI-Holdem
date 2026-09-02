@@ -49,6 +49,9 @@ test('redactRecord: 머킹된 패 미포함, 쇼다운 공개 패 포함', () =>
     assert.deepEqual(redacted.showdown.reveals.find((r) => r.playerId === reveal.playerId).cards, reveal.cards);
   }
   for (const card of st.lastHand.holes.p2) assert.equal(json.includes(card), false);
+  assert.ok('posts' in redacted);
+  assert.ok('uncalledReturns' in redacted);
+  assert.equal('currentBet' in (redacted.actions[0] ?? {}), true);
 });
 
 test('종료된 프리플랍 폴드 핸드의 뷰 스트리트는 preflop', () => {
