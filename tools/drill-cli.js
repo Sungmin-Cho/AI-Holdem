@@ -143,10 +143,26 @@ function commitPending(session) {
   session.pending = null;
 }
 
+function assertPending(pending) {
+  if (!pending || typeof pending !== 'object' || Array.isArray(pending)) {
+    throw coded('PENDING_UNRESOLVED', 'pending journal이 올바르지 않습니다.');
+  }
+  if (!pending.result || typeof pending.result !== 'object' || Array.isArray(pending.result)) {
+    throw coded('PENDING_UNRESOLVED', 'pending result가 올바르지 않습니다.');
+  }
+  if (typeof pending.questionId !== 'string' || !pending.questionId) {
+    throw coded('PENDING_UNRESOLVED', 'pending questionId가 올바르지 않습니다.');
+  }
+  if (!Number.isInteger(pending.attemptNo) || pending.attemptNo < 0) {
+    throw coded('PENDING_UNRESOLVED', 'pending attemptNo가 올바르지 않습니다.');
+  }
+}
+
 async function replayPending(storeDir, session) {
   const pending = session.pending;
   if (!pending) return session;
   try {
+    assertPending(pending);
     if (!pending.applied) pending.applied = { srs: false, profile: false };
     if (!pending.applied.srs) {
       await applySrs(storeDir, pending.srsPatch ?? null);

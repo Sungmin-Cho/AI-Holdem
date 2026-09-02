@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -239,6 +240,46 @@ test('body larger than 64KiB returns 413', async () => {
     assert.equal(child.exitCode, null);
   } finally {
     await stopChild(child);
+  }
+});
+
+test('chunked body over 64KiB returns JSON 413 without resetting the socket', async () => {
+  const storeDir = tmp();
+  const drill = await startDrillServer({ storeDir, port: 0, token: 'tok' });
+  try {
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port: drill.port,
+        method: 'POST',
+        path: '/api/start?token=tok',
+        headers: { 'Content-Type': 'application/json' },
+      }, (incoming) => {
+        const chunks = [];
+        incoming.on('data', (chunk) => chunks.push(chunk));
+        incoming.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try { json = JSON.parse(text); } catch { /* non-JSON */ }
+          resolve({ status: incoming.statusCode, json, text });
+        });
+      });
+      req.on('error', reject);
+      req.write('{"idempotencyKey":"');
+      req.write('x'.repeat(70 * 1024));
+      req.write('"}');
+      req.end();
+    });
+    assert.equal(res.status, 413);
+    assert.equal(res.json?.ok, false);
+    assert.equal(res.json?.code, 'PAYLOAD_TOO_LARGE');
+    const started = await api(drill.port, 'tok', '/api/start', {
+      method: 'POST',
+      body: { mode: 'free', seed: '1', idempotencyKey: 'after-chunked-413' },
+    });
+    assert.equal(started.status, 200);
+  } finally {
+    await drill.close();
   }
 });
 

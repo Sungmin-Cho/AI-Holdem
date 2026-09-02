@@ -62,14 +62,6 @@ function serveStatic(pathname, res) {
 
 function readRawBody(req, res) {
   return new Promise((resolve) => {
-    const len = Number(req.headers['content-length']);
-    if (Number.isFinite(len) && len > MAX_BODY) {
-      sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE' });
-      req.resume();
-      req.destroy();
-      resolve(null);
-      return;
-    }
     const chunks = [];
     let size = 0;
     let done = false;
@@ -78,13 +70,21 @@ function readRawBody(req, res) {
       done = true;
       resolve(value);
     };
+    const rejectTooLarge = () => {
+      sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE' });
+      req.resume();
+      finish(null);
+    };
+    const len = Number(req.headers['content-length']);
+    if (Number.isFinite(len) && len > MAX_BODY) {
+      rejectTooLarge();
+      return;
+    }
     req.on('data', (chunk) => {
       if (done) return;
       size += chunk.length;
       if (size > MAX_BODY) {
-        sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE' });
-        req.destroy();
-        finish(null);
+        rejectTooLarge();
         return;
       }
       chunks.push(chunk);

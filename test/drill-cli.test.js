@@ -355,6 +355,17 @@ test('startDrill replay failure throws PENDING_UNRESOLVED and keeps the session'
   assert.equal(session.pending.applied.profile, false);
 });
 
+test('malformed pending journal is PENDING_UNRESOLVED and is not cleared', async () => {
+  const storeDir = tmp();
+  await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'bad-pending-k' });
+  const session = readSession(storeDir);
+  session.pending = { attemptNo: 0 };
+  writeSession(storeDir, session);
+  await assert.rejects(() => nextQuestion(storeDir), { code: 'PENDING_UNRESOLVED' });
+  assert.deepEqual(readSession(storeDir).pending, { attemptNo: 0 });
+  assert.equal(profileEvents(storeDir).length, 0);
+});
+
 test('answer from a previous sessionId throws STALE_QUESTION', async () => {
   const storeDir = tmp();
   const first = await startDrill(storeDir, { mode: 'free', seed: '1', idempotencyKey: 'stale-a' });
