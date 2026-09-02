@@ -145,3 +145,30 @@ test('unknown authority schema is fail-closed', async () => {
     { code: 'UNSUPPORTED_TRAINING_AUTHORITY' },
   );
 });
+
+test('cutoff marker then late ready seal becomes unavailable (lock-race)', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  assert.equal(typeof tc.writeCutoffMarker, 'function');
+  const evaluation = evalOf();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  let pendingSeal;
+  await tc.withLock(dir, async () => {
+    fs.writeFileSync(
+      path.join(dir, 'training', '.cutoff'),
+      JSON.stringify({ at: new Date().toISOString() }),
+    );
+    pendingSeal = tc.sealAnnotation(dir, evaluation.evaluationId, 'explanation', '늦은 해설');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  });
+  const sealed = await pendingSeal;
+  assert.equal(sealed.ok, true);
+  const auth = tc.loadAuthority(dir);
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+});
+

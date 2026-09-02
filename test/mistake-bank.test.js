@@ -45,6 +45,17 @@ test('off-policy is stored once; forced and preferred are skipped; same spot acc
   }));
   assert.equal(second.added, false);
   assert.equal(second.item.evidence, 2);
+  assert.ok(Array.isArray(second.item.evidenceIds));
+  assert.equal(second.item.evidenceIds.length, 2);
+  const again = await bank.collect(evaluation({
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32), decisionId: 'd-3-preflop-0', providerId: 'local-preflop-baseline', providerVersion: '1.0.0',
+    }),
+    payloadSha256: 'bb'.repeat(32),
+  }));
+  assert.equal(again.added, false);
+  assert.equal(again.item.evidence, 2);
+  assert.deepEqual(again.item.evidenceIds, second.item.evidenceIds);
   const items = await bank.list();
   assert.equal(items.length, 1);
 });

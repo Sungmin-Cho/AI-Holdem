@@ -81,3 +81,34 @@ test('formatter merge by evaluationId+field displays unavailable and does not us
   const card = format(merged);
   assert.match(String(card.explanation), /unavailable/i);
 });
+
+test('SSE-style merge keeps the machine card and fills explanation later', async () => {
+  const { applyTrainingAnnotation, formatTrainingCard: format } = await import('../server/public/training-format.js');
+  const machine = {
+    handNo: 17,
+    evaluationId: 'eval-sse',
+    payloadSha256: 'aa'.repeat(32),
+    spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AJo',
+    chosen: { action: 'fold', frequency: 0.04 },
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.96 }],
+    grade: 'mixed',
+    status: 'supported',
+  };
+  const ui = { training: [machine], trainingAnnotations: [] };
+  const firstCard = format(ui.training[0]);
+  assert.equal(firstCard.explanation, '');
+  const ann = {
+    evaluationId: 'eval-sse',
+    field: 'explanation',
+    status: 'ready',
+    value: 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.',
+    payloadSha256: 'ff'.repeat(32),
+  };
+  ui.trainingAnnotations.push(ann);
+  ui.training[0] = applyTrainingAnnotation(ui.training[0], ann);
+  assert.equal(ui.training[0].payloadSha256, 'aa'.repeat(32));
+  assert.equal(ui.training[0].handClass, 'AJo');
+  const filled = format(ui.training[0]);
+  assert.match(filled.explanation, /0\.96/);
+});
