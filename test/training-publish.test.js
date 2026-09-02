@@ -170,8 +170,7 @@ test('cutoff 이후 training authority가 있으면 게시되고 play-time은 �
       training: [summary],
       trainingAuthority: {
         expectedGameEpoch: gameEpochOf('tok'),
-        evaluationId: summary.evaluationId,
-        payloadSha256: summary.payloadSha256,
+        items: [{ evaluationId: summary.evaluationId, payloadSha256: summary.payloadSha256 }],
       },
     }));
     const published = await run(dir, ['--from', trainingFile]);

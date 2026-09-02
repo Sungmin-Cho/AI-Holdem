@@ -65,6 +65,7 @@ test('public summary strips paths, hole cards, license; keeps forced and compact
   const raw = JSON.stringify(summary);
   assert.equal(summary.forced, true);
   assert.equal(summary.handNo, 17);
+  assert.equal(summary.explanation, undefined);
   assert.equal(summary.source.id, 'local-preflop-baseline');
   assert.equal(summary.source.version, '1.0.0');
   assert.equal(summary.source.license, undefined);
@@ -72,6 +73,7 @@ test('public summary strips paths, hole cards, license; keeps forced and compact
   assert.equal(summary.holeCards, undefined);
   assert.equal(raw.includes('/secret/'), false);
   assert.equal(raw.includes('Ah'), false);
+  assert.equal(raw.includes('오픈이 주력'), false);
   assert.equal(summary.detailRef, detailRefOf(evaluation.evaluationId));
   assert.equal(summary.payloadSha256, trainingPayloadSha256(summary));
   const again = toPublicSummary(evaluation, {

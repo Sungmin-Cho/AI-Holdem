@@ -528,18 +528,22 @@ test('rollback guard는 복합 위반 reasons를 고정 순서와 서로소 reti
   ]);
 });
 
-test('rollback guard는 pending training을 ROLLBACK_REFUSED 허용 예외로 반환한다', async () => {
+test('rollback guard는 pending 맵이 있으면 ROLLBACK_REFUSED (evaluated item만으로는 거부하지 않음, R2/R10)', async () => {
   const fixture = setup({ token: 'tok-roll-training' });
   writeJsonAtomic(path.join(fixture.dir, 'state.json'), { lastHand: null });
   fs.mkdirSync(path.join(fixture.dir, 'training'));
   writeJsonAtomic(path.join(fixture.dir, 'training', '.training-authority.json'), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     gameEpoch: 'ab'.repeat(32),
     ownerSessionId: fixture.owner,
     items: {
       'eval-1': { evaluationId: 'eval-1', status: 'evaluated', handNo: 1 },
     },
     publishQueue: {},
+    pending: {
+      'd-1-preflop-0': { handNo: 1, reason: 'EVALUATE_FAILED', attempts: 1, lastTriedAt: '2026-09-02T00:00:00.000Z' },
+    },
+    annotationQueue: {},
   });
   const guard = await fixture.cc.assertRollbackAllowed(fixture.dir);
   assert.equal(guard.code, 'ROLLBACK_REFUSED');
