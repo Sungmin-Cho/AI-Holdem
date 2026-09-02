@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProfileStore } from '../training/profile-store.js';
-import { openContained, writeContained, writeJsonSecure } from './training-store.js';
+import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
 export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
@@ -50,6 +50,62 @@ function sessionRoots(storeDir) {
 export async function applyEvaluation(storeDir, evaluation) {
   const store = createProfileStore(storeDir);
   return store.apply(evaluation);
+}
+
+function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
+  const file = path.join(storeDir, '.training', 'mistakes.json');
+  try {
+    const data = readJsonSecure(file);
+    for (const item of data.items ?? []) {
+      const evaluation = item.evaluation;
+      if (!evaluation) continue;
+      const mapped = byEvaluationId[item.mistakeId]?.new
+        ?? oldToNew[evaluation.payloadSha256]
+        ?? evaluation.payloadSha256;
+      evaluation.payloadSha256 = mapped;
+    }
+    writeJsonSecure(file, data);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+export async function migrateStoreV2(storeDir, digestMapFile) {
+  const map = JSON.parse(fs.readFileSync(digestMapFile, 'utf8'));
+  const oldToNew = map.oldToNew ?? {};
+  const byEvaluationId = map.byEvaluationId ?? {};
+  const store = createProfileStore(storeDir);
+  const profile = await store.migrateDigests({ oldToNew, byEvaluationId });
+  resignMistakes(storeDir, { oldToNew, byEvaluationId });
+  return profile;
+}
+
+export async function completeSessionStoreMigrations(storeDir) {
+  const sessionsRoot = path.join(storeDir, '.session-store', 'sessions');
+  if (!fs.existsSync(sessionsRoot)) return { completed: 0 };
+  let completed = 0;
+  for (const name of fs.readdirSync(sessionsRoot)) {
+    const sessionDir = path.join(sessionsRoot, name);
+    const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
+    if (!fs.existsSync(markerFile)) continue;
+    let marker;
+    try {
+      marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (marker.status === 'complete') continue;
+    if (marker.status !== 'session-done') continue;
+    const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
+    if (fs.existsSync(mapFile)) await migrateStoreV2(storeDir, mapFile);
+    fs.writeFileSync(markerFile, JSON.stringify({
+      ...marker,
+      status: 'complete',
+      completedAt: new Date().toISOString(),
+    }));
+    completed += 1;
+  }
+  return { completed };
 }
 
 export function writePracticeFocus(storeDir, profile) {
@@ -180,8 +236,16 @@ async function main() {
     const file = flags['evaluation-file'];
     if (!file) fail('USAGE', '--evaluation-file이 필요합니다.');
     const evaluation = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const profile = await store.apply(evaluation);
+    const result = await store.apply(evaluation);
+    const profile = result.profile ?? result;
     writePracticeFocus(storeDir, profile);
+    fs.writeSync(1, `${JSON.stringify({ ok: true, profile, applied: result.applied !== false })}\n`);
+    return;
+  }
+  if (cmd === 'migrate-v2') {
+    const mapFile = flags['digest-map'];
+    if (!mapFile) fail('USAGE', '--digest-map가 필요합니다.');
+    const profile = await migrateStoreV2(storeDir, mapFile);
     fs.writeSync(1, `${JSON.stringify({ ok: true, profile })}\n`);
     return;
   }
@@ -222,7 +286,7 @@ async function main() {
     fs.writeSync(1, `${JSON.stringify({ ok: true, applied, profile })}\n`);
     return;
   }
-  fail('USAGE', 'apply|show|rebuild|reset|sweep만 지원합니다.');
+  fail('USAGE', 'apply|show|rebuild|reset|sweep|migrate-v2만 지원합니다.');
 }
 
 const thisFile = fileURLToPath(import.meta.url);

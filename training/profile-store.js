@@ -63,11 +63,30 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       const appliedAt = now();
       const event = eventFromEvaluation(evaluation, appliedAt);
       let profile = loadProfile();
+      const seen = profile.processed[event.evaluationId];
+      if (seen === event.payloadSha256) {
+        return { applied: false, profile };
+      }
       profile = applyEvent(profile, event);
       if (!readJsonl(eventsPath).some((row) => row.evaluationId === event.evaluationId
         && row.payloadSha256 === event.payloadSha256)) {
         appendJsonl(eventsPath, event);
       }
+      writeJsonSecure(profilePath, profile);
+      return { applied: true, profile };
+    });
+  }
+
+  async function migrateDigests({ oldToNew = {}, byEvaluationId = {} } = {}) {
+    return withLock(() => {
+      const events = readJsonl(eventsPath).map((event) => {
+        const mapped = byEvaluationId[event.evaluationId]?.new
+          ?? oldToNew[event.payloadSha256]
+          ?? event.payloadSha256;
+        return { ...event, payloadSha256: mapped };
+      });
+      writeTextSecure(eventsPath, events.length ? `${events.map((row) => JSON.stringify(row)).join('\n')}\n` : '');
+      const profile = rebuildFromEvents(events);
       writeJsonSecure(profilePath, profile);
       return profile;
     });
@@ -96,5 +115,5 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     });
   }
 
-  return { apply, rebuild, show, reset, profilePath, eventsPath, root };
+  return { apply, rebuild, show, reset, migrateDigests, profilePath, eventsPath, root };
 }

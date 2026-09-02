@@ -34,6 +34,7 @@ import {
 } from './training-pipeline.js';
 import {
   applyEvaluation,
+  completeSessionStoreMigrations,
   installPracticeFocus,
   readInstalledPracticeFocus,
   writePracticeFocus,
@@ -1857,6 +1858,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const profileConsumerReady = () => {
+    if (!storeDir) return false;
+    const markerFile = path.join(root, 'training', '.migration-v2.json');
+    if (!fs.existsSync(markerFile)) return true;
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+      return marker.status === 'complete';
+    } catch {
+      return false;
+    }
+  };
+
   const flushTrainingPublish = async () => {
     if (!trainingOn) return;
     const loop = readLoopState();
@@ -1867,11 +1880,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (publishDeadlineNs != null) flags.push('--deadline-monotonic-ns', String(publishDeadlineNs));
     try {
       await executePublish(flags);
-      const tc = createTrainingControl();
+      const tc = createTrainingControl({ storeDir });
       for (const item of envelope.training) {
         try {
           await tc.markPublished(root, item.evaluationId, item.payloadSha256);
-          if (storeDir) {
+          if (storeDir && profileConsumerReady()) {
             try {
               await applyEvaluation(storeDir, item);
               try {
@@ -4229,6 +4242,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
+      if (storeDir) await completeSessionStoreMigrations(storeDir);
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
@@ -4359,6 +4373,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     let lifecycleStarted = false;
     try {
+      if (storeDir) await completeSessionStoreMigrations(storeDir);
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
       if (!engineState) throw codedError('NO_GAME', 'resume할 engine 상태가 없습니다.');

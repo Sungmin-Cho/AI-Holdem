@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -843,6 +842,11 @@ test('publish.js: annotation after cutoff still passes via annotationAuthority',
     });
     const sealed = await tc.sealAnnotation(dir, ev.evaluationId, 'explanation', '컷오프 뒤 해설');
     assert.equal(sealed.ok, true);
+    const machine = unpublishedEnvelope(dir, { gameEpoch: gameEpochOf('tok') });
+    fs.writeFileSync(path.join(dir, 'training-env.json'), JSON.stringify(machine));
+    const machinePublished = await publishCli(dir, ['--from', path.join(dir, 'training-env.json')]);
+    assert.equal(machinePublished.ok, true);
+    await tc.markPublished(dir, ev.evaluationId, machine.training[0].payloadSha256);
     fs.writeFileSync(path.join(dir, '.coach-authority.json'), JSON.stringify({
       schemaVersion: 2,
       gameEpoch: gameEpochOf('tok'),

@@ -4,8 +4,19 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MAX_PUBLISH_BODY_BYTES, MAX_PUBLISH_ID, payloadSha256 } from '../publish-contract.js';
+import {
+  MAX_PUBLISH_BODY_BYTES,
+  MAX_PUBLISH_ID,
+  payloadSha256,
+  projectTrainingAnnotation,
+  projectTrainingSummary,
+} from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
+
+const DENY_FIELDS = Object.freeze([
+  'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
+  'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
+]);
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 const HEARTBEAT_MS = 15_000;
@@ -61,21 +72,127 @@ function emptyState() {
     log: [],
     coach: [],
     training: [],
+    trainingAnnotations: {},
     review: undefined,
     publishId: undefined,
     history: [],
   };
 }
 
+function annotationsToArray(map) {
+  const out = [];
+  for (const fields of Object.values(map ?? {})) {
+    for (const row of Object.values(fields ?? {})) {
+      out.push({
+        evaluationId: row.evaluationId,
+        payloadSha256: row.payloadSha256,
+        field: row.field,
+        status: row.status,
+        value: row.value,
+        valueSha256: row.valueSha256,
+      });
+    }
+  }
+  out.sort((a, b) => String(a.evaluationId).localeCompare(String(b.evaluationId))
+    || String(a.field).localeCompare(String(b.field)));
+  return out;
+}
+
+function arrayToAnnotationMap(rows) {
+  const map = {};
+  for (const row of rows ?? []) {
+    if (!row?.evaluationId || !row.field) continue;
+    map[row.evaluationId] = map[row.evaluationId] ?? {};
+    map[row.evaluationId][row.field] = row;
+  }
+  return map;
+}
+
+function collectDenyLiterals(gameDir) {
+  const values = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json'), 'utf8'));
+    const list = Array.isArray(parsed) ? parsed : (parsed.players ?? []);
+    for (const player of list) {
+      if (player?.playerId === 'user') continue;
+      for (const field of DENY_FIELDS) {
+        if (player?.[field] != null && String(player[field]).length > 0) {
+          values.push(String(player[field]));
+        }
+      }
+    }
+  } catch { /* players.json is optional */ }
+  return values;
+}
+
+function explanationDenied(text, gameDir) {
+  if (typeof text !== 'string' || !text) return false;
+  return collectDenyLiterals(gameDir).some((literal) => literal && text.includes(literal));
+}
+
+function migrateLoadedTraining(rawTraining) {
+  const training = [];
+  const split = {};
+  for (const item of Array.isArray(rawTraining) ? rawTraining : []) {
+    if (!item || typeof item !== 'object') continue;
+    const explanation = item.explanation;
+    const rest = { ...item };
+    delete rest.explanation;
+    let projected;
+    try {
+      projected = projectTrainingSummary(rest);
+    } catch {
+      continue;
+    }
+    training.push(projected);
+    if (typeof explanation === 'string' && explanation.length) {
+      try {
+        const ann = projectTrainingAnnotation({
+          evaluationId: projected.evaluationId,
+          payloadSha256: projected.payloadSha256,
+          field: 'explanation',
+          status: 'ready',
+          value: explanation,
+        });
+        split[ann.evaluationId] = split[ann.evaluationId] ?? {};
+        split[ann.evaluationId].explanation = ann;
+      } catch { /* drop malformed legacy explanation */ }
+    }
+  }
+  return { training, split };
+}
+
 function loadUiState(gameDir) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
+    const migrated = migrateLoadedTraining(raw.training);
+    let annotationMap = {};
+    if (Array.isArray(raw.trainingAnnotations)) {
+      annotationMap = arrayToAnnotationMap(raw.trainingAnnotations);
+    } else if (raw.trainingAnnotations && typeof raw.trainingAnnotations === 'object') {
+      annotationMap = raw.trainingAnnotations;
+    }
+    for (const [id, fields] of Object.entries(migrated.split)) {
+      annotationMap[id] = { ...fields, ...(annotationMap[id] ?? {}) };
+    }
+    const restoredAnnotations = {};
+    for (const [id, fields] of Object.entries(annotationMap)) {
+      restoredAnnotations[id] = {};
+      for (const [field, row] of Object.entries(fields ?? {})) {
+        try {
+          restoredAnnotations[id][field] = projectTrainingAnnotation(row);
+        } catch {
+          restoredAnnotations[id][field] = row;
+        }
+      }
+    }
     return {
       revision: Number(raw.revision) || 0,
       view: raw.view ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
       coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
-      training: Array.isArray(raw.training) ? raw.training : [],
+      training: migrated.training,
+      trainingAnnotations: restoredAnnotations,
       review: raw.review,
       publishId: raw.publishId,
       history: Array.isArray(raw.history) ? raw.history : [],
@@ -138,24 +255,86 @@ function validateIncomingCoach(existing, incoming, gameDir) {
 // when an older snapshot written before this rule is loaded back.
 function mergeTraining(existing, incoming) {
   const merged = [...existing];
+  const projectedIncoming = [];
   for (const item of incoming) {
     if (!item || typeof item !== 'object' || Array.isArray(item)
       || typeof item.evaluationId !== 'string'
       || typeof item.payloadSha256 !== 'string') {
       return { error: 'TRAINING_PROOF_REQUIRED' };
     }
-    const at = merged.findIndex((row) => row.evaluationId === item.evaluationId);
+    let projected;
+    try {
+      projected = projectTrainingSummary(item);
+    } catch (error) {
+      return { error: error.code === 'SUMMARY_FIELD_TOO_LONG' ? 'TRAINING_PROOF_MISMATCH' : (error.code ?? 'TRAINING_PROOF_MISMATCH') };
+    }
+    if (item.payloadSha256 !== projected.payloadSha256) {
+      return { error: 'TRAINING_PROOF_MISMATCH' };
+    }
+    projectedIncoming.push(projected);
+    const at = merged.findIndex((row) => row.evaluationId === projected.evaluationId);
     if (at === -1) {
-      merged.push(item);
+      merged.push(projected);
       continue;
     }
-    if (merged[at].payloadSha256 !== item.payloadSha256) {
-      return { error: 'TRAINING_CONFLICT' };
+    if (merged[at].payloadSha256 !== projected.payloadSha256) {
+      return { error: 'TRAINING_PROOF_MISMATCH' };
     }
   }
   merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0)
     || String(a.evaluationId).localeCompare(String(b.evaluationId)));
-  return { merged };
+  return { merged, projectedIncoming };
+}
+
+function mergeTrainingAnnotations(existing, incoming, trainingItems, view, gameDir) {
+  const next = { ...existing };
+  for (const key of Object.keys(next)) {
+    next[key] = { ...(next[key] ?? {}) };
+  }
+  const projectedIncoming = [];
+  for (const raw of incoming) {
+    const proof = raw?.annotationProof;
+    if (!proof
+      || typeof proof.id !== 'string'
+      || typeof proof.valueSha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(proof.id)
+      || !/^[0-9a-f]{64}$/.test(proof.valueSha256)) {
+      return { error: 'ANNOTATION_PROOF_MISMATCH', status: 400 };
+    }
+    let projected;
+    try {
+      projected = projectTrainingAnnotation(raw);
+    } catch (error) {
+      return { error: error.code ?? 'ANNOTATION_PROOF_MISMATCH', status: 400 };
+    }
+    if (projected.valueSha256 !== proof.valueSha256
+      || (typeof raw.valueSha256 === 'string' && raw.valueSha256 !== projected.valueSha256)) {
+      return { error: 'ANNOTATION_PROOF_MISMATCH', status: 400 };
+    }
+    const machine = trainingItems.find((row) => row.evaluationId === projected.evaluationId);
+    if (!machine) return { error: 'ANNOTATION_ORPHAN', status: 409 };
+    if (machine.payloadSha256 !== projected.payloadSha256) {
+      return { error: 'ANNOTATION_PROOF_MISMATCH', status: 400 };
+    }
+    if (projected.field === 'explanation' && explanationDenied(projected.value, gameDir)) {
+      return { error: 'FORBIDDEN_LITERAL', status: 400 };
+    }
+    if (projected.field === 'exploit' && view?.gameOver !== true) {
+      return { error: 'EXPLOIT_BEFORE_GAMEOVER', status: 409 };
+    }
+    const prev = next[projected.evaluationId]?.[projected.field];
+    if (prev) {
+      if (prev.valueSha256 === projected.valueSha256) {
+        projectedIncoming.push(projected);
+        continue;
+      }
+      return { error: 'ANNOTATION_CONFLICT', status: 409 };
+    }
+    next[projected.evaluationId] = next[projected.evaluationId] ?? {};
+    next[projected.evaluationId][projected.field] = projected;
+    projectedIncoming.push(projected);
+  }
+  return { merged: next, projectedIncoming };
 }
 
 function mergeCoach(existing, incoming) {
@@ -183,6 +362,7 @@ function publicSnapshot(state) {
     log: state.log,
     coach: state.coach,
     training: state.training ?? [],
+    trainingAnnotations: annotationsToArray(state.trainingAnnotations),
   };
   if (state.review !== undefined) snap.review = state.review;
   return snap;
@@ -195,6 +375,7 @@ function persistUiState(gameDir, state) {
     log: state.log,
     coach: state.coach,
     training: state.training ?? [],
+    trainingAnnotations: state.trainingAnnotations ?? {},
     publishId: state.publishId,
     history: state.history,
   };
@@ -367,6 +548,7 @@ export function startServer({ gameDir, port = 8877, token }) {
       log: state.log,
       coach: state.coach,
       training: state.training ?? [],
+      trainingAnnotations: state.trainingAnnotations ?? {},
       review: state.review,
       history: state.history,
     };
@@ -404,7 +586,22 @@ export function startServer({ gameDir, port = 8877, token }) {
         return;
       }
       next.training = merged.merged;
-      payload.training = body.training;
+      payload.training = merged.projectedIncoming;
+    }
+    if (Array.isArray(body.trainingAnnotations) && body.trainingAnnotations.length) {
+      const merged = mergeTrainingAnnotations(
+        next.trainingAnnotations,
+        body.trainingAnnotations,
+        next.training,
+        next.view,
+        root,
+      );
+      if (merged.error) {
+        sendJson(res, merged.status ?? 400, { ok: false, code: merged.error });
+        return;
+      }
+      next.trainingAnnotations = merged.merged;
+      payload.trainingAnnotations = merged.projectedIncoming;
     }
 
     // Stamped for turn-latency measurement; kept off the payload so clients see no change.

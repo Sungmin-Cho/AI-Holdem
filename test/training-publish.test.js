@@ -107,7 +107,7 @@ test('server merge: same digest is a no-op, different digest fail-closed; restar
       training: [{ ...summary, grade: 'off-policy', payloadSha256: 'ff'.repeat(32) }],
     });
     assert.equal(conflict.json.ok, false);
-    assert.equal(conflict.json.code, 'TRAINING_CONFLICT');
+    assert.equal(conflict.json.code, 'TRAINING_PROOF_MISMATCH');
     await a.close();
     a = null;
     b = await startServer({ gameDir: dir, port: 0, token });

@@ -10,6 +10,20 @@ function actionLabel(action) {
   return ACTION[action] ?? action ?? '—';
 }
 
+export function applyTrainingAnnotation(item, annotation) {
+  if (!item || !annotation || item.evaluationId !== annotation.evaluationId) return item;
+  const next = { ...item };
+  if (annotation.field === 'explanation') {
+    next.explanationStatus = annotation.status;
+    next.explanation = annotation.status === 'unavailable' ? null : annotation.value;
+  }
+  if (annotation.field === 'exploit') {
+    next.exploitStatus = annotation.status;
+    next.exploit = annotation.status === 'unavailable' ? null : annotation.value;
+  }
+  return next;
+}
+
 export function formatTrainingCard(item) {
   const rec = Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
@@ -26,13 +40,22 @@ export function formatTrainingCard(item) {
     grade: item.status === 'supported' ? (item.grade ?? null) : null,
     forced: Boolean(item.forced),
     note: '',
-    explanation: item.explanation ?? '',
+    explanation: item.explanationStatus === 'unavailable'
+      ? 'unavailable'
+      : (item.explanation ?? ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     status: item.status ?? null,
     exploit: '',
   };
-  if (item.exploit?.accuracy === 'heuristic' && item.exploit.adjustment) {
-    const adj = item.exploit.adjustment;
+  const exploitVal = item.exploit;
+  if (exploitVal?.opponents && exploitVal.primary) {
+    const primary = exploitVal.opponents.find((row) => row.opponentId === exploitVal.primary);
+    if (primary?.adjustment) {
+      const adj = primary.adjustment;
+      card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue}`;
+    }
+  } else if (exploitVal?.accuracy === 'heuristic' && exploitVal.adjustment) {
+    const adj = exploitVal.adjustment;
     card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue} (heuristic, EV 없음)`;
   }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';

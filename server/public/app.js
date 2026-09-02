@@ -1,4 +1,4 @@
-import { formatTrainingCard } from './training-format.js';
+import { applyTrainingAnnotation, formatTrainingCard } from './training-format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -10,7 +10,7 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { view: null, log: [], coach: [], training: [], review: undefined };
+const ui = { view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined };
 let pendingAction = false;
 let raiseTo = 0;
 let lastDecisionId = null;
@@ -660,11 +660,21 @@ function paint() {
   paintReview(view);
 }
 
+function mergeAnnotationOntoCards(ann) {
+  const at = ui.training.findIndex((existing) => existing.evaluationId === ann.evaluationId);
+  if (at === -1) return;
+  ui.training[at] = applyTrainingAnnotation(ui.training[at], ann);
+}
+
 function renderSnapshot(snap) {
   ui.view = snap.view ?? null;
   ui.log = Array.isArray(snap.log) ? snap.log.slice() : [];
   ui.coach = Array.isArray(snap.coach) ? snap.coach.slice() : [];
   ui.training = Array.isArray(snap.training) ? snap.training.slice() : [];
+  ui.trainingAnnotations = Array.isArray(snap.trainingAnnotations)
+    ? snap.trainingAnnotations.slice()
+    : [];
+  for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
   pendingAction = false;
   lastDecisionId = null;
@@ -692,10 +702,21 @@ function render(m) {
     for (const item of m.training) {
       const at = ui.training.findIndex((existing) => existing.evaluationId === item.evaluationId);
       if (at === -1) ui.training.push(item);
-      else if (ui.training[at].payloadSha256 === item.payloadSha256) { /* same digest no-op */ }
+      else if (ui.training[at].payloadSha256 === item.payloadSha256) { /* machine digest no-op */ }
       else ui.training[at] = item;
     }
     ui.training.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
+    for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
+  }
+  if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {
+    for (const ann of m.trainingAnnotations) {
+      const at = ui.trainingAnnotations.findIndex((existing) => (
+        existing.evaluationId === ann.evaluationId && existing.field === ann.field
+      ));
+      if (at === -1) ui.trainingAnnotations.push(ann);
+      else ui.trainingAnnotations[at] = ann;
+      mergeAnnotationOntoCards(ann);
+    }
   }
   if (m.review !== undefined) {
     ui.review = m.review;
