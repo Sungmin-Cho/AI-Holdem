@@ -37,13 +37,28 @@ function rssKb(pid) {
   }
 }
 
+function parsePidList(text) {
+  return [...new Set(String(text).trim().split(/\s+/).filter(Boolean).map(Number))]
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
 function processGroupPids(pgid) {
   if (!Number.isInteger(pgid) || pgid <= 0) return { ok: false, pids: [] };
   try {
+    const out = execFileSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
+    const pids = [];
+    for (const line of out.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const pid = Number(parts[0]);
+      const group = Number(parts[1]);
+      if (group === pgid && Number.isInteger(pid) && pid > 0) pids.push(pid);
+    }
+    return { ok: true, pids: [...new Set(pids)] };
+  } catch { /* fall through to ps -g */ }
+  try {
     const out = execFileSync('ps', ['-o', 'pid=', '-g', String(pgid)], { encoding: 'utf8' });
-    const pids = [...new Set(out.trim().split(/\s+/).filter(Boolean).map(Number))]
-      .filter((pid) => Number.isInteger(pid) && pid > 0);
-    return { ok: true, pids };
+    return { ok: true, pids: parsePidList(out) };
   } catch (error) {
     const stdout = String(error.stdout ?? '').trim();
     const stderr = String(error.stderr ?? '').trim();
