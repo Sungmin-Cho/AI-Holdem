@@ -132,10 +132,13 @@ function handleOf(result, { delayMs = 0, onTerminate } = {}) {
   };
 }
 
-function writeLastHand(dir, { token = 'tok', handNo = 1, decisionId = 'd-1-preflop-0' } = {}) {
+function writeLastHand(dir, {
+  token = 'tok', handNo = 1, decisionId = 'd-1-preflop-0', decisionIds,
+} = {}) {
+  const ids = decisionIds ?? [decisionId];
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({
     sessionToken: token,
-    lastHand: { handNo, decisions: [snapshotOf(decisionId)] },
+    lastHand: { handNo, decisions: ids.map((id) => snapshotOf(id)) },
   }));
 }
 
@@ -364,4 +367,130 @@ test('concurrent machine and annotation flushes cannot publish the other produce
   for (const row of seen) {
     assert.deepEqual(row.atRead, row.atEnter);
   }
+});
+
+test('partial hand with one item and one pending still evaluates the missing decision', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token, decisionIds: ['d-1-preflop-0', 'd-1-flop-0'] });
+  const first = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  const second = cannedEvaluation('d-1-flop-0', gameEpoch);
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch,
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [first],
+  });
+  await tc.recordPending(dir, 'd-1-flop-0', {
+    handNo: 1,
+    reason: 'EVALUATE_FAILED',
+    gameEpoch,
+    owner: 'owner-1',
+  });
+  let evaluateCalls = 0;
+  const result = await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => {
+      evaluateCalls += 1;
+      return handleOf({ ok: true, evaluations: [first, second] });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(evaluateCalls, 1);
+  const auth = tc.loadAuthority(dir);
+  assert.equal(auth.items[first.evaluationId].decisionId, 'd-1-preflop-0');
+  assert.equal(auth.items[second.evaluationId].decisionId, 'd-1-flop-0');
+  assert.equal(auth.pending['d-1-flop-0'], undefined);
+  assert.equal(Object.keys(auth.items).length, 2);
+});
+
+test('explain concurrency is 1 across hands', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token, handNo: 2, decisionId: 'd-2-preflop-0' });
+  fs.mkdirSync(path.join(dir, 'hands'));
+  fs.writeFileSync(path.join(dir, 'hands', 'hand-0001.json'), JSON.stringify({
+    handNo: 1,
+    decisions: [snapshotOf('d-1-preflop-0')],
+  }));
+  const first = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  const second = cannedEvaluation('d-2-preflop-0', gameEpoch);
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch, owner: 'owner-1', handNo: 1, evaluations: [first],
+  });
+  await tc.acceptEvaluations(dir, {
+    gameEpoch, owner: 'owner-1', handNo: 2, evaluations: [second],
+  });
+  let inExplain = 0;
+  let overlap = 0;
+  const explain = () => {
+    inExplain += 1;
+    if (inExplain > 1) overlap += 1;
+    return {
+      promise: new Promise((resolve) => {
+        setTimeout(() => {
+          inExplain -= 1;
+          resolve(VALID_EXPLAIN);
+        }, 40);
+      }),
+      terminate: async () => ({ confirmed: true }),
+    };
+  };
+  const results = await Promise.all([
+    pipeline.runHandPipeline({
+      sessionDir: dir,
+      handNo: 1,
+      gameEpoch,
+      owner: 'owner-1',
+      evaluate: () => { throw new Error('hand 1 must not re-evaluate'); },
+      explain,
+    }),
+    pipeline.runHandPipeline({
+      sessionDir: dir,
+      handNo: 2,
+      gameEpoch,
+      owner: 'owner-1',
+      evaluate: () => { throw new Error('hand 2 must not re-evaluate'); },
+      explain,
+    }),
+  ]);
+  assert.equal(results.every((row) => row.ok), true);
+  assert.equal(overlap, 0);
+});
+
+test('in-flight explain cannot seal ready after process-local cutoff without a marker file', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch,
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const { enterExplanationCutoff } = await import('../tools/training-control.js');
+  if (typeof enterExplanationCutoff === 'function') enterExplanationCutoff(dir);
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.cutoff')), false);
+  await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => {
+      throw new Error('already-itemized decision must not be re-evaluated');
+    },
+    explain: () => handleOf(VALID_EXPLAIN),
+  });
+  const auth = tc.loadAuthority(dir);
+  assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.status, 'unavailable');
 });

@@ -691,6 +691,8 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
 test('cutoff-marker write failure stops finalization before late ready seal', { timeout: 40_000 }, async (t) => {
   const gameDir = tmpGame();
   const coachCalls = [];
+  let releaseExplain;
+  const explainGate = new Promise((resolve) => { releaseExplain = resolve; });
   const loop = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
@@ -704,7 +706,12 @@ test('cutoff-marker write failure stops finalization before late ready seal', { 
       onCoachInvoke: (args) => coachCalls.push(args[0]),
       training: {
         evaluate: makeEvaluate(),
-        explain: makeExplain({ delayMs: 30_000 }),
+        explain: () => ({
+          promise: explainGate.then(() => VALID_EXPLAIN),
+          async terminate() {
+            return { confirmed: false };
+          },
+        }),
       },
     },
   });
@@ -723,10 +730,77 @@ test('cutoff-marker write failure stops finalization before late ready seal', { 
     until: (state) => Boolean(state.halt) || state.phase === 'done',
   });
   const finished = await running.catch((error) => error);
-  const haltCode = finished?.code ?? readJson(path.join(gameDir, 'loop-state.json')).halt?.code;
-  assert.notEqual(haltCode, undefined, 'finalize proceeded after cutoff-marker write failure');
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  const haltCode = finished?.code ?? loopState.halt?.code;
+  assert.equal(haltCode, 'FINALIZATION_ABORTED');
   assert.notEqual(haltCode, 'REVIEW_GATE_CLOSED');
   assert.equal(coachCalls.includes('finalize-cutoff'), false, 'finalize-cutoff ran after marker write failure');
+  assert.notEqual(loopState.phase, 'done');
+  releaseExplain();
+  const item = await waitFor(() => {
+    const auth = createTrainingControl().loadAuthority(gameDir);
+    return Object.values(auth?.items ?? {})[0] ?? null;
+  }, 'training item missing after marker write failure');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const sealed = createTrainingControl().loadAuthority(gameDir)?.items?.[item.evaluationId];
+  assert.notEqual(sealed?.annotations?.explanation?.status, 'ready');
+  assert.equal(sealed?.annotations?.explanation?.status, 'unavailable');
+});
+
+test('cutoff-marker write failure still fail-closed when terminate throws', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const coachCalls = [];
+  let releaseExplain;
+  const explainGate = new Promise((resolve) => { releaseExplain = resolve; });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      trainingEnabled: true,
+      finalizeBudgetMs: 6_000,
+      finalizeCutoffLeadMs: 2_000,
+      onCoachInvoke: (args) => coachCalls.push(args[0]),
+      training: {
+        evaluate: makeEvaluate(),
+        explain: () => ({
+          promise: explainGate.then(() => VALID_EXPLAIN),
+          async terminate() {
+            const error = new Error('terminate failed');
+            error.code = 'TERMINATE_FAILED';
+            throw error;
+          },
+        }),
+      },
+    },
+  });
+  t.after(() => {
+    releaseExplain();
+    return loop.requestStop().catch(() => {});
+  });
+  await loop.bootstrap({
+    ai: 1,
+    mode: 'cash-training',
+    stackBb: 100,
+    blinds: '50/100',
+    hands: 1,
+    opponentRuntime: 'policy',
+  });
+  fs.mkdirSync(path.join(gameDir, 'training', '.cutoff'), { recursive: true });
+  putUserOnTheButton(gameDir);
+  const { running } = await playUntil(loop, gameDir, {
+    until: (state) => Boolean(state.halt) || state.phase === 'done',
+  });
+  const finished = await running.catch((error) => error);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  const haltCode = finished?.code ?? loopState.halt?.code;
+  assert.equal(haltCode, 'FINALIZATION_ABORTED');
+  assert.equal(coachCalls.includes('finalize-cutoff'), false, 'finalize-cutoff ran after terminate throw');
+  assert.notEqual(loopState.phase, 'done');
+  releaseExplain();
+  await new Promise((resolve) => setTimeout(resolve, 200));
   const auth = createTrainingControl().loadAuthority(gameDir);
   const item = Object.values(auth?.items ?? {})[0];
   assert.notEqual(item?.annotations?.explanation?.status, 'ready');

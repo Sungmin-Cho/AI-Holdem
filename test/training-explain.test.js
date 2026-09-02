@@ -53,6 +53,15 @@ test('R11 binds 3-bet/3벳 aliases before leftover numbers and nearest action pe
   assert.equal(validateExplanation(supported, '레이즈 96% 폴드 4%').ok, true);
 });
 
+test('R11 binds frequency to the action alias in the same clause only', () => {
+  assert.equal(validateExplanation(supported, 'fold 4%. unrelated 96%. raise').ok, false);
+  assert.equal(validateExplanation(supported, 'raise 96%. stack 0.96.').ok, false);
+  assert.equal(validateExplanation(supported, 'Raise 96%').ok, true);
+  assert.equal(validateExplanation(supported, '레이즈 96%').ok, true);
+  assert.equal(validateExplanation(supported, 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.').ok, true);
+  assert.equal(validateExplanation(foldHeavy, '3-bet 4%').ok, true);
+});
+
 test('buildExplanationPrompt states allowed number forms, aliases, and no new numbers', () => {
   assert.equal(typeof pipeline.buildExplanationPrompt, 'function');
   const prompt = pipeline.buildExplanationPrompt(supported);
