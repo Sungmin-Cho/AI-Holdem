@@ -257,7 +257,7 @@ export function openContained(root, segments, { maxBytes } = {}) {
       if (n === 0) break;
       offset += n;
     }
-    return buf;
+    return buf.subarray(0, offset);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -285,6 +285,13 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
 
   let fd;
   let tmpId;
+  const wipeOpenTmp = () => {
+    if (fd === undefined) return;
+    try { fs.ftruncateSync(fd, 0); } catch { /* best-effort neutralize */ }
+    try { fs.fsyncSync(fd); } catch { /* fsync may be the injected failure */ }
+    try { fs.closeSync(fd); } catch { /* close best-effort */ }
+    fd = undefined;
+  };
   try {
     try {
       fd = openNoFollow(
@@ -295,14 +302,14 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
     } catch (error) {
       throw mapOpenError(error, tmpPath);
     }
+    const opened = fs.fstatSync(fd);
+    tmpId = { dev: opened.dev, ino: opened.ino };
     fs.writeFileSync(fd, buf);
     fs.fchmodSync(fd, FILE_MODE);
     fs.fsyncSync(fd);
-    const st = fs.fstatSync(fd);
-    tmpId = { dev: st.dev, ino: st.ino };
+    reinspectAncestors(ancestors);
     fs.closeSync(fd);
     fd = undefined;
-    reinspectAncestors(ancestors);
     if (mode === 'replace') {
       fs.renameSync(tmpPath, destPath);
       tmpId = undefined;
@@ -320,11 +327,8 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
       unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
       tmpId = undefined;
     }
-    fs.chmodSync(destPath, FILE_MODE);
   } catch (error) {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch { /* close best-effort */ }
-    }
+    wipeOpenTmp();
     if (tmpId) unlinkTmpIfOurs(tmpPath, tmpId, ancestors);
     throw error;
   }

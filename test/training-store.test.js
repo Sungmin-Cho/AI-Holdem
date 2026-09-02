@@ -227,6 +227,104 @@ test('writeContained replace overwrites dest and openContained reads the new byt
   );
 });
 
+test('writeContained rejects the same bad segments as openContained', () => {
+  const root = containedRoot();
+  const cases = [
+    ['..'],
+    ['..', 'ok.json'],
+    [path.join(root, 'ok.json')],
+    [''],
+    ['.'],
+    ['a/b'],
+    ['a\\b'],
+    ['ok.json', ''],
+  ];
+  for (const segments of cases) {
+    assert.throws(
+      () => writeContained(root, segments, 'x', { mode: 'create' }),
+      { code: 'BAD_SEGMENT' },
+      `expected BAD_SEGMENT for ${JSON.stringify(segments)}`,
+    );
+  }
+});
+
+test('writeContained create never calls rename', () => {
+  const root = containedRoot();
+  const origRename = fs.renameSync;
+  let renamed = false;
+  fs.renameSync = (...args) => {
+    renamed = true;
+    return origRename(...args);
+  };
+  try {
+    writeContained(root, ['fresh.json'], 'x', { mode: 'create' });
+    assert.equal(renamed, false);
+    assert.throws(
+      () => writeContained(root, ['fresh.json'], 'y', { mode: 'create' }),
+      { code: 'EXISTS' },
+    );
+    assert.equal(renamed, false);
+    assert.equal(fs.readFileSync(path.join(root, 'fresh.json'), 'utf8'), 'x');
+  } finally {
+    fs.renameSync = origRename;
+  }
+});
+
+test('writeContained does not chmod dest by path after publish', () => {
+  const root = containedRoot();
+  const origChmod = fs.chmodSync;
+  fs.chmodSync = () => {
+    throw new Error('path chmod after publish is a containment hole');
+  };
+  try {
+    writeContained(root, ['mode.json'], 'ok', { mode: 'create' });
+  } finally {
+    fs.chmodSync = origChmod;
+  }
+  assert.equal(fs.lstatSync(path.join(root, 'mode.json')).mode & 0o777, 0o600);
+});
+
+test('writeContained wipes tmp when fsync fails before publish', () => {
+  const root = containedRoot();
+  const origFsync = fs.fsyncSync;
+  fs.fsyncSync = () => {
+    throw Object.assign(new Error('injected fsync failure'), { code: 'EIO' });
+  };
+  try {
+    assert.throws(
+      () => writeContained(root, ['fsync.json'], 'payload', { mode: 'replace' }),
+      { code: 'EIO' },
+    );
+  } finally {
+    fs.fsyncSync = origFsync;
+  }
+  assert.equal(fs.existsSync(path.join(root, 'fsync.json')), false);
+  const leftovers = fs.readdirSync(root).filter((name) => name.includes('.tmp'));
+  assert.deepEqual(leftovers, []);
+});
+
+test('openContained returns only bytes actually read on short read', () => {
+  const root = containedRoot();
+  fs.writeFileSync(path.join(root, 'short.json'), 'ABCDEFGH');
+  const origRead = fs.readSync;
+  let calls = 0;
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    calls += 1;
+    if (calls === 1) {
+      buffer[offset] = 65;
+      return 1;
+    }
+    return 0;
+  };
+  try {
+    const got = openContained(root, ['short.json'], { maxBytes: 4096 });
+    assert.equal(got.toString('utf8'), 'A');
+    assert.equal(got.length, 1);
+  } finally {
+    fs.readSync = origRead;
+  }
+});
+
 test('writeContained rejects parent-swap between inspect and reinspect', () => {
   const root = containedRoot();
   const nested = path.join(root, 'a');
@@ -249,4 +347,21 @@ test('writeContained rejects parent-swap between inspect and reinspect', () => {
     fs.fsyncSync = origFsync;
   }
   assert.deepEqual(fs.readdirSync(outside), []);
+  function collectFiles(dir) {
+    const out = [];
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      const st = fs.lstatSync(full);
+      if (st.isDirectory()) out.push(...collectFiles(full));
+      else if (st.isFile()) out.push(full);
+    }
+    return out;
+  }
+  for (const file of collectFiles(root)) {
+    assert.equal(
+      fs.readFileSync(file, 'utf8').includes('payload'),
+      false,
+      `leftover payload in ${file}`,
+    );
+  }
 });
