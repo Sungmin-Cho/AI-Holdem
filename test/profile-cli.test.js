@@ -271,3 +271,93 @@ test('sweep re-consumes pending evaluate and adapterId solver entries', async ()
   assert.equal(solveAuth.pending['d-2-flop-0'], undefined);
   assert.equal(swept.applied, 2);
 });
+
+test('sweep does not abort the store on one malformed or unsupported archived authority', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  const malformed = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const unsupported = sessionDirOf(storeDir, '22222222-2222-4222-8222-222222222222');
+  const healthy = sessionDirOf(storeDir, '33333333-3333-4333-8333-333333333333');
+  fs.writeFileSync(path.join(malformed, 'training', '.training-authority.json'), '{not-json');
+  fs.writeFileSync(path.join(unsupported, 'training', '.training-authority.json'), JSON.stringify({
+    schemaVersion: 99,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: 'owner-1',
+    items: {},
+    publishQueue: {},
+    pending: {},
+    annotationQueue: {},
+  }));
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  const evaluation = evaluationRow();
+  await createTrainingControl({ storeDir }).acceptEvaluations(healthy, {
+    gameEpoch: 'ab'.repeat(32),
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [evaluation],
+  });
+  const swept = await sweepStore(storeDir);
+  assert.equal((swept.notices ?? []).length >= 2, true);
+  assert.equal(swept.applied, 1);
+  assert.equal(swept.profile.overall.evaluatedDecisions, 1);
+  const { createProfileStore } = await import('../training/profile-store.js');
+  assert.equal((await createProfileStore(storeDir).show()).overall.evaluatedDecisions, 1);
+});
+
+function writeV1ArchivedSession(sessionDir, evaluation) {
+  const training = path.join(sessionDir, 'training');
+  fs.mkdirSync(path.join(training, 'details'), { recursive: true });
+  const detailRef = 'detail-v1';
+  const summary = {
+    ...evaluation,
+    handNo: 1,
+    explanation: 'BTN unopened에서 AJo는 폴드가 아니다.',
+    detailRef,
+    detailSha256: 'cc'.repeat(32),
+  };
+  fs.writeFileSync(path.join(training, 'details', `${detailRef}.json`), JSON.stringify(evaluation));
+  fs.writeFileSync(path.join(training, 'evaluations.jsonl'), `${JSON.stringify(summary)}\n`);
+  fs.writeFileSync(path.join(training, '.training-authority.json'), JSON.stringify({
+    schemaVersion: 1,
+    gameEpoch: 'ab'.repeat(32),
+    ownerSessionId: 'owner-1',
+    items: {
+      [evaluation.evaluationId]: {
+        status: 'evaluated',
+        handNo: 1,
+        decisionId: evaluation.decisionId,
+        evaluationId: evaluation.evaluationId,
+        payloadSha256: evaluation.payloadSha256,
+        detailRef,
+        detailSha256: 'cc'.repeat(32),
+      },
+    },
+    publishQueue: {
+      [evaluation.evaluationId]: {
+        evaluationId: evaluation.evaluationId,
+        handNo: 1,
+        payloadSha256: evaluation.payloadSha256,
+      },
+    },
+  }));
+}
+
+test('authority v1 session without a complete marker is still swept', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const evaluation = evaluationRow();
+  writeV1ArchivedSession(sessionDir, evaluation);
+  assert.equal(fs.existsSync(path.join(sessionDir, 'training', '.migration-v2.json')), false);
+  const swept = await sweepStore(storeDir);
+  assert.equal(swept.applied, 1);
+  assert.equal(swept.skipped, undefined);
+  assert.equal(swept.profile.overall.evaluatedDecisions, 1);
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  const auth = createTrainingControl({ storeDir }).loadAuthority(sessionDir);
+  assert.equal(auth.items[evaluation.evaluationId].consumers.profiled, true);
+  const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
+  assert.equal(fs.existsSync(markerPath), true);
+  const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.notEqual(marker.status, 'in-progress');
+});
