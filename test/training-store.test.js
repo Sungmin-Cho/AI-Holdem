@@ -317,35 +317,7 @@ test('writeContained create EEXIST leaves no tmp beside the original dest', () =
   assert.deepEqual(fs.readdirSync(root).filter((name) => name.includes('.tmp')), []);
 });
 
-test('writeContained wipes payload if parent swaps after reinspect before publish', () => {
-  const root = containedRoot();
-  const nested = path.join(root, 'a');
-  fs.mkdirSync(nested, { mode: 0o700 });
-  const outside = tmp();
-  const origRename = fs.renameSync;
-  const origLink = fs.linkSync;
-  const swapOnce = () => {
-    const st = fs.lstatSync(nested);
-    if (st.isSymbolicLink()) return;
-    origRename(nested, `${nested}.real`);
-    fs.symlinkSync(outside, nested);
-  };
-  fs.renameSync = (...args) => {
-    swapOnce();
-    return origRename(...args);
-  };
-  fs.linkSync = (...args) => {
-    swapOnce();
-    return origLink(...args);
-  };
-  try {
-    assert.throws(
-      () => writeContained(root, ['a', 'out.json'], 'payload', { mode: 'replace' }),
-    );
-  } finally {
-    fs.renameSync = origRename;
-    fs.linkSync = origLink;
-  }
+function assertNoPayload(root, outside) {
   assert.deepEqual(fs.readdirSync(outside), []);
   function collectFiles(dir) {
     const out = [];
@@ -364,6 +336,61 @@ test('writeContained wipes payload if parent swaps after reinspect before publis
       `leftover payload in ${file}`,
     );
   }
+}
+
+function installPostReinspectSwap(nested, outside) {
+  const origRename = fs.renameSync;
+  const origLink = fs.linkSync;
+  const swapOnce = () => {
+    const st = fs.lstatSync(nested);
+    if (st.isSymbolicLink()) return;
+    origRename(nested, `${nested}.real`);
+    fs.symlinkSync(outside, nested);
+  };
+  fs.renameSync = (...args) => {
+    swapOnce();
+    return origRename(...args);
+  };
+  fs.linkSync = (...args) => {
+    swapOnce();
+    return origLink(...args);
+  };
+  return () => {
+    fs.renameSync = origRename;
+    fs.linkSync = origLink;
+  };
+}
+
+test('writeContained wipes payload if parent swaps after reinspect before publish', () => {
+  const root = containedRoot();
+  const nested = path.join(root, 'a');
+  fs.mkdirSync(nested, { mode: 0o700 });
+  const outside = tmp();
+  const restore = installPostReinspectSwap(nested, outside);
+  try {
+    assert.throws(
+      () => writeContained(root, ['a', 'out.json'], 'payload', { mode: 'replace' }),
+    );
+  } finally {
+    restore();
+  }
+  assertNoPayload(root, outside);
+});
+
+test('writeContained create-mode wipes payload if parent swaps after reinspect before link', () => {
+  const root = containedRoot();
+  const nested = path.join(root, 'a');
+  fs.mkdirSync(nested, { mode: 0o700 });
+  const outside = tmp();
+  const restore = installPostReinspectSwap(nested, outside);
+  try {
+    assert.throws(
+      () => writeContained(root, ['a', 'out.json'], 'payload', { mode: 'create' }),
+    );
+  } finally {
+    restore();
+  }
+  assertNoPayload(root, outside);
 });
 
 test('writeContained wipes tmp when fsync fails before publish', () => {
