@@ -752,3 +752,86 @@ test('training-detail GET is token-first and digest-checked', async () => {
     fs.rmSync(gameDir, { recursive: true, force: true });
   }
 });
+
+test('training-detail GET parent-swap is rejected', async () => {
+  const { createHash } = await import('node:crypto');
+  const gameDir = tmpDir();
+  const token = 'tok-swap';
+  const ref = 'cd'.repeat(32);
+  const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
+  const raw = JSON.stringify(payload);
+  const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  const detailsDir = path.join(gameDir, 'training', 'details');
+  fs.mkdirSync(detailsDir, { recursive: true });
+  fs.writeFileSync(path.join(detailsDir, `${ref}.json`), raw);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-detail-outside-'));
+  fs.writeFileSync(path.join(outside, `${ref}.json`), raw);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+  }));
+  const srv = await start(gameDir, token);
+  const origOpen = fs.openSync;
+  fs.openSync = (p, flags, mode) => {
+    if (String(p) === path.join(detailsDir, `${ref}.json`)) {
+      fs.openSync = origOpen;
+      fs.renameSync(detailsDir, `${detailsDir}.real`);
+      fs.symlinkSync(outside, detailsDir);
+    }
+    return origOpen(p, flags, mode);
+  };
+  try {
+    const swapped = await req(srv.port, `/api/training-detail?ref=${ref}`, { token });
+    assert.equal(swapped.status, 404);
+    assert.equal(swapped.json?.ok, false);
+    assert.equal(swapped.json?.code, 'NOT_FOUND');
+  } finally {
+    fs.openSync = origOpen;
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('training-detail GET without a token performs 0 fs accesses', async () => {
+  const { createHash } = await import('node:crypto');
+  const gameDir = tmpDir();
+  const token = 'tok-nofs';
+  const ref = 'ef'.repeat(32);
+  const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
+  const raw = JSON.stringify(payload);
+  const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  fs.mkdirSync(path.join(gameDir, 'training', 'details'), { recursive: true });
+  fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+  }));
+  const srv = await start(gameDir, token);
+  const names = [
+    'openSync', 'open', 'readFileSync', 'readFile', 'lstatSync', 'statSync',
+    'fstatSync', 'existsSync', 'accessSync', 'readdirSync', 'realpathSync', 'readSync',
+  ];
+  const orig = {};
+  const calls = [];
+  for (const name of names) {
+    orig[name] = fs[name];
+    if (typeof fs[name] !== 'function') continue;
+    fs[name] = (...args) => {
+      calls.push({ name, path: typeof args[0] === 'string' ? args[0] : args[0] });
+      return orig[name](...args);
+    };
+  }
+  try {
+    const denied = await req(srv.port, `/api/training-detail?ref=${ref}`);
+    assert.equal(denied.status, 401);
+    assert.equal(denied.json?.code, 'UNAUTHORIZED');
+    assert.deepEqual(calls, []);
+  } finally {
+    for (const name of names) {
+      if (orig[name] !== undefined) fs[name] = orig[name];
+    }
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});

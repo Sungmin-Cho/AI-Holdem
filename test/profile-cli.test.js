@@ -73,3 +73,55 @@ test('writePracticeFocus and defaultPracticeFocusFile', async () => {
   const json = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(json.focus, 'preflop.rfi.BTN');
 });
+
+function writeFocusFile(storeDir, value, { symlinkTo } = {}) {
+  const dir = path.join(storeDir, '.training');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'practice-focus.json');
+  if (symlinkTo !== undefined) {
+    fs.symlinkSync(symlinkTo, file);
+    return file;
+  }
+  const body = typeof value === 'string' ? value : JSON.stringify(value);
+  fs.writeFileSync(file, body);
+  return file;
+}
+
+test('defaultPracticeFocusFile ignores a symlink practice-focus and surfaces a notice', async () => {
+  const {
+    defaultPracticeFocusFile,
+    loadAutoPracticeFocus,
+  } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  const outside = path.join(storeDir, 'outside.json');
+  fs.writeFileSync(outside, JSON.stringify({
+    schemaVersion: 1,
+    leaks: [],
+    focus: 'pwned-via-symlink',
+  }));
+  writeFocusFile(storeDir, null, { symlinkTo: outside });
+  assert.equal(defaultPracticeFocusFile(storeDir), null);
+  assert.equal(typeof loadAutoPracticeFocus, 'function');
+  const loaded = loadAutoPracticeFocus(storeDir);
+  assert.equal(loaded.status, 'ignored');
+  assert.equal(loaded.code, 'UNSAFE_PATH');
+  assert.match(String(loaded.notice), /UNSAFE_PATH/);
+});
+
+test('defaultPracticeFocusFile rejects an oversized practice-focus', async () => {
+  const { defaultPracticeFocusFile } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  writeFocusFile(storeDir, {
+    schemaVersion: 1,
+    leaks: [],
+    focus: 'x'.repeat(5000),
+  });
+  assert.throws(() => defaultPracticeFocusFile(storeDir), { code: 'TOO_LARGE' });
+});
+
+test('defaultPracticeFocusFile rejects a practice-focus schema mismatch', async () => {
+  const { defaultPracticeFocusFile } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  writeFocusFile(storeDir, { focus: 'x', extra: true });
+  assert.throws(() => defaultPracticeFocusFile(storeDir), { code: 'BAD_PRACTICE_FOCUS' });
+});
