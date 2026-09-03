@@ -21,6 +21,7 @@ import {
 import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { newDeck } from '../engine/cards.js';
+import { prepareSession } from '../engine/session-catalog.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -893,6 +894,29 @@ function writeLoopStateFixture(gameDir, sessionToken, overrides = {}) {
   return state;
 }
 
+function writeEmptyTrainingAuthority(gameDir, sessionToken, { schemaVersion }) {
+  const trainingDir = path.join(gameDir, 'training');
+  fs.mkdirSync(trainingDir, { recursive: true });
+  fs.writeFileSync(path.join(trainingDir, 'evaluations.jsonl'), '');
+  fs.writeFileSync(path.join(trainingDir, '.training-authority.json'), JSON.stringify({
+    schemaVersion,
+    gameEpoch: gameEpochOf(sessionToken),
+    ownerSessionId: 'old-owner',
+    items: {},
+    publishQueue: {},
+    ...(schemaVersion === 2 ? { pending: {}, annotationQueue: {}, solveTasks: {} } : {}),
+  }));
+}
+
+function writeTestLoopLock(gameDir) {
+  const dir = path.join(gameDir, 'loop.lock.d');
+  const startTime = 'test-owned-lock';
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime}`);
+  const stat = fs.statSync(dir, { bigint: true });
+  return { dir, pid: process.pid, startTime, dev: stat.dev, ino: stat.ino };
+}
+
 async function setupAiFirst(t, {
   adapter,
   ai = 1,
@@ -1508,6 +1532,52 @@ test('resume rejects missing or mismatched loop-state identity before resolver, 
       assert.equal(fs.existsSync(path.join(gameDir, 'loop.log')), false);
       assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBefore);
       assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+    });
+  }
+});
+
+test('Q2a resume migrates authority before the first reader and completes profile readiness in the same run', { timeout: 30_000 }, async (t) => {
+  const cases = [
+    { name: 'v1', schemaVersion: 1, expectedMarker: 'complete' },
+    { name: 'native-v2', schemaVersion: 2, expectedMarker: null },
+    { name: 'authority-absent', schemaVersion: null, expectedMarker: null },
+  ];
+  for (const variant of cases) {
+    await t.test(variant.name, async (st) => {
+      const storeDir = tmpGame();
+      const prepared = prepareSession(storeDir);
+      const initialized = await initGame(prepared.stagingDir);
+      fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+      const gameDir = prepared.sessionDir;
+      writeLoopStateFixture(gameDir, initialized.sessionToken, { phase: 'bootstrap' });
+      if (variant.schemaVersion !== null) {
+        writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, variant);
+      }
+      const initialLockHandle = writeTestLoopLock(gameDir);
+      const loop = createGameLoop({
+        gameDir,
+        initialLockHandle,
+        resolver: async () => {
+          const error = new Error('stop after the migration boundary');
+          error.code = 'STOP_AFTER_MIGRATION';
+          throw error;
+        },
+        opts: { port: 0, waitMs: 0, storeDir },
+      });
+      st.after(() => loop.requestStop().catch(() => {}));
+
+      await assert.rejects(
+        loop.resume({ skipLock: true }),
+        { code: 'STOP_AFTER_MIGRATION' },
+      );
+
+      const markerFile = path.join(gameDir, 'training', '.migration-v2.json');
+      if (variant.expectedMarker === null) {
+        assert.equal(fs.existsSync(markerFile), false);
+      } else {
+        assert.equal(readJson(markerFile).status, variant.expectedMarker);
+        assert.equal(readJson(path.join(gameDir, 'training', '.training-authority.json')).schemaVersion, 2);
+      }
     });
   }
 });

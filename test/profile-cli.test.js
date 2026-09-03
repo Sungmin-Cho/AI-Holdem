@@ -343,7 +343,7 @@ function writeV1ArchivedSession(sessionDir, evaluation) {
   }));
 }
 
-test('authority v1 session without a complete marker is still swept', async () => {
+test('authority v1 sweep migrates and enables the profile consumer in the same run', async () => {
   const { sweepStore } = await import('../tools/profile-cli.js');
   const storeDir = tmp();
   const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
@@ -360,5 +360,5 @@ test('authority v1 session without a complete marker is still swept', async () =
   const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
   assert.equal(fs.existsSync(markerPath), true);
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-  assert.notEqual(marker.status, 'in-progress');
+  assert.equal(marker.status, 'complete');
 });
