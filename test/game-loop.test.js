@@ -1582,6 +1582,36 @@ test('Q2a resume migrates authority before the first reader and completes profil
   }
 });
 
+test('Q2a resume exposes permanent migration corruption as a durable halt without starting readers', async (t) => {
+  const storeDir = tmpGame();
+  const prepared = prepareSession(storeDir);
+  const initialized = await initGame(prepared.stagingDir);
+  fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+  const gameDir = prepared.sessionDir;
+  writeLoopStateFixture(gameDir, initialized.sessionToken, { phase: 'bootstrap' });
+  writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, { schemaVersion: 2 });
+  fs.writeFileSync(
+    path.join(gameDir, 'training', '.migration-v2.json'),
+    JSON.stringify({ status: 'in-progress' }),
+  );
+  const initialLockHandle = writeTestLoopLock(gameDir);
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    initialLockHandle,
+    resolver: async () => { resolverCalls += 1; return { player: null, upper: null, notices: [] }; },
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const halted = await loop.resume({ skipLock: true });
+
+  assert.equal(halted.halt.code, 'TRAINING_MIGRATION_CORRUPT');
+  assert.equal(resolverCalls, 0);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+  assert.equal(halted.notices.some((notice) => /TRAINING_MIGRATION_CORRUPT/.test(notice)), true);
+});
+
 test('resume from bootstrap never calls init, preserves engine files, and completes server plus warmup', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);

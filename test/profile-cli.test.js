@@ -349,6 +349,7 @@ test('authority v1 sweep migrates and enables the profile consumer in the same r
   const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
   const evaluation = evaluationRow();
   writeV1ArchivedSession(sessionDir, evaluation);
+  fs.writeFileSync(path.join(sessionDir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
   assert.equal(fs.existsSync(path.join(sessionDir, 'training', '.migration-v2.json')), false);
   const swept = await sweepStore(storeDir);
   assert.equal(swept.applied, 1);
@@ -361,4 +362,26 @@ test('authority v1 sweep migrates and enables the profile consumer in the same r
   assert.equal(fs.existsSync(markerPath), true);
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
   assert.equal(marker.status, 'complete');
+});
+
+test('sweep skips nonterminal and missing-phase v1 sessions without migration writes', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  const playing = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const missing = sessionDirOf(storeDir, '22222222-2222-4222-8222-222222222222');
+  writeV1ArchivedSession(playing, evaluationRow());
+  writeV1ArchivedSession(missing, evaluationRow({ decisionId: 'd-2-preflop-0' }));
+  fs.writeFileSync(path.join(playing, 'loop-state.json'), JSON.stringify({ phase: 'playing' }));
+  const beforePlaying = fs.readFileSync(path.join(playing, 'training', '.training-authority.json'));
+  const beforeMissing = fs.readFileSync(path.join(missing, 'training', '.training-authority.json'));
+
+  const swept = await sweepStore(storeDir);
+
+  assert.equal(swept.applied, 0);
+  assert.equal(swept.notices.some((notice) => /SESSION_NOT_TERMINAL/.test(notice)), true);
+  for (const [dir, before] of [[playing, beforePlaying], [missing, beforeMissing]]) {
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'training', '.training-authority.json')), before);
+    assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), false);
+    assert.equal(fs.existsSync(path.join(dir, 'training', '.digest-map-v2.json')), false);
+  }
 });

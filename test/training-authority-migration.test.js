@@ -612,3 +612,139 @@ test('non-string legacy explanation is absent in migration and server restore, w
   }
   assert.match(stderr, /dropped 1 annotation/);
 });
+
+test('an unapplied current-v2 publish attempt survives completed migration re-entry', async () => {
+  const dir = tmp();
+  const { summary } = writeV1Session(dir);
+  const migrated = await createTrainingControl().migrateAuthority(dir);
+  const item = migrated.items[summary.evaluationId];
+  fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: EPOCH,
+    body: { publishId: 42, training: [item.summary] },
+    trainingAuthority: {
+      expectedGameEpoch: EPOCH,
+      items: [{ evaluationId: item.evaluationId, payloadSha256: item.payloadSha256 }],
+    },
+  }));
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({ publishId: 41, training: [] }));
+  secureWriteJson(path.join(dir, 'training', '.migration-v2.json'), { status: 'complete' });
+
+  await createTrainingControl().migrateAuthority(dir);
+
+  assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), true);
+  assert.equal(readAuth(dir).items[item.evaluationId].status, 'evaluated');
+});
+
+test('v2 migration validates items, marker status, and the digest-map file before every write', async () => {
+  const make = () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+    secureWriteJson(path.join(dir, 'training', '.training-authority.json'), nativeV2Authority());
+    secureWriteJson(path.join(dir, 'training', '.migration-v2.json'), { status: 'in-progress' });
+    return dir;
+  };
+  const cases = [];
+
+  const missingItems = make();
+  const noItems = readAuth(missingItems);
+  delete noItems.items;
+  secureWriteJson(path.join(missingItems, 'training', '.training-authority.json'), noItems);
+  secureWriteJson(path.join(missingItems, 'training', '.digest-map-v2.json'), {
+    schemaVersion: 1, oldToNew: {}, byEvaluationId: {},
+  });
+  cases.push(missingItems);
+
+  const mapDirectory = make();
+  fs.mkdirSync(path.join(mapDirectory, 'training', '.digest-map-v2.json'));
+  cases.push(mapDirectory);
+
+  const mapSymlink = make();
+  const outside = path.join(tmp(), 'map.json');
+  secureWriteJson(outside, { schemaVersion: 1, oldToNew: {}, byEvaluationId: {} });
+  fs.symlinkSync(outside, path.join(mapSymlink, 'training', '.digest-map-v2.json'));
+  cases.push(mapSymlink);
+
+  const malformedMap = make();
+  fs.writeFileSync(path.join(malformedMap, 'training', '.digest-map-v2.json'), '{broken');
+  cases.push(malformedMap);
+
+  const unknownMarker = make();
+  secureWriteJson(path.join(unknownMarker, 'training', '.migration-v2.json'), { status: 'mystery' });
+  cases.push(unknownMarker);
+
+  for (const dir of cases) {
+    const before = treeSnapshot(dir);
+    const calls = [];
+    await assert.rejects(
+      createTrainingControl({ io: migrationIo({ calls }) }).migrateAuthority(dir),
+      { code: 'TRAINING_MIGRATION_CORRUPT' },
+    );
+    assert.deepEqual(calls, []);
+    assert.deepEqual(treeSnapshot(dir), before);
+  }
+});
+
+test('legacy row, detail, and attempt evidence are digest- and epoch-bound', async () => {
+  const tamperedRow = tmp();
+  const first = writeV1Session(tamperedRow);
+  const rowPath = path.join(tamperedRow, 'training', 'evaluations.jsonl');
+  const row = JSON.parse(fs.readFileSync(rowPath, 'utf8'));
+  row.explanation = 'tampered without a new v1 digest';
+  fs.writeFileSync(rowPath, `${JSON.stringify(row)}\n`);
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(tamperedRow),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(readAuth(tamperedRow).schemaVersion, 1);
+
+  const tamperedDetail = tmp();
+  const second = writeV1Session(tamperedDetail);
+  fs.writeFileSync(
+    path.join(tamperedDetail, 'training', 'details', `${second.summary.detailRef}.json`),
+    JSON.stringify({ ...second.evaluation, handClass: 'KK' }),
+  );
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(tamperedDetail),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(readAuth(tamperedDetail).schemaVersion, 1);
+
+  for (const mutate of [
+    (attempt) => { attempt.expectedGameEpoch = 'ff'.repeat(32); },
+    (attempt) => { attempt.trainingAuthority.payloadSha256 = 'ff'.repeat(32); },
+  ]) {
+    const dir = tmp();
+    const { summary } = writeV1Session(dir);
+    writeV1Attempt(dir, summary, { applied: true });
+    const attemptPath = path.join(dir, '.publish-attempt.json');
+    const attempt = JSON.parse(fs.readFileSync(attemptPath, 'utf8'));
+    mutate(attempt);
+    fs.writeFileSync(attemptPath, JSON.stringify(attempt));
+    await assert.rejects(
+      createTrainingControl().migrateAuthority(dir),
+      { code: 'TRAINING_MIGRATION_CORRUPT' },
+    );
+    assert.equal(fs.existsSync(attemptPath), true);
+    assert.equal(readAuth(dir).schemaVersion, 1);
+  }
+});
+
+test('server restores legacy UI rows after authority migration using the digest map provenance', async () => {
+  const dir = tmp();
+  writeSecurityFixtures(dir);
+  const { summary } = writeV1Session(dir);
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    publishId: 1,
+    view: null,
+    log: [],
+    coach: [],
+    training: [summary],
+    history: [],
+  }));
+  await createTrainingControl().migrateAuthority(dir);
+
+  const restored = loadUiState(dir, 'tok');
+  assert.equal(restored.training.length, 1);
+  assert.equal(Object.values(restored.trainingAnnotations).flatMap(Object.values).length, 1);
+});
