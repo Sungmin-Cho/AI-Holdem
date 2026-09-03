@@ -16,7 +16,6 @@ import { createTrainingControl } from '../tools/training-control.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE_CLI = path.join(ROOT, 'tools', 'profile-cli.js');
-const GAME_LOOP = path.join(ROOT, 'tools', 'game-loop.js');
 const EPOCH = 'ab'.repeat(32);
 
 function tmp(prefix = 'holdem-q2b-') {
@@ -331,7 +330,7 @@ test('Q2b consumeTrainingItems persists each item outcome and continues after a 
   assert.deepEqual(fs.readFileSync(eventsPath), eventsBeforeReload);
 });
 
-test('Q2b sweep and production callers surface item failures without halting valid items', async () => {
+test('Q2b sweep and CLI surface item failures without halting valid items', async () => {
   const storeDir = tmp();
   const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
   const tc = createTrainingControl({ storeDir });
@@ -363,12 +362,6 @@ test('Q2b sweep and production callers surface item failures without halting val
   ], { encoding: 'utf8' }).trim());
   assert.equal(cli.ok, true);
   assert.equal(cli.failed, 1);
-
-  const gameLoopSource = fs.readFileSync(GAME_LOOP, 'utf8');
-  assert.match(
-    gameLoopSource,
-    /consumeTrainingItems\(root, \{ storeDir \}\);[\s\S]{0,120}consumed\.failed[\s\S]{0,120}training-consume-failed/,
-  );
 });
 
 test('Q2b uninjected sweep uses defaultSolve for installed and missing adapters', async () => {

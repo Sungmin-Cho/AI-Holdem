@@ -11,6 +11,7 @@ import { evaluationIdOf } from '../training/contracts.js';
 import { prepareSession } from '../engine/session-catalog.js';
 import { createGameLoop } from '../tools/game-loop.js';
 import { createTrainingControl } from '../tools/training-control.js';
+import { createProfileStore } from '../tools/training-stores.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine', 'cli.js');
@@ -332,6 +333,46 @@ test('Q2b resume recovers a persisted loop owner before issuing the current owne
       { from: 'persisted-b', to: resumed.ownerSessionId, reason: 'resume' },
     ],
   );
+});
+
+test('Q2b playing resume logs nonfatal consumer failures and continues valid items', { timeout: 40_000 }, async (t) => {
+  const storeDir = tmp();
+  const seeded = seedCatalogSession(storeDir, 'playing');
+  const tc = createTrainingControl({ storeDir });
+  const bad = acceptedEvaluation(seeded.sessionToken, 'd-1-preflop-0');
+  const good = acceptedEvaluation(seeded.sessionToken, 'd-2-preflop-0');
+  await tc.acceptEvaluations(seeded.sessionDir, {
+    gameEpoch: gameEpochOf(seeded.sessionToken),
+    owner: 'owner-0',
+    handNo: 2,
+    evaluations: [bad, good],
+  });
+  const authority = tc.loadAuthority(seeded.sessionDir);
+  const badSummary = authority.items[bad.evaluationId].summary;
+  await createProfileStore(storeDir).apply({
+    ...badSummary,
+    payloadSha256: 'cd'.repeat(32),
+  });
+
+  const binDir = fakeClaudeBin();
+  await leaveSigkilledStoreOwner(storeDir);
+  const run = launchResume(storeDir, binDir);
+  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+
+  const event = await waitFor(
+    () => readLoopLog(seeded.sessionDir)
+      .find((entry) => entry.event === 'training-consume-failed'),
+    `resume did not log consumer failure: ${run.stderr()}`,
+    5_000,
+  );
+  await killChild(run.child, 'SIGKILL');
+  const after = tc.loadAuthority(seeded.sessionDir);
+
+  assert.equal(event.failed, 1);
+  assert.equal(after.items[bad.evaluationId].consumers.profiled, false);
+  assert.equal(after.items[bad.evaluationId].consumers.lastError.code, 'PROFILE_EVENT_CONFLICT');
+  assert.equal(after.items[good.evaluationId].consumers.profiled, true);
+  assert.equal(after.items[good.evaluationId].consumers.banked, true);
 });
 
 test('Q2b finalizing resume after SIGKILL transfers owner before reconcile', { timeout: 40_000 }, async (t) => {
