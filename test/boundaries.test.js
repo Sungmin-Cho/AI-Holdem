@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -150,4 +151,18 @@ test('the process entry points that spawn or touch the filesystem live in tools'
   ]) {
     assert.equal(fs.existsSync(path.join(ROOT, gone)), false, `${gone} should have been moved`);
   }
+});
+
+test('the moved dataset builder still reproduces the pinned dataset byte for byte', () => {
+  const dataset = path.join(ROOT, 'training/data/preflop-baseline-v1.json');
+  const digestFile = path.join(ROOT, 'training/data/preflop-baseline-v1.sha256');
+  const before = fs.readFileSync(dataset);
+  const digest = fs.readFileSync(digestFile, 'utf8').trim();
+  execFileSync(process.execPath, [path.join(ROOT, 'tools/build-preflop-baseline.js')], {
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  const after = fs.readFileSync(dataset);
+  assert.equal(after.equals(before), true, 'the rebuild changed the dataset bytes');
+  assert.equal(fs.readFileSync(digestFile, 'utf8').trim(), digest);
 });

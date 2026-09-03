@@ -3,14 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { evaluateDecision } from './decision-evaluator.js';
-import { loadPreflopJson, lookup } from './providers/preflop-json.js';
-import { handClassOf } from './cards.js';
-import { normalizePreflopSpot } from './preflop-spot.js';
+import { evaluateDecision } from '../training/decision-evaluator.js';
+import { lookup } from '../training/providers/preflop-json.js';
+import { loadPreflopDataset } from './preflop-dataset.js';
+import { handClassOf } from '../training/cards.js';
+import { normalizePreflopSpot } from '../training/preflop-spot.js';
 
 const DATASET = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  'data/preflop-baseline-v1.json',
+  '../training/data/preflop-baseline-v1.json',
 );
 
 function fail(code, message) {
@@ -82,19 +83,12 @@ function runEvaluate() {
     fail('HAND_NOT_FOUND', error.message);
   }
   const datasetPath = flags.dataset ?? DATASET;
-  const shaPath = datasetPath.replace(/\.json$/, '.sha256');
-  let expectedSha256;
-  try {
-    expectedSha256 = fs.readFileSync(shaPath, 'utf8').trim();
-  } catch (error) {
-    fail('DATASET_INVALID', error.message);
-  }
   let data;
   let contentSha256;
   try {
-    ({ data, contentSha256 } = loadPreflopJson(datasetPath, { expectedSha256 }));
+    ({ data, contentSha256 } = loadPreflopDataset(datasetPath));
   } catch (error) {
-    fail(error.code === 'DATASET_INVALID' ? 'DATASET_INVALID' : 'DATASET_INVALID', error.message);
+    fail('DATASET_INVALID', error.message);
   }
   const source = {
     id: data.id,

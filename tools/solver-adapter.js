@@ -1,4 +1,4 @@
-import { solveWithFake } from './fake-solver.js';
+import { solveWithFake } from './fake-solver-adapter.js';
 
 export const DEFAULT_SOLVER_ADAPTER = 'fake-solver';
 

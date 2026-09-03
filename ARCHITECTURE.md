@@ -19,14 +19,20 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `training/exploit/` | 종료 후 heuristic exploit 비교. EV 숫자는 만들지 않는다. |
 | `tools/solver-runtime.js` | Postflop solver 자식. detached process group, RSS/stdout cap, fake adapter. |
 | `tools/solve-cli.js` | 한 postflop 결정을 풀어 evaluate와 같은 evaluation 봉투로 돌려준다. |
+| 계층 방향 | `tools/ → training/`(순수 함수 import만 허용), `training/ → engine/state.js`(락만), `engine/ → training,tools` 금지, `server/*.js`는 `publish-contract.js`와 담기 원시자만. `test/boundaries.test.js`가 강제한다. |
 | `training/postflop/solved-decision.js` | solver 결과 → evaluation 투영(순수). heuristic이면 EV는 전부 null. |
+| `tools/evaluate-cli.js` | preflop 평가 프로세스 진입점. 데이터셋 읽기는 여기(호출자)의 책임이다. |
+| `tools/preflop-dataset.js` | 데이터셋을 읽어 digest를 대조하고 순수 파서에 넘기는 유일한 지점. 두 번째 reader가 digest 고정을 우회할 수 없다. |
+| `tools/training-stores.js` | R12의 주입자 — `tools/training-store.js`의 fs helper를 `training/`의 저장 모듈에 넘긴다. |
+| `tools/fake-solver-adapter.js`, `tools/solver-adapter.js` | solver adapter 레지스트리와 fake adapter. 프로세스 spawn은 tools 책임이다. |
+| `tools/build-preflop-baseline.js` | 데이터셋 빌드 스크립트. |
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
-| `training/` | 엔진 밖 학습 계층. Preflop baseline lookup과 frequency grade. 파일 I/O는 CLI와 `tools/training-store.js`만. 전략 데이터를 engine이 로드하지 않는다. |
+| `training/` | 엔진 밖 학습 계층. Preflop baseline lookup과 frequency grade. **순수 계층 — 파일 I/O도 `tools/` import도 없다**(R12). fs helper와 데이터셋은 주입받는다. |
 | `tools/training-control.js` | 세션 스코프 training authority·평가 멱등·reconcile. 코치 authority와 파일을 합치지 않는다. |
-| `training/profile-store.js` | 장기 skill profile. 저장은 `<store>/.training/`이며 `tools/training-store.js`만 I/O한다. |
-| `server/drill-server.js` | 게임 서버와 분리된 스팟 드릴 HTTP. 자체 토큰, 정적 파일은 `server/drill-public/`. |
+| `training/profile-store.js` | 장기 skill profile. 저장은 `<store>/.training/`. fs helper를 **기본값 없이 주입**받으며, 주입자는 `tools/training-stores.js`다. |
+| `tools/drill-server.js` | 게임 서버와 분리된 스팟 드릴 HTTP(별도 프로세스, 게임 서버와 무관). 자체 토큰, 정적 파일은 `server/drill-public/`. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |

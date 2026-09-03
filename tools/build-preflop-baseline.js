@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { allHandClasses } from '../cards.js';
+import { allHandClasses } from '../training/cards.js';
 
 const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
 const RANK_I = Object.fromEntries(RANKS.map((r, i) => [r, i]));
@@ -106,7 +106,10 @@ const dataset = {
   spots,
 };
 
-const out = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'preflop-baseline-v1.json');
+const out = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../training/data/preflop-baseline-v1.json',
+);
 const body = `${JSON.stringify(dataset)}\n`;
 fs.writeFileSync(out, body);
 const digest = createHash('sha256').update(body).digest('hex');

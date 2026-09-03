@@ -46,7 +46,7 @@ import {
   sweepStore,
   writePracticeFocus,
 } from './profile-cli.js';
-import { createProfileStore } from '../training/profile-store.js';
+import { createProfileStore } from './training-stores.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,

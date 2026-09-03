@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
 
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
@@ -9,15 +8,16 @@ export function hashDataset(raw) {
   return createHash('sha256').update(raw).digest('hex');
 }
 
-export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
+/**
+ * Pure: the caller reads the bytes. Reading files is a tools/CLI
+ * responsibility (R12), so this layer only parses, pins and validates.
+ */
+export function parsePreflopJson(raw, { expectedSha256 } = {}) {
   if (typeof expectedSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(expectedSha256)) {
     throw coded(ERRORS.DATASET_INVALID, 'expectedSha256 required');
   }
-  let raw;
-  try {
-    raw = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    throw coded(ERRORS.DATASET_INVALID, 'dataset 파일을 읽을 수 없습니다.');
+  if (typeof raw !== 'string') {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset raw는 문자열이어야 합니다.');
   }
   const contentSha256 = hashDataset(raw);
   if (expectedSha256.toLowerCase() !== contentSha256) {

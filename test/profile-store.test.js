@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createProfileStore } from '../training/profile-store.js';
+import { createProfileStore } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 function tmp() {

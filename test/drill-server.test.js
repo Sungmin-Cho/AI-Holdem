@@ -7,13 +7,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { startDrillServer } from '../server/drill-server.js';
+import { startDrillServer } from '../tools/drill-server.js';
 import { startServer } from '../server/server.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { readJsonl } from '../tools/training-store.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const SERVER_HREF = pathToFileURL(path.resolve(ROOT, '../server/drill-server.js')).href;
+const SERVER_HREF = pathToFileURL(path.resolve(ROOT, '../tools/drill-server.js')).href;
 const CLIENT = path.resolve(ROOT, '../server/drill-public/drill.js');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

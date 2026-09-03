@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { createMistakeBank } from '../training/mistake-bank.js';
+import { createMistakeBank } from './training-stores.js';
 import { generateQueue } from '../training/drill-generator.js';
 import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
-import { createProfileStore } from '../training/profile-store.js';
-import { loadPreflopJson, lookup } from '../training/providers/preflop-json.js';
+import { createProfileStore } from './training-stores.js';
+import { lookup } from '../training/providers/preflop-json.js';
+import { loadPreflopDataset } from './preflop-dataset.js';
 import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
 import { withNamedLock } from '../engine/state.js';
@@ -67,8 +68,7 @@ function loadSession(storeDir) {
 }
 
 function lookupStrategy(question) {
-  const expectedSha256 = fs.readFileSync(DATASET.replace(/\.json$/, '.sha256'), 'utf8').trim();
-  const { data, contentSha256 } = loadPreflopJson(DATASET, { expectedSha256 });
+  const { data, contentSha256 } = loadPreflopDataset(DATASET);
   return lookup({ data, contentSha256 }, {
     spotKey: question.prompt.spotKey,
     handClass: question.prompt.handClass,
