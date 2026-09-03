@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,6 +16,7 @@ import { createTrainingControl } from '../tools/training-control.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE_CLI = path.join(ROOT, 'tools', 'profile-cli.js');
+const GAME_LOOP = path.join(ROOT, 'tools', 'game-loop.js');
 const EPOCH = 'ab'.repeat(32);
 
 function tmp(prefix = 'holdem-q2b-') {
@@ -327,6 +329,46 @@ test('Q2b consumeTrainingItems persists each item outcome and continues after a 
     .consumeTrainingItems(sessionDir, { storeDir });
   assert.deepEqual(second, { profiled: 0, banked: 0, applied: 0, failed: 1 });
   assert.deepEqual(fs.readFileSync(eventsPath), eventsBeforeReload);
+});
+
+test('Q2b sweep and production callers surface item failures without halting valid items', async () => {
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const tc = createTrainingControl({ storeDir });
+  const bad = evaluation('d-1-preflop-0');
+  const good = evaluation('d-2-preflop-0', { handClass: 'KQo' });
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: EPOCH,
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [bad, good],
+  });
+  writeLoopPhase(sessionDir, 'done');
+  const authorityPath = path.join(sessionDir, 'training', '.training-authority.json');
+  const seeded = JSON.parse(fs.readFileSync(authorityPath, 'utf8'));
+  seeded.items[bad.evaluationId].summary.payloadSha256 = '';
+  fs.writeFileSync(authorityPath, JSON.stringify(seeded));
+
+  const swept = await sweepStore(storeDir);
+  const afterSweep = createTrainingControl({ storeDir }).loadAuthority(sessionDir);
+
+  assert.equal(swept.failed, 1);
+  assert.equal(swept.applied, 1);
+  assert.equal(afterSweep.items[bad.evaluationId].consumers.profiled, false);
+  assert.equal(afterSweep.items[good.evaluationId].consumers.profiled, true);
+  assert.equal(afterSweep.items[good.evaluationId].consumers.banked, true);
+
+  const cli = JSON.parse(execFileSync(process.execPath, [
+    PROFILE_CLI, 'sweep', '--store-dir', storeDir,
+  ], { encoding: 'utf8' }).trim());
+  assert.equal(cli.ok, true);
+  assert.equal(cli.failed, 1);
+
+  const gameLoopSource = fs.readFileSync(GAME_LOOP, 'utf8');
+  assert.match(
+    gameLoopSource,
+    /consumeTrainingItems\(root, \{ storeDir \}\);[\s\S]{0,120}consumed\.failed[\s\S]{0,120}training-consume-failed/,
+  );
 });
 
 test('Q2b uninjected sweep uses defaultSolve for installed and missing adapters', async () => {

@@ -1879,7 +1879,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const consumeTrainingNow = async () => {
     if (!trainingOn || !storeDir) return;
     try {
-      await createTrainingControl({ storeDir }).consumeTrainingItems(root, { storeDir });
+      const consumed = await createTrainingControl({ storeDir })
+        .consumeTrainingItems(root, { storeDir });
+      if ((consumed.failed ?? 0) > 0) {
+        log('training-consume-failed', { failed: consumed.failed });
+      }
     } catch (error) {
       log('training-consume-error', { code: error.code ?? 'ERROR' });
     }

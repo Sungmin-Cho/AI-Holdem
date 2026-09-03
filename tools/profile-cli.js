@@ -173,6 +173,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   let applied = 0;
   let profiled = 0;
   let banked = 0;
+  let failed = 0;
   let pendingRetried = 0;
   const tc = createTrainingControl({ storeDir });
   const runEvaluate = evaluate ?? defaultEvaluate;
@@ -204,6 +205,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
       applied += consume.applied ?? 0;
       profiled += consume.profiled ?? 0;
       banked += consume.banked ?? 0;
+      failed += consume.failed ?? 0;
     } catch (error) {
       const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
       notices.push(notice);
@@ -220,7 +222,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
     onNotice?.(notice);
   }
   return {
-    applied, profiled, banked, pendingRetried, notices, profile,
+    applied, profiled, banked, failed, pendingRetried, notices, profile,
   };
 }
 
@@ -449,6 +451,7 @@ async function main() {
     fs.writeSync(1, `${JSON.stringify({
       ok: true,
       applied: result.applied,
+      failed: result.failed,
       profile: result.profile,
       notices: result.notices,
     })}\n`);
