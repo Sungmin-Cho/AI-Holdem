@@ -59,3 +59,29 @@ test('off-policy is stored once; forced and preferred are skipped; same spot acc
   const items = await bank.list();
   assert.equal(items.length, 1);
 });
+
+test('same evaluationId re-collect leaves evidence bytes unchanged', async () => {
+  const storeDir = tmp();
+  const bank = createMistakeBank(storeDir, { now: () => '2026-09-01T00:00:00.000Z' });
+  const first = evaluation();
+  await bank.collect(first);
+  const secondId = evaluationIdOf({
+    gameEpoch: 'ab'.repeat(32),
+    decisionId: 'd-3-preflop-0',
+    providerId: 'local-preflop-baseline',
+    providerVersion: '1.0.0',
+  });
+  await bank.collect(evaluation({
+    evaluationId: secondId,
+    payloadSha256: 'bb'.repeat(32),
+  }));
+  const before = fs.readFileSync(bank.file);
+  const again = await bank.collect(evaluation({
+    evaluationId: secondId,
+    payloadSha256: 'bb'.repeat(32),
+  }));
+  assert.equal(again.added, false);
+  assert.deepEqual(fs.readFileSync(bank.file), before);
+  assert.equal(again.item.evidence, 2);
+  assert.deepEqual(again.item.evidenceIds, [first.evaluationId, secondId]);
+});

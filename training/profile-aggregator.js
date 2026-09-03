@@ -1,6 +1,9 @@
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
 
+export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
+export const PROFILE_SCHEMA_VERSION = 2;
+
 function coded(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -22,13 +25,16 @@ function emptyOverall() {
 
 export function emptyProfile() {
   return {
-    schemaVersion: 1,
+    schemaVersion: PROFILE_SCHEMA_VERSION,
     updatedAt: null,
     processed: {},
     overall: emptyOverall(),
     skills: {},
     leaks: [],
+    coverageGaps: [],
     segments: {},
+    activeSegmentId: DEFAULT_ACTIVE_SEGMENT_ID,
+    hasGameEvents: false,
   };
 }
 
@@ -88,6 +94,30 @@ function applyToOverall(overall, event) {
   }
 }
 
+function isSafeMapKey(key) {
+  return typeof key === 'string'
+    && key.length > 0
+    && key !== '__proto__'
+    && key !== 'constructor'
+    && key !== 'prototype';
+}
+
+export function assertProfileEvent(event) {
+  if (typeof event?.evaluationId !== 'string' || event.evaluationId.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 없습니다.');
+  }
+  if (typeof event?.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
+  }
+  if (!isSafeMapKey(event.skillKey)) {
+    throw coded('PROFILE_EVENT_INVALID', 'skillKey가 없습니다.');
+  }
+  if (!isSafeMapKey(event.providerId) || typeof event.providerVersion !== 'string'
+    || event.providerVersion.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'provider가 없습니다.');
+  }
+}
+
 function applyToSkill(skills, event) {
   if (event.forced) return;
   const row = skills[event.skillKey] ?? skillRow();
@@ -102,30 +132,86 @@ function applyToSkill(skills, event) {
 }
 
 function segmentKey(event) {
-  return `${event.providerId ?? 'unknown'}@${event.providerVersion ?? '0.0.0'}`;
+  return `${event.providerId}@${event.providerVersion}`;
 }
 
 function clone(profile) {
   return JSON.parse(JSON.stringify(profile));
 }
 
+function emptySegment() {
+  return { overall: emptyOverall(), skills: {} };
+}
+
+function normalizeSegment(prev) {
+  if (!prev) return emptySegment();
+  if (prev.overall && prev.skills && typeof prev.skills === 'object' && !Array.isArray(prev.skills)) {
+    return { overall: prev.overall, skills: prev.skills };
+  }
+  const overall = emptyOverall();
+  for (const key of Object.keys(overall)) {
+    if (prev[key] !== undefined) overall[key] = prev[key];
+  }
+  return { overall, skills: {} };
+}
+
+function isDrill(event) {
+  return event.origin === 'drill';
+}
+
+function hasGameEventsOf(profile) {
+  if (Object.prototype.hasOwnProperty.call(profile, 'hasGameEvents')) {
+    return Boolean(profile.hasGameEvents);
+  }
+  return Object.keys(profile.processed ?? {}).length > 0;
+}
+
+export function projectActive(profile) {
+  const key = profile.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
+  const seg = profile.segments?.[key];
+  if (!seg) {
+    profile.overall = emptyOverall();
+    profile.skills = {};
+    profile.leaks = [];
+    profile.coverageGaps = [];
+    return profile;
+  }
+  const normalized = normalizeSegment(seg);
+  profile.overall = finishOverall({ ...normalized.overall });
+  profile.skills = { ...normalized.skills };
+  const detected = detectLeaks(profile.skills);
+  profile.leaks = detected.leaks;
+  profile.coverageGaps = detected.coverageGaps;
+  return profile;
+}
+
 export function applyEvent(profile, event) {
+  assertProfileEvent(event);
   const next = clone(profile);
+  next.schemaVersion = PROFILE_SCHEMA_VERSION;
+  next.segments = next.segments ?? {};
+  next.hasGameEvents = hasGameEventsOf(next);
+  next.activeSegmentId = next.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
   const seen = next.processed[event.evaluationId];
-  if (seen === event.payloadSha256) return next;
+  if (seen === event.payloadSha256) return projectActive(next);
   if (seen && seen !== event.payloadSha256) {
     throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
   }
   next.processed[event.evaluationId] = event.payloadSha256;
-  applyToOverall(next.overall, event);
-  applyToSkill(next.skills, event);
-  const seg = next.segments[segmentKey(event)] ?? emptyOverall();
-  applyToOverall(seg, event);
-  next.segments[segmentKey(event)] = finishOverall(seg);
-  next.overall = finishOverall(next.overall);
-  next.leaks = detectLeaks(next.skills);
+  const key = segmentKey(event);
+  const seg = normalizeSegment(next.segments[key]);
+  applyToOverall(seg.overall, event);
+  applyToSkill(seg.skills, event);
+  seg.overall = finishOverall(seg.overall);
+  next.segments[key] = seg;
+  if (!isDrill(event)) {
+    next.hasGameEvents = true;
+    next.activeSegmentId = key;
+  } else if (!next.hasGameEvents) {
+    next.activeSegmentId = key;
+  }
   next.updatedAt = event.appliedAt ?? next.updatedAt;
-  return next;
+  return projectActive(next);
 }
 
 export function rebuildFromEvents(events) {

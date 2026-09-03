@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProfileStore } from '../training/profile-store.js';
+import { createTrainingControl } from './training-control.js';
+import { defaultEvaluate, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
@@ -39,12 +41,164 @@ function parseArgs(argv) {
   return { flags, positional };
 }
 
-function sessionRoots(storeDir) {
+function listTrainingSessions(storeDir) {
   const sessions = path.join(storeDir, '.session-store', 'sessions');
   if (!fs.existsSync(sessions)) return [];
-  return fs.readdirSync(sessions)
-    .map((name) => path.join(sessions, name, 'training', 'evaluations.jsonl'))
-    .filter((file) => fs.existsSync(file));
+  return fs.readdirSync(sessions, { withFileTypes: true })
+    .filter((ent) => ent.isDirectory() && !ent.name.startsWith('.'))
+    .map((ent) => path.join(sessions, ent.name))
+    .filter((dir) => fs.existsSync(path.join(dir, 'training', '.training-authority.json')));
+}
+
+async function settleRunner(out) {
+  const handle = toRunnerHandle(out);
+  return handle.promise;
+}
+
+async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
+  const notices = [];
+  let retried = 0;
+  const tc = createTrainingControl({ storeDir });
+  const auth = tc.loadAuthority(sessionDir);
+  if (!auth) return { notices, retried };
+  const pending = { ...(auth.pending ?? {}) };
+  const evaluateByHand = new Map();
+  for (const [decisionId, entry] of Object.entries(pending)) {
+    if (entry?.adapterId) {
+      try {
+        const evaluated = solve
+          ? await settleRunner(solve({
+            sessionDir,
+            decisionId,
+            handNo: entry.handNo,
+            adapterId: entry.adapterId,
+            pending: entry,
+          }))
+          : { ok: false, code: 'SOLVE_PENDING_UNMAPPED' };
+        if (!evaluated?.ok) {
+          await tc.recordPending(sessionDir, decisionId, {
+            handNo: entry.handNo,
+            reason: evaluated?.code ?? 'SOLVE_FAILED',
+            adapterId: entry.adapterId,
+            gameEpoch: auth.gameEpoch,
+            owner: auth.ownerSessionId,
+          });
+          notices.push(`solver pending ${decisionId}: ${evaluated?.code ?? 'SOLVE_FAILED'}`);
+          continue;
+        }
+        const incoming = (evaluated.evaluations ?? []).filter((row) => row.decisionId === decisionId);
+        if (incoming.length === 0) {
+          notices.push(`solver pending ${decisionId}: NO_EVALUATION`);
+          continue;
+        }
+        await tc.acceptEvaluations(sessionDir, {
+          gameEpoch: auth.gameEpoch,
+          owner: auth.ownerSessionId,
+          handNo: entry.handNo,
+          evaluations: incoming,
+        });
+        retried += 1;
+      } catch (error) {
+        notices.push(`solver pending ${decisionId}: ${error.code ?? 'ERROR'}`);
+        try {
+          await tc.recordPending(sessionDir, decisionId, {
+            handNo: entry.handNo,
+            reason: error.code ?? 'SOLVE_FAILED',
+            adapterId: entry.adapterId,
+            gameEpoch: auth.gameEpoch,
+            owner: auth.ownerSessionId,
+          });
+        } catch { /* keep original pending */ }
+      }
+      continue;
+    }
+    const handNo = entry?.handNo;
+    if (!evaluateByHand.has(handNo)) evaluateByHand.set(handNo, []);
+    evaluateByHand.get(handNo).push(decisionId);
+  }
+
+  for (const [handNo, decisionIds] of evaluateByHand) {
+    try {
+      const evaluated = await settleRunner(evaluate(sessionDir, handNo));
+      if (!evaluated?.ok) {
+        for (const decisionId of decisionIds) {
+          await tc.recordPending(sessionDir, decisionId, {
+            handNo,
+            reason: evaluated?.code ?? 'EVALUATE_FAILED',
+            gameEpoch: auth.gameEpoch,
+            owner: auth.ownerSessionId,
+          });
+        }
+        notices.push(`evaluate pending hand ${handNo}: ${evaluated?.code ?? 'EVALUATE_FAILED'}`);
+        continue;
+      }
+      const incoming = (evaluated.evaluations ?? [])
+        .filter((row) => decisionIds.includes(row.decisionId));
+      if (incoming.length === 0) {
+        notices.push(`evaluate pending hand ${handNo}: NO_EVALUATION`);
+        continue;
+      }
+      await tc.acceptEvaluations(sessionDir, {
+        gameEpoch: auth.gameEpoch,
+        owner: auth.ownerSessionId,
+        handNo,
+        evaluations: incoming,
+      });
+      retried += incoming.length;
+    } catch (error) {
+      notices.push(`evaluate pending hand ${handNo}: ${error.code ?? 'ERROR'}`);
+    }
+  }
+  return { notices, retried };
+}
+
+function profileHasFocus(profile) {
+  return (profile?.overall?.evaluatedDecisions ?? 0) > 0 || (profile?.leaks ?? []).length > 0;
+}
+
+export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
+  const notices = [];
+  let applied = 0;
+  let profiled = 0;
+  let banked = 0;
+  let pendingRetried = 0;
+  const tc = createTrainingControl({ storeDir });
+  const runEvaluate = evaluate ?? defaultEvaluate;
+  for (const sessionDir of listTrainingSessions(storeDir)) {
+    try {
+      const pendingOut = await retryPendingMap(sessionDir, {
+        evaluate: runEvaluate,
+        solve,
+        storeDir,
+      });
+      for (const notice of pendingOut.notices) {
+        notices.push(notice);
+        onNotice?.(notice);
+      }
+      pendingRetried += pendingOut.retried;
+      await completeSessionStoreMigration(storeDir, sessionDir);
+      const consume = await tc.consumeTrainingItems(sessionDir, { storeDir });
+      applied += consume.applied ?? 0;
+      profiled += consume.profiled ?? 0;
+      banked += consume.banked ?? 0;
+    } catch (error) {
+      const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
+      notices.push(notice);
+      onNotice?.(notice);
+    }
+  }
+  let profile = null;
+  try {
+    profile = await createProfileStore(storeDir).show();
+    if (profileHasFocus(profile)) writePracticeFocus(storeDir, profile);
+  } catch (error) {
+    const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
+    notices.push(notice);
+    onNotice?.(notice);
+  }
+  return {
+    applied, profiled, banked, pendingRetried, notices, profile,
+  };
 }
 
 export async function applyEvaluation(storeDir, evaluation) {
@@ -80,33 +234,42 @@ export async function migrateStoreV2(storeDir, digestMapFile) {
   return profile;
 }
 
+export async function completeSessionStoreMigration(storeDir, sessionDir) {
+  const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
+  if (!fs.existsSync(markerFile)) return { completed: false };
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  } catch {
+    return { completed: false };
+  }
+  if (marker.status === 'complete') return { completed: false };
+  if (marker.status !== 'session-done') return { completed: false };
+  const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
+  if (!fs.existsSync(mapFile)) return { completed: false };
+  await migrateStoreV2(storeDir, mapFile);
+  fs.writeFileSync(markerFile, JSON.stringify({
+    ...marker,
+    status: 'complete',
+    completedAt: new Date().toISOString(),
+  }));
+  return { completed: true };
+}
+
 export async function completeSessionStoreMigrations(storeDir) {
   const sessionsRoot = path.join(storeDir, '.session-store', 'sessions');
-  if (!fs.existsSync(sessionsRoot)) return { completed: 0 };
+  if (!fs.existsSync(sessionsRoot)) return { completed: 0, notices: [] };
   let completed = 0;
+  const notices = [];
   for (const name of fs.readdirSync(sessionsRoot)) {
-    const sessionDir = path.join(sessionsRoot, name);
-    const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
-    if (!fs.existsSync(markerFile)) continue;
-    let marker;
     try {
-      marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-    } catch {
-      continue;
+      const result = await completeSessionStoreMigration(storeDir, path.join(sessionsRoot, name));
+      if (result.completed) completed += 1;
+    } catch (error) {
+      notices.push(`store migration 실패 (${name}): ${error.code ?? 'ERROR'}`);
     }
-    if (marker.status === 'complete') continue;
-    if (marker.status !== 'session-done') continue;
-    const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
-    if (!fs.existsSync(mapFile)) continue;
-    await migrateStoreV2(storeDir, mapFile);
-    fs.writeFileSync(markerFile, JSON.stringify({
-      ...marker,
-      status: 'complete',
-      completedAt: new Date().toISOString(),
-    }));
-    completed += 1;
   }
-  return { completed };
+  return { completed, notices };
 }
 
 export function writePracticeFocus(storeDir, profile) {
@@ -268,23 +431,13 @@ async function main() {
     return;
   }
   if (cmd === 'sweep') {
-    let applied = 0;
-    for (const file of sessionRoots(storeDir)) {
-      const raw = fs.readFileSync(file, 'utf8');
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue;
-        let evaluation;
-        try { evaluation = JSON.parse(line); } catch { continue; }
-        if (!evaluation?.evaluationId) continue;
-        const before = (await store.show()).overall.evaluatedDecisions;
-        await store.apply(evaluation);
-        const after = (await store.show()).overall.evaluatedDecisions;
-        if (after > before) applied += 1;
-      }
-    }
-    const profile = await store.show();
-    writePracticeFocus(storeDir, profile);
-    fs.writeSync(1, `${JSON.stringify({ ok: true, applied, profile })}\n`);
+    const result = await sweepStore(storeDir);
+    fs.writeSync(1, `${JSON.stringify({
+      ok: true,
+      applied: result.applied,
+      profile: result.profile,
+      notices: result.notices,
+    })}\n`);
     return;
   }
   fail('USAGE', 'apply|show|rebuild|reset|sweep|migrate-v2만 지원합니다.');

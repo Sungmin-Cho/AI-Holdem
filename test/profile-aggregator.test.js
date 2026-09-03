@@ -88,6 +88,144 @@ test('provider version is a separate segment', () => {
   }));
   assert.ok(profile.segments['local-preflop-baseline@1.0.0']);
   assert.ok(profile.segments['local-preflop-baseline@2.0.0']);
-  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].evaluatedDecisions, 1);
-  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
+});
+
+test('mixed provider versions are never summed at the top level', () => {
+  let profile = applyEvent(emptyProfile(), event());
+  profile = applyEvent(profile, event({
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: 'd-4-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '2.0.0',
+    }),
+    payloadSha256: 'ee'.repeat(32),
+    providerVersion: '2.0.0',
+  }));
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 1);
+  assert.equal(profile.skills['preflop.rfi.BTN'].opportunities, 1);
+  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].skills['preflop.rfi.BTN'].opportunities, 1);
+});
+
+test('rebuild [game A, drill, drill] keeps activeSegmentId at A', () => {
+  const profile = rebuildFromEvents([
+    event({ origin: 'game' }),
+    event({
+      evaluationId: evaluationIdOf({
+        gameEpoch: 'ab'.repeat(32),
+        decisionId: 'd-8-preflop-0',
+        providerId: 'local-preflop-baseline',
+        providerVersion: '1.0.0',
+      }),
+      payloadSha256: '11'.repeat(32),
+      origin: 'drill',
+    }),
+    event({
+      evaluationId: evaluationIdOf({
+        gameEpoch: 'ab'.repeat(32),
+        decisionId: 'd-9-preflop-0',
+        providerId: 'other-solver',
+        providerVersion: '3.0.0',
+      }),
+      payloadSha256: '22'.repeat(32),
+      providerId: 'other-solver',
+      providerVersion: '3.0.0',
+      origin: 'drill',
+    }),
+  ]);
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 2);
+});
+
+test('drill-only profile uses the most recent drill provider', () => {
+  const profile = rebuildFromEvents([
+    event({
+      origin: 'drill',
+      providerId: 'drill-a',
+      providerVersion: '1.0.0',
+    }),
+    event({
+      evaluationId: evaluationIdOf({
+        gameEpoch: 'ab'.repeat(32),
+        decisionId: 'd-8-preflop-0',
+        providerId: 'drill-b',
+        providerVersion: '2.0.0',
+      }),
+      payloadSha256: '33'.repeat(32),
+      providerId: 'drill-b',
+      providerVersion: '2.0.0',
+      origin: 'drill',
+    }),
+  ]);
+  assert.equal(profile.activeSegmentId, 'drill-b@2.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 1);
+});
+
+test('other-provider drill is a separate segment and is not mixed into the game overall', () => {
+  const profile = rebuildFromEvents([
+    event({ origin: 'game' }),
+    event({
+      evaluationId: evaluationIdOf({
+        gameEpoch: 'ab'.repeat(32),
+        decisionId: 'd-8-preflop-0',
+        providerId: 'other-solver',
+        providerVersion: '3.0.0',
+      }),
+      payloadSha256: '44'.repeat(32),
+      providerId: 'other-solver',
+      providerVersion: '3.0.0',
+      origin: 'drill',
+    }),
+  ]);
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 1);
+  assert.ok(profile.segments['other-solver@3.0.0']);
+  assert.equal(profile.segments['other-solver@3.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
+});
+
+test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to the dataset provider', () => {
+  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@1.0.0');
+  const bad = event();
+  delete bad.payloadSha256;
+  assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
+});
+
+test('duplicate apply still projects the active segment and persists schemaVersion 2', () => {
+  assert.equal(emptyProfile().schemaVersion, 2);
+  let profile = applyEvent(emptyProfile(), event());
+  profile = applyEvent(profile, event({
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: 'd-4-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '2.0.0',
+    }),
+    payloadSha256: 'ee'.repeat(32),
+    providerVersion: '2.0.0',
+  }));
+  assert.equal(profile.schemaVersion, 2);
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 1);
+  profile.overall.evaluatedDecisions = 2;
+  profile.overall.supportedDecisions = 2;
+  const again = applyEvent(profile, event({
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: 'd-4-preflop-0',
+      providerId: 'local-preflop-baseline',
+      providerVersion: '2.0.0',
+    }),
+    payloadSha256: 'ee'.repeat(32),
+    providerVersion: '2.0.0',
+  }));
+  assert.equal(again.schemaVersion, 2);
+  assert.equal(again.overall.evaluatedDecisions, 1);
+  assert.equal(again.overall.supportedDecisions, 1);
+  assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);
 });

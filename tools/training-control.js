@@ -443,14 +443,17 @@ function collectRecords({ lastHand, handsDir }) {
   return [...byHand.values()].sort((a, b) => a.handNo - b.handNo);
 }
 
-function recordPendingUnlocked(auth, decisionId, { handNo, reason }) {
+function recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId } = {}) {
   const existing = auth.pending[decisionId];
-  auth.pending[decisionId] = {
+  const entry = {
     handNo,
     reason,
     attempts: (existing?.attempts ?? 0) + 1,
     lastTriedAt: new Date().toISOString(),
   };
+  const keepAdapter = adapterId ?? existing?.adapterId;
+  if (keepAdapter) entry.adapterId = keepAdapter;
+  auth.pending[decisionId] = entry;
   return auth.pending[decisionId];
 }
 
@@ -668,11 +671,11 @@ export function createTrainingControl({ storeDir } = {}) {
     });
   }
 
-  async function recordPending(sessionDir, decisionId, { handNo, reason, gameEpoch, owner } = {}) {
+  async function recordPending(sessionDir, decisionId, { handNo, reason, gameEpoch, owner, adapterId } = {}) {
     return withLock(sessionDir, () => {
       let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
       if (!auth) auth = emptyAuth({ gameEpoch: gameEpoch ?? null, owner: owner ?? null });
-      const entry = recordPendingUnlocked(auth, decisionId, { handNo, reason });
+      const entry = recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId });
       persistAuth(sessionDir, auth);
       return entry;
     });
@@ -764,13 +767,14 @@ export function createTrainingControl({ storeDir } = {}) {
   async function consumeTrainingItems(sessionDir, { storeDir: consumeStore } = {}) {
     const activeStore = consumeStore ?? storeDir;
     if (activeStore && !profileConsumerReady(sessionDir)) {
-      return { skipped: true, profiled: 0, banked: 0 };
+      return { skipped: true, profiled: 0, banked: 0, applied: 0 };
     }
     return withLock(sessionDir, async () => {
       const auth = loadAuthorityUnlocked(sessionDir, { storeDir: activeStore });
-      if (!auth) return { profiled: 0, banked: 0 };
+      if (!auth) return { profiled: 0, banked: 0, applied: 0 };
       let profiled = 0;
       let banked = 0;
+      let applied = 0;
       if (activeStore) {
         const store = createProfileStore(activeStore);
         const bank = createMistakeBank(activeStore);
@@ -781,6 +785,7 @@ export function createTrainingControl({ storeDir } = {}) {
             if (result?.applied === true || result?.applied === false) {
               item.consumers.profiled = true;
               profiled += 1;
+              if (result.applied === true) applied += 1;
             }
           }
           if (!item.consumers.banked) {
@@ -791,7 +796,7 @@ export function createTrainingControl({ storeDir } = {}) {
         }
       }
       persistAuth(sessionDir, auth);
-      return { profiled, banked };
+      return { profiled, banked, applied };
     });
   }
 
