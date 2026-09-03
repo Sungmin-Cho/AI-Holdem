@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
-import { createProfileStore } from './training-stores.js';
+import { createMistakeBank, createProfileStore } from './training-stores.js';
 import { createTrainingControl } from './training-control.js';
 import { defaultEvaluate, defaultSolve, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
@@ -229,22 +229,8 @@ export async function applyEvaluation(storeDir, evaluation) {
   return store.apply(evaluation);
 }
 
-function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
-  const file = path.join(storeDir, '.training', 'mistakes.json');
-  try {
-    const data = readJsonSecure(file);
-    for (const item of data.items ?? []) {
-      const evaluation = item.evaluation;
-      if (!evaluation) continue;
-      const mapped = byEvaluationId[item.mistakeId]?.new
-        ?? oldToNew[evaluation.payloadSha256]
-        ?? evaluation.payloadSha256;
-      evaluation.payloadSha256 = mapped;
-    }
-    writeJsonSecure(file, data);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+async function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
+  await createMistakeBank(storeDir).migrateDigests({ oldToNew, byEvaluationId });
 }
 
 export async function migrateStoreV2(storeDir, digestMapFile) {
@@ -253,7 +239,7 @@ export async function migrateStoreV2(storeDir, digestMapFile) {
   const byEvaluationId = map.byEvaluationId ?? {};
   const store = createProfileStore(storeDir);
   const profile = await store.migrateDigests({ oldToNew, byEvaluationId });
-  resignMistakes(storeDir, { oldToNew, byEvaluationId });
+  await resignMistakes(storeDir, { oldToNew, byEvaluationId });
   return profile;
 }
 

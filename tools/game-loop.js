@@ -422,6 +422,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let coachAdapterDisabled = false;
   let playerSessions = null;
   let resumeEntryPending = false;
+  let doneResumeNoTrainingWrite = false;
   let stopRequested = false;
   let stopPromise = null;
   let pendingFinalStatePatch = null;
@@ -3929,7 +3930,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const finishDoneLifecycle = async () => {
     const current = readLoopState();
-    if (storeDir) {
+    if (storeDir && !doneResumeNoTrainingWrite) {
       try {
         const profile = await createProfileStore(storeDir).show();
         writePracticeFocus(storeDir, profile);
@@ -4686,6 +4687,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       lifecycleStarted = true;
 
       if (state?.phase === 'done') {
+        if (state.halt?.source === 'training-migration') {
+          state = writeLoopState({ halt: undefined });
+        }
+        doneResumeNoTrainingWrite = true;
         const resumed = await resolveForPhase('done', engineState, state);
         log('resume-ready', { phase: resumed.phase });
         return resumed;
@@ -4704,6 +4709,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
 
       const ownerSessionId = randomUUID();
+      const persistedOwnerSessionId = state?.ownerSessionId;
       const resumeNotices = [...new Set([
         ...(Array.isArray(state?.notices)
           ? state.notices.filter((notice) => (
@@ -4750,7 +4756,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
       if (storeDir) {
         await createTrainingControl({ storeDir })
-          .takeoverOwner(root, ownerSessionId, { reason: 'resume' });
+          .takeoverOwner(root, ownerSessionId, {
+            reason: 'resume',
+            ...(typeof persistedOwnerSessionId === 'string' && persistedOwnerSessionId !== ''
+              ? { recoverOwnerId: persistedOwnerSessionId }
+              : {}),
+          });
         try {
           await completeSessionStoreMigration(storeDir, root);
         } catch (error) {

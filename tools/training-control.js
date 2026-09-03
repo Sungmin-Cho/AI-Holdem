@@ -863,12 +863,16 @@ export function createTrainingControl({ storeDir, io } = {}) {
     });
   }
 
-  async function takeoverOwner(sessionDir, ownerId, { reason } = {}) {
+  async function takeoverOwner(sessionDir, ownerId, { reason, recoverOwnerId } = {}) {
     if (typeof ownerId !== 'string' || ownerId === '') {
       throw coded('NO_TRAINING_OWNER', 'training owner가 필요합니다.');
     }
     if (reason !== 'terminal-session' && reason !== 'resume') {
       throw coded('INVALID_TAKEOVER_REASON', `training owner takeover reason이 올바르지 않습니다: ${reason ?? '없음'}`);
+    }
+    if (recoverOwnerId !== undefined
+      && (reason !== 'resume' || typeof recoverOwnerId !== 'string' || recoverOwnerId === '')) {
+      throw coded('INVALID_RECOVERY_OWNER', 'resume recovery owner가 올바르지 않습니다.');
     }
     return withLock(sessionDir, () => {
       if (reason === 'terminal-session' && !terminalSession(sessionDir)) {
@@ -881,17 +885,29 @@ export function createTrainingControl({ storeDir, io } = {}) {
       if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
         throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
       }
-      auth.ownerSessionId = ownerId;
       auth.ownerHistory = auth.ownerHistory ?? [];
-      const entry = {
-        from,
-        to: ownerId,
-        reason,
-        at: new Date().toISOString(),
+      const transferTo = (to) => {
+        const transferFrom = auth.ownerSessionId ?? null;
+        if (transferFrom === to) return null;
+        auth.ownerSessionId = to;
+        const entry = {
+          from: transferFrom,
+          to,
+          reason,
+          at: new Date().toISOString(),
+        };
+        auth.ownerHistory.push(entry);
+        return entry;
       };
-      auth.ownerHistory.push(entry);
+      let recovered = null;
+      if (recoverOwnerId !== undefined && recoverOwnerId !== ownerId) {
+        recovered = transferTo(recoverOwnerId);
+        if (recovered) persistAuth(sessionDir, auth);
+      }
+      const entry = transferTo(ownerId);
+      if (!entry && !recovered) return { transferred: false, authority: auth };
       persistAuth(sessionDir, auth);
-      return { transferred: true, entry, authority: auth };
+      return { transferred: true, entry: entry ?? recovered, authority: auth };
     });
   }
 
@@ -983,7 +999,12 @@ export function createTrainingControl({ storeDir, io } = {}) {
         throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
       }
       if (!Object.keys(auth.items).length && !Object.keys(auth.pending ?? {}).length) {
+        if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+          throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+        }
+        const ownerHistory = auth.ownerHistory;
         auth = emptyAuth({ gameEpoch, owner });
+        if (ownerHistory !== undefined) auth.ownerHistory = ownerHistory;
       }
       auth.gameEpoch = gameEpoch;
       auth.ownerSessionId = owner;

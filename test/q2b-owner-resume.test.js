@@ -72,7 +72,14 @@ async function terminatePid(pid) {
 }
 
 function trainingHashes(sessionDir) {
-  const root = path.join(sessionDir, 'training');
+  return directoryHashes(path.join(sessionDir, 'training'));
+}
+
+function storeTrainingHashes(storeDir) {
+  return directoryHashes(path.join(storeDir, '.training'));
+}
+
+function directoryHashes(root) {
   const hashes = {};
   const visit = (dir, prefix = '') => {
     if (!fs.existsSync(dir)) return;
@@ -304,6 +311,29 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
   assert.equal(accepted.accepted.length, 1);
 });
 
+test('Q2b resume recovers a persisted loop owner before issuing the current owner', { timeout: 40_000 }, async (t) => {
+  const storeDir = tmp();
+  const seeded = seedCatalogSession(storeDir, 'playing', { ownerSessionId: 'authority-a' });
+  writeLoopState(seeded.sessionDir, seeded.sessionToken, 'playing', 'persisted-b');
+  const binDir = fakeClaudeBin();
+  await leaveSigkilledStoreOwner(storeDir);
+  const run = launchResume(storeDir, binDir);
+  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+
+  const resumed = await waitForOwnerRotation(seeded.sessionDir, 'persisted-b', run.stderr);
+  await killChild(run.child, 'SIGKILL');
+  const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
+
+  assert.equal(auth.ownerSessionId, resumed.ownerSessionId);
+  assert.deepEqual(
+    auth.ownerHistory.map(({ from, to, reason }) => ({ from, to, reason })),
+    [
+      { from: 'authority-a', to: 'persisted-b', reason: 'resume' },
+      { from: 'persisted-b', to: resumed.ownerSessionId, reason: 'resume' },
+    ],
+  );
+});
+
 test('Q2b finalizing resume after SIGKILL transfers owner before reconcile', { timeout: 40_000 }, async (t) => {
   const storeDir = tmp();
   const seeded = seedCatalogSession(storeDir, 'finalizing');
@@ -331,6 +361,7 @@ test('Q2b finalizing resume after SIGKILL transfers owner before reconcile', { t
 
 test('Q2b done resume leaves every training byte and ownerHistory unchanged', { timeout: 20_000 }, async (t) => {
   const gameDir = tmp();
+  const storeDir = tmp();
   const initialized = JSON.parse(execFileSync(process.execPath, [
     ENGINE_CLI,
     'init',
@@ -340,10 +371,18 @@ test('Q2b done resume leaves every training byte and ownerHistory unchanged', { 
   ], { encoding: 'utf8' }).trim());
   writeLoopState(gameDir, initialized.sessionToken, 'done');
   writeAuthority(gameDir, initialized.sessionToken, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ownerHistory: [{ from: 'older', to: 'owner-0', reason: 'resume', at: 'before' }],
   });
-  const before = trainingHashes(gameDir);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  loopState.halt = {
+    code: 'TRAINING_MIGRATION_CORRUPT',
+    message: 'stale migration halt',
+    source: 'training-migration',
+  };
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify(loopState));
+  const beforeSessionTraining = trainingHashes(gameDir);
+  const beforeStoreTraining = storeTrainingHashes(storeDir);
   const beforeHistory = readJson(path.join(gameDir, 'training', '.training-authority.json')).ownerHistory;
   const lockDir = path.join(gameDir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
@@ -360,14 +399,18 @@ test('Q2b done resume leaves every training byte and ownerHistory unchanged', { 
     gameDir,
     initialLockHandle,
     resolver: async () => { throw new Error('done resume must not resolve runtimes'); },
-    opts: { port: 0, storeDir: gameDir },
+    opts: { port: 0, storeDir },
   });
   t.after(() => loop.requestStop().catch(() => {}));
 
   const resumed = await loop.resume({ skipLock: true });
+  const finished = await loop.run();
 
   assert.equal(resumed.phase, 'done');
-  assert.deepEqual(trainingHashes(gameDir), before);
+  assert.equal(finished.phase, 'done');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt, undefined);
+  assert.deepEqual(trainingHashes(gameDir), beforeSessionTraining);
+  assert.deepEqual(storeTrainingHashes(storeDir), beforeStoreTraining);
   assert.deepEqual(
     readJson(path.join(gameDir, 'training', '.training-authority.json')).ownerHistory,
     beforeHistory,

@@ -172,6 +172,14 @@ test('Q2b takeoverOwner permits only terminal sweep takeover and records additiv
       auth.ownerHistory.map(({ from, to, reason }) => ({ from, to, reason })),
       [{ from: 'owner-1', to: 'sweep-owner', reason: 'terminal-session' }],
     );
+    const historyBeforeReconcile = structuredClone(auth.ownerHistory);
+    await tc.reconcile(sessionDir, {
+      gameEpoch: EPOCH,
+      owner: 'sweep-owner',
+      lastHand: null,
+      handsDir: path.join(sessionDir, 'hands'),
+    });
+    assert.deepEqual(tc.loadAuthority(sessionDir).ownerHistory, historyBeforeReconcile);
   }
 
   const playing = tmp();
