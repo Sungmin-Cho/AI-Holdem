@@ -405,11 +405,22 @@ function legacyTrainingProvenance(gameDir) {
     if (!['session-done', 'complete'].includes(marker?.status)) return {};
     const map = readSecurityJson(gameDir, ['training', '.digest-map-v2.json']);
     if (map?.schemaVersion !== 1 || !map.oldToNew || typeof map.oldToNew !== 'object'
-      || Array.isArray(map.oldToNew)) return {};
+      || Array.isArray(map.oldToNew) || !map.byEvaluationId
+      || typeof map.byEvaluationId !== 'object' || Array.isArray(map.byEvaluationId)
+      || !authority.items || typeof authority.items !== 'object' || Array.isArray(authority.items)) return {};
     const digest = /^[0-9a-f]{64}$/;
     if (Object.entries(map.oldToNew).some(([oldValue, newValue]) => (
       !digest.test(oldValue) || typeof newValue !== 'string' || !digest.test(newValue)
     ))) return {};
+    const itemIds = Object.keys(authority.items).sort();
+    if (Object.keys(map.byEvaluationId).sort().join('\0') !== itemIds.join('\0')) return {};
+    for (const id of itemIds) {
+      const item = authority.items[id];
+      const mapping = map.byEvaluationId[id];
+      if (!item || item.evaluationId !== id || !digest.test(item.payloadSha256)
+        || !mapping || !digest.test(mapping.old) || mapping.new !== item.payloadSha256
+        || map.oldToNew[mapping.old] !== mapping.new) return {};
+    }
     return { allowUnmappedLegacy: false, legacyOldToNew: map.oldToNew };
   } catch {
     return {};

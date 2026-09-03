@@ -61,15 +61,17 @@ function terminalForMigration(sessionDir) {
 
 function migrationNeeded(sessionDir) {
   const auth = readJsonSecure(path.join(sessionDir, 'training', '.training-authority.json'));
-  if (auth?.schemaVersion === 1) return true;
+  if (auth?.schemaVersion === 1) return 'required';
   let marker = null;
   try {
     marker = readJsonSecure(path.join(sessionDir, 'training', '.migration-v2.json'));
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  if (marker?.status === 'in-progress') return true;
-  return false;
+  if (marker?.status === 'in-progress') return 'required';
+  if (['session-done', 'complete'].includes(marker?.status)
+    && fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) return 'residual';
+  return null;
 }
 
 async function settleRunner(out) {
@@ -189,11 +191,14 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
       let migration = null;
-      if (migrationNeeded(sessionDir)) {
-        if (!terminalForMigration(sessionDir)) {
+      const migrationKind = migrationNeeded(sessionDir);
+      if (migrationKind) {
+        const terminal = terminalForMigration(sessionDir);
+        if (!terminal && migrationKind === 'required') {
           throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 authority는 sweep이 마이그레이션하지 않습니다.');
         }
-        migration = await tc.migrateAuthority(sessionDir);
+        if (terminal) migration = await tc.migrateAuthority(sessionDir);
+        else notices.push('profile sweep notice: nonterminal residual publish attempt는 resume이 처리합니다.');
       }
       for (const notice of migration?.notices ?? []) {
         notices.push(notice);

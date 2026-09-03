@@ -287,7 +287,11 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
       resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
     };
   }
-  if (record.expectedGameEpoch !== gameEpoch
+  const epochPattern = /^[0-9a-f]{64}$/;
+  if (!epochPattern.test(gameEpoch)
+    || !epochPattern.test(record.expectedGameEpoch)
+    || !epochPattern.test(trainingAuthz?.expectedGameEpoch)
+    || record.expectedGameEpoch !== gameEpoch
     || trainingAuthz?.expectedGameEpoch !== gameEpoch) {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt epoch가 authority와 일치하지 않습니다.');
   }
@@ -313,6 +317,9 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
         throw coded('TRAINING_MIGRATION_CORRUPT', `${label} digest가 authority와 일치하지 않습니다.`);
       }
       if (verifyBody) {
+        if (entry.payloadSha256 === current && Object.hasOwn(entry, 'explanation')) {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} current body에 unsigned explanation이 있습니다.`);
+        }
         let recomputed;
         try {
           recomputed = entry.payloadSha256 === current
@@ -382,7 +389,9 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
   const appliedIds = [];
   const appliedAnnotationIds = [];
   const legacyExplanationIds = new Set(bodyTraining
-    .filter((row) => row && Object.prototype.hasOwnProperty.call(row, 'explanation'))
+    .filter((row) => row
+      && Object.hasOwn(row, 'explanation')
+      && row.payloadSha256 !== items[row.evaluationId]?.payloadSha256)
     .map((row) => row.evaluationId));
   let changed = false;
   if (applied) {
@@ -500,8 +509,8 @@ function validateLegacySources(sessionDir, auth) {
       throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy authority와 JSONL digest가 일치하지 않습니다.');
     }
     const expectedRef = detailRefOf(id);
-    const detailRef = item.detailRef ?? row.detailRef;
-    const detailSha256 = item.detailSha256 ?? row.detailSha256;
+    const detailRef = item.detailRef ?? row?.detailRef ?? expectedRef;
+    const detailSha256 = item.detailSha256 ?? row?.detailSha256;
     if (detailRef !== expectedRef || (row && row.detailRef !== expectedRef)
       || typeof detailSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(detailSha256)
       || (row?.detailSha256 !== undefined && row.detailSha256 !== detailSha256)) {
