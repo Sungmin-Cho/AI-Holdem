@@ -767,13 +767,11 @@ test('cutoff-marker write failure stops finalization before late ready seal', { 
   }, 'training item missing after marker write failure');
   await new Promise((resolve) => setTimeout(resolve, 200));
   const sealed = createTrainingControl().loadAuthority(gameDir)?.items?.[item.evaluationId];
-  await t.test('M14 explanation and cutoff assertions', { todo: true }, async () => {
-    const explanationStatus = sealed?.annotations?.explanation?.status;
-    assert.equal(explanationStatus === undefined || explanationStatus === 'ready', true);
-    assert.notEqual(explanationStatus, 'unavailable');
-    const cutoff = path.join(gameDir, 'training', '.cutoff');
-    assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
-  });
+  const explanationStatus = sealed?.annotations?.explanation?.status;
+  assert.equal(explanationStatus === undefined || explanationStatus === 'ready', true);
+  assert.notEqual(explanationStatus, 'unavailable');
+  const cutoff = path.join(gameDir, 'training', '.cutoff');
+  assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
 });
 
 test('cutoff-marker write failure still fail-closed when terminate throws', { timeout: 40_000 }, async (t) => {
@@ -832,13 +830,11 @@ test('cutoff-marker write failure still fail-closed when terminate throws', { ti
   await new Promise((resolve) => setTimeout(resolve, 200));
   const auth = createTrainingControl().loadAuthority(gameDir);
   const item = Object.values(auth?.items ?? {})[0];
-  await t.test('M14 explanation and cutoff assertions', { todo: true }, async () => {
-    const explanationStatus = item?.annotations?.explanation?.status;
-    assert.equal(explanationStatus === undefined || explanationStatus === 'ready', true);
-    assert.notEqual(explanationStatus, 'unavailable');
-    const cutoff = path.join(gameDir, 'training', '.cutoff');
-    assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
-  });
+  const explanationStatus = item?.annotations?.explanation?.status;
+  assert.equal(explanationStatus === undefined || explanationStatus === 'ready', true);
+  assert.notEqual(explanationStatus, 'unavailable');
+  const cutoff = path.join(gameDir, 'training', '.cutoff');
+  assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
 });
 
 test('unconfirmed training child terminate fails closed', { timeout: 40_000 }, async (t) => {

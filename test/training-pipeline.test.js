@@ -478,7 +478,7 @@ test('explain concurrency is 1 across hands', async () => {
   assert.equal(overlap, 0);
 });
 
-test('in-flight explain cannot seal ready after process-local cutoff without a marker file', async () => {
+test('in-flight explain remains ready when only the process-local cutoff exists', async () => {
   const dir = tmp();
   const token = 'tok';
   const gameEpoch = gameEpochOf(token);
@@ -505,5 +505,6 @@ test('in-flight explain cannot seal ready after process-local cutoff without a m
     explain: () => handleOf(VALID_EXPLAIN),
   });
   const auth = tc.loadAuthority(dir);
-  assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.status, 'unavailable');
+  assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.status, 'ready');
+  assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.sealReason, undefined);
 });
