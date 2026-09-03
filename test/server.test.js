@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { startServer } from '../server/server.js';
-import { detailRefOf } from '../publish-contract.js';
+import { detailRefOf, projectTrainingSummary } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 function tmpDir() {
@@ -745,11 +745,12 @@ test('training-detail GET is token-first and digest-checked', async () => {
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  const summary = projectTrainingSummary({ evaluationId, detailRef: ref, detailSha256 });
   fs.mkdirSync(path.join(gameDir, 'training', 'details'), { recursive: true });
   fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId, detailRef: ref, detailSha256 }],
+    training: [summary],
   }));
   const srv = await start(gameDir, token);
   try {
@@ -775,6 +776,7 @@ test('training-detail GET parent-swap is rejected', async () => {
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  const summary = projectTrainingSummary({ evaluationId, detailRef: ref, detailSha256 });
   const detailsDir = path.join(gameDir, 'training', 'details');
   fs.mkdirSync(detailsDir, { recursive: true });
   fs.writeFileSync(path.join(detailsDir, `${ref}.json`), raw);
@@ -782,12 +784,14 @@ test('training-detail GET parent-swap is rejected', async () => {
   fs.writeFileSync(path.join(outside, `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId, detailRef: ref, detailSha256 }],
+    training: [summary],
   }));
   const srv = await start(gameDir, token);
   const origOpen = fs.openSync;
+  let swapHookRan = false;
   fs.openSync = (p, flags, mode) => {
     if (String(p) === path.join(detailsDir, `${ref}.json`)) {
+      swapHookRan = true;
       fs.openSync = origOpen;
       fs.renameSync(detailsDir, `${detailsDir}.real`);
       fs.symlinkSync(outside, detailsDir);
@@ -799,6 +803,7 @@ test('training-detail GET parent-swap is rejected', async () => {
     assert.equal(swapped.status, 404);
     assert.equal(swapped.json?.ok, false);
     assert.equal(swapped.json?.code, 'NOT_FOUND');
+    assert.equal(swapHookRan, true);
   } finally {
     fs.openSync = origOpen;
     await closeOf(srv);
@@ -815,11 +820,12 @@ test('training-detail GET without a token performs 0 fs accesses', async () => {
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
+  const summary = projectTrainingSummary({ evaluationId, detailRef: ref, detailSha256 });
   fs.mkdirSync(path.join(gameDir, 'training', 'details'), { recursive: true });
   fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId, detailRef: ref, detailSha256 }],
+    training: [summary],
   }));
   const srv = await start(gameDir, token);
   const names = [

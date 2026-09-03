@@ -205,7 +205,11 @@ test('C2: an unreadable engine state fails closed — absent, directory, symlink
   writeSecurityFixtures(corrupt, { gameOver: true });
   fs.writeFileSync(path.join(corrupt, 'state.json'), '{not json');
 
-  for (const dir of [absent, asDirectory, viaSymlink, corrupt]) {
+  const partial = tmpDir();
+  writeSecurityFixtures(partial, { gameOver: true });
+  fs.writeFileSync(path.join(partial, 'state.json'), JSON.stringify({ gameOver: true }));
+
+  for (const dir of [absent, asDirectory, viaSymlink, corrupt, partial]) {
     await withServer(dir, async ({ port }) => {
       assert.equal((await post(port, { publishId: 1, training: [summary] })).status, 200);
       const denied = await post(port, { publishId: 2, trainingAnnotations: [exploit] });
@@ -432,6 +436,21 @@ test('C1: parseable but incomplete security schemas fail closed', async () => {
   ));
   cases.push(archiveMismatch);
 
+  const forgedReveal = tmpDir();
+  writeSecurityFixtures(forgedReveal, {
+    hands: [handRecordFixture(1, {
+      holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] },
+      reveals: [{ playerId: 'user', cards: ['7c', '2d'] }],
+    })],
+  });
+  cases.push(forgedReveal);
+
+  const duplicateCards = tmpDir();
+  writeSecurityFixtures(duplicateCards, {
+    hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['Ah', '2d'] } })],
+  });
+  cases.push(duplicateCards);
+
   for (const dir of cases) {
     await withServer(dir, async ({ port }) => {
       await post(port, { publishId: 1, training: [summary] });
@@ -531,6 +550,12 @@ test('M1: evaluationId grammar and detail proofs are contract-checked in the pro
     { ...summary, detailRef: detailRefOf(other.evaluationId) },
     'detailRef bound to another evaluation',
   );
+  const evaluationWithoutDetail = { ...summary };
+  for (const key of ['handNo', 'detailRef', 'detailSha256', 'payloadSha256', 'recommendedTruncated']) {
+    delete evaluationWithoutDetail[key];
+  }
+  const withoutDigest = toPublicSummary(evaluationWithoutDetail, { handNo: 1 });
+  assert.equal(Object.hasOwn(withoutDigest, 'detailSha256'), false);
   assert.equal(projectTrainingSummary(summary).detailRef, detailRefOf(summary.evaluationId));
 });
 
@@ -781,6 +806,45 @@ test('M4: forged final digests and conflicting duplicate set-once rows are dropp
   raw.trainingAnnotations = { [otherId]: { explanation: ready } };
   fs.writeFileSync(path.join(outerMismatchDir, 'ui-snapshot.json'), JSON.stringify(raw));
   await withServer(outerMismatchDir, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
+  });
+});
+
+test('M4: unsigned legacy text and every duplicate final authority key are dropped', async () => {
+  const summary = summaryOf();
+
+  const unsignedLegacyDir = tmpDir();
+  writeSecurityFixtures(unsignedLegacyDir);
+  seedSnapshot(unsignedLegacyDir, { training: [{ ...summary, explanation: 'digest에 없는 해설' }] });
+  await withServer(unsignedLegacyDir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(snap.training.length, 0);
+    assert.equal(snap.trainingAnnotations.length, 0);
+  });
+
+  const invalidFirstDir = tmpDir();
+  writeSecurityFixtures(invalidFirstDir);
+  const invalid = { ...summary, payloadSha256: 'ff'.repeat(32) };
+  seedSnapshot(invalidFirstDir, { training: [invalid, summary] });
+  await withServer(invalidFirstDir, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).training.length, 0);
+  });
+
+  const validFirstDir = tmpDir();
+  writeSecurityFixtures(validFirstDir);
+  seedSnapshot(validFirstDir, { training: [summary, invalid] });
+  await withServer(validFirstDir, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).training.length, 0);
+  });
+
+  const duplicateAnnotationDir = tmpDir();
+  writeSecurityFixtures(duplicateAnnotationDir);
+  const ready = storedRow(summary, 'explanation', '동일 값');
+  seedSnapshot(duplicateAnnotationDir, {
+    training: [summary],
+    trainingAnnotations: [ready, { ...ready }],
+  });
+  await withServer(duplicateAnnotationDir, async ({ port }) => {
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
   });
 });
