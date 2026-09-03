@@ -206,6 +206,7 @@ test('forbidden literals include policyId, configDigest, sampledProbability, .se
   assert.throws(() => assertNoSecrets({ x: 'sampledProbability' }), { code: 'FORBIDDEN_EXPORT' });
   assert.throws(() => assertNoSecrets({ x: '.session-store' }), { code: 'FORBIDDEN_EXPORT' });
   assert.throws(() => assertNoSecrets({ path: '/Users/sungmin/secret' }), { code: 'FORBIDDEN_EXPORT' });
+  assert.throws(() => assertNoSecrets({ path: 'path=(/Users/sungmin/secret)' }), { code: 'FORBIDDEN_EXPORT' });
   assert.doesNotThrow(() => assertNoSecrets({ hands: [{ heroCards: ['Ah', 'Kd'] }] }));
 });
 

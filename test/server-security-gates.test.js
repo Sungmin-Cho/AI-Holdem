@@ -344,7 +344,7 @@ test('C1: engine seed, absolute paths and store markers are denied', async () =>
     const cases = [
       [summary, `시드 ${FIXTURE_POLICY_SEED} 유출`],
       [other, '경로 /Users/tester/game/state.json 유출'],
-      [third, '.session-store/sessions/s-1 유출'],
+      [third, 'path=(/Users/tester/game/state.json) 및 .session-store/sessions/s-1 유출'],
     ];
     for (const [item, text] of cases) {
       const denied = await post(port, {
@@ -401,6 +401,50 @@ test('C1: missing or unreadable security material fails closed with 500', async 
   }
 });
 
+test('C1: parseable but incomplete security schemas fail closed', async () => {
+  const summary = summaryOf();
+  const cases = [];
+
+  const stringCards = tmpDir();
+  writeSecurityFixtures(stringCards, {
+    handInProgress: { handNo: 2, holes: { user: ['Ah', 'Kh'], p1: 'Qs' } },
+  });
+  cases.push(stringCards);
+
+  const nestedPolicy = tmpDir();
+  writeSecurityFixtures(nestedPolicy, {
+    players: [
+      { playerId: 'user' },
+      { playerId: 'p1', policy: { policyId: { nested: 'secret-policy' } } },
+    ],
+  });
+  cases.push(nestedPolicy);
+
+  const archiveMismatch = tmpDir();
+  writeSecurityFixtures(archiveMismatch, {
+    hands: [
+      handRecordFixture(1, { holes: { user: ['Ah', 'Kh'] } }),
+      handRecordFixture(2, { holes: { user: ['Qs', 'Qd'], p1: ['9s', '9h'] } }),
+    ],
+  });
+  fs.writeFileSync(handFilePath(archiveMismatch, 2), JSON.stringify(
+    handRecordFixture(3, { holes: { user: ['Qs', 'Qd'], p1: ['9s', '9h'] } }),
+  ));
+  cases.push(archiveMismatch);
+
+  for (const dir of cases) {
+    await withServer(dir, async ({ port }) => {
+      await post(port, { publishId: 1, training: [summary] });
+      const denied = await post(port, {
+        publishId: 2,
+        trainingAnnotations: [annotationRow(summary, 'explanation', 'schema 누락을 통과하면 안 된다')],
+      });
+      assert.equal(denied.status, 500, dir);
+      assert.equal(denied.json.code, 'FORBIDDEN_LITERAL_UNAVAILABLE', dir);
+    });
+  }
+});
+
 test('C1: the deny list is never cached — a new in-progress hole card is denied at once', async () => {
   const dir = tmpDir();
   writeSecurityFixtures(dir, { hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] } })] });
@@ -447,6 +491,26 @@ test('C1: a clean explanation with every material present is accepted', async ()
   });
 });
 
+test('C1: hand-10000.json remains a canonical security source', { timeout: 20_000 }, async () => {
+  const dir = tmpDir();
+  const hands = Array.from({ length: 10_000 }, (_, index) => handRecordFixture(index + 1, {
+    holes: index === 9_999
+      ? { user: ['Ah', 'Kh'], p1: ['7c', '2d'] }
+      : { user: ['Ah', 'Kh'] },
+  }));
+  writeSecurityFixtures(dir, { hands });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '마지막 상대 카드는 7c다')],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
 // --- M1: 투영은 identity·detail·adjustment를 검사한다 ---
 
 test('M1: evaluationId grammar and detail proofs are contract-checked in the projection', () => {
@@ -461,6 +525,7 @@ test('M1: evaluationId grammar and detail proofs are contract-checked in the pro
   throwsMismatch({ ...summary, evaluationId: 'not-an-evaluation-id' }, 'grammar');
   throwsMismatch({ ...summary, detailRef: { policySeed: 'x' } }, 'object detailRef');
   throwsMismatch({ ...summary, detailSha256: { configDigest: 'x' } }, 'object detailSha256');
+  throwsMismatch({ ...summary, detailSha256: null }, 'null detailSha256');
   throwsMismatch({ ...summary, detailRef: 'zz'.repeat(32) }, 'non-hex detailRef');
   throwsMismatch(
     { ...summary, detailRef: detailRefOf(other.evaluationId) },
@@ -488,6 +553,12 @@ test('M1: the exploit adjustment vocabulary is closed and prototype-free', () =>
   throwsMismatch(rowFor({ bluff: null }), 'null level');
   throwsMismatch(rowFor(JSON.parse('{"__proto__":"increase"}')), '__proto__ key');
   throwsMismatch(rowFor({ bluff: 'increase' }, 'ghost'), 'primary outside opponents');
+  throwsMismatch({ ...rowFor({ bluff: 'increase' }), value: { opponents: null, primary: null } }, 'null opponents');
+  throwsMismatch({ ...rowFor({ bluff: 'increase' }), value: { opponents: [], primary: null } }, 'empty opponents');
+  throwsMismatch({
+    ...rowFor({ bluff: 'increase' }),
+    value: { opponents: [{ opponentId: 'p1', policyId: null, adjustment: null }], primary: 'p1' },
+  }, 'null exploit leaves');
 
   const projected = projectTrainingAnnotation(rowFor({ bluff: 'increase', thinValue: 'hold', defense: 'decrease' }));
   assert.equal(projected.value.opponents[0].adjustment.bluff, 'increase');
@@ -663,5 +734,53 @@ test('M4: a history machine item absent from the final training list is dropped'
     assert.equal(sse.includes(summary.evaluationId), true);
     assert.equal(sse.includes(ghost.evaluationId), false);
     assert.equal(sse.includes('off-policy'), false);
+  });
+});
+
+test('M4: forged final digests and conflicting duplicate set-once rows are dropped', async () => {
+  const summary = summaryOf();
+  const forged = { ...summary, grade: 'off-policy', payloadSha256: summary.payloadSha256 };
+  const conflicting = { ...summary, grade: 'mixed' };
+  conflicting.payloadSha256 = trainingPayloadSha256(conflicting);
+
+  const forgedDir = tmpDir();
+  writeSecurityFixtures(forgedDir);
+  seedSnapshot(forgedDir, {
+    training: [forged],
+    history: [{ revision: 1, payload: { training: [forged] } }],
+  });
+  await withServer(forgedDir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(snap.training.length, 0);
+    const sse = await collectSse(port);
+    assert.equal(sse.includes('off-policy'), false);
+  });
+
+  const duplicateDir = tmpDir();
+  writeSecurityFixtures(duplicateDir);
+  const ready = storedRow(summary, 'explanation', '첫 값');
+  const conflict = storedRow(summary, 'explanation', '둘째 값');
+  seedSnapshot(duplicateDir, {
+    training: [summary, conflicting],
+    trainingAnnotations: [ready, conflict],
+    history: [{ revision: 1, payload: { training: [summary], trainingAnnotations: [ready] } }],
+  });
+  await withServer(duplicateDir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(snap.training.length, 0);
+    assert.equal(snap.trainingAnnotations.length, 0);
+    const sse = await collectSse(port);
+    assert.equal(sse.includes('첫 값'), false);
+  });
+
+  const outerMismatchDir = tmpDir();
+  writeSecurityFixtures(outerMismatchDir);
+  const otherId = evaluationId('d-9-preflop-0');
+  seedSnapshot(outerMismatchDir, { training: [summary] });
+  const raw = JSON.parse(fs.readFileSync(path.join(outerMismatchDir, 'ui-snapshot.json'), 'utf8'));
+  raw.trainingAnnotations = { [otherId]: { explanation: ready } };
+  fs.writeFileSync(path.join(outerMismatchDir, 'ui-snapshot.json'), JSON.stringify(raw));
+  await withServer(outerMismatchDir, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
   });
 });
