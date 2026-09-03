@@ -204,8 +204,9 @@ test('the drill provider version comes from the dataset, with no hardcoded const
 test('an opponent note is stamped by the server, not by its author', async () => {
   const storeDir = tmp('holdem-minors-notes-');
   await writeOpponentNote(storeDir, {
-    opponentId: 'p1',
-    text: 'note',
+    playerId: 'p1',
+    atHandNo: 1,
+    observations: ['calls too wide'],
     writtenAt: '1999-01-01T00:00:00.000Z',
   });
 
@@ -219,7 +220,8 @@ test('the solver child is polled every 250ms, not every 50ms', async () => {
   const { SOLVER_POLL_MS } = await import('../tools/solver-runtime.js');
   assert.equal(SOLVER_POLL_MS, 250);
   const source = fs.readFileSync(path.join(ROOT, 'tools/solver-runtime.js'), 'utf8');
-  assert.match(source, /setInterval\([^)]*SOLVER_POLL_MS\)/s, 'the interval must use the constant');
+  assert.match(source, /\}, SOLVER_POLL_MS\);/, 'the interval must use the constant');
+  assert.equal(/setInterval\([\s\S]*?, 50\);/.test(source), false, 'the 50ms poll must be gone');
 });
 
 // 12 — SOLVER_BUSY 단언은 조건부여선 안 된다.

@@ -85,7 +85,7 @@ function attemptKeyOf(sessionId, questionId, attemptNo) {
   return `drill:${sessionId}:${questionId}:${attemptNo}`;
 }
 
-function profileEventOf(session, question, attemptNo, result) {
+function profileEventOf(session, question, attemptNo, result, source) {
   const digest = createHash('sha256')
     .update(attemptKeyOf(session.sessionId, question.questionId, attemptNo))
     .digest('hex');
@@ -93,8 +93,8 @@ function profileEventOf(session, question, attemptNo, result) {
     evaluationId: evaluationIdOf({
       gameEpoch: digest,
       decisionId: `d-${attemptNo + 1}-preflop-0`,
-      providerId: 'local-preflop-baseline',
-      providerVersion: '1.0.0',
+      providerId: source.id,
+      providerVersion: source.version,
     }),
     payloadSha256: digest,
     status: 'supported',
@@ -104,7 +104,7 @@ function profileEventOf(session, question, attemptNo, result) {
     grade: result.grade,
     forced: false,
     evLossBb: null,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: { id: source.id, version: source.version },
     origin: 'drill',
   };
 }
@@ -274,7 +274,9 @@ export async function answerQuestion(storeDir, { action, sizeBb, sessionId, ques
     const strategy = lookupStrategy(question);
     const result = evaluateDrillAnswer(question, { action, sizeBb }, strategy);
     const srsPatch = await buildSrsPatch(storeDir, question, result);
-    const profileEvent = profileEventOf(session, question, attempt, result);
+    // 데이터셋이 스스로 밝히는 provider·version을 쓴다 — 상수를 따로 두면
+    // 데이터셋을 갈아도 프로필 이벤트는 옛 버전을 주장하게 된다.
+    const profileEvent = profileEventOf(session, question, attempt, result, strategy.source);
     session.pending = {
       answer: { action, sizeBb },
       result,

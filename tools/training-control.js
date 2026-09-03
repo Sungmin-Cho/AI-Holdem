@@ -378,6 +378,14 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
   return v2;
 }
 
+// 한 세션의 authority는 그 세션 소유다. 죽은 줄 알았던 이전 owner가 살아 돌아와
+// 쓰면 두 사이드카가 같은 파일을 갈라 쓰게 된다 — 소유자가 다르면 거부한다.
+function assertOwner(auth, owner) {
+  const current = auth.ownerSessionId;
+  if (typeof current !== 'string' || current === '' || current === owner) return;
+  throw coded('TRAINING_OWNER_MISMATCH', `training authority는 ${current} 소유입니다.`);
+}
+
 function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
   try {
     let auth = readJsonSecure(authPath(sessionDir));
@@ -490,6 +498,7 @@ export function createTrainingControl({ storeDir } = {}) {
         auth.gameEpoch = gameEpoch;
       }
       if (!auth) auth = emptyAuth({ gameEpoch, owner });
+      assertOwner(auth, owner);
       auth.ownerSessionId = owner;
       auth.pending = auth.pending ?? {};
       auth.annotationQueue = auth.annotationQueue ?? {};

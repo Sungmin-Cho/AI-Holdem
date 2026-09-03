@@ -53,6 +53,28 @@ function questionFrom({ mode, spotKey, handClass = 'AJo', skillKey, nonce, provi
   };
 }
 
+const POSITIONS = ['btn', 'co', 'mp', 'utg', 'sb', 'bb'];
+// A leak names a position and a situation; the drill should follow it rather
+// than collapse every leak onto one of two spots with one hand.
+const HAND_ROTATION = ['AJo', 'KQs', 'A5s', '77', 'QTs', 'T9s', 'KJo', '22'];
+
+export function spotForSkillKey(skillKey) {
+  const key = String(skillKey ?? '').toLowerCase();
+  const position = POSITIONS.find((name) => key.includes(`.${name}`) || key.endsWith(`-${name}`));
+  if (key.includes('defense') || key.includes('vs-')) {
+    return `6max-100bb-bb-vs-single-raise${position && position !== 'bb' ? `-${position}` : ''}`
+      .replace(/-bb$/, '');
+  }
+  return `6max-100bb-${position ?? 'btn'}-rfi-unopened`;
+}
+
+export function handClassForSkillKey(skillKey) {
+  const key = String(skillKey ?? '');
+  let sum = 0;
+  for (let i = 0; i < key.length; i += 1) sum = (sum * 31 + key.charCodeAt(i)) >>> 0;
+  return HAND_ROTATION[sum % HAND_ROTATION.length];
+}
+
 export function generateQueue({
   mode = 'free',
   profile,
@@ -66,8 +88,10 @@ export function generateQueue({
   if (mode === 'leak') {
     const leak = profile?.leaks?.[0];
     const key = leak?.recommendedDrill ?? leak?.id ?? 'preflop.rfi.BTN';
-    const spot = key.includes('bbDefense') ? '6max-100bb-bb-vs-single-raise' : '6max-100bb-btn-rfi-unopened';
-    return [questionFrom({ mode, spotKey: spot, skillKey: key, nonce, handClass: 'AJo' })];
+    const spot = spotForSkillKey(key);
+    return [questionFrom({
+      mode, spotKey: spot, skillKey: key, nonce, handClass: handClassForSkillKey(key),
+    })];
   }
   if (mode === 'mistake-review') {
     return mistakes.slice(0, limit).map((item, index) => {
