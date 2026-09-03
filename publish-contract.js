@@ -107,7 +107,7 @@ function privateCards(value, label) {
   return value;
 }
 
-function validatePrivateRecord(record, label) {
+function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) {
   if (!plainObject(record) || !Number.isInteger(record.handNo) || record.handNo < 1
     || !plainObject(record.holes) || Object.keys(record.holes).length === 0
     || !plainObject(record.startStacks)) {
@@ -118,6 +118,10 @@ function validatePrivateRecord(record, label) {
   if (holeIds.length !== stackIds.length
     || holeIds.some((playerId, index) => playerId !== stackIds[index])) {
     throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind holes to startStacks`);
+  }
+  if (!holeIds.includes('user')
+    || (allowedPlayerIds && holeIds.some((playerId) => !allowedPlayerIds.has(playerId)))) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind engine seats`);
   }
   const physicalCards = new Set();
   for (const [playerId, cards] of Object.entries(record.holes)) {
@@ -134,6 +138,23 @@ function validatePrivateRecord(record, label) {
     if (typeof record.startStacks[playerId] !== 'number'
       || !Number.isFinite(record.startStacks[playerId])) {
       throw coded('PRIVATE_LITERAL_INVALID', `${label}.startStacks.${playerId} is invalid`);
+    }
+  }
+  if (!Array.isArray(record.board) || record.board.length > 5) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label}.board is invalid`);
+  }
+  const cardZones = [['board', record.board]];
+  if (Object.hasOwn(record, 'deck')) cardZones.push(['deck', record.deck]);
+  for (const [zone, cards] of cardZones) {
+    if (!Array.isArray(cards)
+      || !cards.every((card) => typeof card === 'string' && CARD_RE.test(card))) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.${zone} is invalid`);
+    }
+    for (const card of cards) {
+      if (physicalCards.has(card)) {
+        throw coded('PRIVATE_LITERAL_INVALID', `${label} repeats a physical card across zones`);
+      }
+      physicalCards.add(card);
     }
   }
   const reveals = record.showdown == null
@@ -158,7 +179,7 @@ function validatePrivateRecord(record, label) {
   return record;
 }
 
-export function validatePrivateEngineState(engineState) {
+export function validatePrivateEngineState(engineState, { expectedSessionToken = null } = {}) {
   if (!plainObject(engineState)
     || engineState.schemaVersion !== 1
     || !Number.isInteger(engineState.stateVersion) || engineState.stateVersion < 0
@@ -180,10 +201,32 @@ export function validatePrivateEngineState(engineState) {
     }
     seatIds.add(seat.playerId);
   }
-  if (engineState.hand !== null) {
-    validatePrivateRecord({ ...engineState.hand, handNo: engineState.handNo }, 'state.hand');
+  if (expectedSessionToken !== null && engineState.sessionToken !== expectedSessionToken) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine state session token does not match the server');
   }
-  if (engineState.lastHand !== null) validatePrivateRecord(engineState.lastHand, 'state.lastHand');
+  if ((engineState.phase === 'in_hand') !== (engineState.hand !== null)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine phase does not bind hand presence');
+  }
+  if (engineState.hand !== null) {
+    validatePrivateRecord(
+      { ...engineState.hand, handNo: engineState.handNo },
+      'state.hand',
+      { allowedPlayerIds: seatIds },
+    );
+  }
+  if (engineState.lastHand !== null) {
+    validatePrivateRecord(engineState.lastHand, 'state.lastHand', { allowedPlayerIds: seatIds });
+  }
+  const lastHandNo = engineState.lastHand?.handNo ?? null;
+  if ((engineState.hand !== null
+    && lastHandNo !== null
+    && lastHandNo !== engineState.handNo - 1)
+    || (engineState.hand === null
+      && lastHandNo !== null
+      && lastHandNo !== engineState.handNo)
+    || (engineState.hand === null && lastHandNo === null && engineState.handNo !== 0)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine hand numbers are inconsistent');
+  }
   if (engineState.gameOver
     && (engineState.phase !== 'idle'
       || engineState.hand !== null
@@ -238,7 +281,9 @@ export function collectPrivateLiterals({ players, engineState, records } = {}) {
     values.push(privateScalar(engineState.policySeed, 'state.policySeed'));
   }
   for (const [recordIndex, candidate] of records.entries()) {
-    const record = validatePrivateRecord(candidate, `records.${recordIndex}`);
+    const record = validatePrivateRecord(candidate, `records.${recordIndex}`, {
+      allowedPlayerIds: new Set(engineState.seats.map((seat) => seat.playerId)),
+    });
     const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
     for (const [playerId, cards] of Object.entries(record.holes)) {
       if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
@@ -450,19 +495,18 @@ function projectExploitAdjustment(adjustment) {
   if (typeof adjustment !== 'object' || adjustment === null || Array.isArray(adjustment)) {
     throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must be an object');
   }
-  // 삽입 순서를 그대로 보존한다 — canonical 바이트가 그 순서를 따른다.
+  const keys = Object.keys(adjustment);
+  if (keys.length !== EXPLOIT_ADJUSTMENT_KEYS.length
+    || EXPLOIT_ADJUSTMENT_KEYS.some((key) => !Object.hasOwn(adjustment, key))) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must contain the complete vocabulary');
+  }
   const next = Object.create(null);
-  for (const [key, level] of Object.entries(adjustment)) {
-    if (!EXPLOIT_ADJUSTMENT_KEYS.includes(key)) {
-      throw coded('ANNOTATION_PROOF_MISMATCH', `exploit adjustment key is not in the vocabulary: ${key}`);
-    }
+  for (const key of EXPLOIT_ADJUSTMENT_KEYS) {
+    const level = adjustment[key];
     if (typeof level !== 'string' || !EXPLOIT_ADJUSTMENT_LEVELS.includes(level)) {
       throw coded('ANNOTATION_PROOF_MISMATCH', `exploit adjustment level is not in the vocabulary: ${key}`);
     }
     next[key] = level;
-  }
-  if (Object.keys(next).length === 0) {
-    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must not be empty');
   }
   return next;
 }

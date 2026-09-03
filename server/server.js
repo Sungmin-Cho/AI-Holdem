@@ -130,6 +130,17 @@ function persistedAnnotationCandidates(raw, split) {
   return candidates;
 }
 
+function annotationCandidateKeys({ row, outerId, outerField }) {
+  const keys = new Set();
+  if (typeof outerId === 'string' && typeof outerField === 'string') {
+    keys.add(`${outerId}:${outerField}`);
+  }
+  if (typeof row?.evaluationId === 'string' && typeof row?.field === 'string') {
+    keys.add(`${row.evaluationId}:${row.field}`);
+  }
+  return [...keys];
+}
+
 function coded(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -144,9 +155,12 @@ function readSecurityJson(root, segments) {
 
 // 위조된 POST로는 바꿀 수 없는 유일한 진실. 부재·symlink·파싱 실패·타입 불일치는
 // 전부 "아직 끝나지 않았다"로 읽는다(fail-closed).
-function engineGameOver(root) {
+function engineGameOver(root, expectedSessionToken) {
   try {
-    return validatePrivateEngineState(readSecurityJson(root, ['state.json'])).gameOver === true;
+    return validatePrivateEngineState(
+      readSecurityJson(root, ['state.json']),
+      { expectedSessionToken },
+    ).gameOver === true;
   } catch {
     return false;
   }
@@ -159,9 +173,10 @@ function engineGameOver(root) {
  * `players.json`만 바뀌는 갱신을 놓치기 때문이다. 자료를 하나라도 읽지 못하거나 수집
  * 결과가 0건이면 throw한다(호출자가 fail-closed로 거부한다).
  */
-function collectDenyLiterals(root) {
+function collectDenyLiterals(root, expectedSessionToken) {
   const players = readSecurityJson(root, ['players.json']);
   const engineState = readSecurityJson(root, ['state.json']);
+  validatePrivateEngineState(engineState, { expectedSessionToken });
   const records = [];
   if (engineState?.hand) records.push({ ...engineState.hand, handNo: engineState.handNo });
   if (engineState?.lastHand) records.push(engineState.lastHand);
@@ -397,7 +412,7 @@ function legacyTrainingSnapshot(gameDir) {
   }
 }
 
-function loadUiState(gameDir) {
+function loadUiState(gameDir, expectedSessionToken) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
     const allowLegacyExplanation = legacyTrainingSnapshot(gameDir);
@@ -407,11 +422,11 @@ function loadUiState(gameDir) {
     // 보안 자료는 이 로드에서 한 번 읽는다. 읽지 못하면 explanation은 전부 드롭한다.
     let literals = null;
     try {
-      literals = collectDenyLiterals(gameDir);
+      literals = collectDenyLiterals(gameDir, expectedSessionToken);
     } catch {
       literals = null;
     }
-    const gate = { gameOver: engineGameOver(gameDir) };
+    const gate = { gameOver: engineGameOver(gameDir, expectedSessionToken) };
 
     const restoredAnnotations = Object.create(null);
     let droppedAnnotations = migrated.dropped;
@@ -420,16 +435,14 @@ function loadUiState(gameDir) {
       migrated.split,
     );
     const annotationCounts = new Map();
-    for (const { row } of annotationCandidates) {
-      if (typeof row?.evaluationId !== 'string' || typeof row?.field !== 'string') continue;
-      const key = `${row.evaluationId}:${row.field}`;
-      annotationCounts.set(key, (annotationCounts.get(key) ?? 0) + 1);
+    const keysByCandidate = annotationCandidates.map(annotationCandidateKeys);
+    for (const keys of keysByCandidate) {
+      for (const key of keys) {
+        annotationCounts.set(key, (annotationCounts.get(key) ?? 0) + 1);
+      }
     }
-    for (const { row, outerId, outerField } of annotationCandidates) {
-      const rawKey = typeof row?.evaluationId === 'string' && typeof row?.field === 'string'
-        ? `${row.evaluationId}:${row.field}`
-        : null;
-      if (rawKey && annotationCounts.get(rawKey) > 1) {
+    for (const [index, { row, outerId, outerField }] of annotationCandidates.entries()) {
+      if (keysByCandidate[index].some((key) => annotationCounts.get(key) > 1)) {
         droppedAnnotations += 1;
         continue;
       }
@@ -556,7 +569,7 @@ function mergeTraining(existing, incoming) {
   return { merged, projectedIncoming };
 }
 
-function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir) {
+function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir, expectedSessionToken) {
   const next = Object.create(null);
   for (const [key, fields] of Object.entries(existing ?? {})) {
     next[key] = Object.assign(Object.create(null), fields);
@@ -592,7 +605,7 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir) {
     if (projected.field === 'explanation') {
       if (literals === undefined) {
         try {
-          literals = collectDenyLiterals(gameDir);
+          literals = collectDenyLiterals(gameDir, expectedSessionToken);
         } catch {
           literals = null;
         }
@@ -605,7 +618,7 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir) {
       }
     }
     // 게시자의 view(요청 본문이든 저장된 것이든)는 이 게이트의 입력이 아니다.
-    if (projected.field === 'exploit' && !engineGameOver(gameDir)) {
+    if (projected.field === 'exploit' && !engineGameOver(gameDir, expectedSessionToken)) {
       return { error: 'EXPLOIT_BEFORE_GAMEOVER', status: 409 };
     }
     const prev = next[projected.evaluationId]?.[projected.field];
@@ -616,7 +629,7 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir) {
       }
       return { error: 'ANNOTATION_CONFLICT', status: 409 };
     }
-    next[projected.evaluationId] = next[projected.evaluationId] ?? {};
+    next[projected.evaluationId] = next[projected.evaluationId] ?? Object.create(null);
     next[projected.evaluationId][projected.field] = projected;
     projectedIncoming.push(projected);
   }
@@ -776,7 +789,7 @@ export function startServer({ gameDir, port = 8877, token }) {
   const root = path.resolve(gameDir);
   fs.mkdirSync(root, { recursive: true });
 
-  const state = loadUiState(root);
+  const state = loadUiState(root, token);
   const sseClients = new Set();
   const waiters = new Set();
   let slot = null;
@@ -880,6 +893,7 @@ export function startServer({ gameDir, port = 8877, token }) {
         body.trainingAnnotations,
         next.training,
         root,
+        token,
       );
       if (merged.error) {
         sendJson(res, merged.status ?? 400, { ok: false, code: merged.error });
