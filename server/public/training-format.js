@@ -3,6 +3,17 @@
  * a different digest for the same id is a conflict, not an update, so the card
  * already on screen wins and the newcomer is dropped.
  */
+export function mergeTrainingItems(list, incoming) {
+  const out = Array.isArray(list) ? [...list] : [];
+  for (const item of incoming ?? []) {
+    const at = out.findIndex((existing) => existing.evaluationId === item.evaluationId);
+    if (at === -1) out.push(item);
+    else out[at] = mergeTrainingItem(out[at], item);
+  }
+  out.sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0));
+  return out;
+}
+
 export function mergeTrainingItem(existing, incoming) {
   if (!existing) return incoming;
   if (!incoming || existing.evaluationId !== incoming.evaluationId) return existing;

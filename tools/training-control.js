@@ -382,8 +382,12 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
 // 쓰면 두 사이드카가 같은 파일을 갈라 쓰게 된다 — 소유자가 다르면 거부한다.
 function assertOwner(auth, owner) {
   const current = auth.ownerSessionId;
-  if (typeof current !== 'string' || current === '' || current === owner) return;
-  throw coded('TRAINING_OWNER_MISMATCH', `training authority는 ${current} 소유입니다.`);
+  if (typeof current !== 'string' || current === '') return;
+  if (current === owner) return;
+  throw coded(
+    'TRAINING_OWNER_MISMATCH',
+    `training authority는 ${current} 소유입니다(요청: ${owner ?? 'unnamed'}).`,
+  );
 }
 
 function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
@@ -690,8 +694,9 @@ export function createTrainingControl({ storeDir } = {}) {
     return withLock(sessionDir, () => {
       let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
       if (!auth) auth = emptyAuth({ gameEpoch: gameEpoch ?? null, owner: owner ?? null });
-      // Same authority, same rule — otherwise a stale owner keeps a writer path.
-      if (owner != null) assertOwner(auth, owner);
+      // Same authority, same rule. Omitting the owner is not a way past it:
+      // once an authority is owned, a writer has to say who it is.
+      assertOwner(auth, owner ?? null);
       const entry = recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId });
       persistAuth(sessionDir, auth);
       return entry;

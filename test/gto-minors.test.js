@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { createTrainingControl } from '../tools/training-control.js';
 import { appendJsonl, readJsonl } from '../tools/training-store.js';
@@ -165,22 +166,52 @@ test('the drill server refuses a token passed in the query string', async () => 
   }
 });
 
-test('the shipped drill client sends the header the server requires', () => {
+test('the shipped drill client builds a header-authenticated request', async () => {
+  // Run the shipped file rather than grep it: a dead mention of the header name
+  // would satisfy a source scan while `fetch` still sent the token in the URL.
   const client = fs.readFileSync(path.join(ROOT, 'server/drill-public/drill.js'), 'utf8');
-  // Changing the server without changing the browser would 401 every drill.
-  assert.match(client, /x-drill-token/);
-  assert.equal(/\?token=/.test(client), false, 'the client still puts the token in the URL');
+  const context = vm.createContext({
+    location: { search: '?token=tok' },
+    crypto: { randomUUID: () => 'k' },
+    document: { getElementById: () => null, addEventListener() {} },
+    fetch: async () => ({ status: 200, json: async () => ({}) }),
+    console,
+  });
+  // The file has top-level await, so it runs inside an async IIFE. Function
+  // declarations hoist, so the helper is captured before any of the page setup
+  // runs (and that setup is free to fail against a stub DOM).
+  vm.runInContext(
+    `(async () => { globalThis.__drillRequest = drillRequest;\n${client}\n })().catch(() => {});`,
+    context,
+  );
+
+  const [url, init] = context.__drillRequest('/api/next', 'tok');
+  assert.equal(url, '/api/next', 'the token must not be in the URL');
+  assert.equal(init.headers['x-drill-token'], 'tok');
+
+  const [postUrl, postInit] = context.__drillRequest('/api/answer', 'tok', {
+    method: 'POST', body: { action: 'fold' },
+  });
+  assert.equal(postUrl, '/api/answer');
+  assert.equal(postInit.headers['x-drill-token'], 'tok');
+  assert.equal(postInit.headers['Content-Type'], 'application/json');
 });
 
-test('the client actually routes machine items through the merge rule', () => {
-  const app = fs.readFileSync(path.join(ROOT, 'server/public/app.js'), 'utf8');
-  // Testing the helper alone would stay green if app.js stopped calling it.
-  assert.match(app, /mergeTrainingItem/);
-  assert.equal(
-    /ui\.training\[at\] = item;/.test(app),
-    false,
-    'a raw overwrite path is still there',
-  );
+test('the client merge keeps a shown card and appends a new one, in hand order', async () => {
+  // The whole loop lives in the module now, so this exercises the behaviour the
+  // client relies on instead of asserting that a call site looks a certain way.
+  const { mergeTrainingItems } = await import('../server/public/training-format.js');
+  const shown = [{ evaluationId: 'e1', handNo: 1, payloadSha256: 'a'.repeat(64), grade: 'preferred' }];
+
+  const merged = mergeTrainingItems(shown, [
+    { evaluationId: 'e1', handNo: 1, payloadSha256: 'b'.repeat(64), grade: 'off-policy' },
+    { evaluationId: 'e2', handNo: 2, payloadSha256: 'c'.repeat(64), grade: 'mixed' },
+  ]);
+
+  assert.deepEqual(merged.map((row) => row.evaluationId), ['e1', 'e2']);
+  assert.equal(merged[0].grade, 'preferred', 'a conflicting digest must not rewrite the card');
+  assert.equal(merged[1].grade, 'mixed');
+  assert.deepEqual(shown.map((row) => row.grade), ['preferred'], 'the input must not be mutated');
 });
 
 test('a dataset version change flows into the question id and the answer policy', async () => {

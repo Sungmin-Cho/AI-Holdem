@@ -113,10 +113,15 @@ export function generateQueue({
   now = new Date().toISOString(),
   spotKey,
   limit = 10,
-  // 데이터셋이 밝히는 provider — 여기 상수를 두면 데이터셋을 갈아도 질문 id와
-  // answerPolicy가 옛 버전을 주장한다.
-  source = { id: 'local-preflop-baseline', version: '1.0.0' },
+  // 데이터셋이 밝히는 provider. 기본값을 두면 데이터셋을 갈아도 질문 id와
+  // answerPolicy가 옛 버전을 주장하므로, 없으면 fail-closed다.
+  source,
 } = {}) {
+  if (typeof source?.version !== 'string' || typeof source?.id !== 'string') {
+    const error = new Error('drill queue needs the dataset source');
+    error.code = 'PROVIDER_VERSION_REQUIRED';
+    throw error;
+  }
   const nonce = 1;
   const provider = { providerId: source.id, providerVersion: source.version };
   if (mode === 'leak') {

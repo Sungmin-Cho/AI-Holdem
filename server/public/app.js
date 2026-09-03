@@ -1,4 +1,4 @@
-import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItem } from './training-format.js';
+import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems } from './training-format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -699,12 +699,7 @@ function render(m) {
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (Array.isArray(m.training) && m.training.length) {
-    for (const item of m.training) {
-      const at = ui.training.findIndex((existing) => existing.evaluationId === item.evaluationId);
-      if (at === -1) ui.training.push(item);
-      else ui.training[at] = mergeTrainingItem(ui.training[at], item);
-    }
-    ui.training.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
+    ui.training = mergeTrainingItems(ui.training, m.training);
     for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   }
   if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {

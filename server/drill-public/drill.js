@@ -2,16 +2,17 @@ const token = new URLSearchParams(location.search).get('token');
 const idempotencyKey = crypto.randomUUID();
 let sessionId = null;
 
-async function api(pathname, { method = 'GET', body } = {}) {
-  // 토큰은 헤더로만 간다 — query token은 referrer·프록시 로그·히스토리에 남고,
-  // 서버는 이제 그것을 401로 거부한다.
-  const headers = { 'x-drill-token': token };
+// 토큰은 헤더로만 간다 — query token은 referrer·프록시 로그·히스토리에 남고,
+// 서버는 이제 그것을 401로 거부한다. 요청 모양을 함수로 떼어 두면 테스트가
+// 문자열을 훑는 대신 실제로 만들어지는 요청을 검사할 수 있다.
+function drillRequest(pathname, authToken, { method = 'GET', body } = {}) {
+  const headers = { 'x-drill-token': authToken };
   if (body) headers['Content-Type'] = 'application/json';
-  const res = await fetch(pathname, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  return [pathname, { method, headers, body: body ? JSON.stringify(body) : undefined }];
+}
+
+async function api(pathname, { method = 'GET', body } = {}) {
+  const res = await fetch(...drillRequest(pathname, token, { method, body }));
   const json = await res.json();
   return { httpStatus: res.status, ...json };
 }
