@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
@@ -688,16 +689,33 @@ export function createTrainingControl({ storeDir } = {}) {
   }
 
   // 진행 중인 solve를 권위에 남긴다. rollback guard(R10)가 `solveTasks`가 비어
-  // 있는지로 quiescence를 판정하므로, 시작과 종료가 모두 락 아래에서 보여야 한다.
-  async function setSolveTask(sessionDir, decisionId, entry) {
+  // 있는지로 quiescence를 판정하므로, 시작과 종료가 모두 락 아래에서 보여야
+  // 한다. 점유는 토큰으로 소유자에게 묶인다 — 잡은 쪽만 풀 수 있다.
+  async function claimSolveTask(sessionDir, decisionId, entry) {
     return withLock(sessionDir, () => {
       const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
-      if (!auth) return null;
+      if (!auth) return { claimed: false, code: 'NO_TRAINING_AUTHORITY' };
       auth.solveTasks = auth.solveTasks ?? {};
-      if (entry == null) delete auth.solveTasks[decisionId];
-      else auth.solveTasks[decisionId] = { decisionId, ...entry };
+      const existing = auth.solveTasks[decisionId];
+      if (existing) {
+        return { claimed: false, code: 'SOLVE_ALREADY_RUNNING', task: existing };
+      }
+      const token = randomBytes(16).toString('hex');
+      auth.solveTasks[decisionId] = { decisionId, token, ...entry };
       persistAuth(sessionDir, auth);
-      return auth.solveTasks[decisionId] ?? null;
+      return { claimed: true, token };
+    });
+  }
+
+  async function releaseSolveTask(sessionDir, decisionId, token) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return { released: false };
+      const existing = auth.solveTasks?.[decisionId];
+      if (!existing || existing.token !== token) return { released: false };
+      delete auth.solveTasks[decisionId];
+      persistAuth(sessionDir, auth);
+      return { released: true };
     });
   }
 
@@ -828,7 +846,8 @@ export function createTrainingControl({ storeDir } = {}) {
     markPublished,
     markConsumer,
     recordPending,
-    setSolveTask,
+    claimSolveTask,
+    releaseSolveTask,
     sealAnnotation,
     markAnnotationPublished,
     writeCutoffMarker,

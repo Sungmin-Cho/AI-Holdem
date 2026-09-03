@@ -2098,8 +2098,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         players: Array.isArray(players) ? players : [],
       });
       log('training-exploit-sealed', result);
+      if (result.skipped > 0) {
+        appendNotice(`exploit 평가를 남기지 못한 결정 ${result.skipped}건 (상대 정책 없음 또는 평가 불가).`);
+      }
     } catch (error) {
+      // exploit annotation은 additive UI 정보다. cutoff 마커와 달리 없다고 해서
+      // 계약이 깨지지는 않으므로 종료를 중단하지 않는다. 다만 조용히 사라지지도
+      // 않게 사용자에게 notice로 남긴다.
       log('training-exploit-error', { code: error.code ?? 'ERROR' });
+      appendNotice(`exploit 평가 실패: ${error.code ?? 'ERROR'}`);
     }
   };
 

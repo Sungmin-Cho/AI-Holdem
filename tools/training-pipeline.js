@@ -423,7 +423,13 @@ export async function runSolveTask({
       });
     } catch { /* the existing pending entry is already the record */ }
   };
-  await tc.setSolveTask(sessionDir, decisionId, { handNo, adapterId });
+  // 점유를 잡지 못하면 다른 solve가 이미 이 결정을 들고 있다는 뜻이다. 그
+  // 경우 pending도 건드리지 않고 물러난다 — 여기서 덮어쓰면 살아 있는 자식의
+  // 점유 기록을 지워 rollback guard가 live solve를 놓친다.
+  const claim = await tc.claimSolveTask(sessionDir, decisionId, { handNo, adapterId });
+  if (!claim?.claimed) {
+    return { ok: false, code: claim?.code ?? 'SOLVE_ALREADY_RUNNING' };
+  }
   try {
     let solved;
     try {
@@ -458,7 +464,7 @@ export async function runSolveTask({
     }
     return { ok: true };
   } finally {
-    await tc.setSolveTask(sessionDir, decisionId, null);
+    await tc.releaseSolveTask(sessionDir, decisionId, claim.token);
   }
 }
 
@@ -504,9 +510,13 @@ export async function sealExploitAnnotations({
     }
     const detail = loadEvaluationDetail(sessionDir, item);
     const rows = [];
+    let unevaluated = 0;
     for (const opponent of livePotOpponents(snapshot)) {
       const policy = policyOf(players, opponent.playerId);
-      if (!policy) continue;
+      if (!policy) {
+        unevaluated += 1;
+        continue;
+      }
       let evaluated;
       try {
         evaluated = evaluateExploit({
@@ -516,9 +526,13 @@ export async function sealExploitAnnotations({
           chosen: snapshot.chosenAction,
         });
       } catch {
+        unevaluated += 1;
         continue;
       }
-      if (evaluated?.exploit?.status !== 'supported') continue;
+      if (evaluated?.exploit?.status !== 'supported') {
+        unevaluated += 1;
+        continue;
+      }
       rows.push({
         opponentId: opponent.playerId,
         policyId: evaluated.exploit.opponentModelId,
@@ -527,7 +541,10 @@ export async function sealExploitAnnotations({
         contribution: opponent.contribution,
       });
     }
-    if (rows.length === 0) {
+    // 부분 결과는 봉인하지 않는다. annotation은 terminal set-once이므로 한
+    // 상대라도 평가하지 못한 채 봉인하면 틀린 `primary`가 영구히 박힌다. 상대
+    // 전원을 평가할 수 없으면 annotation을 아예 남기지 않는 쪽이 fail-closed다.
+    if (rows.length === 0 || unevaluated > 0) {
       skipped += 1;
       continue;
     }
