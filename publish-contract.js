@@ -187,8 +187,8 @@ export function validatePrivateEngineState(engineState) {
   if (engineState.gameOver
     && (engineState.phase !== 'idle'
       || engineState.hand !== null
-      || engineState.lastHand === null
-      || !['win', 'lose', 'completed'].includes(engineState.result))) {
+      || !['win', 'lose', 'completed', 'abort'].includes(engineState.result)
+      || (engineState.result !== 'abort' && engineState.lastHand === null))) {
     throw coded('PRIVATE_LITERAL_INVALID', 'gameOver is not backed by terminal engine state');
   }
   return engineState;

@@ -215,15 +215,17 @@ function legacyTrainingPayloadSha256(item) {
   return sha256Hex(JSON.stringify(canonical));
 }
 
-function storedTrainingDigestMatches(item, projected) {
+function storedTrainingDigestMatches(item, projected, { allowLegacyExplanation = false } = {}) {
   if (typeof item?.payloadSha256 !== 'string') return false;
   if (Object.hasOwn(item, 'explanation')) {
-    return item.payloadSha256 === legacyTrainingPayloadSha256(item);
+    return allowLegacyExplanation
+      ? item.payloadSha256 === legacyTrainingPayloadSha256(item)
+      : item.payloadSha256 === projected.payloadSha256;
   }
   return item.payloadSha256 === projected.payloadSha256;
 }
 
-function migrateLoadedTraining(rawTraining) {
+function migrateLoadedTraining(rawTraining, { allowLegacyExplanation = false } = {}) {
   const byId = new Map();
   const split = Object.create(null);
   let dropped = 0;
@@ -252,12 +254,12 @@ function migrateLoadedTraining(rawTraining) {
       dropped += 1;
       continue;
     }
-    if (!storedTrainingDigestMatches(item, projected)) {
+    if (!storedTrainingDigestMatches(item, projected, { allowLegacyExplanation })) {
       dropped += 1;
       continue;
     }
     byId.set(projected.evaluationId, projected);
-    if (typeof explanation === 'string' && explanation.length) {
+    if (allowLegacyExplanation && typeof explanation === 'string' && explanation.length) {
       try {
         const ann = projectTrainingAnnotation({
           evaluationId: projected.evaluationId,
@@ -332,7 +334,9 @@ function restoreHistory(rawHistory, context) {
           continue;
         }
         const machine = context.machineById.get(projected.evaluationId);
-        if (!storedTrainingDigestMatches(item, projected)
+        if (!storedTrainingDigestMatches(item, projected, {
+          allowLegacyExplanation: context.allowLegacyExplanation,
+        })
           || !machine
           || machine.payloadSha256 !== projected.payloadSha256) {
           dropped += 1;
@@ -384,10 +388,20 @@ function restoreHistory(rawHistory, context) {
   return { history: restored, dropped };
 }
 
+function legacyTrainingSnapshot(gameDir) {
+  try {
+    const authority = readSecurityJson(gameDir, ['training', '.training-authority.json']);
+    return authority?.schemaVersion === 1;
+  } catch {
+    return false;
+  }
+}
+
 function loadUiState(gameDir) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
-    const migrated = migrateLoadedTraining(raw.training);
+    const allowLegacyExplanation = legacyTrainingSnapshot(gameDir);
+    const migrated = migrateLoadedTraining(raw.training, { allowLegacyExplanation });
     const machineById = new Map(migrated.training.map((row) => [row.evaluationId, row]));
 
     // 보안 자료는 이 로드에서 한 번 읽는다. 읽지 못하면 explanation은 전부 드롭한다.
@@ -437,7 +451,7 @@ function loadUiState(gameDir) {
       restoredAnnotations[projected.evaluationId][projected.field] = projected;
     }
     const replay = restoreHistory(raw.history, {
-      machineById, literals, gate, annotations: restoredAnnotations,
+      machineById, literals, gate, annotations: restoredAnnotations, allowLegacyExplanation,
     });
     if (droppedAnnotations || replay.dropped) {
       process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
