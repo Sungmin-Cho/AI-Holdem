@@ -602,9 +602,18 @@ export async function reconcileSession({
   });
 }
 
+// 게시 경로는 매 턴 호출된다. 여기서 던지면 training 장애가 턴 게시 장애가 된다 —
+// training은 자기 소비자에게 계속 크게 실패하되, 게임 진행은 막지 않는다.
+function authorityForPublish(sessionDir) {
+  try {
+    return createTrainingControl().loadAuthority(sessionDir);
+  } catch {
+    return null;
+  }
+}
+
 export function unpublishedEnvelope(sessionDir, { gameEpoch } = {}) {
-  const tc = createTrainingControl();
-  const auth = tc.loadAuthority(sessionDir);
+  const auth = authorityForPublish(sessionDir);
   if (!auth) return null;
   const unpublished = Object.values(auth.items)
     .filter((item) => item.status !== 'published' && auth.publishQueue[item.evaluationId] && item.summary)
@@ -647,8 +656,7 @@ export function unpublishedEnvelope(sessionDir, { gameEpoch } = {}) {
 }
 
 export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
-  const tc = createTrainingControl();
-  const auth = tc.loadAuthority(sessionDir);
+  const auth = authorityForPublish(sessionDir);
   if (!auth) return null;
   const entries = [];
   for (const [evaluationId, fields] of Object.entries(auth.annotationQueue ?? {})) {

@@ -29,7 +29,8 @@ export async function writeOpponentNote(storeDir, note, { io } = {}) {
     atHandNo: note.atHandNo,
     observations: [...(note.observations ?? [])],
     confidence: note.confidence ?? null,
-    writtenAt: note.writtenAt ?? new Date().toISOString(),
+    // 작성자가 준 시각은 무시한다 — 노트의 시간순은 서버가 소유한다.
+    writtenAt: new Date().toISOString(),
   };
   const dir = path.join(storeDir, '.training');
   ensureDir(dir);

@@ -4593,6 +4593,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const notices = [
         ...(Array.isArray(resolved?.notices) ? resolved.notices : []),
         ...sweepNotices,
+        // 레거시 --game-dir는 training이 꺼진 채로 도는데, 지금까지는 아무 말도
+        // 하지 않아 평가가 왜 비어 있는지 알 길이 없었다.
+        ...(trainingOn ? [] : ['이 세션은 레거시 --game-dir라 training이 꺼져 있습니다. 학습 평가를 남기려면 --store-dir로 시작하세요.']),
       ];
       selectAdapters(resolved ?? {});
       writeLoopState({

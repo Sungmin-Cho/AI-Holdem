@@ -90,8 +90,8 @@ function writePending(storeDir) {
 
 async function api(port, token, pathname, { method = 'GET', body, raw, signal } = {}) {
   const url = new URL(pathname, `http://127.0.0.1:${port}`);
-  url.searchParams.set('token', token);
-  const headers = {};
+  // 토큰은 헤더 전용(P2-2 항목 7) — query token은 401이다.
+  const headers = { 'x-drill-token': token };
   const init = { method, headers, signal };
   if (raw != null) {
     headers['Content-Type'] = 'application/json';
@@ -164,9 +164,9 @@ test('drill server uses its own token and game server does not serve drill.html'
   try {
     const denied = await fetch(`http://127.0.0.1:${drill.port}/api/next`);
     assert.equal(denied.status, 401);
-    const started = await fetch(`http://127.0.0.1:${drill.port}/api/start?token=drill-tok`, {
+    const started = await fetch(`http://127.0.0.1:${drill.port}/api/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-drill-token': 'drill-tok' },
       body: JSON.stringify({ mode: 'free', seed: '1', idempotencyKey: 'k-existing' }),
     });
     assert.equal((await started.json()).ok, true);
@@ -252,8 +252,8 @@ test('chunked body over 64KiB returns JSON 413 without resetting the socket', as
         hostname: '127.0.0.1',
         port: drill.port,
         method: 'POST',
-        path: '/api/start?token=tok',
-        headers: { 'Content-Type': 'application/json' },
+        path: '/api/start',
+        headers: { 'Content-Type': 'application/json', 'x-drill-token': 'tok' },
       }, (incoming) => {
         const chunks = [];
         incoming.on('data', (chunk) => chunks.push(chunk));

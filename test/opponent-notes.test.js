@@ -14,14 +14,18 @@ test('notes freeze at write time and cannot be rewritten', async () => {
     atHandNo: 3,
     observations: ['calls-too-wide'],
     confidence: 0.6,
+    // 서버가 시각을 찍는다(P2-2 항목 10) — 여기 준 값은 무시된다.
     writtenAt: '2026-09-01T00:00:00.000Z',
   });
   assert.equal(first.atHandNo, 3);
   const again = readOpponentNotes(store);
   assert.equal(again.length, 1);
   assert.deepEqual(again[0].observations, ['calls-too-wide']);
+  assert.notEqual(first.writtenAt, '2026-09-01T00:00:00.000Z');
+  const stamped = first.writtenAt;
   await assert.rejects(() => rewriteOpponentNotesForbidden(store), { code: 'NOTE_IMMUTABLE' });
-  assert.equal(readOpponentNotes(store)[0].writtenAt, '2026-09-01T00:00:00.000Z');
+  // 여전히 불변이다 — 바뀐 것은 누가 시각을 정하느냐뿐이다.
+  assert.equal(readOpponentNotes(store)[0].writtenAt, stamped);
 });
 
 test('read accuracy splits hit/miss/wrong against actual deviations', () => {

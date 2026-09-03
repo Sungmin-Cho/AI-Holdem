@@ -30,7 +30,18 @@ function shuffle(items, seed) {
   return copy;
 }
 
-function questionFrom({ mode, spotKey, handClass = 'AJo', skillKey, nonce, providerVersion = '1.0.0' }) {
+const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
+const PROVIDER_VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+function questionFrom({
+  mode, spotKey, handClass = 'AJo', skillKey, nonce,
+  providerId = 'local-preflop-baseline', providerVersion,
+}) {
+  if (!PROVIDER_VERSION_RE.test(providerVersion ?? '')) {
+    const error = new Error('drill question needs the dataset provider version');
+    error.code = 'PROVIDER_VERSION_REQUIRED';
+    throw error;
+  }
   const pos = (spotKey.split('-')[2] ?? 'btn').toUpperCase();
   return {
     questionId: `drill:${providerVersion}:${spotKey}:${handClass}:${nonce}`,
@@ -47,10 +58,54 @@ function questionFrom({ mode, spotKey, handClass = 'AJo', skillKey, nonce, provi
         : ['fold', 'raise:2.5'],
     },
     answerPolicy: {
-      providerId: 'local-preflop-baseline',
+      providerId,
       providerVersion,
     },
   };
+}
+
+// The spot grammar, not the dataset — `training/` stays pure. A leak names a
+// seat and a situation, and the drill should follow it rather than collapse
+// every leak onto one of two spots with one hand.
+const RFI_SEATS = ['utg', 'hj', 'co', 'btn', 'sb'];
+const DEFENSE_SEATS = ['bb', 'sb', 'btn'];
+const SEAT_ALIASES = new Map([['mp', 'hj'], ['lj', 'hj'], ['bu', 'btn'], ['button', 'btn']]);
+const HAND_ROTATION = ['AJo', 'KQs', 'A5s', '77', 'QTs', 'T9s', 'KJo', '22'];
+
+function seatIn(key, seats) {
+  for (const seat of seats) {
+    if (new RegExp(`(^|[^a-z])${seat}([^a-z]|$)`).test(key)) return seat;
+  }
+  for (const [alias, seat] of SEAT_ALIASES) {
+    if (!seats.includes(seat)) continue;
+    if (new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`).test(key)) return seat;
+  }
+  return null;
+}
+
+export function spotForSkillKey(skillKey) {
+  const key = String(skillKey ?? '').toLowerCase();
+  // `skillKeyOf` emits `preflop.rfi.<POS>`, `preflop.bbDefense.vsRaise` and
+  // `preflop.vsRaise.<POS>`. The last two have no hyphen, so testing for `vs-`
+  // alone sent every non-BB defence leak to an RFI spot.
+  if (/defense|defence|vs-?raise|vs-/.test(key)) {
+    // Named by the seat that defends: `preflop.vsRaise.CO` carries it after the
+    // marker, `preflop.bbDefense.vsRaise` before it. Seats the grammar has no
+    // defence spot for fall back to BB rather than to an unrelated RFI spot.
+    const parts = key.split(/defense|defence|vs-?raise|vs-/);
+    const defender = seatIn(parts[0] ?? '', DEFENSE_SEATS)
+      ?? seatIn(parts.slice(1).join(' '), DEFENSE_SEATS)
+      ?? 'bb';
+    return `6max-100bb-${defender}-vs-single-raise`;
+  }
+  return `6max-100bb-${seatIn(key, RFI_SEATS) ?? 'btn'}-rfi-unopened`;
+}
+
+export function handClassForSkillKey(skillKey) {
+  const key = String(skillKey ?? '');
+  let sum = 0;
+  for (let i = 0; i < key.length; i += 1) sum = (sum * 31 + key.charCodeAt(i)) >>> 0;
+  return HAND_ROTATION[sum % HAND_ROTATION.length];
 }
 
 export function generateQueue({
@@ -61,18 +116,33 @@ export function generateQueue({
   now = new Date().toISOString(),
   spotKey,
   limit = 10,
+  // 데이터셋이 밝히는 provider. 기본값을 두면 데이터셋을 갈아도 질문 id와
+  // answerPolicy가 옛 버전을 주장하므로, 없으면 fail-closed다.
+  source,
 } = {}) {
+  // 타입만 보면 빈 문자열이 통과해 `drill::…` 같은 provenance가 생기고, 빈
+  // 버전은 평가기의 truthy 검사까지 비껴간다. evaluationId와 같은 문법으로 건다.
+  if (!PROVIDER_ID_RE.test(source?.id ?? '') || !PROVIDER_VERSION_RE.test(source?.version ?? '')) {
+    const error = new Error('drill queue needs a dataset source with a provider id and semver');
+    error.code = 'PROVIDER_VERSION_REQUIRED';
+    throw error;
+  }
   const nonce = 1;
+  const provider = { providerId: source.id, providerVersion: source.version };
   if (mode === 'leak') {
     const leak = profile?.leaks?.[0];
     const key = leak?.recommendedDrill ?? leak?.id ?? 'preflop.rfi.BTN';
-    const spot = key.includes('bbDefense') ? '6max-100bb-bb-vs-single-raise' : '6max-100bb-btn-rfi-unopened';
-    return [questionFrom({ mode, spotKey: spot, skillKey: key, nonce, handClass: 'AJo' })];
+    const spot = spotForSkillKey(key);
+    return [questionFrom({
+      ...provider,
+      mode, spotKey: spot, skillKey: key, nonce, handClass: handClassForSkillKey(key),
+    })];
   }
   if (mode === 'mistake-review') {
     return mistakes.slice(0, limit).map((item, index) => {
       const [spot, handClass] = String(item.spotSignature).split(':');
       return questionFrom({
+        ...provider,
         mode,
         spotKey: spot,
         handClass: handClass ?? 'AJo',
@@ -86,6 +156,7 @@ export function generateQueue({
     return due.slice(0, limit).map((item, index) => {
       const [spot, handClass] = String(item.spotSignature).split(':');
       return questionFrom({
+        ...provider,
         mode,
         spotKey: spot,
         handClass: handClass ?? 'AJo',
@@ -96,6 +167,7 @@ export function generateQueue({
   }
   const spots = spotKey ? [spotKey] : shuffle(DEFAULT_SPOTS, seed);
   return spots.slice(0, limit).map((spot, index) => questionFrom({
+    ...provider,
     mode: 'free',
     spotKey: spot,
     skillKey: 'preflop.free',

@@ -119,12 +119,31 @@ export function appendJsonl(filePath, record) {
     if (!st.isFile()) throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
     let size = st.size;
     if (size > 0) {
-      const tailSize = Math.min(size, 64 * 1024);
-      const buf = Buffer.alloc(tailSize);
-      fs.readSync(fd, buf, 0, tailSize, size - tailSize);
-      if (buf[buf.length - 1] !== 0x0a) {
+      // Walk back a window at a time until a newline turns up. Scanning one
+      // 64KiB window and giving up truncated a longer torn line to a point that
+      // was still mid-line, which left the file corrupt instead of repairing it.
+      const window = 64 * 1024;
+      let end = size;
+      let recovered = null;
+      let complete = false;
+      while (end > 0) {
+        const chunk = Math.min(window, end);
+        const buf = Buffer.alloc(chunk);
+        fs.readSync(fd, buf, 0, chunk, end - chunk);
+        if (end === size && buf[buf.length - 1] === 0x0a) {
+          complete = true;
+          break;
+        }
         const nl = lastNewlineOffset(buf);
-        size = nl === -1 ? size - tailSize : size - tailSize + nl + 1;
+        if (nl !== -1) {
+          recovered = end - chunk + nl + 1;
+          break;
+        }
+        end -= chunk;
+      }
+      if (!complete) {
+        // No newline anywhere means the whole file is one torn line.
+        size = recovered ?? 0;
         fs.ftruncateSync(fd, size);
       }
     }
@@ -137,12 +156,28 @@ export function appendJsonl(filePath, record) {
 }
 
 export function readJsonl(filePath) {
-  const st = lstatOrNull(filePath);
-  if (!st) return [];
-  if (st.isSymbolicLink() || !st.isFile()) {
-    throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
+  // O_NOFOLLOW instead of lstat-then-read: the check and the read are the same
+  // syscall, so the path cannot become a symlink in between.
+  let fd;
+  let raw;
+  try {
+    // O_NONBLOCK so a FIFO is refused by the fstat below instead of blocking
+    // forever waiting for a writer; on a regular file it changes nothing.
+    fd = openNoFollow(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    if (error.code === 'ELOOP' || error.code === 'EMLINK' || error.code === 'EISDIR') {
+      throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
+    }
+    throw error;
   }
-  const raw = fs.readFileSync(filePath, 'utf8');
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
+    raw = fs.readFileSync(fd, 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
   const rows = [];
   const parts = raw.split('\n');
   const last = parts[parts.length - 1];

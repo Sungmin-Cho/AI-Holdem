@@ -1233,7 +1233,8 @@ test('coach rollback requires empty pending map and empty annotationQueue (evalu
   const evaluatedOnly = await cc.assertRollbackAllowed(dir);
   assert.equal(evaluatedOnly.ok, true);
 
-  await tc.recordPending(dir, 'd-9-preflop-0', { handNo: 9, reason: 'EVALUATE_FAILED' });
+  // 소유된 authority에 쓰려면 자신이 누구인지 밝혀야 한다(P2-2 항목 1).
+  await tc.recordPending(dir, 'd-9-preflop-0', { handNo: 9, reason: 'EVALUATE_FAILED', owner: 'owner-1' });
   const pending = await cc.assertRollbackAllowed(dir);
   assert.equal(pending.ok, false);
   assert.equal(pending.reasons.some((reason) => reason.code === 'pending_training'), true);

@@ -1303,7 +1303,9 @@ test('bootstrap records NO_PLAYER_RUNTIME, removes the canary, and releases owne
     code: 'NO_PLAYER_RUNTIME',
     message: '적격 플레이어 런타임이 없습니다.',
   });
-  assert.deepEqual(state.notices, ['none eligible']);
+  // 레거시 --game-dir는 training이 꺼졌다는 notice를 함께 남긴다(P2-2 항목 2).
+  assert.equal(state.notices[0], 'none eligible');
+  assert.ok(state.notices.some((notice) => /--store-dir/.test(notice)));
   assert.equal(fs.existsSync(canaryAbsPath), false);
   assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);

@@ -1,0 +1,424 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+import { createTrainingControl } from '../tools/training-control.js';
+import { appendJsonl, readJsonl } from '../tools/training-store.js';
+import { evaluationIdOf } from '../training/contracts.js';
+import { generateQueue } from '../training/drill-generator.js';
+import { writeOpponentNote, readOpponentNotes } from '../tools/training-stores.js';
+import { startDrillServer } from '../tools/drill-server.js';
+import * as pipeline from '../tools/training-pipeline.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EPOCH = 'ab'.repeat(32);
+
+function tmp(prefix = 'holdem-minors-') {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function evaluationOf(decisionId = 'd-1-preflop-0') {
+  return {
+    schemaVersion: 1,
+    evaluationId: evaluationIdOf({
+      gameEpoch: EPOCH,
+      decisionId,
+      providerId: 'local-preflop-baseline',
+      providerVersion: '1.0.0',
+    }),
+    decisionId,
+    status: 'supported',
+    street: 'preflop',
+    spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AA',
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }],
+    chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null },
+    bestEvBb: null,
+    evLossBb: null,
+    grade: 'preferred',
+    forced: false,
+    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+  };
+}
+
+// 1 — owner 검증: stale owner의 authority 변경은 거부된다.
+test('an authority owned by one session refuses a write from a stale owner', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: EPOCH, owner: 'owner-live', handNo: 1, evaluations: [evaluationOf()],
+  });
+
+  await assert.rejects(
+    () => tc.acceptEvaluations(dir, {
+      gameEpoch: EPOCH, owner: 'owner-stale', handNo: 1, evaluations: [evaluationOf('d-2-preflop-0')],
+    }),
+    { code: 'TRAINING_OWNER_MISMATCH' },
+  );
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.ownerSessionId, 'owner-live');
+  assert.equal(Object.keys(auth.items).length, 1);
+});
+
+// 2 — 레거시 `--game-dir`은 training이 꺼진다는 사실을 notice로 남긴다.
+test('a legacy --game-dir session says out loud that training is off', async (t) => {
+  const { createGameLoop } = await import('../tools/game-loop.js');
+  const gameDir = tmp('holdem-minors-legacy-');
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy' },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({
+    ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 1, opponentRuntime: 'policy',
+  });
+
+  const state = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'), 'utf8'));
+  assert.ok(
+    (state.notices ?? []).some((notice) => /training/i.test(notice) && /--store-dir/.test(notice)),
+    `no training-off notice in ${JSON.stringify(state.notices)}`,
+  );
+});
+
+// 3 — readJsonl은 symlink를 거부한다(O_NOFOLLOW 하드닝의 회귀 가드).
+test('readJsonl refuses a symlinked jsonl', () => {
+  const dir = tmp();
+  const real = path.join(dir, 'real.jsonl');
+  const link = path.join(dir, 'link.jsonl');
+  fs.writeFileSync(real, `${JSON.stringify({ a: 1 })}\n`);
+  fs.symlinkSync(real, link);
+  assert.deepEqual(readJsonl(real), [{ a: 1 }]);
+  assert.throws(() => readJsonl(link), { code: 'UNSAFE_PATH' });
+});
+
+// 4 — 깨진 training authority가 turn 게시를 막아선 안 된다.
+test('a corrupt training authority halts training without blocking publication', () => {
+  const dir = tmp();
+  fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'training', '.training-authority.json'),
+    JSON.stringify({ schemaVersion: 99, items: {} }),
+  );
+
+  // The publisher asks for an envelope on every turn. Throwing here stops the
+  // turn from being published at all, which trades a training outage for a game
+  // outage.
+  assert.doesNotThrow(() => pipeline.unpublishedEnvelope(dir, { gameEpoch: EPOCH }));
+  assert.equal(pipeline.unpublishedEnvelope(dir, { gameEpoch: EPOCH }), null);
+  assert.doesNotThrow(() => pipeline.annotationEnvelope(dir, { gameEpoch: EPOCH }));
+  assert.equal(pipeline.annotationEnvelope(dir, { gameEpoch: EPOCH }), null);
+  // Training itself must still fail loudly for its own consumers.
+  assert.throws(
+    () => createTrainingControl().loadAuthority(dir),
+    { code: 'UNSUPPORTED_TRAINING_AUTHORITY' },
+  );
+});
+
+// 5 — torn tail은 64KiB 창이 아니라 파일 전체를 역탐색해 복구한다.
+test('a torn tail longer than the 64KiB window is recovered, then append and read succeed', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'events.jsonl');
+  const intact = { id: 'first', pad: 'x'.repeat(16) };
+  // One complete row, then a torn row larger than the scan window.
+  const torn = `${JSON.stringify({ id: 'torn', pad: 'y'.repeat(80 * 1024) })}`;
+  fs.writeFileSync(file, `${JSON.stringify(intact)}\n${torn.slice(0, torn.length - 5)}`);
+
+  appendJsonl(file, { id: 'second' });
+
+  const rows = readJsonl(file);
+  assert.deepEqual(rows.map((row) => row.id), ['first', 'second']);
+});
+
+// 6 — 클라이언트 병합: 같은 evaluationId에 다른 digest가 오면 기존을 유지한다.
+test('a machine item with a conflicting digest never replaces the one already shown', async () => {
+  const { mergeTrainingItem } = await import('../server/public/training-format.js');
+  const existing = { evaluationId: 'e1', payloadSha256: 'a'.repeat(64), grade: 'preferred' };
+
+  assert.equal(mergeTrainingItem(existing, { ...existing }), existing, 'same digest is a no-op');
+  const conflicting = { evaluationId: 'e1', payloadSha256: 'b'.repeat(64), grade: 'off-policy' };
+  assert.equal(
+    mergeTrainingItem(existing, conflicting),
+    existing,
+    'a set-once digest cannot be rewritten by a later publish',
+  );
+  assert.equal(mergeTrainingItem(undefined, conflicting), conflicting, 'a first item is taken');
+});
+
+// 7 — drill 토큰은 헤더 전용. query token은 401.
+test('the drill server refuses a token passed in the query string', async () => {
+  const storeDir = tmp('holdem-minors-drill-');
+  const started = await startDrillServer({ storeDir, port: 0, token: 'tok' });
+  try {
+    const viaQuery = await fetch(`http://127.0.0.1:${started.port}/api/drill/state?token=tok`);
+    assert.equal(viaQuery.status, 401, 'a query-string token must not authenticate');
+
+    const viaHeader = await fetch(`http://127.0.0.1:${started.port}/api/drill/state`, {
+      headers: { 'x-drill-token': 'tok' },
+    });
+    assert.notEqual(viaHeader.status, 401);
+  } finally {
+    await started.close();
+  }
+});
+
+test('the shipped drill client sends its token in the header, never in the URL', async () => {
+  // Run the shipped file and inspect what `api` actually hands to `fetch`.
+  // Calling the request builder alone would stay green if `api` stopped using
+  // it, which is the regression this guards.
+  const client = fs.readFileSync(path.join(ROOT, 'server/drill-public/drill.js'), 'utf8');
+  const calls = [];
+  const context = vm.createContext({
+    URLSearchParams,
+    URL,
+    location: { search: '?token=tok' },
+    crypto: { randomUUID: () => 'k' },
+    document: { getElementById: () => null, addEventListener() {}, querySelectorAll: () => [] },
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return { status: 200, json: async () => ({ ok: true }) };
+    },
+    console,
+    setTimeout,
+  });
+  // Function declarations hoist, so `api` is captured before the page setup
+  // runs — and that setup is free to fail against a stub DOM.
+  vm.runInContext(
+    `(async () => { globalThis.__api = api;\n${client}\n })().catch(() => {});`,
+    context,
+  );
+  assert.equal(typeof context.__api, 'function', 'the shipped client exposes no api()');
+
+  await context.__api('/api/next');
+  const post = await context.__api('/api/answer', { method: 'POST', body: { action: 'fold' } });
+  assert.ok(post);
+
+  // Every request the page makes, including the ones its own startup issues.
+  assert.ok(calls.length >= 2, `only ${calls.length} requests observed`);
+  for (const call of calls) {
+    assert.equal(/[?&]token=/.test(call.url), false, `token leaked into ${call.url}`);
+    assert.equal(call.init.headers['x-drill-token'], 'tok', `no header on ${call.url}`);
+  }
+  const posted = calls.find((call) => call.init.method === 'POST');
+  assert.ok(posted, 'no POST was observed');
+  assert.equal(posted.init.headers['Content-Type'], 'application/json');
+});
+
+test('the client merge keeps a shown card and appends a new one, in hand order', async () => {
+  // The whole loop lives in the module now, so this exercises the behaviour the
+  // client relies on instead of asserting that a call site looks a certain way.
+  const { mergeTrainingItems } = await import('../server/public/training-format.js');
+  const shown = [{ evaluationId: 'e1', handNo: 1, payloadSha256: 'a'.repeat(64), grade: 'preferred' }];
+
+  const merged = mergeTrainingItems(shown, [
+    // Out of order on purpose: an unsorted input is what proves the sort.
+    { evaluationId: 'e3', handNo: 9, payloadSha256: 'd'.repeat(64), grade: 'mixed' },
+    { evaluationId: 'e1', handNo: 1, payloadSha256: 'b'.repeat(64), grade: 'off-policy' },
+    { evaluationId: 'e2', handNo: 2, payloadSha256: 'c'.repeat(64), grade: 'mixed' },
+  ]);
+
+  assert.deepEqual(merged.map((row) => row.evaluationId), ['e1', 'e2', 'e3']);
+  assert.equal(merged[0].grade, 'preferred', 'a conflicting digest must not rewrite the card');
+  assert.equal(merged[1].grade, 'mixed');
+  assert.deepEqual(shown.map((row) => row.grade), ['preferred'], 'the input must not be mutated');
+
+  // And the client must route through it rather than keep its own loop.
+  const app = fs.readFileSync(path.join(ROOT, 'server/public/app.js'), 'utf8');
+  assert.match(app, /ui\.training = mergeTrainingItems\(ui\.training, m\.training\);/);
+  assert.equal(/ui\.training\.(push|splice)\(/.test(app), false, 'a second mutation path exists');
+});
+
+test('a dataset version change flows into the question id and the answer policy', async () => {
+  const { generateQueue: build } = await import('../training/drill-generator.js');
+  const [question] = build({
+    mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened',
+    source: { id: 'local-preflop-baseline', version: '2.5.0' },
+  });
+  assert.match(question.questionId, /^drill:2\.5\.0:/);
+  assert.equal(question.answerPolicy.providerVersion, '2.5.0');
+  assert.equal(question.answerPolicy.providerId, 'local-preflop-baseline');
+});
+
+// 8 — leak 모드 spot 매핑은 두 갈래 하드코딩이 아니라 leak id에서 유도된다.
+test('leak drills derive their spot and hand from the leak, not from a two-branch default', () => {
+  const source = { id: 'local-preflop-baseline', version: '1.0.0' };
+  const build = (id) => generateQueue({ mode: 'leak', profile: { leaks: [{ id }] }, source })[0].prompt;
+
+  const co = build('preflop.rfi.CO');
+  const sb = build('preflop.rfi.SB');
+  const defense = build('preflop.bbDefense.vs-BTN');
+
+  assert.match(co.spotKey, /co/, `CO leak mapped to ${co.spotKey}`);
+  assert.match(sb.spotKey, /sb/, `SB leak mapped to ${sb.spotKey}`);
+  assert.notEqual(co.spotKey, sb.spotKey, 'different leaks must not collapse to one spot');
+  assert.match(defense.spotKey, /bb-vs/, `defense leak mapped to ${defense.spotKey}`);
+
+  const hands = new Set([co.handClass, sb.handClass, defense.handClass]);
+  assert.ok(hands.size > 1, `every leak drilled the same hand: ${[...hands]}`);
+});
+
+test('readJsonl refuses a FIFO instead of waiting for a writer', { timeout: 10_000 }, () => {
+  const dir = tmp();
+  const fifo = path.join(dir, 'pipe.jsonl');
+  const made = spawnSync('mkfifo', [fifo]);
+  if (made.status !== 0) return; // no mkfifo on this platform
+  // Opening a FIFO read-only blocks until a writer appears; the old lstat check
+  // refused it immediately, and that contract must survive the O_NOFOLLOW move.
+  assert.throws(() => readJsonl(fifo), { code: 'UNSAFE_PATH' });
+});
+
+test('the real leak vocabulary maps defence leaks to defence spots', async () => {
+  const { spotForSkillKey } = await import('../training/drill-generator.js');
+  // `skillKeyOf` emits these three shapes, and the last two carry no hyphen.
+  assert.equal(spotForSkillKey('preflop.bbDefense.vsRaise'), '6max-100bb-bb-vs-single-raise');
+  assert.equal(spotForSkillKey('preflop.vsRaise.SB'), '6max-100bb-sb-vs-single-raise');
+  assert.equal(spotForSkillKey('preflop.vsRaise.BTN'), '6max-100bb-btn-vs-single-raise');
+  // A seat with no defence spot in the grammar stays a defence spot rather than
+  // silently becoming an unrelated RFI drill.
+  assert.match(spotForSkillKey('preflop.vsRaise.CO'), /vs-single-raise$/);
+  assert.equal(spotForSkillKey('preflop.rfi.CO'), '6max-100bb-co-rfi-unopened');
+});
+
+test('a stale owner cannot record a pending decision either', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: EPOCH, owner: 'owner-live', handNo: 1, evaluations: [evaluationOf()],
+  });
+
+  await assert.rejects(
+    () => tc.recordPending(dir, 'd-9-preflop-0', {
+      handNo: 9, reason: 'solve', gameEpoch: EPOCH, owner: 'owner-stale',
+    }),
+    { code: 'TRAINING_OWNER_MISMATCH' },
+  );
+  // Omitting the owner is not a way past the fence either.
+  await assert.rejects(
+    () => tc.recordPending(dir, 'd-9-preflop-0', { handNo: 9, reason: 'EVALUATE_FAILED' }),
+    { code: 'TRAINING_OWNER_MISMATCH' },
+  );
+  assert.equal(createTrainingControl().loadAuthority(dir).pending['d-9-preflop-0'], undefined);
+});
+
+test('a drill source with an empty id or version is refused', async () => {
+  const { generateQueue: build } = await import('../training/drill-generator.js');
+  const opts = { mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened' };
+  for (const source of [
+    undefined, null,
+    { id: 'local-preflop-baseline', version: '' },
+    { id: '', version: '1.0.0' },
+    { id: 'local-preflop-baseline', version: ' ' },
+    { id: 'Local Baseline', version: '1.0.0' },
+  ]) {
+    assert.throws(
+      () => build({ ...opts, source }),
+      { code: 'PROVIDER_VERSION_REQUIRED' },
+      `accepted ${JSON.stringify(source)}`,
+    );
+  }
+});
+
+test('every derived leak spot is one the dataset actually has', async () => {
+  const { spotForSkillKey } = await import('../training/drill-generator.js');
+  const { loadPreflopDataset } = await import('../tools/preflop-dataset.js');
+  const { data } = loadPreflopDataset();
+
+  // A derived name the dataset does not carry would make every leak drill
+  // unsupported, which is worse than the two-branch default it replaces.
+  const leaks = [
+    'preflop.rfi.UTG', 'preflop.rfi.MP', 'preflop.rfi.HJ', 'preflop.rfi.CO',
+    'preflop.rfi.BTN', 'preflop.rfi.SB',
+    'preflop.bbDefense.vs-BTN', 'preflop.sbDefense.vs-CO', 'preflop.btnDefense.vs-UTG',
+    'nothing-recognisable',
+  ];
+  const missing = leaks
+    .map((leak) => [leak, spotForSkillKey(leak)])
+    .filter(([, spot]) => !data.spots[spot]);
+  assert.deepEqual(missing, []);
+});
+
+test('appendJsonl repairs a torn tail at every boundary without eating a whole line', () => {
+  const dir = tmp();
+  const row = (id, pad = 8) => JSON.stringify({ id, pad: 'z'.repeat(pad) });
+
+  // A file that is one torn line and nothing else.
+  const only = path.join(dir, 'only.jsonl');
+  fs.writeFileSync(only, row('torn', 70 * 1024).slice(0, -3));
+  appendJsonl(only, { id: 'kept' });
+  assert.deepEqual(readJsonl(only).map((entry) => entry.id), ['kept']);
+
+  // A file that already ends on a newline must not lose its last line.
+  const clean = path.join(dir, 'clean.jsonl');
+  fs.writeFileSync(clean, `${row('a')}\n${row('b')}\n`);
+  appendJsonl(clean, { id: 'c' });
+  assert.deepEqual(readJsonl(clean).map((entry) => entry.id), ['a', 'b', 'c']);
+
+  // A torn line spanning several windows.
+  const wide = path.join(dir, 'wide.jsonl');
+  fs.writeFileSync(wide, `${row('a')}\n${row('torn', 200 * 1024).slice(0, -3)}`);
+  appendJsonl(wide, { id: 'b' });
+  assert.deepEqual(readJsonl(wide).map((entry) => entry.id), ['a', 'b']);
+
+  // An empty file.
+  const empty = path.join(dir, 'empty.jsonl');
+  fs.writeFileSync(empty, '');
+  appendJsonl(empty, { id: 'first' });
+  assert.deepEqual(readJsonl(empty).map((entry) => entry.id), ['first']);
+});
+
+// 9 — provider version은 데이터셋에서 온다. 하드코딩 상수가 남아 있으면 안 된다.
+test('the drill provider version comes from the dataset, with no hardcoded constant left', async () => {
+  const { loadPreflopDataset } = await import('../tools/preflop-dataset.js');
+  const { data } = loadPreflopDataset();
+  const source = fs.readFileSync(path.join(ROOT, 'tools/drill-cli.js'), 'utf8');
+
+  assert.equal(
+    /providerVersion:\s*'\d+\.\d+\.\d+'/.test(source),
+    false,
+    'drill-cli still pins a provider version by hand',
+  );
+  assert.equal(
+    /version:\s*'\d+\.\d+\.\d+'/.test(source),
+    false,
+    'drill-cli still pins a source version by hand',
+  );
+  assert.match(data.version, /^\d+\.\d+\.\d+$/);
+});
+
+// 10 — 노트의 writtenAt은 서버 시각이다. 입력값은 무시한다.
+test('an opponent note is stamped by the server, not by its author', async () => {
+  const storeDir = tmp('holdem-minors-notes-');
+  await writeOpponentNote(storeDir, {
+    playerId: 'p1',
+    atHandNo: 1,
+    observations: ['calls too wide'],
+    writtenAt: '1999-01-01T00:00:00.000Z',
+  });
+
+  const [note] = readOpponentNotes(storeDir);
+  assert.notEqual(note.writtenAt, '1999-01-01T00:00:00.000Z', 'the supplied timestamp was trusted');
+  assert.ok(Date.now() - Date.parse(note.writtenAt) < 60_000, `stale stamp ${note.writtenAt}`);
+});
+
+// 11 — solver 자식의 ps 폴링 간격은 250ms다.
+test('the solver child is polled every 250ms, not every 50ms', async () => {
+  const { SOLVER_POLL_MS } = await import('../tools/solver-runtime.js');
+  assert.equal(SOLVER_POLL_MS, 250);
+  const source = fs.readFileSync(path.join(ROOT, 'tools/solver-runtime.js'), 'utf8');
+  assert.match(source, /\}, SOLVER_POLL_MS\);/, 'the interval must use the constant');
+  assert.equal(/setInterval\([\s\S]*?, 50\);/.test(source), false, 'the 50ms poll must be gone');
+});
+
+// 12 — SOLVER_BUSY 단언은 조건부여선 안 된다.
+test('the live-child SOLVER_BUSY assertion is not wrapped in a conditional', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'test/solver-runtime.test.js'), 'utf8');
+  assert.equal(
+    /if\s*\(\s*hasLiveSolverChild\(\)\s*\)\s*\{/.test(source),
+    false,
+    'a conditional assertion silently passes when the child is not up yet',
+  );
+});

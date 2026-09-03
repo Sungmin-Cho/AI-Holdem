@@ -121,7 +121,8 @@ export async function startDrillServer({ storeDir, port = 0, token } = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
-      const provided = url.searchParams.get('token') ?? req.headers['x-drill-token'];
+      // 헤더 전용. query token은 referrer·프록시 로그·브라우저 히스토리에 남는다.
+      const provided = req.headers['x-drill-token'];
       if (url.pathname.startsWith('/api/')) {
         if (!tokensEqual(provided, token)) {
           sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED' });

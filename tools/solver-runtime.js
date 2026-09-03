@@ -9,6 +9,9 @@ import { assertSolverResult } from '../training/postflop/contracts.js';
 const FAKE_CHILD = fileURLToPath(new URL('./fake-solver-child.js', import.meta.url));
 const DEFAULT_STDOUT = 256 * 1024;
 const DEFAULT_RSS_KB = 256 * 1024;
+// `rssKb` shells out to `ps`; 50ms spawned twenty processes a second for a
+// ceiling that moves far more slowly than that.
+export const SOLVER_POLL_MS = 250;
 const SOLVER_RECORD = '.solver-child.json';
 const live = new Map();
 
@@ -280,7 +283,7 @@ export async function runSolver({
   rssTimer = setInterval(() => {
     const rss = rssKb(child.pid);
     if (rss != null && rss > maxRssKb) child.emit('solver-rss');
-  }, 50);
+  }, SOLVER_POLL_MS);
 
   timer = setTimeout(() => child.emit('solver-timeout'), timeoutMs);
   child.stdin.write(`${JSON.stringify(input)}\n`);

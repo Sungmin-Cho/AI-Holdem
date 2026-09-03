@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateQueue } from '../training/drill-generator.js';
+import { generateQueue as buildQueue } from '../training/drill-generator.js';
+
+// 데이터셋 provider는 인자다(P2-2 항목 9) — 상수를 두면 데이터셋을 갈아도 질문이
+// 옛 버전을 주장한다. 테스트는 고정 source로 감싸 호출한다.
+const SOURCE = { id: 'local-preflop-baseline', version: '1.0.0' };
+const generateQueue = (opts = {}) => buildQueue({ source: SOURCE, ...opts });
 
 test('same seed and snapshot reproduce the same queue; four modes exist', () => {
   const mistakes = [{

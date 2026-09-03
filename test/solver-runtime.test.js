@@ -112,10 +112,14 @@ test('timeout/flood/partial/die fault matrix', async () => {
 
 test('ignore-term is killed and a second solve is not started while live', async () => {
   const first = runSolver({ timeoutMs: 300, env: { SOLVER_FAULT: 'ignore-term' } });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  if (hasLiveSolverChild()) {
-    await assert.rejects(() => runSolver({ timeoutMs: 200 }), (error) => error.code === 'SOLVER_BUSY');
+  // Wait for the child to actually be live instead of sleeping and hoping: a
+  // conditional assertion silently passes on a slow machine.
+  const liveBy = Date.now() + 5_000;
+  while (!hasLiveSolverChild() && Date.now() < liveBy) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  assert.equal(hasLiveSolverChild(), true, 'the first solver child never came up');
+  await assert.rejects(() => runSolver({ timeoutMs: 200 }), (error) => error.code === 'SOLVER_BUSY');
   await assert.rejects(() => first, (error) => error.code === 'SOLVER_TIMEOUT');
   assert.equal(hasLiveSolverChild(), false);
 });
