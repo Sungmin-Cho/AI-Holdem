@@ -1,23 +1,36 @@
 import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
+
+// Keyed by object identity, so the association cannot be reflected, copied or
+// spoofed: `Object.getOwnPropertySymbols` finds nothing, and a Proxy cannot
+// answer for a key it does not hold. R5: a dataset that did not come out of
+// this parser cannot be turned into a strategy.
+const PINNED = new WeakMap();
 
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
+}
 
 export function hashDataset(raw) {
   return createHash('sha256').update(raw).digest('hex');
 }
 
-export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
+/**
+ * Pure: the caller reads the bytes. Reading files is a tools/CLI
+ * responsibility (R12), so this layer only parses, pins and validates.
+ */
+export function parsePreflopJson(raw, { expectedSha256 } = {}) {
   if (typeof expectedSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(expectedSha256)) {
     throw coded(ERRORS.DATASET_INVALID, 'expectedSha256 required');
   }
-  let raw;
-  try {
-    raw = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    throw coded(ERRORS.DATASET_INVALID, 'dataset 파일을 읽을 수 없습니다.');
+  if (typeof raw !== 'string') {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset raw는 문자열이어야 합니다.');
   }
   const contentSha256 = hashDataset(raw);
   if (expectedSha256.toLowerCase() !== contentSha256) {
@@ -30,6 +43,9 @@ export function loadPreflopJson(filePath, { expectedSha256 } = {}) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset JSON이 아닙니다.');
   }
   validateDataset(data);
+  // Frozen so the validated shape cannot be edited after the pin is recorded.
+  deepFreeze(data);
+  PINNED.set(data, contentSha256);
   return { data, contentSha256, raw };
 }
 
@@ -64,6 +80,9 @@ export function validateDataset(data) {
 }
 
 export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
+  if (data == null || PINNED.get(data) !== contentSha256) {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset가 pin 검증을 거치지 않았습니다.');
+  }
   const source = {
     id: data.id,
     version: data.version,

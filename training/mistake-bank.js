@@ -1,7 +1,18 @@
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { skillKeyOf } from './opportunities.js';
-import { readJsonSecure, writeJsonSecure, ensureDir } from '../tools/training-store.js';
+
+function requireIo(io, names) {
+  for (const name of names) {
+    if (typeof io?.[name] !== 'function') {
+      const error = new Error(`training store io.${name}가 필요합니다.`);
+      error.code = 'IO_NOT_INJECTED';
+      throw error;
+    }
+  }
+  return io;
+}
+
 
 function coded(code, message) {
   const error = new Error(message);
@@ -19,7 +30,10 @@ function signatureOf(evaluation) {
   return `${evaluation.spotKey}:${evaluation.handClass}`;
 }
 
-export function createMistakeBank(storeDir, { now = () => new Date().toISOString() } = {}) {
+// R12: fs helper는 주입받는다. 기본값은 없다 — 기본값이 있으면 training이
+// 다시 tools를 import하게 되고, 그것이 결함 #20의 역전 그 자체다.
+export function createMistakeBank(storeDir, { now = () => new Date().toISOString(), io } = {}) {
+  const { readJsonSecure, writeJsonSecure, ensureDir } = requireIo(io, ['readJsonSecure', 'writeJsonSecure', 'ensureDir']);
   const root = path.join(storeDir, '.training');
   const file = path.join(root, 'mistakes.json');
 

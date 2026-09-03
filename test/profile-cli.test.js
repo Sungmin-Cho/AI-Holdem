@@ -300,7 +300,7 @@ test('sweep does not abort the store on one malformed or unsupported archived au
   assert.equal((swept.notices ?? []).length >= 2, true);
   assert.equal(swept.applied, 1);
   assert.equal(swept.profile.overall.evaluatedDecisions, 1);
-  const { createProfileStore } = await import('../training/profile-store.js');
+  const { createProfileStore } = await import('../tools/training-stores.js');
   assert.equal((await createProfileStore(storeDir).show()).overall.evaluatedDecisions, 1);
 });
 

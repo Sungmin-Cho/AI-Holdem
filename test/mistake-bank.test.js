@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createMistakeBank } from '../training/mistake-bank.js';
+import { createMistakeBank } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 function tmp() {

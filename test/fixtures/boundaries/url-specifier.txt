@@ -1,0 +1,1 @@
+await import('file:///abs/training/x.js');

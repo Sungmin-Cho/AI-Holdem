@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { solvePostflop, DEFAULT_SOLVER_ADAPTER } from '../training/providers/solver-adapter.js';
+import { solvePostflop, DEFAULT_SOLVER_ADAPTER } from './solver-adapter.js';
 import { evaluateSolvedDecision } from '../training/postflop/solved-decision.js';
 
 function fail(code, message) {

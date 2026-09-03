@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createGameLoop } from '../tools/game-loop.js';
 import { createTrainingControl } from '../tools/training-control.js';
-import { createProfileStore } from '../training/profile-store.js';
+import { createProfileStore } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 function tmp() {

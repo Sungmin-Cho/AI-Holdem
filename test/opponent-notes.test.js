@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { writeOpponentNote, readOpponentNotes, rewriteOpponentNotesForbidden, readAccuracy } from '../training/opponent-notes.js';
+import { writeOpponentNote, readOpponentNotes, rewriteOpponentNotesForbidden, readAccuracy } from '../tools/training-stores.js';
 import { labelsForDeviation } from '../training/exploit/adjustments.js';
 import { policyById } from '../training/policies/catalog.js';
 

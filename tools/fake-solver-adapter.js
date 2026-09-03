@@ -1,4 +1,4 @@
-import { runSolver, FAKE_CHILD } from '../../tools/solver-runtime.js';
+import { runSolver, FAKE_CHILD } from './solver-runtime.js';
 
 export function fakeSolverArgv() {
   return [process.execPath, FAKE_CHILD];

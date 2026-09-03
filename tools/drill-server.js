@@ -4,9 +4,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startDrill, nextQuestion, answerQuestion } from '../tools/drill-cli.js';
+import { startDrill, nextQuestion, answerQuestion } from './drill-cli.js';
 
-const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'drill-public');
+const PUBLIC_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../server/drill-public',
+);
 const MAX_BODY = 64 * 1024;
 const MIME = {
   '.html': 'text/html; charset=utf-8',

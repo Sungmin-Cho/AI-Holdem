@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadPreflopJson } from '../training/providers/preflop-json.js';
+import { loadPreflopDataset } from '../tools/preflop-dataset.js';
+import { parsePreflopJson } from '../training/providers/preflop-json.js';
 
-const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/cli.js');
+const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/evaluate-cli.js');
 const DATA = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/data/preflop-baseline-v1.json');
 
 const SHA = `${DATA.replace(/\.json$/, '.sha256')}`;
@@ -18,7 +19,7 @@ function fileSha256(file) {
 }
 
 function pinnedLoad(file, expected) {
-  return loadPreflopJson(file, { expectedSha256: expected });
+  return loadPreflopDataset(file, { expectedSha256: expected });
 }
 
 test('dataset metadata fail-closed and frequency sum', () => {
@@ -36,10 +37,13 @@ test('preflop-baseline-v1.sha256 matches the dataset bytes', () => {
   assert.equal(recorded, fileSha256(DATA));
 });
 
-test('loadPreflopJson requires expectedSha256 and rejects mismatch', () => {
-  assert.throws(() => loadPreflopJson(DATA), { code: 'DATASET_INVALID' });
+test('the dataset loader rejects a digest mismatch, and the parser still requires a pin', () => {
+  // The pin requirement lives on the pure parser now: the loader reads the
+  // pin file when the caller passes none, so this is where "no pin" is refused.
+  assert.throws(() => parsePreflopJson(fs.readFileSync(DATA, 'utf8')), { code: 'DATASET_INVALID' });
+  assert.throws(() => loadPreflopDataset(DATA, { expectedSha256: 'nope' }), { code: 'DATASET_INVALID' });
   assert.throws(
-    () => loadPreflopJson(DATA, { expectedSha256: '0'.repeat(64) }),
+    () => loadPreflopDataset(DATA, { expectedSha256: '0'.repeat(64) }),
     { code: 'DATASET_INVALID' },
   );
 });

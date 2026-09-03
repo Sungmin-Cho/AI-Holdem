@@ -22,7 +22,7 @@ import {
   TRAINING_CHUNK_SLACK_BYTES,
 } from '../publish-contract.js';
 
-const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/cli.js');
+const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'evaluate-cli.js');
 const SOLVE_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'solve-cli.js');
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
 const handPipelineTail = new Map();

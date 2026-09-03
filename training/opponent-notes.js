@@ -1,12 +1,24 @@
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
-import { ensureDir, readJsonl, appendJsonl, writeJsonSecure } from '../tools/training-store.js';
+
+function requireIo(io, names) {
+  for (const name of names) {
+    if (typeof io?.[name] !== 'function') {
+      const error = new Error(`training store io.${name}가 필요합니다.`);
+      error.code = 'IO_NOT_INJECTED';
+      throw error;
+    }
+  }
+  return io;
+}
+
 
 function notesPath(storeDir) {
   return path.join(storeDir, '.training', 'opponent-notes.jsonl');
 }
 
-export async function writeOpponentNote(storeDir, note) {
+export async function writeOpponentNote(storeDir, note, { io } = {}) {
+  const { ensureDir, appendJsonl } = requireIo(io, ['ensureDir', 'appendJsonl']);
   if (!note?.playerId || !Number.isInteger(note.atHandNo) || note.atHandNo < 1) {
     const error = new Error('invalid opponent note');
     error.code = 'INVALID_NOTE';
@@ -27,7 +39,8 @@ export async function writeOpponentNote(storeDir, note) {
   return frozen;
 }
 
-export function readOpponentNotes(storeDir) {
+export function readOpponentNotes(storeDir, { io } = {}) {
+  const { readJsonl } = requireIo(io, ['readJsonl']);
   try {
     return readJsonl(notesPath(storeDir));
   } catch {
@@ -35,7 +48,8 @@ export function readOpponentNotes(storeDir) {
   }
 }
 
-export async function rewriteOpponentNotesForbidden(storeDir) {
+export async function rewriteOpponentNotesForbidden(storeDir, { io } = {}) {
+  const { readJsonl } = requireIo(io, ['readJsonl']);
   const error = new Error('opponent notes cannot be rewritten');
   error.code = 'NOTE_IMMUTABLE';
   throw error;
@@ -55,7 +69,8 @@ export function readAccuracy(notes, modelLabels) {
   };
 }
 
-export function persistReadReport(storeDir, report) {
+export function persistReadReport(storeDir, report, { io } = {}) {
+  const { ensureDir, writeJsonSecure } = requireIo(io, ['ensureDir', 'writeJsonSecure']);
   ensureDir(path.join(storeDir, '.training'));
   writeJsonSecure(path.join(storeDir, '.training', 'read-accuracy.json'), report);
 }

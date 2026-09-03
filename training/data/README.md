@@ -13,7 +13,7 @@ Digest: `preflop-baseline-v1.sha256` (one hex line). Loaders must pass it as `ex
 Rebuild:
 
 ```bash
-node training/data/build-preflop-baseline.js
+node tools/build-preflop-baseline.js
 ```
 
 Unsupported on purpose: postflop, stacks other than 100bb, multiway, 4-bet+, ante, ICM.

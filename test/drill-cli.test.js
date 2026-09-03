@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerQuestion, nextQuestion, startDrill } from '../tools/drill-cli.js';
 import { evaluationIdOf } from '../training/contracts.js';
-import { createMistakeBank } from '../training/mistake-bank.js';
+import { createMistakeBank } from '../tools/training-stores.js';
 import { readJsonl } from '../tools/training-store.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/drill-cli.js');
@@ -223,7 +223,7 @@ test('drill profile events are tagged origin drill and stay in their provider se
   const events = profileEvents(storeDir);
   assert.equal(events.length, 1);
   assert.equal(events[0].origin, 'drill');
-  const { createProfileStore } = await import('../training/profile-store.js');
+  const { createProfileStore } = await import('../tools/training-stores.js');
   const profile = await createProfileStore(storeDir).show();
   assert.equal(profile.activeSegmentId, `${events[0].providerId}@${events[0].providerVersion}`);
 });

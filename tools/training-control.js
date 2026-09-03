@@ -4,8 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
-import { createProfileStore } from '../training/profile-store.js';
-import { createMistakeBank } from '../training/mistake-bank.js';
+import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   detailRefOf,

@@ -1,6 +1,18 @@
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { classifyOpportunity } from './opportunities.js';
+
+function requireIo(io, names) {
+  for (const name of names) {
+    if (typeof io?.[name] !== 'function') {
+      const error = new Error(`training store io.${name}가 필요합니다.`);
+      error.code = 'IO_NOT_INJECTED';
+      throw error;
+    }
+  }
+  return io;
+}
+
 import {
   applyEvent,
   emptyProfile,
@@ -8,14 +20,6 @@ import {
   projectActive,
   rebuildFromEvents,
 } from './profile-aggregator.js';
-import {
-  appendJsonl,
-  ensureDir,
-  readJsonl,
-  readJsonSecure,
-  writeJsonSecure,
-  writeTextSecure,
-} from '../tools/training-store.js';
 
 const PROFILE_LOCK = 'profile.lock.d';
 
@@ -42,7 +46,14 @@ function eventFromEvaluation(evaluation, appliedAt) {
   };
 }
 
-export function createProfileStore(storeDir, { now = () => new Date().toISOString() } = {}) {
+// R12: fs helper는 주입받는다. 기본값 없음.
+export function createProfileStore(storeDir, { now = () => new Date().toISOString(), io } = {}) {
+  const {
+    appendJsonl, ensureDir, readJsonl, readJsonSecure, writeJsonSecure, writeTextSecure,
+  } = requireIo(
+    io,
+    ['appendJsonl', 'ensureDir', 'readJsonl', 'readJsonSecure', 'writeJsonSecure', 'writeTextSecure'],
+  );
   const root = path.join(storeDir, '.training');
   const profilePath = path.join(root, 'profile.json');
   const eventsPath = path.join(root, 'profile-events.jsonl');
