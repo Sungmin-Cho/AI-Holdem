@@ -18,7 +18,7 @@ import {
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
-import { gameEpochOf } from '../publish-contract.js';
+import { collectPrivateLiterals, gameEpochOf } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
@@ -69,10 +69,6 @@ const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+각 AI의 실제 아키타입 공개[ \t]*\+[ \t]*읽기 평가(?:[ \t]|$)/m,
   /^#{1,6}[ \t]+다음 게임에서 연습할 것(?:[ \t]|$)/m,
 ]);
-const COACH_PRIVATE_FIELDS = [
-  'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
-  'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
-];
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
 const FINALIZE_BUDGET_MS = 20_000;
@@ -2414,36 +2410,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return readJsonOptional(archivePath, 'HAND_RECORD');
   };
 
-  const coachForbiddenLiterals = (handNo) => {
-    const values = [];
-    const players = readJsonOptional(playersPath, 'PLAYERS');
-    for (const player of Array.isArray(players) ? players : []) {
-      if (player?.playerId === 'user') continue;
-      for (const field of COACH_PRIVATE_FIELDS) {
-        const value = player?.[field];
-        if (value !== undefined && value !== null && String(value).length > 0) values.push(String(value));
-      }
-      if (player?.policy && typeof player.policy === 'object') {
-        values.push(JSON.stringify(player.policy));
-        for (const value of Object.values(player.policy)) {
-          if (value !== undefined && value !== null && typeof value !== 'object') values.push(String(value));
-        }
-      }
-    }
-    const enginePrivate = readJsonOptional(engineStatePath, 'ENGINE_STATE');
-    if (enginePrivate?.policySeed) values.push(String(enginePrivate.policySeed));
-    const record = fullHandRecord(handNo);
-    const publicCards = new Set(
-      (record?.showdown?.reveals ?? []).flatMap((reveal) => reveal?.cards ?? []),
-    );
-    for (const [playerId, cards] of Object.entries(record?.holes ?? {})) {
-      if (playerId === 'user') continue;
-      for (const card of cards ?? []) {
-        if (!publicCards.has(card)) values.push(String(card));
-      }
-    }
-    return [...new Set(values)];
-  };
+  // 규칙 자체는 게시 계약이 갖는다 — 서버의 deny 수집기와 같은 코드여야 한다.
+  const coachForbiddenLiterals = (handNo) => collectPrivateLiterals({
+    players: readJsonOptional(playersPath, 'PLAYERS'),
+    engineState: readJsonOptional(engineStatePath, 'ENGINE_STATE'),
+    records: [fullHandRecord(handNo)],
+  });
 
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);

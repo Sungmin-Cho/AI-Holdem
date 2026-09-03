@@ -871,6 +871,7 @@ test('empty training: [] and trainingAnnotations: [] are BAD_ENVELOPE', async ()
 
 test('publish.js: annotation after cutoff still passes via annotationAuthority', async () => {
   const dir = tmp();
+  writeSecurityFixtures(dir);
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
     const tc = createTrainingControl();

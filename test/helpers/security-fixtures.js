@@ -35,7 +35,7 @@ export function handFilePath(dir, handNo) {
 
 export function writeSecurityFixtures(dir, {
   gameOver = false,
-  hands = [],
+  hands = [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'] } })],
   players = defaultPlayers(),
   handInProgress = null,
   state = {},

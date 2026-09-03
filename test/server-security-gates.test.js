@@ -377,6 +377,8 @@ test('C1: missing or unreadable security material fails closed with 500', async 
   fs.writeFileSync(path.join(badPlayers, 'players.json'), '{broken');
   const noState = build();
   fs.rmSync(path.join(noState, 'state.json'));
+  const noHands = build();
+  fs.rmSync(path.join(noHands, 'hands'), { recursive: true });
   const missingHand = build();
   fs.rmSync(handFilePath(missingHand, 1));
   const brokenHand = build();
@@ -386,7 +388,7 @@ test('C1: missing or unreadable security material fails closed with 500', async 
   fs.writeFileSync(path.join(emptyPlayers, 'state.json'), JSON.stringify({ gameOver: false }));
   for (const record of [1, 2, 3]) fs.rmSync(handFilePath(emptyPlayers, record));
 
-  for (const dir of [noPlayers, badPlayers, noState, missingHand, brokenHand, emptyPlayers]) {
+  for (const dir of [noPlayers, badPlayers, noState, noHands, missingHand, brokenHand, emptyPlayers]) {
     await withServer(dir, async ({ port }) => {
       await post(port, { publishId: 1, training: [summary] });
       const denied = await post(port, {
