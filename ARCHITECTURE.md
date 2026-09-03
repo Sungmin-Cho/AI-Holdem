@@ -22,7 +22,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | 계층 방향 | `tools/ → training/`(순수 함수 import만 허용), `training/ → engine/state.js`(락만), `engine/ → training,tools` 금지, `server/*.js`는 `publish-contract.js`와 담기 원시자만. `test/boundaries.test.js`가 강제한다. |
 | `training/postflop/solved-decision.js` | solver 결과 → evaluation 투영(순수). heuristic이면 EV는 전부 null. |
 | `tools/evaluate-cli.js` | preflop 평가 프로세스 진입점. 데이터셋 읽기는 여기(호출자)의 책임이다. |
-| `tools/preflop-dataset.js` | 데이터셋을 읽어 digest를 대조하고 순수 파서에 넘기는 유일한 지점. 두 번째 reader가 digest 고정을 우회할 수 없다. |
+| `tools/preflop-dataset.js` | 데이터셋을 읽어 digest를 대조하고 순수 파서에 넘기는 유일한 지점. 파서가 통과시킨 dataset에만 모듈 전용 브랜드를 달고 `lookup`이 그것을 요구하므로(R5), raw `JSON.parse`로 만든 dataset은 전략이 될 수 없다. |
 | `tools/training-stores.js` | R12의 주입자 — `tools/training-store.js`의 fs helper를 `training/`의 저장 모듈에 넘긴다. |
 | `tools/fake-solver-adapter.js`, `tools/solver-adapter.js` | solver adapter 레지스트리와 fake adapter. 프로세스 spawn은 tools 책임이다. |
 | `tools/build-preflop-baseline.js` | 데이터셋 빌드 스크립트. |

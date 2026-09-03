@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
 
+// Module-private, so nothing outside this file can forge it — `Symbol.for`
+// would be globally registered and therefore forgeable. R5: a dataset that did
+// not come through the pinned parser cannot be turned into a strategy.
+const PIN = Symbol('preflop-dataset-pin');
+
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
@@ -30,6 +35,7 @@ export function parsePreflopJson(raw, { expectedSha256 } = {}) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset JSON이 아닙니다.');
   }
   validateDataset(data);
+  Object.defineProperty(data, PIN, { value: contentSha256, enumerable: false });
   return { data, contentSha256, raw };
 }
 
@@ -64,6 +70,9 @@ export function validateDataset(data) {
 }
 
 export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
+  if (data?.[PIN] == null || data[PIN] !== contentSha256) {
+    throw coded(ERRORS.DATASET_INVALID, 'dataset가 pin 검증을 거치지 않았습니다.');
+  }
   const source = {
     id: data.id,
     version: data.version,

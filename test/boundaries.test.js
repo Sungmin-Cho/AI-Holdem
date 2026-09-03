@@ -1,20 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const RECORDER = path.join(ROOT, 'test/helpers/import-recorder.mjs');
+const SCANNED = ['engine', 'training', 'server', 'tools', 'export'];
 
 // R12 계층 방향. 이 가드가 없으면 역방향 import가 다시 스며든다 — 결함 #20은
-// "engine과 training이 tools를 불러 쓰는" 그 역전이 재발한 결과였다.
-const LAYERS = {
-  engine: 'engine',
-  training: 'training',
-  server: 'server',
-  tools: 'tools',
-};
+// engine과 training이 tools를 불러 쓰는 그 역전이었다.
+//
+// 소스를 정규식으로 훑지 않는다. 정규식은 주석이 낀 dynamic import, 템플릿
+// 리터럴 specifier, 문자열 이름 바인딩, `require`를 전부 놓친다. 대신 resolve
+// 훅으로 **Node가 실제로 해석한 그래프**를 기록한다. 이 가드를 우회하려면 Node의
+// 해석기 자체를 우회해야 한다.
 
 function jsFilesUnder(dir) {
   const out = [];
@@ -32,130 +34,133 @@ function jsFilesUnder(dir) {
   return out;
 }
 
-const IMPORT_RE = /(?:^|\n)\s*(?:import\b[^'"`;]*?from\s*|import\s*|export\b[^'"`;]*?from\s*)['"]([^'"]+)['"]/g;
-// Not anchored on the closing paren: `import(x, {...})` is a valid form, and a
-// template literal with no substitution is just a string.
-const DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*['"`]([^'"`$]+)['"`]/g;
-// The tree is ESM, but a guard that only understands ESM is a guard that a
-// single `require` walks past.
-const REQUIRE_RE = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+let graphCache = null;
 
-function importsOf(file) {
-  const source = fs.readFileSync(file, 'utf8');
-  const specifiers = [];
-  for (const re of [IMPORT_RE, DYNAMIC_IMPORT_RE, REQUIRE_RE]) {
-    re.lastIndex = 0;
-    let match = re.exec(source);
-    while (match) {
-      specifiers.push(match[1]);
-      match = re.exec(source);
-    }
+/**
+ * Every edge Node resolves while loading each module — one child process per
+ * module, so a script with top-level side effects (or one that calls
+ * `process.exit`) cannot cut the recording short for the rest.
+ */
+function moduleGraph() {
+  if (graphCache) return graphCache;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-graph-'));
+  const out = path.join(dir, 'edges.jsonl');
+  const probe = path.join(dir, 'probe.mjs');
+  fs.writeFileSync(probe, [
+    "import { register } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "register(process.env.RECORDER, pathToFileURL(process.env.ROOT + '/'), {",
+    '  data: { out: process.env.RECORD_OUT },',
+    '});',
+    'try {',
+    '  await import(pathToFileURL(process.env.RECORD_FILE).href);',
+    '} catch { /* the edges are recorded before the body runs */ }',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(out, '');
+  const files = SCANNED.flatMap(jsFilesUnder);
+  const loaded = [];
+  for (const file of files) {
+    const before = fs.statSync(out).size;
+    try {
+      execFileSync(process.execPath, [probe], {
+        cwd: ROOT,
+        timeout: 20_000,
+        stdio: 'ignore',
+        env: {
+          ...process.env, RECORDER, ROOT, RECORD_OUT: out, RECORD_FILE: file,
+        },
+      });
+    } catch { /* a script that exits non-zero still recorded what it resolved */ }
+    if (fs.statSync(out).size > before) loaded.push(path.relative(ROOT, file));
   }
-  return specifiers;
+  const edges = [];
+  const seen = new Set();
+  for (const line of fs.readFileSync(out, 'utf8').split('\n')) {
+    if (!line) continue;
+    const row = JSON.parse(line);
+    if (!row.parent?.startsWith('file:')) continue;
+    const from = path.relative(ROOT, fileURLToPath(row.parent));
+    const to = row.url?.startsWith('file:') ? path.relative(ROOT, fileURLToPath(row.url)) : row.url;
+    const key = `${from} ${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({ from, to, specifier: row.specifier });
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  graphCache = { edges, files: files.map((file) => path.relative(ROOT, file)), loaded };
+  return graphCache;
 }
 
-function resolvedLayer(file, specifier) {
-  if (!specifier.startsWith('.')) return null;
-  const target = path.resolve(path.dirname(file), specifier);
-  const relative = path.relative(ROOT, target);
-  const top = relative.split(path.sep)[0];
-  return LAYERS[top] ?? null;
+function layerOf(target) {
+  if (typeof target !== 'string' || target.startsWith('..') || target.includes(':')) return null;
+  return target.split(path.sep)[0];
 }
 
-function rel(file) {
-  return path.relative(ROOT, file);
+function edgesFrom(layer) {
+  return moduleGraph().edges.filter((edge) => layerOf(edge.from) === layer);
 }
+
+test('the recorder actually observed the tree it is guarding', () => {
+  const { edges, files, loaded } = moduleGraph();
+  // An empty or partial recording would make every rule below pass vacuously.
+  assert.ok(edges.length > 100, `only ${edges.length} edges were recorded`);
+  const missed = files.filter((file) => !loaded.includes(file));
+  assert.deepEqual(missed, [], 'these modules resolved nothing, so they are unguarded');
+});
 
 test('engine imports neither training nor tools', () => {
-  const offenders = [];
-  for (const file of jsFilesUnder('engine')) {
-    for (const specifier of importsOf(file)) {
-      const layer = resolvedLayer(file, specifier);
-      if (layer === 'training' || layer === 'tools') {
-        offenders.push(`${rel(file)} -> ${specifier}`);
-      }
-    }
-  }
+  const offenders = edgesFrom('engine')
+    .filter((edge) => ['training', 'tools'].includes(layerOf(edge.to)))
+    .map((edge) => `${edge.from} -> ${edge.to}`);
   assert.deepEqual(offenders, []);
 });
 
 test('training imports no tools module', () => {
-  const offenders = [];
-  for (const file of jsFilesUnder('training')) {
-    for (const specifier of importsOf(file)) {
-      if (resolvedLayer(file, specifier) === 'tools') {
-        offenders.push(`${rel(file)} -> ${specifier}`);
-      }
-    }
-  }
+  const offenders = edgesFrom('training')
+    .filter((edge) => layerOf(edge.to) === 'tools')
+    .map((edge) => `${edge.from} -> ${edge.to}`);
   assert.deepEqual(offenders, []);
 });
 
 test('training does no filesystem I/O of its own', () => {
-  const offenders = [];
-  for (const file of jsFilesUnder('training')) {
-    for (const specifier of importsOf(file)) {
-      if (/^(node:)?fs(\/promises)?$/.test(specifier)) {
-        offenders.push(rel(file));
-      }
-    }
-  }
-  assert.deepEqual(offenders, []);
+  const offenders = edgesFrom('training')
+    .filter((edge) => /^(node:)?fs(\/promises)?$/.test(edge.specifier))
+    .map((edge) => edge.from);
+  assert.deepEqual([...new Set(offenders)], []);
 });
 
-// 서버는 신뢰 경계 밖의 HTTP 입력을 다루는 계층이므로 사이드카 로직을 전혀
-// 불러선 안 된다. 예외는 담기(containment) 원시자 하나뿐이다 — P0-0 helper를
-// 재구현하는 것이 더 나쁘고, 서버는 별도 프로세스라 주입할 수 없다.
-const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
-
-function escapeRe(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Every import declaration for `specifier`, not just the first: a second
- * default or namespace import from the same module would otherwise ride in
- * behind an allowed named one.
- */
-function declarationsFor(source, specifier) {
-  const re = new RegExp(`(?:^|\\n)\\s*import\\s+([^;'"\`]*?)\\s*from\\s*['"]${escapeRe(specifier)}['"]`, 'g');
-  const clauses = [];
-  let match = re.exec(source);
-  while (match) {
-    clauses.push(match[1].trim());
-    match = re.exec(source);
-  }
-  return clauses;
-}
-
-function namesInClause(clause) {
-  // A default or namespace binding is never an allowed containment primitive.
-  if (!clause.startsWith('{')) return [clause.replace(/\s*,.*$/, '').trim() || 'default'];
-  const inner = clause.slice(1, clause.lastIndexOf('}'));
-  return inner.split(',').map((name) => name.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean);
-}
+// 서버는 신뢰 경계 밖의 HTTP 입력을 다루므로 사이드카 로직을 전혀 불러선 안
+// 된다. 예외는 담기 원시자 하나뿐이다 — 서버는 별도 프로세스라 주입이
+// 불가능하고, P0-0 helper를 재구현하는 쪽이 더 나쁘다.
+const SERVER_CONTAINMENT_IMPORT = "import { openContained } from '../tools/training-store.js';";
 
 test('server imports only the publish contract and the containment primitives', () => {
   const offenders = [];
-  for (const file of jsFilesUnder('server')) {
-    const source = fs.readFileSync(file, 'utf8');
-    for (const specifier of importsOf(file)) {
-      if (!specifier.startsWith('.')) continue;
-      const target = path.resolve(path.dirname(file), specifier);
-      if (target === path.join(ROOT, 'publish-contract.js')) continue;
-      if (target.startsWith(path.join(ROOT, 'server') + path.sep)) continue;
-      if (target === path.join(ROOT, 'tools', 'training-store.js')) {
-        const clauses = declarationsFor(source, specifier);
-        const names = clauses.flatMap(namesInClause);
-        const extra = names.filter((name) => !SERVER_ALLOWED_CONTAINMENT.has(name));
-        if (clauses.length > 0 && names.length > 0 && extra.length === 0) continue;
-        offenders.push(`${rel(file)} -> ${specifier} (${extra.join(', ') || 'no named import'})`);
-        continue;
-      }
-      offenders.push(`${rel(file)} -> ${specifier}`);
-    }
+  for (const edge of edgesFrom('server')) {
+    if (layerOf(edge.to) === null) continue;
+    if (edge.to === 'publish-contract.js') continue;
+    if (layerOf(edge.to) === 'server') continue;
+    if (edge.to === path.join('tools', 'training-store.js')) continue;
+    offenders.push(`${edge.from} -> ${edge.to}`);
   }
   assert.deepEqual(offenders, []);
+
+  // An edge cannot say which bindings crossed it, so the one allowed module is
+  // pinned to its exact declaration. A mixed default import, a namespace import
+  // or an extra named binding would not match this line.
+  for (const file of jsFilesUnder('server')) {
+    const declarations = fs.readFileSync(file, 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('tools/training-store.js'))
+      .map((line) => line.trim());
+    if (declarations.length === 0) continue;
+    assert.deepEqual(
+      declarations,
+      [SERVER_CONTAINMENT_IMPORT],
+      `${path.relative(ROOT, file)} may take only the containment primitive`,
+    );
+  }
 });
 
 test('the process entry points that spawn or touch the filesystem live in tools', () => {
@@ -181,72 +186,79 @@ test('the process entry points that spawn or touch the filesystem live in tools'
   }
 });
 
-test('the moved dataset builder rewrites the canonical dataset, byte for byte', () => {
+test('the moved dataset builder rewrites the canonical dataset and its pin, byte for byte', () => {
   const dataset = path.join(ROOT, 'training/data/preflop-baseline-v1.json');
   const digestFile = path.join(ROOT, 'training/data/preflop-baseline-v1.sha256');
   const before = fs.readFileSync(dataset);
-  const digest = fs.readFileSync(digestFile, 'utf8').trim();
+  const digestBefore = fs.readFileSync(digestFile);
   // Comparing bytes alone cannot tell "rebuilt identically" from "wrote
-  // somewhere else and left this file alone", which is exactly what a bad
-  // output path after the move would look like.
+  // somewhere else and left these alone", which is exactly what a bad output
+  // path after the move looks like. Stale both mtimes and require both to move.
   const stampedAt = new Date(Date.now() - 5_000);
   fs.utimesSync(dataset, stampedAt, stampedAt);
-  const staleMtime = fs.statSync(dataset).mtimeMs;
+  fs.utimesSync(digestFile, stampedAt, stampedAt);
+  const staleDataset = fs.statSync(dataset).mtimeMs;
+  const staleDigest = fs.statSync(digestFile).mtimeMs;
 
   execFileSync(process.execPath, [path.join(ROOT, 'tools/build-preflop-baseline.js')], {
     encoding: 'utf8',
     timeout: 60_000,
   });
 
-  assert.notEqual(fs.statSync(dataset).mtimeMs, staleMtime, 'the builder did not write this file');
+  assert.notEqual(fs.statSync(dataset).mtimeMs, staleDataset, 'the builder did not write the dataset');
+  assert.notEqual(fs.statSync(digestFile).mtimeMs, staleDigest, 'the builder did not write the pin');
   assert.equal(fs.readFileSync(dataset).equals(before), true, 'the rebuild changed the dataset bytes');
-  assert.equal(fs.readFileSync(digestFile, 'utf8').trim(), digest);
+  assert.equal(fs.readFileSync(digestFile).equals(digestBefore), true, 'the rebuild changed the pin');
 });
 
-test('the pinned parser has exactly one production caller, and only it reads the pin', () => {
-  const parser = path.join(ROOT, 'training/providers/preflop-json.js');
-  const parserImporters = [];
-  const digestReaders = [];
-  for (const dir of ['engine', 'training', 'server', 'tools', 'export']) {
-    for (const file of jsFilesUnder(dir)) {
-      const source = fs.readFileSync(file, 'utf8');
-      for (const specifier of importsOf(file)) {
-        if (!specifier.startsWith('.')) continue;
-        if (path.resolve(path.dirname(file), specifier) !== parser) continue;
-        // `lookup` and `validateDataset` are pure and free to use. Only the
-        // pin-checking entry point is restricted.
-        const names = declarationsFor(source, specifier).flatMap(namesInClause);
-        if (names.includes('parsePreflopJson')) parserImporters.push(rel(file));
-      }
-      if (/['"`]\.sha256['"`]/.test(source)) digestReaders.push(rel(file));
-    }
-  }
-  // R5: the digest pin cannot be bypassed while the only way to turn dataset
-  // bytes into a strategy runs through one caller that always supplies a pin.
-  assert.deepEqual(
-    [...new Set(parserImporters)].sort(),
-    ['tools/preflop-dataset.js'],
-    'only one module may turn dataset bytes into a strategy, and it always pins',
+test('a dataset that never went through the pinned parser cannot become a strategy', async () => {
+  const { lookup, parsePreflopJson } = await import('../training/providers/preflop-json.js');
+  const dataset = path.join(ROOT, 'training/data/preflop-baseline-v1.json');
+  const raw = fs.readFileSync(dataset, 'utf8');
+  const pinned = parsePreflopJson(raw, {
+    expectedSha256: fs.readFileSync(dataset.replace(/\.json$/, '.sha256'), 'utf8').trim(),
+  });
+  const spotKey = Object.keys(pinned.data.spots)[0];
+  const handClass = Object.keys(pinned.data.spots[spotKey])[0];
+  assert.equal(lookup(pinned, { spotKey, handClass }).status, 'supported');
+
+  // R5: reading the bytes and calling JSON.parse is the bypass no import rule
+  // can stop, so the parser brands what it pinned and `lookup` refuses anything
+  // else — including data carrying a digest the caller supplied itself.
+  const forged = JSON.parse(raw);
+  assert.throws(
+    () => lookup({ data: forged, contentSha256: pinned.contentSha256 }, { spotKey, handClass }),
+    { code: 'DATASET_INVALID' },
   );
-  assert.deepEqual([...new Set(digestReaders)].sort(), ['tools/build-preflop-baseline.js', 'tools/preflop-dataset.js']);
+  assert.throws(
+    () => lookup({ data: forged, contentSha256: 'f'.repeat(64) }, { spotKey, handClass }),
+    { code: 'DATASET_INVALID' },
+  );
 });
 
 // R12는 "기본값 없음"을 요구한다. 기본값이 슬쩍 돌아오면 training이 다시
 // tools를 import하게 되므로, 주입 누락이 조용히 통과하지 않는지 직접 건다.
-test('the training stores refuse to run without an injected io', async () => {
+test('the training stores refuse to run without a complete injected io', async () => {
   const { createProfileStore } = await import('../training/profile-store.js');
   const { createMistakeBank } = await import('../training/mistake-bank.js');
   const notes = await import('../training/opponent-notes.js');
   const store = path.join(ROOT, 'test');
+  const partial = { ensureDir() {}, readJsonl() { return []; } };
 
   assert.throws(() => createProfileStore(store), { code: 'IO_NOT_INJECTED' });
   assert.throws(() => createMistakeBank(store), { code: 'IO_NOT_INJECTED' });
-  assert.throws(() => notes.readOpponentNotes(store), { code: 'IO_NOT_INJECTED' });
-
-  // A partial io must fail at construction, not on a rare branch at runtime.
-  const partial = { ensureDir() {}, readJsonl() { return []; } };
   assert.throws(() => createProfileStore(store, { io: partial }), { code: 'IO_NOT_INJECTED' });
   assert.throws(() => createMistakeBank(store, { io: partial }), { code: 'IO_NOT_INJECTED' });
+
+  // opponent-notes injects per function, so every entry point needs its own
+  // check — a helper missing on the write path would otherwise surface only at
+  // runtime, on the one branch that uses it.
+  assert.throws(() => notes.readOpponentNotes(store), { code: 'IO_NOT_INJECTED' });
+  assert.throws(() => notes.persistReadReport(store, {}), { code: 'IO_NOT_INJECTED' });
+  assert.throws(() => notes.persistReadReport(store, {}, { io: partial }), { code: 'IO_NOT_INJECTED' });
+  await assert.rejects(() => notes.writeOpponentNote(store, {}), { code: 'IO_NOT_INJECTED' });
+  await assert.rejects(() => notes.writeOpponentNote(store, {}, { io: partial }), { code: 'IO_NOT_INJECTED' });
+  await assert.rejects(() => notes.rewriteOpponentNotesForbidden(store), { code: 'IO_NOT_INJECTED' });
 });
 
 test('the tools injector supplies every helper the training stores require', async () => {
