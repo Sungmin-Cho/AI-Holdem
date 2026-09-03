@@ -161,7 +161,9 @@ export function readJsonl(filePath) {
   let fd;
   let raw;
   try {
-    fd = openNoFollow(filePath, fs.constants.O_RDONLY);
+    // O_NONBLOCK so a FIFO is refused by the fstat below instead of blocking
+    // forever waiting for a writer; on a regular file it changes nothing.
+    fd = openNoFollow(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     if (error.code === 'ELOOP' || error.code === 'EMLINK' || error.code === 'EISDIR') {

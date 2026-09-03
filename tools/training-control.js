@@ -690,6 +690,8 @@ export function createTrainingControl({ storeDir } = {}) {
     return withLock(sessionDir, () => {
       let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
       if (!auth) auth = emptyAuth({ gameEpoch: gameEpoch ?? null, owner: owner ?? null });
+      // Same authority, same rule — otherwise a stale owner keeps a writer path.
+      if (owner != null) assertOwner(auth, owner);
       const entry = recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId });
       persistAuth(sessionDir, auth);
       return entry;

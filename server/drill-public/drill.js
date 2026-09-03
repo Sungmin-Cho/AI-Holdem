@@ -3,10 +3,13 @@ const idempotencyKey = crypto.randomUUID();
 let sessionId = null;
 
 async function api(pathname, { method = 'GET', body } = {}) {
-  const url = `${pathname}?token=${encodeURIComponent(token)}`;
-  const res = await fetch(url, {
+  // 토큰은 헤더로만 간다 — query token은 referrer·프록시 로그·히스토리에 남고,
+  // 서버는 이제 그것을 401로 거부한다.
+  const headers = { 'x-drill-token': token };
+  if (body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(pathname, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json();

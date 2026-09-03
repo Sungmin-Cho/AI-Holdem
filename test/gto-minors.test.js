@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createTrainingControl } from '../tools/training-control.js';
 import { appendJsonl, readJsonl } from '../tools/training-store.js';
@@ -164,9 +165,39 @@ test('the drill server refuses a token passed in the query string', async () => 
   }
 });
 
+test('the shipped drill client sends the header the server requires', () => {
+  const client = fs.readFileSync(path.join(ROOT, 'server/drill-public/drill.js'), 'utf8');
+  // Changing the server without changing the browser would 401 every drill.
+  assert.match(client, /x-drill-token/);
+  assert.equal(/\?token=/.test(client), false, 'the client still puts the token in the URL');
+});
+
+test('the client actually routes machine items through the merge rule', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'server/public/app.js'), 'utf8');
+  // Testing the helper alone would stay green if app.js stopped calling it.
+  assert.match(app, /mergeTrainingItem/);
+  assert.equal(
+    /ui\.training\[at\] = item;/.test(app),
+    false,
+    'a raw overwrite path is still there',
+  );
+});
+
+test('a dataset version change flows into the question id and the answer policy', async () => {
+  const { generateQueue: build } = await import('../training/drill-generator.js');
+  const [question] = build({
+    mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened',
+    source: { id: 'local-preflop-baseline', version: '2.5.0' },
+  });
+  assert.match(question.questionId, /^drill:2\.5\.0:/);
+  assert.equal(question.answerPolicy.providerVersion, '2.5.0');
+  assert.equal(question.answerPolicy.providerId, 'local-preflop-baseline');
+});
+
 // 8 — leak 모드 spot 매핑은 두 갈래 하드코딩이 아니라 leak id에서 유도된다.
 test('leak drills derive their spot and hand from the leak, not from a two-branch default', () => {
-  const build = (id) => generateQueue({ mode: 'leak', profile: { leaks: [{ id }] } })[0].prompt;
+  const source = { id: 'local-preflop-baseline', version: '1.0.0' };
+  const build = (id) => generateQueue({ mode: 'leak', profile: { leaks: [{ id }] }, source })[0].prompt;
 
   const co = build('preflop.rfi.CO');
   const sb = build('preflop.rfi.SB');
@@ -179,6 +210,92 @@ test('leak drills derive their spot and hand from the leak, not from a two-branc
 
   const hands = new Set([co.handClass, sb.handClass, defense.handClass]);
   assert.ok(hands.size > 1, `every leak drilled the same hand: ${[...hands]}`);
+});
+
+test('readJsonl refuses a FIFO instead of waiting for a writer', { timeout: 10_000 }, () => {
+  const dir = tmp();
+  const fifo = path.join(dir, 'pipe.jsonl');
+  const made = spawnSync('mkfifo', [fifo]);
+  if (made.status !== 0) return; // no mkfifo on this platform
+  // Opening a FIFO read-only blocks until a writer appears; the old lstat check
+  // refused it immediately, and that contract must survive the O_NOFOLLOW move.
+  assert.throws(() => readJsonl(fifo), { code: 'UNSAFE_PATH' });
+});
+
+test('the real leak vocabulary maps defence leaks to defence spots', async () => {
+  const { spotForSkillKey } = await import('../training/drill-generator.js');
+  // `skillKeyOf` emits these three shapes, and the last two carry no hyphen.
+  assert.equal(spotForSkillKey('preflop.bbDefense.vsRaise'), '6max-100bb-bb-vs-single-raise');
+  assert.equal(spotForSkillKey('preflop.vsRaise.SB'), '6max-100bb-sb-vs-single-raise');
+  assert.equal(spotForSkillKey('preflop.vsRaise.BTN'), '6max-100bb-btn-vs-single-raise');
+  // A seat with no defence spot in the grammar stays a defence spot rather than
+  // silently becoming an unrelated RFI drill.
+  assert.match(spotForSkillKey('preflop.vsRaise.CO'), /vs-single-raise$/);
+  assert.equal(spotForSkillKey('preflop.rfi.CO'), '6max-100bb-co-rfi-unopened');
+});
+
+test('a stale owner cannot record a pending decision either', async () => {
+  const dir = tmp();
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, {
+    gameEpoch: EPOCH, owner: 'owner-live', handNo: 1, evaluations: [evaluationOf()],
+  });
+
+  await assert.rejects(
+    () => tc.recordPending(dir, 'd-9-preflop-0', {
+      handNo: 9, reason: 'solve', gameEpoch: EPOCH, owner: 'owner-stale',
+    }),
+    { code: 'TRAINING_OWNER_MISMATCH' },
+  );
+  assert.equal(createTrainingControl().loadAuthority(dir).pending['d-9-preflop-0'], undefined);
+});
+
+test('every derived leak spot is one the dataset actually has', async () => {
+  const { spotForSkillKey } = await import('../training/drill-generator.js');
+  const { loadPreflopDataset } = await import('../tools/preflop-dataset.js');
+  const { data } = loadPreflopDataset();
+
+  // A derived name the dataset does not carry would make every leak drill
+  // unsupported, which is worse than the two-branch default it replaces.
+  const leaks = [
+    'preflop.rfi.UTG', 'preflop.rfi.MP', 'preflop.rfi.HJ', 'preflop.rfi.CO',
+    'preflop.rfi.BTN', 'preflop.rfi.SB',
+    'preflop.bbDefense.vs-BTN', 'preflop.sbDefense.vs-CO', 'preflop.btnDefense.vs-UTG',
+    'nothing-recognisable',
+  ];
+  const missing = leaks
+    .map((leak) => [leak, spotForSkillKey(leak)])
+    .filter(([, spot]) => !data.spots[spot]);
+  assert.deepEqual(missing, []);
+});
+
+test('appendJsonl repairs a torn tail at every boundary without eating a whole line', () => {
+  const dir = tmp();
+  const row = (id, pad = 8) => JSON.stringify({ id, pad: 'z'.repeat(pad) });
+
+  // A file that is one torn line and nothing else.
+  const only = path.join(dir, 'only.jsonl');
+  fs.writeFileSync(only, row('torn', 70 * 1024).slice(0, -3));
+  appendJsonl(only, { id: 'kept' });
+  assert.deepEqual(readJsonl(only).map((entry) => entry.id), ['kept']);
+
+  // A file that already ends on a newline must not lose its last line.
+  const clean = path.join(dir, 'clean.jsonl');
+  fs.writeFileSync(clean, `${row('a')}\n${row('b')}\n`);
+  appendJsonl(clean, { id: 'c' });
+  assert.deepEqual(readJsonl(clean).map((entry) => entry.id), ['a', 'b', 'c']);
+
+  // A torn line spanning several windows.
+  const wide = path.join(dir, 'wide.jsonl');
+  fs.writeFileSync(wide, `${row('a')}\n${row('torn', 200 * 1024).slice(0, -3)}`);
+  appendJsonl(wide, { id: 'b' });
+  assert.deepEqual(readJsonl(wide).map((entry) => entry.id), ['a', 'b']);
+
+  // An empty file.
+  const empty = path.join(dir, 'empty.jsonl');
+  fs.writeFileSync(empty, '');
+  appendJsonl(empty, { id: 'first' });
+  assert.deepEqual(readJsonl(empty).map((entry) => entry.id), ['first']);
 });
 
 // 9 — provider version은 데이터셋에서 온다. 하드코딩 상수가 남아 있으면 안 된다.

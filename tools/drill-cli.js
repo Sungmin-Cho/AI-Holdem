@@ -219,7 +219,11 @@ export async function startDrill(storeDir, { mode = 'free', seed = '0', idempote
     const bank = createMistakeBank(storeDir);
     const profile = await createProfileStore(storeDir).show();
     const mistakes = await bank.list();
-    const queue = generateQueue({ mode, profile, mistakes, seed, now: new Date().toISOString() });
+    const { data } = loadPreflopDataset(DATASET);
+    const queue = generateQueue({
+      mode, profile, mistakes, seed, now: new Date().toISOString(),
+      source: { id: data.id, version: data.version },
+    });
     const session = {
       schemaVersion: 1,
       sessionId: randomUUID(),
