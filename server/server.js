@@ -218,17 +218,20 @@ function collectDenyLiterals(root, expectedSessionToken) {
   return literals;
 }
 
-function storedTrainingDigestMatches(item, projected, {
+function legacyDigestAuthorized(item, projected, {
   allowUnmappedLegacy = false,
   legacyOldToNew = null,
 } = {}) {
+  if (!Object.hasOwn(item, 'explanation')
+    || item.payloadSha256 !== legacyTrainingPayloadSha256(item)) return false;
+  return allowUnmappedLegacy
+    || legacyOldToNew?.[item.payloadSha256] === projected.payloadSha256;
+}
+
+function storedTrainingDigestMatches(item, projected, legacyProvenance = {}) {
   if (typeof item?.payloadSha256 !== 'string') return false;
-  if (Object.hasOwn(item, 'explanation')) {
-    if (item.payloadSha256 !== legacyTrainingPayloadSha256(item)) return false;
-    return allowUnmappedLegacy
-      || legacyOldToNew?.[item.payloadSha256] === projected.payloadSha256;
-  }
-  return item.payloadSha256 === projected.payloadSha256;
+  return item.payloadSha256 === projected.payloadSha256
+    || legacyDigestAuthorized(item, projected, legacyProvenance);
 }
 
 function migrateLoadedTraining(rawTraining, { legacyProvenance = {} } = {}) {
@@ -265,8 +268,7 @@ function migrateLoadedTraining(rawTraining, { legacyProvenance = {} } = {}) {
       continue;
     }
     byId.set(projected.evaluationId, projected);
-    if ((legacyProvenance.allowUnmappedLegacy || legacyProvenance.legacyOldToNew)
-      && Object.hasOwn(item, 'explanation')) {
+    if (legacyDigestAuthorized(item, projected, legacyProvenance)) {
       const legacy = legacyExplanationAnnotation(explanation);
       if (legacy) {
         const ann = projectTrainingAnnotation({
