@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -89,6 +90,17 @@ function annotationRow(summary, field, value, { status = 'ready' } = {}) {
       valueSha256,
     },
   };
+}
+
+function legacySummaryDigest(summary) {
+  const keys = [
+    'evaluationId', 'handNo', 'decisionId', 'status', 'street', 'spotKey', 'handClass',
+    'chosen', 'recommended', 'evLossBb', 'grade', 'forced', 'source', 'explanation',
+    'detailRef', 'detailSha256', 'code', 'reason',
+  ];
+  const canonical = {};
+  for (const key of keys) if (summary[key] !== undefined) canonical[key] = summary[key];
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
 function exploitValue({ opponentId = 'p1', policyId = 'tight-v1', adjustment = { bluff: 'increase' }, primary = 'p1' } = {}) {
@@ -233,6 +245,24 @@ test('C2: the engine gameOver flag alone opens the gate — no view needed', asy
     const snap = await snapshotOf(port);
     assert.equal(snap.view, null);
     assert.equal((snap.trainingAnnotations ?? []).some((row) => row.field === 'exploit'), true);
+  });
+});
+
+test('C2: canonical engine abort is a terminal gameOver state', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, {
+    gameOver: true,
+    hands: [],
+    state: { handNo: 0, lastHand: null, result: 'abort' },
+  });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const accepted = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'exploit', exploitValue())],
+    });
+    assert.equal(accepted.status, 200);
   });
 });
 
@@ -816,6 +846,17 @@ test('M4: unsigned legacy text and every duplicate final authority key are dropp
   writeSecurityFixtures(unsignedLegacyDir);
   seedSnapshot(unsignedLegacyDir, { training: [{ ...summary, explanation: 'digest에 없는 해설' }] });
   await withServer(unsignedLegacyDir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(snap.training.length, 1);
+    assert.equal(snap.trainingAnnotations.length, 0);
+  });
+
+  const forgedLegacyDir = tmpDir();
+  writeSecurityFixtures(forgedLegacyDir);
+  const forgedLegacy = { ...summary, explanation: '공식 provenance 없는 legacy 해설' };
+  forgedLegacy.payloadSha256 = legacySummaryDigest(forgedLegacy);
+  seedSnapshot(forgedLegacyDir, { training: [forgedLegacy] });
+  await withServer(forgedLegacyDir, async ({ port }) => {
     const snap = await snapshotOf(port);
     assert.equal(snap.training.length, 0);
     assert.equal(snap.trainingAnnotations.length, 0);

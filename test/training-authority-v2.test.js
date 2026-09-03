@@ -1214,6 +1214,8 @@ test('loadUiState drops forged and orphan persisted annotations', async () => {
   const dir2 = tmp();
   writeSecurityFixtures(dir2);
   const v1 = v1SummaryOf(evaluation(), { explanation: '구 스냅샷 해설' });
+  fs.mkdirSync(path.join(dir2, 'training'), { recursive: true });
+  fs.writeFileSync(path.join(dir2, 'training', '.training-authority.json'), JSON.stringify({ schemaVersion: 1 }));
   fs.writeFileSync(path.join(dir2, 'ui-snapshot.json'), JSON.stringify({
     revision: 3,
     publishId: 3,
