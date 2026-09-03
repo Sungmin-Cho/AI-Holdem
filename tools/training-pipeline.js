@@ -9,6 +9,7 @@ import {
   readAnnotationExactFile,
 } from './training-control.js';
 import { validateExplanation } from '../training/explain.js';
+import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
 import {
   annotationBodyByteLength,
@@ -22,6 +23,7 @@ import {
 } from '../publish-contract.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/cli.js');
+const SOLVE_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'solve-cli.js');
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
 const handPipelineTail = new Map();
 const explainTail = new Map();
@@ -59,15 +61,13 @@ export function toRunnerHandle(out) {
   return { promise: Promise.resolve(out), terminate: async () => ({ confirmed: true }) };
 }
 
-export function defaultEvaluate(sessionDir, handNo) {
+function cliRunner(argv, { timeoutMs, failCode }) {
   let child = null;
   let settled = false;
   const promise = new Promise((resolve) => {
-    child = execFile(process.execPath, [
-      CLI, 'evaluate', '--game-dir', sessionDir, '--hand', String(handNo),
-    ], {
+    child = execFile(process.execPath, argv, {
       encoding: 'utf8',
-      timeout: 15_000,
+      timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
     }, (error, stdout) => {
       settled = true;
@@ -82,7 +82,7 @@ export function defaultEvaluate(sessionDir, handNo) {
       }
       resolve({
         ok: false,
-        code: parsed?.code ?? error?.code ?? 'EVALUATE_FAILED',
+        code: parsed?.code ?? error?.code ?? failCode,
         message: parsed?.message ?? error?.message,
       });
     });
@@ -99,6 +99,22 @@ export function defaultEvaluate(sessionDir, handNo) {
       return { confirmed: await waitChild(child, 400) };
     },
   };
+}
+
+export function defaultEvaluate(sessionDir, handNo, { solverAdapterId = null } = {}) {
+  const argv = [CLI, 'evaluate', '--game-dir', sessionDir, '--hand', String(handNo)];
+  if (solverAdapterId) argv.push('--solver', solverAdapterId);
+  return cliRunner(argv, { timeoutMs: 15_000, failCode: 'EVALUATE_FAILED' });
+}
+
+export function defaultSolve({ sessionDir, decisionId, handNo, adapterId }) {
+  return cliRunner([
+    SOLVE_CLI,
+    '--game-dir', sessionDir,
+    '--hand', String(handNo),
+    '--decision', decisionId,
+    '--adapter', adapterId,
+  ], { timeoutMs: 20_000, failCode: 'SOLVE_FAILED' });
 }
 
 export function buildExplanationPrompt(evaluation) {
@@ -161,12 +177,14 @@ function userDecisionsOf(record) {
 }
 
 async function recordEvaluateFailure(tc, sessionDir, {
-  handNo, gameEpoch, owner, code, decisionIds,
+  handNo, gameEpoch, owner, code, decisionIds, skip,
 }) {
   const snaps = userDecisionsOf(loadHandRecord(sessionDir, handNo));
-  const ids = decisionIds?.length
-    ? decisionIds
-    : (snaps.length ? snaps.map((snap) => snap.decisionId) : [`hand-${handNo}`]);
+  const fallback = snaps.length ? snaps.map((snap) => snap.decisionId) : [`hand-${handNo}`];
+  const ids = (decisionIds?.length ? decisionIds : fallback)
+    // solve로 미뤄진 결정에 evaluate 실패 사유를 덮어쓰지 않는다 — 그 pending은
+    // solver가 소유한다.
+    .filter((decisionId) => !skip?.has(decisionId));
   for (const decisionId of ids) {
     await tc.recordPending(sessionDir, decisionId, {
       handNo,
@@ -209,13 +227,27 @@ function uncoveredDecisionIds(tc, sessionDir, handNo, existing) {
   return missing;
 }
 
+function solvePendingIds(tc, sessionDir) {
+  const auth = tc.loadAuthority(sessionDir);
+  const ids = new Set();
+  for (const [decisionId, entry] of Object.entries(auth?.pending ?? {})) {
+    if (typeof entry?.adapterId === 'string') ids.add(decisionId);
+  }
+  return ids;
+}
+
 async function runHandPipelineUnlocked({
   sessionDir, handNo, gameEpoch, owner, storeDir,
-  evaluate, explain, publish, consume,
+  evaluate, explain, publish, consume, solverAdapterId, startSolve,
 }) {
   const tc = createTrainingControl({ storeDir });
   const existing = itemsCoveringHand(tc, sessionDir, handNo);
-  const missingIds = uncoveredDecisionIds(tc, sessionDir, handNo, existing);
+  // 이미 solve로 미뤄진 결정은 evaluate 경로에서 완전히 빠진다. 여기서 빼지
+  // 않으면 `--solver` 없는 resume이 unsupported item을 먼저 만들어 solve 결과
+  // accept가 EVALUATION_CONFLICT가 된다.
+  const deferred = solvePendingIds(tc, sessionDir);
+  const missingIds = uncoveredDecisionIds(tc, sessionDir, handNo, existing)
+    .filter((id) => !deferred.has(id));
   const skipEvaluate = existing.length > 0 && missingIds.length === 0;
   let acceptedItems = existing;
   let evaluations = existing.map((item) => loadEvaluationDetail(sessionDir, item));
@@ -225,8 +257,8 @@ async function runHandPipelineUnlocked({
   };
   if (!skipEvaluate) {
     evalHandle = typeof evaluate === 'function'
-      ? toRunnerHandle(evaluate(sessionDir, handNo))
-      : defaultEvaluate(sessionDir, handNo);
+      ? toRunnerHandle(evaluate(sessionDir, handNo, { solverAdapterId }))
+      : defaultEvaluate(sessionDir, handNo, { solverAdapterId });
     let evaluated;
     try {
       evaluated = await evalHandle.promise;
@@ -236,13 +268,23 @@ async function runHandPipelineUnlocked({
     if (!evaluated?.ok) {
       const code = evaluated?.code ?? 'EVALUATE_FAILED';
       await recordEvaluateFailure(tc, sessionDir, {
-        handNo, gameEpoch, owner, code, decisionIds: missingIds,
+        handNo, gameEpoch, owner, code, decisionIds: missingIds, skip: deferred,
       });
       return {
         ok: false, code, evaluations: [], handle: evalHandle,
       };
     }
-    const incoming = evaluated.evaluations ?? [];
+    for (const decisionId of evaluated.pendingSolve ?? []) {
+      await tc.recordPending(sessionDir, decisionId, {
+        handNo,
+        reason: 'solve',
+        adapterId: solverAdapterId,
+        gameEpoch,
+        owner,
+      });
+      deferred.add(decisionId);
+    }
+    const incoming = (evaluated.evaluations ?? []).filter((row) => !deferred.has(row.decisionId));
     const toAccept = existing.length === 0
       ? incoming
       : incoming.filter((row) => missingIds.includes(row.decisionId));
@@ -260,6 +302,26 @@ async function runHandPipelineUnlocked({
       if (row?.evaluationId) details.set(row.evaluationId, row);
     }
     evaluations = [...details.values()];
+  }
+
+  // 미뤄진 결정마다 solve task를 연다. resume은 `--solver` 없이도 pending에
+  // 적힌 adapterId로 재개한다 — 플래그는 새 pending 생성만 게이트한다.
+  if (typeof startSolve === 'function') {
+    const auth = tc.loadAuthority(sessionDir);
+    for (const decisionId of deferred) {
+      const entry = auth?.pending?.[decisionId];
+      if (!entry?.adapterId) continue;
+      if (entry.handNo != null && Number(entry.handNo) !== Number(handNo)) continue;
+      if (auth?.solveTasks?.[decisionId]) continue;
+      startSolve({
+        sessionDir,
+        decisionId,
+        handNo: entry.handNo ?? handNo,
+        adapterId: entry.adapterId,
+        gameEpoch,
+        owner,
+      });
+    }
   }
 
   if (typeof publish === 'function') await publish('machine');
@@ -341,6 +403,149 @@ export async function ingestHand({
   return runHandPipeline({
     sessionDir, handNo, gameEpoch, owner, explain, evaluate,
   });
+}
+
+/**
+ * One deferred postflop solve. The authority `solveTasks` map holds the task
+ * while it runs (R10 rollback quiescence), the result is accepted as an
+ * ordinary `evaluated` item, and any failure keeps the `pending` entry with its
+ * adapterId so a later resume or bootstrap sweep can retry it.
+ */
+export async function runSolveTask({
+  sessionDir, decisionId, handNo, adapterId, gameEpoch, owner, storeDir,
+  solve, publish, consume,
+}) {
+  const tc = createTrainingControl({ storeDir });
+  const keepPending = async (code) => {
+    try {
+      await tc.recordPending(sessionDir, decisionId, {
+        handNo, reason: code, adapterId, gameEpoch, owner,
+      });
+    } catch { /* the existing pending entry is already the record */ }
+  };
+  await tc.setSolveTask(sessionDir, decisionId, { handNo, adapterId });
+  try {
+    let solved;
+    try {
+      const runner = typeof solve === 'function' ? solve : defaultSolve;
+      const handle = toRunnerHandle(runner({ sessionDir, decisionId, handNo, adapterId }));
+      solved = await handle.promise;
+    } catch (error) {
+      solved = { ok: false, code: error.code ?? 'SOLVE_FAILED' };
+    }
+    if (!solved?.ok) {
+      const code = solved?.code ?? 'SOLVE_FAILED';
+      await keepPending(code);
+      return { ok: false, code };
+    }
+    const incoming = (solved.evaluations ?? []).filter((row) => row?.decisionId === decisionId);
+    if (incoming.length === 0) {
+      await keepPending('NO_EVALUATION');
+      return { ok: false, code: 'NO_EVALUATION' };
+    }
+    try {
+      await tc.acceptEvaluations(sessionDir, {
+        gameEpoch, owner, handNo, evaluations: incoming,
+      });
+    } catch (error) {
+      const code = error.code ?? 'SOLVE_ACCEPT_FAILED';
+      await keepPending(code);
+      return { ok: false, code };
+    }
+    if (typeof publish === 'function') await publish('machine');
+    if (typeof consume === 'function') {
+      try { await consume(); } catch { /* consumers retry independently */ }
+    }
+    return { ok: true };
+  } finally {
+    await tc.setSolveTask(sessionDir, decisionId, null);
+  }
+}
+
+function livePotOpponents(snapshot) {
+  return (snapshot?.publicSeats ?? [])
+    .filter((seat) => seat?.playerId !== snapshot.actorId && !seat?.folded && !seat?.out)
+    .map((seat) => ({
+      playerId: seat.playerId,
+      contribution: Number.isFinite(seat.contribution) ? seat.contribution : 0,
+    }));
+}
+
+function policyOf(players, playerId) {
+  const player = (players ?? []).find((row) => row?.playerId === playerId);
+  return player?.policy ?? null;
+}
+
+/**
+ * Seals one `exploit` annotation per already-evaluated item, covering every
+ * opponent still in the pot at decision time. Called at finalize after the
+ * training settle and **before** the cutoff marker: the marker fences
+ * `explanation` only, but the reveal stage runs after the marker, so computing
+ * exploit there would orphan the last hand's annotations.
+ */
+export async function sealExploitAnnotations({
+  sessionDir, storeDir, players, publish,
+}) {
+  const tc = createTrainingControl({ storeDir });
+  const auth = tc.loadAuthority(sessionDir);
+  if (!auth) return { sealed: 0, skipped: 0 };
+  let sealed = 0;
+  let skipped = 0;
+  for (const item of Object.values(auth.items)) {
+    // pending 결정은 건너뛴다 — item이 없는 annotation은 ANNOTATION_ORPHAN이다.
+    if (item.status !== 'evaluated' && item.status !== 'published') continue;
+    if (item.annotations?.exploit) continue;
+    const record = loadHandRecord(sessionDir, item.handNo);
+    const snapshot = (record?.decisions ?? [])
+      .find((snap) => snap.actorId === 'user' && snap.decisionId === item.decisionId);
+    if (!snapshot) {
+      skipped += 1;
+      continue;
+    }
+    const detail = loadEvaluationDetail(sessionDir, item);
+    const rows = [];
+    for (const opponent of livePotOpponents(snapshot)) {
+      const policy = policyOf(players, opponent.playerId);
+      if (!policy) continue;
+      let evaluated;
+      try {
+        evaluated = evaluateExploit({
+          gto: detail,
+          policy,
+          snapshot,
+          chosen: snapshot.chosenAction,
+        });
+      } catch {
+        continue;
+      }
+      if (evaluated?.exploit?.status !== 'supported') continue;
+      rows.push({
+        opponentId: opponent.playerId,
+        policyId: evaluated.exploit.opponentModelId,
+        adjustment: evaluated.exploit.adjustment,
+        comparison: { summaryCode: evaluated.comparison.summaryCode },
+        contribution: opponent.contribution,
+      });
+    }
+    if (rows.length === 0) {
+      skipped += 1;
+      continue;
+    }
+    // primary는 결정 시점 pot 기여가 가장 큰 상대다. 동률은 id 순으로 고정해
+    // 같은 입력이 같은 annotation digest를 내도록 한다.
+    const primary = [...rows]
+      .sort((left, right) => right.contribution - left.contribution
+        || String(left.opponentId).localeCompare(String(right.opponentId)))[0].opponentId;
+    const value = {
+      opponents: rows.map(({ contribution, ...row }) => row),
+      primary,
+    };
+    const result = await tc.sealAnnotation(sessionDir, item.evaluationId, 'exploit', value);
+    if (result?.ok) sealed += 1;
+    else skipped += 1;
+  }
+  if (sealed > 0 && typeof publish === 'function') await publish('annotation');
+  return { sealed, skipped };
 }
 
 export async function reconcileSession({

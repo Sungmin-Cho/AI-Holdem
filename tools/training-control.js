@@ -131,6 +131,7 @@ function emptyAuth({ gameEpoch, owner }) {
     publishQueue: {},
     pending: {},
     annotationQueue: {},
+    solveTasks: {},
   };
 }
 
@@ -359,6 +360,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
     publishQueue: newQueue,
     pending,
     annotationQueue,
+    solveTasks: {},
   };
   const lines = Object.values(newItems)
     .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
@@ -398,6 +400,10 @@ function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
     auth.publishQueue = auth.publishQueue && typeof auth.publishQueue === 'object'
       && !Array.isArray(auth.publishQueue)
       ? auth.publishQueue
+      : {};
+    auth.solveTasks = auth.solveTasks && typeof auth.solveTasks === 'object'
+      && !Array.isArray(auth.solveTasks)
+      ? auth.solveTasks
       : {};
     return auth;
   } catch (error) {
@@ -681,6 +687,20 @@ export function createTrainingControl({ storeDir } = {}) {
     });
   }
 
+  // 진행 중인 solve를 권위에 남긴다. rollback guard(R10)가 `solveTasks`가 비어
+  // 있는지로 quiescence를 판정하므로, 시작과 종료가 모두 락 아래에서 보여야 한다.
+  async function setSolveTask(sessionDir, decisionId, entry) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return null;
+      auth.solveTasks = auth.solveTasks ?? {};
+      if (entry == null) delete auth.solveTasks[decisionId];
+      else auth.solveTasks[decisionId] = { decisionId, ...entry };
+      persistAuth(sessionDir, auth);
+      return auth.solveTasks[decisionId] ?? null;
+    });
+  }
+
   async function writeCutoffMarker(sessionDir) {
     return withLock(sessionDir, () => writeCutoffMarkerUnlocked(sessionDir));
   }
@@ -808,6 +828,7 @@ export function createTrainingControl({ storeDir } = {}) {
     markPublished,
     markConsumer,
     recordPending,
+    setSolveTask,
     sealAnnotation,
     markAnnotationPublished,
     writeCutoffMarker,
