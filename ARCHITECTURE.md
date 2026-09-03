@@ -18,6 +18,8 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `tools/policy-player.js` | `--opponent-runtime policy`일 때 인프로세스 결정. LLM 워밍업을 생략한다. |
 | `training/exploit/` | 종료 후 heuristic exploit 비교. EV 숫자는 만들지 않는다. |
 | `tools/solver-runtime.js` | Postflop solver 자식. detached process group, RSS/stdout cap, fake adapter. |
+| `tools/solve-cli.js` | 한 postflop 결정을 풀어 evaluate와 같은 evaluation 봉투로 돌려준다. |
+| `training/postflop/solved-decision.js` | solver 결과 → evaluation 투영(순수). heuristic이면 EV는 전부 null. |
 | `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |

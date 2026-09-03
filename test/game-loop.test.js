@@ -7087,6 +7087,7 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     stackBb: undefined,
     hands: undefined,
     opponentRuntime: undefined,
+    solverAdapterId: undefined,
   });
   assert.equal(parseGameLoopArgs(['--ai', '1', '--opponent-runtime', 'policy']).opponentRuntime, 'policy');
   assert.deepEqual(

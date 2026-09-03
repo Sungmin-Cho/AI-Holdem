@@ -27,12 +27,15 @@ import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import {
   buildExplanationPrompt,
   defaultEvaluate,
+  defaultSolve,
   flushAnnotationPublish as flushAnnotationEnvelope,
   flushMachinePublish,
   isTrainingEnabled,
   reconcileSession,
   retryUnresolvedTrainingAttempt as retryTrainingAttempt,
   runHandPipeline,
+  runSolveTask,
+  sealExploitAnnotations,
   toRunnerHandle,
   trainingAggregate,
 } from './training-pipeline.js';
@@ -201,6 +204,7 @@ export function parseGameLoopArgs(argv) {
     stackBb: undefined,
     hands: undefined,
     opponentRuntime: undefined,
+    solverAdapterId: undefined,
   };
   const bools = new Map([
     ['--force', 'force'],
@@ -219,6 +223,7 @@ export function parseGameLoopArgs(argv) {
     ['--stack-bb', 'stackBb'],
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
+    ['--solver', 'solverAdapterId'],
   ]);
   let sawGameDir = false;
 
@@ -249,6 +254,9 @@ export function parseGameLoopArgs(argv) {
   }
   if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
     throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
+  }
+  if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
+    throw codedError('USAGE', '--solver는 [a-z0-9-] 64자 이내 adapterId입니다.');
   }
   return parsed;
 }
@@ -379,6 +387,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
   const storeDir = opts.storeDir ?? null;
+  // 플래그는 새 solve pending 생성만 게이트한다. 이미 pending에 적힌 adapterId는
+  // 플래그 없이도 resume에서 재개된다.
+  const solverAdapterId = typeof opts.solverAdapterId === 'string' && opts.solverAdapterId
+    ? opts.solverAdapterId
+    : null;
   const loopStatePath = path.join(root, 'loop-state.json');
   const engineStatePath = path.join(root, 'state.json');
   const playersPath = path.join(root, 'players.json');
@@ -1929,6 +1942,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const solveInFlight = new Set();
+
   const trackTrainingTask = (handNo, work) => {
     let task;
     task = Promise.resolve()
@@ -1941,11 +1956,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return task;
   };
 
-  const evaluateForPipeline = (sessionDir, handNo) => {
+  const evaluateForPipeline = (sessionDir, handNo, options = {}) => {
     const raw = typeof trainingHooks.evaluate === 'function'
-      ? trainingHooks.evaluate(sessionDir, handNo)
-      : defaultEvaluate(sessionDir, handNo);
+      ? trainingHooks.evaluate(sessionDir, handNo, options)
+      : defaultEvaluate(sessionDir, handNo, options);
     return bindTrainingAttempt(`${handNo}:evaluate`, toRunnerHandle(raw));
+  };
+
+  // solve 자식도 evaluate/explain과 같은 attempt 표에 올린다 — cutoff의 종료
+  // 확인 절차가 그 표를 훑기 때문이다.
+  const solveForPipeline = (task) => {
+    const raw = typeof trainingHooks.solve === 'function'
+      ? trainingHooks.solve(task)
+      : defaultSolve(task);
+    return bindTrainingAttempt(`${task.decisionId}:solve`, toRunnerHandle(raw));
   };
 
   const explainForPipeline = (evaluation) => {
@@ -1981,6 +2005,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, wrapped);
   };
 
+  const startSolveTask = (task) => {
+    if (!trainingOn) return;
+    // 권위의 solveTasks는 자식이 실제로 뜬 뒤에야 보인다. 그 사이에 같은
+    // 파이프라인이 다시 돌면 같은 결정에 두 자식이 뜨므로 로컬 in-flight 집합이
+    // 먼저 막는다.
+    if (solveInFlight.has(task.decisionId)) return;
+    solveInFlight.add(task.decisionId);
+    const loop = readLoopState();
+    trackTrainingTask(task.handNo, () => runSolveTask({
+      ...task,
+      gameEpoch: task.gameEpoch ?? loop?.gameEpoch,
+      owner: task.owner ?? loop?.ownerSessionId,
+      storeDir,
+      solve: solveForPipeline,
+      shouldStop: () => stopRequested || finalizationCutoff,
+      publish: async (kind) => {
+        if (kind === 'machine') await flushTrainingPublish();
+        if (kind === 'annotation') await flushAnnotationPublish();
+      },
+      consume: consumeTrainingNow,
+    }).finally(() => solveInFlight.delete(task.decisionId)));
+  };
+
   const runTrainingPipeline = async (handNo) => {
     const loop = readLoopState();
     const result = await runHandPipeline({
@@ -1991,6 +2038,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       storeDir,
       evaluate: evaluateForPipeline,
       explain: explainForPipeline,
+      solverAdapterId,
+      startSolve: startSolveTask,
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -2037,12 +2086,28 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  // R8/#25. training settle 직후·cutoff 마커 기록 전에 돈다. reveal 단계는 마커
+  // 이후라 마지막 핸드 item이 pending이면 ANNOTATION_ORPHAN이 되고 리뷰 LLM과
+  // 예산을 경합한다. 게시는 cutoff 뒤 annotation flush가 함께 처리한다.
   const sealExploitAtCutoff = async () => {
-    if (typeof trainingHooks.exploit !== 'function') return;
+    if (!trainingOn) return;
     try {
-      await trainingHooks.exploit({ sessionDir: root });
+      const players = readJsonOptional(playersPath, 'PLAYERS');
+      const result = await sealExploitAnnotations({
+        sessionDir: root,
+        storeDir,
+        players: Array.isArray(players) ? players : [],
+      });
+      log('training-exploit-sealed', result);
+      if (result.skipped > 0) {
+        appendNotice(`exploit 평가를 남기지 못한 결정 ${result.skipped}건 (상대 정책 없음 또는 평가 불가).`);
+      }
     } catch (error) {
-      log('training-exploit-stub-error', { code: error.code ?? 'ERROR' });
+      // exploit annotation은 additive UI 정보다. cutoff 마커와 달리 없다고 해서
+      // 계약이 깨지지는 않으므로 종료를 중단하지 않는다. 다만 조용히 사라지지도
+      // 않게 사용자에게 notice로 남긴다.
+      log('training-exploit-error', { code: error.code ?? 'ERROR' });
+      appendNotice(`exploit 평가 실패: ${error.code ?? 'ERROR'}`);
     }
   };
 
@@ -2099,6 +2164,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!trainingOn) return;
     trainingProducerOpen = true;
     try {
+      // 이 프로세스가 들고 있지 않은 solve 점유는 죽은 사이드카의 잔해다.
+      // 거두지 않으면 resume이 그 결정의 solve를 영원히 다시 열지 못하고
+      // rollback guard도 영원히 닫힌다.
+      try {
+        const reaped = await createTrainingControl({ storeDir })
+          .reapSolveTasks(root, { keepDecisionIds: [...solveInFlight] });
+        if (reaped.reaped > 0) log('training-solve-task-reaped', reaped);
+      } catch (error) {
+        log('training-solve-task-reap-error', { code: error.code ?? 'ERROR' });
+      }
       await retryUnresolvedTrainingAttempt();
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const loop = readLoopState();
@@ -4078,6 +4153,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('training-cutoff-marker', { at: isoNow(now) });
       await sealUnfinishedExplanations();
       trainingTerminationConfirmed = await terminateTrainingChildren(finalDeadlineNs);
+      // settle이 timeout으로 끝났으면 첫 스캔 이후에도 in-flight evaluate/solve가
+      // item을 accept할 수 있다. 자식 종료가 확인된 지금이 생산자 집합이 실제로
+      // 닫히는 시점이므로 한 번 더 훑어 늦게 온 item이 exploit 없이 게시되는 것을
+      // 막는다. seal은 이미 붙은 annotation을 건너뛰므로 멱등이고, cutoff 마커는
+      // explanation 전용이라 이 시점의 exploit ready seal은 정상 경로다.
+      await sealExploitAtCutoff();
     }
     const signalAuthority = persistedCoachAttempts();
     if (signalAuthority.authorityError) {
@@ -4954,6 +5035,7 @@ async function main() {
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
+              solverAdapterId: args.solverAdapterId,
             },
           });
         } else {
@@ -4975,6 +5057,7 @@ async function main() {
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
+              solverAdapterId: args.solverAdapterId,
             },
           });
         }
@@ -4987,7 +5070,7 @@ async function main() {
       loop = createGameLoop({
         gameDir: args.gameDir,
         resolver,
-        opts: { opponentRuntime: args.opponentRuntime },
+        opts: { opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
     process.once('SIGTERM', () => {

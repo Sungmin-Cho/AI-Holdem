@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
@@ -131,6 +132,7 @@ function emptyAuth({ gameEpoch, owner }) {
     publishQueue: {},
     pending: {},
     annotationQueue: {},
+    solveTasks: {},
   };
 }
 
@@ -359,6 +361,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
     publishQueue: newQueue,
     pending,
     annotationQueue,
+    solveTasks: {},
   };
   const lines = Object.values(newItems)
     .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
@@ -398,6 +401,10 @@ function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
     auth.publishQueue = auth.publishQueue && typeof auth.publishQueue === 'object'
       && !Array.isArray(auth.publishQueue)
       ? auth.publishQueue
+      : {};
+    auth.solveTasks = auth.solveTasks && typeof auth.solveTasks === 'object'
+      && !Array.isArray(auth.solveTasks)
+      ? auth.solveTasks
       : {};
     return auth;
   } catch (error) {
@@ -681,6 +688,54 @@ export function createTrainingControl({ storeDir } = {}) {
     });
   }
 
+  // 진행 중인 solve를 권위에 남긴다. rollback guard(R10)가 `solveTasks`가 비어
+  // 있는지로 quiescence를 판정하므로, 시작과 종료가 모두 락 아래에서 보여야
+  // 한다. 점유는 토큰으로 소유자에게 묶인다 — 잡은 쪽만 풀 수 있다.
+  async function claimSolveTask(sessionDir, decisionId, entry) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return { claimed: false, code: 'NO_TRAINING_AUTHORITY' };
+      auth.solveTasks = auth.solveTasks ?? {};
+      const existing = auth.solveTasks[decisionId];
+      if (existing) {
+        return { claimed: false, code: 'SOLVE_ALREADY_RUNNING', task: existing };
+      }
+      const token = randomBytes(16).toString('hex');
+      // entry를 먼저 펴야 호출자가 준 필드가 소유권 토큰이나 decisionId를
+      // 덮어쓰지 못한다 — 예측 가능한 토큰이 들어오면 아무나 점유를 풀 수 있다.
+      auth.solveTasks[decisionId] = { ...entry, decisionId, token };
+      persistAuth(sessionDir, auth);
+      return { claimed: true, token };
+    });
+  }
+
+  // 크래시로 claim과 release 사이가 끊기면 점유가 영속 파일에 남아 resume의
+  // 재기동과 rollback guard를 영구히 막는다. loop 락이 세션당 사이드카를 하나로
+  // 강제하므로, 살아 있는 프로세스가 소유하지 않은 점유는 정의상 죽은 것이다.
+  async function reapSolveTasks(sessionDir, { keepDecisionIds = [] } = {}) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return { reaped: 0 };
+      const keep = new Set(keepDecisionIds);
+      const stale = Object.keys(auth.solveTasks ?? {}).filter((id) => !keep.has(id));
+      for (const decisionId of stale) delete auth.solveTasks[decisionId];
+      if (stale.length > 0) persistAuth(sessionDir, auth);
+      return { reaped: stale.length, decisionIds: stale };
+    });
+  }
+
+  async function releaseSolveTask(sessionDir, decisionId, token) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return { released: false };
+      const existing = auth.solveTasks?.[decisionId];
+      if (!existing || existing.token !== token) return { released: false };
+      delete auth.solveTasks[decisionId];
+      persistAuth(sessionDir, auth);
+      return { released: true };
+    });
+  }
+
   async function writeCutoffMarker(sessionDir) {
     return withLock(sessionDir, () => writeCutoffMarkerUnlocked(sessionDir));
   }
@@ -808,6 +863,9 @@ export function createTrainingControl({ storeDir } = {}) {
     markPublished,
     markConsumer,
     recordPending,
+    claimSolveTask,
+    releaseSolveTask,
+    reapSolveTasks,
     sealAnnotation,
     markAnnotationPublished,
     writeCutoffMarker,

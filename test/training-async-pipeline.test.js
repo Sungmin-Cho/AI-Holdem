@@ -695,7 +695,10 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
     return Object.values(auth?.items ?? {})[0] ?? null;
   }, 'unfinished explanation had no training item');
   assert.equal(item.annotations.explanation.status, 'unavailable');
-  const annPub = publishes.find((row) => row.envelope?.trainingAnnotations?.[0]?.status === 'unavailable');
+  // exploit annotation(P1-5)이 같은 봉투에 먼저 실릴 수 있으므로 인덱스가 아니라
+  // field로 찾는다. 단언 대상은 그대로 "미완 해설이 unavailable로 게시된다"이다.
+  const annPub = publishes.find((row) => row.envelope?.trainingAnnotations
+    ?.some((entry) => entry.field === 'explanation' && entry.status === 'unavailable'));
   assert.ok(annPub);
   const review = fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8');
   assert.match(review, /pending|미완|0/);
