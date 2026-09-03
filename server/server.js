@@ -14,6 +14,7 @@ import {
   projectTrainingSummary,
   sha256Hex,
   textLeaksPrivate,
+  validatePrivateEngineState,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
 
@@ -145,7 +146,7 @@ function readSecurityJson(root, segments) {
 // 전부 "아직 끝나지 않았다"로 읽는다(fail-closed).
 function engineGameOver(root) {
   try {
-    return readSecurityJson(root, ['state.json'])?.gameOver === true;
+    return validatePrivateEngineState(readSecurityJson(root, ['state.json'])).gameOver === true;
   } catch {
     return false;
   }
@@ -216,23 +217,30 @@ function legacyTrainingPayloadSha256(item) {
 
 function storedTrainingDigestMatches(item, projected) {
   if (typeof item?.payloadSha256 !== 'string') return false;
-  if (item.payloadSha256 === projected.payloadSha256) return true;
-  return Object.hasOwn(item, 'explanation')
-    && item.payloadSha256 === legacyTrainingPayloadSha256(item);
+  if (Object.hasOwn(item, 'explanation')) {
+    return item.payloadSha256 === legacyTrainingPayloadSha256(item);
+  }
+  return item.payloadSha256 === projected.payloadSha256;
 }
 
 function migrateLoadedTraining(rawTraining) {
   const byId = new Map();
-  const duplicateIds = new Set();
   const split = Object.create(null);
   let dropped = 0;
-  for (const item of Array.isArray(rawTraining) ? rawTraining : []) {
+  const rows = Array.isArray(rawTraining) ? rawTraining : [];
+  const idCounts = new Map();
+  for (const item of rows) {
+    if (typeof item?.evaluationId !== 'string') continue;
+    idCounts.set(item.evaluationId, (idCounts.get(item.evaluationId) ?? 0) + 1);
+  }
+  for (const item of rows) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       dropped += 1;
       continue;
     }
-    if (typeof item.evaluationId === 'string' && byId.has(item.evaluationId)) {
-      duplicateIds.add(item.evaluationId);
+    if (typeof item.evaluationId === 'string' && idCounts.get(item.evaluationId) > 1) {
+      dropped += 1;
+      continue;
     }
     const explanation = item.explanation;
     const rest = { ...item };
@@ -248,8 +256,7 @@ function migrateLoadedTraining(rawTraining) {
       dropped += 1;
       continue;
     }
-    if (byId.has(projected.evaluationId)) duplicateIds.add(projected.evaluationId);
-    else byId.set(projected.evaluationId, projected);
+    byId.set(projected.evaluationId, projected);
     if (typeof explanation === 'string' && explanation.length) {
       try {
         const ann = projectTrainingAnnotation({
@@ -263,10 +270,6 @@ function migrateLoadedTraining(rawTraining) {
         split[ann.evaluationId].explanation = ann;
       } catch { dropped += 1; }
     }
-  }
-  for (const id of duplicateIds) {
-    if (byId.delete(id)) dropped += 1;
-    delete split[id];
   }
   return { training: [...byId.values()], split, dropped };
 }
@@ -310,8 +313,17 @@ function restoreHistory(rawHistory, context) {
       : {};
     if ('training' in payload) {
       const itemsById = new Map();
-      const duplicateIds = new Set();
-      for (const item of Array.isArray(payload.training) ? payload.training : []) {
+      const historyTraining = Array.isArray(payload.training) ? payload.training : [];
+      const historyIdCounts = new Map();
+      for (const item of historyTraining) {
+        if (typeof item?.evaluationId !== 'string') continue;
+        historyIdCounts.set(item.evaluationId, (historyIdCounts.get(item.evaluationId) ?? 0) + 1);
+      }
+      for (const item of historyTraining) {
+        if (typeof item?.evaluationId === 'string' && historyIdCounts.get(item.evaluationId) > 1) {
+          dropped += 1;
+          continue;
+        }
         let projected;
         try {
           projected = projectTrainingSummary(item);
@@ -326,22 +338,31 @@ function restoreHistory(rawHistory, context) {
           dropped += 1;
           continue;
         }
-        if (itemsById.has(projected.evaluationId)) {
-          duplicateIds.add(projected.evaluationId);
-          dropped += 1;
-        } else {
-          itemsById.set(projected.evaluationId, projected);
-        }
+        itemsById.set(projected.evaluationId, projected);
       }
-      for (const id of duplicateIds) itemsById.delete(id);
       const items = [...itemsById.values()];
       if (items.length) payload.training = items;
       else delete payload.training;
     }
     if ('trainingAnnotations' in payload) {
       const rowsByKey = new Map();
-      const duplicateKeys = new Set();
-      for (const row of Array.isArray(payload.trainingAnnotations) ? payload.trainingAnnotations : []) {
+      const historyAnnotations = Array.isArray(payload.trainingAnnotations)
+        ? payload.trainingAnnotations
+        : [];
+      const historyAnnotationCounts = new Map();
+      for (const row of historyAnnotations) {
+        if (typeof row?.evaluationId !== 'string' || typeof row?.field !== 'string') continue;
+        const key = `${row.evaluationId}:${row.field}`;
+        historyAnnotationCounts.set(key, (historyAnnotationCounts.get(key) ?? 0) + 1);
+      }
+      for (const row of historyAnnotations) {
+        const rawKey = typeof row?.evaluationId === 'string' && typeof row?.field === 'string'
+          ? `${row.evaluationId}:${row.field}`
+          : null;
+        if (rawKey && historyAnnotationCounts.get(rawKey) > 1) {
+          dropped += 1;
+          continue;
+        }
         const machine = context.machineById.get(row?.evaluationId);
         const projected = restoreAnnotationRow(row, { ...context, machine });
         const settled = projected
@@ -352,14 +373,8 @@ function restoreHistory(rawHistory, context) {
           continue;
         }
         const key = `${projected.evaluationId}:${projected.field}`;
-        if (rowsByKey.has(key)) {
-          duplicateKeys.add(key);
-          dropped += 1;
-        } else {
-          rowsByKey.set(key, projected);
-        }
+        rowsByKey.set(key, projected);
       }
-      for (const key of duplicateKeys) rowsByKey.delete(key);
       const rows = [...rowsByKey.values()];
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
@@ -385,12 +400,25 @@ function loadUiState(gameDir) {
     const gate = { gameOver: engineGameOver(gameDir) };
 
     const restoredAnnotations = Object.create(null);
-    const invalidAnnotationKeys = new Set();
     let droppedAnnotations = migrated.dropped;
-    for (const { row, outerId, outerField } of persistedAnnotationCandidates(
+    const annotationCandidates = persistedAnnotationCandidates(
       raw.trainingAnnotations,
       migrated.split,
-    )) {
+    );
+    const annotationCounts = new Map();
+    for (const { row } of annotationCandidates) {
+      if (typeof row?.evaluationId !== 'string' || typeof row?.field !== 'string') continue;
+      const key = `${row.evaluationId}:${row.field}`;
+      annotationCounts.set(key, (annotationCounts.get(key) ?? 0) + 1);
+    }
+    for (const { row, outerId, outerField } of annotationCandidates) {
+      const rawKey = typeof row?.evaluationId === 'string' && typeof row?.field === 'string'
+        ? `${row.evaluationId}:${row.field}`
+        : null;
+      if (rawKey && annotationCounts.get(rawKey) > 1) {
+        droppedAnnotations += 1;
+        continue;
+      }
       const machine = machineById.get(row?.evaluationId);
       const projected = restoreAnnotationRow(row, { machine, literals, gate });
       if (!projected
@@ -399,20 +427,8 @@ function loadUiState(gameDir) {
         droppedAnnotations += 1;
         continue;
       }
-      const key = `${projected.evaluationId}:${projected.field}`;
-      if (invalidAnnotationKeys.has(key)) {
-        droppedAnnotations += 1;
-        continue;
-      }
       const previous = restoredAnnotations[projected.evaluationId]?.[projected.field];
       if (previous) {
-        if (previous.valueSha256 !== projected.valueSha256) {
-          delete restoredAnnotations[projected.evaluationId][projected.field];
-          if (!Object.keys(restoredAnnotations[projected.evaluationId]).length) {
-            delete restoredAnnotations[projected.evaluationId];
-          }
-          invalidAnnotationKeys.add(key);
-        }
         droppedAnnotations += 1;
         continue;
       }

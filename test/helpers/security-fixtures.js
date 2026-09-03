@@ -24,9 +24,29 @@ export function defaultPlayers() {
 }
 
 export function handRecordFixture(handNo, { holes = {}, reveals = null } = {}) {
-  const record = { handNo, holes };
-  if (reveals) record.showdown = { reveals, mucks: [] };
-  return record;
+  const completeHoles = {
+    user: ['Ah', 'Kh'],
+    p1: ['7c', '2d'],
+    ...holes,
+  };
+  return {
+    handNo,
+    level: 0,
+    blinds: [50, 100],
+    button: 'user',
+    holes: completeHoles,
+    board: [],
+    folded: [],
+    allIn: [],
+    actions: [],
+    decisions: [],
+    pots: [],
+    showdown: reveals ? { reveals, mucks: [] } : null,
+    startStacks: Object.fromEntries(Object.keys(completeHoles).map((playerId) => [playerId, 10_000])),
+    endStacks: Object.fromEntries(Object.keys(completeHoles).map((playerId) => [playerId, 10_000])),
+    posts: [],
+    uncalledReturns: {},
+  };
 }
 
 export function handFilePath(dir, handNo) {
@@ -44,14 +64,37 @@ export function writeSecurityFixtures(dir, {
   fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(players));
   const archived = [...hands].sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0));
   const lastHand = archived.length ? archived[archived.length - 1] : null;
+  const currentHoles = handInProgress
+    ? { user: ['Ah', 'Kh'], p1: ['7c', '2d'], ...(handInProgress.holes ?? {}) }
+    : null;
+  const currentHand = handInProgress
+    ? {
+      street: 'preflop',
+      deck: [],
+      board: [],
+      holes: currentHoles,
+      startStacks: Object.fromEntries(Object.keys(currentHoles).map((playerId) => [playerId, 10_000])),
+      ...handInProgress,
+      holes: currentHoles,
+    }
+    : null;
+  const seatIds = [...new Set(players.map((player) => player.playerId).filter(Boolean))];
   const engineState = {
     schemaVersion: 1,
     stateVersion: 1,
     handNo: handInProgress?.handNo ?? lastHand?.handNo ?? 0,
+    config: { blinds0: [50, 100], levelEvery: 8 },
+    sessionToken: 'tok',
+    level: 0,
+    phase: currentHand ? 'in_hand' : 'idle',
+    button: 0,
+    seats: seatIds.map((playerId) => ({ playerId, stack: 10_000, out: false })),
     policySeed: FIXTURE_POLICY_SEED,
-    hand: handInProgress,
+    hand: currentHand,
     lastHand,
     gameOver,
+    result: gameOver ? 'completed' : null,
+    bustedPlayerIds: [],
     ...state,
   };
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(engineState));

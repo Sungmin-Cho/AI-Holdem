@@ -674,7 +674,6 @@ test('M4: a v1 history payload is reprojected before it is replayed', async () =
     ...summary,
     chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null, policySeed: 'LEAKED-SEED' },
     source: { id: 'local-preflop-baseline', version: '1.0.0', path: '/Users/tester/secret.json' },
-    explanation: '구 스냅샷 해설',
   };
   seedSnapshot(dir, {
     training: [summary],

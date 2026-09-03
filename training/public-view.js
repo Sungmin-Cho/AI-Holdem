@@ -18,6 +18,6 @@ export function toPublicSummary(evaluation, extras = {}) {
     recommendedTruncated: truncated,
     handNo: extras.handNo,
     detailRef: extras.detailRef ?? detailRefOf(evaluationId),
-    detailSha256: extras.detailSha256,
+    ...(extras.detailSha256 !== undefined ? { detailSha256: extras.detailSha256 } : {}),
   });
 }

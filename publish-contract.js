@@ -109,14 +109,32 @@ function privateCards(value, label) {
 
 function validatePrivateRecord(record, label) {
   if (!plainObject(record) || !Number.isInteger(record.handNo) || record.handNo < 1
-    || !plainObject(record.holes) || Object.keys(record.holes).length === 0) {
+    || !plainObject(record.holes) || Object.keys(record.holes).length === 0
+    || !plainObject(record.startStacks)) {
     throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a complete hand record`);
   }
+  const holeIds = Object.keys(record.holes).sort();
+  const stackIds = Object.keys(record.startStacks).sort();
+  if (holeIds.length !== stackIds.length
+    || holeIds.some((playerId, index) => playerId !== stackIds[index])) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind holes to startStacks`);
+  }
+  const physicalCards = new Set();
   for (const [playerId, cards] of Object.entries(record.holes)) {
     if (typeof playerId !== 'string' || playerId.length === 0) {
       throw coded('PRIVATE_LITERAL_INVALID', `${label}.holes has an invalid player id`);
     }
     privateCards(cards, `${label}.holes.${playerId}`);
+    for (const card of cards) {
+      if (physicalCards.has(card)) {
+        throw coded('PRIVATE_LITERAL_INVALID', `${label} contains duplicate physical cards`);
+      }
+      physicalCards.add(card);
+    }
+    if (typeof record.startStacks[playerId] !== 'number'
+      || !Number.isFinite(record.startStacks[playerId])) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.startStacks.${playerId} is invalid`);
+    }
   }
   const reveals = record.showdown == null
     ? []
@@ -124,13 +142,56 @@ function validatePrivateRecord(record, label) {
   if (!Array.isArray(reveals)) {
     throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals is not an array`);
   }
+  const revealedPlayers = new Set();
   for (const [index, reveal] of reveals.entries()) {
     if (!plainObject(reveal) || typeof reveal.playerId !== 'string' || reveal.playerId.length === 0) {
       throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals.${index} is invalid`);
     }
     privateCards(reveal.cards, `${label}.showdown.reveals.${index}.cards`);
+    if (revealedPlayers.has(reveal.playerId)
+      || !Object.hasOwn(record.holes, reveal.playerId)
+      || reveal.cards.some((card, cardIndex) => card !== record.holes[reveal.playerId][cardIndex])) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label} reveal is not bound to the player's holes`);
+    }
+    revealedPlayers.add(reveal.playerId);
   }
   return record;
+}
+
+export function validatePrivateEngineState(engineState) {
+  if (!plainObject(engineState)
+    || engineState.schemaVersion !== 1
+    || !Number.isInteger(engineState.stateVersion) || engineState.stateVersion < 0
+    || !plainObject(engineState.config)
+    || typeof engineState.sessionToken !== 'string' || engineState.sessionToken.length === 0
+    || !Number.isInteger(engineState.handNo) || engineState.handNo < 0
+    || !['idle', 'in_hand'].includes(engineState.phase)
+    || !Array.isArray(engineState.seats) || engineState.seats.length < 2
+    || typeof engineState.gameOver !== 'boolean'
+    || !Object.hasOwn(engineState, 'hand')
+    || !Object.hasOwn(engineState, 'lastHand')) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine state security schema is incomplete');
+  }
+  const seatIds = new Set();
+  for (const seat of engineState.seats) {
+    if (!plainObject(seat) || typeof seat.playerId !== 'string' || seat.playerId.length === 0
+      || seatIds.has(seat.playerId)) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'engine state contains an invalid seat');
+    }
+    seatIds.add(seat.playerId);
+  }
+  if (engineState.hand !== null) {
+    validatePrivateRecord({ ...engineState.hand, handNo: engineState.handNo }, 'state.hand');
+  }
+  if (engineState.lastHand !== null) validatePrivateRecord(engineState.lastHand, 'state.lastHand');
+  if (engineState.gameOver
+    && (engineState.phase !== 'idle'
+      || engineState.hand !== null
+      || engineState.lastHand === null
+      || !['win', 'lose', 'completed'].includes(engineState.result))) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'gameOver is not backed by terminal engine state');
+  }
+  return engineState;
 }
 
 /**
@@ -141,13 +202,19 @@ function validatePrivateRecord(record, label) {
 export function collectPrivateLiterals({ players, engineState, records } = {}) {
   const values = [];
   const list = Array.isArray(players) ? players : players?.players;
-  if (!Array.isArray(list) || !plainObject(engineState) || !Array.isArray(records)) {
+  if (!Array.isArray(list) || !Array.isArray(records)) {
     throw coded('PRIVATE_LITERAL_INVALID', 'private literal inputs are incomplete');
   }
+  validatePrivateEngineState(engineState);
+  const playerIds = new Set();
   for (const player of list) {
     if (!plainObject(player) || typeof player.playerId !== 'string' || player.playerId.length === 0) {
       throw coded('PRIVATE_LITERAL_INVALID', 'players contains an invalid row');
     }
+    if (playerIds.has(player.playerId)) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'players contains a duplicate player id');
+    }
+    playerIds.add(player.playerId);
     if (player.playerId === 'user') continue;
     for (const field of PRIVATE_PLAYER_FIELDS) {
       const value = player?.[field];
@@ -163,18 +230,20 @@ export function collectPrivateLiterals({ players, engineState, records } = {}) {
       }
     }
   }
+  const seatIds = engineState.seats.map((seat) => seat.playerId);
+  if (playerIds.size !== seatIds.length || seatIds.some((playerId) => !playerIds.has(playerId))) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'players do not bind every engine seat');
+  }
   if (engineState.policySeed !== undefined && engineState.policySeed !== null) {
     values.push(privateScalar(engineState.policySeed, 'state.policySeed'));
   }
   for (const [recordIndex, candidate] of records.entries()) {
     const record = validatePrivateRecord(candidate, `records.${recordIndex}`);
-    const publicCards = new Set(
-      (record.showdown?.reveals ?? []).flatMap((reveal) => reveal.cards),
-    );
+    const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
     for (const [playerId, cards] of Object.entries(record.holes)) {
-      if (playerId === 'user') continue;
+      if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
       for (const card of cards) {
-        if (!publicCards.has(card)) values.push(String(card));
+        values.push(String(card));
       }
     }
   }
