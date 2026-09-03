@@ -701,9 +701,26 @@ export function createTrainingControl({ storeDir } = {}) {
         return { claimed: false, code: 'SOLVE_ALREADY_RUNNING', task: existing };
       }
       const token = randomBytes(16).toString('hex');
-      auth.solveTasks[decisionId] = { decisionId, token, ...entry };
+      // entry를 먼저 펴야 호출자가 준 필드가 소유권 토큰이나 decisionId를
+      // 덮어쓰지 못한다 — 예측 가능한 토큰이 들어오면 아무나 점유를 풀 수 있다.
+      auth.solveTasks[decisionId] = { ...entry, decisionId, token };
       persistAuth(sessionDir, auth);
       return { claimed: true, token };
+    });
+  }
+
+  // 크래시로 claim과 release 사이가 끊기면 점유가 영속 파일에 남아 resume의
+  // 재기동과 rollback guard를 영구히 막는다. loop 락이 세션당 사이드카를 하나로
+  // 강제하므로, 살아 있는 프로세스가 소유하지 않은 점유는 정의상 죽은 것이다.
+  async function reapSolveTasks(sessionDir, { keepDecisionIds = [] } = {}) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      if (!auth) return { reaped: 0 };
+      const keep = new Set(keepDecisionIds);
+      const stale = Object.keys(auth.solveTasks ?? {}).filter((id) => !keep.has(id));
+      for (const decisionId of stale) delete auth.solveTasks[decisionId];
+      if (stale.length > 0) persistAuth(sessionDir, auth);
+      return { reaped: stale.length, decisionIds: stale };
     });
   }
 
@@ -848,6 +865,7 @@ export function createTrainingControl({ storeDir } = {}) {
     recordPending,
     claimSolveTask,
     releaseSolveTask,
+    reapSolveTasks,
     sealAnnotation,
     markAnnotationPublished,
     writeCutoffMarker,

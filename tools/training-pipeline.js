@@ -27,12 +27,25 @@ const SOLVE_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'so
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
 const handPipelineTail = new Map();
 const explainTail = new Map();
+const solveTail = new Map();
 
 function withExplainLock(sessionDir, work) {
   const key = path.resolve(sessionDir);
   const prev = explainTail.get(key) ?? Promise.resolve();
   const run = prev.catch(() => {}).then(work);
   explainTail.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
+// solver-runtime은 세션당 하나의 자식만 허용한다(`.solver-child.json`). 한 핸드에
+// postflop 결정이 둘 이상이면 solve를 나란히 띄우는 순간 뒤엣것이 스스로
+// SOLVER_BUSY를 맞고 pending으로 되돌아간다 — 자기가 만든 경합이다. 세션별로
+// 직렬화한다.
+function withSolveLock(sessionDir, work) {
+  const key = path.resolve(sessionDir);
+  const prev = solveTail.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(work);
+  solveTail.set(key, run.then(() => {}, () => {}));
   return run;
 }
 
@@ -411,10 +424,17 @@ export async function ingestHand({
  * ordinary `evaluated` item, and any failure keeps the `pending` entry with its
  * adapterId so a later resume or bootstrap sweep can retry it.
  */
-export async function runSolveTask({
+export async function runSolveTask(opts) {
+  return withSolveLock(opts.sessionDir, () => runSolveTaskUnlocked(opts));
+}
+
+async function runSolveTaskUnlocked({
   sessionDir, decisionId, handNo, adapterId, gameEpoch, owner, storeDir,
-  solve, publish, consume,
+  solve, publish, consume, shouldStop,
 }) {
+  // 큐에서 기다리는 동안 cutoff가 지났을 수 있다. 그러면 자식을 새로 띄우지
+  // 않고 pending을 그대로 둔다 — cutoff 시 pending 유지가 계약이다.
+  if (shouldStop?.()) return { ok: false, code: 'SOLVE_CUTOFF' };
   const tc = createTrainingControl({ storeDir });
   const keepPending = async (code) => {
     try {

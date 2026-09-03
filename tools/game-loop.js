@@ -2019,6 +2019,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       owner: task.owner ?? loop?.ownerSessionId,
       storeDir,
       solve: solveForPipeline,
+      shouldStop: () => stopRequested || finalizationCutoff,
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -2163,6 +2164,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!trainingOn) return;
     trainingProducerOpen = true;
     try {
+      // 이 프로세스가 들고 있지 않은 solve 점유는 죽은 사이드카의 잔해다.
+      // 거두지 않으면 resume이 그 결정의 solve를 영원히 다시 열지 못하고
+      // rollback guard도 영원히 닫힌다.
+      try {
+        const reaped = await createTrainingControl({ storeDir })
+          .reapSolveTasks(root, { keepDecisionIds: [...solveInFlight] });
+        if (reaped.reaped > 0) log('training-solve-task-reaped', reaped);
+      } catch (error) {
+        log('training-solve-task-reap-error', { code: error.code ?? 'ERROR' });
+      }
       await retryUnresolvedTrainingAttempt();
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const loop = readLoopState();
@@ -4142,6 +4153,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('training-cutoff-marker', { at: isoNow(now) });
       await sealUnfinishedExplanations();
       trainingTerminationConfirmed = await terminateTrainingChildren(finalDeadlineNs);
+      // settle이 timeout으로 끝났으면 첫 스캔 이후에도 in-flight evaluate/solve가
+      // item을 accept할 수 있다. 자식 종료가 확인된 지금이 생산자 집합이 실제로
+      // 닫히는 시점이므로 한 번 더 훑어 늦게 온 item이 exploit 없이 게시되는 것을
+      // 막는다. seal은 이미 붙은 annotation을 건너뛰므로 멱등이고, cutoff 마커는
+      // explanation 전용이라 이 시점의 exploit ready seal은 정상 경로다.
+      await sealExploitAtCutoff();
     }
     const signalAuthority = persistedCoachAttempts();
     if (signalAuthority.authorityError) {
