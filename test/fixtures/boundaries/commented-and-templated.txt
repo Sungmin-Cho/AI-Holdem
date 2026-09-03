@@ -1,0 +1,5 @@
+// import { nope } from '../tools/not-real.js';
+/* import '../tools/also-not-real.js'; */
+const fine = "import { x } from '../tools/string-only.js'";
+await import(/* comment */ `../tools/training-store.js`);
+export { readJsonl } from "../tools/training-store.js";

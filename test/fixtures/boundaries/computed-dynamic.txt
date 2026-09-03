@@ -1,0 +1,2 @@
+const spec = `../tools/` + `training-store.js`;
+await import(/* sneaky */ spec, {});

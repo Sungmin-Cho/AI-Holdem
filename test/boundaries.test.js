@@ -5,18 +5,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scanModule } from './helpers/module-scan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECORDER = path.join(ROOT, 'test/helpers/import-recorder.mjs');
+const FIXTURES = path.join(ROOT, 'test/fixtures/boundaries');
 const SCANNED = ['engine', 'training', 'server', 'tools', 'export'];
 
-// R12 계층 방향. 이 가드가 없으면 역방향 import가 다시 스며든다 — 결함 #20은
-// engine과 training이 tools를 불러 쓰는 그 역전이었다.
+// R12 계층 방향. 결함 #20은 engine과 training이 tools를 불러 쓰는 역전이었고,
+// 이 가드가 없으면 다시 스며든다.
 //
-// 소스를 정규식으로 훑지 않는다. 정규식은 주석이 낀 dynamic import, 템플릿
-// 리터럴 specifier, 문자열 이름 바인딩, `require`를 전부 놓친다. 대신 resolve
-// 훅으로 **Node가 실제로 해석한 그래프**를 기록한다. 이 가드를 우회하려면 Node의
-// 해석기 자체를 우회해야 한다.
+// 두 관점을 함께 쓴다. **정적 스캔이 계약이다**: `scanModule`이 주석·문자열을
+// 인식해 로딩 구문을 읽고, 리터럴로 해석되지 않는 로드(계산된 specifier,
+// `createRequire` 같은 자체 로더)는 무시하지 않고 **위반으로 올린다** — 숨기려면
+// 가드가 이미 거부하는 문법을 써야 한다. 함수 안의 lazy `import()`도 여기서
+// 잡힌다. 런타임 recorder는 보조로, 정적 스캔이 놓친 실제 해석이 있는지 대조한다.
 
 function jsFilesUnder(dir) {
   const out = [];
@@ -34,62 +37,29 @@ function jsFilesUnder(dir) {
   return out;
 }
 
-let graphCache = null;
+let staticCache = null;
 
-/**
- * Every edge Node resolves while loading each module — one child process per
- * module, so a script with top-level side effects (or one that calls
- * `process.exit`) cannot cut the recording short for the rest.
- */
-function moduleGraph() {
-  if (graphCache) return graphCache;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-graph-'));
-  const out = path.join(dir, 'edges.jsonl');
-  const probe = path.join(dir, 'probe.mjs');
-  fs.writeFileSync(probe, [
-    "import { register } from 'node:module';",
-    "import { pathToFileURL } from 'node:url';",
-    "register(process.env.RECORDER, pathToFileURL(process.env.ROOT + '/'), {",
-    '  data: { out: process.env.RECORD_OUT },',
-    '});',
-    'try {',
-    '  await import(pathToFileURL(process.env.RECORD_FILE).href);',
-    '} catch { /* the edges are recorded before the body runs */ }',
-    '',
-  ].join('\n'));
-  fs.writeFileSync(out, '');
-  const files = SCANNED.flatMap(jsFilesUnder);
-  const loaded = [];
-  for (const file of files) {
-    const before = fs.statSync(out).size;
-    try {
-      execFileSync(process.execPath, [probe], {
-        cwd: ROOT,
-        timeout: 20_000,
-        stdio: 'ignore',
-        env: {
-          ...process.env, RECORDER, ROOT, RECORD_OUT: out, RECORD_FILE: file,
-        },
-      });
-    } catch { /* a script that exits non-zero still recorded what it resolved */ }
-    if (fs.statSync(out).size > before) loaded.push(path.relative(ROOT, file));
-  }
+function staticGraph() {
+  if (staticCache) return staticCache;
   const edges = [];
-  const seen = new Set();
-  for (const line of fs.readFileSync(out, 'utf8').split('\n')) {
-    if (!line) continue;
-    const row = JSON.parse(line);
-    if (!row.parent?.startsWith('file:')) continue;
-    const from = path.relative(ROOT, fileURLToPath(row.parent));
-    const to = row.url?.startsWith('file:') ? path.relative(ROOT, fileURLToPath(row.url)) : row.url;
-    const key = `${from} ${to}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    edges.push({ from, to, specifier: row.specifier });
+  const unresolved = [];
+  for (const dir of SCANNED) {
+    for (const file of jsFilesUnder(dir)) {
+      const relative = path.relative(ROOT, file);
+      const scan = scanModule(fs.readFileSync(file, 'utf8'));
+      for (const entry of scan.imports) {
+        const target = entry.specifier.startsWith('.')
+          ? path.relative(ROOT, path.resolve(path.dirname(file), entry.specifier))
+          : entry.specifier;
+        edges.push({ from: relative, to: target, ...entry });
+      }
+      for (const entry of scan.unresolved) {
+        unresolved.push({ from: relative, ...entry });
+      }
+    }
   }
-  fs.rmSync(dir, { recursive: true, force: true });
-  graphCache = { edges, files: files.map((file) => path.relative(ROOT, file)), loaded };
-  return graphCache;
+  staticCache = { edges, unresolved };
+  return staticCache;
 }
 
 function layerOf(target) {
@@ -98,15 +68,15 @@ function layerOf(target) {
 }
 
 function edgesFrom(layer) {
-  return moduleGraph().edges.filter((edge) => layerOf(edge.from) === layer);
+  return staticGraph().edges.filter((edge) => layerOf(edge.from) === layer);
 }
 
-test('the recorder actually observed the tree it is guarding', () => {
-  const { edges, files, loaded } = moduleGraph();
-  // An empty or partial recording would make every rule below pass vacuously.
-  assert.ok(edges.length > 100, `only ${edges.length} edges were recorded`);
-  const missed = files.filter((file) => !loaded.includes(file));
-  assert.deepEqual(missed, [], 'these modules resolved nothing, so they are unguarded');
+test('no guarded module loads anything the scanner cannot resolve', () => {
+  // Fail closed. A computed specifier or a hand-rolled loader hides the
+  // dependency from every rule below, so its presence is itself the violation.
+  const offenders = staticGraph().unresolved
+    .map((entry) => `${entry.from}:${entry.line} ${entry.kind}`);
+  assert.deepEqual(offenders, []);
 });
 
 test('engine imports neither training nor tools', () => {
@@ -125,42 +95,142 @@ test('training imports no tools module', () => {
 
 test('training does no filesystem I/O of its own', () => {
   const offenders = edgesFrom('training')
-    .filter((edge) => /^(node:)?fs(\/promises)?$/.test(edge.specifier))
+    .filter((edge) => /^(node:)?fs(\/promises)?$/.test(edge.to))
     .map((edge) => edge.from);
   assert.deepEqual([...new Set(offenders)], []);
 });
 
-// 서버는 신뢰 경계 밖의 HTTP 입력을 다루므로 사이드카 로직을 전혀 불러선 안
-// 된다. 예외는 담기 원시자 하나뿐이다 — 서버는 별도 프로세스라 주입이
-// 불가능하고, P0-0 helper를 재구현하는 쪽이 더 나쁘다.
-const SERVER_CONTAINMENT_IMPORT = "import { openContained } from '../tools/training-store.js';";
+// 서버는 신뢰 경계 밖의 HTTP 입력을 다루므로 사이드카 로직을 불러선 안 된다.
+// 예외는 담기 원시자뿐 — 서버는 별도 프로세스라 주입이 불가능하고, P0-0 helper를
+// 재구현하는 쪽이 더 나쁘다.
+const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
+const CONTAINMENT_MODULE = path.join('tools', 'training-store.js');
 
-test('server imports only the publish contract and the containment primitives', () => {
+test('server imports only the publish contract and named containment primitives', () => {
   const offenders = [];
   for (const edge of edgesFrom('server')) {
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
-    if (edge.to === path.join('tools', 'training-store.js')) continue;
-    offenders.push(`${edge.from} -> ${edge.to}`);
+    if (edge.to !== CONTAINMENT_MODULE) {
+      offenders.push(`${edge.from} -> ${edge.to}`);
+      continue;
+    }
+    // A dynamic import hands over the whole namespace, so it can never be the
+    // narrow exception; a static one is judged by its bindings, not its text,
+    // so reformatting or quote style cannot flip the result.
+    if (edge.dynamic) {
+      offenders.push(`${edge.from} -> ${edge.to} (namespace via dynamic import)`);
+      continue;
+    }
+    const extra = (edge.bindings ?? []).filter((name) => !SERVER_ALLOWED_CONTAINMENT.has(name));
+    if (edge.bindings?.length && extra.length === 0) continue;
+    offenders.push(`${edge.from} -> ${edge.to} (${extra.join(', ') || 'no named binding'})`);
   }
   assert.deepEqual(offenders, []);
+});
 
-  // An edge cannot say which bindings crossed it, so the one allowed module is
-  // pinned to its exact declaration. A mixed default import, a namespace import
-  // or an extra named binding would not match this line.
-  for (const file of jsFilesUnder('server')) {
-    const declarations = fs.readFileSync(file, 'utf8')
-      .split('\n')
-      .filter((line) => line.includes('tools/training-store.js'))
-      .map((line) => line.trim());
-    if (declarations.length === 0) continue;
-    assert.deepEqual(
-      declarations,
-      [SERVER_CONTAINMENT_IMPORT],
-      `${path.relative(ROOT, file)} may take only the containment primitive`,
-    );
+test('the scanner refuses every bypass form the reviews raised', () => {
+  const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8');
+
+  // Committed fixtures, so these stay regressions rather than one-off probes.
+  const computed = scanModule(read('computed-dynamic.txt'));
+  assert.deepEqual(computed.imports, []);
+  assert.deepEqual(computed.unresolved.map((row) => row.kind), ['import()']);
+
+  const requireLoader = scanModule(read('create-require.txt'));
+  assert.ok(requireLoader.unresolved.some((row) => row.kind === 'createRequire'));
+
+  // The runtime recorder cannot see this one; the scanner must.
+  const lazy = scanModule(read('lazy-import.txt'));
+  assert.deepEqual(
+    lazy.imports.map((row) => row.specifier),
+    ['../tools/training-store.js'],
+  );
+
+  const tricky = scanModule(read('commented-and-templated.txt'));
+  assert.deepEqual(
+    tricky.imports.map((row) => row.specifier).sort(),
+    ['../tools/training-store.js', '../tools/training-store.js'],
+    'commented-out and string-literal imports must not count, real ones must',
+  );
+  assert.deepEqual(tricky.unresolved, []);
+
+  const mixed = scanModule(read('mixed-default.txt'));
+  const bindings = mixed.imports[0].bindings;
+  assert.ok(bindings.includes('default'), 'a default binding must be visible');
+  assert.ok(
+    bindings.some((name) => !SERVER_ALLOWED_CONTAINMENT.has(name)),
+    'a forbidden binding smuggled beside an allowed one must be visible',
+  );
+});
+
+let recordedCache = null;
+
+/**
+ * What Node actually resolved while loading each module, one child per module so
+ * a script with top-level side effects or a `process.exit` cannot truncate the
+ * recording for the rest. Supplementary: it sees only eager edges, which is why
+ * the static scan above is the contract.
+ */
+function recordedGraph() {
+  if (recordedCache) return recordedCache;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-graph-'));
+  const out = path.join(dir, 'edges.jsonl');
+  const probe = path.join(dir, 'probe.mjs');
+  fs.writeFileSync(probe, [
+    "import { register } from 'node:module';",
+    "import { pathToFileURL } from 'node:url';",
+    "register(process.env.RECORDER, pathToFileURL(process.env.ROOT + '/'), {",
+    '  data: { out: process.env.RECORD_OUT },',
+    '});',
+    'try {',
+    '  await import(pathToFileURL(process.env.RECORD_FILE).href);',
+    '} catch { /* the edges are recorded before the body runs */ }',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(out, '');
+  const files = SCANNED.flatMap(jsFilesUnder);
+  for (const file of files) {
+    try {
+      execFileSync(process.execPath, [probe], {
+        cwd: ROOT,
+        timeout: 20_000,
+        stdio: 'ignore',
+        env: {
+          ...process.env, RECORDER, ROOT, RECORD_OUT: out, RECORD_FILE: file,
+        },
+      });
+    } catch { /* a script that exits non-zero still recorded what it resolved */ }
   }
+  const edges = [];
+  for (const line of fs.readFileSync(out, 'utf8').split('\n')) {
+    if (!line) continue;
+    const row = JSON.parse(line);
+    if (!row.parent?.startsWith('file:')) continue;
+    const from = path.relative(ROOT, fileURLToPath(row.parent));
+    // The probe's own import of the target is not an edge of the tree.
+    if (from.startsWith('..')) continue;
+    const to = row.url?.startsWith('file:') ? path.relative(ROOT, fileURLToPath(row.url)) : row.url;
+    edges.push({ from, to, specifier: row.specifier });
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  recordedCache = { edges, files: files.map((file) => path.relative(ROOT, file)) };
+  return recordedCache;
+}
+
+test('every edge Node actually resolves was already known to the scanner', () => {
+  const known = new Set(staticGraph().edges.map((edge) => `${edge.from} ${edge.to}`));
+  const surprises = [];
+  for (const edge of recordedGraph().edges) {
+    // Only modules the scanner covers can be cross-checked against it; the
+    // recorder also walks into shared root modules like `publish-contract.js`.
+    if (!SCANNED.includes(layerOf(edge.from))) continue;
+    if (known.has(`${edge.from} ${edge.to}`)) continue;
+    surprises.push(`${edge.from} -> ${edge.to} (${edge.specifier})`);
+  }
+  // The scan is the contract; this is the cross-check that it is not blind.
+  assert.deepEqual([...new Set(surprises)], []);
 });
 
 test('the process entry points that spawn or touch the filesystem live in tools', () => {
@@ -192,8 +262,8 @@ test('the moved dataset builder rewrites the canonical dataset and its pin, byte
   const before = fs.readFileSync(dataset);
   const digestBefore = fs.readFileSync(digestFile);
   // Comparing bytes alone cannot tell "rebuilt identically" from "wrote
-  // somewhere else and left these alone", which is exactly what a bad output
-  // path after the move looks like. Stale both mtimes and require both to move.
+  // somewhere else and left these alone", which is what a bad output path after
+  // the move looks like. Stale both mtimes and require both to move.
   const stampedAt = new Date(Date.now() - 5_000);
   fs.utimesSync(dataset, stampedAt, stampedAt);
   fs.utimesSync(digestFile, stampedAt, stampedAt);
@@ -223,15 +293,29 @@ test('a dataset that never went through the pinned parser cannot become a strate
   assert.equal(lookup(pinned, { spotKey, handClass }).status, 'supported');
 
   // R5: reading the bytes and calling JSON.parse is the bypass no import rule
-  // can stop, so the parser brands what it pinned and `lookup` refuses anything
-  // else — including data carrying a digest the caller supplied itself.
+  // can stop. The association is a WeakMap keyed by object identity, so it is
+  // not reflectable, not copyable, and not answerable by a Proxy.
+  assert.deepEqual(Object.getOwnPropertySymbols(pinned.data), []);
+  assert.equal(Object.isFrozen(pinned.data), true);
+  assert.equal(Object.isFrozen(pinned.data.spots), true);
+
   const forged = JSON.parse(raw);
+  for (const symbol of Object.getOwnPropertySymbols(pinned.data)) {
+    forged[symbol] = pinned.contentSha256;
+  }
   assert.throws(
     () => lookup({ data: forged, contentSha256: pinned.contentSha256 }, { spotKey, handClass }),
     { code: 'DATASET_INVALID' },
   );
+  const proxied = new Proxy(forged, {
+    get: (target, key) => (key in target ? target[key] : pinned.contentSha256),
+  });
   assert.throws(
-    () => lookup({ data: forged, contentSha256: 'f'.repeat(64) }, { spotKey, handClass }),
+    () => lookup({ data: proxied, contentSha256: pinned.contentSha256 }, { spotKey, handClass }),
+    { code: 'DATASET_INVALID' },
+  );
+  assert.throws(
+    () => lookup({ data: pinned.data, contentSha256: 'f'.repeat(64) }, { spotKey, handClass }),
     { code: 'DATASET_INVALID' },
   );
 });

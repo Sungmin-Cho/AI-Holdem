@@ -1,0 +1,4 @@
+export async function later() {
+  const store = await import('../tools/training-store.js');
+  return store;
+}

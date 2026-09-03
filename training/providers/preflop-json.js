@@ -1,13 +1,21 @@
 import { createHash } from 'node:crypto';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
 
-// Module-private, so nothing outside this file can forge it — `Symbol.for`
-// would be globally registered and therefore forgeable. R5: a dataset that did
-// not come through the pinned parser cannot be turned into a strategy.
-const PIN = Symbol('preflop-dataset-pin');
+// Keyed by object identity, so the association cannot be reflected, copied or
+// spoofed: `Object.getOwnPropertySymbols` finds nothing, and a Proxy cannot
+// answer for a key it does not hold. R5: a dataset that did not come out of
+// this parser cannot be turned into a strategy.
+const PINNED = new WeakMap();
 
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
+}
 
 export function hashDataset(raw) {
   return createHash('sha256').update(raw).digest('hex');
@@ -35,7 +43,9 @@ export function parsePreflopJson(raw, { expectedSha256 } = {}) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset JSON이 아닙니다.');
   }
   validateDataset(data);
-  Object.defineProperty(data, PIN, { value: contentSha256, enumerable: false });
+  // Frozen so the validated shape cannot be edited after the pin is recorded.
+  deepFreeze(data);
+  PINNED.set(data, contentSha256);
   return { data, contentSha256, raw };
 }
 
@@ -70,7 +80,7 @@ export function validateDataset(data) {
 }
 
 export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
-  if (data?.[PIN] == null || data[PIN] !== contentSha256) {
+  if (data == null || PINNED.get(data) !== contentSha256) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset가 pin 검증을 거치지 않았습니다.');
   }
   const source = {
