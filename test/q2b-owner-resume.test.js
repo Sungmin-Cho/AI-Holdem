@@ -235,16 +235,20 @@ function launchResume(storeDir, binDir) {
 }
 
 async function waitForOwnerRotation(sessionDir, previousOwner, stderr) {
-  const state = await waitFor(() => {
+  return waitFor(() => {
     try {
       const current = readJson(path.join(sessionDir, 'loop-state.json'));
-      return current.ownerSessionId === previousOwner ? null : current;
+      if (current.ownerSessionId === previousOwner) return null;
+      const authority = readJson(path.join(
+        sessionDir,
+        'training',
+        '.training-authority.json',
+      ));
+      return authority.ownerSessionId === current.ownerSessionId ? current : null;
     } catch {
       return null;
     }
   }, `resume did not rotate owner: ${stderr()}`);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  return state;
 }
 
 async function cleanupSession(child, sessionDir) {
@@ -296,6 +300,8 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
   launched.push(first);
   const firstState = await waitForOwnerRotation(seeded.sessionDir, 'owner-0', first.stderr);
   await killChild(first.child, 'SIGKILL');
+  const tc = createTrainingControl({ storeDir });
+  await tc.migrateAuthority(seeded.sessionDir, { recoverOwnerId: firstState.ownerSessionId });
 
   const second = launchResume(storeDir, binDir);
   launched.push(second);
@@ -305,11 +311,12 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
     second.stderr,
   );
   await killChild(second.child, 'SIGKILL');
+  await tc.migrateAuthority(seeded.sessionDir, { recoverOwnerId: secondState.ownerSessionId });
   await leaveSigkilledTrainingOwner(seeded.sessionDir);
-  await createTrainingControl({ storeDir }).migrateAuthority(seeded.sessionDir, {
+  await tc.migrateAuthority(seeded.sessionDir, {
     recoverOwnerId: secondState.ownerSessionId,
   });
-  const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
+  const auth = tc.loadAuthority(seeded.sessionDir);
 
   assert.equal(auth.ownerSessionId, secondState.ownerSessionId);
   assert.deepEqual(

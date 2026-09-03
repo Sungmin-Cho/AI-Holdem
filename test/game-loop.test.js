@@ -22,6 +22,9 @@ import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { newDeck } from '../engine/cards.js';
 import { prepareSession } from '../engine/session-catalog.js';
+import { evaluationIdOf } from '../training/contracts.js';
+import { createTrainingControl } from '../tools/training-control.js';
+import { createProfileStore } from '../tools/training-stores.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1215,6 +1218,72 @@ test('bootstrap auto-select ignores a symlink practice-focus and records a notic
     true,
     JSON.stringify(state.notices),
   );
+});
+
+test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 }, async (t) => {
+  const storeDir = tmpGame();
+  const terminalDir = path.join(
+    storeDir,
+    '.session-store',
+    'sessions',
+    '11111111-1111-4111-8111-111111111111',
+  );
+  fs.mkdirSync(path.join(terminalDir, 'training'), { recursive: true });
+  fs.writeFileSync(path.join(terminalDir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
+  const terminalEpoch = 'ab'.repeat(32);
+  const evaluation = (decisionId, handClass) => ({
+    schemaVersion: 1,
+    evaluationId: evaluationIdOf({
+      gameEpoch: terminalEpoch,
+      decisionId,
+      providerId: 'local-preflop-baseline',
+      providerVersion: '1.0.0',
+    }),
+    decisionId,
+    status: 'supported',
+    street: 'preflop',
+    spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass,
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }],
+    chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null },
+    bestEvBb: null,
+    evLossBb: null,
+    grade: 'preferred',
+    forced: false,
+    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+  });
+  const bad = evaluation('d-1-preflop-0', 'AA');
+  const good = evaluation('d-2-preflop-0', 'KQo');
+  const tc = createTrainingControl({ storeDir });
+  await tc.acceptEvaluations(terminalDir, {
+    gameEpoch: terminalEpoch,
+    owner: 'terminal-owner',
+    handNo: 2,
+    evaluations: [bad, good],
+  });
+  const badSummary = tc.loadAuthority(terminalDir).items[bad.evaluationId].summary;
+  await createProfileStore(storeDir).apply({ ...badSummary, payloadSha256: 'cd'.repeat(32) });
+
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, trainingEnabled: true, storeDir },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const state = await loop.bootstrap({ ai: 1, stack: 100 });
+  const failureNotices = state.notices.filter((notice) => notice === 'profile sweep consumer 실패: 1건');
+  const failureEvents = readLoopLog(gameDir)
+    .filter((entry) => entry.event === 'profile-sweep-consume-failed');
+  const authority = tc.loadAuthority(terminalDir);
+
+  assert.equal(state.phase, 'playing');
+  assert.equal(failureNotices.length, 1);
+  assert.deepEqual(failureEvents.map(({ failed }) => failed), [1]);
+  assert.equal(authority.items[bad.evaluationId].consumers.profiled, false);
+  assert.equal(authority.items[good.evaluationId].consumers.profiled, true);
 });
 
 test('bootstrap auto-select rejects an oversized practice-focus', { timeout: 10_000 }, async (t) => {

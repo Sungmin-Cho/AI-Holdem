@@ -199,6 +199,53 @@ test('Q2b takeoverOwner permits only terminal sweep takeover and records additiv
   );
 });
 
+test('Q2b owner transfer entrypoints reject invalid owner inputs before writing', async () => {
+  const sessionDir = tmp();
+  const tc = createTrainingControl();
+  writeEmptyAuthority(sessionDir);
+  writeLoopPhase(sessionDir, 'done');
+  const authorityPath = path.join(sessionDir, 'training', '.training-authority.json');
+
+  const cases = [
+    {
+      name: 'missing takeover owner',
+      run: () => tc.takeoverOwner(sessionDir, null, { reason: 'terminal-session' }),
+      code: 'NO_TRAINING_OWNER',
+    },
+    {
+      name: 'empty takeover owner',
+      run: () => tc.takeoverOwner(sessionDir, '', { reason: 'terminal-session' }),
+      code: 'NO_TRAINING_OWNER',
+    },
+    {
+      name: 'missing takeover reason',
+      run: () => tc.takeoverOwner(sessionDir, 'next-owner'),
+      code: 'INVALID_TAKEOVER_REASON',
+    },
+    {
+      name: 'unknown takeover reason',
+      run: () => tc.takeoverOwner(sessionDir, 'next-owner', { reason: 'other' }),
+      code: 'INVALID_TAKEOVER_REASON',
+    },
+    {
+      name: 'null recovery owner',
+      run: () => tc.migrateAuthority(sessionDir, { recoverOwnerId: null }),
+      code: 'INVALID_RECOVERY_OWNER',
+    },
+    {
+      name: 'empty recovery owner',
+      run: () => tc.migrateAuthority(sessionDir, { recoverOwnerId: '' }),
+      code: 'INVALID_RECOVERY_OWNER',
+    },
+  ];
+
+  for (const entry of cases) {
+    const before = fs.readFileSync(authorityPath);
+    await assert.rejects(entry.run(), { code: entry.code }, entry.name);
+    assert.deepEqual(fs.readFileSync(authorityPath), before, entry.name);
+  }
+});
+
 test('Q2b terminal sweep takes ownership before consumers and keeps one process identity', async () => {
   const storeDir = tmp();
   const firstDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');

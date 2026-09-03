@@ -562,6 +562,9 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
   if (auth.schemaVersion !== 1) {
     throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
   }
+  if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+    throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+  }
 
   const { rows, rowById } = validateLegacySources(sessionDir, auth);
 
@@ -693,7 +696,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       schemaVersion: 2,
       gameEpoch: auth.gameEpoch,
       ownerSessionId: auth.ownerSessionId,
-      ...(Array.isArray(auth.ownerHistory) ? { ownerHistory: [...auth.ownerHistory] } : {}),
+      ...(auth.ownerHistory !== undefined ? { ownerHistory: [...auth.ownerHistory] } : {}),
       items: newItems,
       publishQueue: newQueue,
       pending,

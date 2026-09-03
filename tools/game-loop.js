@@ -4519,6 +4519,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
       let sweepNotices = [];
+      let sweepFailed = 0;
       if (storeDir) {
         try {
           const swept = await sweepStore(storeDir, {
@@ -4526,6 +4527,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             solve: typeof trainingHooks.solve === 'function' ? trainingHooks.solve : undefined,
           });
           sweepNotices = swept.notices ?? [];
+          sweepFailed = swept.failed ?? 0;
+          if (sweepFailed > 0) {
+            sweepNotices.push(`profile sweep consumer 실패: ${sweepFailed}건`);
+          }
         } catch (error) {
           sweepNotices = [`profile sweep 실패: ${error.code ?? 'ERROR'}`];
           log('profile-sweep-error', { code: error.code ?? 'ERROR' });
@@ -4557,6 +4562,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         metrics: [],
       });
       log('bootstrap-initialized', { sessionToken: initialized.sessionToken });
+      if (sweepFailed > 0) log('profile-sweep-consume-failed', { failed: sweepFailed });
 
       const policyMode = opponentRuntimeOf() === 'policy';
       if (policyMode) stampPlayerPolicies(root);
