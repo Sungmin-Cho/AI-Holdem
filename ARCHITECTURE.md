@@ -79,7 +79,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 | 의존 방향 | 허용 | 금지 |
 |---|---|---|
 | `tools/` → `engine/` | `engine/cli.js`를 **자식 프로세스**로 호출, `engine/state.js`의 락·원자적 쓰기·pid 프리미티브를 직접 import(사이드카·게시 도구 자신의 수명 락에 재사용) | `engine/hand.js` 등 게임 로직 함수를 tools에서 직접 import — 상태 변경은 항상 `engine/cli.js` 서브커맨드를 거친다 |
-| `server/` → `tools/`, `engine/` | 없음 — `server/server.js`는 `publish-contract.js`만 import | 서버가 엔진 상태나 사이드카 내부를 직접 참조 |
+| `server/` → `tools/`, `engine/` | `publish-contract.js`, 그리고 `tools/training-store.js`의 담기 원시자(`openContained`/`writeContained`)만 — 서버는 별도 프로세스라 주입이 불가능하고 담기 helper를 재구현해선 안 된다 | 사이드카 로직 모듈 전부. `test/boundaries.test.js`가 이름 단위로 강제한다 |
 | `engine/` → `tools/`, `server/` | 없음 | 엔진이 상위 계층을 참조 |
 | 딜러 세션(호스트 LLM) → 게임 루프 | current가 선택한 session의 `loop-state.json` 폴링, 사이드카 기동 | 핸드 안 진행에 관여, 상태 파일 직접 수정 |
 

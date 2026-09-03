@@ -9,6 +9,11 @@ export const DEFAULT_DATASET = path.resolve(
   '../training/data/preflop-baseline-v1.json',
 );
 
+function withCause(error, cause) {
+  error.cause = cause;
+  return error;
+}
+
 export function datasetDigestPath(datasetPath) {
   return datasetPath.replace(/\.json$/, '.sha256');
 }
@@ -23,15 +28,17 @@ export function loadPreflopDataset(datasetPath = DEFAULT_DATASET, { expectedSha2
   if (pinned == null) {
     try {
       pinned = fs.readFileSync(datasetDigestPath(datasetPath), 'utf8').trim();
-    } catch {
-      throw coded(ERRORS.DATASET_INVALID, 'dataset digest 파일을 읽을 수 없습니다.');
+    } catch (error) {
+      // 코드는 하나로 모으되 원인은 버리지 않는다 — 이전에는 ENOENT가 그대로
+      // 올라와 어느 파일이 없는지 보였다.
+      throw withCause(coded(ERRORS.DATASET_INVALID, `dataset digest 파일을 읽을 수 없습니다: ${error.message}`), error);
     }
   }
   let raw;
   try {
     raw = fs.readFileSync(datasetPath, 'utf8');
-  } catch {
-    throw coded(ERRORS.DATASET_INVALID, 'dataset 파일을 읽을 수 없습니다.');
+  } catch (error) {
+    throw withCause(coded(ERRORS.DATASET_INVALID, `dataset 파일을 읽을 수 없습니다: ${error.message}`), error);
   }
   return parsePreflopJson(raw, { expectedSha256: pinned });
 }
