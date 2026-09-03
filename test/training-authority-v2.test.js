@@ -32,6 +32,7 @@ import { startServer } from '../server/server.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { writeJsonAtomic } from '../engine/state.js';
 import { readJsonl, readJsonSecure } from '../tools/training-store.js';
+import { writeSecurityFixtures } from './helpers/security-fixtures.js';
 
 const PUBLISH_TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 const execFileAsync = promisify(execFile);
@@ -393,7 +394,7 @@ test('projectTrainingAnnotation: explanation cap, exploit keys, unavailable cano
       opponents: [{
         opponentId: 'p1',
         policyId: 'tight',
-        adjustment: { bluff: 'increase', thinValue: 'hold' },
+        adjustment: { bluff: 'increase', thinValue: 'hold', defense: 'decrease' },
         comparison: { summaryCode: 'GTO_OK_EXPLOIT_MISSED', extra: 'drop-me' },
         secret: true,
       }],
@@ -870,6 +871,7 @@ test('empty training: [] and trainingAnnotations: [] are BAD_ENVELOPE', async ()
 
 test('publish.js: annotation after cutoff still passes via annotationAuthority', async () => {
   const dir = tmp();
+  writeSecurityFixtures(dir);
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
     const tc = createTrainingControl();
@@ -962,10 +964,13 @@ test('server deep-projects training: nested extra keys 400; object leaf 400; for
 
 test('server annotations: orphan 409, same value no-op, different value 409, fields independent, proof required, deny-literal, extra keys dropped', async () => {
   const dir = tmp();
-  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify([
-    { playerId: 'user' },
-    { playerId: 'p1', archetype: 'DENY_ARCHETYPE_SENTINEL', personality: 'quiet' },
-  ]));
+  // 보안 술어 자료 셋(players·state·hands)이 있어야 explanation이 200을 받는다.
+  writeSecurityFixtures(dir, {
+    players: [
+      { playerId: 'user' },
+      { playerId: 'p1', archetype: 'DENY_ARCHETYPE_SENTINEL', personality: 'quiet' },
+    ],
+  });
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
     const summary = toPublicSummary(evaluation(), { handNo: 1, detailSha256: 'ab'.repeat(32) });
@@ -1072,7 +1077,7 @@ test('server annotations: orphan 409, same value no-op, different value 409, fie
         opponents: [{
           opponentId: 'p1',
           policyId: 'tight',
-          adjustment: { bluff: 'increase' },
+          adjustment: { bluff: 'increase', thinValue: 'hold', defense: 'decrease' },
           comparison: { summaryCode: 'GTO_OK_EXPLOIT_MISSED' },
         }],
         primary: 'p1',
@@ -1091,9 +1096,30 @@ test('server annotations: orphan 409, same value no-op, different value 409, fie
     assert.equal(beforeOver.status, 409);
     assert.equal(beforeOver.json.code, 'EXPLOIT_BEFORE_GAMEOVER');
 
+    // 게시된 view는 게이트를 열지 못한다 — 권위는 엔진 state.json이다(S1).
     await postPublish(started.port, 'tok', {
       publishId: 6,
       view: { handNo: 1, gameOver: true, toAct: null, seats: [] },
+    });
+    const viewClaim = await postPublish(started.port, 'tok', {
+      publishId: 7,
+      trainingAnnotations: [{
+        ...exploit,
+        annotationProof: {
+          id: publicProofId(`${summary.evaluationId}:exploit`),
+          valueSha256: exploit.valueSha256,
+        },
+      }],
+    });
+    assert.equal(viewClaim.status, 409);
+    assert.equal(viewClaim.json.code, 'EXPLOIT_BEFORE_GAMEOVER');
+
+    writeSecurityFixtures(dir, {
+      gameOver: true,
+      players: [
+        { playerId: 'user' },
+        { playerId: 'p1', archetype: 'DENY_ARCHETYPE_SENTINEL', personality: 'quiet' },
+      ],
     });
     const afterOver = await postPublish(started.port, 'tok', {
       publishId: 7,
@@ -1113,6 +1139,7 @@ test('server annotations: orphan 409, same value no-op, different value 409, fie
 
 test('persist → restart → loadUiState keeps annotations; old snapshot explanation is split and digest recomputed', async () => {
   const dir = tmp();
+  writeSecurityFixtures(dir);
   const summary = toPublicSummary(evaluation(), { handNo: 1, detailSha256: 'ab'.repeat(32) });
   const projectedAnn = contract.projectTrainingAnnotation({
     evaluationId: summary.evaluationId,
@@ -1185,7 +1212,10 @@ test('loadUiState drops forged and orphan persisted annotations', async () => {
   }
 
   const dir2 = tmp();
+  writeSecurityFixtures(dir2);
   const v1 = v1SummaryOf(evaluation(), { explanation: '구 스냅샷 해설' });
+  fs.mkdirSync(path.join(dir2, 'training'), { recursive: true });
+  fs.writeFileSync(path.join(dir2, 'training', '.training-authority.json'), JSON.stringify({ schemaVersion: 1 }));
   fs.writeFileSync(path.join(dir2, 'ui-snapshot.json'), JSON.stringify({
     revision: 3,
     publishId: 3,

@@ -16,6 +16,7 @@ import {
   projectTrainingAnnotation,
   publicProofId,
 } from '../publish-contract.js';
+import { writeSecurityFixtures } from './helpers/security-fixtures.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 const execFileAsync = promisify(execFile);
@@ -202,10 +203,13 @@ test('publish authority mismatches fail before the relay POST', async () => {
 
 test('server deny-literal rejects explanation without snapshot or SSE annotation', async () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify([
-    { playerId: 'user' },
-    { playerId: 'p1', policyId: 'DENY_POLICY_ID' },
-  ]));
+  // 서버의 deny 수집은 완전 fail-closed다 — players.json만으로는 목록을 만들 수 없다.
+  writeSecurityFixtures(dir, {
+    players: [
+      { playerId: 'user' },
+      { playerId: 'p1', policyId: 'DENY_POLICY_ID' },
+    ],
+  });
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
     const summary = summaryOf();

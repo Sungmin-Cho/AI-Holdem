@@ -1,3 +1,5 @@
+import { EVALUATION_ID_MAX, EVALUATION_ID_RE } from '../publish-contract.js';
+
 export const ERRORS = Object.freeze({
   UNSUPPORTED_SPOT: 'UNSUPPORTED_SPOT',
   UNSUPPORTED_SIZE: 'UNSUPPORTED_SIZE',
@@ -6,9 +8,6 @@ export const ERRORS = Object.freeze({
   SNAPSHOT_INVALID: 'SNAPSHOT_INVALID',
   EVALUATION_ID_INVALID: 'EVALUATION_ID_INVALID',
 });
-
-const EVALUATION_ID_RE = /^([0-9a-f]{64}):(d-\d+-[a-z]+-\d+):([a-z0-9-]{1,64})@(\d+\.\d+\.\d+)$/;
-const EVALUATION_ID_MAX = 256;
 
 const FREQ_EPS = 1e-6;
 

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { detailRefOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/profile-cli.js');
@@ -307,7 +308,7 @@ test('sweep does not abort the store on one malformed or unsupported archived au
 function writeV1ArchivedSession(sessionDir, evaluation) {
   const training = path.join(sessionDir, 'training');
   fs.mkdirSync(path.join(training, 'details'), { recursive: true });
-  const detailRef = 'detail-v1';
+  const detailRef = detailRefOf(evaluation.evaluationId);
   const summary = {
     ...evaluation,
     handNo: 1,

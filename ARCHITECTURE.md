@@ -58,6 +58,7 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 - 활성 게임 여부는 서버 pid와 loop 락 pid **양쪽**이 살아 있다는 것으로만 증명돼야 한다 — 한쪽만 보고 활성/비활성을 판정하면 안 된다(`engine/game-archive.js`의 `assertLoopAllowsInit`, `resume-check`의 `serverPidAlive`·`loopPidAlive`).
 - `--resume`은 어떤 경로로도 `init`을 호출하면 안 된다.
 - 종료 phase 체크포인트는 역행하면 안 된다: `playing → finalizing → review_generated → review_published → done`. `review_generated` 이후 재개는 선택된 session의 `review.md`를 다시 만들지 않고, 먼저 기록해 둔 sha256으로 그 산출물을 재사용해야 한다.
+- 서버는 세션 디렉터리의 `players.json`·`.coach-authority.json`·`state.json`·`hands/hand-*.json`을 **읽기 전용 보안 술어**로만 참조하며 어느 것도 쓰지 않는다 — 게시자의 주장(`view`·machine item의 `handNo`)은 exploit 게이트와 deny 목록의 입력이 될 수 없다.
 - 오래된 `gameEpoch`/`activeOwnerSessionId`의 코치 콜백이 새 게임의 상태를 오염시키면 안 된다.
 - decision snapshot은 `engine/` 소유이며, redacted 핸드·코치 입력은 viewer 자신의 스냅샷만 남기고 `decisions[].priorActions`를 최상위 액션과 같은 허용 키로 다시 걸러 상대 홀카드·비공개 정책 필드가 새면 안 된다.
 

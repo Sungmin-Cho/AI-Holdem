@@ -130,6 +130,32 @@ test('server imports only the publish contract and named containment primitives'
   assert.deepEqual(offenders, []);
 });
 
+// S1: 서버는 `state.json`·`players.json`·`hands/`를 **읽기 전용 보안 술어**로만 본다.
+// 그 파일들이 쓰기 원시자 옆에 나타나는 순간 "중계만 하는 서버"가 깨진다.
+const SERVER_WRITE_TARGETS = new Set(['ui-snapshot.json', 'lock.json']);
+const WRITE_PRIMITIVE_RE = /\b(?:fs\.(?:write|append|rename|unlink|rm|truncate|copyFile|mkdir)\w*|writeJsonAtomic|writeContained)\(/;
+const SECURITY_INPUT_RE = /'(?:state|players)\.json'|'hands'|'\.coach-authority\.json'/;
+
+test('the server writes only the two files it owns, never the ones it reads as security predicates', () => {
+  const offenders = [];
+  for (const file of jsFilesUnder('server')) {
+    const relative = path.relative(ROOT, file);
+    const source = fs.readFileSync(file, 'utf8');
+    if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
+    for (const call of source.matchAll(/writeJsonAtomic\(\s*path\.join\(([^)]*)\)/g)) {
+      const literals = [...call[1].matchAll(/'([^']+)'/g)].map((row) => row[1]);
+      const target = literals[literals.length - 1];
+      if (!SERVER_WRITE_TARGETS.has(target)) offenders.push(`${relative} -> ${target ?? call[1]}`);
+    }
+    for (const line of source.split('\n')) {
+      if (WRITE_PRIMITIVE_RE.test(line) && SECURITY_INPUT_RE.test(line)) {
+        offenders.push(`${relative} -> ${line.trim()}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test('the scanner refuses every bypass form the reviews raised', () => {
   const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8');
 

@@ -63,6 +63,252 @@ export const TRAINING_SUMMARY_LIMITS = Object.freeze({
 
 const ALLOWED_ACTIONS = new Set(['fold', 'check', 'call', 'raise', 'bet']);
 
+// D9 결정 identity. `training/contracts.js`가 이것을 import해 생산자·서버가 같은
+// 문법을 쓴다 — 서버는 training 모듈을 부를 수 없으므로 정본이 여기에 있어야 한다.
+export const EVALUATION_ID_MAX = 256;
+export const EVALUATION_ID_RE = /^([0-9a-f]{64}):(d-\d+-[a-z]+-\d+):([a-z0-9-]{1,64})@(\d+\.\d+\.\d+)$/;
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const EXPLOIT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const SUMMARY_CODE_RE = /^[A-Z_]{1,64}$/;
+
+// exploit adjustment의 어휘는 닫힌 3×3이고 생산자는 우리 evaluator다. 미지 키·미지
+// 값은 드롭이 아니라 오류로 다룬다(드롭하면 게시자가 선언한 digest와 어긋난다).
+export const EXPLOIT_ADJUSTMENT_KEYS = Object.freeze(['bluff', 'thinValue', 'defense']);
+export const EXPLOIT_ADJUSTMENT_LEVELS = Object.freeze(['increase', 'decrease', 'hold']);
+
+// 코치·서버가 공유하는 비공개 필드 목록과 경로 계열. 한 규칙은 한 곳에 산다.
+export const PRIVATE_PLAYER_FIELDS = Object.freeze([
+  'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
+  'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
+]);
+export const FORBIDDEN_PATH_RE = /(?:\/(?:Users|home|tmp|var|private|etc|opt|root)\b|[A-Za-z]:\\)/;
+export const FORBIDDEN_PATH_LITERALS = Object.freeze(['.session-store']);
+
+const CARD_RE = /^[2-9TJQKA][cdhs]$/;
+
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function privateScalar(value, label) {
+  if (!['string', 'number', 'boolean'].includes(typeof value) || String(value).length === 0) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a non-empty scalar`);
+  }
+  return String(value);
+}
+
+function privateCards(value, label) {
+  if (!Array.isArray(value)
+    || value.length !== 2
+    || !value.every((card) => typeof card === 'string' && CARD_RE.test(card))) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a two-card array`);
+  }
+  return value;
+}
+
+function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) {
+  if (!plainObject(record) || !Number.isInteger(record.handNo) || record.handNo < 1
+    || !plainObject(record.holes) || Object.keys(record.holes).length === 0
+    || !plainObject(record.startStacks)) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a complete hand record`);
+  }
+  const holeIds = Object.keys(record.holes).sort();
+  const stackIds = Object.keys(record.startStacks).sort();
+  if (holeIds.length !== stackIds.length
+    || holeIds.some((playerId, index) => playerId !== stackIds[index])) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind holes to startStacks`);
+  }
+  if (!holeIds.includes('user')
+    || (allowedPlayerIds && holeIds.some((playerId) => !allowedPlayerIds.has(playerId)))) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind engine seats`);
+  }
+  const physicalCards = new Set();
+  for (const [playerId, cards] of Object.entries(record.holes)) {
+    if (typeof playerId !== 'string' || playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.holes has an invalid player id`);
+    }
+    privateCards(cards, `${label}.holes.${playerId}`);
+    for (const card of cards) {
+      if (physicalCards.has(card)) {
+        throw coded('PRIVATE_LITERAL_INVALID', `${label} contains duplicate physical cards`);
+      }
+      physicalCards.add(card);
+    }
+    if (typeof record.startStacks[playerId] !== 'number'
+      || !Number.isFinite(record.startStacks[playerId])) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.startStacks.${playerId} is invalid`);
+    }
+  }
+  if (!Array.isArray(record.board) || record.board.length > 5) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label}.board is invalid`);
+  }
+  const cardZones = [['board', record.board]];
+  if (Object.hasOwn(record, 'deck')) cardZones.push(['deck', record.deck]);
+  for (const [zone, cards] of cardZones) {
+    if (!Array.isArray(cards)
+      || !cards.every((card) => typeof card === 'string' && CARD_RE.test(card))) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.${zone} is invalid`);
+    }
+    for (const card of cards) {
+      if (physicalCards.has(card)) {
+        throw coded('PRIVATE_LITERAL_INVALID', `${label} repeats a physical card across zones`);
+      }
+      physicalCards.add(card);
+    }
+  }
+  const reveals = record.showdown == null
+    ? []
+    : record.showdown?.reveals;
+  if (!Array.isArray(reveals)) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals is not an array`);
+  }
+  const revealedPlayers = new Set();
+  for (const [index, reveal] of reveals.entries()) {
+    if (!plainObject(reveal) || typeof reveal.playerId !== 'string' || reveal.playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals.${index} is invalid`);
+    }
+    privateCards(reveal.cards, `${label}.showdown.reveals.${index}.cards`);
+    if (revealedPlayers.has(reveal.playerId)
+      || !Object.hasOwn(record.holes, reveal.playerId)
+      || reveal.cards.some((card, cardIndex) => card !== record.holes[reveal.playerId][cardIndex])) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label} reveal is not bound to the player's holes`);
+    }
+    revealedPlayers.add(reveal.playerId);
+  }
+  return record;
+}
+
+export function validatePrivateEngineState(engineState, { expectedSessionToken = null } = {}) {
+  if (!plainObject(engineState)
+    || engineState.schemaVersion !== 1
+    || !Number.isInteger(engineState.stateVersion) || engineState.stateVersion < 0
+    || !plainObject(engineState.config)
+    || typeof engineState.sessionToken !== 'string' || engineState.sessionToken.length === 0
+    || !Number.isInteger(engineState.handNo) || engineState.handNo < 0
+    || !['idle', 'in_hand'].includes(engineState.phase)
+    || !Array.isArray(engineState.seats) || engineState.seats.length < 2
+    || typeof engineState.gameOver !== 'boolean'
+    || !Object.hasOwn(engineState, 'hand')
+    || !Object.hasOwn(engineState, 'lastHand')) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine state security schema is incomplete');
+  }
+  const seatIds = new Set();
+  for (const seat of engineState.seats) {
+    if (!plainObject(seat) || typeof seat.playerId !== 'string' || seat.playerId.length === 0
+      || seatIds.has(seat.playerId)) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'engine state contains an invalid seat');
+    }
+    seatIds.add(seat.playerId);
+  }
+  if (expectedSessionToken !== null && engineState.sessionToken !== expectedSessionToken) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine state session token does not match the server');
+  }
+  if ((engineState.phase === 'in_hand') !== (engineState.hand !== null)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine phase does not bind hand presence');
+  }
+  if (engineState.hand !== null) {
+    validatePrivateRecord(
+      { ...engineState.hand, handNo: engineState.handNo },
+      'state.hand',
+      { allowedPlayerIds: seatIds },
+    );
+  }
+  if (engineState.lastHand !== null) {
+    validatePrivateRecord(engineState.lastHand, 'state.lastHand', { allowedPlayerIds: seatIds });
+  }
+  const lastHandNo = engineState.lastHand?.handNo ?? null;
+  if ((engineState.hand !== null
+    && lastHandNo !== null
+    && lastHandNo !== engineState.handNo - 1)
+    || (engineState.hand === null
+      && lastHandNo !== null
+      && lastHandNo !== engineState.handNo)
+    || (engineState.hand === null && lastHandNo === null && engineState.handNo !== 0)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine hand numbers are inconsistent');
+  }
+  if (engineState.gameOver
+    && (engineState.phase !== 'idle'
+      || engineState.hand !== null
+      || !['win', 'lose', 'completed', 'abort'].includes(engineState.result)
+      || (engineState.result !== 'abort' && engineState.lastHand === null))) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'gameOver is not backed by terminal engine state');
+  }
+  return engineState;
+}
+
+/**
+ * 파싱된 JSON만 받는 순수 수집기(fs 없음). 코치(`coachForbiddenLiterals`)와 서버
+ * (`collectDenyLiterals`)가 같은 규칙을 쓰기 위한 정본이다.
+ * `records`는 핸드 레코드의 배열이며, 각 레코드에서 showdown으로 공개된 카드는 뺀다.
+ */
+export function collectPrivateLiterals({ players, engineState, records } = {}) {
+  const values = [];
+  const list = Array.isArray(players) ? players : players?.players;
+  if (!Array.isArray(list) || !Array.isArray(records)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'private literal inputs are incomplete');
+  }
+  validatePrivateEngineState(engineState);
+  const playerIds = new Set();
+  for (const player of list) {
+    if (!plainObject(player) || typeof player.playerId !== 'string' || player.playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'players contains an invalid row');
+    }
+    if (playerIds.has(player.playerId)) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'players contains a duplicate player id');
+    }
+    playerIds.add(player.playerId);
+    if (player.playerId === 'user') continue;
+    for (const field of PRIVATE_PLAYER_FIELDS) {
+      const value = player?.[field];
+      if (value !== undefined && value !== null) values.push(privateScalar(value, `player.${field}`));
+    }
+    if (player.policy !== undefined && player.policy !== null) {
+      if (!plainObject(player.policy)) {
+        throw coded('PRIVATE_LITERAL_INVALID', 'player.policy is not an object');
+      }
+      values.push(JSON.stringify(player.policy));
+      for (const [field, value] of Object.entries(player.policy)) {
+        values.push(privateScalar(value, `player.policy.${field}`));
+      }
+    }
+  }
+  const seatIds = engineState.seats.map((seat) => seat.playerId);
+  if (playerIds.size !== seatIds.length || seatIds.some((playerId) => !playerIds.has(playerId))) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'players do not bind every engine seat');
+  }
+  if (engineState.policySeed !== undefined && engineState.policySeed !== null) {
+    values.push(privateScalar(engineState.policySeed, 'state.policySeed'));
+  }
+  for (const [recordIndex, candidate] of records.entries()) {
+    const record = validatePrivateRecord(candidate, `records.${recordIndex}`, {
+      allowedPlayerIds: new Set(engineState.seats.map((seat) => seat.playerId)),
+    });
+    const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
+    for (const [playerId, cards] of Object.entries(record.holes)) {
+      if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
+      for (const card of cards) {
+        values.push(String(card));
+      }
+    }
+  }
+  return [...new Set(values)];
+}
+
+/**
+ * 수집된 literal 하나라도 들어 있거나 절대 경로·저장소 표지가 보이면 참.
+ * `literals`가 비어 있어도 경로 계열은 검사한다 — 다만 호출자는 빈 목록 자체를
+ * fail-closed 조건으로 다뤄야 한다(수집에 실패한 것과 구별되지 않기 때문).
+ */
+export function textLeaksPrivate(text, literals) {
+  if (typeof text !== 'string' || !text) return false;
+  if (FORBIDDEN_PATH_RE.test(text)) return true;
+  if (FORBIDDEN_PATH_LITERALS.some((literal) => text.includes(literal))) return true;
+  return (Array.isArray(literals) ? literals : []).some(
+    (literal) => typeof literal === 'string' && literal.length > 0 && text.includes(literal),
+  );
+}
+
 const TRAINING_SUMMARY_KEYS = Object.freeze([
   'evaluationId',
   'handNo',
@@ -174,8 +420,12 @@ export function projectTrainingSummary(item) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) {
     throw coded('TRAINING_PROOF_MISMATCH', 'training summary must be an object');
   }
-  if (typeof item.evaluationId !== 'string') {
-    throw coded('TRAINING_PROOF_MISMATCH', 'evaluationId must be a string');
+  // identity는 문법으로만 확인된다. 문자열이기만 하면 `__proto__` 같은 값이
+  // 맵 키로 흘러들고, detail 증명을 다른 결정에 결박할 여지가 생긴다.
+  if (typeof item.evaluationId !== 'string'
+    || item.evaluationId.length > EVALUATION_ID_MAX
+    || !EVALUATION_ID_RE.test(item.evaluationId)) {
+    throw coded('TRAINING_PROOF_MISMATCH', 'evaluationId is not a contract identity');
   }
   if (item.handNo != null && !Number.isInteger(item.handNo)) {
     throw coded('TRAINING_PROOF_MISMATCH', 'handNo must be an integer');
@@ -218,8 +468,22 @@ export function projectTrainingSummary(item) {
     forced: item.forced === true,
     source: compactSource(item.source),
   };
-  if (item.detailRef !== undefined) out.detailRef = item.detailRef;
-  if (item.detailSha256) out.detailSha256 = item.detailSha256;
+  // D9 ③: detailRef는 이 evaluation에서 파생된 값이어야 한다. 문법만 보면 유효한
+  // 토큰 보유자가 A의 summary에 B의 detail 증명을 실을 수 있다.
+  if (item.detailRef !== undefined) {
+    if (typeof item.detailRef !== 'string'
+      || !HEX64_RE.test(item.detailRef)
+      || item.detailRef !== detailRefOf(item.evaluationId)) {
+      throw coded('TRAINING_PROOF_MISMATCH', 'detailRef is not derived from this evaluationId');
+    }
+    out.detailRef = item.detailRef;
+  }
+  if (Object.hasOwn(item, 'detailSha256')) {
+    if (typeof item.detailSha256 !== 'string' || !HEX64_RE.test(item.detailSha256)) {
+      throw coded('TRAINING_PROOF_MISMATCH', 'detailSha256 must be a sha256 digest');
+    }
+    out.detailSha256 = item.detailSha256;
+  }
   if (item.code) out.code = item.code;
   if (item.reason) out.reason = item.reason;
   out.recommendedTruncated = item.recommendedTruncated === true;
@@ -227,51 +491,59 @@ export function projectTrainingSummary(item) {
   return out;
 }
 
+function projectExploitAdjustment(adjustment) {
+  if (typeof adjustment !== 'object' || adjustment === null || Array.isArray(adjustment)) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must be an object');
+  }
+  const keys = Object.keys(adjustment);
+  if (keys.length !== EXPLOIT_ADJUSTMENT_KEYS.length
+    || EXPLOIT_ADJUSTMENT_KEYS.some((key) => !Object.hasOwn(adjustment, key))) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must contain the complete vocabulary');
+  }
+  const next = Object.create(null);
+  for (const key of EXPLOIT_ADJUSTMENT_KEYS) {
+    const level = adjustment[key];
+    if (typeof level !== 'string' || !EXPLOIT_ADJUSTMENT_LEVELS.includes(level)) {
+      throw coded('ANNOTATION_PROOF_MISMATCH', `exploit adjustment level is not in the vocabulary: ${key}`);
+    }
+    next[key] = level;
+  }
+  return next;
+}
+
 function projectExploitValue(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit value must be an object');
   }
-  const opponents = Array.isArray(value.opponents)
-    ? value.opponents.map((row) => {
+  if (!Array.isArray(value.opponents) || value.opponents.length === 0) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponents must be a non-empty array');
+  }
+  const opponents = value.opponents.map((row) => {
       if (!row || typeof row !== 'object' || Array.isArray(row)) {
         throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponent must be an object');
       }
-      if (row.opponentId != null && typeof row.opponentId !== 'string') {
-        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponentId must be a string');
+      if (typeof row.opponentId !== 'string' || !EXPLOIT_ID_RE.test(row.opponentId)) {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponentId is not an identifier');
       }
-      if (row.policyId != null && typeof row.policyId !== 'string') {
-        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit policyId must be a string');
+      if (typeof row.policyId !== 'string' || !EXPLOIT_ID_RE.test(row.policyId)) {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit policyId is not an identifier');
       }
-      let adjustment = row.adjustment;
-      if (adjustment != null) {
-        if (typeof adjustment !== 'object' || Array.isArray(adjustment)) {
-          throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must be an object');
-        }
-        const next = {};
-        for (const [key, amount] of Object.entries(adjustment)) {
-          if (amount != null && typeof amount === 'object') {
-            throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment values must be scalars');
-          }
-          next[key] = amount;
-        }
-        adjustment = next;
+      if (!plainObject(row.comparison)
+        || typeof row.comparison.summaryCode !== 'string'
+        || !SUMMARY_CODE_RE.test(row.comparison.summaryCode)) {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit comparison.summaryCode is not a code');
       }
       const out = {
         opponentId: row.opponentId,
         policyId: row.policyId,
-        adjustment,
+        adjustment: projectExploitAdjustment(row.adjustment),
+        comparison: { summaryCode: row.comparison.summaryCode },
       };
-      if (row.comparison && typeof row.comparison === 'object' && !Array.isArray(row.comparison)) {
-        if (row.comparison.summaryCode != null && typeof row.comparison.summaryCode !== 'string') {
-          throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit comparison.summaryCode must be a string');
-        }
-        out.comparison = { summaryCode: row.comparison.summaryCode };
-      }
       return out;
-    })
-    : [];
-  if (value.primary != null && typeof value.primary !== 'string') {
-    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit primary must be a string');
+    });
+  const named = opponents.some((row) => row.opponentId === value.primary);
+  if (typeof value.primary !== 'string' || !named) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit primary must name one of the opponents');
   }
   return { opponents, primary: value.primary };
 }

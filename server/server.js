@@ -5,21 +5,29 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  collectPrivateLiterals,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   payloadSha256,
   publicProofId,
   projectTrainingAnnotation,
   projectTrainingSummary,
+  sha256Hex,
+  textLeaksPrivate,
+  validatePrivateEngineState,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
 
-const DENY_FIELDS = Object.freeze([
-  'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
-  'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
-]);
-
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
+// 서버가 읽기 전용 보안 술어로만 여는 세션 파일들. 엔진은 원자적 rename으로 쓰므로
+// 부분 읽기는 없고, 이 상한을 넘는 파일은 읽기 실패(=fail-closed)로 다룬다.
+const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
+const HAND_FILE_RE = /^hand-(\d{4,})\.json$/;
+const LEGACY_TRAINING_KEYS = Object.freeze([
+  'evaluationId', 'handNo', 'decisionId', 'status', 'street', 'spotKey', 'handClass',
+  'chosen', 'recommended', 'evLossBb', 'grade', 'forced', 'source', 'explanation',
+  'detailRef', 'detailSha256', 'code', 'reason',
+]);
 const HEARTBEAT_MS = 15_000;
 const KEEP_ALIVE_MS = 120_000;
 const HEADERS_MS = 125_000;
@@ -73,7 +81,7 @@ function emptyState() {
     log: [],
     coach: [],
     training: [],
-    trainingAnnotations: {},
+    trainingAnnotations: Object.create(null),
     review: undefined,
     publishId: undefined,
     history: [],
@@ -99,43 +107,158 @@ function annotationsToArray(map) {
   return out;
 }
 
-function arrayToAnnotationMap(rows) {
-  const map = {};
-  for (const row of rows ?? []) {
-    if (!row?.evaluationId || !row.field) continue;
-    map[row.evaluationId] = map[row.evaluationId] ?? {};
-    map[row.evaluationId][row.field] = row;
-  }
-  return map;
-}
-
-function collectDenyLiterals(gameDir) {
-  const values = [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json'), 'utf8'));
-    const list = Array.isArray(parsed) ? parsed : (parsed.players ?? []);
-    for (const player of list) {
-      if (player?.playerId === 'user') continue;
-      for (const field of DENY_FIELDS) {
-        if (player?.[field] != null && String(player[field]).length > 0) {
-          values.push(String(player[field]));
-        }
+function persistedAnnotationCandidates(raw, split) {
+  const candidates = [];
+  if (Array.isArray(raw)) {
+    for (const row of raw) candidates.push({ row, outerId: null, outerField: null });
+  } else if (raw && typeof raw === 'object') {
+    for (const [outerId, fields] of Object.entries(raw)) {
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+        candidates.push({ row: null, outerId, outerField: null });
+        continue;
+      }
+      for (const [outerField, row] of Object.entries(fields)) {
+        candidates.push({ row, outerId, outerField });
       }
     }
-  } catch { /* players.json is optional */ }
-  return values;
+  }
+  for (const [outerId, fields] of Object.entries(split ?? {})) {
+    for (const [outerField, row] of Object.entries(fields ?? {})) {
+      candidates.push({ row, outerId, outerField });
+    }
+  }
+  return candidates;
 }
 
-function explanationDenied(text, gameDir) {
-  if (typeof text !== 'string' || !text) return false;
-  return collectDenyLiterals(gameDir).some((literal) => literal && text.includes(literal));
+function annotationCandidateKeys({ row, outerId, outerField }) {
+  const keys = new Set();
+  if (typeof outerId === 'string' && typeof outerField === 'string') {
+    keys.add(`${outerId}:${outerField}`);
+  }
+  if (typeof row?.evaluationId === 'string' && typeof row?.field === 'string') {
+    keys.add(`${row.evaluationId}:${row.field}`);
+  }
+  return [...keys];
 }
 
-function migrateLoadedTraining(rawTraining) {
-  const training = [];
-  const split = {};
-  for (const item of Array.isArray(rawTraining) ? rawTraining : []) {
-    if (!item || typeof item !== 'object') continue;
+function coded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function readSecurityJson(root, segments) {
+  return JSON.parse(
+    openContained(root, segments, { maxBytes: SECURITY_READ_MAX_BYTES }).toString('utf8'),
+  );
+}
+
+// 위조된 POST로는 바꿀 수 없는 유일한 진실. 부재·symlink·파싱 실패·타입 불일치는
+// 전부 "아직 끝나지 않았다"로 읽는다(fail-closed).
+function engineGameOver(root, expectedSessionToken) {
+  try {
+    return validatePrivateEngineState(
+      readSecurityJson(root, ['state.json']),
+      { expectedSessionToken },
+    ).gameOver === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 세션 전 핸드의 미공개 상대 카드 **합집합**과 비공개 정책 값을 매 호출마다 다시 읽는다.
+ * 게시자가 주장하는 handNo·machine item으로 핸드를 고르지 않으며(같은 POST에서 위조
+ * 가능하다) 캐시하지도 않는다 — `hands/`는 그대로인 채 `state.json`의 진행 중 핸드나
+ * `players.json`만 바뀌는 갱신을 놓치기 때문이다. 자료를 하나라도 읽지 못하거나 수집
+ * 결과가 0건이면 throw한다(호출자가 fail-closed로 거부한다).
+ */
+function collectDenyLiterals(root, expectedSessionToken) {
+  const players = readSecurityJson(root, ['players.json']);
+  const engineState = readSecurityJson(root, ['state.json']);
+  validatePrivateEngineState(engineState, { expectedSessionToken });
+  const records = [];
+  if (engineState?.hand) records.push({ ...engineState.hand, handNo: engineState.handNo });
+  if (engineState?.lastHand) records.push(engineState.lastHand);
+
+  const names = fs.readdirSync(path.join(root, 'hands'));
+  if (!names.some((entry) => HAND_FILE_RE.test(entry))) {
+    throw coded('HAND_ARCHIVE_MISSING', '보안 술어에 필요한 hand archive가 없습니다.');
+  }
+  const archives = names.flatMap((name) => {
+    const match = HAND_FILE_RE.exec(name);
+    if (!match) return [];
+    const handNo = Number(match[1]);
+    if (!Number.isSafeInteger(handNo) || handNo < 1
+      || `hand-${String(handNo).padStart(4, '0')}.json` !== name) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}은 canonical hand archive 이름이 아닙니다.`);
+    }
+    return [{ name, handNo }];
+  }).sort((left, right) => left.handNo - right.handNo);
+  const archived = new Set();
+  for (const { name, handNo } of archives) {
+    if (archived.has(handNo)) throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 중복됩니다.`);
+    const record = readSecurityJson(root, ['hands', name]);
+    if (record?.handNo !== handNo) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 파일명과 다릅니다.`);
+    }
+    records.push(record);
+    archived.add(handNo);
+  }
+  // lastHandNo 자체가 비정상적으로 커도 그 수만큼 루프하지 않는다. 실제 파일 수와
+  // 정렬된 번호를 한 번 대조해 빠진 archive를 fail-closed로 찾는다.
+  const lastHandNo = engineState?.lastHand?.handNo;
+  if (Number.isInteger(lastHandNo)) {
+    if (archives.length !== lastHandNo
+      || archives.some(({ handNo }, index) => handNo !== index + 1)) {
+      throw coded('HAND_ARCHIVE_MISSING', '완료된 hand archive 연속성이 깨졌습니다.');
+    }
+  }
+
+  const literals = collectPrivateLiterals({ players, engineState, records });
+  if (literals.length === 0) {
+    throw coded('DENY_LITERALS_EMPTY', 'deny literal 목록이 비어 있습니다.');
+  }
+  return literals;
+}
+
+function legacyTrainingPayloadSha256(item) {
+  const canonical = {};
+  for (const key of LEGACY_TRAINING_KEYS) {
+    if (item?.[key] !== undefined) canonical[key] = item[key];
+  }
+  return sha256Hex(JSON.stringify(canonical));
+}
+
+function storedTrainingDigestMatches(item, projected, { allowLegacyExplanation = false } = {}) {
+  if (typeof item?.payloadSha256 !== 'string') return false;
+  if (Object.hasOwn(item, 'explanation')) {
+    return allowLegacyExplanation
+      ? item.payloadSha256 === legacyTrainingPayloadSha256(item)
+      : item.payloadSha256 === projected.payloadSha256;
+  }
+  return item.payloadSha256 === projected.payloadSha256;
+}
+
+function migrateLoadedTraining(rawTraining, { allowLegacyExplanation = false } = {}) {
+  const byId = new Map();
+  const split = Object.create(null);
+  let dropped = 0;
+  const rows = Array.isArray(rawTraining) ? rawTraining : [];
+  const idCounts = new Map();
+  for (const item of rows) {
+    if (typeof item?.evaluationId !== 'string') continue;
+    idCounts.set(item.evaluationId, (idCounts.get(item.evaluationId) ?? 0) + 1);
+  }
+  for (const item of rows) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      dropped += 1;
+      continue;
+    }
+    if (typeof item.evaluationId === 'string' && idCounts.get(item.evaluationId) > 1) {
+      dropped += 1;
+      continue;
+    }
     const explanation = item.explanation;
     const rest = { ...item };
     delete rest.explanation;
@@ -143,10 +266,15 @@ function migrateLoadedTraining(rawTraining) {
     try {
       projected = projectTrainingSummary(rest);
     } catch {
+      dropped += 1;
       continue;
     }
-    training.push(projected);
-    if (typeof explanation === 'string' && explanation.length) {
+    if (!storedTrainingDigestMatches(item, projected, { allowLegacyExplanation })) {
+      dropped += 1;
+      continue;
+    }
+    byId.set(projected.evaluationId, projected);
+    if (allowLegacyExplanation && typeof explanation === 'string' && explanation.length) {
       try {
         const ann = projectTrainingAnnotation({
           evaluationId: projected.evaluationId,
@@ -155,51 +283,191 @@ function migrateLoadedTraining(rawTraining) {
           status: 'ready',
           value: explanation,
         });
-        split[ann.evaluationId] = split[ann.evaluationId] ?? {};
+        split[ann.evaluationId] = split[ann.evaluationId] ?? Object.create(null);
         split[ann.evaluationId].explanation = ann;
-      } catch { /* drop malformed legacy explanation */ }
+      } catch { dropped += 1; }
     }
   }
-  return { training, split };
+  return { training: [...byId.values()], split, dropped };
 }
 
-function loadUiState(gameDir) {
+// 복원은 live merge와 같은 다섯 술어를 통과한 항목만 남긴다: ① 투영 성공 + 저장된
+// `valueSha256`이 재계산값과 일치 ② `payloadSha256`이 존재하고 복원된 machine item과
+// 일치 ③ 최종 상태에 같은 digest로 존재(set-once) ④ explanation은 deny-literal
+// ⑤ exploit은 엔진 `gameOver`. 하나라도 어긋나면 드롭한다.
+function restoreAnnotationRow(row, { machine, literals, gate }) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  if (!machine) return null;
+  let projected;
+  try {
+    projected = projectTrainingAnnotation(row);
+  } catch {
+    return null;
+  }
+  if (typeof row.valueSha256 !== 'string' || row.valueSha256 !== projected.valueSha256) return null;
+  if (typeof projected.payloadSha256 !== 'string'
+    || projected.payloadSha256 !== machine.payloadSha256) {
+    return null;
+  }
+  if (projected.field === 'explanation') {
+    if (!literals || textLeaksPrivate(projected.value, literals)) return null;
+  }
+  if (projected.field === 'exploit' && !gate.gameOver) return null;
+  return projected;
+}
+
+function restoreHistory(rawHistory, context) {
+  const restored = [];
+  let dropped = 0;
+  for (const entry of Array.isArray(rawHistory) ? rawHistory : []) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      dropped += 1;
+      continue;
+    }
+    const source = entry.payload;
+    const payload = source && typeof source === 'object' && !Array.isArray(source)
+      ? { ...source }
+      : {};
+    if ('training' in payload) {
+      const itemsById = new Map();
+      const historyTraining = Array.isArray(payload.training) ? payload.training : [];
+      const historyIdCounts = new Map();
+      for (const item of historyTraining) {
+        if (typeof item?.evaluationId !== 'string') continue;
+        historyIdCounts.set(item.evaluationId, (historyIdCounts.get(item.evaluationId) ?? 0) + 1);
+      }
+      for (const item of historyTraining) {
+        if (typeof item?.evaluationId === 'string' && historyIdCounts.get(item.evaluationId) > 1) {
+          dropped += 1;
+          continue;
+        }
+        let projected;
+        try {
+          projected = projectTrainingSummary(item);
+        } catch {
+          dropped += 1;
+          continue;
+        }
+        const machine = context.machineById.get(projected.evaluationId);
+        if (!storedTrainingDigestMatches(item, projected, {
+          allowLegacyExplanation: context.allowLegacyExplanation,
+        })
+          || !machine
+          || machine.payloadSha256 !== projected.payloadSha256) {
+          dropped += 1;
+          continue;
+        }
+        itemsById.set(projected.evaluationId, projected);
+      }
+      const items = [...itemsById.values()];
+      if (items.length) payload.training = items;
+      else delete payload.training;
+    }
+    if ('trainingAnnotations' in payload) {
+      const rowsByKey = new Map();
+      const historyAnnotations = Array.isArray(payload.trainingAnnotations)
+        ? payload.trainingAnnotations
+        : [];
+      const historyAnnotationCounts = new Map();
+      for (const row of historyAnnotations) {
+        if (typeof row?.evaluationId !== 'string' || typeof row?.field !== 'string') continue;
+        const key = `${row.evaluationId}:${row.field}`;
+        historyAnnotationCounts.set(key, (historyAnnotationCounts.get(key) ?? 0) + 1);
+      }
+      for (const row of historyAnnotations) {
+        const rawKey = typeof row?.evaluationId === 'string' && typeof row?.field === 'string'
+          ? `${row.evaluationId}:${row.field}`
+          : null;
+        if (rawKey && historyAnnotationCounts.get(rawKey) > 1) {
+          dropped += 1;
+          continue;
+        }
+        const machine = context.machineById.get(row?.evaluationId);
+        const projected = restoreAnnotationRow(row, { ...context, machine });
+        const settled = projected
+          ? context.annotations[projected.evaluationId]?.[projected.field]
+          : null;
+        if (!projected || !settled || settled.valueSha256 !== projected.valueSha256) {
+          dropped += 1;
+          continue;
+        }
+        const key = `${projected.evaluationId}:${projected.field}`;
+        rowsByKey.set(key, projected);
+      }
+      const rows = [...rowsByKey.values()];
+      if (rows.length) payload.trainingAnnotations = rows;
+      else delete payload.trainingAnnotations;
+    }
+    restored.push({ revision: Number(entry.revision) || 0, at: entry.at, payload });
+  }
+  return { history: restored, dropped };
+}
+
+function legacyTrainingSnapshot(gameDir) {
+  try {
+    const authority = readSecurityJson(gameDir, ['training', '.training-authority.json']);
+    return authority?.schemaVersion === 1;
+  } catch {
+    return false;
+  }
+}
+
+function loadUiState(gameDir, expectedSessionToken) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
-    const migrated = migrateLoadedTraining(raw.training);
-    let annotationMap = {};
-    if (Array.isArray(raw.trainingAnnotations)) {
-      annotationMap = arrayToAnnotationMap(raw.trainingAnnotations);
-    } else if (raw.trainingAnnotations && typeof raw.trainingAnnotations === 'object') {
-      annotationMap = raw.trainingAnnotations;
+    const allowLegacyExplanation = legacyTrainingSnapshot(gameDir);
+    const migrated = migrateLoadedTraining(raw.training, { allowLegacyExplanation });
+    const machineById = new Map(migrated.training.map((row) => [row.evaluationId, row]));
+
+    // 보안 자료는 이 로드에서 한 번 읽는다. 읽지 못하면 explanation은 전부 드롭한다.
+    let literals = null;
+    try {
+      literals = collectDenyLiterals(gameDir, expectedSessionToken);
+    } catch {
+      literals = null;
     }
-    for (const [id, fields] of Object.entries(migrated.split)) {
-      annotationMap[id] = { ...fields, ...(annotationMap[id] ?? {}) };
-    }
-    const trainingIds = new Set(migrated.training.map((row) => row.evaluationId));
-    const restoredAnnotations = {};
-    for (const [id, fields] of Object.entries(annotationMap)) {
-      if (!trainingIds.has(id)) continue;
-      const machine = migrated.training.find((row) => row.evaluationId === id);
-      restoredAnnotations[id] = {};
-      for (const [field, row] of Object.entries(fields ?? {})) {
-        try {
-          const projected = projectTrainingAnnotation(row);
-          if (machine && projected.payloadSha256 && projected.payloadSha256 !== machine.payloadSha256) {
-            continue;
-          }
-          if (projected.field === 'explanation' && explanationDenied(projected.value, gameDir)) {
-            continue;
-          }
-          if (projected.field === 'exploit' && raw.view?.gameOver !== true) {
-            continue;
-          }
-          restoredAnnotations[id][field] = projected;
-        } catch {
-          /* drop malformed persisted annotation */
-        }
+    const gate = { gameOver: engineGameOver(gameDir, expectedSessionToken) };
+
+    const restoredAnnotations = Object.create(null);
+    let droppedAnnotations = migrated.dropped;
+    const annotationCandidates = persistedAnnotationCandidates(
+      raw.trainingAnnotations,
+      migrated.split,
+    );
+    const annotationCounts = new Map();
+    const keysByCandidate = annotationCandidates.map(annotationCandidateKeys);
+    for (const keys of keysByCandidate) {
+      for (const key of keys) {
+        annotationCounts.set(key, (annotationCounts.get(key) ?? 0) + 1);
       }
-      if (!Object.keys(restoredAnnotations[id]).length) delete restoredAnnotations[id];
+    }
+    for (const [index, { row, outerId, outerField }] of annotationCandidates.entries()) {
+      if (keysByCandidate[index].some((key) => annotationCounts.get(key) > 1)) {
+        droppedAnnotations += 1;
+        continue;
+      }
+      const machine = machineById.get(row?.evaluationId);
+      const projected = restoreAnnotationRow(row, { machine, literals, gate });
+      if (!projected
+        || (outerId !== null && outerId !== projected.evaluationId)
+        || (outerField !== null && outerField !== projected.field)) {
+        droppedAnnotations += 1;
+        continue;
+      }
+      const previous = restoredAnnotations[projected.evaluationId]?.[projected.field];
+      if (previous) {
+        droppedAnnotations += 1;
+        continue;
+      }
+      restoredAnnotations[projected.evaluationId] = restoredAnnotations[projected.evaluationId]
+        ?? Object.create(null);
+      restoredAnnotations[projected.evaluationId][projected.field] = projected;
+    }
+    const replay = restoreHistory(raw.history, {
+      machineById, literals, gate, annotations: restoredAnnotations, allowLegacyExplanation,
+    });
+    if (droppedAnnotations || replay.dropped) {
+      process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
     }
     return {
       revision: Number(raw.revision) || 0,
@@ -210,7 +478,7 @@ function loadUiState(gameDir) {
       trainingAnnotations: restoredAnnotations,
       review: raw.review,
       publishId: raw.publishId,
-      history: Array.isArray(raw.history) ? raw.history : [],
+      history: replay.history,
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -301,11 +569,13 @@ function mergeTraining(existing, incoming) {
   return { merged, projectedIncoming };
 }
 
-function mergeTrainingAnnotations(existing, incoming, trainingItems, view, gameDir) {
-  const next = { ...existing };
-  for (const key of Object.keys(next)) {
-    next[key] = { ...(next[key] ?? {}) };
+function mergeTrainingAnnotations(existing, incoming, trainingItems, gameDir, expectedSessionToken) {
+  const next = Object.create(null);
+  for (const [key, fields] of Object.entries(existing ?? {})) {
+    next[key] = Object.assign(Object.create(null), fields);
   }
+  // deny 목록은 요청마다 한 번 읽는다(요청 간 캐시 없음).
+  let literals;
   const projectedIncoming = [];
   for (const raw of incoming) {
     const proof = raw?.annotationProof;
@@ -332,10 +602,23 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, view, gameD
     if (machine.payloadSha256 !== projected.payloadSha256) {
       return { error: 'ANNOTATION_PROOF_MISMATCH', status: 400 };
     }
-    if (projected.field === 'explanation' && explanationDenied(projected.value, gameDir)) {
-      return { error: 'FORBIDDEN_LITERAL', status: 400 };
+    if (projected.field === 'explanation') {
+      if (literals === undefined) {
+        try {
+          literals = collectDenyLiterals(gameDir, expectedSessionToken);
+        } catch {
+          literals = null;
+        }
+      }
+      if (literals === null) {
+        return { error: 'FORBIDDEN_LITERAL_UNAVAILABLE', status: 500 };
+      }
+      if (textLeaksPrivate(projected.value, literals)) {
+        return { error: 'FORBIDDEN_LITERAL', status: 400 };
+      }
     }
-    if (projected.field === 'exploit' && view?.gameOver !== true) {
+    // 게시자의 view(요청 본문이든 저장된 것이든)는 이 게이트의 입력이 아니다.
+    if (projected.field === 'exploit' && !engineGameOver(gameDir, expectedSessionToken)) {
       return { error: 'EXPLOIT_BEFORE_GAMEOVER', status: 409 };
     }
     const prev = next[projected.evaluationId]?.[projected.field];
@@ -346,7 +629,7 @@ function mergeTrainingAnnotations(existing, incoming, trainingItems, view, gameD
       }
       return { error: 'ANNOTATION_CONFLICT', status: 409 };
     }
-    next[projected.evaluationId] = next[projected.evaluationId] ?? {};
+    next[projected.evaluationId] = next[projected.evaluationId] ?? Object.create(null);
     next[projected.evaluationId][projected.field] = projected;
     projectedIncoming.push(projected);
   }
@@ -506,7 +789,7 @@ export function startServer({ gameDir, port = 8877, token }) {
   const root = path.resolve(gameDir);
   fs.mkdirSync(root, { recursive: true });
 
-  const state = loadUiState(root);
+  const state = loadUiState(root, token);
   const sseClients = new Set();
   const waiters = new Set();
   let slot = null;
@@ -609,8 +892,8 @@ export function startServer({ gameDir, port = 8877, token }) {
         next.trainingAnnotations,
         body.trainingAnnotations,
         next.training,
-        next.view,
         root,
+        token,
       );
       if (merged.error) {
         sendJson(res, merged.status ?? 400, { ok: false, code: merged.error });
