@@ -108,6 +108,20 @@ test('NaN hero raise amount is UNSUPPORTED_SIZE', () => {
   })).code, 'UNSUPPORTED_SIZE');
 });
 
+test('normalizePreflopSpot rejects malformed snapshots at the assertSnapshot boundary', () => {
+  for (const [label, override] of [
+    ['schemaVersion', { schemaVersion: 2 }],
+    ['decisionId', { decisionId: 42 }],
+    ['holeCards', { holeCards: ['Ah'] }],
+  ]) {
+    assert.throws(
+      () => normalizePreflopSpot(baseSpot(override)),
+      (error) => error.code === 'SNAPSHOT_INVALID',
+      label,
+    );
+  }
+});
+
 test('6-max engine labels map to training positions', () => {
   assert.equal(trainingPosition('UTG', { seated: 6 }), 'UTG');
   assert.equal(trainingPosition('UTG+1', { seated: 6 }), 'HJ');

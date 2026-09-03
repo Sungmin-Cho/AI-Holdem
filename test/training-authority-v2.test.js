@@ -237,6 +237,25 @@ function findAnnotationFile(dir, detailRef, field) {
   return candidates.find((file) => fs.existsSync(file)) ?? null;
 }
 
+function migrationArtifactHashes(dir) {
+  const training = path.join(dir, 'training');
+  const annotationDir = path.join(training, 'annotations');
+  const files = [
+    path.join(training, '.training-authority.json'),
+    path.join(training, 'evaluations.jsonl'),
+    path.join(training, '.digest-map-v2.json'),
+    path.join(training, '.migration-v2.json'),
+    ...fs.readdirSync(annotationDir)
+      .filter((name) => name.endsWith('.json'))
+      .sort()
+      .map((name) => path.join(annotationDir, name)),
+  ];
+  return Object.fromEntries(files.map((file) => [
+    path.relative(dir, file),
+    sha(fs.readFileSync(file)),
+  ]));
+}
+
 // --- contract ---
 
 test('SUPPORTED schemas include 1 (read-only) and 2; explanation is not a digest key', () => {
@@ -606,14 +625,11 @@ test('v1 fixture with explanation migrates byte-stable: annotation exact-file, j
   const marker = JSON.parse(fs.readFileSync(path.join(dir, 'training', '.migration-v2.json'), 'utf8'));
   assert.equal(marker.status === 'session-done' || marker.status === 'complete', true);
 
+  const before = migrationArtifactHashes(dir);
+  assert.equal(Object.keys(before).length, 5);
   const again = tc.loadAuthority(dir);
   assert.equal(again.items[summary.evaluationId].payloadSha256, item.payloadSha256);
-  assert.equal(
-    fs.readFileSync(path.join(dir, 'training', '.training-authority.json'), 'utf8'),
-    JSON.stringify(auth) === fs.readFileSync(path.join(dir, 'training', '.training-authority.json'), 'utf8')
-      ? fs.readFileSync(path.join(dir, 'training', '.training-authority.json'), 'utf8')
-      : fs.readFileSync(path.join(dir, 'training', '.training-authority.json'), 'utf8'),
-  );
+  assert.deepEqual(migrationArtifactHashes(dir), before);
 });
 
 test('v1 explanation:null becomes absent; published+string explanation does not enter annotationQueue as unpublished', async () => {
@@ -728,14 +744,38 @@ test('session-done marker, crash mid store-migration, restart completes', async 
   const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
   assert.equal(marker.status, 'session-done');
-  fs.writeFileSync(markerPath, JSON.stringify({ ...marker, status: 'session-done' }));
+  const mistakesPath = path.join(storeDir, '.training', 'mistakes.json');
+  fs.mkdirSync(mistakesPath, { recursive: true });
   assert.equal(typeof profileCli.completeSessionStoreMigrations, 'function');
-  await profileCli.completeSessionStoreMigrations(storeDir);
+  await assert.rejects(
+    () => profileCli.completeSessionStoreMigration(storeDir, sessionDir),
+    (error) => error.code === 'EISDIR' || error.code === 'UNSAFE_PATH',
+  );
+  assert.equal(JSON.parse(fs.readFileSync(markerPath, 'utf8')).status, 'session-done');
+  fs.rmdirSync(mistakesPath);
+  await profileCli.completeSessionStoreMigration(storeDir, sessionDir);
   const complete = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
   assert.equal(complete.status, 'complete');
-  fs.writeFileSync(markerPath, JSON.stringify({ ...complete, status: 'session-done' }));
-  await profileCli.completeSessionStoreMigrations(storeDir);
-  assert.equal(JSON.parse(fs.readFileSync(markerPath, 'utf8')).status, 'complete');
+  const map = JSON.parse(fs.readFileSync(path.join(sessionDir, 'training', '.digest-map-v2.json'), 'utf8'));
+  const profile = await createProfileStore(storeDir).show();
+  assert.equal(profile.processed[summary.evaluationId], map.oldToNew[summary.payloadSha256]);
+});
+
+test('M6: digest map write failure resumes v1 migration without losing annotations', { todo: true }, async () => {
+  const dir = tmp();
+  const { summary } = writeV1Session(dir, { status: 'evaluated' });
+  const mapPath = path.join(dir, 'training', '.digest-map-v2.json');
+  fs.mkdirSync(mapPath);
+  const tc = createTrainingControl();
+  assert.throws(() => tc.loadAuthority(dir), (error) => error.code === 'UNSAFE_PATH');
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), true);
+  fs.rmdirSync(mapPath);
+  const resumed = tc.loadAuthority(dir);
+  const item = resumed.items[summary.evaluationId];
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'training', '.migration-v2.json'), 'utf8')).status, 'session-done');
+  assert.equal(item.annotations.explanation.status, 'ready');
+  assert.equal(fs.existsSync(findAnnotationFile(dir, item.detailRef, 'explanation')), true);
+  assert.equal(fs.existsSync(mapPath), true);
 });
 
 // --- pipeline / publish envelopes ---
