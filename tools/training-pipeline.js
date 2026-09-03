@@ -451,6 +451,10 @@ async function runSolveTaskUnlocked({
     return { ok: false, code: claim?.code ?? 'SOLVE_ALREADY_RUNNING' };
   }
   try {
+    // cutoff는 claim을 기다리는 동안에도 지나갈 수 있다. 자식을 띄우기 직전에
+    // 다시 확인해야 종료 확인 절차가 이미 끝난 뒤에 새 solver가 태어나는 창이
+    // 닫힌다. finally가 점유를 풀어 주므로 여기서 나가도 잔해는 없다.
+    if (shouldStop?.()) return { ok: false, code: 'SOLVE_CUTOFF' };
     let solved;
     try {
       const runner = typeof solve === 'function' ? solve : defaultSolve;
