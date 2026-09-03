@@ -30,11 +30,14 @@ function shuffle(items, seed) {
   return copy;
 }
 
+const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
+const PROVIDER_VERSION_RE = /^\d+\.\d+\.\d+$/;
+
 function questionFrom({
   mode, spotKey, handClass = 'AJo', skillKey, nonce,
   providerId = 'local-preflop-baseline', providerVersion,
 }) {
-  if (typeof providerVersion !== 'string') {
+  if (!PROVIDER_VERSION_RE.test(providerVersion ?? '')) {
     const error = new Error('drill question needs the dataset provider version');
     error.code = 'PROVIDER_VERSION_REQUIRED';
     throw error;
@@ -117,8 +120,10 @@ export function generateQueue({
   // answerPolicy가 옛 버전을 주장하므로, 없으면 fail-closed다.
   source,
 } = {}) {
-  if (typeof source?.version !== 'string' || typeof source?.id !== 'string') {
-    const error = new Error('drill queue needs the dataset source');
+  // 타입만 보면 빈 문자열이 통과해 `drill::…` 같은 provenance가 생기고, 빈
+  // 버전은 평가기의 truthy 검사까지 비껴간다. evaluationId와 같은 문법으로 건다.
+  if (!PROVIDER_ID_RE.test(source?.id ?? '') || !PROVIDER_VERSION_RE.test(source?.version ?? '')) {
+    const error = new Error('drill queue needs a dataset source with a provider id and semver');
     error.code = 'PROVIDER_VERSION_REQUIRED';
     throw error;
   }

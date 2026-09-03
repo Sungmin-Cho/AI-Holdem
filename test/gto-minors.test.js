@@ -166,35 +166,46 @@ test('the drill server refuses a token passed in the query string', async () => 
   }
 });
 
-test('the shipped drill client builds a header-authenticated request', async () => {
-  // Run the shipped file rather than grep it: a dead mention of the header name
-  // would satisfy a source scan while `fetch` still sent the token in the URL.
+test('the shipped drill client sends its token in the header, never in the URL', async () => {
+  // Run the shipped file and inspect what `api` actually hands to `fetch`.
+  // Calling the request builder alone would stay green if `api` stopped using
+  // it, which is the regression this guards.
   const client = fs.readFileSync(path.join(ROOT, 'server/drill-public/drill.js'), 'utf8');
+  const calls = [];
   const context = vm.createContext({
+    URLSearchParams,
+    URL,
     location: { search: '?token=tok' },
     crypto: { randomUUID: () => 'k' },
-    document: { getElementById: () => null, addEventListener() {} },
-    fetch: async () => ({ status: 200, json: async () => ({}) }),
+    document: { getElementById: () => null, addEventListener() {}, querySelectorAll: () => [] },
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return { status: 200, json: async () => ({ ok: true }) };
+    },
     console,
+    setTimeout,
   });
-  // The file has top-level await, so it runs inside an async IIFE. Function
-  // declarations hoist, so the helper is captured before any of the page setup
-  // runs (and that setup is free to fail against a stub DOM).
+  // Function declarations hoist, so `api` is captured before the page setup
+  // runs — and that setup is free to fail against a stub DOM.
   vm.runInContext(
-    `(async () => { globalThis.__drillRequest = drillRequest;\n${client}\n })().catch(() => {});`,
+    `(async () => { globalThis.__api = api;\n${client}\n })().catch(() => {});`,
     context,
   );
+  assert.equal(typeof context.__api, 'function', 'the shipped client exposes no api()');
 
-  const [url, init] = context.__drillRequest('/api/next', 'tok');
-  assert.equal(url, '/api/next', 'the token must not be in the URL');
-  assert.equal(init.headers['x-drill-token'], 'tok');
+  await context.__api('/api/next');
+  const post = await context.__api('/api/answer', { method: 'POST', body: { action: 'fold' } });
+  assert.ok(post);
 
-  const [postUrl, postInit] = context.__drillRequest('/api/answer', 'tok', {
-    method: 'POST', body: { action: 'fold' },
-  });
-  assert.equal(postUrl, '/api/answer');
-  assert.equal(postInit.headers['x-drill-token'], 'tok');
-  assert.equal(postInit.headers['Content-Type'], 'application/json');
+  // Every request the page makes, including the ones its own startup issues.
+  assert.ok(calls.length >= 2, `only ${calls.length} requests observed`);
+  for (const call of calls) {
+    assert.equal(/[?&]token=/.test(call.url), false, `token leaked into ${call.url}`);
+    assert.equal(call.init.headers['x-drill-token'], 'tok', `no header on ${call.url}`);
+  }
+  const posted = calls.find((call) => call.init.method === 'POST');
+  assert.ok(posted, 'no POST was observed');
+  assert.equal(posted.init.headers['Content-Type'], 'application/json');
 });
 
 test('the client merge keeps a shown card and appends a new one, in hand order', async () => {
@@ -204,14 +215,21 @@ test('the client merge keeps a shown card and appends a new one, in hand order',
   const shown = [{ evaluationId: 'e1', handNo: 1, payloadSha256: 'a'.repeat(64), grade: 'preferred' }];
 
   const merged = mergeTrainingItems(shown, [
+    // Out of order on purpose: an unsorted input is what proves the sort.
+    { evaluationId: 'e3', handNo: 9, payloadSha256: 'd'.repeat(64), grade: 'mixed' },
     { evaluationId: 'e1', handNo: 1, payloadSha256: 'b'.repeat(64), grade: 'off-policy' },
     { evaluationId: 'e2', handNo: 2, payloadSha256: 'c'.repeat(64), grade: 'mixed' },
   ]);
 
-  assert.deepEqual(merged.map((row) => row.evaluationId), ['e1', 'e2']);
+  assert.deepEqual(merged.map((row) => row.evaluationId), ['e1', 'e2', 'e3']);
   assert.equal(merged[0].grade, 'preferred', 'a conflicting digest must not rewrite the card');
   assert.equal(merged[1].grade, 'mixed');
   assert.deepEqual(shown.map((row) => row.grade), ['preferred'], 'the input must not be mutated');
+
+  // And the client must route through it rather than keep its own loop.
+  const app = fs.readFileSync(path.join(ROOT, 'server/public/app.js'), 'utf8');
+  assert.match(app, /ui\.training = mergeTrainingItems\(ui\.training, m\.training\);/);
+  assert.equal(/ui\.training\.(push|splice)\(/.test(app), false, 'a second mutation path exists');
 });
 
 test('a dataset version change flows into the question id and the answer policy', async () => {
@@ -278,7 +296,30 @@ test('a stale owner cannot record a pending decision either', async () => {
     }),
     { code: 'TRAINING_OWNER_MISMATCH' },
   );
+  // Omitting the owner is not a way past the fence either.
+  await assert.rejects(
+    () => tc.recordPending(dir, 'd-9-preflop-0', { handNo: 9, reason: 'EVALUATE_FAILED' }),
+    { code: 'TRAINING_OWNER_MISMATCH' },
+  );
   assert.equal(createTrainingControl().loadAuthority(dir).pending['d-9-preflop-0'], undefined);
+});
+
+test('a drill source with an empty id or version is refused', async () => {
+  const { generateQueue: build } = await import('../training/drill-generator.js');
+  const opts = { mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened' };
+  for (const source of [
+    undefined, null,
+    { id: 'local-preflop-baseline', version: '' },
+    { id: '', version: '1.0.0' },
+    { id: 'local-preflop-baseline', version: ' ' },
+    { id: 'Local Baseline', version: '1.0.0' },
+  ]) {
+    assert.throws(
+      () => build({ ...opts, source }),
+      { code: 'PROVIDER_VERSION_REQUIRED' },
+      `accepted ${JSON.stringify(source)}`,
+    );
+  }
 });
 
 test('every derived leak spot is one the dataset actually has', async () => {
