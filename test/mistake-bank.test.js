@@ -85,3 +85,19 @@ test('same evaluationId re-collect leaves evidence bytes unchanged', async () =>
   assert.equal(again.item.evidence, 2);
   assert.deepEqual(again.item.evidenceIds, [first.evaluationId, secondId]);
 });
+
+test('same mistakeId persists a missing legacy evidenceIds backfill', async () => {
+  const storeDir = tmp();
+  const first = evaluation();
+  const bank = createMistakeBank(storeDir, { now: () => '2026-09-01T00:00:00.000Z' });
+  await bank.collect(first);
+  const legacy = JSON.parse(fs.readFileSync(bank.file, 'utf8'));
+  delete legacy.items[0].evidenceIds;
+  fs.writeFileSync(bank.file, JSON.stringify(legacy));
+
+  const result = await bank.collect(first);
+  const reloaded = await createMistakeBank(storeDir).list();
+
+  assert.equal(result.added, false);
+  assert.deepEqual(reloaded[0].evidenceIds, [first.evaluationId]);
+});
