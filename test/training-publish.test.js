@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,11 @@ import { startServer } from '../server/server.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
 import { createTrainingControl } from '../tools/training-control.js';
-import { gameEpochOf } from '../publish-contract.js';
+import {
+  gameEpochOf,
+  projectTrainingAnnotation,
+  publicProofId,
+} from '../publish-contract.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 const execFileAsync = promisify(execFile);
@@ -64,6 +69,192 @@ function summaryOf(overrides = {}) {
   };
   return toPublicSummary(evaluation, { handNo: 1, detailSha256: 'ab'.repeat(32) });
 }
+
+async function startPublishSpy() {
+  let posts = 0;
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url?.startsWith('/api/publish')) posts += 1;
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, revision: posts }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    port: server.address().port,
+    get posts() { return posts; },
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  };
+}
+
+function writePublisherLock(dir, port) {
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({ port, sessionToken: 'tok' }));
+}
+
+function collectSseWindow(port, token, windowMs = 250) {
+  return new Promise((resolve) => {
+    let body = '';
+    let settled = false;
+    let request;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      request?.destroy();
+      resolve(body);
+    };
+    const timer = setTimeout(finish, windowMs);
+    request = http.get(`http://127.0.0.1:${port}/api/events?token=${token}&after=0`, (res) => {
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+    });
+    request.on('error', () => {
+      if (!settled) {
+        clearTimeout(timer);
+        finish();
+      }
+    });
+  });
+}
+
+test('publish authority mismatches fail before the relay POST', async () => {
+  const dir = tmpDir();
+  const spy = await startPublishSpy();
+  try {
+    writePublisherLock(dir, spy.port);
+    fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+    const summary = summaryOf();
+    const epoch = gameEpochOf('tok');
+    const annotation = projectTrainingAnnotation({
+      evaluationId: summary.evaluationId,
+      payloadSha256: summary.payloadSha256,
+      field: 'explanation',
+      status: 'ready',
+      value: '설명',
+    });
+    const proof = {
+      id: publicProofId(`${summary.evaluationId}:explanation`),
+      valueSha256: annotation.valueSha256,
+    };
+    const cases = [
+      {
+        code: 'STALE_TRAINING_AUTHORITY',
+        body: { training: [summary], trainingAuthority: {
+          expectedGameEpoch: epoch,
+          items: [{ evaluationId: summary.evaluationId, payloadSha256: summary.payloadSha256 }],
+        } },
+        auth: { schemaVersion: 2, gameEpoch: epoch, publishQueue: {} },
+      },
+      {
+        code: 'STALE_TRAINING_AUTHORITY',
+        body: { training: [summary], trainingAuthority: {
+          expectedGameEpoch: epoch,
+          items: [{ evaluationId: summary.evaluationId, payloadSha256: 'ff'.repeat(32) }],
+        } },
+        auth: { schemaVersion: 2, gameEpoch: epoch, publishQueue: {
+          [summary.evaluationId]: { payloadSha256: summary.payloadSha256 },
+        } },
+      },
+      {
+        code: 'STALE_ANNOTATION_AUTHORITY',
+        body: { trainingAnnotations: [{ ...annotation, annotationProof: proof }], annotationAuthority: {
+          expectedGameEpoch: epoch,
+          items: [{ evaluationId: summary.evaluationId, field: 'explanation', valueSha256: annotation.valueSha256 }],
+        } },
+        auth: { schemaVersion: 2, gameEpoch: epoch, annotationQueue: {} },
+      },
+      {
+        code: 'STALE_ANNOTATION_AUTHORITY',
+        body: { trainingAnnotations: [{ ...annotation, annotationProof: proof }], annotationAuthority: {
+          expectedGameEpoch: epoch,
+          items: [{ evaluationId: summary.evaluationId, field: 'explanation', valueSha256: annotation.valueSha256 }],
+        } },
+        auth: { schemaVersion: 2, gameEpoch: epoch, annotationQueue: {
+          [summary.evaluationId]: { explanation: { valueSha256: 'ff'.repeat(32) } },
+        } },
+      },
+      {
+        code: 'STALE_ANNOTATION_AUTHORITY',
+        body: { trainingAnnotations: [{ ...annotation, annotationProof: proof }], annotationAuthority: {
+          expectedGameEpoch: epoch,
+          items: [{ evaluationId: summary.evaluationId, field: 'exploit', valueSha256: annotation.valueSha256 }],
+        } },
+        auth: { schemaVersion: 2, gameEpoch: epoch, annotationQueue: {
+          [summary.evaluationId]: { explanation: { valueSha256: annotation.valueSha256 } },
+        } },
+      },
+    ];
+    for (const [index, current] of cases.entries()) {
+      fs.writeFileSync(path.join(dir, 'training', '.training-authority.json'), JSON.stringify(current.auth));
+      const envelope = path.join(dir, `authority-mismatch-${index}.json`);
+      fs.writeFileSync(envelope, JSON.stringify(current.body));
+      const failed = await runFailing(dir, ['--from', envelope]);
+      assert.equal(failed.json.code, current.code);
+    }
+    assert.equal(spy.posts, 0);
+  } finally {
+    await spy.close();
+  }
+});
+
+test('server deny-literal rejects explanation without snapshot or SSE annotation', async () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify([
+    { playerId: 'user' },
+    { playerId: 'p1', policyId: 'DENY_POLICY_ID' },
+  ]));
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const summary = summaryOf();
+    const machine = await fetch(`http://127.0.0.1:${started.port}/api/publish?token=tok`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publishId: 1, training: [summary] }),
+    });
+    assert.equal(machine.status, 200);
+    const annotation = projectTrainingAnnotation({
+      evaluationId: summary.evaluationId,
+      payloadSha256: summary.payloadSha256,
+      field: 'explanation',
+      status: 'ready',
+      value: 'DENY_POLICY_ID가 포함된 해설',
+    });
+    const denied = await fetch(`http://127.0.0.1:${started.port}/api/publish?token=tok`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        publishId: 2,
+        trainingAnnotations: [{
+          ...annotation,
+          annotationProof: {
+            id: publicProofId(`${summary.evaluationId}:explanation`),
+            valueSha256: annotation.valueSha256,
+          },
+        }],
+      }),
+    });
+    const deniedJson = await denied.json();
+    assert.equal(denied.status, 400);
+    assert.equal(deniedJson.code, 'FORBIDDEN_LITERAL');
+    const snapshot = await (await fetch(`http://127.0.0.1:${started.port}/api/snapshot?token=tok`)).json();
+    assert.equal(
+      snapshot.trainingAnnotations?.some((row) => (
+        row.evaluationId === summary.evaluationId && row.field === 'explanation'
+      )),
+      false,
+    );
+    const history = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
+    assert.equal(JSON.stringify(history).includes('DENY_POLICY_ID'), false);
+    const sse = await collectSseWindow(started.port, 'tok');
+    assert.equal(sse.includes('DENY_POLICY_ID'), false);
+    assert.equal(sse.includes('trainingAnnotations'), false);
+  } finally {
+    await started.close();
+  }
+});
 
 test('publish: view 없는 training-only envelope를 수락하고 buildBody가 training을 복사한다', async () => {
   const dir = tmpDir();
