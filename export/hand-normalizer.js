@@ -1,14 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
+import { FORBIDDEN_PATH_LITERALS, FORBIDDEN_PATH_RE } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
 import { EXPORT_MAX_BYTES } from './contracts.js';
 
 const FORBIDDEN = [
   'archetype', 'personality', 'bluffFreq', 'policySeed', 'sessionToken',
-  'policyId', 'configDigest', 'sampledProbability', '.session-store',
+  'policyId', 'configDigest', 'sampledProbability', ...FORBIDDEN_PATH_LITERALS,
 ];
-const ABSOLUTE_PATH_RE = /(?:^|["'\s])(?:\/(?:Users|home|tmp|var|private|etc|opt|root)\b|[A-Za-z]:\\)/;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -122,7 +122,7 @@ export function assertNoSecrets(payload) {
       throw coded('FORBIDDEN_EXPORT', `forbidden field ${key}`);
     }
   }
-  if (ABSOLUTE_PATH_RE.test(json)) {
+  if (FORBIDDEN_PATH_RE.test(json)) {
     throw coded('FORBIDDEN_EXPORT', 'forbidden absolute path');
   }
 }

@@ -82,8 +82,56 @@ export const PRIVATE_PLAYER_FIELDS = Object.freeze([
   'archetype', 'personality', 'bluffFreq', 'threeBetFreq', 'tiltProne',
   'policyId', 'policyVersion', 'sampledProbability', 'reasonCode', 'policySeed', 'configDigest',
 ]);
-export const FORBIDDEN_PATH_RE = /(?:^|["'\s])(?:\/(?:Users|home|tmp|var|private|etc|opt|root)\b|[A-Za-z]:\\)/;
+export const FORBIDDEN_PATH_RE = /(?:\/(?:Users|home|tmp|var|private|etc|opt|root)\b|[A-Za-z]:\\)/;
 export const FORBIDDEN_PATH_LITERALS = Object.freeze(['.session-store']);
+
+const CARD_RE = /^[2-9TJQKA][cdhs]$/;
+
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function privateScalar(value, label) {
+  if (!['string', 'number', 'boolean'].includes(typeof value) || String(value).length === 0) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a non-empty scalar`);
+  }
+  return String(value);
+}
+
+function privateCards(value, label) {
+  if (!Array.isArray(value)
+    || value.length !== 2
+    || !value.every((card) => typeof card === 'string' && CARD_RE.test(card))) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a two-card array`);
+  }
+  return value;
+}
+
+function validatePrivateRecord(record, label) {
+  if (!plainObject(record) || !Number.isInteger(record.handNo) || record.handNo < 1
+    || !plainObject(record.holes) || Object.keys(record.holes).length === 0) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label} is not a complete hand record`);
+  }
+  for (const [playerId, cards] of Object.entries(record.holes)) {
+    if (typeof playerId !== 'string' || playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.holes has an invalid player id`);
+    }
+    privateCards(cards, `${label}.holes.${playerId}`);
+  }
+  const reveals = record.showdown == null
+    ? []
+    : record.showdown?.reveals;
+  if (!Array.isArray(reveals)) {
+    throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals is not an array`);
+  }
+  for (const [index, reveal] of reveals.entries()) {
+    if (!plainObject(reveal) || typeof reveal.playerId !== 'string' || reveal.playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', `${label}.showdown.reveals.${index} is invalid`);
+    }
+    privateCards(reveal.cards, `${label}.showdown.reveals.${index}.cards`);
+  }
+  return record;
+}
 
 /**
  * 파싱된 JSON만 받는 순수 수집기(fs 없음). 코치(`coachForbiddenLiterals`)와 서버
@@ -92,31 +140,40 @@ export const FORBIDDEN_PATH_LITERALS = Object.freeze(['.session-store']);
  */
 export function collectPrivateLiterals({ players, engineState, records } = {}) {
   const values = [];
-  const list = Array.isArray(players)
-    ? players
-    : (Array.isArray(players?.players) ? players.players : []);
+  const list = Array.isArray(players) ? players : players?.players;
+  if (!Array.isArray(list) || !plainObject(engineState) || !Array.isArray(records)) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'private literal inputs are incomplete');
+  }
   for (const player of list) {
-    if (player?.playerId === 'user') continue;
+    if (!plainObject(player) || typeof player.playerId !== 'string' || player.playerId.length === 0) {
+      throw coded('PRIVATE_LITERAL_INVALID', 'players contains an invalid row');
+    }
+    if (player.playerId === 'user') continue;
     for (const field of PRIVATE_PLAYER_FIELDS) {
       const value = player?.[field];
-      if (value !== undefined && value !== null && String(value).length > 0) values.push(String(value));
+      if (value !== undefined && value !== null) values.push(privateScalar(value, `player.${field}`));
     }
-    if (player?.policy && typeof player.policy === 'object') {
+    if (player.policy !== undefined && player.policy !== null) {
+      if (!plainObject(player.policy)) {
+        throw coded('PRIVATE_LITERAL_INVALID', 'player.policy is not an object');
+      }
       values.push(JSON.stringify(player.policy));
-      for (const value of Object.values(player.policy)) {
-        if (value !== undefined && value !== null && typeof value !== 'object') values.push(String(value));
+      for (const [field, value] of Object.entries(player.policy)) {
+        values.push(privateScalar(value, `player.policy.${field}`));
       }
     }
   }
-  if (engineState?.policySeed) values.push(String(engineState.policySeed));
-  for (const record of Array.isArray(records) ? records : []) {
-    if (!record || typeof record !== 'object') continue;
+  if (engineState.policySeed !== undefined && engineState.policySeed !== null) {
+    values.push(privateScalar(engineState.policySeed, 'state.policySeed'));
+  }
+  for (const [recordIndex, candidate] of records.entries()) {
+    const record = validatePrivateRecord(candidate, `records.${recordIndex}`);
     const publicCards = new Set(
-      (record.showdown?.reveals ?? []).flatMap((reveal) => reveal?.cards ?? []),
+      (record.showdown?.reveals ?? []).flatMap((reveal) => reveal.cards),
     );
-    for (const [playerId, cards] of Object.entries(record.holes ?? {})) {
+    for (const [playerId, cards] of Object.entries(record.holes)) {
       if (playerId === 'user') continue;
-      for (const card of Array.isArray(cards) ? cards : []) {
+      for (const card of cards) {
         if (!publicCards.has(card)) values.push(String(card));
       }
     }
@@ -307,7 +364,7 @@ export function projectTrainingSummary(item) {
     }
     out.detailRef = item.detailRef;
   }
-  if (item.detailSha256 !== undefined && item.detailSha256 !== null) {
+  if (Object.hasOwn(item, 'detailSha256')) {
     if (typeof item.detailSha256 !== 'string' || !HEX64_RE.test(item.detailSha256)) {
       throw coded('TRAINING_PROOF_MISMATCH', 'detailSha256 must be a sha256 digest');
     }
@@ -335,6 +392,9 @@ function projectExploitAdjustment(adjustment) {
     }
     next[key] = level;
   }
+  if (Object.keys(next).length === 0) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit adjustment must not be empty');
+  }
   return next;
 }
 
@@ -342,40 +402,35 @@ function projectExploitValue(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit value must be an object');
   }
-  const opponents = Array.isArray(value.opponents)
-    ? value.opponents.map((row) => {
+  if (!Array.isArray(value.opponents) || value.opponents.length === 0) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponents must be a non-empty array');
+  }
+  const opponents = value.opponents.map((row) => {
       if (!row || typeof row !== 'object' || Array.isArray(row)) {
         throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponent must be an object');
       }
-      if (row.opponentId != null
-        && (typeof row.opponentId !== 'string' || !EXPLOIT_ID_RE.test(row.opponentId))) {
+      if (typeof row.opponentId !== 'string' || !EXPLOIT_ID_RE.test(row.opponentId)) {
         throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit opponentId is not an identifier');
       }
-      if (row.policyId != null
-        && (typeof row.policyId !== 'string' || !EXPLOIT_ID_RE.test(row.policyId))) {
+      if (typeof row.policyId !== 'string' || !EXPLOIT_ID_RE.test(row.policyId)) {
         throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit policyId is not an identifier');
+      }
+      if (!plainObject(row.comparison)
+        || typeof row.comparison.summaryCode !== 'string'
+        || !SUMMARY_CODE_RE.test(row.comparison.summaryCode)) {
+        throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit comparison.summaryCode is not a code');
       }
       const out = {
         opponentId: row.opponentId,
         policyId: row.policyId,
-        adjustment: row.adjustment == null ? row.adjustment : projectExploitAdjustment(row.adjustment),
+        adjustment: projectExploitAdjustment(row.adjustment),
+        comparison: { summaryCode: row.comparison.summaryCode },
       };
-      if (row.comparison && typeof row.comparison === 'object' && !Array.isArray(row.comparison)) {
-        if (row.comparison.summaryCode != null
-          && (typeof row.comparison.summaryCode !== 'string'
-            || !SUMMARY_CODE_RE.test(row.comparison.summaryCode))) {
-          throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit comparison.summaryCode is not a code');
-        }
-        out.comparison = { summaryCode: row.comparison.summaryCode };
-      }
       return out;
-    })
-    : [];
-  if (value.primary != null) {
-    const named = opponents.some((row) => row.opponentId === value.primary);
-    if (typeof value.primary !== 'string' || !named) {
-      throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit primary must name one of the opponents');
-    }
+    });
+  const named = opponents.some((row) => row.opponentId === value.primary);
+  if (typeof value.primary !== 'string' || !named) {
+    throw coded('ANNOTATION_PROOF_MISMATCH', 'exploit primary must name one of the opponents');
   }
   return { opponents, primary: value.primary };
 }

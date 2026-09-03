@@ -12,6 +12,7 @@ import {
   publicProofId,
   projectTrainingAnnotation,
   projectTrainingSummary,
+  sha256Hex,
   textLeaksPrivate,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
@@ -20,7 +21,12 @@ const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 // 서버가 읽기 전용 보안 술어로만 여는 세션 파일들. 엔진은 원자적 rename으로 쓰므로
 // 부분 읽기는 없고, 이 상한을 넘는 파일은 읽기 실패(=fail-closed)로 다룬다.
 const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
-const HAND_FILE_RE = /^hand-(\d{4})\.json$/;
+const HAND_FILE_RE = /^hand-(\d{4,})\.json$/;
+const LEGACY_TRAINING_KEYS = Object.freeze([
+  'evaluationId', 'handNo', 'decisionId', 'status', 'street', 'spotKey', 'handClass',
+  'chosen', 'recommended', 'evLossBb', 'grade', 'forced', 'source', 'explanation',
+  'detailRef', 'detailSha256', 'code', 'reason',
+]);
 const HEARTBEAT_MS = 15_000;
 const KEEP_ALIVE_MS = 120_000;
 const HEADERS_MS = 125_000;
@@ -100,14 +106,27 @@ function annotationsToArray(map) {
   return out;
 }
 
-function arrayToAnnotationMap(rows) {
-  const map = Object.create(null);
-  for (const row of rows ?? []) {
-    if (!row?.evaluationId || !row.field) continue;
-    map[row.evaluationId] = map[row.evaluationId] ?? Object.create(null);
-    map[row.evaluationId][row.field] = row;
+function persistedAnnotationCandidates(raw, split) {
+  const candidates = [];
+  if (Array.isArray(raw)) {
+    for (const row of raw) candidates.push({ row, outerId: null, outerField: null });
+  } else if (raw && typeof raw === 'object') {
+    for (const [outerId, fields] of Object.entries(raw)) {
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+        candidates.push({ row: null, outerId, outerField: null });
+        continue;
+      }
+      for (const [outerField, row] of Object.entries(fields)) {
+        candidates.push({ row, outerId, outerField });
+      }
+    }
   }
-  return map;
+  for (const [outerId, fields] of Object.entries(split ?? {})) {
+    for (const [outerField, row] of Object.entries(fields ?? {})) {
+      candidates.push({ row, outerId, outerField });
+    }
+  }
+  return candidates;
 }
 
 function coded(code, message) {
@@ -143,26 +162,40 @@ function collectDenyLiterals(root) {
   const players = readSecurityJson(root, ['players.json']);
   const engineState = readSecurityJson(root, ['state.json']);
   const records = [];
-  if (engineState?.hand) records.push(engineState.hand);
+  if (engineState?.hand) records.push({ ...engineState.hand, handNo: engineState.handNo });
   if (engineState?.lastHand) records.push(engineState.lastHand);
 
   const names = fs.readdirSync(path.join(root, 'hands'));
   if (!names.some((entry) => HAND_FILE_RE.test(entry))) {
     throw coded('HAND_ARCHIVE_MISSING', '보안 술어에 필요한 hand archive가 없습니다.');
   }
+  const archives = names.flatMap((name) => {
+    const match = HAND_FILE_RE.exec(name);
+    if (!match) return [];
+    const handNo = Number(match[1]);
+    if (!Number.isSafeInteger(handNo) || handNo < 1
+      || `hand-${String(handNo).padStart(4, '0')}.json` !== name) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}은 canonical hand archive 이름이 아닙니다.`);
+    }
+    return [{ name, handNo }];
+  }).sort((left, right) => left.handNo - right.handNo);
   const archived = new Set();
-  for (const name of names.filter((entry) => HAND_FILE_RE.test(entry)).sort()) {
-    records.push(readSecurityJson(root, ['hands', name]));
-    archived.add(Number(HAND_FILE_RE.exec(name)[1]));
+  for (const { name, handNo } of archives) {
+    if (archived.has(handNo)) throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 중복됩니다.`);
+    const record = readSecurityJson(root, ['hands', name]);
+    if (record?.handNo !== handNo) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 파일명과 다릅니다.`);
+    }
+    records.push(record);
+    archived.add(handNo);
   }
-  // 엔진은 끝난 핸드마다 아카이브를 쓴다. 빠진 번호가 있으면 그 핸드의 카드를 알 수
-  // 없으므로 조용히 통과시키지 않는다.
+  // lastHandNo 자체가 비정상적으로 커도 그 수만큼 루프하지 않는다. 실제 파일 수와
+  // 정렬된 번호를 한 번 대조해 빠진 archive를 fail-closed로 찾는다.
   const lastHandNo = engineState?.lastHand?.handNo;
   if (Number.isInteger(lastHandNo)) {
-    for (let handNo = 1; handNo <= lastHandNo; handNo += 1) {
-      if (!archived.has(handNo)) {
-        throw coded('HAND_ARCHIVE_MISSING', `hands/hand-${String(handNo).padStart(4, '0')}.json이 없습니다.`);
-      }
+    if (archives.length !== lastHandNo
+      || archives.some(({ handNo }, index) => handNo !== index + 1)) {
+      throw coded('HAND_ARCHIVE_MISSING', '완료된 hand archive 연속성이 깨졌습니다.');
     }
   }
 
@@ -173,11 +206,34 @@ function collectDenyLiterals(root) {
   return literals;
 }
 
+function legacyTrainingPayloadSha256(item) {
+  const canonical = {};
+  for (const key of LEGACY_TRAINING_KEYS) {
+    if (item?.[key] !== undefined) canonical[key] = item[key];
+  }
+  return sha256Hex(JSON.stringify(canonical));
+}
+
+function storedTrainingDigestMatches(item, projected) {
+  if (typeof item?.payloadSha256 !== 'string') return false;
+  if (item.payloadSha256 === projected.payloadSha256) return true;
+  return Object.hasOwn(item, 'explanation')
+    && item.payloadSha256 === legacyTrainingPayloadSha256(item);
+}
+
 function migrateLoadedTraining(rawTraining) {
-  const training = [];
-  const split = {};
+  const byId = new Map();
+  const duplicateIds = new Set();
+  const split = Object.create(null);
+  let dropped = 0;
   for (const item of Array.isArray(rawTraining) ? rawTraining : []) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      dropped += 1;
+      continue;
+    }
+    if (typeof item.evaluationId === 'string' && byId.has(item.evaluationId)) {
+      duplicateIds.add(item.evaluationId);
+    }
     const explanation = item.explanation;
     const rest = { ...item };
     delete rest.explanation;
@@ -185,9 +241,15 @@ function migrateLoadedTraining(rawTraining) {
     try {
       projected = projectTrainingSummary(rest);
     } catch {
+      dropped += 1;
       continue;
     }
-    training.push(projected);
+    if (!storedTrainingDigestMatches(item, projected)) {
+      dropped += 1;
+      continue;
+    }
+    if (byId.has(projected.evaluationId)) duplicateIds.add(projected.evaluationId);
+    else byId.set(projected.evaluationId, projected);
     if (typeof explanation === 'string' && explanation.length) {
       try {
         const ann = projectTrainingAnnotation({
@@ -197,12 +259,16 @@ function migrateLoadedTraining(rawTraining) {
           status: 'ready',
           value: explanation,
         });
-        split[ann.evaluationId] = split[ann.evaluationId] ?? {};
+        split[ann.evaluationId] = split[ann.evaluationId] ?? Object.create(null);
         split[ann.evaluationId].explanation = ann;
-      } catch { /* drop malformed legacy explanation */ }
+      } catch { dropped += 1; }
     }
   }
-  return { training, split };
+  for (const id of duplicateIds) {
+    if (byId.delete(id)) dropped += 1;
+    delete split[id];
+  }
+  return { training: [...byId.values()], split, dropped };
 }
 
 // 복원은 live merge와 같은 다섯 술어를 통과한 항목만 남긴다: ① 투영 성공 + 저장된
@@ -243,7 +309,8 @@ function restoreHistory(rawHistory, context) {
       ? { ...source }
       : {};
     if ('training' in payload) {
-      const items = [];
+      const itemsById = new Map();
+      const duplicateIds = new Set();
       for (const item of Array.isArray(payload.training) ? payload.training : []) {
         let projected;
         try {
@@ -253,17 +320,27 @@ function restoreHistory(rawHistory, context) {
           continue;
         }
         const machine = context.machineById.get(projected.evaluationId);
-        if (!machine || machine.payloadSha256 !== projected.payloadSha256) {
+        if (!storedTrainingDigestMatches(item, projected)
+          || !machine
+          || machine.payloadSha256 !== projected.payloadSha256) {
           dropped += 1;
           continue;
         }
-        items.push(projected);
+        if (itemsById.has(projected.evaluationId)) {
+          duplicateIds.add(projected.evaluationId);
+          dropped += 1;
+        } else {
+          itemsById.set(projected.evaluationId, projected);
+        }
       }
+      for (const id of duplicateIds) itemsById.delete(id);
+      const items = [...itemsById.values()];
       if (items.length) payload.training = items;
       else delete payload.training;
     }
     if ('trainingAnnotations' in payload) {
-      const rows = [];
+      const rowsByKey = new Map();
+      const duplicateKeys = new Set();
       for (const row of Array.isArray(payload.trainingAnnotations) ? payload.trainingAnnotations : []) {
         const machine = context.machineById.get(row?.evaluationId);
         const projected = restoreAnnotationRow(row, { ...context, machine });
@@ -274,8 +351,16 @@ function restoreHistory(rawHistory, context) {
           dropped += 1;
           continue;
         }
-        rows.push(projected);
+        const key = `${projected.evaluationId}:${projected.field}`;
+        if (rowsByKey.has(key)) {
+          duplicateKeys.add(key);
+          dropped += 1;
+        } else {
+          rowsByKey.set(key, projected);
+        }
       }
+      for (const key of duplicateKeys) rowsByKey.delete(key);
+      const rows = [...rowsByKey.values()];
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
     }
@@ -299,30 +384,41 @@ function loadUiState(gameDir) {
     }
     const gate = { gameOver: engineGameOver(gameDir) };
 
-    let annotationMap = Object.create(null);
-    if (Array.isArray(raw.trainingAnnotations)) {
-      annotationMap = arrayToAnnotationMap(raw.trainingAnnotations);
-    } else if (raw.trainingAnnotations && typeof raw.trainingAnnotations === 'object') {
-      for (const [id, fields] of Object.entries(raw.trainingAnnotations)) {
-        annotationMap[id] = Object.assign(Object.create(null), fields);
-      }
-    }
-    for (const [id, fields] of Object.entries(migrated.split)) {
-      annotationMap[id] = Object.assign(Object.create(null), fields, annotationMap[id] ?? {});
-    }
     const restoredAnnotations = Object.create(null);
-    let droppedAnnotations = 0;
-    for (const [id, fields] of Object.entries(annotationMap)) {
-      const machine = machineById.get(id);
-      for (const [field, row] of Object.entries(fields ?? {})) {
-        const projected = restoreAnnotationRow(row, { machine, literals, gate });
-        if (!projected || projected.field !== field) {
-          droppedAnnotations += 1;
-          continue;
-        }
-        restoredAnnotations[id] = restoredAnnotations[id] ?? Object.create(null);
-        restoredAnnotations[id][field] = projected;
+    const invalidAnnotationKeys = new Set();
+    let droppedAnnotations = migrated.dropped;
+    for (const { row, outerId, outerField } of persistedAnnotationCandidates(
+      raw.trainingAnnotations,
+      migrated.split,
+    )) {
+      const machine = machineById.get(row?.evaluationId);
+      const projected = restoreAnnotationRow(row, { machine, literals, gate });
+      if (!projected
+        || (outerId !== null && outerId !== projected.evaluationId)
+        || (outerField !== null && outerField !== projected.field)) {
+        droppedAnnotations += 1;
+        continue;
       }
+      const key = `${projected.evaluationId}:${projected.field}`;
+      if (invalidAnnotationKeys.has(key)) {
+        droppedAnnotations += 1;
+        continue;
+      }
+      const previous = restoredAnnotations[projected.evaluationId]?.[projected.field];
+      if (previous) {
+        if (previous.valueSha256 !== projected.valueSha256) {
+          delete restoredAnnotations[projected.evaluationId][projected.field];
+          if (!Object.keys(restoredAnnotations[projected.evaluationId]).length) {
+            delete restoredAnnotations[projected.evaluationId];
+          }
+          invalidAnnotationKeys.add(key);
+        }
+        droppedAnnotations += 1;
+        continue;
+      }
+      restoredAnnotations[projected.evaluationId] = restoredAnnotations[projected.evaluationId]
+        ?? Object.create(null);
+      restoredAnnotations[projected.evaluationId][projected.field] = projected;
     }
     const replay = restoreHistory(raw.history, {
       machineById, literals, gate, annotations: restoredAnnotations,
