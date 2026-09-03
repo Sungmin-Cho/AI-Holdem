@@ -330,6 +330,11 @@ const TRAINING_SUMMARY_KEYS = Object.freeze([
   'code',
   'reason',
 ]);
+const LEGACY_TRAINING_SUMMARY_KEYS = Object.freeze([
+  'evaluationId', 'handNo', 'decisionId', 'status', 'street', 'spotKey', 'handClass',
+  'chosen', 'recommended', 'evLossBb', 'grade', 'forced', 'source', 'explanation',
+  'detailRef', 'detailSha256', 'code', 'reason',
+]);
 
 function coded(code, message) {
   const error = new Error(message);
@@ -415,6 +420,14 @@ export function canonicalTrainingJson(summary) {
 
 export function trainingPayloadSha256(summary) {
   return sha256Hex(canonicalTrainingJson(summary));
+}
+
+export function legacyTrainingPayloadSha256(summary) {
+  const out = {};
+  for (const key of LEGACY_TRAINING_SUMMARY_KEYS) {
+    if (summary?.[key] !== undefined) out[key] = summary[key];
+  }
+  return sha256Hex(JSON.stringify(out));
 }
 
 export function projectTrainingSummary(item) {

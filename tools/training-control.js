@@ -9,6 +9,7 @@ import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   detailRefOf,
   legacyExplanationAnnotation,
+  legacyTrainingPayloadSha256,
   projectTrainingAnnotation,
   projectTrainingSummary,
   sha256Hex,
@@ -145,6 +146,50 @@ function readMarker(sessionDir) {
   }
 }
 
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function validateMigrationMarker(marker) {
+  if (marker === null) return null;
+  if (!plainObject(marker)
+    || !['in-progress', 'session-done', 'complete'].includes(marker.status)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'training migration marker가 올바르지 않습니다.');
+  }
+  return marker;
+}
+
+function validateV2Items(auth) {
+  if (!plainObject(auth?.items)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training authority items가 올바르지 않습니다.');
+  }
+}
+
+function readDigestMapForMigration(sessionDir) {
+  let map;
+  try {
+    map = readJsonSecure(digestMapPath(sessionDir));
+  } catch {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map을 안전하게 읽을 수 없습니다.');
+  }
+  if (!plainObject(map) || map.schemaVersion !== 1
+    || !plainObject(map.oldToNew) || !plainObject(map.byEvaluationId)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map 형식이 올바르지 않습니다.');
+  }
+  const digest = /^[0-9a-f]{64}$/;
+  for (const [oldDigest, newDigest] of Object.entries(map.oldToNew)) {
+    if (!digest.test(oldDigest) || !digest.test(newDigest)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map 값이 올바르지 않습니다.');
+    }
+  }
+  for (const entry of Object.values(map.byEvaluationId)) {
+    if (!plainObject(entry) || !digest.test(entry.old) || !digest.test(entry.new)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map evaluation 항목이 올바르지 않습니다.');
+    }
+  }
+  return map;
+}
+
 function loadProcessed(storeDir) {
   try {
     const profile = readJsonSecure(path.join(storeDir, '.training', 'profile.json'));
@@ -186,17 +231,26 @@ export function readAnnotationExactFile(sessionDir, detailRef, field) {
   return JSON.parse(buf.toString('utf8'));
 }
 
-function resolveV1Attempt(sessionDir, items) {
+function currentPayloadFor(id, payloadSha256, items, digestMap) {
+  const current = items[id]?.payloadSha256;
+  if (typeof current !== 'string' || typeof payloadSha256 !== 'string') return null;
+  if (payloadSha256 === current) return current;
+  return digestMap?.oldToNew?.[payloadSha256] === current ? current : null;
+}
+
+function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
   const attemptFile = path.join(sessionDir, '.publish-attempt.json');
-  if (!fs.existsSync(attemptFile)) {
-    return {
-      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
-    };
-  }
   let record;
   try {
-    record = JSON.parse(fs.readFileSync(attemptFile, 'utf8'));
-  } catch {
+    record = JSON.parse(openContained(sessionDir, ['.publish-attempt.json'], {
+      maxBytes: 1_000_000,
+    }).toString('utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return {
+        resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+      };
+    }
     return {
       resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
     };
@@ -209,25 +263,54 @@ function resolveV1Attempt(sessionDir, items) {
       resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
     };
   }
-  const v1Shape = Boolean(trainingAuthz?.evaluationId) && !Array.isArray(trainingAuthz?.items);
-  if (!v1Shape && !bodyTraining.length) {
-    return {
-      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
-    };
+  if (record.expectedGameEpoch !== gameEpoch
+    || trainingAuthz?.expectedGameEpoch !== gameEpoch) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt epoch가 authority와 일치하지 않습니다.');
   }
-  const evalIds = Array.isArray(trainingAuthz?.items)
-    ? trainingAuthz.items.map((entry) => entry.evaluationId)
-    : [
-      trainingAuthz?.evaluationId,
-      ...bodyTraining.map((row) => row?.evaluationId),
-    ].filter(Boolean);
+  const attemptId = Number(record.body?.publishId);
+  if (!Number.isSafeInteger(attemptId) || attemptId <= 0) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt id가 올바르지 않습니다.');
+  }
+  const declared = [];
+  if (Array.isArray(trainingAuthz?.items)) declared.push(...trainingAuthz.items);
+  else if (trainingAuthz?.evaluationId) declared.push(trainingAuthz);
+  declared.push(...bodyTraining);
+  if (declared.length === 0) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 비어 있습니다.');
+  }
+  const payloadById = new Map();
+  let legacyAttempt = false;
+  for (const entry of declared) {
+    if (!plainObject(entry) || typeof entry.evaluationId !== 'string'
+      || typeof entry.payloadSha256 !== 'string') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 올바르지 않습니다.');
+    }
+    const current = currentPayloadFor(entry.evaluationId, entry.payloadSha256, items, digestMap);
+    if (!current) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt digest가 authority와 일치하지 않습니다.');
+    }
+    if (payloadById.has(entry.evaluationId)
+      && payloadById.get(entry.evaluationId) !== entry.payloadSha256) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 서로 충돌합니다.');
+    }
+    payloadById.set(entry.evaluationId, entry.payloadSha256);
+    if (entry.payloadSha256 !== current) legacyAttempt = true;
+  }
+  const evalIds = [...payloadById.keys()];
   let snapshotPublishId = 0;
+  let snapshotTraining = [];
   try {
-    const snap = JSON.parse(fs.readFileSync(path.join(sessionDir, 'ui-snapshot.json'), 'utf8'));
+    const snap = JSON.parse(openContained(sessionDir, ['ui-snapshot.json'], {
+      maxBytes: 4_000_000,
+    }).toString('utf8'));
     snapshotPublishId = Number(snap.publishId) || 0;
+    snapshotTraining = Array.isArray(snap.training) ? snap.training : [];
   } catch { /* no snapshot */ }
-  const attemptId = Number(record.body?.publishId) || 0;
-  const applied = attemptId > 0 && snapshotPublishId >= attemptId;
+  const snapshotById = new Map(snapshotTraining.map((row) => [row?.evaluationId, row]));
+  const applied = snapshotPublishId >= attemptId && evalIds.every((id) => {
+    const row = snapshotById.get(id);
+    return Boolean(currentPayloadFor(id, row?.payloadSha256, items, digestMap));
+  });
   const appliedIds = [];
   const appliedAnnotationIds = [];
   const legacyExplanationIds = new Set(bodyTraining
@@ -249,7 +332,7 @@ function resolveV1Attempt(sessionDir, items) {
     }
   }
   return {
-    resolved: true, applied, appliedIds, appliedAnnotationIds, attemptFile, changed,
+    resolved: true, applied, legacyAttempt, appliedIds, appliedAnnotationIds, attemptFile, changed,
   };
 }
 
@@ -296,8 +379,11 @@ function migrationResult(auth, { includeNotices = false } = {}) {
   return auth ? { ...auth, notices: includeNotices ? migrationNotices(auth) : [] } : null;
 }
 
-function finishResolvedAttempt(sessionDir, auth, writers) {
-  const attempt = resolveV1Attempt(sessionDir, auth.items ?? {});
+function finishResolvedAttempt(sessionDir, auth, writers, digestMap) {
+  const attempt = resolveV1Attempt(sessionDir, auth.items ?? {}, {
+    gameEpoch: auth.gameEpoch,
+    digestMap,
+  });
   if (!attempt.resolved) return false;
   let changed = attempt.changed;
   for (const id of attempt.appliedIds) {
@@ -314,28 +400,77 @@ function finishResolvedAttempt(sessionDir, auth, writers) {
     }
   }
   if (changed) writers.writeJsonSecure(authPath(sessionDir), auth);
-  writers.unlinkSync(attempt.attemptFile);
-  return true;
+  const shouldDelete = attempt.applied || attempt.legacyAttempt;
+  if (shouldDelete) writers.unlinkSync(attempt.attemptFile);
+  return changed || shouldDelete;
+}
+
+function validateLegacySources(sessionDir, auth) {
+  if (!plainObject(auth?.items)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'v1 training authority items가 올바르지 않습니다.');
+  }
+  const rows = readJsonl(evaluationsPath(sessionDir));
+  const rowById = new Map();
+  for (const row of rows) {
+    if (!plainObject(row) || typeof row.evaluationId !== 'string' || rowById.has(row.evaluationId)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy evaluations.jsonl 항목이 올바르지 않습니다.');
+    }
+    rowById.set(row.evaluationId, row);
+  }
+  for (const [id, item] of Object.entries(auth.items)) {
+    const row = rowById.get(id);
+    if (!plainObject(item) || item.evaluationId !== id || !row || row.evaluationId !== id
+      || typeof item.payloadSha256 !== 'string'
+      || row.payloadSha256 !== item.payloadSha256
+      || legacyTrainingPayloadSha256(row) !== item.payloadSha256) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy authority와 JSONL digest가 일치하지 않습니다.');
+    }
+    const expectedRef = detailRefOf(id);
+    const detailRef = item.detailRef ?? row.detailRef;
+    const detailSha256 = item.detailSha256 ?? row.detailSha256;
+    if (detailRef !== expectedRef || row.detailRef !== expectedRef
+      || typeof detailSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(detailSha256)
+      || (row.detailSha256 !== undefined && row.detailSha256 !== detailSha256)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail identity가 올바르지 않습니다.');
+    }
+    let detailRaw;
+    try {
+      detailRaw = openContained(trainingDir(sessionDir), ['details', `${detailRef}.json`], {
+        maxBytes: 1_000_000,
+      }).toString('utf8');
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail 파일을 안전하게 읽을 수 없습니다.');
+    }
+    let detail;
+    try {
+      detail = JSON.parse(detailRaw);
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail JSON이 올바르지 않습니다.');
+    }
+    if (sha256Hex(detailRaw) !== detailSha256 || detail?.evaluationId !== id) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail digest가 일치하지 않습니다.');
+    }
+  }
+  return { rows, rowById };
 }
 
 function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
   const writers = migrationWriters(io);
-  const marker = readMarker(sessionDir);
+  const marker = validateMigrationMarker(readMarker(sessionDir));
   if (auth.schemaVersion === 2) {
+    validateV2Items(auth);
     let resumedMigration = false;
     if (marker?.status === 'in-progress') {
-      if (!fs.existsSync(digestMapPath(sessionDir))) {
-        throw coded(
-          'TRAINING_MIGRATION_CORRUPT',
-          'v2 authority의 in-progress 마이그레이션에 digest map이 없습니다.',
-        );
-      }
+      const digestMap = readDigestMapForMigration(sessionDir);
       rewriteJsonlFromItems(sessionDir, auth, writers);
       writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
-      finishResolvedAttempt(sessionDir, auth, writers);
+      finishResolvedAttempt(sessionDir, auth, writers, digestMap);
       resumedMigration = true;
     } else if (marker?.status === 'session-done' || marker?.status === 'complete') {
-      resumedMigration = finishResolvedAttempt(sessionDir, auth, writers);
+      if (fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) {
+        const digestMap = readDigestMapForMigration(sessionDir);
+        resumedMigration = finishResolvedAttempt(sessionDir, auth, writers, digestMap);
+      }
     }
     return migrationResult(auth, { includeNotices: resumedMigration });
   }
@@ -343,14 +478,14 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
     throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
   }
 
+  const { rows, rowById } = validateLegacySources(sessionDir, auth);
+
   try {
     writers.writeJsonSecure(markerPath(sessionDir), {
       status: 'in-progress',
       at: new Date().toISOString(),
     });
 
-    const rows = readJsonl(evaluationsPath(sessionDir));
-    const rowById = new Map(rows.map((row) => [row.evaluationId, row]));
     const oldToNew = {};
     const byEvaluationId = {};
     const newItems = {};
@@ -449,7 +584,11 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       };
     }
 
-    const attempt = resolveV1Attempt(sessionDir, newItems);
+    const digestMap = { schemaVersion: 1, oldToNew, byEvaluationId };
+    const attempt = resolveV1Attempt(sessionDir, newItems, {
+      gameEpoch: auth.gameEpoch,
+      digestMap,
+    });
     for (const id of attempt.appliedAnnotationIds) {
       if (annotationQueue[id]?.explanation) {
         delete annotationQueue[id].explanation;
@@ -475,11 +614,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       annotationQueue,
       solveTasks: {},
     };
-    writers.writeJsonSecure(digestMapPath(sessionDir), {
-      schemaVersion: 1,
-      oldToNew,
-      byEvaluationId,
-    });
+    writers.writeJsonSecure(digestMapPath(sessionDir), digestMap);
     writers.writeJsonSecure(authPath(sessionDir), v2);
     rewriteJsonlFromItems(sessionDir, v2, writers);
     writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
@@ -515,24 +650,17 @@ function assertOwner(auth, owner) {
 function loadAuthorityUnlocked(sessionDir) {
   try {
     const auth = readJsonSecure(authPath(sessionDir));
-    const marker = readMarker(sessionDir);
+    const marker = validateMigrationMarker(readMarker(sessionDir));
     if (auth.schemaVersion === 1) {
       throw coded('TRAINING_AUTHORITY_V1', 'v1 training authority는 명시적으로 마이그레이션해야 합니다.');
     }
     if (auth.schemaVersion !== 2) {
       throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
     }
+    validateV2Items(auth);
     if (marker?.status === 'in-progress') {
-      if (!fs.existsSync(digestMapPath(sessionDir))) {
-        throw coded(
-          'TRAINING_MIGRATION_CORRUPT',
-          'v2 authority의 in-progress 마이그레이션에 digest map이 없습니다.',
-        );
-      }
+      readDigestMapForMigration(sessionDir);
       throw coded('TRAINING_MIGRATION_INCOMPLETE', 'training authority 마이그레이션이 완료되지 않았습니다.');
-    }
-    if (!auth.items || typeof auth.items !== 'object' || Array.isArray(auth.items)) {
-      throw coded('UNSUPPORTED_TRAINING_AUTHORITY', 'items');
     }
     auth.pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
       ? auth.pending
@@ -624,7 +752,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
   }
 
   function loadAuthority(sessionDir) {
-    return loadAuthorityUnlocked(sessionDir, { storeDir });
+    return loadAuthorityUnlocked(sessionDir);
   }
 
   async function migrateAuthority(sessionDir) {
@@ -644,7 +772,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
     gameEpoch, owner, handNo, evaluations,
   }) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      let auth = loadAuthorityUnlocked(sessionDir);
       if (auth && auth.gameEpoch !== gameEpoch) {
         if (Object.keys(auth.items ?? {}).length > 0) {
           throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
@@ -721,7 +849,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
     gameEpoch, owner, lastHand, handsDir,
   }) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir }) ?? emptyAuth({ gameEpoch, owner });
+      let auth = loadAuthorityUnlocked(sessionDir) ?? emptyAuth({ gameEpoch, owner });
       if (auth.gameEpoch !== gameEpoch && Object.keys(auth.items).length) {
         throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
       }
@@ -803,14 +931,14 @@ export function createTrainingControl({ storeDir, io } = {}) {
   }
 
   function pendingItems(sessionDir) {
-    const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+    const auth = loadAuthorityUnlocked(sessionDir);
     if (!auth) return [];
     return Object.values(auth.items).filter((item) => item.status !== 'published');
   }
 
   async function markPublished(sessionDir, evaluationId, payloadSha256) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -827,7 +955,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
 
   async function markConsumer(sessionDir, evaluationId, name, value) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -842,7 +970,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
 
   async function recordPending(sessionDir, decisionId, { handNo, reason, gameEpoch, owner, adapterId } = {}) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      let auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) auth = emptyAuth({ gameEpoch: gameEpoch ?? null, owner: owner ?? null });
       // Same authority, same rule. Omitting the owner is not a way past it:
       // once an authority is owned, a writer has to say who it is.
@@ -858,7 +986,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
   // 한다. 점유는 토큰으로 소유자에게 묶인다 — 잡은 쪽만 풀 수 있다.
   async function claimSolveTask(sessionDir, decisionId, entry) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { claimed: false, code: 'NO_TRAINING_AUTHORITY' };
       auth.solveTasks = auth.solveTasks ?? {};
       const existing = auth.solveTasks[decisionId];
@@ -879,7 +1007,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
   // 강제하므로, 살아 있는 프로세스가 소유하지 않은 점유는 정의상 죽은 것이다.
   async function reapSolveTasks(sessionDir, { keepDecisionIds = [] } = {}) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { reaped: 0 };
       const keep = new Set(keepDecisionIds);
       const stale = Object.keys(auth.solveTasks ?? {}).filter((id) => !keep.has(id));
@@ -891,7 +1019,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
 
   async function releaseSolveTask(sessionDir, decisionId, token) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { released: false };
       const existing = auth.solveTasks?.[decisionId];
       if (!existing || existing.token !== token) return { released: false };
@@ -907,7 +1035,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
 
   async function sealAnnotation(sessionDir, evaluationId, field, valueOrUnavailable) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { ok: false, code: 'NO_TRAINING_ITEM' };
       const item = auth.items[evaluationId];
       if (!item) return { ok: false, code: 'NO_TRAINING_ITEM' };
@@ -964,7 +1092,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
 
   async function markAnnotationPublished(sessionDir, evaluationId, field, valueSha256) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -990,7 +1118,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
       return { skipped: true, profiled: 0, banked: 0, applied: 0 };
     }
     return withLock(sessionDir, async () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir: activeStore });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { profiled: 0, banked: 0, applied: 0 };
       let profiled = 0;
       let banked = 0;

@@ -5,7 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detailRefOf } from '../publish-contract.js';
+import {
+  detailRefOf,
+  legacyTrainingPayloadSha256,
+  sha256Hex,
+} from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/profile-cli.js');
@@ -309,14 +313,17 @@ function writeV1ArchivedSession(sessionDir, evaluation) {
   const training = path.join(sessionDir, 'training');
   fs.mkdirSync(path.join(training, 'details'), { recursive: true });
   const detailRef = detailRefOf(evaluation.evaluationId);
+  const detailRaw = JSON.stringify(evaluation);
+  const detailSha256 = sha256Hex(detailRaw);
   const summary = {
     ...evaluation,
     handNo: 1,
     explanation: 'BTN unopened에서 AJo는 폴드가 아니다.',
     detailRef,
-    detailSha256: 'cc'.repeat(32),
+    detailSha256,
   };
-  fs.writeFileSync(path.join(training, 'details', `${detailRef}.json`), JSON.stringify(evaluation));
+  summary.payloadSha256 = legacyTrainingPayloadSha256(summary);
+  fs.writeFileSync(path.join(training, 'details', `${detailRef}.json`), detailRaw);
   fs.writeFileSync(path.join(training, 'evaluations.jsonl'), `${JSON.stringify(summary)}\n`);
   fs.writeFileSync(path.join(training, '.training-authority.json'), JSON.stringify({
     schemaVersion: 1,
@@ -328,16 +335,16 @@ function writeV1ArchivedSession(sessionDir, evaluation) {
         handNo: 1,
         decisionId: evaluation.decisionId,
         evaluationId: evaluation.evaluationId,
-        payloadSha256: evaluation.payloadSha256,
+        payloadSha256: summary.payloadSha256,
         detailRef,
-        detailSha256: 'cc'.repeat(32),
+        detailSha256,
       },
     },
     publishQueue: {
       [evaluation.evaluationId]: {
         evaluationId: evaluation.evaluationId,
         handNo: 1,
-        payloadSha256: evaluation.payloadSha256,
+        payloadSha256: summary.payloadSha256,
       },
     },
   }));

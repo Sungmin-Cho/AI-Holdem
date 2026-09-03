@@ -4670,16 +4670,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     let lifecycleStarted = false;
     let trainingMigrationNotices = [];
+    let trainingMigrationError = null;
     try {
       if (storeDir) {
-        const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
-        trainingMigrationNotices = migration?.notices ?? [];
         try {
-          await completeSessionStoreMigrations(storeDir);
+          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
+          trainingMigrationNotices = migration?.notices ?? [];
+          try {
+            await completeSessionStoreMigrations(storeDir);
+          } catch (error) {
+            log('profile-migration-error', { code: error.code ?? 'ERROR' });
+          }
+          await consumeTrainingNow();
         } catch (error) {
-          log('profile-migration-error', { code: error.code ?? 'ERROR' });
+          trainingMigrationError = error;
+          trainingMigrationNotices = [
+            `training migration halt: ${error.code ?? 'ERROR'}`,
+          ];
         }
-        await consumeTrainingNow();
       }
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
@@ -4725,6 +4733,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         });
       } else {
         state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
+      }
+
+      if (trainingMigrationError) {
+        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
+        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
+        state = writeLoopState({ halt: { code, message }, notices: resumeNotices });
+        log('training-migration-halt', { code });
+        return state;
+      }
+      if (['TRAINING_MIGRATION_CORRUPT', 'TRAINING_AUTHORITY_V1', 'ANNOTATION_CONFLICT']
+        .includes(state.halt?.code)) {
+        state = writeLoopState({ halt: undefined });
       }
 
       let phase = state.phase;

@@ -659,10 +659,10 @@ test('v1 attempt applied vs unapplied: exact-retry is forbidden', async () => {
   const dir = tmp();
   const { summary } = writeV1Session(dir, { status: 'evaluated' });
   fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
-    expectedGameEpoch: gameEpochOf('tok'),
+    expectedGameEpoch: EPOCH,
     body: { publishId: 4, training: [summary] },
     trainingAuthority: {
-      expectedGameEpoch: gameEpochOf('tok'),
+      expectedGameEpoch: EPOCH,
       evaluationId: summary.evaluationId,
       payloadSha256: summary.payloadSha256,
     },
@@ -675,10 +675,10 @@ test('v1 attempt applied vs unapplied: exact-retry is forbidden', async () => {
   const dir2 = tmp();
   const second = writeV1Session(dir2, { status: 'evaluated' });
   fs.writeFileSync(path.join(dir2, '.publish-attempt.json'), JSON.stringify({
-    expectedGameEpoch: gameEpochOf('tok'),
+    expectedGameEpoch: EPOCH,
     body: { publishId: 9, training: [second.summary] },
     trainingAuthority: {
-      expectedGameEpoch: gameEpochOf('tok'),
+      expectedGameEpoch: EPOCH,
       evaluationId: second.summary.evaluationId,
       payloadSha256: second.summary.payloadSha256,
     },
