@@ -4669,8 +4669,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await acquireLoopLock({ mode: 'resume' });
     }
     let lifecycleStarted = false;
+    let trainingMigrationNotices = [];
     try {
       if (storeDir) {
+        const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
+        trainingMigrationNotices = migration?.notices ?? [];
         try {
           await completeSessionStoreMigrations(storeDir);
         } catch (error) {
@@ -4698,6 +4701,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       lifecycleStarted = true;
 
       const ownerSessionId = randomUUID();
+      const resumeNotices = [...new Set([
+        ...(Array.isArray(state?.notices) ? state.notices : []),
+        ...trainingMigrationNotices,
+      ])];
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({
@@ -4712,12 +4719,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           playerRuntime: null,
           upperRuntime: null,
           startedAt: isoNow(now),
-          notices: [],
+          notices: resumeNotices,
           metrics: [],
           opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
         });
       } else {
-        state = writeLoopState({ ownerSessionId, stopping: false });
+        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
       }
 
       let phase = state.phase;

@@ -12,7 +12,7 @@ import {
   writeJsonSecure as secureWriteJson,
   writeTextSecure as secureWriteText,
 } from '../tools/training-store.js';
-import { startServer } from '../server/server.js';
+import { loadUiState } from '../server/server.js';
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
 
 const EPOCH = 'ab'.repeat(32);
@@ -256,12 +256,12 @@ async function snapshotFromLegacyServer(summary) {
     training: [summary],
     history: [],
   }));
-  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
-  try {
-    return await (await fetch(`http://127.0.0.1:${started.port}/api/snapshot?token=tok`)).json();
-  } finally {
-    await started.close();
-  }
+  const restored = loadUiState(dir, 'tok');
+  return {
+    ...restored,
+    trainingAnnotations: Object.values(restored.trainingAnnotations)
+      .flatMap((fields) => Object.values(fields)),
+  };
 }
 
 test('legacyExplanationAnnotation is the 600-character SSOT', () => {
@@ -299,6 +299,25 @@ test('loadAuthority is a byte-stable pure reader and a locked writer cannot lazi
   assert.deepEqual(treeSnapshot(dir), before);
 });
 
+test('a conflicting legacy explanation exact-file fails closed as ANNOTATION_CONFLICT', async () => {
+  const dir = tmp();
+  const { summary } = writeV1Session(dir);
+  const exactDir = path.join(dir, 'training', 'annotations');
+  fs.mkdirSync(exactDir);
+  fs.writeFileSync(
+    path.join(exactDir, `${summary.detailRef}.explanation.json`),
+    JSON.stringify({ field: 'explanation', status: 'ready', value: 'different legacy text' }),
+  );
+
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(dir),
+    { code: 'ANNOTATION_CONFLICT' },
+  );
+  assert.equal(readAuth(dir).schemaVersion, 1);
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.digest-map-v2.json')), false);
+});
+
 test('migration writes in-progress then map → authority → jsonl → marker → attempt deletion', async () => {
   const dir = tmp();
   const { summary } = writeV1Session(dir);
@@ -319,12 +338,11 @@ test('migration writes in-progress then map → authority → jsonl → marker �
 });
 
 test('five-row migration re-entry table', async (t) => {
-  await t.test('row 1: authority v1, marker absent/in-progress/complete, map absent/present → restart from the beginning', async () => {
+  await t.test('row 1: authority v1 + marker absent/in-progress + map absent/present → restart from the beginning', async () => {
     const cases = [
       { marker: null, map: false },
       { marker: 'in-progress', map: false },
       { marker: 'in-progress', map: true },
-      { marker: 'complete', map: true },
     ];
     for (const [index, variant] of cases.entries()) {
       const dir = tmp(`holdem-row1-${index}-`);
@@ -423,7 +441,7 @@ test('five-row migration re-entry table', async (t) => {
 
 test('five injected migration failures recover without losing map, explanation, or attempt judgement', async (t) => {
   for (const failure of ['map', 'authority', 'jsonl', 'marker', 'attempt']) {
-    await t.test(failure, async (st) => {
+    await t.test(failure, async () => {
       const appliedCases = failure === 'authority' ? [true, false] : [true];
       for (const applied of appliedCases) {
         const dir = tmp(`holdem-fail-${failure}-${applied}-`);

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   collectPrivateLiterals,
+  legacyExplanationAnnotation,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   payloadSha256,
@@ -274,18 +275,21 @@ function migrateLoadedTraining(rawTraining, { allowLegacyExplanation = false } =
       continue;
     }
     byId.set(projected.evaluationId, projected);
-    if (allowLegacyExplanation && typeof explanation === 'string' && explanation.length) {
-      try {
+    if (allowLegacyExplanation && Object.hasOwn(item, 'explanation')) {
+      const legacy = legacyExplanationAnnotation(explanation);
+      if (legacy) {
         const ann = projectTrainingAnnotation({
           evaluationId: projected.evaluationId,
           payloadSha256: projected.payloadSha256,
           field: 'explanation',
-          status: 'ready',
-          value: explanation,
+          status: legacy.status,
+          value: legacy.value,
         });
         split[ann.evaluationId] = split[ann.evaluationId] ?? Object.create(null);
         split[ann.evaluationId].explanation = ann;
-      } catch { dropped += 1; }
+      } else if (explanation !== null && typeof explanation !== 'string') {
+        dropped += 1;
+      }
     }
   }
   return { training: [...byId.values()], split, dropped };
@@ -412,7 +416,7 @@ function legacyTrainingSnapshot(gameDir) {
   }
 }
 
-function loadUiState(gameDir, expectedSessionToken) {
+export function loadUiState(gameDir, expectedSessionToken) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
     const allowLegacyExplanation = legacyTrainingSnapshot(gameDir);

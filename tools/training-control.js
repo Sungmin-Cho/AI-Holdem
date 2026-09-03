@@ -8,6 +8,7 @@ import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   detailRefOf,
+  legacyExplanationAnnotation,
   projectTrainingAnnotation,
   projectTrainingSummary,
   sha256Hex,
@@ -187,19 +188,33 @@ export function readAnnotationExactFile(sessionDir, detailRef, field) {
 
 function resolveV1Attempt(sessionDir, items) {
   const attemptFile = path.join(sessionDir, '.publish-attempt.json');
-  if (!fs.existsSync(attemptFile)) return;
+  if (!fs.existsSync(attemptFile)) {
+    return {
+      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+    };
+  }
   let record;
   try {
     record = JSON.parse(fs.readFileSync(attemptFile, 'utf8'));
   } catch {
-    return;
+    return {
+      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+    };
   }
   const trainingAuthz = record.trainingAuthority;
   const bodyTraining = Array.isArray(record.body?.training) ? record.body.training : [];
   const isTrainingAttempt = Boolean(trainingAuthz) || bodyTraining.length > 0;
-  if (!isTrainingAttempt) return;
+  if (!isTrainingAttempt) {
+    return {
+      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+    };
+  }
   const v1Shape = Boolean(trainingAuthz?.evaluationId) && !Array.isArray(trainingAuthz?.items);
-  if (!v1Shape && !bodyTraining.length) return;
+  if (!v1Shape && !bodyTraining.length) {
+    return {
+      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+    };
+  }
   const evalIds = Array.isArray(trainingAuthz?.items)
     ? trainingAuthz.items.map((entry) => entry.evaluationId)
     : [
@@ -213,169 +228,276 @@ function resolveV1Attempt(sessionDir, items) {
   } catch { /* no snapshot */ }
   const attemptId = Number(record.body?.publishId) || 0;
   const applied = attemptId > 0 && snapshotPublishId >= attemptId;
+  const appliedIds = [];
+  const appliedAnnotationIds = [];
+  const legacyExplanationIds = new Set(bodyTraining
+    .filter((row) => row && Object.prototype.hasOwnProperty.call(row, 'explanation'))
+    .map((row) => row.evaluationId));
+  let changed = false;
   if (applied) {
     for (const id of evalIds) {
       if (!items[id]) continue;
+      if (items[id].status !== 'published' || items[id].consumers?.published !== true) changed = true;
       items[id].status = 'published';
       items[id].consumers = { ...(items[id].consumers ?? {}), published: true };
+      appliedIds.push(id);
+      if (legacyExplanationIds.has(id) && items[id].annotations?.explanation) {
+        if (items[id].annotations.explanation.published !== true) changed = true;
+        items[id].annotations.explanation.published = true;
+        appliedAnnotationIds.push(id);
+      }
     }
   }
-  try { fs.unlinkSync(attemptFile); } catch { /* already gone */ }
+  return {
+    resolved: true, applied, appliedIds, appliedAnnotationIds, attemptFile, changed,
+  };
 }
 
-function rewriteJsonlFromItems(sessionDir, auth) {
+function rewriteJsonlFromItems(sessionDir, auth, { writeTextSecure: writeText = writeTextSecure } = {}) {
   const lines = Object.values(auth.items ?? {})
     .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
       || String(left.evaluationId).localeCompare(String(right.evaluationId)))
     .map((item) => JSON.stringify(item.summary));
-  writeTextSecure(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
+  writeText(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
 }
 
-function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
-  const marker = readMarker(sessionDir);
-  if (auth.schemaVersion === 2) {
-    if (marker?.status === 'in-progress') {
-      rewriteJsonlFromItems(sessionDir, auth);
-      if (!fs.existsSync(digestMapPath(sessionDir))) return auth;
-      writeJsonSecure(markerPath(sessionDir), {
-        status: 'session-done',
-        at: new Date().toISOString(),
-        digestMapRef: '.digest-map-v2.json',
-      });
-    }
-    return auth;
-  }
-  if (auth.schemaVersion !== 1) {
-    throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
-  }
-  writeJsonSecure(markerPath(sessionDir), { status: 'in-progress', at: new Date().toISOString() });
-
-  const rows = readJsonl(evaluationsPath(sessionDir));
-  const rowById = new Map(rows.map((row) => [row.evaluationId, row]));
-  const oldToNew = {};
-  const byEvaluationId = {};
-  const newItems = {};
-  const newQueue = {};
-  const annotationQueue = {};
-  const pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
-    ? { ...auth.pending }
-    : {};
-  const processed = storeDir ? loadProcessed(storeDir) : {};
-  const mistakeIds = storeDir ? loadMistakeIds(storeDir) : new Set();
-
-  for (const [id, item] of Object.entries(auth.items ?? {})) {
-    const row = rowById.get(id);
-    const detailRef = item.detailRef ?? row?.detailRef ?? detailRefOf(id);
-    let evaluation = null;
-    try {
-      evaluation = readJsonSecure(path.join(detailsDir(sessionDir), `${detailRef}.json`));
-    } catch {
-      evaluation = row ?? null;
-    }
-    const explanation = row && Object.prototype.hasOwnProperty.call(row, 'explanation')
-      ? row.explanation
-      : null;
-    let summary;
-    if (evaluation?.evaluationId) {
-      summary = toPublicSummary(evaluation, {
-        handNo: item.handNo ?? row?.handNo,
-        detailRef,
-        detailSha256: item.detailSha256 ?? row?.detailSha256,
-      });
-    } else if (row) {
-      const rest = { ...row };
-      delete rest.explanation;
-      delete rest.payloadSha256;
-      summary = projectTrainingSummary({ ...rest, recommendedTruncated: rest.recommendedTruncated === true });
-    } else {
-      continue;
-    }
-    oldToNew[item.payloadSha256] = summary.payloadSha256;
-    byEvaluationId[id] = { old: item.payloadSha256, new: summary.payloadSha256 };
-
-    const annotations = {};
-    if (typeof explanation === 'string' && explanation.length) {
-      const projected = projectTrainingAnnotation({
-        evaluationId: id,
-        payloadSha256: summary.payloadSha256,
-        field: 'explanation',
-        status: 'ready',
-        value: explanation,
-      });
-      annotations.explanation = {
-        status: 'ready',
-        valueSha256: projected.valueSha256,
-        published: item.status === 'published',
-      };
-      writeAnnotationExactFile(sessionDir, summary.detailRef, 'explanation', {
-        field: 'explanation',
-        status: 'ready',
-        value: explanation,
-      });
-      if (item.status !== 'published') {
-        annotationQueue[id] = annotationQueue[id] ?? {};
-        annotationQueue[id].explanation = {
-          evaluationId: id,
-          field: 'explanation',
-          valueSha256: projected.valueSha256,
-          payloadSha256: summary.payloadSha256,
-          published: false,
-        };
-      }
-    }
-
-    newItems[id] = {
-      status: item.status === 'published' ? 'published' : 'evaluated',
-      handNo: item.handNo,
-      decisionId: item.decisionId,
-      evaluationId: id,
-      payloadSha256: summary.payloadSha256,
-      detailRef: summary.detailRef,
-      detailSha256: item.detailSha256 ?? summary.detailSha256,
-      summary,
-      consumers: {
-        published: item.status === 'published',
-        profiled: Object.prototype.hasOwnProperty.call(processed, id),
-        banked: mistakeIds.has(id),
-      },
-      annotations,
-    };
-  }
-
-  resolveV1Attempt(sessionDir, newItems);
-  for (const [id, item] of Object.entries(newItems)) {
-    if (item.status === 'published') continue;
-    newQueue[id] = {
-      evaluationId: id,
-      handNo: item.handNo,
-      payloadSha256: item.payloadSha256,
-    };
-  }
-
-  const v2 = {
-    schemaVersion: 2,
-    gameEpoch: auth.gameEpoch,
-    ownerSessionId: auth.ownerSessionId,
-    items: newItems,
-    publishQueue: newQueue,
-    pending,
-    annotationQueue,
-    solveTasks: {},
+function migrationWriters(overrides = {}) {
+  return {
+    writeJsonSecure: overrides.writeJsonSecure ?? writeJsonSecure,
+    writeTextSecure: overrides.writeTextSecure ?? writeTextSecure,
+    unlinkSync: overrides.unlinkSync ?? ((file) => fs.unlinkSync(file)),
   };
-  const lines = Object.values(newItems)
-    .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
-      || String(left.evaluationId).localeCompare(String(right.evaluationId)))
-    .map((item) => JSON.stringify(item.summary));
-  writeTextSecure(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
-  persistAuth(sessionDir, v2);
-  writeJsonSecure(digestMapPath(sessionDir), { schemaVersion: 1, oldToNew, byEvaluationId });
-  const nextMarker = {
+}
+
+function sessionDoneMarker() {
+  return {
     status: 'session-done',
     at: new Date().toISOString(),
     digestMapRef: '.digest-map-v2.json',
   };
-  writeJsonSecure(markerPath(sessionDir), nextMarker);
-  return v2;
+}
+
+function removeMigrationFile(file) {
+  try {
+    if (fs.lstatSync(file).isFile()) fs.unlinkSync(file);
+  } catch { /* rollback cleanup is best-effort; the original failure remains authoritative */ }
+}
+
+function migrationNotices(auth) {
+  const overCap = Object.values(auth?.items ?? {}).filter(
+    (item) => item.annotations?.explanation?.sealReason === 'LEGACY_OVER_CAP',
+  ).length;
+  return overCap > 0
+    ? [`legacy explanation ${overCap}건 상한 초과 → unavailable`]
+    : [];
+}
+
+function migrationResult(auth, { includeNotices = false } = {}) {
+  return auth ? { ...auth, notices: includeNotices ? migrationNotices(auth) : [] } : null;
+}
+
+function finishResolvedAttempt(sessionDir, auth, writers) {
+  const attempt = resolveV1Attempt(sessionDir, auth.items ?? {});
+  if (!attempt.resolved) return false;
+  let changed = attempt.changed;
+  for (const id of attempt.appliedIds) {
+    if (Object.prototype.hasOwnProperty.call(auth.publishQueue ?? {}, id)) {
+      delete auth.publishQueue[id];
+      changed = true;
+    }
+  }
+  for (const id of attempt.appliedAnnotationIds) {
+    if (auth.annotationQueue?.[id]?.explanation) {
+      delete auth.annotationQueue[id].explanation;
+      if (Object.keys(auth.annotationQueue[id]).length === 0) delete auth.annotationQueue[id];
+      changed = true;
+    }
+  }
+  if (changed) writers.writeJsonSecure(authPath(sessionDir), auth);
+  writers.unlinkSync(attempt.attemptFile);
+  return true;
+}
+
+function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
+  const writers = migrationWriters(io);
+  const marker = readMarker(sessionDir);
+  if (auth.schemaVersion === 2) {
+    let resumedMigration = false;
+    if (marker?.status === 'in-progress') {
+      if (!fs.existsSync(digestMapPath(sessionDir))) {
+        throw coded(
+          'TRAINING_MIGRATION_CORRUPT',
+          'v2 authority의 in-progress 마이그레이션에 digest map이 없습니다.',
+        );
+      }
+      rewriteJsonlFromItems(sessionDir, auth, writers);
+      writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
+      finishResolvedAttempt(sessionDir, auth, writers);
+      resumedMigration = true;
+    } else if (marker?.status === 'session-done' || marker?.status === 'complete') {
+      resumedMigration = finishResolvedAttempt(sessionDir, auth, writers);
+    }
+    return migrationResult(auth, { includeNotices: resumedMigration });
+  }
+  if (auth.schemaVersion !== 1) {
+    throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
+  }
+
+  try {
+    writers.writeJsonSecure(markerPath(sessionDir), {
+      status: 'in-progress',
+      at: new Date().toISOString(),
+    });
+
+    const rows = readJsonl(evaluationsPath(sessionDir));
+    const rowById = new Map(rows.map((row) => [row.evaluationId, row]));
+    const oldToNew = {};
+    const byEvaluationId = {};
+    const newItems = {};
+    const newQueue = {};
+    const annotationQueue = {};
+    const pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
+      ? { ...auth.pending }
+      : {};
+    const processed = storeDir ? loadProcessed(storeDir) : {};
+    const mistakeIds = storeDir ? loadMistakeIds(storeDir) : new Set();
+
+    for (const [id, item] of Object.entries(auth.items ?? {})) {
+      const row = rowById.get(id);
+      const detailRef = item.detailRef ?? row?.detailRef ?? detailRefOf(id);
+      let evaluation = null;
+      try {
+        evaluation = readJsonSecure(path.join(detailsDir(sessionDir), `${detailRef}.json`));
+      } catch {
+        evaluation = row ?? null;
+      }
+      const explanation = row && Object.prototype.hasOwnProperty.call(row, 'explanation')
+        ? row.explanation
+        : null;
+      let summary;
+      if (evaluation?.evaluationId) {
+        summary = toPublicSummary(evaluation, {
+          handNo: item.handNo ?? row?.handNo,
+          detailRef,
+          detailSha256: item.detailSha256 ?? row?.detailSha256,
+        });
+      } else if (row) {
+        const rest = { ...row };
+        delete rest.explanation;
+        delete rest.payloadSha256;
+        summary = projectTrainingSummary({
+          ...rest,
+          recommendedTruncated: rest.recommendedTruncated === true,
+        });
+      } else {
+        continue;
+      }
+      oldToNew[item.payloadSha256] = summary.payloadSha256;
+      byEvaluationId[id] = { old: item.payloadSha256, new: summary.payloadSha256 };
+
+      const annotations = {};
+      const legacyAnnotation = legacyExplanationAnnotation(explanation);
+      if (legacyAnnotation) {
+        const projected = projectTrainingAnnotation({
+          evaluationId: id,
+          payloadSha256: summary.payloadSha256,
+          field: 'explanation',
+          status: legacyAnnotation.status,
+          value: legacyAnnotation.value,
+        });
+        annotations.explanation = {
+          status: legacyAnnotation.status,
+          valueSha256: projected.valueSha256,
+          published: item.status === 'published',
+          ...(legacyAnnotation.sealReason ? { sealReason: legacyAnnotation.sealReason } : {}),
+        };
+        const written = writeAnnotationExactFile(sessionDir, summary.detailRef, 'explanation', {
+          field: 'explanation',
+          status: legacyAnnotation.status,
+          value: legacyAnnotation.value,
+        });
+        if (written.conflict) {
+          throw coded('ANNOTATION_CONFLICT', 'legacy explanation exact-file이 기존 값과 다릅니다.');
+        }
+        if (item.status !== 'published') {
+          annotationQueue[id] = annotationQueue[id] ?? {};
+          annotationQueue[id].explanation = {
+            evaluationId: id,
+            field: 'explanation',
+            valueSha256: projected.valueSha256,
+            payloadSha256: summary.payloadSha256,
+            published: false,
+          };
+        }
+      }
+
+      newItems[id] = {
+        status: item.status === 'published' ? 'published' : 'evaluated',
+        handNo: item.handNo,
+        decisionId: item.decisionId,
+        evaluationId: id,
+        payloadSha256: summary.payloadSha256,
+        detailRef: summary.detailRef,
+        detailSha256: item.detailSha256 ?? summary.detailSha256,
+        summary,
+        consumers: {
+          published: item.status === 'published',
+          profiled: Object.prototype.hasOwnProperty.call(processed, id),
+          banked: mistakeIds.has(id),
+        },
+        annotations,
+      };
+    }
+
+    const attempt = resolveV1Attempt(sessionDir, newItems);
+    for (const id of attempt.appliedAnnotationIds) {
+      if (annotationQueue[id]?.explanation) {
+        delete annotationQueue[id].explanation;
+        if (Object.keys(annotationQueue[id]).length === 0) delete annotationQueue[id];
+      }
+    }
+    for (const [id, item] of Object.entries(newItems)) {
+      if (item.status === 'published') continue;
+      newQueue[id] = {
+        evaluationId: id,
+        handNo: item.handNo,
+        payloadSha256: item.payloadSha256,
+      };
+    }
+
+    const v2 = {
+      schemaVersion: 2,
+      gameEpoch: auth.gameEpoch,
+      ownerSessionId: auth.ownerSessionId,
+      items: newItems,
+      publishQueue: newQueue,
+      pending,
+      annotationQueue,
+      solveTasks: {},
+    };
+    writers.writeJsonSecure(digestMapPath(sessionDir), {
+      schemaVersion: 1,
+      oldToNew,
+      byEvaluationId,
+    });
+    writers.writeJsonSecure(authPath(sessionDir), v2);
+    rewriteJsonlFromItems(sessionDir, v2, writers);
+    writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
+    if (attempt.resolved) writers.unlinkSync(attempt.attemptFile);
+    return migrationResult(v2, { includeNotices: true });
+  } catch (error) {
+    let diskAuthority = null;
+    try {
+      diskAuthority = readJsonSecure(authPath(sessionDir));
+    } catch {
+      // Without readable disk truth, do not guess that a commit did or did not happen.
+    }
+    if (diskAuthority?.schemaVersion === 1) {
+      removeMigrationFile(markerPath(sessionDir));
+      removeMigrationFile(digestMapPath(sessionDir));
+    }
+    throw error;
+  }
 }
 
 // 한 세션의 authority는 그 세션 소유다. 죽은 줄 알았던 이전 owner가 살아 돌아와
@@ -390,14 +512,24 @@ function assertOwner(auth, owner) {
   );
 }
 
-function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
+function loadAuthorityUnlocked(sessionDir) {
   try {
-    let auth = readJsonSecure(authPath(sessionDir));
-    if (auth.schemaVersion === 1 || auth.schemaVersion === 2) {
-      auth = migrateV1ToV2Unlocked(sessionDir, auth, { storeDir });
+    const auth = readJsonSecure(authPath(sessionDir));
+    const marker = readMarker(sessionDir);
+    if (auth.schemaVersion === 1) {
+      throw coded('TRAINING_AUTHORITY_V1', 'v1 training authority는 명시적으로 마이그레이션해야 합니다.');
     }
     if (auth.schemaVersion !== 2) {
       throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
+    }
+    if (marker?.status === 'in-progress') {
+      if (!fs.existsSync(digestMapPath(sessionDir))) {
+        throw coded(
+          'TRAINING_MIGRATION_CORRUPT',
+          'v2 authority의 in-progress 마이그레이션에 digest map이 없습니다.',
+        );
+      }
+      throw coded('TRAINING_MIGRATION_INCOMPLETE', 'training authority 마이그레이션이 완료되지 않았습니다.');
     }
     if (!auth.items || typeof auth.items !== 'object' || Array.isArray(auth.items)) {
       throw coded('UNSUPPORTED_TRAINING_AUTHORITY', 'items');
@@ -428,7 +560,8 @@ function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
     } catch (accessError) {
       if (accessError.code === 'ENOENT') return null;
     }
-    if (error.code === 'UNSUPPORTED_TRAINING_AUTHORITY') throw error;
+    if (['UNSUPPORTED_TRAINING_AUTHORITY', 'TRAINING_AUTHORITY_V1',
+      'TRAINING_MIGRATION_INCOMPLETE', 'TRAINING_MIGRATION_CORRUPT'].includes(error.code)) throw error;
     if (error.code === 'ENOENT') return null;
     throw error;
   }
@@ -481,13 +614,30 @@ function profileConsumerReady(sessionDir) {
   return marker.status === 'complete';
 }
 
-export function createTrainingControl({ storeDir } = {}) {
+export function createTrainingControl({ storeDir, io } = {}) {
   async function withLock(sessionDir, fn) {
     return withNamedLock(sessionDir, TRAINING_LOCK, fn);
   }
 
+  async function withMigrationLock(sessionDir, fn) {
+    return withNamedLock(sessionDir, TRAINING_LOCK, fn, { timeoutMs: 10_000 });
+  }
+
   function loadAuthority(sessionDir) {
     return loadAuthorityUnlocked(sessionDir, { storeDir });
+  }
+
+  async function migrateAuthority(sessionDir) {
+    return withMigrationLock(sessionDir, () => {
+      let auth;
+      try {
+        auth = readJsonSecure(authPath(sessionDir));
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+      return migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+    });
   }
 
   async function acceptEvaluations(sessionDir, {
@@ -874,6 +1024,7 @@ export function createTrainingControl({ storeDir } = {}) {
     acceptEvaluations,
     reconcile,
     loadAuthority,
+    migrateAuthority,
     pendingItems,
     markPublished,
     markConsumer,

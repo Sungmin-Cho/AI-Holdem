@@ -54,11 +54,12 @@ export function gameEpochOf(sessionToken) {
 
 export const SUPPORTED_TRAINING_AUTHORITY_SCHEMAS = Object.freeze([1, 2]);
 export const TRAINING_CHUNK_SLACK_BYTES = 4096;
+export const EXPLANATION_MAX_CHARS = 600;
 export const TRAINING_SUMMARY_LIMITS = Object.freeze({
   reason: 256,
   key: 64,
   version: 32,
-  explanation: 600,
+  explanation: EXPLANATION_MAX_CHARS,
 });
 
 const ALLOWED_ACTIONS = new Set(['fold', 'check', 'call', 'raise', 'bet']);
@@ -556,6 +557,12 @@ export function annotationValueSha256(tuple) {
   return sha256Hex(annotationCanonicalJson(tuple));
 }
 
+export function legacyExplanationAnnotation(text) {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  if (text.length <= EXPLANATION_MAX_CHARS) return { status: 'ready', value: text };
+  return { status: 'unavailable', value: null, sealReason: 'LEGACY_OVER_CAP' };
+}
+
 export function projectTrainingAnnotation({ evaluationId, payloadSha256, field, value, status }) {
   if (field !== 'explanation' && field !== 'exploit') {
     throw coded('ANNOTATION_PROOF_MISMATCH', 'annotation field is invalid');
@@ -570,7 +577,7 @@ export function projectTrainingAnnotation({ evaluationId, payloadSha256, field, 
     if (typeof value !== 'string') {
       throw coded('ANNOTATION_PROOF_MISMATCH', 'explanation must be a string');
     }
-    if (value.length > TRAINING_SUMMARY_LIMITS.explanation) {
+    if (value.length > EXPLANATION_MAX_CHARS) {
       throw coded('ANNOTATION_PROOF_MISMATCH', 'explanation exceeds 600 characters');
     }
     projectedValue = value;

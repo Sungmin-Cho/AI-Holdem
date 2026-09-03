@@ -166,6 +166,11 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   const runEvaluate = evaluate ?? defaultEvaluate;
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
+      const migration = await tc.migrateAuthority(sessionDir);
+      for (const notice of migration?.notices ?? []) {
+        notices.push(notice);
+        onNotice?.(notice);
+      }
       const pendingOut = await retryPendingMap(sessionDir, {
         evaluate: runEvaluate,
         solve,
