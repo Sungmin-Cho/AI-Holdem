@@ -761,6 +761,9 @@ test('identical duplicate legacy rows and detail-only authority items remain rec
   const missingRowDir = tmp();
   const missing = writeV1Session(missingRowDir);
   fs.writeFileSync(path.join(missingRowDir, 'training', 'evaluations.jsonl'), '');
+  const missingAuth = readAuth(missingRowDir);
+  delete missingAuth.items[missing.summary.evaluationId].detailRef;
+  secureWriteJson(path.join(missingRowDir, 'training', '.training-authority.json'), missingAuth);
   const migratedMissing = await createTrainingControl().migrateAuthority(missingRowDir);
   assert.equal(migratedMissing.items[missing.summary.evaluationId].summary.evaluationId, missing.summary.evaluationId);
   assert.equal(migratedMissing.items[missing.summary.evaluationId].annotations.explanation, undefined);
@@ -843,6 +846,23 @@ test('malformed attempts and unsafe snapshot publish ids never become applied ev
     { code: 'TRAINING_MIGRATION_CORRUPT' },
   );
   assert.equal(readAuth(forgedBody).schemaVersion, 1);
+
+  for (const removeEpoch of [
+    (attempt) => { delete attempt.expectedGameEpoch; },
+    (attempt) => { delete attempt.trainingAuthority.expectedGameEpoch; },
+  ]) {
+    const dir = tmp();
+    const current = writeV1Session(dir);
+    writeV1Attempt(dir, current.summary, { applied: true });
+    const attemptPath = path.join(dir, '.publish-attempt.json');
+    const attempt = JSON.parse(fs.readFileSync(attemptPath, 'utf8'));
+    removeEpoch(attempt);
+    fs.writeFileSync(attemptPath, JSON.stringify(attempt));
+    await assert.rejects(
+      createTrainingControl().migrateAuthority(dir),
+      { code: 'TRAINING_MIGRATION_CORRUPT' },
+    );
+  }
 });
 
 test('legacy UI provenance fails closed when marker or digest-map coverage is missing', async () => {
@@ -867,4 +887,39 @@ test('legacy UI provenance fails closed when marker or digest-map coverage is mi
   delete map.oldToNew[missingMapEntry.summary.payloadSha256];
   secureWriteJson(mapPath, map);
   assert.equal(loadUiState(missingMapEntry.dir, 'tok').training.length, 0);
+
+  const missingAuthorityItem = await make();
+  const authPath = path.join(missingAuthorityItem.dir, 'training', '.training-authority.json');
+  const auth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+  delete auth.items[missingAuthorityItem.summary.evaluationId];
+  secureWriteJson(authPath, auth);
+  assert.equal(loadUiState(missingAuthorityItem.dir, 'tok').training.length, 0);
+});
+
+test('current-v2 attempt rows cannot smuggle an unsigned legacy explanation', async () => {
+  const dir = tmp();
+  const { summary } = writeV1Session(dir);
+  const migrated = await createTrainingControl().migrateAuthority(dir);
+  const item = migrated.items[summary.evaluationId];
+  const bodyRow = { ...item.summary, explanation: 'not covered by current digest' };
+  fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: EPOCH,
+    body: { publishId: 51, training: [bodyRow] },
+    trainingAuthority: {
+      expectedGameEpoch: EPOCH,
+      items: [{ evaluationId: item.evaluationId, payloadSha256: item.payloadSha256 }],
+    },
+  }));
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
+    publishId: 51,
+    training: [item.summary],
+  }));
+  secureWriteJson(path.join(dir, 'training', '.migration-v2.json'), { status: 'complete' });
+
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(dir),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), true);
+  assert.equal(readAuth(dir).items[item.evaluationId].status, 'evaluated');
 });
