@@ -40,7 +40,7 @@ import {
   trainingAggregate,
 } from './training-pipeline.js';
 import {
-  completeSessionStoreMigrations,
+  completeSessionStoreMigration,
   installPracticeFocus,
   readInstalledPracticeFocus,
   sweepStore,
@@ -422,6 +422,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let coachAdapterDisabled = false;
   let playerSessions = null;
   let resumeEntryPending = false;
+  let doneResumeNoTrainingWrite = false;
   let stopRequested = false;
   let stopPromise = null;
   let pendingFinalStatePatch = null;
@@ -1878,7 +1879,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const consumeTrainingNow = async () => {
     if (!trainingOn || !storeDir) return;
     try {
-      await createTrainingControl({ storeDir }).consumeTrainingItems(root, { storeDir });
+      const consumed = await createTrainingControl({ storeDir })
+        .consumeTrainingItems(root, { storeDir });
+      if ((consumed.failed ?? 0) > 0) {
+        log('training-consume-failed', { failed: consumed.failed });
+      }
     } catch (error) {
       log('training-consume-error', { code: error.code ?? 'ERROR' });
     }
@@ -3929,7 +3934,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const finishDoneLifecycle = async () => {
     const current = readLoopState();
-    if (storeDir) {
+    if (storeDir && !doneResumeNoTrainingWrite) {
       try {
         const profile = await createProfileStore(storeDir).show();
         writePracticeFocus(storeDir, profile);
@@ -4514,19 +4519,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
       let sweepNotices = [];
+      let sweepFailed = 0;
       if (storeDir) {
-        try {
-          await completeSessionStoreMigrations(storeDir);
-        } catch (error) {
-          sweepNotices.push(`store migration 실패: ${error.code ?? 'ERROR'}`);
-          log('profile-migration-error', { code: error.code ?? 'ERROR' });
-        }
         try {
           const swept = await sweepStore(storeDir, {
             evaluate: (sessionDir, handNo) => evaluateForPipeline(sessionDir, handNo),
             solve: typeof trainingHooks.solve === 'function' ? trainingHooks.solve : undefined,
           });
           sweepNotices = swept.notices ?? [];
+          sweepFailed = swept.failed ?? 0;
+          if (sweepFailed > 0) {
+            sweepNotices.push(`profile sweep consumer 실패: ${sweepFailed}건`);
+          }
         } catch (error) {
           sweepNotices = [`profile sweep 실패: ${error.code ?? 'ERROR'}`];
           log('profile-sweep-error', { code: error.code ?? 'ERROR' });
@@ -4558,6 +4562,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         metrics: [],
       });
       log('bootstrap-initialized', { sessionToken: initialized.sessionToken });
+      if (sweepFailed > 0) log('profile-sweep-consume-failed', { failed: sweepFailed });
 
       const policyMode = opponentRuntimeOf() === 'policy';
       if (policyMode) stampPlayerPolicies(root);
@@ -4672,23 +4677,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let trainingMigrationNotices = [];
     let trainingMigrationError = null;
     try {
-      if (storeDir) {
-        try {
-          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
-          trainingMigrationNotices = migration?.notices ?? [];
-          try {
-            await completeSessionStoreMigrations(storeDir);
-          } catch (error) {
-            log('profile-migration-error', { code: error.code ?? 'ERROR' });
-          }
-          await consumeTrainingNow();
-        } catch (error) {
-          trainingMigrationError = error;
-          trainingMigrationNotices = [
-            `training migration halt: ${error.code ?? 'ERROR'}`,
-          ];
-        }
-      }
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
       if (!engineState) throw codedError('NO_GAME', 'resume할 engine 상태가 없습니다.');
@@ -4708,7 +4696,32 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       openLog();
       lifecycleStarted = true;
 
-      const ownerSessionId = randomUUID();
+      if (state?.phase === 'done') {
+        if (state.halt?.source === 'training-migration') {
+          state = writeLoopState({ halt: undefined });
+        }
+        doneResumeNoTrainingWrite = true;
+        const resumed = await resolveForPhase('done', engineState, state);
+        log('resume-ready', { phase: resumed.phase });
+        return resumed;
+      }
+
+      if (trainingOn) {
+        try {
+          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root, {
+            ...(typeof state?.ownerSessionId === 'string' && state.ownerSessionId !== ''
+              ? { recoverOwnerId: state.ownerSessionId }
+              : {}),
+          });
+          trainingMigrationNotices = migration?.notices ?? [];
+        } catch (error) {
+          trainingMigrationError = error;
+          trainingMigrationNotices = [
+            `training migration halt: ${error.code ?? 'ERROR'}`,
+          ];
+        }
+      }
+
       const resumeNotices = [...new Set([
         ...(Array.isArray(state?.notices)
           ? state.notices.filter((notice) => (
@@ -4717,6 +4730,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           : []),
         ...trainingMigrationNotices,
       ])];
+      if (trainingMigrationError) {
+        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
+        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
+        state = writeLoopState({
+          halt: { code, message, source: 'training-migration' },
+          notices: resumeNotices,
+        });
+        log('training-migration-halt', { code });
+        return state;
+      }
+
+      const ownerSessionId = randomUUID();
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({
@@ -4739,18 +4764,44 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
       }
 
-      if (trainingMigrationError) {
-        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
-        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
-        state = writeLoopState({
-          halt: { code, message, source: 'training-migration' },
-          notices: resumeNotices,
-        });
-        log('training-migration-halt', { code });
-        return state;
-      }
       if (state.halt?.source === 'training-migration') {
         state = writeLoopState({ halt: undefined });
+      }
+
+      if (trainingOn) {
+        try {
+          const takeover = await createTrainingControl({ storeDir })
+            .takeoverOwner(root, ownerSessionId, { reason: 'resume' });
+          log('training-owner-transferred', {
+            ownerSessionId,
+            transferred: takeover.transferred,
+          });
+        } catch (error) {
+          const code = error.code ?? 'TRAINING_OWNER_TAKEOVER_FAILED';
+          const message = `training owner 교대를 완료할 수 없습니다 (${code}).`;
+          const notices = [...new Set([
+            ...resumeNotices,
+            `training owner halt: ${code}`,
+          ])];
+          state = writeLoopState({
+            halt: { code, message, source: 'training-owner' },
+            notices,
+          });
+          log('training-owner-halt', { code });
+          return state;
+        }
+        if (state.halt?.source === 'training-owner') {
+          state = writeLoopState({ halt: undefined });
+        }
+      }
+
+      if (storeDir) {
+        try {
+          await completeSessionStoreMigration(storeDir, root);
+        } catch (error) {
+          log('profile-migration-error', { code: error.code ?? 'ERROR' });
+        }
+        await consumeTrainingNow();
       }
 
       let phase = state.phase;

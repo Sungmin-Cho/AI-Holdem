@@ -19,6 +19,7 @@ function readJson(filePath) {
 function sessionDirOf(storeDir, id = '11111111-1111-4111-8111-111111111111') {
   const dir = path.join(storeDir, '.session-store', 'sessions', id);
   fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
   return dir;
 }
 

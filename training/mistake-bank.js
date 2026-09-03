@@ -59,7 +59,10 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
       if (!collectable(evaluation)) return { added: false, item: null };
       const existingId = data.items.find((item) => item.mistakeId === evaluation.evaluationId);
       if (existingId) {
-        existingId.evidenceIds = existingId.evidenceIds ?? [existingId.mistakeId];
+        if (!Object.prototype.hasOwnProperty.call(existingId, 'evidenceIds')) {
+          existingId.evidenceIds = [existingId.mistakeId];
+          writeJsonSecure(file, data);
+        }
         return { added: false, item: existingId };
       }
       const sig = signatureOf(evaluation);
@@ -113,5 +116,25 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
     });
   }
 
-  return { collect, list, update, file };
+  async function migrateDigests({ oldToNew = {}, byEvaluationId = {} } = {}) {
+    return withLock(() => {
+      const data = load();
+      let changed = false;
+      for (const item of data.items ?? []) {
+        const evaluation = item.evaluation;
+        if (!evaluation) continue;
+        const current = evaluation.payloadSha256;
+        const mapped = byEvaluationId[item.mistakeId]?.new
+          ?? oldToNew[current]
+          ?? current;
+        if (mapped === current) continue;
+        evaluation.payloadSha256 = mapped;
+        changed = true;
+      }
+      if (changed) writeJsonSecure(file, data);
+      return { changed };
+    });
+  }
+
+  return { collect, list, update, migrateDigests, file };
 }

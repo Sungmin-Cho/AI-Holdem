@@ -562,6 +562,9 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
   if (auth.schemaVersion !== 1) {
     throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
   }
+  if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+    throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+  }
 
   const { rows, rowById } = validateLegacySources(sessionDir, auth);
 
@@ -693,6 +696,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       schemaVersion: 2,
       gameEpoch: auth.gameEpoch,
       ownerSessionId: auth.ownerSessionId,
+      ...(auth.ownerHistory !== undefined ? { ownerHistory: [...auth.ownerHistory] } : {}),
       items: newItems,
       publishQueue: newQueue,
       pending,
@@ -730,6 +734,35 @@ function assertOwner(auth, owner) {
     'TRAINING_OWNER_MISMATCH',
     `training authority는 ${current} 소유입니다(요청: ${owner ?? 'unnamed'}).`,
   );
+}
+
+function transferOwnerUnlocked(sessionDir, auth, ownerId, reason) {
+  if (!auth) return { transferred: false, authority: null };
+  const from = auth.ownerSessionId ?? null;
+  if (from === ownerId) return { transferred: false, authority: auth };
+  if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+    throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+  }
+  auth.ownerHistory = auth.ownerHistory ?? [];
+  auth.ownerSessionId = ownerId;
+  const entry = {
+    from,
+    to: ownerId,
+    reason,
+    at: new Date().toISOString(),
+  };
+  auth.ownerHistory.push(entry);
+  persistAuth(sessionDir, auth);
+  return { transferred: true, entry, authority: auth };
+}
+
+function terminalSession(sessionDir) {
+  try {
+    const state = readJsonSecure(path.join(sessionDir, 'loop-state.json'));
+    return state?.phase === 'done' || state?.phase === 'review_published';
+  } catch {
+    return false;
+  }
 }
 
 function loadAuthorityUnlocked(sessionDir) {
@@ -840,7 +873,11 @@ export function createTrainingControl({ storeDir, io } = {}) {
     return loadAuthorityUnlocked(sessionDir);
   }
 
-  async function migrateAuthority(sessionDir) {
+  async function migrateAuthority(sessionDir, { recoverOwnerId } = {}) {
+    if (recoverOwnerId !== undefined
+      && (typeof recoverOwnerId !== 'string' || recoverOwnerId === '')) {
+      throw coded('INVALID_RECOVERY_OWNER', 'resume recovery owner가 올바르지 않습니다.');
+    }
     return withMigrationLock(sessionDir, () => {
       let auth;
       try {
@@ -849,7 +886,32 @@ export function createTrainingControl({ storeDir, io } = {}) {
         if (error.code === 'ENOENT') return null;
         throw error;
       }
-      return migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+      const migration = migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+      if (recoverOwnerId === undefined || !migration) return migration;
+      const notices = migration.notices ?? [];
+      const recovered = transferOwnerUnlocked(
+        sessionDir,
+        loadAuthorityUnlocked(sessionDir),
+        recoverOwnerId,
+        'resume',
+      );
+      return recovered.authority ? { ...recovered.authority, notices } : migration;
+    });
+  }
+
+  async function takeoverOwner(sessionDir, ownerId, { reason } = {}) {
+    if (typeof ownerId !== 'string' || ownerId === '') {
+      throw coded('NO_TRAINING_OWNER', 'training owner가 필요합니다.');
+    }
+    if (reason !== 'terminal-session' && reason !== 'resume') {
+      throw coded('INVALID_TAKEOVER_REASON', `training owner takeover reason이 올바르지 않습니다: ${reason ?? '없음'}`);
+    }
+    return withLock(sessionDir, () => {
+      if (reason === 'terminal-session' && !terminalSession(sessionDir)) {
+        throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 training owner는 sweep이 인수할 수 없습니다.');
+      }
+      const auth = loadAuthorityUnlocked(sessionDir);
+      return transferOwnerUnlocked(sessionDir, auth, ownerId, reason);
     });
   }
 
@@ -934,12 +996,19 @@ export function createTrainingControl({ storeDir, io } = {}) {
     gameEpoch, owner, lastHand, handsDir,
   }) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir) ?? emptyAuth({ gameEpoch, owner });
+      let auth = loadAuthorityUnlocked(sessionDir);
+      if (auth) assertOwner(auth, owner);
+      else auth = emptyAuth({ gameEpoch, owner });
       if (auth.gameEpoch !== gameEpoch && Object.keys(auth.items).length) {
         throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
       }
       if (!Object.keys(auth.items).length && !Object.keys(auth.pending ?? {}).length) {
+        if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+          throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+        }
+        const ownerHistory = auth.ownerHistory;
         auth = emptyAuth({ gameEpoch, owner });
+        if (ownerHistory !== undefined) auth.ownerHistory = ownerHistory;
       }
       auth.gameEpoch = gameEpoch;
       auth.ownerSessionId = owner;
@@ -1200,36 +1269,56 @@ export function createTrainingControl({ storeDir, io } = {}) {
   async function consumeTrainingItems(sessionDir, { storeDir: consumeStore } = {}) {
     const activeStore = consumeStore ?? storeDir;
     if (activeStore && !profileConsumerReady(sessionDir)) {
-      return { skipped: true, profiled: 0, banked: 0, applied: 0 };
+      return {
+        skipped: true, profiled: 0, banked: 0, applied: 0, failed: 0,
+      };
     }
     return withLock(sessionDir, async () => {
       const auth = loadAuthorityUnlocked(sessionDir);
-      if (!auth) return { profiled: 0, banked: 0, applied: 0 };
+      if (!auth) return {
+        profiled: 0, banked: 0, applied: 0, failed: 0,
+      };
       let profiled = 0;
       let banked = 0;
       let applied = 0;
+      let failed = 0;
       if (activeStore) {
         const store = createProfileStore(activeStore);
         const bank = createMistakeBank(activeStore);
         for (const item of Object.values(auth.items)) {
           item.consumers = item.consumers ?? { published: false, profiled: false, banked: false };
-          if (!item.consumers.profiled) {
-            const result = await store.apply(item.summary);
-            if (result?.applied === true || result?.applied === false) {
-              item.consumers.profiled = true;
-              profiled += 1;
-              if (result.applied === true) applied += 1;
+          try {
+            let attempted = false;
+            if (!item.consumers.profiled) {
+              attempted = true;
+              const result = await store.apply(item.summary);
+              if (result?.applied === true || result?.applied === false) {
+                item.consumers.profiled = true;
+                profiled += 1;
+                if (result.applied === true) applied += 1;
+              }
             }
-          }
-          if (!item.consumers.banked) {
-            await bank.collect(item.summary);
-            item.consumers.banked = true;
-            banked += 1;
+            if (!item.consumers.banked) {
+              attempted = true;
+              await bank.collect(item.summary);
+              item.consumers.banked = true;
+              banked += 1;
+            }
+            if (attempted) delete item.consumers.lastError;
+          } catch (error) {
+            failed += 1;
+            item.consumers.lastError = {
+              code: error.code ?? 'ERROR',
+              at: new Date().toISOString(),
+            };
+          } finally {
+            persistAuth(sessionDir, auth);
           }
         }
       }
-      persistAuth(sessionDir, auth);
-      return { profiled, banked, applied };
+      return {
+        profiled, banked, applied, failed,
+      };
     });
   }
 
@@ -1238,6 +1327,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
     reconcile,
     loadAuthority,
     migrateAuthority,
+    takeoverOwner,
     pendingItems,
     markPublished,
     markConsumer,

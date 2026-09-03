@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { hostname } from 'node:os';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
-import { createProfileStore } from './training-stores.js';
+import { createMistakeBank, createProfileStore } from './training-stores.js';
 import { createTrainingControl } from './training-control.js';
-import { defaultEvaluate, toRunnerHandle } from './training-pipeline.js';
+import { defaultEvaluate, defaultSolve, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
@@ -12,6 +14,12 @@ export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
 const PRACTICE_FOCUS_DEST = ['.practice-focus.json'];
 const PRACTICE_FOCUS_KEYS = new Set(['schemaVersion', 'leaks', 'focus']);
 const PRACTICE_FOCUS_LEAK_KEYS = new Set(['id', 'recommendedDrill', 'severity', 'confidence']);
+const MIGRATION_MARKER_SEGMENTS = ['training', '.migration-v2.json'];
+const DIGEST_MAP_SEGMENTS = ['training', '.digest-map-v2.json'];
+const MIGRATION_MARKER_MAX_BYTES = 64 * 1024;
+const DIGEST_MAP_MAX_BYTES = 16 * 1024 * 1024;
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const SWEEP_OWNER_ID = `sweep:${process.pid}@${hostname()}:${new Date(performance.timeOrigin).toISOString()}`;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -59,27 +67,14 @@ function terminalForMigration(sessionDir) {
   }
 }
 
-function migrationNeeded(sessionDir) {
-  const auth = readJsonSecure(path.join(sessionDir, 'training', '.training-authority.json'));
-  if (auth?.schemaVersion === 1) return 'required';
-  let marker = null;
-  try {
-    marker = readJsonSecure(path.join(sessionDir, 'training', '.migration-v2.json'));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  if (marker?.status === 'in-progress') return 'required';
-  if (['session-done', 'complete'].includes(marker?.status)
-    && fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) return 'residual';
-  return null;
-}
-
 async function settleRunner(out) {
   const handle = toRunnerHandle(out);
   return handle.promise;
 }
 
-async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
+async function retryPendingMap(sessionDir, {
+  evaluate, solve, storeDir, owner,
+}) {
   const notices = [];
   let retried = 0;
   const tc = createTrainingControl({ storeDir });
@@ -90,22 +85,20 @@ async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
   for (const [decisionId, entry] of Object.entries(pending)) {
     if (entry?.adapterId) {
       try {
-        const evaluated = solve
-          ? await settleRunner(solve({
-            sessionDir,
-            decisionId,
-            handNo: entry.handNo,
-            adapterId: entry.adapterId,
-            pending: entry,
-          }))
-          : { ok: false, code: 'SOLVE_PENDING_UNMAPPED' };
+        const evaluated = await settleRunner((solve ?? defaultSolve)({
+          sessionDir,
+          decisionId,
+          handNo: entry.handNo,
+          adapterId: entry.adapterId,
+          pending: entry,
+        }));
         if (!evaluated?.ok) {
           await tc.recordPending(sessionDir, decisionId, {
             handNo: entry.handNo,
             reason: evaluated?.code ?? 'SOLVE_FAILED',
             adapterId: entry.adapterId,
             gameEpoch: auth.gameEpoch,
-            owner: auth.ownerSessionId,
+            owner,
           });
           notices.push(`solver pending ${decisionId}: ${evaluated?.code ?? 'SOLVE_FAILED'}`);
           continue;
@@ -117,7 +110,7 @@ async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
         }
         await tc.acceptEvaluations(sessionDir, {
           gameEpoch: auth.gameEpoch,
-          owner: auth.ownerSessionId,
+          owner,
           handNo: entry.handNo,
           evaluations: incoming,
         });
@@ -130,7 +123,7 @@ async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
             reason: error.code ?? 'SOLVE_FAILED',
             adapterId: entry.adapterId,
             gameEpoch: auth.gameEpoch,
-            owner: auth.ownerSessionId,
+            owner,
           });
         } catch { /* keep original pending */ }
       }
@@ -150,7 +143,7 @@ async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
             handNo,
             reason: evaluated?.code ?? 'EVALUATE_FAILED',
             gameEpoch: auth.gameEpoch,
-            owner: auth.ownerSessionId,
+            owner,
           });
         }
         notices.push(`evaluate pending hand ${handNo}: ${evaluated?.code ?? 'EVALUATE_FAILED'}`);
@@ -164,7 +157,7 @@ async function retryPendingMap(sessionDir, { evaluate, solve, storeDir }) {
       }
       await tc.acceptEvaluations(sessionDir, {
         gameEpoch: auth.gameEpoch,
-        owner: auth.ownerSessionId,
+        owner,
         handNo,
         evaluations: incoming,
       });
@@ -185,29 +178,27 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   let applied = 0;
   let profiled = 0;
   let banked = 0;
+  let failed = 0;
   let pendingRetried = 0;
   const tc = createTrainingControl({ storeDir });
   const runEvaluate = evaluate ?? defaultEvaluate;
+  const owner = SWEEP_OWNER_ID;
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
-      let migration = null;
-      const migrationKind = migrationNeeded(sessionDir);
-      if (migrationKind) {
-        const terminal = terminalForMigration(sessionDir);
-        if (!terminal && migrationKind === 'required') {
-          throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 authority는 sweep이 마이그레이션하지 않습니다.');
-        }
-        if (terminal) migration = await tc.migrateAuthority(sessionDir);
-        else notices.push('profile sweep notice: nonterminal residual publish attempt는 resume이 처리합니다.');
+      if (!terminalForMigration(sessionDir)) {
+        throw coded('SESSION_NOT_TERMINAL', '비terminal 세션은 profile sweep이 변경하지 않습니다.');
       }
+      const migration = await tc.migrateAuthority(sessionDir);
       for (const notice of migration?.notices ?? []) {
         notices.push(notice);
         onNotice?.(notice);
       }
+      await tc.takeoverOwner(sessionDir, owner, { reason: 'terminal-session' });
       const pendingOut = await retryPendingMap(sessionDir, {
         evaluate: runEvaluate,
         solve,
         storeDir,
+        owner,
       });
       for (const notice of pendingOut.notices) {
         notices.push(notice);
@@ -219,6 +210,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
       applied += consume.applied ?? 0;
       profiled += consume.profiled ?? 0;
       banked += consume.banked ?? 0;
+      failed += consume.failed ?? 0;
     } catch (error) {
       const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
       notices.push(notice);
@@ -235,7 +227,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
     onNotice?.(notice);
   }
   return {
-    applied, profiled, banked, pendingRetried, notices, profile,
+    applied, profiled, banked, failed, pendingRetried, notices, profile,
   };
 }
 
@@ -244,53 +236,113 @@ export async function applyEvaluation(storeDir, evaluation) {
   return store.apply(evaluation);
 }
 
-function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
-  const file = path.join(storeDir, '.training', 'mistakes.json');
+async function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
+  await createMistakeBank(storeDir).migrateDigests({ oldToNew, byEvaluationId });
+}
+
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function readContainedJson(root, segments, maxBytes, label) {
+  const bytes = openContained(root, segments, { maxBytes });
   try {
-    const data = readJsonSecure(file);
-    for (const item of data.items ?? []) {
-      const evaluation = item.evaluation;
-      if (!evaluation) continue;
-      const mapped = byEvaluationId[item.mistakeId]?.new
-        ?? oldToNew[evaluation.payloadSha256]
-        ?? evaluation.payloadSha256;
-      evaluation.payloadSha256 = mapped;
-    }
-    writeJsonSecure(file, data);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', `${label} JSON이 올바르지 않습니다.`);
   }
+}
+
+function validateMigrationMarker(marker) {
+  const allowed = new Set(['status', 'at', 'digestMapRef', 'completedAt']);
+  if (!plainObject(marker)
+    || Object.keys(marker).some((key) => !allowed.has(key))
+    || !['in-progress', 'session-done', 'complete'].includes(marker.status)) {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store migration marker 형식이 올바르지 않습니다.');
+  }
+  for (const key of ['at', 'completedAt']) {
+    if (marker[key] !== undefined
+      && (typeof marker[key] !== 'string' || Number.isNaN(Date.parse(marker[key])))) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', `session store migration marker ${key}가 올바르지 않습니다.`);
+    }
+  }
+  if (marker.digestMapRef !== undefined && marker.digestMapRef !== '.digest-map-v2.json') {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store migration digestMapRef가 올바르지 않습니다.');
+  }
+  return marker;
+}
+
+function validateDigestMap(map) {
+  if (!plainObject(map)
+    || Object.keys(map).some((key) => !['schemaVersion', 'oldToNew', 'byEvaluationId'].includes(key))
+    || map.schemaVersion !== 1
+    || !plainObject(map.oldToNew)
+    || !plainObject(map.byEvaluationId)) {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store digest map 형식이 올바르지 않습니다.');
+  }
+  for (const [oldDigest, newDigest] of Object.entries(map.oldToNew)) {
+    if (!SHA256_RE.test(oldDigest) || !SHA256_RE.test(newDigest)) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store digest map 값이 올바르지 않습니다.');
+    }
+  }
+  for (const entry of Object.values(map.byEvaluationId)) {
+    if (!plainObject(entry)
+      || Object.keys(entry).some((key) => key !== 'old' && key !== 'new')
+      || !SHA256_RE.test(entry.old)
+      || !SHA256_RE.test(entry.new)
+      || map.oldToNew[entry.old] !== entry.new) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store evaluation digest map 값이 올바르지 않습니다.');
+    }
+  }
+  return map;
 }
 
 export async function migrateStoreV2(storeDir, digestMapFile) {
-  const map = JSON.parse(fs.readFileSync(digestMapFile, 'utf8'));
-  const oldToNew = map.oldToNew ?? {};
-  const byEvaluationId = map.byEvaluationId ?? {};
+  const map = validateDigestMap(
+    typeof digestMapFile === 'string' ? readJsonSecure(digestMapFile) : digestMapFile,
+  );
+  const { oldToNew, byEvaluationId } = map;
   const store = createProfileStore(storeDir);
   const profile = await store.migrateDigests({ oldToNew, byEvaluationId });
-  resignMistakes(storeDir, { oldToNew, byEvaluationId });
+  await resignMistakes(storeDir, { oldToNew, byEvaluationId });
   return profile;
 }
 
-export async function completeSessionStoreMigration(storeDir, sessionDir) {
-  const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
-  if (!fs.existsSync(markerFile)) return { completed: false };
+export async function completeSessionStoreMigration(storeDir, sessionDir, {
+  write = writeContained,
+} = {}) {
   let marker;
   try {
-    marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-  } catch {
-    return { completed: false };
+    marker = validateMigrationMarker(readContainedJson(
+      sessionDir,
+      MIGRATION_MARKER_SEGMENTS,
+      MIGRATION_MARKER_MAX_BYTES,
+      'migration marker',
+    ));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { completed: false };
+    throw error;
   }
   if (marker.status === 'complete') return { completed: false };
   if (marker.status !== 'session-done') return { completed: false };
-  const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
-  if (!fs.existsSync(mapFile)) return { completed: false };
-  await migrateStoreV2(storeDir, mapFile);
-  fs.writeFileSync(markerFile, JSON.stringify({
+  let map;
+  try {
+    map = validateDigestMap(readContainedJson(
+      sessionDir,
+      DIGEST_MAP_SEGMENTS,
+      DIGEST_MAP_MAX_BYTES,
+      'digest map',
+    ));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { completed: false };
+    throw error;
+  }
+  await migrateStoreV2(storeDir, map);
+  write(sessionDir, MIGRATION_MARKER_SEGMENTS, JSON.stringify({
     ...marker,
     status: 'complete',
     completedAt: new Date().toISOString(),
-  }));
+  }), { mode: 'replace' });
   return { completed: true };
 }
 
@@ -301,7 +353,12 @@ export async function completeSessionStoreMigrations(storeDir) {
   const notices = [];
   for (const name of fs.readdirSync(sessionsRoot)) {
     try {
-      const result = await completeSessionStoreMigration(storeDir, path.join(sessionsRoot, name));
+      const sessionDir = path.join(sessionsRoot, name);
+      if (!terminalForMigration(sessionDir)) {
+        notices.push(`store migration 건너뜀 (${name}): SESSION_NOT_TERMINAL`);
+        continue;
+      }
+      const result = await completeSessionStoreMigration(storeDir, sessionDir);
       if (result.completed) completed += 1;
     } catch (error) {
       notices.push(`store migration 실패 (${name}): ${error.code ?? 'ERROR'}`);
@@ -473,6 +530,7 @@ async function main() {
     fs.writeSync(1, `${JSON.stringify({
       ok: true,
       applied: result.applied,
+      failed: result.failed,
       profile: result.profile,
       notices: result.notices,
     })}\n`);

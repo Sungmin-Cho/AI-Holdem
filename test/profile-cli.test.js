@@ -75,6 +75,7 @@ test('profile-cli apply/show/rebuild/reset/sweep', async () => {
     handNo: 9,
     evaluations: [second],
   });
+  fs.writeFileSync(path.join(sessionDir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
   const swept = run(['sweep', '--store-dir', storeDir]);
   assert.equal(swept.applied >= 1, true);
   const reset = run(['reset', '--store-dir', storeDir]);
@@ -147,6 +148,7 @@ test('defaultPracticeFocusFile rejects a practice-focus schema mismatch', async 
 function sessionDirOf(storeDir, id = '11111111-1111-4111-8111-111111111111') {
   const dir = path.join(storeDir, '.session-store', 'sessions', id);
   fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
   return dir;
 }
 
@@ -379,6 +381,7 @@ test('sweep skips nonterminal and missing-phase v1 sessions without migration wr
   writeV1ArchivedSession(playing, evaluationRow());
   writeV1ArchivedSession(missing, evaluationRow({ decisionId: 'd-2-preflop-0' }));
   fs.writeFileSync(path.join(playing, 'loop-state.json'), JSON.stringify({ phase: 'playing' }));
+  fs.unlinkSync(path.join(missing, 'loop-state.json'));
   const beforePlaying = fs.readFileSync(path.join(playing, 'training', '.training-authority.json'));
   const beforeMissing = fs.readFileSync(path.join(missing, 'training', '.training-authority.json'));
 

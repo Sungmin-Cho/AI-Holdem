@@ -337,6 +337,35 @@ test('migration writes in-progress then map → authority → jsonl → marker �
   assertCompleteMigration(dir, summary, { applied: true });
 });
 
+test('v1 migration preserves valid ownerHistory and rejects malformed history before writing', async () => {
+  const valid = tmp();
+  writeV1Session(valid);
+  const validPath = path.join(valid, 'training', '.training-authority.json');
+  const validAuth = readAuth(valid);
+  validAuth.ownerHistory = [
+    { from: 'owner-0', to: 'owner-1', reason: 'resume', at: '2026-09-04T00:00:00.000Z' },
+  ];
+  secureWriteJson(validPath, validAuth);
+
+  const migrated = await createTrainingControl().migrateAuthority(valid);
+  assert.deepEqual(migrated.ownerHistory, validAuth.ownerHistory);
+  assert.deepEqual(readAuth(valid).ownerHistory, validAuth.ownerHistory);
+
+  const malformed = tmp();
+  writeV1Session(malformed);
+  const malformedPath = path.join(malformed, 'training', '.training-authority.json');
+  const malformedAuth = readAuth(malformed);
+  malformedAuth.ownerHistory = {};
+  secureWriteJson(malformedPath, malformedAuth);
+  const before = treeSnapshot(malformed);
+
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(malformed),
+    { code: 'TRAINING_OWNER_HISTORY_INVALID' },
+  );
+  assert.deepEqual(treeSnapshot(malformed), before);
+});
+
 test('five-row migration re-entry table', async (t) => {
   await t.test('row 1: authority v1 + marker absent/in-progress + map absent/present → restart from the beginning', async () => {
     const cases = [

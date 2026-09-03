@@ -559,6 +559,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
   await first.requestStop().catch(() => {});
   await running.catch(() => {});
 
+  const resumeLogs = [];
   const resumed = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
@@ -567,6 +568,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
       waitMs: 40,
       opponentRuntime: 'policy',
       trainingEnabled: true,
+      log: (record) => resumeLogs.push(record),
       training: {
         evaluate: makeEvaluate(),
         explain: makeExplain(),
@@ -574,7 +576,13 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 4
     },
   });
   t.after(() => resumed.requestStop().catch(() => {}));
-  await resumed.resume();
+  const resumedState = await resumed.resume();
+  const resumedAuthority = createTrainingControl().loadAuthority(gameDir);
+  assert.equal(resumedAuthority.ownerSessionId, resumedState.ownerSessionId);
+  const ownerTransferAt = resumeLogs.findIndex((row) => row.event === 'training-owner-transferred');
+  const reconcileAt = resumeLogs.findIndex((row) => row.event === 'training-reconcile-registered');
+  assert.notEqual(ownerTransferAt, -1, 'no-store resume did not transfer training owner');
+  assert.equal(ownerTransferAt < reconcileAt, true, 'no-store reconcile started before owner transfer');
   startRun(resumed);
   await waitFor(() => {
     const auth = createTrainingControl().loadAuthority(gameDir);
