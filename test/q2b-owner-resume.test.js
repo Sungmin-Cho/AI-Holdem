@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { prepareSession } from '../engine/session-catalog.js';
@@ -170,6 +170,24 @@ async function leaveSigkilledStoreOwner(storeDir) {
   await killChild(child, 'SIGKILL');
 }
 
+async function leaveSigkilledTrainingOwner(sessionDir) {
+  const stateModule = pathToFileURL(path.join(ROOT, 'engine', 'state.js')).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+import { withNamedLock } from ${JSON.stringify(stateModule)};
+await withNamedLock(${JSON.stringify(sessionDir)}, 'training.lock.d', async () => {
+  process.stdout.write('locked\\n');
+  await new Promise(() => {});
+});
+`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let ready = false;
+  child.stdout.on('data', (chunk) => {
+    if (String(chunk).includes('locked')) ready = true;
+  });
+  await waitFor(() => ready, 'training lock owner did not start');
+  await killChild(child, 'SIGKILL');
+  assert.equal(fs.existsSync(path.join(sessionDir, 'training.lock.d')), true);
+}
+
 function fakeClaudeBin() {
   const binDir = tmp('holdem-q2b-bin-');
   const claude = path.join(binDir, 'claude');
@@ -287,6 +305,10 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
     second.stderr,
   );
   await killChild(second.child, 'SIGKILL');
+  await leaveSigkilledTrainingOwner(seeded.sessionDir);
+  await createTrainingControl({ storeDir }).migrateAuthority(seeded.sessionDir, {
+    recoverOwnerId: secondState.ownerSessionId,
+  });
   const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
 
   assert.equal(auth.ownerSessionId, secondState.ownerSessionId);
@@ -312,26 +334,90 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
   assert.equal(accepted.accepted.length, 1);
 });
 
-test('Q2b resume recovers a persisted loop owner before issuing the current owner', { timeout: 40_000 }, async (t) => {
+test('Q2b crash chain preserves exact A-to-B-to-C-to-D owner history', { timeout: 60_000 }, async (t) => {
   const storeDir = tmp();
   const seeded = seedCatalogSession(storeDir, 'playing', { ownerSessionId: 'authority-a' });
   writeLoopState(seeded.sessionDir, seeded.sessionToken, 'playing', 'persisted-b');
+  const binDir = fakeClaudeBin();
+  const launched = [];
+  t.after(async () => {
+    for (const run of launched) await cleanupSession(run.child, seeded.sessionDir);
+  });
+  await leaveSigkilledStoreOwner(storeDir);
+  const tc = createTrainingControl({ storeDir });
+
+  const first = launchResume(storeDir, binDir);
+  launched.push(first);
+  const currentC = await waitForOwnerRotation(seeded.sessionDir, 'persisted-b', first.stderr);
+  await waitFor(
+    () => tc.loadAuthority(seeded.sessionDir)?.ownerSessionId === currentC.ownerSessionId,
+    'first resume did not publish training authority',
+  );
+  await killChild(first.child, 'SIGKILL');
+  await tc.migrateAuthority(seeded.sessionDir, { recoverOwnerId: currentC.ownerSessionId });
+
+  const second = launchResume(storeDir, binDir);
+  launched.push(second);
+  const currentD = await waitForOwnerRotation(seeded.sessionDir, currentC.ownerSessionId, second.stderr);
+  await waitFor(
+    () => tc.loadAuthority(seeded.sessionDir)?.ownerSessionId === currentD.ownerSessionId,
+    'second resume did not publish training authority',
+  );
+  await killChild(second.child, 'SIGKILL');
+  await tc.migrateAuthority(seeded.sessionDir, { recoverOwnerId: currentD.ownerSessionId });
+  const auth = tc.loadAuthority(seeded.sessionDir);
+
+  assert.equal(auth.ownerSessionId, currentD.ownerSessionId);
+  assert.deepEqual(
+    auth.ownerHistory.map(({ from, to, reason }) => ({ from, to, reason })),
+    [
+      { from: 'authority-a', to: 'persisted-b', reason: 'resume' },
+      { from: 'persisted-b', to: currentC.ownerSessionId, reason: 'resume' },
+      { from: currentC.ownerSessionId, to: currentD.ownerSessionId, reason: 'resume' },
+    ],
+  );
+});
+
+test('Q2b migration failure halts before rotating the persisted loop owner', { timeout: 30_000 }, async (t) => {
+  const storeDir = tmp();
+  const seeded = seedCatalogSession(storeDir, 'playing');
+  fs.writeFileSync(
+    path.join(seeded.sessionDir, 'training', '.migration-v2.json'),
+    JSON.stringify({ status: 'in-progress' }),
+  );
   const binDir = fakeClaudeBin();
   await leaveSigkilledStoreOwner(storeDir);
   const run = launchResume(storeDir, binDir);
   t.after(() => cleanupSession(run.child, seeded.sessionDir));
 
-  const resumed = await waitForOwnerRotation(seeded.sessionDir, 'persisted-b', run.stderr);
+  const halted = await waitFor(() => {
+    const state = readJson(path.join(seeded.sessionDir, 'loop-state.json'));
+    return state.halt?.source === 'training-migration' ? state : null;
+  }, `migration failure did not halt: ${run.stderr()}`);
   await killChild(run.child, 'SIGKILL');
-  const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
 
-  assert.equal(auth.ownerSessionId, resumed.ownerSessionId);
-  assert.deepEqual(
-    auth.ownerHistory.map(({ from, to, reason }) => ({ from, to, reason })),
-    [
-      { from: 'authority-a', to: 'persisted-b', reason: 'resume' },
-      { from: 'persisted-b', to: resumed.ownerSessionId, reason: 'resume' },
-    ],
+  assert.equal(halted.ownerSessionId, 'owner-0');
+  assert.equal(halted.halt.code, 'TRAINING_MIGRATION_CORRUPT');
+});
+
+test('Q2b takeover failure becomes a durable training-owner halt before producer work', { timeout: 30_000 }, async (t) => {
+  const storeDir = tmp();
+  const seeded = seedCatalogSession(storeDir, 'playing', { ownerHistory: {} });
+  const binDir = fakeClaudeBin();
+  await leaveSigkilledStoreOwner(storeDir);
+  const run = launchResume(storeDir, binDir);
+  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+
+  const halted = await waitFor(() => {
+    const state = readJson(path.join(seeded.sessionDir, 'loop-state.json'));
+    return state.halt?.source === 'training-owner' ? state : null;
+  }, `takeover failure did not halt: ${run.stderr()}`);
+  await killChild(run.child, 'SIGKILL');
+
+  assert.equal(halted.halt.code, 'TRAINING_OWNER_HISTORY_INVALID');
+  assert.equal(
+    readLoopLog(seeded.sessionDir).some((entry) => entry.event === 'training-reconcile-registered'),
+    false,
   );
 });
 

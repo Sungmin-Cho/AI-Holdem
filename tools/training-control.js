@@ -733,6 +733,26 @@ function assertOwner(auth, owner) {
   );
 }
 
+function transferOwnerUnlocked(sessionDir, auth, ownerId, reason) {
+  if (!auth) return { transferred: false, authority: null };
+  const from = auth.ownerSessionId ?? null;
+  if (from === ownerId) return { transferred: false, authority: auth };
+  if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
+    throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
+  }
+  auth.ownerHistory = auth.ownerHistory ?? [];
+  auth.ownerSessionId = ownerId;
+  const entry = {
+    from,
+    to: ownerId,
+    reason,
+    at: new Date().toISOString(),
+  };
+  auth.ownerHistory.push(entry);
+  persistAuth(sessionDir, auth);
+  return { transferred: true, entry, authority: auth };
+}
+
 function terminalSession(sessionDir) {
   try {
     const state = readJsonSecure(path.join(sessionDir, 'loop-state.json'));
@@ -850,7 +870,11 @@ export function createTrainingControl({ storeDir, io } = {}) {
     return loadAuthorityUnlocked(sessionDir);
   }
 
-  async function migrateAuthority(sessionDir) {
+  async function migrateAuthority(sessionDir, { recoverOwnerId } = {}) {
+    if (recoverOwnerId !== undefined
+      && (typeof recoverOwnerId !== 'string' || recoverOwnerId === '')) {
+      throw coded('INVALID_RECOVERY_OWNER', 'resume recovery owner가 올바르지 않습니다.');
+    }
     return withMigrationLock(sessionDir, () => {
       let auth;
       try {
@@ -859,55 +883,32 @@ export function createTrainingControl({ storeDir, io } = {}) {
         if (error.code === 'ENOENT') return null;
         throw error;
       }
-      return migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+      const migration = migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+      if (recoverOwnerId === undefined || !migration) return migration;
+      const notices = migration.notices ?? [];
+      const recovered = transferOwnerUnlocked(
+        sessionDir,
+        loadAuthorityUnlocked(sessionDir),
+        recoverOwnerId,
+        'resume',
+      );
+      return recovered.authority ? { ...recovered.authority, notices } : migration;
     });
   }
 
-  async function takeoverOwner(sessionDir, ownerId, { reason, recoverOwnerId } = {}) {
+  async function takeoverOwner(sessionDir, ownerId, { reason } = {}) {
     if (typeof ownerId !== 'string' || ownerId === '') {
       throw coded('NO_TRAINING_OWNER', 'training owner가 필요합니다.');
     }
     if (reason !== 'terminal-session' && reason !== 'resume') {
       throw coded('INVALID_TAKEOVER_REASON', `training owner takeover reason이 올바르지 않습니다: ${reason ?? '없음'}`);
     }
-    if (recoverOwnerId !== undefined
-      && (reason !== 'resume' || typeof recoverOwnerId !== 'string' || recoverOwnerId === '')) {
-      throw coded('INVALID_RECOVERY_OWNER', 'resume recovery owner가 올바르지 않습니다.');
-    }
     return withLock(sessionDir, () => {
       if (reason === 'terminal-session' && !terminalSession(sessionDir)) {
         throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 training owner는 sweep이 인수할 수 없습니다.');
       }
       const auth = loadAuthorityUnlocked(sessionDir);
-      if (!auth) return { transferred: false, authority: null };
-      const from = auth.ownerSessionId ?? null;
-      if (from === ownerId) return { transferred: false, authority: auth };
-      if (auth.ownerHistory !== undefined && !Array.isArray(auth.ownerHistory)) {
-        throw coded('TRAINING_OWNER_HISTORY_INVALID', 'training ownerHistory가 배열이 아닙니다.');
-      }
-      auth.ownerHistory = auth.ownerHistory ?? [];
-      const transferTo = (to) => {
-        const transferFrom = auth.ownerSessionId ?? null;
-        if (transferFrom === to) return null;
-        auth.ownerSessionId = to;
-        const entry = {
-          from: transferFrom,
-          to,
-          reason,
-          at: new Date().toISOString(),
-        };
-        auth.ownerHistory.push(entry);
-        return entry;
-      };
-      let recovered = null;
-      if (recoverOwnerId !== undefined && recoverOwnerId !== ownerId) {
-        recovered = transferTo(recoverOwnerId);
-        if (recovered) persistAuth(sessionDir, auth);
-      }
-      const entry = transferTo(ownerId);
-      if (!entry && !recovered) return { transferred: false, authority: auth };
-      persistAuth(sessionDir, auth);
-      return { transferred: true, entry: entry ?? recovered, authority: auth };
+      return transferOwnerUnlocked(sessionDir, auth, ownerId, reason);
     });
   }
 

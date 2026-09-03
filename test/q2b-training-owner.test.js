@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import {
+  completeSessionStoreMigration,
   completeSessionStoreMigrations,
   sweepStore,
 } from '../tools/profile-cli.js';
@@ -292,6 +293,111 @@ test('Q2b completeSessionStoreMigrations gates v2 session-done writes on termina
   assert.equal(result.completed, 0);
   assert.equal(result.notices.some((notice) => /SESSION_NOT_TERMINAL/.test(notice)), true);
   assert.deepEqual(fileHashes(path.join(sessionDir, 'training')), before);
+});
+
+function writeSessionDoneMigration(sessionDir, map = {
+  schemaVersion: 1,
+  oldToNew: {},
+  byEvaluationId: {},
+}) {
+  fs.writeFileSync(
+    path.join(sessionDir, 'training', '.migration-v2.json'),
+    JSON.stringify({
+      status: 'session-done',
+      at: '2026-09-04T00:00:00.000Z',
+      digestMapRef: '.digest-map-v2.json',
+    }),
+  );
+  fs.writeFileSync(
+    path.join(sessionDir, 'training', '.digest-map-v2.json'),
+    JSON.stringify(map),
+  );
+}
+
+test('Q2b session store migration rejects symlinked marker and map without outside or store writes', async () => {
+  for (const linked of ['marker', 'map']) {
+    const storeDir = tmp();
+    const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+    writeSessionDoneMigration(sessionDir);
+    const target = path.join(tmp('holdem-q2b-outside-'), `${linked}.json`);
+    fs.writeFileSync(target, JSON.stringify(linked === 'marker'
+      ? { status: 'session-done' }
+      : { schemaVersion: 1, oldToNew: {}, byEvaluationId: {} }));
+    const before = fs.readFileSync(target);
+    const linkedPath = path.join(
+      sessionDir,
+      'training',
+      linked === 'marker' ? '.migration-v2.json' : '.digest-map-v2.json',
+    );
+    fs.unlinkSync(linkedPath);
+    fs.symlinkSync(target, linkedPath);
+
+    await assert.rejects(
+      completeSessionStoreMigration(storeDir, sessionDir),
+      { code: 'UNSAFE_PATH' },
+    );
+
+    assert.deepEqual(fs.readFileSync(target), before);
+    assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
+  }
+});
+
+test('Q2b malformed digest map fails before profile or mistake migration', async () => {
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  writeSessionDoneMigration(sessionDir, {
+    schemaVersion: 1,
+    oldToNew: { malformed: 'aa'.repeat(32) },
+    byEvaluationId: {},
+  });
+
+  await assert.rejects(
+    completeSessionStoreMigration(storeDir, sessionDir),
+    { code: 'TRAINING_STORE_MIGRATION_CORRUPT' },
+  );
+
+  assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
+  assert.equal(
+    JSON.parse(fs.readFileSync(
+      path.join(sessionDir, 'training', '.migration-v2.json'),
+      'utf8',
+    )).status,
+    'session-done',
+  );
+});
+
+test('Q2b complete marker publication is atomic, retryable, and idempotent', async () => {
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  writeSessionDoneMigration(sessionDir);
+  const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
+  const before = fs.readFileSync(markerPath);
+  const injected = new Error('injected marker publication failure');
+  injected.code = 'INJECTED_MARKER_WRITE';
+
+  await assert.rejects(
+    completeSessionStoreMigration(storeDir, sessionDir, {
+      write: () => { throw injected; },
+    }),
+    { code: 'INJECTED_MARKER_WRITE' },
+  );
+  assert.deepEqual(fs.readFileSync(markerPath), before);
+
+  const completed = await completeSessionStoreMigration(storeDir, sessionDir);
+  assert.equal(completed.completed, true);
+  assert.equal(fs.lstatSync(markerPath).isFile(), true);
+  assert.equal(fs.lstatSync(markerPath).isSymbolicLink(), false);
+  assert.equal(JSON.parse(fs.readFileSync(markerPath, 'utf8')).status, 'complete');
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(markerPath)).filter((name) => name.includes('.tmp')),
+    [],
+  );
+  const completeBytes = fs.readFileSync(markerPath);
+  assert.deepEqual(
+    await completeSessionStoreMigration(storeDir, sessionDir),
+    { completed: false },
+  );
+  assert.deepEqual(fs.readFileSync(markerPath), completeBytes);
 });
 
 test('Q2b consumeTrainingItems persists each item outcome and continues after a failure', async () => {

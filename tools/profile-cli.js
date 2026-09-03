@@ -14,6 +14,11 @@ export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
 const PRACTICE_FOCUS_DEST = ['.practice-focus.json'];
 const PRACTICE_FOCUS_KEYS = new Set(['schemaVersion', 'leaks', 'focus']);
 const PRACTICE_FOCUS_LEAK_KEYS = new Set(['id', 'recommendedDrill', 'severity', 'confidence']);
+const MIGRATION_MARKER_SEGMENTS = ['training', '.migration-v2.json'];
+const DIGEST_MAP_SEGMENTS = ['training', '.digest-map-v2.json'];
+const MIGRATION_MARKER_MAX_BYTES = 64 * 1024;
+const DIGEST_MAP_MAX_BYTES = 16 * 1024 * 1024;
+const SHA256_RE = /^[0-9a-f]{64}$/;
 const SWEEP_OWNER_ID = `sweep:${process.pid}@${hostname()}:${new Date(performance.timeOrigin).toISOString()}`;
 
 function coded(code, message) {
@@ -235,35 +240,109 @@ async function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) 
   await createMistakeBank(storeDir).migrateDigests({ oldToNew, byEvaluationId });
 }
 
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function readContainedJson(root, segments, maxBytes, label) {
+  const bytes = openContained(root, segments, { maxBytes });
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', `${label} JSON이 올바르지 않습니다.`);
+  }
+}
+
+function validateMigrationMarker(marker) {
+  const allowed = new Set(['status', 'at', 'digestMapRef', 'completedAt']);
+  if (!plainObject(marker)
+    || Object.keys(marker).some((key) => !allowed.has(key))
+    || !['in-progress', 'session-done', 'complete'].includes(marker.status)) {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store migration marker 형식이 올바르지 않습니다.');
+  }
+  for (const key of ['at', 'completedAt']) {
+    if (marker[key] !== undefined
+      && (typeof marker[key] !== 'string' || Number.isNaN(Date.parse(marker[key])))) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', `session store migration marker ${key}가 올바르지 않습니다.`);
+    }
+  }
+  if (marker.digestMapRef !== undefined && marker.digestMapRef !== '.digest-map-v2.json') {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store migration digestMapRef가 올바르지 않습니다.');
+  }
+  return marker;
+}
+
+function validateDigestMap(map) {
+  if (!plainObject(map)
+    || Object.keys(map).some((key) => !['schemaVersion', 'oldToNew', 'byEvaluationId'].includes(key))
+    || map.schemaVersion !== 1
+    || !plainObject(map.oldToNew)
+    || !plainObject(map.byEvaluationId)) {
+    throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store digest map 형식이 올바르지 않습니다.');
+  }
+  for (const [oldDigest, newDigest] of Object.entries(map.oldToNew)) {
+    if (!SHA256_RE.test(oldDigest) || !SHA256_RE.test(newDigest)) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store digest map 값이 올바르지 않습니다.');
+    }
+  }
+  for (const entry of Object.values(map.byEvaluationId)) {
+    if (!plainObject(entry)
+      || Object.keys(entry).some((key) => key !== 'old' && key !== 'new')
+      || !SHA256_RE.test(entry.old)
+      || !SHA256_RE.test(entry.new)
+      || map.oldToNew[entry.old] !== entry.new) {
+      throw coded('TRAINING_STORE_MIGRATION_CORRUPT', 'session store evaluation digest map 값이 올바르지 않습니다.');
+    }
+  }
+  return map;
+}
+
 export async function migrateStoreV2(storeDir, digestMapFile) {
-  const map = JSON.parse(fs.readFileSync(digestMapFile, 'utf8'));
-  const oldToNew = map.oldToNew ?? {};
-  const byEvaluationId = map.byEvaluationId ?? {};
+  const map = validateDigestMap(
+    typeof digestMapFile === 'string' ? readJsonSecure(digestMapFile) : digestMapFile,
+  );
+  const { oldToNew, byEvaluationId } = map;
   const store = createProfileStore(storeDir);
   const profile = await store.migrateDigests({ oldToNew, byEvaluationId });
   await resignMistakes(storeDir, { oldToNew, byEvaluationId });
   return profile;
 }
 
-export async function completeSessionStoreMigration(storeDir, sessionDir) {
-  const markerFile = path.join(sessionDir, 'training', '.migration-v2.json');
-  if (!fs.existsSync(markerFile)) return { completed: false };
+export async function completeSessionStoreMigration(storeDir, sessionDir, {
+  write = writeContained,
+} = {}) {
   let marker;
   try {
-    marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-  } catch {
-    return { completed: false };
+    marker = validateMigrationMarker(readContainedJson(
+      sessionDir,
+      MIGRATION_MARKER_SEGMENTS,
+      MIGRATION_MARKER_MAX_BYTES,
+      'migration marker',
+    ));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { completed: false };
+    throw error;
   }
   if (marker.status === 'complete') return { completed: false };
   if (marker.status !== 'session-done') return { completed: false };
-  const mapFile = path.join(sessionDir, 'training', '.digest-map-v2.json');
-  if (!fs.existsSync(mapFile)) return { completed: false };
-  await migrateStoreV2(storeDir, mapFile);
-  fs.writeFileSync(markerFile, JSON.stringify({
+  let map;
+  try {
+    map = validateDigestMap(readContainedJson(
+      sessionDir,
+      DIGEST_MAP_SEGMENTS,
+      DIGEST_MAP_MAX_BYTES,
+      'digest map',
+    ));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { completed: false };
+    throw error;
+  }
+  await migrateStoreV2(storeDir, map);
+  write(sessionDir, MIGRATION_MARKER_SEGMENTS, JSON.stringify({
     ...marker,
     status: 'complete',
     completedAt: new Date().toISOString(),
-  }));
+  }), { mode: 'replace' });
   return { completed: true };
 }
 

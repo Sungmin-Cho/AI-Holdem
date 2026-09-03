@@ -4700,9 +4700,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return resumed;
       }
 
-      if (storeDir) {
+      if (trainingOn) {
         try {
-          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
+          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root, {
+            ...(typeof state?.ownerSessionId === 'string' && state.ownerSessionId !== ''
+              ? { recoverOwnerId: state.ownerSessionId }
+              : {}),
+          });
           trainingMigrationNotices = migration?.notices ?? [];
         } catch (error) {
           trainingMigrationError = error;
@@ -4712,8 +4716,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       }
 
-      const ownerSessionId = randomUUID();
-      const persistedOwnerSessionId = state?.ownerSessionId;
       const resumeNotices = [...new Set([
         ...(Array.isArray(state?.notices)
           ? state.notices.filter((notice) => (
@@ -4722,6 +4724,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           : []),
         ...trainingMigrationNotices,
       ])];
+      if (trainingMigrationError) {
+        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
+        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
+        state = writeLoopState({
+          halt: { code, message, source: 'training-migration' },
+          notices: resumeNotices,
+        });
+        log('training-migration-halt', { code });
+        return state;
+      }
+
+      const ownerSessionId = randomUUID();
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({
@@ -4744,28 +4758,38 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
       }
 
-      if (trainingMigrationError) {
-        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
-        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
-        state = writeLoopState({
-          halt: { code, message, source: 'training-migration' },
-          notices: resumeNotices,
-        });
-        log('training-migration-halt', { code });
-        return state;
-      }
       if (state.halt?.source === 'training-migration') {
         state = writeLoopState({ halt: undefined });
       }
 
-      if (storeDir) {
-        await createTrainingControl({ storeDir })
-          .takeoverOwner(root, ownerSessionId, {
-            reason: 'resume',
-            ...(typeof persistedOwnerSessionId === 'string' && persistedOwnerSessionId !== ''
-              ? { recoverOwnerId: persistedOwnerSessionId }
-              : {}),
+      if (trainingOn) {
+        try {
+          const takeover = await createTrainingControl({ storeDir })
+            .takeoverOwner(root, ownerSessionId, { reason: 'resume' });
+          log('training-owner-transferred', {
+            ownerSessionId,
+            transferred: takeover.transferred,
           });
+        } catch (error) {
+          const code = error.code ?? 'TRAINING_OWNER_TAKEOVER_FAILED';
+          const message = `training owner 교대를 완료할 수 없습니다 (${code}).`;
+          const notices = [...new Set([
+            ...resumeNotices,
+            `training owner halt: ${code}`,
+          ])];
+          state = writeLoopState({
+            halt: { code, message, source: 'training-owner' },
+            notices,
+          });
+          log('training-owner-halt', { code });
+          return state;
+        }
+        if (state.halt?.source === 'training-owner') {
+          state = writeLoopState({ halt: undefined });
+        }
+      }
+
+      if (storeDir) {
         try {
           await completeSessionStoreMigration(storeDir, root);
         } catch (error) {
