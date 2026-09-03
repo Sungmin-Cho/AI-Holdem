@@ -50,6 +50,30 @@ function listTrainingSessions(storeDir) {
     .filter((dir) => fs.existsSync(path.join(dir, 'training', '.training-authority.json')));
 }
 
+function terminalForMigration(sessionDir) {
+  try {
+    const state = readJsonSecure(path.join(sessionDir, 'loop-state.json'));
+    return state?.phase === 'done' || state?.phase === 'review_published';
+  } catch {
+    return false;
+  }
+}
+
+function migrationNeeded(sessionDir) {
+  const auth = readJsonSecure(path.join(sessionDir, 'training', '.training-authority.json'));
+  if (auth?.schemaVersion === 1) return 'required';
+  let marker = null;
+  try {
+    marker = readJsonSecure(path.join(sessionDir, 'training', '.migration-v2.json'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (marker?.status === 'in-progress') return 'required';
+  if (['session-done', 'complete'].includes(marker?.status)
+    && fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) return 'residual';
+  return null;
+}
+
 async function settleRunner(out) {
   const handle = toRunnerHandle(out);
   return handle.promise;
@@ -166,6 +190,20 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   const runEvaluate = evaluate ?? defaultEvaluate;
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
+      let migration = null;
+      const migrationKind = migrationNeeded(sessionDir);
+      if (migrationKind) {
+        const terminal = terminalForMigration(sessionDir);
+        if (!terminal && migrationKind === 'required') {
+          throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 authority는 sweep이 마이그레이션하지 않습니다.');
+        }
+        if (terminal) migration = await tc.migrateAuthority(sessionDir);
+        else notices.push('profile sweep notice: nonterminal residual publish attempt는 resume이 처리합니다.');
+      }
+      for (const notice of migration?.notices ?? []) {
+        notices.push(notice);
+        onNotice?.(notice);
+      }
       const pendingOut = await retryPendingMap(sessionDir, {
         evaluate: runEvaluate,
         solve,

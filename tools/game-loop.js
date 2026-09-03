@@ -4669,14 +4669,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await acquireLoopLock({ mode: 'resume' });
     }
     let lifecycleStarted = false;
+    let trainingMigrationNotices = [];
+    let trainingMigrationError = null;
     try {
       if (storeDir) {
         try {
-          await completeSessionStoreMigrations(storeDir);
+          const migration = await createTrainingControl({ storeDir }).migrateAuthority(root);
+          trainingMigrationNotices = migration?.notices ?? [];
+          try {
+            await completeSessionStoreMigrations(storeDir);
+          } catch (error) {
+            log('profile-migration-error', { code: error.code ?? 'ERROR' });
+          }
+          await consumeTrainingNow();
         } catch (error) {
-          log('profile-migration-error', { code: error.code ?? 'ERROR' });
+          trainingMigrationError = error;
+          trainingMigrationNotices = [
+            `training migration halt: ${error.code ?? 'ERROR'}`,
+          ];
         }
-        await consumeTrainingNow();
       }
       const engineState = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       let state = readLoopState();
@@ -4698,6 +4709,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       lifecycleStarted = true;
 
       const ownerSessionId = randomUUID();
+      const resumeNotices = [...new Set([
+        ...(Array.isArray(state?.notices)
+          ? state.notices.filter((notice) => (
+            trainingMigrationError || !String(notice).startsWith('training migration halt:')
+          ))
+          : []),
+        ...trainingMigrationNotices,
+      ])];
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({
@@ -4712,12 +4731,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           playerRuntime: null,
           upperRuntime: null,
           startedAt: isoNow(now),
-          notices: [],
+          notices: resumeNotices,
           metrics: [],
           opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
         });
       } else {
-        state = writeLoopState({ ownerSessionId, stopping: false });
+        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
+      }
+
+      if (trainingMigrationError) {
+        const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
+        const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
+        state = writeLoopState({
+          halt: { code, message, source: 'training-migration' },
+          notices: resumeNotices,
+        });
+        log('training-migration-halt', { code });
+        return state;
+      }
+      if (state.halt?.source === 'training-migration') {
+        state = writeLoopState({ halt: undefined });
       }
 
       let phase = state.phase;

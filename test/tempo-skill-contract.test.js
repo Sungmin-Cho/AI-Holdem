@@ -122,7 +122,7 @@ test('종료 보고: done·halt 분기와 세 halt 코드의 사용자 안내가
   assert.match(done, /phase가 done/);
   assert.match(done, /finishedAt/);
   assert.match(done, /halt/);
-  for (const code of ['REVIEW_FAILED', 'repair_failed', 'NO_PLAYER_RUNTIME']) {
+  for (const code of ['REVIEW_FAILED', 'repair_failed', 'NO_PLAYER_RUNTIME', 'TRAINING_MIGRATION_CORRUPT']) {
     assert.ok(done.includes(code), `종료 보고에 ${code} 안내가 없다`);
   }
   assert.match(done, /review\.md/);

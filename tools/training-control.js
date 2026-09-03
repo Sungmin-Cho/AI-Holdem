@@ -8,6 +8,8 @@ import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   detailRefOf,
+  legacyExplanationAnnotation,
+  legacyTrainingPayloadSha256,
   projectTrainingAnnotation,
   projectTrainingSummary,
   sha256Hex,
@@ -139,8 +141,78 @@ function readMarker(sessionDir) {
   try {
     return readJsonSecure(markerPath(sessionDir));
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (error.code === 'ENOENT') return undefined;
     throw error;
+  }
+}
+
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function validateMigrationMarker(marker) {
+  if (marker === undefined) return null;
+  if (!plainObject(marker)
+    || !['in-progress', 'session-done', 'complete'].includes(marker.status)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'training migration marker가 올바르지 않습니다.');
+  }
+  return marker;
+}
+
+function validateV2Items(auth) {
+  if (!plainObject(auth?.items)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training authority items가 올바르지 않습니다.');
+  }
+}
+
+function readDigestMapForMigration(sessionDir) {
+  let map;
+  try {
+    map = readJsonSecure(digestMapPath(sessionDir));
+  } catch {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map을 안전하게 읽을 수 없습니다.');
+  }
+  if (!plainObject(map) || map.schemaVersion !== 1
+    || !plainObject(map.oldToNew) || !plainObject(map.byEvaluationId)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map 형식이 올바르지 않습니다.');
+  }
+  const digest = /^[0-9a-f]{64}$/;
+  for (const [oldDigest, newDigest] of Object.entries(map.oldToNew)) {
+    if (!digest.test(oldDigest) || !digest.test(newDigest)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map 값이 올바르지 않습니다.');
+    }
+  }
+  for (const entry of Object.values(map.byEvaluationId)) {
+    if (!plainObject(entry) || !digest.test(entry.old) || !digest.test(entry.new)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map evaluation 항목이 올바르지 않습니다.');
+    }
+  }
+  return map;
+}
+
+function validateV2AuthorityAgainstMap(auth, map) {
+  validateV2Items(auth);
+  const ids = Object.keys(auth.items).sort();
+  if (Object.keys(map.byEvaluationId).sort().join('\0') !== ids.join('\0')) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map coverage가 authority items와 다릅니다.');
+  }
+  for (const [id, item] of Object.entries(auth.items)) {
+    if (!plainObject(item) || item.evaluationId !== id || !plainObject(item.summary)
+      || item.summary.evaluationId !== id || typeof item.payloadSha256 !== 'string') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training item 형식이 올바르지 않습니다.');
+    }
+    let projected;
+    try {
+      projected = projectTrainingSummary(item.summary);
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training item summary가 올바르지 않습니다.');
+    }
+    const mapping = map.byEvaluationId[id];
+    if (projected.payloadSha256 !== item.payloadSha256
+      || mapping.new !== item.payloadSha256
+      || map.oldToNew[mapping.old] !== mapping.new) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 item과 digest map이 일치하지 않습니다.');
+    }
   }
 }
 
@@ -185,197 +257,467 @@ export function readAnnotationExactFile(sessionDir, detailRef, field) {
   return JSON.parse(buf.toString('utf8'));
 }
 
-function resolveV1Attempt(sessionDir, items) {
+function currentPayloadFor(id, payloadSha256, items, digestMap) {
+  const current = items[id]?.payloadSha256;
+  if (typeof current !== 'string' || typeof payloadSha256 !== 'string') return null;
+  if (payloadSha256 === current) return current;
+  return digestMap?.oldToNew?.[payloadSha256] === current ? current : null;
+}
+
+function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
   const attemptFile = path.join(sessionDir, '.publish-attempt.json');
-  if (!fs.existsSync(attemptFile)) return;
   let record;
   try {
-    record = JSON.parse(fs.readFileSync(attemptFile, 'utf8'));
-  } catch {
-    return;
+    record = JSON.parse(openContained(sessionDir, ['.publish-attempt.json'], {
+      maxBytes: 1_000_000,
+    }).toString('utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return {
+        resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+      };
+    }
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt 파일을 안전하게 읽을 수 없습니다.');
   }
   const trainingAuthz = record.trainingAuthority;
   const bodyTraining = Array.isArray(record.body?.training) ? record.body.training : [];
   const isTrainingAttempt = Boolean(trainingAuthz) || bodyTraining.length > 0;
-  if (!isTrainingAttempt) return;
-  const v1Shape = Boolean(trainingAuthz?.evaluationId) && !Array.isArray(trainingAuthz?.items);
-  if (!v1Shape && !bodyTraining.length) return;
-  const evalIds = Array.isArray(trainingAuthz?.items)
-    ? trainingAuthz.items.map((entry) => entry.evaluationId)
-    : [
-      trainingAuthz?.evaluationId,
-      ...bodyTraining.map((row) => row?.evaluationId),
-    ].filter(Boolean);
+  if (!isTrainingAttempt) {
+    return {
+      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
+    };
+  }
+  const epochPattern = /^[0-9a-f]{64}$/;
+  if (!epochPattern.test(gameEpoch)
+    || !epochPattern.test(record.expectedGameEpoch)
+    || !epochPattern.test(trainingAuthz?.expectedGameEpoch)
+    || record.expectedGameEpoch !== gameEpoch
+    || trainingAuthz?.expectedGameEpoch !== gameEpoch) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt epoch가 authority와 일치하지 않습니다.');
+  }
+  const attemptId = record.body?.publishId;
+  if (!Number.isSafeInteger(attemptId) || attemptId <= 0) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt id가 올바르지 않습니다.');
+  }
+  const authorityEntries = Array.isArray(trainingAuthz?.items)
+    ? trainingAuthz.items
+    : (trainingAuthz?.evaluationId ? [trainingAuthz] : []);
+  if (bodyTraining.length === 0 || authorityEntries.length === 0) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 비어 있습니다.');
+  }
+  const collectEntries = (entries, label, { verifyBody = false } = {}) => {
+    const collected = new Map();
+    for (const entry of entries) {
+      if (!plainObject(entry) || typeof entry.evaluationId !== 'string'
+        || typeof entry.payloadSha256 !== 'string' || collected.has(entry.evaluationId)) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', `${label} 항목이 올바르지 않습니다.`);
+      }
+      const current = currentPayloadFor(entry.evaluationId, entry.payloadSha256, items, digestMap);
+      if (!current) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', `${label} digest가 authority와 일치하지 않습니다.`);
+      }
+      if (verifyBody) {
+        if (entry.payloadSha256 === current && Object.hasOwn(entry, 'explanation')) {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} current body에 unsigned explanation이 있습니다.`);
+        }
+        let recomputed;
+        try {
+          recomputed = entry.payloadSha256 === current
+            ? projectTrainingSummary(entry).payloadSha256
+            : legacyTrainingPayloadSha256(entry);
+        } catch {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} body가 올바르지 않습니다.`);
+        }
+        if (recomputed !== entry.payloadSha256) {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} body digest가 일치하지 않습니다.`);
+        }
+      }
+      collected.set(entry.evaluationId, entry.payloadSha256);
+    }
+    return collected;
+  };
+  const authorityById = collectEntries(authorityEntries, 'training authority');
+  const bodyById = collectEntries(bodyTraining, 'training publish', { verifyBody: true });
+  if (authorityById.size !== bodyById.size
+    || [...authorityById].some(([id, digest]) => bodyById.get(id) !== digest)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'attempt body와 authority 항목 집합이 다릅니다.');
+  }
+  const payloadById = bodyById;
+  let legacyAttempt = false;
+  for (const [id, digest] of payloadById) {
+    if (digest !== items[id].payloadSha256) legacyAttempt = true;
+  }
+  const evalIds = [...payloadById.keys()];
   let snapshotPublishId = 0;
+  let snapshotTraining = [];
   try {
-    const snap = JSON.parse(fs.readFileSync(path.join(sessionDir, 'ui-snapshot.json'), 'utf8'));
-    snapshotPublishId = Number(snap.publishId) || 0;
-  } catch { /* no snapshot */ }
-  const attemptId = Number(record.body?.publishId) || 0;
-  const applied = attemptId > 0 && snapshotPublishId >= attemptId;
+    const snap = JSON.parse(openContained(sessionDir, ['ui-snapshot.json'], {
+      maxBytes: 4_000_000,
+    }).toString('utf8'));
+    if (snap.publishId !== undefined && !Number.isSafeInteger(snap.publishId)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot publishId가 올바르지 않습니다.');
+    }
+    snapshotPublishId = snap.publishId ?? 0;
+    snapshotTraining = Array.isArray(snap.training) ? snap.training : [];
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot evidence를 안전하게 읽을 수 없습니다.');
+    }
+  }
+  const snapshotById = new Map();
+  for (const row of snapshotTraining) {
+    if (!plainObject(row) || typeof row.evaluationId !== 'string'
+      || snapshotById.has(row.evaluationId)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training 항목이 올바르지 않습니다.');
+    }
+    const current = currentPayloadFor(row.evaluationId, row.payloadSha256, items, digestMap);
+    if (!current) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training digest가 authority와 일치하지 않습니다.');
+    }
+    const recomputed = row.payloadSha256 === current
+      ? projectTrainingSummary(row).payloadSha256
+      : legacyTrainingPayloadSha256(row);
+    if (recomputed !== row.payloadSha256) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training body digest가 일치하지 않습니다.');
+    }
+    snapshotById.set(row.evaluationId, row);
+  }
+  const applied = snapshotPublishId >= attemptId && evalIds.every((id) => {
+    const row = snapshotById.get(id);
+    return Boolean(currentPayloadFor(id, row?.payloadSha256, items, digestMap));
+  });
+  const appliedIds = [];
+  const appliedAnnotationIds = [];
+  const legacyExplanationIds = new Set(bodyTraining
+    .filter((row) => row
+      && Object.hasOwn(row, 'explanation')
+      && row.payloadSha256 !== items[row.evaluationId]?.payloadSha256)
+    .map((row) => row.evaluationId));
+  let changed = false;
   if (applied) {
     for (const id of evalIds) {
       if (!items[id]) continue;
+      if (items[id].status !== 'published' || items[id].consumers?.published !== true) changed = true;
       items[id].status = 'published';
       items[id].consumers = { ...(items[id].consumers ?? {}), published: true };
+      appliedIds.push(id);
+      if (legacyExplanationIds.has(id) && items[id].annotations?.explanation) {
+        if (items[id].annotations.explanation.published !== true) changed = true;
+        items[id].annotations.explanation.published = true;
+        appliedAnnotationIds.push(id);
+      }
     }
   }
-  try { fs.unlinkSync(attemptFile); } catch { /* already gone */ }
+  return {
+    resolved: true, applied, legacyAttempt, appliedIds, appliedAnnotationIds, attemptFile, changed,
+  };
 }
 
-function rewriteJsonlFromItems(sessionDir, auth) {
+function rewriteJsonlFromItems(sessionDir, auth, { writeTextSecure: writeText = writeTextSecure } = {}) {
   const lines = Object.values(auth.items ?? {})
     .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
       || String(left.evaluationId).localeCompare(String(right.evaluationId)))
     .map((item) => JSON.stringify(item.summary));
-  writeTextSecure(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
+  writeText(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
 }
 
-function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir } = {}) {
-  const marker = readMarker(sessionDir);
-  if (auth.schemaVersion === 2) {
-    if (marker?.status === 'in-progress') {
-      rewriteJsonlFromItems(sessionDir, auth);
-      if (!fs.existsSync(digestMapPath(sessionDir))) return auth;
-      writeJsonSecure(markerPath(sessionDir), {
-        status: 'session-done',
-        at: new Date().toISOString(),
-        digestMapRef: '.digest-map-v2.json',
-      });
-    }
-    return auth;
-  }
-  if (auth.schemaVersion !== 1) {
-    throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
-  }
-  writeJsonSecure(markerPath(sessionDir), { status: 'in-progress', at: new Date().toISOString() });
-
-  const rows = readJsonl(evaluationsPath(sessionDir));
-  const rowById = new Map(rows.map((row) => [row.evaluationId, row]));
-  const oldToNew = {};
-  const byEvaluationId = {};
-  const newItems = {};
-  const newQueue = {};
-  const annotationQueue = {};
-  const pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
-    ? { ...auth.pending }
-    : {};
-  const processed = storeDir ? loadProcessed(storeDir) : {};
-  const mistakeIds = storeDir ? loadMistakeIds(storeDir) : new Set();
-
-  for (const [id, item] of Object.entries(auth.items ?? {})) {
-    const row = rowById.get(id);
-    const detailRef = item.detailRef ?? row?.detailRef ?? detailRefOf(id);
-    let evaluation = null;
-    try {
-      evaluation = readJsonSecure(path.join(detailsDir(sessionDir), `${detailRef}.json`));
-    } catch {
-      evaluation = row ?? null;
-    }
-    const explanation = row && Object.prototype.hasOwnProperty.call(row, 'explanation')
-      ? row.explanation
-      : null;
-    let summary;
-    if (evaluation?.evaluationId) {
-      summary = toPublicSummary(evaluation, {
-        handNo: item.handNo ?? row?.handNo,
-        detailRef,
-        detailSha256: item.detailSha256 ?? row?.detailSha256,
-      });
-    } else if (row) {
-      const rest = { ...row };
-      delete rest.explanation;
-      delete rest.payloadSha256;
-      summary = projectTrainingSummary({ ...rest, recommendedTruncated: rest.recommendedTruncated === true });
-    } else {
-      continue;
-    }
-    oldToNew[item.payloadSha256] = summary.payloadSha256;
-    byEvaluationId[id] = { old: item.payloadSha256, new: summary.payloadSha256 };
-
-    const annotations = {};
-    if (typeof explanation === 'string' && explanation.length) {
-      const projected = projectTrainingAnnotation({
-        evaluationId: id,
-        payloadSha256: summary.payloadSha256,
-        field: 'explanation',
-        status: 'ready',
-        value: explanation,
-      });
-      annotations.explanation = {
-        status: 'ready',
-        valueSha256: projected.valueSha256,
-        published: item.status === 'published',
-      };
-      writeAnnotationExactFile(sessionDir, summary.detailRef, 'explanation', {
-        field: 'explanation',
-        status: 'ready',
-        value: explanation,
-      });
-      if (item.status !== 'published') {
-        annotationQueue[id] = annotationQueue[id] ?? {};
-        annotationQueue[id].explanation = {
-          evaluationId: id,
-          field: 'explanation',
-          valueSha256: projected.valueSha256,
-          payloadSha256: summary.payloadSha256,
-          published: false,
-        };
-      }
-    }
-
-    newItems[id] = {
-      status: item.status === 'published' ? 'published' : 'evaluated',
-      handNo: item.handNo,
-      decisionId: item.decisionId,
-      evaluationId: id,
-      payloadSha256: summary.payloadSha256,
-      detailRef: summary.detailRef,
-      detailSha256: item.detailSha256 ?? summary.detailSha256,
-      summary,
-      consumers: {
-        published: item.status === 'published',
-        profiled: Object.prototype.hasOwnProperty.call(processed, id),
-        banked: mistakeIds.has(id),
-      },
-      annotations,
-    };
-  }
-
-  resolveV1Attempt(sessionDir, newItems);
-  for (const [id, item] of Object.entries(newItems)) {
-    if (item.status === 'published') continue;
-    newQueue[id] = {
-      evaluationId: id,
-      handNo: item.handNo,
-      payloadSha256: item.payloadSha256,
-    };
-  }
-
-  const v2 = {
-    schemaVersion: 2,
-    gameEpoch: auth.gameEpoch,
-    ownerSessionId: auth.ownerSessionId,
-    items: newItems,
-    publishQueue: newQueue,
-    pending,
-    annotationQueue,
-    solveTasks: {},
+function migrationWriters(overrides = {}) {
+  return {
+    writeJsonSecure: overrides.writeJsonSecure ?? writeJsonSecure,
+    writeTextSecure: overrides.writeTextSecure ?? writeTextSecure,
+    unlinkSync: overrides.unlinkSync ?? ((file) => fs.unlinkSync(file)),
   };
-  const lines = Object.values(newItems)
-    .sort((left, right) => (left.handNo ?? 0) - (right.handNo ?? 0)
-      || String(left.evaluationId).localeCompare(String(right.evaluationId)))
-    .map((item) => JSON.stringify(item.summary));
-  writeTextSecure(evaluationsPath(sessionDir), lines.length ? `${lines.join('\n')}\n` : '');
-  persistAuth(sessionDir, v2);
-  writeJsonSecure(digestMapPath(sessionDir), { schemaVersion: 1, oldToNew, byEvaluationId });
-  const nextMarker = {
+}
+
+function sessionDoneMarker() {
+  return {
     status: 'session-done',
     at: new Date().toISOString(),
     digestMapRef: '.digest-map-v2.json',
   };
-  writeJsonSecure(markerPath(sessionDir), nextMarker);
-  return v2;
+}
+
+function removeMigrationFile(file) {
+  try {
+    if (fs.lstatSync(file).isFile()) fs.unlinkSync(file);
+  } catch { /* rollback cleanup is best-effort; the original failure remains authoritative */ }
+}
+
+function migrationNotices(auth) {
+  const overCap = Object.values(auth?.items ?? {}).filter(
+    (item) => item.annotations?.explanation?.sealReason === 'LEGACY_OVER_CAP',
+  ).length;
+  return overCap > 0
+    ? [`legacy explanation ${overCap}건 상한 초과 → unavailable`]
+    : [];
+}
+
+function migrationResult(auth, { includeNotices = false } = {}) {
+  return auth ? { ...auth, notices: includeNotices ? migrationNotices(auth) : [] } : null;
+}
+
+function finishResolvedAttempt(sessionDir, auth, writers, digestMap) {
+  const attempt = resolveV1Attempt(sessionDir, auth.items ?? {}, {
+    gameEpoch: auth.gameEpoch,
+    digestMap,
+  });
+  if (!attempt.resolved) return false;
+  let changed = attempt.changed;
+  for (const id of attempt.appliedIds) {
+    if (Object.prototype.hasOwnProperty.call(auth.publishQueue ?? {}, id)) {
+      delete auth.publishQueue[id];
+      changed = true;
+    }
+  }
+  for (const id of attempt.appliedAnnotationIds) {
+    if (auth.annotationQueue?.[id]?.explanation) {
+      delete auth.annotationQueue[id].explanation;
+      if (Object.keys(auth.annotationQueue[id]).length === 0) delete auth.annotationQueue[id];
+      changed = true;
+    }
+  }
+  if (changed) writers.writeJsonSecure(authPath(sessionDir), auth);
+  const shouldDelete = attempt.applied || attempt.legacyAttempt;
+  if (shouldDelete) writers.unlinkSync(attempt.attemptFile);
+  return changed || shouldDelete;
+}
+
+function validateLegacySources(sessionDir, auth) {
+  if (!plainObject(auth?.items)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'v1 training authority items가 올바르지 않습니다.');
+  }
+  const rows = readJsonl(evaluationsPath(sessionDir));
+  const rowById = new Map();
+  for (const row of rows) {
+    if (!plainObject(row) || typeof row.evaluationId !== 'string') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy evaluations.jsonl 항목이 올바르지 않습니다.');
+    }
+    if (rowById.has(row.evaluationId)) {
+      if (JSON.stringify(rowById.get(row.evaluationId)) !== JSON.stringify(row)) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy evaluations.jsonl 중복 항목이 충돌합니다.');
+      }
+      continue;
+    }
+    rowById.set(row.evaluationId, row);
+  }
+  for (const [id, item] of Object.entries(auth.items)) {
+    const row = rowById.get(id);
+    if (!plainObject(item) || item.evaluationId !== id || typeof item.payloadSha256 !== 'string'
+      || (row && (row.evaluationId !== id
+        || row.payloadSha256 !== item.payloadSha256
+        || legacyTrainingPayloadSha256(row) !== item.payloadSha256))) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy authority와 JSONL digest가 일치하지 않습니다.');
+    }
+    const expectedRef = detailRefOf(id);
+    const detailRef = item.detailRef ?? row?.detailRef ?? expectedRef;
+    const detailSha256 = item.detailSha256 ?? row?.detailSha256;
+    if (detailRef !== expectedRef || (row && row.detailRef !== expectedRef)
+      || typeof detailSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(detailSha256)
+      || (row?.detailSha256 !== undefined && row.detailSha256 !== detailSha256)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail identity가 올바르지 않습니다.');
+    }
+    let detailRaw;
+    try {
+      detailRaw = openContained(trainingDir(sessionDir), ['details', `${detailRef}.json`], {
+        maxBytes: 1_000_000,
+      }).toString('utf8');
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail 파일을 안전하게 읽을 수 없습니다.');
+    }
+    let detail;
+    try {
+      detail = JSON.parse(detailRaw);
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail JSON이 올바르지 않습니다.');
+    }
+    if (sha256Hex(detailRaw) !== detailSha256 || detail?.evaluationId !== id) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail digest가 일치하지 않습니다.');
+    }
+  }
+  return { rows, rowById };
+}
+
+function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
+  const writers = migrationWriters(io);
+  const marker = validateMigrationMarker(readMarker(sessionDir));
+  if (auth.schemaVersion === 2) {
+    validateV2Items(auth);
+    let resumedMigration = false;
+    if (marker?.status === 'in-progress') {
+      const digestMap = readDigestMapForMigration(sessionDir);
+      validateV2AuthorityAgainstMap(auth, digestMap);
+      rewriteJsonlFromItems(sessionDir, auth, writers);
+      writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
+      finishResolvedAttempt(sessionDir, auth, writers, digestMap);
+      resumedMigration = true;
+    } else if (marker?.status === 'session-done' || marker?.status === 'complete') {
+      if (fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) {
+        const digestMap = readDigestMapForMigration(sessionDir);
+        validateV2AuthorityAgainstMap(auth, digestMap);
+        resumedMigration = finishResolvedAttempt(sessionDir, auth, writers, digestMap);
+      }
+    }
+    return migrationResult(auth, { includeNotices: resumedMigration });
+  }
+  if (auth.schemaVersion !== 1) {
+    throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
+  }
+
+  const { rows, rowById } = validateLegacySources(sessionDir, auth);
+
+  try {
+    writers.writeJsonSecure(markerPath(sessionDir), {
+      status: 'in-progress',
+      at: new Date().toISOString(),
+    });
+
+    const oldToNew = {};
+    const byEvaluationId = {};
+    const newItems = {};
+    const newQueue = {};
+    const annotationQueue = {};
+    const pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
+      ? { ...auth.pending }
+      : {};
+    const processed = storeDir ? loadProcessed(storeDir) : {};
+    const mistakeIds = storeDir ? loadMistakeIds(storeDir) : new Set();
+
+    for (const [id, item] of Object.entries(auth.items ?? {})) {
+      const row = rowById.get(id);
+      const detailRef = item.detailRef ?? row?.detailRef ?? detailRefOf(id);
+      let evaluation = null;
+      try {
+        evaluation = readJsonSecure(path.join(detailsDir(sessionDir), `${detailRef}.json`));
+      } catch {
+        evaluation = row ?? null;
+      }
+      const explanation = row && Object.prototype.hasOwnProperty.call(row, 'explanation')
+        ? row.explanation
+        : null;
+      let summary;
+      if (evaluation?.evaluationId) {
+        summary = toPublicSummary(evaluation, {
+          handNo: item.handNo ?? row?.handNo,
+          detailRef,
+          detailSha256: item.detailSha256 ?? row?.detailSha256,
+        });
+      } else if (row) {
+        const rest = { ...row };
+        delete rest.explanation;
+        delete rest.payloadSha256;
+        summary = projectTrainingSummary({
+          ...rest,
+          recommendedTruncated: rest.recommendedTruncated === true,
+        });
+      } else {
+        continue;
+      }
+      oldToNew[item.payloadSha256] = summary.payloadSha256;
+      byEvaluationId[id] = { old: item.payloadSha256, new: summary.payloadSha256 };
+
+      const annotations = {};
+      const legacyAnnotation = legacyExplanationAnnotation(explanation);
+      if (legacyAnnotation) {
+        const projected = projectTrainingAnnotation({
+          evaluationId: id,
+          payloadSha256: summary.payloadSha256,
+          field: 'explanation',
+          status: legacyAnnotation.status,
+          value: legacyAnnotation.value,
+        });
+        annotations.explanation = {
+          status: legacyAnnotation.status,
+          valueSha256: projected.valueSha256,
+          published: item.status === 'published',
+          ...(legacyAnnotation.sealReason ? { sealReason: legacyAnnotation.sealReason } : {}),
+        };
+        const written = writeAnnotationExactFile(sessionDir, summary.detailRef, 'explanation', {
+          field: 'explanation',
+          status: legacyAnnotation.status,
+          value: legacyAnnotation.value,
+        });
+        if (written.conflict) {
+          throw coded('ANNOTATION_CONFLICT', 'legacy explanation exact-file이 기존 값과 다릅니다.');
+        }
+        if (item.status !== 'published') {
+          annotationQueue[id] = annotationQueue[id] ?? {};
+          annotationQueue[id].explanation = {
+            evaluationId: id,
+            field: 'explanation',
+            valueSha256: projected.valueSha256,
+            payloadSha256: summary.payloadSha256,
+            published: false,
+          };
+        }
+      }
+
+      newItems[id] = {
+        status: item.status === 'published' ? 'published' : 'evaluated',
+        handNo: item.handNo,
+        decisionId: item.decisionId,
+        evaluationId: id,
+        payloadSha256: summary.payloadSha256,
+        detailRef: summary.detailRef,
+        detailSha256: item.detailSha256 ?? summary.detailSha256,
+        summary,
+        consumers: {
+          published: item.status === 'published',
+          profiled: Object.prototype.hasOwnProperty.call(processed, id),
+          banked: mistakeIds.has(id),
+        },
+        annotations,
+      };
+    }
+
+    const digestMap = { schemaVersion: 1, oldToNew, byEvaluationId };
+    const attempt = resolveV1Attempt(sessionDir, newItems, {
+      gameEpoch: auth.gameEpoch,
+      digestMap,
+    });
+    for (const id of attempt.appliedAnnotationIds) {
+      if (annotationQueue[id]?.explanation) {
+        delete annotationQueue[id].explanation;
+        if (Object.keys(annotationQueue[id]).length === 0) delete annotationQueue[id];
+      }
+    }
+    for (const [id, item] of Object.entries(newItems)) {
+      if (item.status === 'published') continue;
+      newQueue[id] = {
+        evaluationId: id,
+        handNo: item.handNo,
+        payloadSha256: item.payloadSha256,
+      };
+    }
+
+    const v2 = {
+      schemaVersion: 2,
+      gameEpoch: auth.gameEpoch,
+      ownerSessionId: auth.ownerSessionId,
+      items: newItems,
+      publishQueue: newQueue,
+      pending,
+      annotationQueue,
+      solveTasks: {},
+    };
+    writers.writeJsonSecure(digestMapPath(sessionDir), digestMap);
+    writers.writeJsonSecure(authPath(sessionDir), v2);
+    rewriteJsonlFromItems(sessionDir, v2, writers);
+    writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
+    if (attempt.resolved) writers.unlinkSync(attempt.attemptFile);
+    return migrationResult(v2, { includeNotices: true });
+  } catch (error) {
+    let diskAuthority = null;
+    try {
+      diskAuthority = readJsonSecure(authPath(sessionDir));
+    } catch {
+      // Without readable disk truth, do not guess that a commit did or did not happen.
+    }
+    if (diskAuthority?.schemaVersion === 1) {
+      removeMigrationFile(markerPath(sessionDir));
+      removeMigrationFile(digestMapPath(sessionDir));
+    }
+    throw error;
+  }
 }
 
 // 한 세션의 authority는 그 세션 소유다. 죽은 줄 알았던 이전 owner가 살아 돌아와
@@ -390,17 +732,20 @@ function assertOwner(auth, owner) {
   );
 }
 
-function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
+function loadAuthorityUnlocked(sessionDir) {
   try {
-    let auth = readJsonSecure(authPath(sessionDir));
-    if (auth.schemaVersion === 1 || auth.schemaVersion === 2) {
-      auth = migrateV1ToV2Unlocked(sessionDir, auth, { storeDir });
+    const auth = readJsonSecure(authPath(sessionDir));
+    const marker = validateMigrationMarker(readMarker(sessionDir));
+    if (auth.schemaVersion === 1) {
+      throw coded('TRAINING_AUTHORITY_V1', 'v1 training authority는 명시적으로 마이그레이션해야 합니다.');
     }
     if (auth.schemaVersion !== 2) {
       throw coded('UNSUPPORTED_TRAINING_AUTHORITY', `schema ${auth.schemaVersion}`);
     }
-    if (!auth.items || typeof auth.items !== 'object' || Array.isArray(auth.items)) {
-      throw coded('UNSUPPORTED_TRAINING_AUTHORITY', 'items');
+    validateV2Items(auth);
+    if (marker?.status === 'in-progress') {
+      readDigestMapForMigration(sessionDir);
+      throw coded('TRAINING_MIGRATION_INCOMPLETE', 'training authority 마이그레이션이 완료되지 않았습니다.');
     }
     auth.pending = auth.pending && typeof auth.pending === 'object' && !Array.isArray(auth.pending)
       ? auth.pending
@@ -428,7 +773,8 @@ function loadAuthorityUnlocked(sessionDir, { storeDir } = {}) {
     } catch (accessError) {
       if (accessError.code === 'ENOENT') return null;
     }
-    if (error.code === 'UNSUPPORTED_TRAINING_AUTHORITY') throw error;
+    if (['UNSUPPORTED_TRAINING_AUTHORITY', 'TRAINING_AUTHORITY_V1',
+      'TRAINING_MIGRATION_INCOMPLETE', 'TRAINING_MIGRATION_CORRUPT'].includes(error.code)) throw error;
     if (error.code === 'ENOENT') return null;
     throw error;
   }
@@ -476,25 +822,42 @@ function recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId } =
 }
 
 function profileConsumerReady(sessionDir) {
-  const marker = readMarker(sessionDir);
+  const marker = validateMigrationMarker(readMarker(sessionDir));
   if (!marker) return true;
   return marker.status === 'complete';
 }
 
-export function createTrainingControl({ storeDir } = {}) {
+export function createTrainingControl({ storeDir, io } = {}) {
   async function withLock(sessionDir, fn) {
     return withNamedLock(sessionDir, TRAINING_LOCK, fn);
   }
 
+  async function withMigrationLock(sessionDir, fn) {
+    return withNamedLock(sessionDir, TRAINING_LOCK, fn, { timeoutMs: 10_000 });
+  }
+
   function loadAuthority(sessionDir) {
-    return loadAuthorityUnlocked(sessionDir, { storeDir });
+    return loadAuthorityUnlocked(sessionDir);
+  }
+
+  async function migrateAuthority(sessionDir) {
+    return withMigrationLock(sessionDir, () => {
+      let auth;
+      try {
+        auth = readJsonSecure(authPath(sessionDir));
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+      return migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io });
+    });
   }
 
   async function acceptEvaluations(sessionDir, {
     gameEpoch, owner, handNo, evaluations,
   }) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      let auth = loadAuthorityUnlocked(sessionDir);
       if (auth && auth.gameEpoch !== gameEpoch) {
         if (Object.keys(auth.items ?? {}).length > 0) {
           throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
@@ -571,7 +934,7 @@ export function createTrainingControl({ storeDir } = {}) {
     gameEpoch, owner, lastHand, handsDir,
   }) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir }) ?? emptyAuth({ gameEpoch, owner });
+      let auth = loadAuthorityUnlocked(sessionDir) ?? emptyAuth({ gameEpoch, owner });
       if (auth.gameEpoch !== gameEpoch && Object.keys(auth.items).length) {
         throw coded('TRAINING_EPOCH_MISMATCH', 'training authority gameEpoch가 일치하지 않습니다.');
       }
@@ -653,14 +1016,14 @@ export function createTrainingControl({ storeDir } = {}) {
   }
 
   function pendingItems(sessionDir) {
-    const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+    const auth = loadAuthorityUnlocked(sessionDir);
     if (!auth) return [];
     return Object.values(auth.items).filter((item) => item.status !== 'published');
   }
 
   async function markPublished(sessionDir, evaluationId, payloadSha256) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -677,7 +1040,7 @@ export function createTrainingControl({ storeDir } = {}) {
 
   async function markConsumer(sessionDir, evaluationId, name, value) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -692,7 +1055,7 @@ export function createTrainingControl({ storeDir } = {}) {
 
   async function recordPending(sessionDir, decisionId, { handNo, reason, gameEpoch, owner, adapterId } = {}) {
     return withLock(sessionDir, () => {
-      let auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      let auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) auth = emptyAuth({ gameEpoch: gameEpoch ?? null, owner: owner ?? null });
       // Same authority, same rule. Omitting the owner is not a way past it:
       // once an authority is owned, a writer has to say who it is.
@@ -708,7 +1071,7 @@ export function createTrainingControl({ storeDir } = {}) {
   // 한다. 점유는 토큰으로 소유자에게 묶인다 — 잡은 쪽만 풀 수 있다.
   async function claimSolveTask(sessionDir, decisionId, entry) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { claimed: false, code: 'NO_TRAINING_AUTHORITY' };
       auth.solveTasks = auth.solveTasks ?? {};
       const existing = auth.solveTasks[decisionId];
@@ -729,7 +1092,7 @@ export function createTrainingControl({ storeDir } = {}) {
   // 강제하므로, 살아 있는 프로세스가 소유하지 않은 점유는 정의상 죽은 것이다.
   async function reapSolveTasks(sessionDir, { keepDecisionIds = [] } = {}) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { reaped: 0 };
       const keep = new Set(keepDecisionIds);
       const stale = Object.keys(auth.solveTasks ?? {}).filter((id) => !keep.has(id));
@@ -741,7 +1104,7 @@ export function createTrainingControl({ storeDir } = {}) {
 
   async function releaseSolveTask(sessionDir, decisionId, token) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { released: false };
       const existing = auth.solveTasks?.[decisionId];
       if (!existing || existing.token !== token) return { released: false };
@@ -757,7 +1120,7 @@ export function createTrainingControl({ storeDir } = {}) {
 
   async function sealAnnotation(sessionDir, evaluationId, field, valueOrUnavailable) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { ok: false, code: 'NO_TRAINING_ITEM' };
       const item = auth.items[evaluationId];
       if (!item) return { ok: false, code: 'NO_TRAINING_ITEM' };
@@ -814,7 +1177,7 @@ export function createTrainingControl({ storeDir } = {}) {
 
   async function markAnnotationPublished(sessionDir, evaluationId, field, valueSha256) {
     return withLock(sessionDir, () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
       const item = auth.items[evaluationId];
       if (!item) throw coded('NO_TRAINING_ITEM', evaluationId);
@@ -840,7 +1203,7 @@ export function createTrainingControl({ storeDir } = {}) {
       return { skipped: true, profiled: 0, banked: 0, applied: 0 };
     }
     return withLock(sessionDir, async () => {
-      const auth = loadAuthorityUnlocked(sessionDir, { storeDir: activeStore });
+      const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { profiled: 0, banked: 0, applied: 0 };
       let profiled = 0;
       let banked = 0;
@@ -874,6 +1237,7 @@ export function createTrainingControl({ storeDir } = {}) {
     acceptEvaluations,
     reconcile,
     loadAuthority,
+    migrateAuthority,
     pendingItems,
     markPublished,
     markConsumer,

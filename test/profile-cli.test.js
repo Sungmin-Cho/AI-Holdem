@@ -5,7 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detailRefOf } from '../publish-contract.js';
+import {
+  detailRefOf,
+  legacyTrainingPayloadSha256,
+  sha256Hex,
+} from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/profile-cli.js');
@@ -309,14 +313,17 @@ function writeV1ArchivedSession(sessionDir, evaluation) {
   const training = path.join(sessionDir, 'training');
   fs.mkdirSync(path.join(training, 'details'), { recursive: true });
   const detailRef = detailRefOf(evaluation.evaluationId);
+  const detailRaw = JSON.stringify(evaluation);
+  const detailSha256 = sha256Hex(detailRaw);
   const summary = {
     ...evaluation,
     handNo: 1,
     explanation: 'BTN unopened에서 AJo는 폴드가 아니다.',
     detailRef,
-    detailSha256: 'cc'.repeat(32),
+    detailSha256,
   };
-  fs.writeFileSync(path.join(training, 'details', `${detailRef}.json`), JSON.stringify(evaluation));
+  summary.payloadSha256 = legacyTrainingPayloadSha256(summary);
+  fs.writeFileSync(path.join(training, 'details', `${detailRef}.json`), detailRaw);
   fs.writeFileSync(path.join(training, 'evaluations.jsonl'), `${JSON.stringify(summary)}\n`);
   fs.writeFileSync(path.join(training, '.training-authority.json'), JSON.stringify({
     schemaVersion: 1,
@@ -328,27 +335,28 @@ function writeV1ArchivedSession(sessionDir, evaluation) {
         handNo: 1,
         decisionId: evaluation.decisionId,
         evaluationId: evaluation.evaluationId,
-        payloadSha256: evaluation.payloadSha256,
+        payloadSha256: summary.payloadSha256,
         detailRef,
-        detailSha256: 'cc'.repeat(32),
+        detailSha256,
       },
     },
     publishQueue: {
       [evaluation.evaluationId]: {
         evaluationId: evaluation.evaluationId,
         handNo: 1,
-        payloadSha256: evaluation.payloadSha256,
+        payloadSha256: summary.payloadSha256,
       },
     },
   }));
 }
 
-test('authority v1 session without a complete marker is still swept', async () => {
+test('authority v1 sweep migrates and enables the profile consumer in the same run', async () => {
   const { sweepStore } = await import('../tools/profile-cli.js');
   const storeDir = tmp();
   const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
   const evaluation = evaluationRow();
   writeV1ArchivedSession(sessionDir, evaluation);
+  fs.writeFileSync(path.join(sessionDir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
   assert.equal(fs.existsSync(path.join(sessionDir, 'training', '.migration-v2.json')), false);
   const swept = await sweepStore(storeDir);
   assert.equal(swept.applied, 1);
@@ -360,5 +368,62 @@ test('authority v1 session without a complete marker is still swept', async () =
   const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
   assert.equal(fs.existsSync(markerPath), true);
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-  assert.notEqual(marker.status, 'in-progress');
+  assert.equal(marker.status, 'complete');
+});
+
+test('sweep skips nonterminal and missing-phase v1 sessions without migration writes', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  const storeDir = tmp();
+  const playing = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  const missing = sessionDirOf(storeDir, '22222222-2222-4222-8222-222222222222');
+  writeV1ArchivedSession(playing, evaluationRow());
+  writeV1ArchivedSession(missing, evaluationRow({ decisionId: 'd-2-preflop-0' }));
+  fs.writeFileSync(path.join(playing, 'loop-state.json'), JSON.stringify({ phase: 'playing' }));
+  const beforePlaying = fs.readFileSync(path.join(playing, 'training', '.training-authority.json'));
+  const beforeMissing = fs.readFileSync(path.join(missing, 'training', '.training-authority.json'));
+
+  const swept = await sweepStore(storeDir);
+
+  assert.equal(swept.applied, 0);
+  assert.equal(swept.notices.some((notice) => /SESSION_NOT_TERMINAL/.test(notice)), true);
+  for (const [dir, before] of [[playing, beforePlaying], [missing, beforeMissing]]) {
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'training', '.training-authority.json')), before);
+    assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), false);
+    assert.equal(fs.existsSync(path.join(dir, 'training', '.digest-map-v2.json')), false);
+  }
+});
+
+test('terminal sweep reconciles an applied current-v2 residual attempt', async () => {
+  const { sweepStore } = await import('../tools/profile-cli.js');
+  const { createTrainingControl } = await import('../tools/training-control.js');
+  const storeDir = tmp();
+  const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
+  writeV1ArchivedSession(sessionDir, evaluationRow());
+  fs.writeFileSync(path.join(sessionDir, 'loop-state.json'), JSON.stringify({ phase: 'done' }));
+  await sweepStore(storeDir);
+  const tc = createTrainingControl({ storeDir });
+  const auth = tc.loadAuthority(sessionDir);
+  const item = Object.values(auth.items)[0];
+  item.status = 'evaluated';
+  item.consumers.published = false;
+  auth.publishQueue[item.evaluationId] = {
+    evaluationId: item.evaluationId, handNo: item.handNo, payloadSha256: item.payloadSha256,
+  };
+  fs.writeFileSync(path.join(sessionDir, 'training', '.training-authority.json'), JSON.stringify(auth));
+  fs.writeFileSync(path.join(sessionDir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: auth.gameEpoch,
+    body: { publishId: 9, training: [item.summary] },
+    trainingAuthority: {
+      expectedGameEpoch: auth.gameEpoch,
+      items: [{ evaluationId: item.evaluationId, payloadSha256: item.payloadSha256 }],
+    },
+  }));
+  fs.writeFileSync(path.join(sessionDir, 'ui-snapshot.json'), JSON.stringify({
+    publishId: 9, training: [item.summary],
+  }));
+
+  await sweepStore(storeDir);
+
+  assert.equal(fs.existsSync(path.join(sessionDir, '.publish-attempt.json')), false);
+  assert.equal(tc.loadAuthority(sessionDir).items[item.evaluationId].status, 'published');
 });

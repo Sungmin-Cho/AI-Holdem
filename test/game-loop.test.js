@@ -21,6 +21,7 @@ import {
 import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { newDeck } from '../engine/cards.js';
+import { prepareSession } from '../engine/session-catalog.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -893,6 +894,29 @@ function writeLoopStateFixture(gameDir, sessionToken, overrides = {}) {
   return state;
 }
 
+function writeEmptyTrainingAuthority(gameDir, sessionToken, { schemaVersion }) {
+  const trainingDir = path.join(gameDir, 'training');
+  fs.mkdirSync(trainingDir, { recursive: true });
+  fs.writeFileSync(path.join(trainingDir, 'evaluations.jsonl'), '');
+  fs.writeFileSync(path.join(trainingDir, '.training-authority.json'), JSON.stringify({
+    schemaVersion,
+    gameEpoch: gameEpochOf(sessionToken),
+    ownerSessionId: 'old-owner',
+    items: {},
+    publishQueue: {},
+    ...(schemaVersion === 2 ? { pending: {}, annotationQueue: {}, solveTasks: {} } : {}),
+  }));
+}
+
+function writeTestLoopLock(gameDir) {
+  const dir = path.join(gameDir, 'loop.lock.d');
+  const startTime = 'test-owned-lock';
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime}`);
+  const stat = fs.statSync(dir, { bigint: true });
+  return { dir, pid: process.pid, startTime, dev: stat.dev, ino: stat.ino };
+}
+
 async function setupAiFirst(t, {
   adapter,
   ai = 1,
@@ -1510,6 +1534,108 @@ test('resume rejects missing or mismatched loop-state identity before resolver, 
       assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
     });
   }
+});
+
+test('Q2a resume migrates authority before the first reader and completes profile readiness in the same run', { timeout: 30_000 }, async (t) => {
+  const cases = [
+    { name: 'v1', schemaVersion: 1, expectedMarker: 'complete' },
+    { name: 'native-v2', schemaVersion: 2, expectedMarker: null },
+    { name: 'authority-absent', schemaVersion: null, expectedMarker: null },
+  ];
+  for (const variant of cases) {
+    await t.test(variant.name, async (st) => {
+      const storeDir = tmpGame();
+      const prepared = prepareSession(storeDir);
+      const initialized = await initGame(prepared.stagingDir);
+      fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+      const gameDir = prepared.sessionDir;
+      writeLoopStateFixture(gameDir, initialized.sessionToken, { phase: 'bootstrap' });
+      if (variant.schemaVersion !== null) {
+        writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, variant);
+      }
+      const initialLockHandle = writeTestLoopLock(gameDir);
+      const loop = createGameLoop({
+        gameDir,
+        initialLockHandle,
+        resolver: async () => {
+          const error = new Error('stop after the migration boundary');
+          error.code = 'STOP_AFTER_MIGRATION';
+          throw error;
+        },
+        opts: { port: 0, waitMs: 0, storeDir },
+      });
+      st.after(() => loop.requestStop().catch(() => {}));
+
+      await assert.rejects(
+        loop.resume({ skipLock: true }),
+        { code: 'STOP_AFTER_MIGRATION' },
+      );
+
+      const markerFile = path.join(gameDir, 'training', '.migration-v2.json');
+      if (variant.expectedMarker === null) {
+        assert.equal(fs.existsSync(markerFile), false);
+      } else {
+        assert.equal(readJson(markerFile).status, variant.expectedMarker);
+        assert.equal(readJson(path.join(gameDir, 'training', '.training-authority.json')).schemaVersion, 2);
+      }
+    });
+  }
+});
+
+test('Q2a resume exposes permanent migration corruption as a durable halt without starting readers', async (t) => {
+  const storeDir = tmpGame();
+  const prepared = prepareSession(storeDir);
+  const initialized = await initGame(prepared.stagingDir);
+  fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+  const gameDir = prepared.sessionDir;
+  writeLoopStateFixture(gameDir, initialized.sessionToken, { phase: 'bootstrap' });
+  writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, { schemaVersion: 2 });
+  fs.writeFileSync(
+    path.join(gameDir, 'training', '.migration-v2.json'),
+    JSON.stringify({ status: 'in-progress' }),
+  );
+  const initialLockHandle = writeTestLoopLock(gameDir);
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    initialLockHandle,
+    resolver: async () => { resolverCalls += 1; return { player: null, upper: null, notices: [] }; },
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const halted = await loop.resume({ skipLock: true });
+
+  assert.equal(halted.halt.code, 'TRAINING_MIGRATION_CORRUPT');
+  assert.equal(resolverCalls, 0);
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
+  assert.equal(halted.notices.some((notice) => /TRAINING_MIGRATION_CORRUPT/.test(notice)), true);
+});
+
+test('Q2a resume clears any repaired halt by training-migration source, not a code allowlist', async (t) => {
+  const storeDir = tmpGame();
+  const prepared = prepareSession(storeDir);
+  const initialized = await initGame(prepared.stagingDir);
+  fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+  const gameDir = prepared.sessionDir;
+  writeLoopStateFixture(gameDir, initialized.sessionToken, {
+    phase: 'bootstrap',
+    halt: { code: 'UNSAFE_PATH', message: 'old migration failure', source: 'training-migration' },
+  });
+  writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, { schemaVersion: 2 });
+  const initialLockHandle = writeTestLoopLock(gameDir);
+  const loop = createGameLoop({
+    gameDir,
+    initialLockHandle,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const resumed = await loop.resume({ skipLock: true });
+
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(resumed.halt, undefined);
 });
 
 test('resume from bootstrap never calls init, preserves engine files, and completes server plus warmup', { timeout: 10_000 }, async (t) => {

@@ -605,7 +605,7 @@ test('v1 fixture with explanation migrates byte-stable: annotation exact-file, j
   const dir = tmp();
   const { summary } = writeV1Session(dir, { status: 'evaluated' });
   const tc = createTrainingControl();
-  const auth = tc.loadAuthority(dir);
+  const auth = await tc.migrateAuthority(dir);
   assert.equal(auth.schemaVersion, 2);
   const item = auth.items[summary.evaluationId];
   assert.notEqual(item.payloadSha256, summary.payloadSha256);
@@ -628,7 +628,7 @@ test('v1 fixture with explanation migrates byte-stable: annotation exact-file, j
 
   const before = migrationArtifactHashes(dir);
   assert.equal(Object.keys(before).length, 5);
-  const again = tc.loadAuthority(dir);
+  const again = await tc.migrateAuthority(dir);
   assert.equal(again.items[summary.evaluationId].payloadSha256, item.payloadSha256);
   assert.deepEqual(migrationArtifactHashes(dir), before);
 });
@@ -637,7 +637,7 @@ test('v1 explanation:null becomes absent; published+string explanation does not 
   const dir = tmp();
   writeV1Session(dir, { explanation: null, status: 'evaluated' });
   const tc = createTrainingControl();
-  const auth = tc.loadAuthority(dir);
+  const auth = await tc.migrateAuthority(dir);
   const item = auth.items[evaluationId()];
   assert.equal(item.annotations?.explanation, undefined);
   assert.equal(auth.annotationQueue[evaluationId()]?.explanation, undefined);
@@ -647,7 +647,7 @@ test('v1 explanation:null becomes absent; published+string explanation does not 
     explanation: '이미 게시된 해설',
     status: 'published',
   });
-  const auth2 = createTrainingControl().loadAuthority(dir2);
+  const auth2 = await createTrainingControl().migrateAuthority(dir2);
   const item2 = auth2.items[evaluationId()];
   assert.equal(item2.annotations.explanation.status, 'ready');
   assert.equal(item2.annotations.explanation.published, true);
@@ -659,32 +659,32 @@ test('v1 attempt applied vs unapplied: exact-retry is forbidden', async () => {
   const dir = tmp();
   const { summary } = writeV1Session(dir, { status: 'evaluated' });
   fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
-    expectedGameEpoch: gameEpochOf('tok'),
+    expectedGameEpoch: EPOCH,
     body: { publishId: 4, training: [summary] },
     trainingAuthority: {
-      expectedGameEpoch: gameEpochOf('tok'),
+      expectedGameEpoch: EPOCH,
       evaluationId: summary.evaluationId,
       payloadSha256: summary.payloadSha256,
     },
   }));
   fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({ publishId: 4, training: [summary] }));
-  const appliedAuth = createTrainingControl().loadAuthority(dir);
+  const appliedAuth = await createTrainingControl().migrateAuthority(dir);
   assert.equal(appliedAuth.items[summary.evaluationId].status, 'published');
   assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
 
   const dir2 = tmp();
   const second = writeV1Session(dir2, { status: 'evaluated' });
   fs.writeFileSync(path.join(dir2, '.publish-attempt.json'), JSON.stringify({
-    expectedGameEpoch: gameEpochOf('tok'),
+    expectedGameEpoch: EPOCH,
     body: { publishId: 9, training: [second.summary] },
     trainingAuthority: {
-      expectedGameEpoch: gameEpochOf('tok'),
+      expectedGameEpoch: EPOCH,
       evaluationId: second.summary.evaluationId,
       payloadSha256: second.summary.payloadSha256,
     },
   }));
   fs.writeFileSync(path.join(dir2, 'ui-snapshot.json'), JSON.stringify({ publishId: 1 }));
-  const unapplied = createTrainingControl().loadAuthority(dir2);
+  const unapplied = await createTrainingControl().migrateAuthority(dir2);
   assert.equal(unapplied.items[second.summary.evaluationId].status, 'evaluated');
   assert.equal(fs.existsSync(path.join(dir2, '.publish-attempt.json')), false);
 });
@@ -701,7 +701,7 @@ test('v1 consumers are induced from processed/mistake; consume treats apply idem
     payloadSha256: summary.payloadSha256,
   });
   const tc = createTrainingControl({ storeDir });
-  const auth = tc.loadAuthority(dir);
+  const auth = await tc.migrateAuthority(dir);
   assert.equal(auth.items[summary.evaluationId].consumers.published, true);
   assert.equal(auth.items[summary.evaluationId].consumers.profiled, true);
   assert.equal(auth.items[summary.evaluationId].consumers.banked, true);
@@ -723,7 +723,7 @@ test('profile/mistake re-sign via digest map; rebuild has no PROFILE_EVENT_CONFL
   assert.equal(again.applied, false);
   await createMistakeBank(storeDir).collect({ ...summary, grade: 'off-policy' });
 
-  createTrainingControl({ storeDir }).loadAuthority(dir);
+  await createTrainingControl({ storeDir }).migrateAuthority(dir);
   const mapFile = path.join(dir, 'training', '.digest-map-v2.json');
   assert.equal(typeof profileCli.migrateStoreV2, 'function');
   await profileCli.migrateStoreV2(storeDir, mapFile);
@@ -741,7 +741,7 @@ test('session-done marker, crash mid store-migration, restart completes', async 
   const { summary } = writeV1Session(sessionDir, { status: 'published' });
   const store = createProfileStore(storeDir);
   await store.apply({ ...summary });
-  createTrainingControl({ storeDir }).loadAuthority(sessionDir);
+  await createTrainingControl({ storeDir }).migrateAuthority(sessionDir);
   const markerPath = path.join(sessionDir, 'training', '.migration-v2.json');
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
   assert.equal(marker.status, 'session-done');
@@ -762,16 +762,19 @@ test('session-done marker, crash mid store-migration, restart completes', async 
   assert.equal(profile.processed[summary.evaluationId], map.oldToNew[summary.payloadSha256]);
 });
 
-test('M6: digest map write failure resumes v1 migration without losing annotations', { todo: true }, async () => {
+test('M6: digest map write failure resumes v1 migration without losing annotations', async () => {
   const dir = tmp();
   const { summary } = writeV1Session(dir, { status: 'evaluated' });
   const mapPath = path.join(dir, 'training', '.digest-map-v2.json');
   fs.mkdirSync(mapPath);
   const tc = createTrainingControl();
-  assert.throws(() => tc.loadAuthority(dir), (error) => error.code === 'UNSAFE_PATH');
-  assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), true);
+  await assert.rejects(
+    tc.migrateAuthority(dir),
+    (error) => error.code === 'UNSAFE_PATH',
+  );
+  assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), false);
   fs.rmdirSync(mapPath);
-  const resumed = tc.loadAuthority(dir);
+  const resumed = await tc.migrateAuthority(dir);
   const item = resumed.items[summary.evaluationId];
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'training', '.migration-v2.json'), 'utf8')).status, 'session-done');
   assert.equal(item.annotations.explanation.status, 'ready');
