@@ -5,9 +5,23 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { startServer } from '../server/server.js';
+import { detailRefOf } from '../publish-contract.js';
+import { evaluationIdOf } from '../training/contracts.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-srv-'));
+}
+
+// M1: machine item의 identity는 D9 문법이고 detailRef는 그 identity에서 파생된다.
+// 이 픽스처들의 주제는 토큰·digest·부모 교체이므로 identity만 계약에 맞춘다.
+function detailFixtureIds(decisionId) {
+  const evaluationId = evaluationIdOf({
+    gameEpoch: 'ab'.repeat(32),
+    decisionId,
+    providerId: 'local-preflop-baseline',
+    providerVersion: '1.0.0',
+  });
+  return { evaluationId, ref: detailRefOf(evaluationId) };
 }
 
 test('UI는 레거시 talk를 렌더링하지 않고 narration은 유지한다', () => {
@@ -727,7 +741,7 @@ test('training-detail GET is token-first and digest-checked', async () => {
   const { createHash } = await import('node:crypto');
   const gameDir = tmpDir();
   const token = 'tok-detail';
-  const ref = 'ab'.repeat(32);
+  const { evaluationId, ref } = detailFixtureIds('d-1-preflop-0');
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
@@ -735,7 +749,7 @@ test('training-detail GET is token-first and digest-checked', async () => {
   fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+    training: [{ evaluationId, detailRef: ref, detailSha256 }],
   }));
   const srv = await start(gameDir, token);
   try {
@@ -757,7 +771,7 @@ test('training-detail GET parent-swap is rejected', async () => {
   const { createHash } = await import('node:crypto');
   const gameDir = tmpDir();
   const token = 'tok-swap';
-  const ref = 'cd'.repeat(32);
+  const { evaluationId, ref } = detailFixtureIds('d-2-preflop-0');
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
@@ -768,7 +782,7 @@ test('training-detail GET parent-swap is rejected', async () => {
   fs.writeFileSync(path.join(outside, `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+    training: [{ evaluationId, detailRef: ref, detailSha256 }],
   }));
   const srv = await start(gameDir, token);
   const origOpen = fs.openSync;
@@ -797,7 +811,7 @@ test('training-detail GET without a token performs 0 fs accesses', async () => {
   const { createHash } = await import('node:crypto');
   const gameDir = tmpDir();
   const token = 'tok-nofs';
-  const ref = 'ef'.repeat(32);
+  const { evaluationId, ref } = detailFixtureIds('d-3-preflop-0');
   const payload = { schemaVersion: 1, rangeMatrix: { cells: [] } };
   const raw = JSON.stringify(payload);
   const detailSha256 = createHash('sha256').update(raw).digest('hex');
@@ -805,7 +819,7 @@ test('training-detail GET without a token performs 0 fs accesses', async () => {
   fs.writeFileSync(path.join(gameDir, 'training', 'details', `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,
-    training: [{ evaluationId: 'e', detailRef: ref, detailSha256 }],
+    training: [{ evaluationId, detailRef: ref, detailSha256 }],
   }));
   const srv = await start(gameDir, token);
   const names = [
