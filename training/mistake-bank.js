@@ -59,7 +59,10 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
       if (!collectable(evaluation)) return { added: false, item: null };
       const existingId = data.items.find((item) => item.mistakeId === evaluation.evaluationId);
       if (existingId) {
-        existingId.evidenceIds = existingId.evidenceIds ?? [existingId.mistakeId];
+        if (!Object.prototype.hasOwnProperty.call(existingId, 'evidenceIds')) {
+          existingId.evidenceIds = [existingId.mistakeId];
+          writeJsonSecure(file, data);
+        }
         return { added: false, item: existingId };
       }
       const sig = signatureOf(evaluation);
