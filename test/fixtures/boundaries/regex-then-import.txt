@@ -1,0 +1,5 @@
+const ABSOLUTE_PATH_RE = /(?:^|["'\s])(?:\/(?:Users|home)\b|[A-Za-z]:\\)/;
+const ratio = width / height;
+export async function later() {
+  return import('../tools/training-store.js');
+}

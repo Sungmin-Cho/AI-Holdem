@@ -156,6 +156,41 @@ test('the scanner refuses every bypass form the reviews raised', () => {
   );
   assert.deepEqual(tricky.unresolved, []);
 
+  // A regex literal containing a quote must not open a bogus string and eat the
+  // import after it — this tree really contains such a pattern.
+  const afterRegex = scanModule(read('regex-then-import.txt'));
+  assert.deepEqual(
+    afterRegex.imports.map((row) => row.specifier),
+    ['../tools/training-store.js'],
+    'a regex literal must not swallow the import that follows it',
+  );
+  assert.deepEqual(afterRegex.unresolved, [], 'division must not be read as a regex');
+
+  // A specifier no layer rule can classify must fail closed rather than be
+  // skipped silently.
+  const url = scanModule(read('url-specifier.txt'));
+  assert.ok(url.unresolved.some((row) => row.kind.startsWith('unclassifiable specifier')));
+
+  // Reaching for the module machinery is how a loader gets minted.
+  const minting = scanModule(read('loader-minting.txt'));
+  // `Module['_load'](...)` is unreachable without importing the machinery, so
+  // refusing the import is what closes the whole family.
+  assert.ok(minting.unresolved.some((row) => row.kind === 'node:module'));
+
+  // A template substitution is executable code, so a load inside it must stay
+  // visible even though the template itself is not a literal specifier.
+  const substitution = scanModule(read('template-substitution.txt'));
+  assert.deepEqual(
+    substitution.imports.map((row) => row.specifier),
+    ['../tools/training-store.js'],
+  );
+
+  // Node cooks `\x2f` to `/`; a reader of the raw bytes does not. Refuse rather
+  // than guess.
+  const escaped = scanModule(read('escaped-specifier.txt'));
+  assert.deepEqual(escaped.imports, []);
+  assert.deepEqual(escaped.unresolved.map((row) => row.kind), ['import()']);
+
   const mixed = scanModule(read('mixed-default.txt'));
   const bindings = mixed.imports[0].bindings;
   assert.ok(bindings.includes('default'), 'a default binding must be visible');
@@ -220,9 +255,18 @@ function recordedGraph() {
 }
 
 test('every edge Node actually resolves was already known to the scanner', () => {
+  const recorded = recordedGraph();
+  // Without this the cross-check would pass on an empty recording, which is
+  // what a broken recorder looks like.
+  assert.ok(recorded.edges.length > 100, `only ${recorded.edges.length} edges recorded`);
+  const parents = new Set(recorded.edges.map((edge) => edge.from));
+  assert.ok(
+    recorded.files.filter((file) => parents.has(file)).length > recorded.files.length / 2,
+    'most scanned modules should have produced at least one recorded edge',
+  );
   const known = new Set(staticGraph().edges.map((edge) => `${edge.from} ${edge.to}`));
   const surprises = [];
-  for (const edge of recordedGraph().edges) {
+  for (const edge of recorded.edges) {
     // Only modules the scanner covers can be cross-checked against it; the
     // recorder also walks into shared root modules like `publish-contract.js`.
     if (!SCANNED.includes(layerOf(edge.from))) continue;

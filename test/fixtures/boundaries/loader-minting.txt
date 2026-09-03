@@ -1,0 +1,2 @@
+import M from 'node:module';
+export const x = M['_load']('../training/x.js');
