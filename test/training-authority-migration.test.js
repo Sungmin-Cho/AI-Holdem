@@ -748,3 +748,123 @@ test('server restores legacy UI rows after authority migration using the digest 
   assert.equal(restored.training.length, 1);
   assert.equal(Object.values(restored.trainingAnnotations).flatMap(Object.values).length, 1);
 });
+
+test('identical duplicate legacy rows and detail-only authority items remain recoverable', async () => {
+  const duplicateDir = tmp();
+  const duplicate = writeV1Session(duplicateDir);
+  const rowPath = path.join(duplicateDir, 'training', 'evaluations.jsonl');
+  const originalRow = fs.readFileSync(rowPath, 'utf8');
+  fs.appendFileSync(rowPath, originalRow);
+  const migratedDuplicate = await createTrainingControl().migrateAuthority(duplicateDir);
+  assert.equal(migratedDuplicate.items[duplicate.summary.evaluationId].summary.evaluationId, duplicate.summary.evaluationId);
+
+  const missingRowDir = tmp();
+  const missing = writeV1Session(missingRowDir);
+  fs.writeFileSync(path.join(missingRowDir, 'training', 'evaluations.jsonl'), '');
+  const migratedMissing = await createTrainingControl().migrateAuthority(missingRowDir);
+  assert.equal(migratedMissing.items[missing.summary.evaluationId].summary.evaluationId, missing.summary.evaluationId);
+  assert.equal(migratedMissing.items[missing.summary.evaluationId].annotations.explanation, undefined);
+});
+
+test('v2 authority items and digest-map coverage are semantically bound before resume writes', async () => {
+  const makeInterrupted = async () => {
+    const dir = tmp();
+    writeV1Session(dir);
+    await assert.rejects(
+      createTrainingControl({ io: migrationIo({ failAt: 'jsonl' }) }).migrateAuthority(dir),
+      { code: 'INJECTED_JSONL_FAILURE' },
+    );
+    return dir;
+  };
+  const cases = [];
+
+  const badItem = await makeInterrupted();
+  const badItemAuth = readAuth(badItem);
+  Object.values(badItemAuth.items)[0].payloadSha256 = 'ff'.repeat(32);
+  secureWriteJson(path.join(badItem, 'training', '.training-authority.json'), badItemAuth);
+  cases.push(badItem);
+
+  const missingCoverage = await makeInterrupted();
+  const mapPath = path.join(missingCoverage, 'training', '.digest-map-v2.json');
+  const map = JSON.parse(fs.readFileSync(mapPath, 'utf8'));
+  map.oldToNew = {};
+  map.byEvaluationId = {};
+  secureWriteJson(mapPath, map);
+  cases.push(missingCoverage);
+
+  const nullMarker = await makeInterrupted();
+  secureWriteJson(path.join(nullMarker, 'training', '.migration-v2.json'), null);
+  cases.push(nullMarker);
+
+  for (const dir of cases) {
+    const before = treeSnapshot(dir);
+    const calls = [];
+    await assert.rejects(
+      createTrainingControl({ io: migrationIo({ calls }) }).migrateAuthority(dir),
+      { code: 'TRAINING_MIGRATION_CORRUPT' },
+    );
+    assert.deepEqual(calls, []);
+    assert.deepEqual(treeSnapshot(dir), before);
+  }
+});
+
+test('malformed attempts and unsafe snapshot publish ids never become applied evidence', async () => {
+  const malformed = tmp();
+  writeV1Session(malformed);
+  fs.writeFileSync(path.join(malformed, '.publish-attempt.json'), '{broken');
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(malformed),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(readAuth(malformed).schemaVersion, 1);
+
+  const unsafeSnapshot = tmp();
+  const { summary } = writeV1Session(unsafeSnapshot);
+  writeV1Attempt(unsafeSnapshot, summary, { applied: true, publishId: 7 });
+  fs.writeFileSync(path.join(unsafeSnapshot, 'ui-snapshot.json'), JSON.stringify({
+    publishId: 'Infinity',
+    training: [summary],
+  }));
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(unsafeSnapshot),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(readAuth(unsafeSnapshot).schemaVersion, 1);
+
+  const forgedBody = tmp();
+  const forged = writeV1Session(forgedBody);
+  writeV1Attempt(forgedBody, forged.summary, { applied: true });
+  const attemptPath = path.join(forgedBody, '.publish-attempt.json');
+  const attempt = JSON.parse(fs.readFileSync(attemptPath, 'utf8'));
+  attempt.body.training[0].grade = 'off-policy';
+  fs.writeFileSync(attemptPath, JSON.stringify(attempt));
+  await assert.rejects(
+    createTrainingControl().migrateAuthority(forgedBody),
+    { code: 'TRAINING_MIGRATION_CORRUPT' },
+  );
+  assert.equal(readAuth(forgedBody).schemaVersion, 1);
+});
+
+test('legacy UI provenance fails closed when marker or digest-map coverage is missing', async () => {
+  const make = async () => {
+    const dir = tmp();
+    writeSecurityFixtures(dir);
+    const { summary } = writeV1Session(dir);
+    fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
+      revision: 1, publishId: 1, training: [summary], history: [],
+    }));
+    await createTrainingControl().migrateAuthority(dir);
+    return { dir, summary };
+  };
+
+  const noMarker = await make();
+  fs.unlinkSync(path.join(noMarker.dir, 'training', '.migration-v2.json'));
+  assert.equal(loadUiState(noMarker.dir, 'tok').training.length, 0);
+
+  const missingMapEntry = await make();
+  const mapPath = path.join(missingMapEntry.dir, 'training', '.digest-map-v2.json');
+  const map = JSON.parse(fs.readFileSync(mapPath, 'utf8'));
+  delete map.oldToNew[missingMapEntry.summary.payloadSha256];
+  secureWriteJson(mapPath, map);
+  assert.equal(loadUiState(missingMapEntry.dir, 'tok').training.length, 0);
+});

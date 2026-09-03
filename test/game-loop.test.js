@@ -1612,6 +1612,32 @@ test('Q2a resume exposes permanent migration corruption as a durable halt withou
   assert.equal(halted.notices.some((notice) => /TRAINING_MIGRATION_CORRUPT/.test(notice)), true);
 });
 
+test('Q2a resume clears any repaired halt by training-migration source, not a code allowlist', async (t) => {
+  const storeDir = tmpGame();
+  const prepared = prepareSession(storeDir);
+  const initialized = await initGame(prepared.stagingDir);
+  fs.renameSync(prepared.stagingDir, prepared.sessionDir);
+  const gameDir = prepared.sessionDir;
+  writeLoopStateFixture(gameDir, initialized.sessionToken, {
+    phase: 'bootstrap',
+    halt: { code: 'UNSAFE_PATH', message: 'old migration failure', source: 'training-migration' },
+  });
+  writeEmptyTrainingAuthority(gameDir, initialized.sessionToken, { schemaVersion: 2 });
+  const initialLockHandle = writeTestLoopLock(gameDir);
+  const loop = createGameLoop({
+    gameDir,
+    initialLockHandle,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0, storeDir },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const resumed = await loop.resume({ skipLock: true });
+
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(resumed.halt, undefined);
+});
+
 test('resume from bootstrap never calls init, preserves engine files, and completes server plus warmup', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
