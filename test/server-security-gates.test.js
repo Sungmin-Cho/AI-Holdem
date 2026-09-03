@@ -103,7 +103,12 @@ function legacySummaryDigest(summary) {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
-function exploitValue({ opponentId = 'p1', policyId = 'tight-v1', adjustment = { bluff: 'increase' }, primary = 'p1' } = {}) {
+function exploitValue({
+  opponentId = 'p1',
+  policyId = 'tight-v1',
+  adjustment = { bluff: 'increase', thinValue: 'hold', defense: 'decrease' },
+  primary = 'p1',
+} = {}) {
   return {
     opponents: [{
       opponentId,
@@ -221,7 +226,10 @@ test('C2: an unreadable engine state fails closed — absent, directory, symlink
   writeSecurityFixtures(partial, { gameOver: true });
   fs.writeFileSync(path.join(partial, 'state.json'), JSON.stringify({ gameOver: true }));
 
-  for (const dir of [absent, asDirectory, viaSymlink, corrupt, partial]) {
+  const staleSession = tmpDir();
+  writeSecurityFixtures(staleSession, { gameOver: true, state: { sessionToken: 'other-session' } });
+
+  for (const dir of [absent, asDirectory, viaSymlink, corrupt, partial, staleSession]) {
     await withServer(dir, async ({ port }) => {
       assert.equal((await post(port, { publishId: 1, training: [summary] })).status, 200);
       const denied = await post(port, { publishId: 2, trainingAnnotations: [exploit] });
@@ -481,6 +489,52 @@ test('C1: parseable but incomplete security schemas fail closed', async () => {
   });
   cases.push(duplicateCards);
 
+  const ghostParticipant = tmpDir();
+  writeSecurityFixtures(ghostParticipant, {
+    handInProgress: { handNo: 2, holes: { user: ['Ah', 'Kh'], ghost: ['Qs', 'Qd'] } },
+  });
+  cases.push(ghostParticipant);
+
+  const boardOverlap = tmpDir();
+  writeSecurityFixtures(boardOverlap, {
+    handInProgress: {
+      handNo: 2,
+      holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] },
+      board: ['7c'],
+      deck: [],
+    },
+  });
+  cases.push(boardOverlap);
+
+  const deckOverlap = tmpDir();
+  writeSecurityFixtures(deckOverlap, {
+    handInProgress: {
+      handNo: 2,
+      holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] },
+      board: [],
+      deck: ['7c'],
+    },
+  });
+  cases.push(deckOverlap);
+
+  const phaseMismatch = tmpDir();
+  writeSecurityFixtures(phaseMismatch, {
+    handInProgress: { handNo: 2, holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] } },
+    state: { phase: 'idle' },
+  });
+  cases.push(phaseMismatch);
+
+  const handNoMismatch = tmpDir();
+  writeSecurityFixtures(handNoMismatch, {
+    hands: [handRecordFixture(1)],
+    state: { handNo: 2 },
+  });
+  cases.push(handNoMismatch);
+
+  const tokenMismatch = tmpDir();
+  writeSecurityFixtures(tokenMismatch, { state: { sessionToken: 'other-session' } });
+  cases.push(tokenMismatch);
+
   for (const dir of cases) {
     await withServer(dir, async ({ port }) => {
       await post(port, { publishId: 1, training: [summary] });
@@ -544,7 +598,7 @@ test('C1: hand-10000.json remains a canonical security source', { timeout: 20_00
   const dir = tmpDir();
   const hands = Array.from({ length: 10_000 }, (_, index) => handRecordFixture(index + 1, {
     holes: index === 9_999
-      ? { user: ['Ah', 'Kh'], p1: ['7c', '2d'] }
+      ? { user: ['Ah', 'Kh'], p1: ['As', 'Ks'] }
       : { user: ['Ah', 'Kh'] },
   }));
   writeSecurityFixtures(dir, { hands });
@@ -553,7 +607,7 @@ test('C1: hand-10000.json remains a canonical security source', { timeout: 20_00
     await post(port, { publishId: 1, training: [summary] });
     const denied = await post(port, {
       publishId: 2,
-      trainingAnnotations: [annotationRow(summary, 'explanation', '마지막 상대 카드는 7c다')],
+      trainingAnnotations: [annotationRow(summary, 'explanation', '마지막 상대 카드는 As다')],
     });
     assert.equal(denied.status, 400);
     assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
@@ -606,6 +660,7 @@ test('M1: the exploit adjustment vocabulary is closed and prototype-free', () =>
   throwsMismatch(rowFor({ configDigest: 'x', bluff: 'increase' }), 'unknown key');
   throwsMismatch(rowFor({ bluff: 'lots' }), 'unknown level');
   throwsMismatch(rowFor({ bluff: null }), 'null level');
+  throwsMismatch(rowFor({ bluff: 'increase' }), 'incomplete adjustment');
   throwsMismatch(rowFor(JSON.parse('{"__proto__":"increase"}')), '__proto__ key');
   throwsMismatch(rowFor({ bluff: 'increase' }, 'ghost'), 'primary outside opponents');
   throwsMismatch({ ...rowFor({ bluff: 'increase' }), value: { opponents: null, primary: null } }, 'null opponents');
@@ -885,6 +940,23 @@ test('M4: unsigned legacy text and every duplicate final authority key are dropp
     trainingAnnotations: [ready, { ...ready }],
   });
   await withServer(duplicateAnnotationDir, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
+  });
+
+  const malformedOuterDir = tmpDir();
+  writeSecurityFixtures(malformedOuterDir);
+  const legacy = { ...summary, explanation: 'authority가 증명한 구 해설' };
+  legacy.payloadSha256 = legacySummaryDigest(legacy);
+  fs.mkdirSync(path.join(malformedOuterDir, 'training'), { recursive: true });
+  fs.writeFileSync(
+    path.join(malformedOuterDir, 'training', '.training-authority.json'),
+    JSON.stringify({ schemaVersion: 1 }),
+  );
+  seedSnapshot(malformedOuterDir, { training: [legacy] });
+  const raw = JSON.parse(fs.readFileSync(path.join(malformedOuterDir, 'ui-snapshot.json'), 'utf8'));
+  raw.trainingAnnotations = { [summary.evaluationId]: { explanation: null } };
+  fs.writeFileSync(path.join(malformedOuterDir, 'ui-snapshot.json'), JSON.stringify(raw));
+  await withServer(malformedOuterDir, async ({ port }) => {
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
   });
 });

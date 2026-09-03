@@ -394,7 +394,7 @@ test('projectTrainingAnnotation: explanation cap, exploit keys, unavailable cano
       opponents: [{
         opponentId: 'p1',
         policyId: 'tight',
-        adjustment: { bluff: 'increase', thinValue: 'hold' },
+        adjustment: { bluff: 'increase', thinValue: 'hold', defense: 'decrease' },
         comparison: { summaryCode: 'GTO_OK_EXPLOIT_MISSED', extra: 'drop-me' },
         secret: true,
       }],
@@ -1077,7 +1077,7 @@ test('server annotations: orphan 409, same value no-op, different value 409, fie
         opponents: [{
           opponentId: 'p1',
           policyId: 'tight',
-          adjustment: { bluff: 'increase' },
+          adjustment: { bluff: 'increase', thinValue: 'hold', defense: 'decrease' },
           comparison: { summaryCode: 'GTO_OK_EXPLOIT_MISSED' },
         }],
         primary: 'p1',
