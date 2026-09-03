@@ -114,6 +114,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 | `REVIEW_FAILED` | 게임은 끝났고 상태·코치 노트는 온전하지만 종합 리뷰 생성이 두 번 실패했습니다. 상위 모델 CLI 인증을 확인한 뒤 `/start-game resume`으로 리뷰 단계부터 다시 시도합니다 |
 | `repair_failed` | 직전 핸드 아카이브를 쓰지 못해 멈췄습니다. 그 핸드는 코치·리뷰가 읽을 수 없습니다. `$SESSION_DIR/hands/` 상태를 확인해야 합니다 |
 | `NO_PLAYER_RUNTIME` | 적격 플레이어 런타임이 하나도 없어 게임을 시작(또는 재개)하지 않았습니다. `notices`의 probe 실패 내역대로 CLI 인증·설치를 고친 뒤 다시 시도합니다 |
+| `TRAINING_MIGRATION_CORRUPT` | training authority 마이그레이션 증거가 불완전해 재개 전에 멈췄습니다. `message`가 지목한 authority·digest map·JSONL·attempt 파일을 복구한 뒤 `/start-game resume`으로 다시 시도합니다 |
 
 그 밖의 `halt.code`는 코드와 `message`를 그대로 전하고 `$SESSION_DIR/loop.log`를 가리킨다. 딜러가 원인을 추측해 지어내지 않는다.
 

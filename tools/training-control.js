@@ -141,7 +141,7 @@ function readMarker(sessionDir) {
   try {
     return readJsonSecure(markerPath(sessionDir));
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (error.code === 'ENOENT') return undefined;
     throw error;
   }
 }
@@ -151,7 +151,7 @@ function plainObject(value) {
 }
 
 function validateMigrationMarker(marker) {
-  if (marker === null) return null;
+  if (marker === undefined) return null;
   if (!plainObject(marker)
     || !['in-progress', 'session-done', 'complete'].includes(marker.status)) {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'training migration marker가 올바르지 않습니다.');
@@ -188,6 +188,32 @@ function readDigestMapForMigration(sessionDir) {
     }
   }
   return map;
+}
+
+function validateV2AuthorityAgainstMap(auth, map) {
+  validateV2Items(auth);
+  const ids = Object.keys(auth.items).sort();
+  if (Object.keys(map.byEvaluationId).sort().join('\0') !== ids.join('\0')) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'digest map coverage가 authority items와 다릅니다.');
+  }
+  for (const [id, item] of Object.entries(auth.items)) {
+    if (!plainObject(item) || item.evaluationId !== id || !plainObject(item.summary)
+      || item.summary.evaluationId !== id || typeof item.payloadSha256 !== 'string') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training item 형식이 올바르지 않습니다.');
+    }
+    let projected;
+    try {
+      projected = projectTrainingSummary(item.summary);
+    } catch {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 training item summary가 올바르지 않습니다.');
+    }
+    const mapping = map.byEvaluationId[id];
+    if (projected.payloadSha256 !== item.payloadSha256
+      || mapping.new !== item.payloadSha256
+      || map.oldToNew[mapping.old] !== mapping.new) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'v2 item과 digest map이 일치하지 않습니다.');
+    }
+  }
 }
 
 function loadProcessed(storeDir) {
@@ -246,14 +272,12 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
       maxBytes: 1_000_000,
     }).toString('utf8'));
   } catch (error) {
-    if (error.code !== 'ENOENT') {
+    if (error.code === 'ENOENT') {
       return {
         resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
       };
     }
-    return {
-      resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
-    };
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt 파일을 안전하게 읽을 수 없습니다.');
   }
   const trainingAuthz = record.trainingAuthority;
   const bodyTraining = Array.isArray(record.body?.training) ? record.body.training : [];
@@ -267,34 +291,54 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
     || trainingAuthz?.expectedGameEpoch !== gameEpoch) {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt epoch가 authority와 일치하지 않습니다.');
   }
-  const attemptId = Number(record.body?.publishId);
+  const attemptId = record.body?.publishId;
   if (!Number.isSafeInteger(attemptId) || attemptId <= 0) {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt id가 올바르지 않습니다.');
   }
-  const declared = [];
-  if (Array.isArray(trainingAuthz?.items)) declared.push(...trainingAuthz.items);
-  else if (trainingAuthz?.evaluationId) declared.push(trainingAuthz);
-  declared.push(...bodyTraining);
-  if (declared.length === 0) {
+  const authorityEntries = Array.isArray(trainingAuthz?.items)
+    ? trainingAuthz.items
+    : (trainingAuthz?.evaluationId ? [trainingAuthz] : []);
+  if (bodyTraining.length === 0 || authorityEntries.length === 0) {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 비어 있습니다.');
   }
-  const payloadById = new Map();
+  const collectEntries = (entries, label, { verifyBody = false } = {}) => {
+    const collected = new Map();
+    for (const entry of entries) {
+      if (!plainObject(entry) || typeof entry.evaluationId !== 'string'
+        || typeof entry.payloadSha256 !== 'string' || collected.has(entry.evaluationId)) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', `${label} 항목이 올바르지 않습니다.`);
+      }
+      const current = currentPayloadFor(entry.evaluationId, entry.payloadSha256, items, digestMap);
+      if (!current) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', `${label} digest가 authority와 일치하지 않습니다.`);
+      }
+      if (verifyBody) {
+        let recomputed;
+        try {
+          recomputed = entry.payloadSha256 === current
+            ? projectTrainingSummary(entry).payloadSha256
+            : legacyTrainingPayloadSha256(entry);
+        } catch {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} body가 올바르지 않습니다.`);
+        }
+        if (recomputed !== entry.payloadSha256) {
+          throw coded('TRAINING_MIGRATION_CORRUPT', `${label} body digest가 일치하지 않습니다.`);
+        }
+      }
+      collected.set(entry.evaluationId, entry.payloadSha256);
+    }
+    return collected;
+  };
+  const authorityById = collectEntries(authorityEntries, 'training authority');
+  const bodyById = collectEntries(bodyTraining, 'training publish', { verifyBody: true });
+  if (authorityById.size !== bodyById.size
+    || [...authorityById].some(([id, digest]) => bodyById.get(id) !== digest)) {
+    throw coded('TRAINING_MIGRATION_CORRUPT', 'attempt body와 authority 항목 집합이 다릅니다.');
+  }
+  const payloadById = bodyById;
   let legacyAttempt = false;
-  for (const entry of declared) {
-    if (!plainObject(entry) || typeof entry.evaluationId !== 'string'
-      || typeof entry.payloadSha256 !== 'string') {
-      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 올바르지 않습니다.');
-    }
-    const current = currentPayloadFor(entry.evaluationId, entry.payloadSha256, items, digestMap);
-    if (!current) {
-      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt digest가 authority와 일치하지 않습니다.');
-    }
-    if (payloadById.has(entry.evaluationId)
-      && payloadById.get(entry.evaluationId) !== entry.payloadSha256) {
-      throw coded('TRAINING_MIGRATION_CORRUPT', 'training publish attempt 항목이 서로 충돌합니다.');
-    }
-    payloadById.set(entry.evaluationId, entry.payloadSha256);
-    if (entry.payloadSha256 !== current) legacyAttempt = true;
+  for (const [id, digest] of payloadById) {
+    if (digest !== items[id].payloadSha256) legacyAttempt = true;
   }
   const evalIds = [...payloadById.keys()];
   let snapshotPublishId = 0;
@@ -303,10 +347,34 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
     const snap = JSON.parse(openContained(sessionDir, ['ui-snapshot.json'], {
       maxBytes: 4_000_000,
     }).toString('utf8'));
-    snapshotPublishId = Number(snap.publishId) || 0;
+    if (snap.publishId !== undefined && !Number.isSafeInteger(snap.publishId)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot publishId가 올바르지 않습니다.');
+    }
+    snapshotPublishId = snap.publishId ?? 0;
     snapshotTraining = Array.isArray(snap.training) ? snap.training : [];
-  } catch { /* no snapshot */ }
-  const snapshotById = new Map(snapshotTraining.map((row) => [row?.evaluationId, row]));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot evidence를 안전하게 읽을 수 없습니다.');
+    }
+  }
+  const snapshotById = new Map();
+  for (const row of snapshotTraining) {
+    if (!plainObject(row) || typeof row.evaluationId !== 'string'
+      || snapshotById.has(row.evaluationId)) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training 항목이 올바르지 않습니다.');
+    }
+    const current = currentPayloadFor(row.evaluationId, row.payloadSha256, items, digestMap);
+    if (!current) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training digest가 authority와 일치하지 않습니다.');
+    }
+    const recomputed = row.payloadSha256 === current
+      ? projectTrainingSummary(row).payloadSha256
+      : legacyTrainingPayloadSha256(row);
+    if (recomputed !== row.payloadSha256) {
+      throw coded('TRAINING_MIGRATION_CORRUPT', 'ui snapshot training body digest가 일치하지 않습니다.');
+    }
+    snapshotById.set(row.evaluationId, row);
+  }
   const applied = snapshotPublishId >= attemptId && evalIds.every((id) => {
     const row = snapshotById.get(id);
     return Boolean(currentPayloadFor(id, row?.payloadSha256, items, digestMap));
@@ -412,25 +480,31 @@ function validateLegacySources(sessionDir, auth) {
   const rows = readJsonl(evaluationsPath(sessionDir));
   const rowById = new Map();
   for (const row of rows) {
-    if (!plainObject(row) || typeof row.evaluationId !== 'string' || rowById.has(row.evaluationId)) {
+    if (!plainObject(row) || typeof row.evaluationId !== 'string') {
       throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy evaluations.jsonl 항목이 올바르지 않습니다.');
+    }
+    if (rowById.has(row.evaluationId)) {
+      if (JSON.stringify(rowById.get(row.evaluationId)) !== JSON.stringify(row)) {
+        throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy evaluations.jsonl 중복 항목이 충돌합니다.');
+      }
+      continue;
     }
     rowById.set(row.evaluationId, row);
   }
   for (const [id, item] of Object.entries(auth.items)) {
     const row = rowById.get(id);
-    if (!plainObject(item) || item.evaluationId !== id || !row || row.evaluationId !== id
-      || typeof item.payloadSha256 !== 'string'
-      || row.payloadSha256 !== item.payloadSha256
-      || legacyTrainingPayloadSha256(row) !== item.payloadSha256) {
+    if (!plainObject(item) || item.evaluationId !== id || typeof item.payloadSha256 !== 'string'
+      || (row && (row.evaluationId !== id
+        || row.payloadSha256 !== item.payloadSha256
+        || legacyTrainingPayloadSha256(row) !== item.payloadSha256))) {
       throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy authority와 JSONL digest가 일치하지 않습니다.');
     }
     const expectedRef = detailRefOf(id);
     const detailRef = item.detailRef ?? row.detailRef;
     const detailSha256 = item.detailSha256 ?? row.detailSha256;
-    if (detailRef !== expectedRef || row.detailRef !== expectedRef
+    if (detailRef !== expectedRef || (row && row.detailRef !== expectedRef)
       || typeof detailSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(detailSha256)
-      || (row.detailSha256 !== undefined && row.detailSha256 !== detailSha256)) {
+      || (row?.detailSha256 !== undefined && row.detailSha256 !== detailSha256)) {
       throw coded('TRAINING_MIGRATION_CORRUPT', 'legacy detail identity가 올바르지 않습니다.');
     }
     let detailRaw;
@@ -462,6 +536,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
     let resumedMigration = false;
     if (marker?.status === 'in-progress') {
       const digestMap = readDigestMapForMigration(sessionDir);
+      validateV2AuthorityAgainstMap(auth, digestMap);
       rewriteJsonlFromItems(sessionDir, auth, writers);
       writers.writeJsonSecure(markerPath(sessionDir), sessionDoneMarker());
       finishResolvedAttempt(sessionDir, auth, writers, digestMap);
@@ -469,6 +544,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
     } else if (marker?.status === 'session-done' || marker?.status === 'complete') {
       if (fs.existsSync(path.join(sessionDir, '.publish-attempt.json'))) {
         const digestMap = readDigestMapForMigration(sessionDir);
+        validateV2AuthorityAgainstMap(auth, digestMap);
         resumedMigration = finishResolvedAttempt(sessionDir, auth, writers, digestMap);
       }
     }
@@ -737,7 +813,7 @@ function recordPendingUnlocked(auth, decisionId, { handNo, reason, adapterId } =
 }
 
 function profileConsumerReady(sessionDir) {
-  const marker = readMarker(sessionDir);
+  const marker = validateMigrationMarker(readMarker(sessionDir));
   if (!marker) return true;
   return marker.status === 'complete';
 }

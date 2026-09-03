@@ -59,7 +59,7 @@ function terminalForMigration(sessionDir) {
   }
 }
 
-function migrationMayWrite(sessionDir) {
+function migrationNeeded(sessionDir) {
   const auth = readJsonSecure(path.join(sessionDir, 'training', '.training-authority.json'));
   if (auth?.schemaVersion === 1) return true;
   let marker = null;
@@ -69,8 +69,7 @@ function migrationMayWrite(sessionDir) {
     if (error.code !== 'ENOENT') throw error;
   }
   if (marker?.status === 'in-progress') return true;
-  return ['session-done', 'complete'].includes(marker?.status)
-    && fs.existsSync(path.join(sessionDir, '.publish-attempt.json'));
+  return false;
 }
 
 async function settleRunner(out) {
@@ -189,10 +188,13 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   const runEvaluate = evaluate ?? defaultEvaluate;
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
-      if (migrationMayWrite(sessionDir) && !terminalForMigration(sessionDir)) {
-        throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 authority는 sweep이 마이그레이션하지 않습니다.');
+      let migration = null;
+      if (migrationNeeded(sessionDir)) {
+        if (!terminalForMigration(sessionDir)) {
+          throw coded('SESSION_NOT_TERMINAL', '비terminal 세션의 authority는 sweep이 마이그레이션하지 않습니다.');
+        }
+        migration = await tc.migrateAuthority(sessionDir);
       }
-      const migration = await tc.migrateAuthority(sessionDir);
       for (const notice of migration?.notices ?? []) {
         notices.push(notice);
         onNotice?.(notice);

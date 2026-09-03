@@ -406,6 +406,10 @@ function legacyTrainingProvenance(gameDir) {
     const map = readSecurityJson(gameDir, ['training', '.digest-map-v2.json']);
     if (map?.schemaVersion !== 1 || !map.oldToNew || typeof map.oldToNew !== 'object'
       || Array.isArray(map.oldToNew)) return {};
+    const digest = /^[0-9a-f]{64}$/;
+    if (Object.entries(map.oldToNew).some(([oldValue, newValue]) => (
+      !digest.test(oldValue) || typeof newValue !== 'string' || !digest.test(newValue)
+    ))) return {};
     return { allowUnmappedLegacy: false, legacyOldToNew: map.oldToNew };
   } catch {
     return {};

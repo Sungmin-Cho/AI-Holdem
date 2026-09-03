@@ -4710,7 +4710,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
       const ownerSessionId = randomUUID();
       const resumeNotices = [...new Set([
-        ...(Array.isArray(state?.notices) ? state.notices : []),
+        ...(Array.isArray(state?.notices)
+          ? state.notices.filter((notice) => (
+            trainingMigrationError || !String(notice).startsWith('training migration halt:')
+          ))
+          : []),
         ...trainingMigrationNotices,
       ])];
       if (!state) {
@@ -4738,12 +4742,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (trainingMigrationError) {
         const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
         const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
-        state = writeLoopState({ halt: { code, message }, notices: resumeNotices });
+        state = writeLoopState({
+          halt: { code, message, source: 'training-migration' },
+          notices: resumeNotices,
+        });
         log('training-migration-halt', { code });
         return state;
       }
-      if (['TRAINING_MIGRATION_CORRUPT', 'TRAINING_AUTHORITY_V1', 'ANNOTATION_CONFLICT']
-        .includes(state.halt?.code)) {
+      if (state.halt?.source === 'training-migration') {
         state = writeLoopState({ halt: undefined });
       }
 
