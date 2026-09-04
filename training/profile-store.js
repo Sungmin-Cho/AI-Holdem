@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
+import { assertEvaluationId } from './contracts.js';
 import { classifyOpportunity } from './opportunities.js';
 
 function requireIo(io, names) {
@@ -15,10 +16,10 @@ function requireIo(io, names) {
 
 import {
   applyEvent,
+  assertProfileEvent,
   emptyProfile,
   PROFILE_SCHEMA_VERSION,
   projectActive,
-  rebuildFromEvents,
 } from './profile-aggregator.js';
 
 const PROFILE_LOCK = 'profile.lock.d';
@@ -29,12 +30,12 @@ function coded(code, message) {
   return error;
 }
 
-function eventFromEvaluation(evaluation, appliedAt) {
-  const classified = classifyOpportunity(evaluation);
+function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
   return {
     evaluationId: evaluation.evaluationId,
     payloadSha256: evaluation.payloadSha256,
     skillKey: classified.skillKey,
+    street: classified.street,
     status: evaluation.status,
     grade: evaluation.grade ?? null,
     forced: Boolean(evaluation.forced),
@@ -44,6 +45,39 @@ function eventFromEvaluation(evaluation, appliedAt) {
     appliedAt,
     ...(evaluation.origin === 'drill' ? { origin: 'drill' } : {}),
   };
+}
+
+function streetFromEvaluationId(evaluationId) {
+  try {
+    assertEvaluationId(evaluationId);
+  } catch {
+    throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 계약 문법을 벗어났습니다.');
+  }
+  const decisionId = evaluationId.split(':')[1];
+  return decisionId.split('-')[2];
+}
+
+function retainProcessed(profile, event) {
+  assertProfileEvent(event);
+  const seen = profile.processed[event.evaluationId];
+  if (seen === event.payloadSha256) return profile;
+  if (seen && seen !== event.payloadSha256) {
+    throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
+  }
+  profile.processed[event.evaluationId] = event.payloadSha256;
+  profile.updatedAt = event.appliedAt ?? profile.updatedAt;
+  return profile;
+}
+
+function rebuildLearnableFromEvents(events) {
+  let profile = emptyProfile();
+  for (const event of events) {
+    const street = streetFromEvaluationId(event?.evaluationId);
+    profile = street === 'preflop'
+      ? applyEvent(profile, event)
+      : retainProcessed(profile, event);
+  }
+  return projectActive(profile);
 }
 
 // R12: fs helper는 주입받는다. 기본값 없음.
@@ -63,31 +97,31 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withNamedLock(root, PROFILE_LOCK, fn);
   }
 
-  function migrateSchema1(profile) {
+  function migrateLegacyProfile(profile, { persist = true } = {}) {
     const events = readJsonl(eventsPath);
     const processedIds = Object.keys(profile.processed ?? {});
     if (processedIds.length > 0 && events.length === 0) {
-      throw coded('UNSUPPORTED_PROFILE', 'schema 1 events cannot support schema 2');
+      throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 3`);
     }
-    const rebuilt = rebuildFromEvents(events);
+    const rebuilt = rebuildLearnableFromEvents(events);
     for (const id of processedIds) {
       if (!Object.prototype.hasOwnProperty.call(rebuilt.processed, id)
         || rebuilt.processed[id] !== profile.processed[id]) {
-        throw coded('UNSUPPORTED_PROFILE', 'schema 1 events cannot support schema 2');
+        throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 3`);
       }
     }
-    writeJsonSecure(profilePath, rebuilt);
+    if (persist) writeJsonSecure(profilePath, rebuilt);
     return rebuilt;
   }
 
-  function loadProfile() {
+  function loadProfile({ persistLegacy = true } = {}) {
     try {
       const profile = readJsonSecure(profilePath);
       if (profile.schemaVersion === PROFILE_SCHEMA_VERSION) {
         return projectActive(profile);
       }
-      if (profile.schemaVersion === 1) {
-        return migrateSchema1(profile);
+      if (profile.schemaVersion === 1 || profile.schemaVersion === 2) {
+        return migrateLegacyProfile(profile, { persist: persistLegacy });
       }
       throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion}`);
     } catch (error) {
@@ -98,8 +132,13 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
 
   async function apply(evaluation) {
     return withLock(() => {
+      const classified = classifyOpportunity(evaluation);
+      if (!classified.learnable) {
+        const profile = loadProfile({ persistLegacy: false });
+        return { applied: false, reason: 'NOT_LEARNABLE', profile };
+      }
       const appliedAt = now();
-      const event = eventFromEvaluation(evaluation, appliedAt);
+      const event = eventFromEvaluation(evaluation, appliedAt, classified);
       if (typeof event.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
         throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
       }
@@ -120,7 +159,9 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withLock(() => {
       try {
         const current = readJsonSecure(profilePath);
-        if (current.schemaVersion === 1) migrateSchema1(current);
+        if (current.schemaVersion === 1 || current.schemaVersion === 2) {
+          migrateLegacyProfile(current);
+        }
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }
@@ -130,8 +171,8 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
           ?? event.payloadSha256;
         return { ...event, payloadSha256: mapped };
       });
+      const profile = rebuildLearnableFromEvents(events);
       writeTextSecure(eventsPath, events.length ? `${events.map((row) => JSON.stringify(row)).join('\n')}\n` : '');
-      const profile = rebuildFromEvents(events);
       writeJsonSecure(profilePath, profile);
       return profile;
     });
@@ -140,7 +181,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
   async function rebuild() {
     return withLock(() => {
       const events = readJsonl(eventsPath);
-      const profile = rebuildFromEvents(events);
+      const profile = rebuildLearnableFromEvents(events);
       writeJsonSecure(profilePath, profile);
       return profile;
     });

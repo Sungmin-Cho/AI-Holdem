@@ -106,10 +106,13 @@ export function validateExplanation(evaluation, explanation) {
     if (/(정답|GTO)/i.test(explanation) && !/지원되지/.test(explanation)) {
       return { ok: false, code: 'UNSUPPORTED_AS_ANSWER' };
     }
-    const tokens = explanation.match(/-?\d+(?:\.\d+)?/g) ?? [];
+    const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;
-    for (const token of tokens) {
-      if (handNo == null || token !== String(handNo)) {
+    let match;
+    while ((match = numberRe.exec(explanation))) {
+      const token = match[0];
+      if (EV_WORDS.test(clauseAt(explanation, match.index))
+        || handNo == null || token !== String(handNo)) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
       }
     }
@@ -119,7 +122,6 @@ export function validateExplanation(evaluation, explanation) {
   const actions = [evaluation.chosen, ...(evaluation.recommended ?? [])].filter(Boolean);
   const freqByAction = new Map();
   const sizeBbs = [];
-  let anyEv = false;
   for (const action of actions) {
     if (action.action && action.frequency != null && Number.isFinite(Number(action.frequency))) {
       freqByAction.set(action.action, Number(action.frequency));
@@ -127,7 +129,6 @@ export function validateExplanation(evaluation, explanation) {
     if (action.sizeBb != null && Number.isFinite(Number(action.sizeBb))) {
       sizeBbs.push(Number(action.sizeBb));
     }
-    if (action.evBb != null && Number.isFinite(Number(action.evBb))) anyEv = true;
   }
   const handNo = Number(evaluation.handNo);
   const spans = aliasSpans(explanation);
@@ -144,7 +145,7 @@ export function validateExplanation(evaluation, explanation) {
     const isBb = /^\s*(?:bb|BB)/.test(rest);
     const isHandNo = Number.isFinite(handNo) && !token.includes('.') && num === handNo;
 
-    if (!anyEv && EV_WORDS.test(clause) && !isHandNo) {
+    if (EV_WORDS.test(clause)) {
       return { ok: false, code: 'NUMBER_CONTRADICTION' };
     }
 

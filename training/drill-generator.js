@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isPreflopSpotKey } from './opportunities.js';
 
 const DEFAULT_SPOTS = [
   '6max-100bb-utg-rfi-unopened',
@@ -42,7 +43,12 @@ function questionFrom({
     error.code = 'PROVIDER_VERSION_REQUIRED';
     throw error;
   }
-  const pos = (spotKey.split('-')[2] ?? 'btn').toUpperCase();
+  if (!isPreflopSpotKey(spotKey)) {
+    const error = new Error('drill question spotKey가 지원 문법을 벗어났습니다.');
+    error.code = 'UNSUPPORTED_SPOT';
+    throw error;
+  }
+  const pos = spotKey.split('-')[2].toUpperCase();
   return {
     questionId: `drill:${providerVersion}:${spotKey}:${handClass}:${nonce}`,
     mode,
@@ -98,7 +104,8 @@ export function spotForSkillKey(skillKey) {
       ?? 'bb';
     return `6max-100bb-${defender}-vs-single-raise`;
   }
-  return `6max-100bb-${seatIn(key, RFI_SEATS) ?? 'btn'}-rfi-unopened`;
+  const rfiSeat = seatIn(key, RFI_SEATS);
+  return rfiSeat ? `6max-100bb-${rfiSeat}-rfi-unopened` : null;
 }
 
 export function handClassForSkillKey(skillKey) {
@@ -106,6 +113,12 @@ export function handClassForSkillKey(skillKey) {
   let sum = 0;
   for (let i = 0; i < key.length; i += 1) sum = (sum * 31 + key.charCodeAt(i)) >>> 0;
   return HAND_ROTATION[sum % HAND_ROTATION.length];
+}
+
+function mistakeQuestionInput(item) {
+  const [spot, handClass] = String(item?.spotSignature ?? '').split(':');
+  if (!isPreflopSpotKey(spot)) return null;
+  return { item, spot, handClass: handClass || 'AJo' };
 }
 
 export function generateQueue({
@@ -131,35 +144,37 @@ export function generateQueue({
   const provider = { providerId: source.id, providerVersion: source.version };
   if (mode === 'leak') {
     const leak = profile?.leaks?.[0];
-    const key = leak?.recommendedDrill ?? leak?.id ?? 'preflop.rfi.BTN';
+    if (!leak) return [];
+    const key = leak.recommendedDrill ?? leak.id;
     const spot = spotForSkillKey(key);
+    if (!isPreflopSpotKey(spot)) return [];
     return [questionFrom({
       ...provider,
       mode, spotKey: spot, skillKey: key, nonce, handClass: handClassForSkillKey(key),
     })];
   }
   if (mode === 'mistake-review') {
-    return mistakes.slice(0, limit).map((item, index) => {
-      const [spot, handClass] = String(item.spotSignature).split(':');
+    return mistakes.map(mistakeQuestionInput).filter(Boolean).slice(0, limit)
+      .map(({ item, spot, handClass }, index) => {
       return questionFrom({
         ...provider,
         mode,
         spotKey: spot,
-        handClass: handClass ?? 'AJo',
+        handClass,
         skillKey: item.skillKey,
         nonce: index + 1,
       });
     });
   }
   if (mode === 'daily') {
-    const due = mistakes.filter((item) => !item.nextReviewAt || item.nextReviewAt <= now);
-    return due.slice(0, limit).map((item, index) => {
-      const [spot, handClass] = String(item.spotSignature).split(':');
+    const due = mistakes.filter((item) => !item.nextReviewAt || item.nextReviewAt <= now)
+      .map(mistakeQuestionInput).filter(Boolean);
+    return due.slice(0, limit).map(({ item, spot, handClass }, index) => {
       return questionFrom({
         ...provider,
         mode,
         spotKey: spot,
-        handClass: handClass ?? 'AJo',
+        handClass,
         skillKey: item.skillKey,
         nonce: index + 1,
       });

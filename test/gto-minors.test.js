@@ -335,8 +335,11 @@ test('every derived leak spot is one the dataset actually has', async () => {
     'preflop.bbDefense.vs-BTN', 'preflop.sbDefense.vs-CO', 'preflop.btnDefense.vs-UTG',
     'nothing-recognisable',
   ];
-  const missing = leaks
+  const derived = leaks
     .map((leak) => [leak, spotForSkillKey(leak)])
+  assert.equal(derived.at(-1)[1], null);
+  const missing = derived
+    .filter(([, spot]) => spot !== null)
     .filter(([, spot]) => !data.spots[spot]);
   assert.deepEqual(missing, []);
 });

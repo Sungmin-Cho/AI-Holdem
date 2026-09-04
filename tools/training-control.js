@@ -1605,6 +1605,13 @@ export function createTrainingControl({ storeDir, io } = {}) {
                 item.consumers.profiled = true;
                 profiled += 1;
                 if (result.applied === true) applied += 1;
+                if (result.reason === 'NOT_LEARNABLE') {
+                  if (!item.consumers.banked) {
+                    item.consumers.banked = true;
+                    banked += 1;
+                  }
+                  item.consumers.skipReason = 'NOT_LEARNABLE';
+                }
               }
             }
             if (!item.consumers.banked) {

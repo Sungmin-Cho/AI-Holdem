@@ -2,7 +2,7 @@ import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
-export const PROFILE_SCHEMA_VERSION = 2;
+export const PROFILE_SCHEMA_VERSION = 3;
 
 function coded(code, message) {
   const error = new Error(message);

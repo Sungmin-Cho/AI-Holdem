@@ -219,6 +219,10 @@ export async function startDrill(storeDir, { mode = 'free', seed = '0', idempote
     const bank = createMistakeBank(storeDir);
     const profile = await createProfileStore(storeDir).show();
     const mistakes = await bank.list();
+    const bankStats = await bank.stats();
+    const notices = bankStats.prunedUnlearnable > 0
+      ? [`postflop 항목 ${bankStats.prunedUnlearnable}건은 드릴 대상이 아닙니다`]
+      : [];
     const { data } = loadPreflopDataset(DATASET);
     const queue = generateQueue({
       mode, profile, mistakes, seed, now: new Date().toISOString(),
@@ -234,6 +238,7 @@ export async function startDrill(storeDir, { mode = 'free', seed = '0', idempote
       queue,
       answers: [],
       pending: null,
+      notices,
     };
     persistSession(storeDir, session);
     return session;
@@ -307,7 +312,13 @@ async function main() {
       seed: flags.seed ?? '0',
       idempotencyKey: flags['idempotency-key'],
     });
-    fs.writeSync(1, `${JSON.stringify({ ok: true, count: session.queue.length, sessionId: session.sessionId, session })}\n`);
+    fs.writeSync(1, `${JSON.stringify({
+      ok: true,
+      count: session.queue.length,
+      sessionId: session.sessionId,
+      notices: session.notices ?? [],
+      session,
+    })}\n`);
     return;
   }
   if (cmd === 'next') {

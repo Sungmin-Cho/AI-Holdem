@@ -1,19 +1,37 @@
+import { assertEvaluationId } from './contracts.js';
+
+export const PREFLOP_SPOT_RE = /^6max-100bb-(utg|hj|co|btn|sb|bb)-(rfi-unopened|vs-single-raise)$/;
+
+export function isPreflopSpotKey(spotKey) {
+  return typeof spotKey === 'string' && PREFLOP_SPOT_RE.test(spotKey);
+}
+
 export function skillKeyOf({ spotKey } = {}) {
-  if (typeof spotKey !== 'string' || !spotKey) return 'preflop.unknown';
-  const parts = spotKey.split('-');
-  const pos = (parts[2] ?? 'unk').toUpperCase();
-  const context = parts.slice(3).join('-');
+  const match = typeof spotKey === 'string' ? PREFLOP_SPOT_RE.exec(spotKey) : null;
+  if (!match) return 'unknown';
+  const [, seat, context] = match;
+  const pos = seat.toUpperCase();
   if (context === 'rfi-unopened') return `preflop.rfi.${pos}`;
   if (context === 'vs-single-raise') {
     return pos === 'BB' ? 'preflop.bbDefense.vsRaise' : `preflop.vsRaise.${pos}`;
   }
-  return `preflop.other.${pos}`;
+  return 'unknown';
 }
 
-export function classifyOpportunity(evaluation) {
+export function classifyOpportunity(evaluation = {}) {
+  let canonicalStreet = null;
+  if (evaluation.evaluationId != null) {
+    assertEvaluationId(evaluation.evaluationId);
+    canonicalStreet = evaluation.evaluationId.split(':')[1].split('-')[2];
+  }
+  const street = evaluation.street ?? canonicalStreet ?? 'preflop';
+  const learnable = street === 'preflop';
   return {
-    skillKey: skillKeyOf(evaluation),
-    street: evaluation.street ?? 'preflop',
+    skillKey: learnable
+      ? (isPreflopSpotKey(evaluation.spotKey) ? skillKeyOf(evaluation) : 'preflop.unknown')
+      : `postflop.${street}`,
+    street,
+    learnable,
     supported: evaluation.status === 'supported',
     forced: Boolean(evaluation.forced),
     grade: evaluation.grade ?? null,
