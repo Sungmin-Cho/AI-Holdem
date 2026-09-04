@@ -791,7 +791,6 @@ test('session-done marker, crash mid store-migration, restart completes', async 
   assert.equal(marker.status, 'session-done');
   const mistakesPath = path.join(storeDir, '.training', 'mistakes.json');
   fs.mkdirSync(mistakesPath, { recursive: true });
-  assert.equal(typeof profileCli.completeSessionStoreMigrations, 'function');
   await assert.rejects(
     () => profileCli.completeSessionStoreMigration(storeDir, sessionDir),
     (error) => error.code === 'EISDIR' || error.code === 'UNSAFE_PATH',
