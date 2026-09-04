@@ -7,12 +7,16 @@ import { toPublicSummary } from '../training/public-view.js';
 import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
+  collectPrivateLiterals,
   detailRefOf,
+  gameEpochOf,
   legacyExplanationAnnotation,
   legacyTrainingPayloadSha256,
   projectTrainingAnnotation,
   projectTrainingSummary,
   sha256Hex,
+  textLeaksPrivate,
+  validatePrivateEngineState,
 } from '../publish-contract.js';
 import {
   appendJsonl,
@@ -28,6 +32,15 @@ import {
 export const TRAINING_LOCK = 'training.lock.d';
 export const SUPPORTED_SCHEMAS = SUPPORTED_TRAINING_AUTHORITY_SCHEMAS;
 const ANNOTATION_MAX_BYTES = 64_000;
+const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
+const HAND_FILE_RE = /^hand-(\d{4,})\.json$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const ALLOWED_SEAL_REASONS = new Set([
+  'cutoff',
+  'exact-file-missing',
+  'post-cutoff',
+  'explain-failed',
+]);
 
 function coded(code, message) {
   const error = new Error(message);
@@ -255,6 +268,249 @@ export function readAnnotationExactFile(sessionDir, detailRef, field) {
     maxBytes: ANNOTATION_MAX_BYTES,
   });
   return JSON.parse(buf.toString('utf8'));
+}
+
+function readSecurityJson(sessionDir, segments) {
+  return JSON.parse(openContained(sessionDir, segments, {
+    maxBytes: SECURITY_READ_MAX_BYTES,
+  }).toString('utf8'));
+}
+
+function readSecurityEngineState(sessionDir, auth) {
+  const engineState = validatePrivateEngineState(readSecurityJson(sessionDir, ['state.json']));
+  if (gameEpochOf(engineState.sessionToken) !== auth.gameEpoch) {
+    throw coded('PRIVATE_LITERAL_INVALID', 'engine state와 training authority identity가 다릅니다.');
+  }
+  return engineState;
+}
+
+// Q1 M4와 같은 공용 수집기와 완전한 세션 입력을 사용한다. snapshot 행이 가리키는
+// handNo는 같은 파일 안의 공격자 입력일 수 있으므로 특정 핸드만 고르지 않는다.
+function collectRecoveryDenyLiterals(sessionDir, auth) {
+  const players = readSecurityJson(sessionDir, ['players.json']);
+  const engineState = readSecurityEngineState(sessionDir, auth);
+  const records = [];
+  if (engineState.hand) records.push({ ...engineState.hand, handNo: engineState.handNo });
+  if (engineState.lastHand) records.push(engineState.lastHand);
+
+  const names = fs.readdirSync(path.join(sessionDir, 'hands'));
+  if (!names.some((entry) => HAND_FILE_RE.test(entry))) {
+    throw coded('HAND_ARCHIVE_MISSING', 'annotation 복구 보안 술어에 필요한 hand archive가 없습니다.');
+  }
+  const archives = names.flatMap((name) => {
+    const match = HAND_FILE_RE.exec(name);
+    if (!match) return [];
+    const handNo = Number(match[1]);
+    if (!Number.isSafeInteger(handNo) || handNo < 1
+      || `hand-${String(handNo).padStart(4, '0')}.json` !== name) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}은 canonical hand archive 이름이 아닙니다.`);
+    }
+    return [{ name, handNo }];
+  }).sort((left, right) => left.handNo - right.handNo);
+  const archived = new Set();
+  for (const { name, handNo } of archives) {
+    if (archived.has(handNo)) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 중복됩니다.`);
+    }
+    const record = readSecurityJson(sessionDir, ['hands', name]);
+    if (record?.handNo !== handNo) {
+      throw coded('HAND_ARCHIVE_INVALID', `${name}의 handNo가 파일명과 다릅니다.`);
+    }
+    records.push(record);
+    archived.add(handNo);
+  }
+  const lastHandNo = engineState.lastHand?.handNo;
+  if (Number.isInteger(lastHandNo)
+    && (archives.length !== lastHandNo
+      || archives.some(({ handNo }, index) => handNo !== index + 1))) {
+    throw coded('HAND_ARCHIVE_MISSING', '완료된 hand archive 연속성이 깨졌습니다.');
+  }
+  const literals = collectPrivateLiterals({ players, engineState, records });
+  if (literals.length === 0) {
+    throw coded('DENY_LITERALS_EMPTY', 'deny literal 목록이 비어 있습니다.');
+  }
+  return literals;
+}
+
+function snapshotAnnotationRow(snapshot, evaluationId, field) {
+  const byId = snapshot?.trainingAnnotations;
+  if (!plainObject(byId) || !Object.hasOwn(byId, evaluationId)) return null;
+  const fields = byId[evaluationId];
+  if (!plainObject(fields) || !Object.hasOwn(fields, field)) return null;
+  return fields[field];
+}
+
+function snapshotMachineProvesPayload(sessionDir, auth, item, snapshot, payloadSha256) {
+  if (!SHA256_RE.test(payloadSha256)) return false;
+  const rows = Array.isArray(snapshot?.training)
+    ? snapshot.training.filter((row) => row?.evaluationId === item.evaluationId)
+    : [];
+  if (rows.length !== 1) return false;
+  const machine = rows[0];
+  if (!plainObject(machine) || machine.payloadSha256 !== payloadSha256) return false;
+  const withoutExplanation = { ...machine };
+  delete withoutExplanation.explanation;
+  let projected;
+  try {
+    projected = projectTrainingSummary(withoutExplanation);
+  } catch {
+    return false;
+  }
+  if (projected.evaluationId !== item.evaluationId
+    || projected.payloadSha256 !== item.payloadSha256) return false;
+  if (payloadSha256 === item.payloadSha256) return true;
+  if (!Object.hasOwn(machine, 'explanation')
+    || legacyTrainingPayloadSha256(machine) !== payloadSha256) return false;
+  try {
+    const marker = validateMigrationMarker(readMarker(sessionDir));
+    if (!marker || !['session-done', 'complete'].includes(marker.status)) return false;
+    const map = readDigestMapForMigration(sessionDir);
+    validateV2AuthorityAgainstMap(auth, map);
+    const mapping = map.byEvaluationId[item.evaluationId];
+    return mapping?.old === payloadSha256
+      && mapping.new === item.payloadSha256
+      && map.oldToNew[payloadSha256] === item.payloadSha256;
+  } catch {
+    return false;
+  }
+}
+
+function validateRecoverySnapshotRow(sessionDir, auth, item, field, annotation, snapshot) {
+  const row = snapshotAnnotationRow(snapshot, item.evaluationId, field);
+  if (!plainObject(row)
+    || row.evaluationId !== item.evaluationId
+    || row.field !== field
+    || typeof row.payloadSha256 !== 'string') return null;
+  let projected;
+  try {
+    projected = projectTrainingAnnotation(row);
+  } catch {
+    return null;
+  }
+  if (typeof row.valueSha256 !== 'string'
+    || row.valueSha256 !== projected.valueSha256
+    || projected.valueSha256 !== annotation.valueSha256
+    || !snapshotMachineProvesPayload(
+      sessionDir,
+      auth,
+      item,
+      snapshot,
+      projected.payloadSha256,
+    )) return null;
+  try {
+    if (field === 'explanation'
+      && textLeaksPrivate(projected.value, collectRecoveryDenyLiterals(sessionDir, auth))) {
+      return null;
+    }
+    if (field === 'exploit' && readSecurityEngineState(sessionDir, auth).gameOver !== true) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return projected;
+}
+
+function removeQueuedAnnotation(auth, evaluationId, field) {
+  const queued = auth.annotationQueue?.[evaluationId];
+  if (!queued) return;
+  delete queued[field];
+  if (Object.keys(queued).length === 0) delete auth.annotationQueue[evaluationId];
+}
+
+function reconcileAnnotationQueueUnlocked(sessionDir, auth) {
+  if (!auth) return {
+    reconstructed: 0, responseLost: 0, stale: 0, dropped: 0, notices: [],
+  };
+  let snapshot;
+  let snapshotRead = false;
+  let changed = false;
+  let reconstructed = 0;
+  let responseLost = 0;
+  let stale = 0;
+  let dropped = 0;
+  const notices = [];
+  for (const [evaluationId, fields] of Object.entries(auth.annotationQueue ?? {})) {
+    const item = auth.items?.[evaluationId];
+    for (const [field, queued] of Object.entries(fields ?? {})) {
+      if (queued?.published) continue;
+      let exactError = null;
+      try {
+        readAnnotationExactFile(sessionDir, item?.detailRef, field);
+        continue;
+      } catch (error) {
+        exactError = error;
+      }
+      const annotation = item?.annotations?.[field];
+      let canonical = null;
+      let responseWasLost = false;
+      if (exactError?.code === 'ENOENT' && annotation?.status === 'unavailable') {
+        const projected = projectTrainingAnnotation({
+          evaluationId,
+          payloadSha256: item.payloadSha256,
+          field,
+          status: 'unavailable',
+          value: null,
+        });
+        if (projected.valueSha256 === annotation.valueSha256
+          && projected.valueSha256 === queued?.valueSha256) {
+          canonical = { field, status: 'unavailable', value: null };
+        }
+      } else if (exactError?.code === 'ENOENT' && annotation?.status === 'ready') {
+        if (!snapshotRead) {
+          snapshotRead = true;
+          try {
+            snapshot = readSecurityJson(sessionDir, ['ui-snapshot.json']);
+          } catch {
+            snapshot = null;
+          }
+        }
+        const projected = validateRecoverySnapshotRow(
+          sessionDir,
+          auth,
+          item,
+          field,
+          annotation,
+          snapshot,
+        );
+        if (projected && projected.valueSha256 === queued?.valueSha256) {
+          canonical = { field, status: projected.status, value: projected.value };
+          responseWasLost = projected.payloadSha256 === item.payloadSha256;
+        }
+      }
+
+      if (canonical) {
+        let written;
+        try {
+          written = writeAnnotationExactFile(sessionDir, item.detailRef, field, canonical);
+        } catch {
+          written = { conflict: true };
+        }
+        if (!written.conflict) {
+          reconstructed += 1;
+          if (responseWasLost) {
+            annotation.published = true;
+            removeQueuedAnnotation(auth, evaluationId, field);
+            responseLost += 1;
+            changed = true;
+          } else if (annotation.status === 'ready') {
+            stale += 1;
+          }
+          continue;
+        }
+      }
+
+      removeQueuedAnnotation(auth, evaluationId, field);
+      if (annotation) annotation.publishFailed = 'exact-file-missing';
+      notices.push(`annotation exact-file 복구 실패: ${evaluationId}:${field}`);
+      dropped += 1;
+      changed = true;
+    }
+  }
+  if (changed) persistAuth(sessionDir, auth);
+  return {
+    reconstructed, responseLost, stale, dropped, notices,
+  };
 }
 
 function currentPayloadFor(id, payloadSha256, items, digestMap) {
@@ -983,6 +1239,35 @@ export function createTrainingControl({ storeDir, io } = {}) {
           handNo,
           payloadSha256: summary.payloadSha256,
         };
+        if (hasCutoffMarker(sessionDir)) {
+          const projected = projectTrainingAnnotation({
+            evaluationId,
+            payloadSha256: item.payloadSha256,
+            field: 'explanation',
+            status: 'unavailable',
+            value: null,
+          });
+          const written = writeAnnotationExactFile(sessionDir, item.detailRef, 'explanation', {
+            field: 'explanation', status: 'unavailable', value: null,
+          });
+          if (written.conflict) {
+            throw coded('ANNOTATION_CONFLICT', 'post-cutoff explanation exact-file이 기존 값과 다릅니다.');
+          }
+          item.annotations.explanation = {
+            status: 'unavailable',
+            valueSha256: projected.valueSha256,
+            published: false,
+            sealReason: 'post-cutoff',
+          };
+          auth.annotationQueue[evaluationId] = auth.annotationQueue[evaluationId] ?? {};
+          auth.annotationQueue[evaluationId].explanation = {
+            evaluationId,
+            field: 'explanation',
+            valueSha256: projected.valueSha256,
+            payloadSha256: item.payloadSha256,
+            published: false,
+          };
+        }
         persistAuth(sessionDir, auth);
         appendJsonl(evaluationsPath(sessionDir), summary);
         accepted.push(item);
@@ -1187,7 +1472,13 @@ export function createTrainingControl({ storeDir, io } = {}) {
     return withLock(sessionDir, () => writeCutoffMarkerUnlocked(sessionDir));
   }
 
-  async function sealAnnotation(sessionDir, evaluationId, field, valueOrUnavailable) {
+  async function sealAnnotation(
+    sessionDir,
+    evaluationId,
+    field,
+    valueOrUnavailable,
+    { sealReason } = {},
+  ) {
     return withLock(sessionDir, () => {
       const auth = loadAuthorityUnlocked(sessionDir);
       if (!auth) return { ok: false, code: 'NO_TRAINING_ITEM' };
@@ -1195,9 +1486,19 @@ export function createTrainingControl({ storeDir, io } = {}) {
       if (!item) return { ok: false, code: 'NO_TRAINING_ITEM' };
       let status = valueOrUnavailable === 'unavailable' ? 'unavailable' : 'ready';
       let value = status === 'unavailable' ? null : valueOrUnavailable;
-      if (field === 'explanation' && status === 'ready' && hasExplanationCutoff(sessionDir)) {
+      let effectiveSealReason = sealReason;
+      if (field === 'explanation' && status === 'ready' && hasCutoffMarker(sessionDir)) {
         status = 'unavailable';
         value = null;
+        effectiveSealReason = 'cutoff';
+      }
+      if (status === 'unavailable' && !ALLOWED_SEAL_REASONS.has(effectiveSealReason)) {
+        return { ok: false, code: 'INVALID_SEAL_REASON' };
+      }
+      if (status === 'unavailable'
+        && effectiveSealReason === 'cutoff'
+        && !hasCutoffMarker(sessionDir)) {
+        return { ok: false, code: 'CUTOFF_MARKER_REQUIRED' };
       }
       const existing = item.annotations?.[field];
       if (existing?.status === 'unavailable') {
@@ -1230,6 +1531,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
         status,
         valueSha256: projected.valueSha256,
         published: false,
+        ...(status === 'unavailable' ? { sealReason: effectiveSealReason } : {}),
       };
       auth.annotationQueue[evaluationId] = auth.annotationQueue[evaluationId] ?? {};
       auth.annotationQueue[evaluationId][field] = {
@@ -1241,6 +1543,13 @@ export function createTrainingControl({ storeDir, io } = {}) {
       };
       persistAuth(sessionDir, auth);
       return { ok: true, annotation: item.annotations[field], converted: status === 'unavailable' && valueOrUnavailable !== 'unavailable' };
+    });
+  }
+
+  async function reconcileAnnotationQueue(sessionDir) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir);
+      return reconcileAnnotationQueueUnlocked(sessionDir, auth);
     });
   }
 
@@ -1336,6 +1645,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
     releaseSolveTask,
     reapSolveTasks,
     sealAnnotation,
+    reconcileAnnotationQueue,
     markAnnotationPublished,
     writeCutoffMarker,
     consumeTrainingItems,

@@ -53,6 +53,7 @@ export function stampPlayerPolicies(gameDir) {
     error.code = 'BAD_PLAYERS';
     throw error;
   }
+  let changed = false;
   for (const player of players) {
     if (player.playerId === 'user') continue;
     if (player.policy) {
@@ -69,7 +70,8 @@ export function stampPlayerPolicies(gameDir) {
       continue;
     }
     player.policy = assignmentFor(player.archetype);
+    changed = true;
   }
-  writeJsonAtomic(file, players);
+  if (changed) writeJsonAtomic(file, players);
   return players;
 }

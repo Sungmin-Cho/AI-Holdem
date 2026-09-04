@@ -501,10 +501,17 @@ test('annotation transition table: unavailable is terminal; late ready is discar
     gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [evaluation()],
   });
   const id = evaluationId();
-  const unavailable = await tc.sealAnnotation(dir, id, 'explanation', 'unavailable');
+  const unavailable = await tc.sealAnnotation(
+    dir,
+    id,
+    'explanation',
+    'unavailable',
+    { sealReason: 'explain-failed' },
+  );
   assert.equal(unavailable.ok, true);
   const auth = tc.loadAuthority(dir);
   assert.equal(auth.items[id].annotations.explanation.status, 'unavailable');
+  assert.equal(auth.items[id].annotations.explanation.sealReason, 'explain-failed');
   const late = await tc.sealAnnotation(dir, id, 'explanation', '늦은 해설');
   assert.equal(late.ok === false || late.discarded === true, true);
   const after = tc.loadAuthority(dir);

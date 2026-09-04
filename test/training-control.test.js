@@ -162,6 +162,7 @@ test('cutoff marker then late ready seal becomes unavailable', async () => {
   assert.equal(sealed.ok, true);
   const auth = tc.loadAuthority(dir);
   assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.sealReason, 'cutoff');
 });
 
 test('cutoff marker already-present file is EXISTS reuse; non-file dest fails closed', async () => {
@@ -220,7 +221,7 @@ test('writeCutoffMarker EXISTS reuse re-lstats and accepts a regular file', () =
   assert.equal(fs.lstatSync(dest).isFile(), true);
 });
 
-test('process-local explanation cutoff fences ready without a marker file', async () => {
+test('process-local explanation cutoff cannot replace the durable marker fence', async () => {
   const dir = tmp();
   const tc = createTrainingControl();
   const evaluation = evalOf();
@@ -237,6 +238,6 @@ test('process-local explanation cutoff fences ready without a marker file', asyn
   const sealed = await tc.sealAnnotation(dir, evaluation.evaluationId, 'explanation', '늦은 해설');
   assert.equal(sealed.ok, true);
   const auth = tc.loadAuthority(dir);
-  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'unavailable');
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.status, 'ready');
+  assert.equal(auth.items[evaluation.evaluationId].annotations.explanation.sealReason, undefined);
 });
-
