@@ -1,0 +1,191 @@
+{
+  "handNo": 1,
+  "level": 0,
+  "blinds": [
+    25,
+    50
+  ],
+  "button": "user",
+  "holes": {
+    "p1": [
+      "2c",
+      "3d"
+    ],
+    "p2": [
+      "7s",
+      "8s"
+    ],
+    "user": [
+      "Ah",
+      "Kd"
+    ]
+  },
+  "board": [],
+  "folded": [
+    "p1",
+    "p2"
+  ],
+  "allIn": [],
+  "actions": [
+    {
+      "decisionId": "d-1-preflop-0",
+      "playerId": "user",
+      "action": "raise",
+      "amount": 200,
+      "street": "preflop",
+      "potTotal": 75,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000,
+      "currentBet": 50,
+      "board": [],
+      "stacks": {
+        "user": 5000,
+        "p1": 4975,
+        "p2": 4950
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-1",
+      "playerId": "p1",
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop",
+      "potTotal": 275,
+      "callAmount": 175,
+      "minRaiseTo": 350,
+      "maxRaiseTo": 5000,
+      "currentBet": 200,
+      "board": [],
+      "stacks": {
+        "user": 4800,
+        "p1": 4975,
+        "p2": 4950
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-2",
+      "playerId": "p2",
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop",
+      "potTotal": 275,
+      "callAmount": 150,
+      "minRaiseTo": 350,
+      "maxRaiseTo": 5000,
+      "currentBet": 200,
+      "board": [],
+      "stacks": {
+        "user": 4800,
+        "p1": 4975,
+        "p2": 4950
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "schemaVersion": 1,
+      "decisionId": "d-1-preflop-0",
+      "gameMode": "tournament",
+      "handNo": 1,
+      "actorId": "user",
+      "street": "preflop",
+      "position": "BTN",
+      "holeCards": [
+        "Ah",
+        "Kd"
+      ],
+      "board": [],
+      "blinds": [
+        25,
+        50
+      ],
+      "potBefore": 75,
+      "currentBet": 50,
+      "actorBet": 0,
+      "toCall": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000,
+      "effectiveStack": 5000,
+      "forced": false,
+      "publicSeats": [
+        {
+          "playerId": "user",
+          "position": "BTN",
+          "stack": 5000,
+          "bet": 0,
+          "contribution": 0,
+          "folded": false,
+          "allIn": false,
+          "out": false
+        },
+        {
+          "playerId": "p1",
+          "position": "SB",
+          "stack": 4975,
+          "bet": 25,
+          "contribution": 25,
+          "folded": false,
+          "allIn": false,
+          "out": false
+        },
+        {
+          "playerId": "p2",
+          "position": "BB",
+          "stack": 4950,
+          "bet": 50,
+          "contribution": 50,
+          "folded": false,
+          "allIn": false,
+          "out": false
+        }
+      ],
+      "priorActions": [],
+      "chosenAction": {
+        "action": "raise",
+        "amount": 200
+      }
+    }
+  ],
+  "pots": [
+    {
+      "potIndex": 0,
+      "amount": 125,
+      "eligible": [
+        "user"
+      ],
+      "winners": [
+        {
+          "playerId": "user",
+          "share": 125
+        }
+      ]
+    }
+  ],
+  "showdown": null,
+  "startStacks": {
+    "p1": 5000,
+    "p2": 5000,
+    "user": 5000
+  },
+  "endStacks": {
+    "user": 5075,
+    "p1": 4975,
+    "p2": 4950
+  },
+  "posts": [
+    {
+      "playerId": "p1",
+      "amount": 25,
+      "allIn": false
+    },
+    {
+      "playerId": "p2",
+      "amount": 50,
+      "allIn": false
+    }
+  ],
+  "uncalledReturns": {
+    "user": 150
+  }
+}

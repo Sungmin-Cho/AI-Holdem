@@ -104,7 +104,10 @@ function main() {
     const { root, segments } = resolveContainedOutput(out);
     writeContained(root, segments, body, { mode: 'create' });
     const safe = path.join(root, ...segments);
-    fs.writeSync(1, `${JSON.stringify({ ok: true, out: safe, hands: canonical.hands.length, warnings })}\n`);
+    const excluded = canonical.warnings.filter((row) => row.exportStatus === 'unsupported').length;
+    fs.writeSync(1, `${JSON.stringify({
+      ok: true, out: safe, hands: canonical.hands.length, excluded, warnings,
+    })}\n`);
   } catch (error) {
     fail(error.code ?? 'EXPORT_FAILED', error.message);
   }

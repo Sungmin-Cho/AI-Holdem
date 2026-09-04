@@ -6,17 +6,17 @@ Seat 3: user (100 in chips)
 p1: posts small blind 25
 p2: posts big blind 50
 *** HOLE CARDS ***
-Dealt to user [Ah Kd]
+Dealt to user [Ah Kh]
 user: raises 50 to 100 and is all-in
 p1: raises 200 to 300 and is all-in
-p2: calls 250 and is all-in
+p2: calls 250
 *** FLOP *** [2c 7d 9h]
 *** TURN *** [2c 7d 9h 3s]
 *** RIVER *** [2c 7d 9h 3s 4c]
 *** SHOW DOWN ***
-p2: shows [As Ad] (a pair of Aces)
-p1: shows [Kc Kd] (a pair of Kings)
-user: shows [Ah Kd] (high card)
+p1: shows [Kc Kd] (원페어)
+p2: shows [As Ad] (원페어)
+user: mucks
 p2 collected 300 from pot
 p2 collected 400 from side pot-1
 *** SUMMARY ***

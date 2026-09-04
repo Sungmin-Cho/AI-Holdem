@@ -23,8 +23,8 @@ p1: checks
 p2: checks
 user: checks
 *** SHOW DOWN ***
-p1: shows [As Ks] (straight flush)
-user: shows [Ah Kh] (straight flush)
+p1: shows [Ad Kd] (스트레이트)
+user: shows [Ah Kh] (스트레이트)
 p2: mucks
 p1 collected 75 from pot
 user collected 75 from pot
