@@ -346,27 +346,6 @@ export async function completeSessionStoreMigration(storeDir, sessionDir, {
   return { completed: true };
 }
 
-export async function completeSessionStoreMigrations(storeDir) {
-  const sessionsRoot = path.join(storeDir, '.session-store', 'sessions');
-  if (!fs.existsSync(sessionsRoot)) return { completed: 0, notices: [] };
-  let completed = 0;
-  const notices = [];
-  for (const name of fs.readdirSync(sessionsRoot)) {
-    try {
-      const sessionDir = path.join(sessionsRoot, name);
-      if (!terminalForMigration(sessionDir)) {
-        notices.push(`store migration 건너뜀 (${name}): SESSION_NOT_TERMINAL`);
-        continue;
-      }
-      const result = await completeSessionStoreMigration(storeDir, sessionDir);
-      if (result.completed) completed += 1;
-    } catch (error) {
-      notices.push(`store migration 실패 (${name}): ${error.code ?? 'ERROR'}`);
-    }
-  }
-  return { completed, notices };
-}
-
 export function writePracticeFocus(storeDir, profile) {
   const leaks = (profile.leaks ?? []).slice(0, 3).map((leak) => ({
     id: leak.id,

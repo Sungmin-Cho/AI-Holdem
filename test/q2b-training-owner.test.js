@@ -10,7 +10,6 @@ import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import {
   completeSessionStoreMigration,
-  completeSessionStoreMigrations,
   sweepStore,
 } from '../tools/profile-cli.js';
 import { createTrainingControl } from '../tools/training-control.js';
@@ -320,7 +319,7 @@ test('Q2b sweep skips playing, finalizing, and missing-phase v1/v2 sessions byte
   );
 });
 
-test('Q2b completeSessionStoreMigrations gates v2 session-done writes on terminal phase', async () => {
+test('Q2b sweep gates v2 session-done store migration on terminal phase', async () => {
   const storeDir = tmp();
   const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
   writeEmptyAuthority(sessionDir);
@@ -335,9 +334,9 @@ test('Q2b completeSessionStoreMigrations gates v2 session-done writes on termina
   );
   const before = fileHashes(path.join(sessionDir, 'training'));
 
-  const result = await completeSessionStoreMigrations(storeDir);
+  const result = await sweepStore(storeDir);
 
-  assert.equal(result.completed, 0);
+  assert.equal(result.applied, 0);
   assert.equal(result.notices.some((notice) => /SESSION_NOT_TERMINAL/.test(notice)), true);
   assert.deepEqual(fileHashes(path.join(sessionDir, 'training')), before);
 });
