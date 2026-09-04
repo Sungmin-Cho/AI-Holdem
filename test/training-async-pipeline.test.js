@@ -1,3 +1,8 @@
+// 이 파일의 통합 테스트는 실제 사이드카·서버·엔진 자식 프로세스를 띄운다. GitHub 러너에서
+// 같은 테스트의 실측 소요가 6.2s / 12.0s / 39.75s로 흔들렸고(마지막은 40s 예산에 250ms 남기고
+// 통과), 그 다음 두 번은 40.5s·64.2s로 예산을 넘겨 실패했다. 바깥 timeout은 멈춘 테스트를
+// 끊는 안전망일 뿐 성능 계약이 아니다 — 계약은 각 waitFor 예산과 "다음 핸드 < 1s" 단언이며
+// 그 둘은 그대로다. 관측된 5배 변동을 덮도록 안전망만 넓힌다.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -236,7 +241,7 @@ function envelopeFromPublishArgs(args) {
   }
 }
 
-test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 40_000 }, async (t) => {
+test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const explainCalls = [];
   const logs = [];
@@ -304,7 +309,7 @@ test('turn loop does not wait on training; machine UI arrives before explanation
   await running.catch(() => {});
 });
 
-test('last-hand kill → finalizing resume publishes machine before cutoff and annotation after', { timeout: 40_000 }, async (t) => {
+test('last-hand kill → finalizing resume publishes machine before cutoff and annotation after', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const evalGate = {};
   evalGate.promise = new Promise((resolve) => { evalGate.release = resolve; });
@@ -418,7 +423,7 @@ test('last-hand kill → finalizing resume publishes machine before cutoff and a
   assert.equal(item.annotations.explanation.status, 'unavailable');
 });
 
-test('mid-hand kill → playing resume has the same machine-then-annotation shape', { timeout: 40_000 }, async (t) => {
+test('mid-hand kill → playing resume has the same machine-then-annotation shape', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -483,7 +488,7 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
   await resumed.requestStop().catch(() => {});
 });
 
-test('coach settle and training settle share result-wait cutoff without REVIEW_GATE_CLOSED', { timeout: 40_000 }, async (t) => {
+test('coach settle and training settle share result-wait cutoff without REVIEW_GATE_CLOSED', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
@@ -523,7 +528,7 @@ test('coach settle and training settle share result-wait cutoff without REVIEW_G
   assert.ok(settleEvents.length >= 1);
 });
 
-test('evaluator fail records pending; resume retries to evaluated', { timeout: 40_000 }, async (t) => {
+test('evaluator fail records pending; resume retries to evaluated', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -663,7 +668,7 @@ test('server respawn restores training and republish is a no-op', { timeout: 20_
   }
 });
 
-test('unfinished explanation is sealed unavailable and published after cutoff', { timeout: 40_000 }, async (t) => {
+test('unfinished explanation is sealed unavailable and published after cutoff', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const publishes = [];
   const loop = createGameLoop({
@@ -712,7 +717,7 @@ test('unfinished explanation is sealed unavailable and published after cutoff', 
   assert.match(review, /pending|미완|0/);
 });
 
-test('cutoff-marker write failure stops finalization before late ready seal', { timeout: 40_000 }, async (t) => {
+test('cutoff-marker write failure stops finalization before late ready seal', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const coachCalls = [];
   let releaseExplain;
@@ -774,7 +779,7 @@ test('cutoff-marker write failure stops finalization before late ready seal', { 
   assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
 });
 
-test('cutoff-marker write failure still fail-closed when terminate throws', { timeout: 40_000 }, async (t) => {
+test('cutoff-marker write failure still fail-closed when terminate throws', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const coachCalls = [];
   let releaseExplain;
@@ -837,7 +842,7 @@ test('cutoff-marker write failure still fail-closed when terminate throws', { ti
   assert.equal(fs.existsSync(cutoff) && fs.lstatSync(cutoff).isFile(), false);
 });
 
-test('unconfirmed training child terminate fails closed', { timeout: 40_000 }, async (t) => {
+test('unconfirmed training child terminate fails closed', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const loop = createGameLoop({
     gameDir,
@@ -876,7 +881,7 @@ test('unconfirmed training child terminate fails closed', { timeout: 40_000 }, a
   assert.equal(loopState.finalization?.cutoff?.terminationConfirmed, false);
 });
 
-test('resume of a published last hand does not re-evaluate', { timeout: 40_000 }, async (t) => {
+test('resume of a published last hand does not re-evaluate', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
