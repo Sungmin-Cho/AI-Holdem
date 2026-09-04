@@ -104,7 +104,8 @@ export function spotForSkillKey(skillKey) {
       ?? 'bb';
     return `6max-100bb-${defender}-vs-single-raise`;
   }
-  return `6max-100bb-${seatIn(key, RFI_SEATS) ?? 'btn'}-rfi-unopened`;
+  const rfiSeat = seatIn(key, RFI_SEATS);
+  return rfiSeat ? `6max-100bb-${rfiSeat}-rfi-unopened` : null;
 }
 
 export function handClassForSkillKey(skillKey) {
@@ -143,8 +144,10 @@ export function generateQueue({
   const provider = { providerId: source.id, providerVersion: source.version };
   if (mode === 'leak') {
     const leak = profile?.leaks?.[0];
-    const key = leak?.recommendedDrill ?? leak?.id ?? 'preflop.rfi.BTN';
+    if (!leak) return [];
+    const key = leak.recommendedDrill ?? leak.id;
     const spot = spotForSkillKey(key);
+    if (!isPreflopSpotKey(spot)) return [];
     return [questionFrom({
       ...provider,
       mode, spotKey: spot, skillKey: key, nonce, handClass: handClassForSkillKey(key),

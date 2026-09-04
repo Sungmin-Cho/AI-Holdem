@@ -97,7 +97,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withNamedLock(root, PROFILE_LOCK, fn);
   }
 
-  function migrateLegacyProfile(profile) {
+  function migrateLegacyProfile(profile, { persist = true } = {}) {
     const events = readJsonl(eventsPath);
     const processedIds = Object.keys(profile.processed ?? {});
     if (processedIds.length > 0 && events.length === 0) {
@@ -110,18 +110,18 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
         throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 3`);
       }
     }
-    writeJsonSecure(profilePath, rebuilt);
+    if (persist) writeJsonSecure(profilePath, rebuilt);
     return rebuilt;
   }
 
-  function loadProfile() {
+  function loadProfile({ persistLegacy = true } = {}) {
     try {
       const profile = readJsonSecure(profilePath);
       if (profile.schemaVersion === PROFILE_SCHEMA_VERSION) {
         return projectActive(profile);
       }
       if (profile.schemaVersion === 1 || profile.schemaVersion === 2) {
-        return migrateLegacyProfile(profile);
+        return migrateLegacyProfile(profile, { persist: persistLegacy });
       }
       throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion}`);
     } catch (error) {
@@ -134,7 +134,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withLock(() => {
       const classified = classifyOpportunity(evaluation);
       if (!classified.learnable) {
-        const profile = loadProfile();
+        const profile = loadProfile({ persistLegacy: false });
         return { applied: false, reason: 'NOT_LEARNABLE', profile };
       }
       const appliedAt = now();
@@ -171,8 +171,8 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
           ?? event.payloadSha256;
         return { ...event, payloadSha256: mapped };
       });
-      writeTextSecure(eventsPath, events.length ? `${events.map((row) => JSON.stringify(row)).join('\n')}\n` : '');
       const profile = rebuildLearnableFromEvents(events);
+      writeTextSecure(eventsPath, events.length ? `${events.map((row) => JSON.stringify(row)).join('\n')}\n` : '');
       writeJsonSecure(profilePath, profile);
       return profile;
     });

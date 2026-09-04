@@ -122,7 +122,6 @@ export function validateExplanation(evaluation, explanation) {
   const actions = [evaluation.chosen, ...(evaluation.recommended ?? [])].filter(Boolean);
   const freqByAction = new Map();
   const sizeBbs = [];
-  let anyEv = false;
   for (const action of actions) {
     if (action.action && action.frequency != null && Number.isFinite(Number(action.frequency))) {
       freqByAction.set(action.action, Number(action.frequency));
@@ -130,7 +129,6 @@ export function validateExplanation(evaluation, explanation) {
     if (action.sizeBb != null && Number.isFinite(Number(action.sizeBb))) {
       sizeBbs.push(Number(action.sizeBb));
     }
-    if (action.evBb != null && Number.isFinite(Number(action.evBb))) anyEv = true;
   }
   const handNo = Number(evaluation.handNo);
   const spans = aliasSpans(explanation);
@@ -147,7 +145,7 @@ export function validateExplanation(evaluation, explanation) {
     const isBb = /^\s*(?:bb|BB)/.test(rest);
     const isHandNo = Number.isFinite(handNo) && !token.includes('.') && num === handNo;
 
-    if (!anyEv && EV_WORDS.test(clause)) {
+    if (EV_WORDS.test(clause)) {
       return { ok: false, code: 'NUMBER_CONTRADICTION' };
     }
 

@@ -1,3 +1,5 @@
+import { assertEvaluationId } from './contracts.js';
+
 export const PREFLOP_SPOT_RE = /^6max-100bb-(utg|hj|co|btn|sb|bb)-(rfi-unopened|vs-single-raise)$/;
 
 export function isPreflopSpotKey(spotKey) {
@@ -17,7 +19,12 @@ export function skillKeyOf({ spotKey } = {}) {
 }
 
 export function classifyOpportunity(evaluation = {}) {
-  const street = evaluation.street ?? 'preflop';
+  let canonicalStreet = null;
+  if (evaluation.evaluationId != null) {
+    assertEvaluationId(evaluation.evaluationId);
+    canonicalStreet = evaluation.evaluationId.split(':')[1].split('-')[2];
+  }
+  const street = evaluation.street ?? canonicalStreet ?? 'preflop';
   const learnable = street === 'preflop';
   return {
     skillKey: learnable
