@@ -110,7 +110,11 @@ export function readGeneratedRecord(name, dir = GENERATED_DIR) {
 }
 
 const thisFile = fileURLToPath(import.meta.url);
-if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
+// `node --test` discovers helper files under test/. It must import this module
+// without regenerating tracked fixtures as a test-suite side effect.
+if (!process.env.NODE_TEST_CONTEXT
+  && process.argv[1]
+  && path.resolve(process.argv[1]) === thisFile) {
   const argv = process.argv.slice(2);
   const outIdx = argv.indexOf('--out');
   const outDir = outIdx >= 0 ? path.resolve(argv[outIdx + 1]) : GENERATED_DIR;

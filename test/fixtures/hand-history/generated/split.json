@@ -433,7 +433,8 @@
             "user": 5000,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-1",
@@ -450,7 +451,8 @@
             "user": 4950,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-2",
@@ -467,7 +469,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-flop-3",
@@ -488,7 +491,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-flop-4",
@@ -509,7 +513,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         }
       ],
       "chosenAction": {
@@ -595,7 +600,8 @@
             "user": 5000,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-1",
@@ -612,7 +618,8 @@
             "user": 4950,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-2",
@@ -629,7 +636,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-flop-3",
@@ -650,7 +658,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-flop-4",
@@ -671,7 +680,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-flop-5",
@@ -692,7 +702,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-turn-6",
@@ -714,7 +725,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-turn-7",
@@ -736,7 +748,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         }
       ],
       "chosenAction": {
@@ -823,7 +836,8 @@
             "user": 5000,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-1",
@@ -840,7 +854,8 @@
             "user": 4950,
             "p1": 4975,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-preflop-2",
@@ -857,7 +872,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 50
         },
         {
           "decisionId": "d-1-flop-3",
@@ -878,7 +894,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-flop-4",
@@ -899,7 +916,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-flop-5",
@@ -920,7 +938,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-turn-6",
@@ -942,7 +961,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-turn-7",
@@ -964,7 +984,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-turn-8",
@@ -986,7 +1007,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-river-9",
@@ -1009,7 +1031,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         },
         {
           "decisionId": "d-1-river-10",
@@ -1032,7 +1055,8 @@
             "user": 4950,
             "p1": 4950,
             "p2": 4950
-          }
+          },
+          "currentBet": 0
         }
       ],
       "chosenAction": {
