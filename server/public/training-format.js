@@ -85,5 +85,8 @@ export function formatTrainingCard(item) {
   else if (item.status === 'unsupported') {
     card.note = item.reason ? `지원되지 않는 스팟 (${item.reason})` : '지원되지 않는 스팟';
   }
+  if (typeof item.spotKey === 'string' && item.spotKey.startsWith('postflop-')) {
+    card.note = [card.note, '학습 집계 제외(postflop)'].filter(Boolean).join('\n');
+  }
   return card;
 }

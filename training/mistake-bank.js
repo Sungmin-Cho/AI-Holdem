@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
-import { skillKeyOf } from './opportunities.js';
+import { classifyOpportunity, isPreflopSpotKey } from './opportunities.js';
 
 function requireIo(io, names) {
   for (const name of names) {
@@ -21,6 +21,7 @@ function coded(code, message) {
 }
 
 function collectable(evaluation) {
+  if (!classifyOpportunity(evaluation).learnable) return false;
   if (evaluation.forced) return false;
   if (evaluation.status !== 'supported') return false;
   return evaluation.grade === 'off-policy' || evaluation.grade === 'low-frequency';
@@ -28,6 +29,21 @@ function collectable(evaluation) {
 
 function signatureOf(evaluation) {
   return `${evaluation.spotKey}:${evaluation.handClass}`;
+}
+
+function learnableSignature(item) {
+  const [spotKey] = String(item?.spotSignature ?? '').split(':');
+  return isPreflopSpotKey(spotKey);
+}
+
+function statsOf(data) {
+  return {
+    prunedUnlearnable: Number.isSafeInteger(data.meta?.prunedUnlearnable)
+      && data.meta.prunedUnlearnable >= 0
+      ? data.meta.prunedUnlearnable
+      : 0,
+    prunedAt: typeof data.meta?.prunedAt === 'string' ? data.meta.prunedAt : null,
+  };
 }
 
 // R12: fs helper는 주입받는다. 기본값은 없다 — 기본값이 있으면 training이
@@ -46,9 +62,30 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
     try {
       const data = readJsonSecure(file);
       if (data.schemaVersion !== 1) throw coded('UNSUPPORTED_MISTAKES', `schema ${data.schemaVersion}`);
+      const items = Array.isArray(data.items) ? data.items : [];
+      const kept = items.filter(learnableSignature);
+      const pruned = items.length - kept.length;
+      if (pruned > 0) {
+        const prior = statsOf(data).prunedUnlearnable;
+        data.items = kept;
+        data.meta = {
+          ...(data.meta && typeof data.meta === 'object' && !Array.isArray(data.meta)
+            ? data.meta
+            : {}),
+          prunedUnlearnable: prior + pruned,
+          prunedAt: now(),
+        };
+        writeJsonSecure(file, data);
+      }
       return data;
     } catch (error) {
-      if (error.code === 'ENOENT') return { schemaVersion: 1, items: [] };
+      if (error.code === 'ENOENT') {
+        return {
+          schemaVersion: 1,
+          items: [],
+          meta: { prunedUnlearnable: 0, prunedAt: null },
+        };
+      }
       throw error;
     }
   }
@@ -82,7 +119,7 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
         schemaVersion: 1,
         mistakeId: evaluation.evaluationId,
         spotSignature: sig,
-        skillKey: skillKeyOf(evaluation),
+        skillKey: classifyOpportunity(evaluation).skillKey,
         evaluation,
         firstSeenAt: now(),
         lastReviewedAt: null,
@@ -103,6 +140,10 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
 
   async function list() {
     return withLock(() => load().items);
+  }
+
+  async function stats() {
+    return withLock(() => statsOf(load()));
   }
 
   async function update(mistakeId, patch) {
@@ -136,5 +177,7 @@ export function createMistakeBank(storeDir, { now = () => new Date().toISOString
     });
   }
 
-  return { collect, list, update, migrateDigests, file };
+  return {
+    collect, list, stats, update, migrateDigests, file,
+  };
 }
