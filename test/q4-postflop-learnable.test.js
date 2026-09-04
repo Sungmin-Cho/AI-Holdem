@@ -441,3 +441,115 @@ test('postflop training cards say they are excluded from learning aggregation', 
   });
   assert.match(card.note, /학습 집계 제외\(postflop\)/);
 });
+
+test('canonical flop evaluationId cannot become learnable when street is omitted', async () => {
+  const disguised = preflopEvaluation('d-3-flop-0');
+  delete disguised.street;
+  const classified = classifyOpportunity(disguised);
+  assert.deepEqual(
+    { street: classified.street, skillKey: classified.skillKey, learnable: classified.learnable },
+    { street: 'flop', skillKey: 'postflop.flop', learnable: false },
+  );
+
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  const applied = await store.apply(disguised);
+  assert.equal(applied.reason, 'NOT_LEARNABLE');
+  assert.equal(fs.existsSync(store.eventsPath), false);
+  assert.equal(fs.existsSync(store.profilePath), false);
+});
+
+test('NOT_LEARNABLE against a valid schema 2 profile is byte-for-byte read-only', async () => {
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  fs.mkdirSync(path.dirname(store.profilePath), { recursive: true });
+  const row = {
+    evaluationId: preflopEvaluation().evaluationId,
+    payloadSha256: '66'.repeat(32),
+    skillKey: 'preflop.rfi.BTN',
+    status: 'supported',
+    grade: 'off-policy',
+    forced: false,
+    evLossBb: null,
+    providerId: SOURCE.id,
+    providerVersion: SOURCE.version,
+    appliedAt: '2026-09-02T00:00:00.000Z',
+  };
+  fs.writeFileSync(store.eventsPath, `${JSON.stringify(row)}\n`);
+  fs.writeFileSync(store.profilePath, JSON.stringify({
+    schemaVersion: 2,
+    processed: { [row.evaluationId]: row.payloadSha256 },
+    segments: {},
+  }));
+  const profileBefore = fs.readFileSync(store.profilePath);
+  const eventsBefore = fs.readFileSync(store.eventsPath);
+
+  const result = await store.apply(solvedEvaluation());
+
+  assert.equal(result.reason, 'NOT_LEARNABLE');
+  assert.equal(result.profile.schemaVersion, 3);
+  assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
+  assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
+});
+
+test('digest migration validates malformed evaluation ids before rewriting events', async () => {
+  const storeDir = tmp();
+  const store = createProfileStore(storeDir);
+  fs.mkdirSync(path.dirname(store.eventsPath), { recursive: true });
+  const oldDigest = '77'.repeat(32);
+  const row = {
+    evaluationId: 'malformed-evaluation-id',
+    payloadSha256: oldDigest,
+    skillKey: 'preflop.unknown',
+    status: 'unsupported',
+    grade: null,
+    forced: false,
+    evLossBb: null,
+    providerId: SOURCE.id,
+    providerVersion: SOURCE.version,
+    appliedAt: '2026-09-02T00:00:00.000Z',
+  };
+  fs.writeFileSync(store.eventsPath, `${JSON.stringify(row)}\n`);
+  const before = fs.readFileSync(store.eventsPath);
+
+  await assert.rejects(
+    store.migrateDigests({ oldToNew: { [oldDigest]: '88'.repeat(32) } }),
+    { code: 'PROFILE_EVENT_INVALID' },
+  );
+  assert.deepEqual(fs.readFileSync(store.eventsPath), before);
+  assert.equal(fs.existsSync(store.profilePath), false);
+});
+
+test('leak mode never fabricates a BTN question when no valid leak exists', () => {
+  assert.deepEqual(buildQueue({ mode: 'leak', profile: { leaks: [] }, source: SOURCE }), []);
+  assert.deepEqual(buildQueue({
+    mode: 'leak',
+    profile: { leaks: [{ id: 'not-a-training-skill' }] },
+    source: SOURCE,
+  }), []);
+});
+
+test('M11 rejects every number in supported EV clauses even when EV data exists', () => {
+  const supportedWithEv = {
+    ...supportedWithoutEv,
+    chosen: { ...supportedWithoutEv.chosen, evBb: -0.9 },
+    recommended: [{ ...supportedWithoutEv.recommended[0], evBb: 0.1 }],
+  };
+  for (const explanation of ['EV loss 17', 'raise EV 96%']) {
+    assert.deepEqual(
+      validateExplanation(supportedWithEv, explanation),
+      { ok: false, code: 'NUMBER_CONTRADICTION' },
+    );
+  }
+});
+
+test('postflop UI exclusion label follows street when spotKey is absent', () => {
+  const card = formatTrainingCard({
+    ...solvedEvaluation(),
+    street: 'flop',
+    spotKey: null,
+    handNo: 3,
+    chosen: { action: 'check', frequency: 0 },
+  });
+  assert.match(card.note, /학습 집계 제외\(postflop\)/);
+});
