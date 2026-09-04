@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyAction, blindsForLevel, createGame, forceDefault, legalFor, startHand } from '../engine/hand.js';
-import { snapshotDecision } from '../engine/decision.js';
+import { snapshotDecision, PRIOR_ACTION_KEYS } from '../engine/decision.js';
 import { positionsOf } from '../engine/positions.js';
-import { redactRecord } from '../engine/views.js';
+import { redactRecord, SAFE_ACTION_KEYS } from '../engine/views.js';
 import { newDeck } from '../engine/cards.js';
 import { setup3 } from './helpers/fixtures.js';
 
@@ -252,6 +252,25 @@ test('snapshotDecision: 핸드 없으면 SNAPSHOT_INVALID', () => {
     () => snapshotDecision(st, 'user', { action: 'fold', amount: 0 }, { blinds: [25, 50] }),
     { code: 'SNAPSHOT_INVALID' },
   );
+});
+
+test('priorActions의 currentBet이 hand.actions[i].currentBet과 정확히 일치한다', () => {
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'call').state;
+  st = applyAction(st, 'p1', 'call').state;
+  st = applyAction(st, 'p2', 'check').state;
+  st = applyAction(st, 'p1', 'check').state;
+  st = applyAction(st, 'p2', 'check').state;
+  st = applyAction(st, 'user', 'check').state;
+  const snap = st.hand.decisions.at(-1);
+  assert.ok(snap.priorActions.length > 0);
+  for (let i = 0; i < snap.priorActions.length; i += 1) {
+    assert.equal(snap.priorActions[i].currentBet, st.hand.actions[i].currentBet);
+  }
+});
+
+test('PRIOR_ACTION_KEYS는 engine/views.js safeAction의 키 목록과 정확히 일치한다', () => {
+  assert.deepEqual([...PRIOR_ACTION_KEYS].sort(), [...SAFE_ACTION_KEYS].sort());
 });
 
 test('cli hand --redacted 에 user decisions만 있고 상대 홀카드가 없다', () => {

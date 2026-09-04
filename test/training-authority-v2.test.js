@@ -20,7 +20,7 @@ import {
 import * as contract from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
-import { createTrainingControl } from '../tools/training-control.js';
+import { annotationExactSegments, createTrainingControl } from '../tools/training-control.js';
 import { ingestHand, unpublishedEnvelope } from '../tools/training-pipeline.js';
 import * as pipeline from '../tools/training-pipeline.js';
 import { createProfileStore } from '../tools/training-stores.js';
@@ -229,14 +229,25 @@ function postPublish(port, token, body) {
 }
 
 function findAnnotationFile(dir, detailRef, field) {
-  const candidates = [
-    path.join(dir, 'training', 'annotations', `${detailRef}.${field}.json`),
-    path.join(dir, 'training', 'annotations', `${detailRef}-${field}.json`),
-    path.join(dir, 'training', 'explanations', `${detailRef}.json`),
-    path.join(dir, 'training', 'details', 'annotations', `${detailRef}.${field}.json`),
-  ];
-  return candidates.find((file) => fs.existsSync(file)) ?? null;
+  const file = path.join(dir, 'training', ...annotationExactSegments(detailRef, field));
+  return fs.existsSync(file) ? file : null;
 }
+
+test('findAnnotationFile: annotationExactSegments 정본 경로만 인정하고 legacy fallback을 쓰지 않는다 (회귀 가드)', () => {
+  assert.deepEqual(annotationExactSegments('deadbeef', 'explanation'), ['annotations', 'deadbeef.explanation.json']);
+  const dir = tmp();
+  const detailRef = 'a'.repeat(64);
+  const legacyDir = path.join(dir, 'training', 'explanations');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(path.join(legacyDir, `${detailRef}.json`), '{}');
+  assert.equal(findAnnotationFile(dir, detailRef, 'explanation'), null);
+
+  const canonicalDir = path.join(dir, 'training', 'annotations');
+  fs.mkdirSync(canonicalDir, { recursive: true });
+  const canonicalFile = path.join(canonicalDir, `${detailRef}.explanation.json`);
+  fs.writeFileSync(canonicalFile, '{}');
+  assert.equal(findAnnotationFile(dir, detailRef, 'explanation'), canonicalFile);
+});
 
 function migrationArtifactHashes(dir) {
   const training = path.join(dir, 'training');
@@ -303,6 +314,32 @@ test('projectTrainingSummary drops nested extra keys and type-fails object leave
     }),
     { code: 'TRAINING_PROOF_MISMATCH' },
   );
+});
+
+test('projectTrainingSummary: chosen.action은 solver 전용 bet을 거부하고 recommended[].action은 허용한다', () => {
+  const chosenBetRow = evaluation({
+    chosen: { action: 'bet', sizeBb: 2.5, frequency: 1, evBb: null },
+  });
+  assert.throws(
+    () => contract.projectTrainingSummary({
+      ...chosenBetRow,
+      handNo: 1,
+      detailRef: detailRefOf(chosenBetRow.evaluationId),
+      recommendedTruncated: false,
+    }),
+    { code: 'TRAINING_PROOF_MISMATCH' },
+  );
+
+  const recommendedBetRow = evaluation({
+    recommended: [{ action: 'bet', sizeBb: 2.5, frequency: 1, evBb: null }],
+  });
+  const projected = contract.projectTrainingSummary({
+    ...recommendedBetRow,
+    handNo: 1,
+    detailRef: detailRefOf(recommendedBetRow.evaluationId),
+    recommendedTruncated: false,
+  });
+  assert.equal(projected.recommended[0].action, 'bet');
 });
 
 test('toPublicSummary truncates recommended at accept and never puts explanation on the digest', () => {

@@ -50,12 +50,17 @@ test('formatter: collapsed card, unsupported reason, forced is not a mistake', (
     grade: 'preferred',
     chosen: { action: 'raise' },
     exploit: {
-      accuracy: 'heuristic',
-      adjustment: { bluff: 'decrease', thinValue: 'increase' },
+      opponents: [{
+        opponentId: 'villain-1',
+        policyId: 'policy-1',
+        adjustment: { bluff: 'decrease', thinValue: 'increase', defense: 'hold' },
+        comparison: { summaryCode: 'GTO_CLOSE' },
+      }],
+      primary: 'villain-1',
     },
   });
-  assert.match(exploit.exploit, /heuristic/);
-  assert.equal(exploit.exploit.includes('0.80'), false);
+  assert.match(exploit.exploit, /bluff decrease/);
+  assert.match(exploit.exploit, /thin value increase/);
 });
 
 test('formatter merge by evaluationId+field displays unavailable and does not use payloadSha256 no-op for annotations', async () => {
