@@ -97,13 +97,15 @@ export function normalizeHand(record, { evaluations = [] } = {}) {
     seats: Object.entries(record.startStacks ?? {}).map(([playerId, stack]) => ({ playerId, stack })),
     heroCards: record.holes?.user ?? [],
     board: record.board ?? [],
-    actions: (record.actions ?? []).map((action) => ({
-      playerId: action.playerId,
-      action: action.action,
-      amount: action.amount,
-      street: action.street,
-      ...(typeof action.currentBet === 'number' ? { currentBet: action.currentBet } : {}),
-    })),
+    actions: Array.isArray(record.actions)
+      ? record.actions.map((action) => ({
+        playerId: action.playerId,
+        action: action.action,
+        amount: action.amount,
+        street: action.street,
+        ...(typeof action.currentBet === 'number' ? { currentBet: action.currentBet } : {}),
+      }))
+      : record.actions,
     showdown: {
       reveals: record.showdown?.reveals ?? [],
       mucks: record.showdown?.mucks ?? [],
