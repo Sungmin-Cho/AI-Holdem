@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 기본 AI 3명(4인 테이블). 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 토너먼트 기본 AI 3명(4인 테이블). cash-training 기본 AI 5명(6인 테이블). 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -50,7 +50,7 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 AI 수 `n=3`. 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 skill profile은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다.
+인자가 없으면 토너먼트 AI 수 `n=3`. cash-training은 `n=5`(6인). 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. `--ai`를 생략하면 사이드카가 5로 채운다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 skill profile은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 
@@ -111,7 +111,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 | `halt.code` | 사용자 안내 |
 |---|---|
-| `REVIEW_FAILED` | 게임은 끝났고 상태·코치 노트는 온전하지만 종합 리뷰 생성이 두 번 실패했습니다. 상위 모델 CLI 인증을 확인한 뒤 `/start-game resume`으로 리뷰 단계부터 다시 시도합니다 |
+| `REVIEW_FAILED` | 게임은 끝났고 상태·코치 노트는 온전하지만 종합 리뷰 생성 또는 게시가 실패했습니다. `halt.message`가 게시 거절을 가리키면 CLI 인증이 아니라 그 코드와 남은 attempt를 본다. 그 다음 `/start-game resume`으로 리뷰 단계부터 다시 시도합니다 |
 | `repair_failed` | 직전 핸드 아카이브를 쓰지 못해 멈췄습니다. 그 핸드는 코치·리뷰가 읽을 수 없습니다. `$SESSION_DIR/hands/` 상태를 확인해야 합니다 |
 | `NO_PLAYER_RUNTIME` | 적격 플레이어 런타임이 하나도 없어 게임을 시작(또는 재개)하지 않았습니다. `notices`의 probe 실패 내역대로 CLI 인증·설치를 고친 뒤 다시 시도합니다 |
 | `TRAINING_MIGRATION_CORRUPT` | training authority 마이그레이션 증거가 불완전해 재개 전에 멈췄습니다. `message`가 지목한 authority·digest map·JSONL·attempt 파일을 복구한 뒤 `/start-game resume`으로 다시 시도합니다 |

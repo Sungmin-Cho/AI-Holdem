@@ -11,7 +11,7 @@ import {
 import { userView } from '../engine/views.js';
 import { archiveTag } from '../engine/game-archive.js';
 import { newDeck } from '../engine/cards.js';
-import { engineInitFlags, parseGameLoopArgs } from '../tools/game-loop.js';
+import { applyModeDefaults, engineInitFlags, gtoEvalNotice, parseGameLoopArgs } from '../tools/game-loop.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
@@ -212,6 +212,28 @@ test('engineInitFlags는 bootstrap/prepared session 공통으로 mode·stack-bb�
     ],
   );
   assert.deepEqual(engineInitFlags({}), []);
+});
+
+test('applyModeDefaults: cash-training --ai 생략은 5, 명시는 유지, 토너먼트는 그대로', () => {
+  const cash = applyModeDefaults(parseGameLoopArgs(['--mode', 'cash-training', '--store-dir', '/tmp/x']));
+  assert.equal(cash.ai, 5);
+  const explicit = applyModeDefaults(parseGameLoopArgs([
+    '--mode', 'cash-training', '--ai', '3', '--store-dir', '/tmp/x',
+  ]));
+  assert.equal(explicit.ai, 3);
+  const tourney = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x']));
+  assert.equal(tourney.ai, undefined);
+});
+
+test('gtoEvalNotice: cash-training만, 6-max 100BB가 아니면 문면', () => {
+  assert.equal(gtoEvalNotice({}), null);
+  assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 100 }), null);
+  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 100 }), null);
+  const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 });
+  assert.match(four, /6-max 100BB/);
+  assert.match(four, /4인/);
+  const stack = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 50 });
+  assert.match(stack, /startStackBb=50/);
 });
 
 test('parseGameLoopArgs는 --mode/--stack-bb/--hands를 읽는다', () => {

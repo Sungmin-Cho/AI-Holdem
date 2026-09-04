@@ -37,6 +37,14 @@ test('스킬 frontmatter는 그대로다 — 슬래시 명령 인식의 계약',
   assert.match(fm, /^\s+user-invocable:\s*true\s*$/m);
 });
 
+test('스킬 §2: 토너먼트 기본 n=3, cash-training 기본 n=5', () => {
+  const start = section(read(SKILL), '## 2. 시작');
+  assert.match(start, /n=3/);
+  assert.match(start, /n=5/);
+  assert.match(start, /cash-training/);
+  assert.match(start, /6인/);
+});
+
 test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있다', () => {
   const skill = read(SKILL);
   assert.match(skill, /node tools\/game-loop\.js --store-dir game --ai/);
