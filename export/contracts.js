@@ -26,7 +26,10 @@ export function validateCanonicalHand(hand) {
   if (!isPlainObject(hand.uncalledReturns)) {
     return { exportStatus: 'unsupported', reason: 'legacy archive: missing uncalledReturns' };
   }
-  for (const action of hand.actions ?? []) {
+  if (!Array.isArray(hand.actions)) {
+    return { exportStatus: 'unsupported', reason: 'legacy archive: missing actions' };
+  }
+  for (const action of hand.actions) {
     if (!LEGAL_ACTIONS.has(action.action)) {
       return { exportStatus: 'unsupported', reason: 'nonstandard action' };
     }

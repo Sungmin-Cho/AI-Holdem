@@ -220,13 +220,21 @@ export function validatePrivateEngineState(engineState, { expectedSessionToken =
     validatePrivateRecord(engineState.lastHand, 'state.lastHand', { allowedPlayerIds: seatIds });
   }
   const lastHandNo = engineState.lastHand?.handNo ?? null;
+  // `end --result abort`는 진행 중이던 핸드를 완료로 기록하지 않고 버린다(engine/cli.js의
+  // cmdEnd: hand=null·gameOver=true·result='abort', handNo는 그대로). 그래서 버려진 핸드
+  // 번호가 handNo에 남고 lastHand는 그 이전 핸드다 — 위조가 아니라 중단의 정상 형태이므로
+  // 이 한 가지 모양만 예외로 둔다. 그렇지 않으면 §6 롤백의 미해소 게시 해소 단계에서
+  // exploit은 409, explanation은 500이 되어 큐를 영원히 비우지 못한다.
+  const abandonedHand = engineState.hand === null && engineState.result === 'abort';
   if ((engineState.hand !== null
     && lastHandNo !== null
     && lastHandNo !== engineState.handNo - 1)
     || (engineState.hand === null
       && lastHandNo !== null
-      && lastHandNo !== engineState.handNo)
-    || (engineState.hand === null && lastHandNo === null && engineState.handNo !== 0)) {
+      && lastHandNo !== engineState.handNo
+      && !(abandonedHand && lastHandNo === engineState.handNo - 1))
+    || (engineState.hand === null && lastHandNo === null && engineState.handNo !== 0
+      && !(abandonedHand && engineState.handNo === 1))) {
     throw coded('PRIVATE_LITERAL_INVALID', 'engine hand numbers are inconsistent');
   }
   if (engineState.gameOver
