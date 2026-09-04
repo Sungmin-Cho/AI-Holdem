@@ -196,8 +196,8 @@ test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to 
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('duplicate apply still projects the active segment and persists schemaVersion 2', () => {
-  assert.equal(emptyProfile().schemaVersion, 2);
+test('duplicate apply still projects the active segment and persists schemaVersion 3', () => {
+  assert.equal(emptyProfile().schemaVersion, 3);
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -209,7 +209,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.schemaVersion, 2);
+  assert.equal(profile.schemaVersion, 3);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   profile.overall.evaluatedDecisions = 2;
@@ -224,7 +224,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(again.schemaVersion, 2);
+  assert.equal(again.schemaVersion, 3);
   assert.equal(again.overall.evaluatedDecisions, 1);
   assert.equal(again.overall.supportedDecisions, 1);
   assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);

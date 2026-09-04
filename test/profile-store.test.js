@@ -65,17 +65,17 @@ test('apply returns {applied}; missing payloadSha256 is PROFILE_EVENT_INVALID', 
   });
 });
 
-test('new profile persist uses schemaVersion 2', async () => {
+test('new profile persist uses schemaVersion 3', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = await store.apply(evaluation());
-  assert.equal(first.profile.schemaVersion, 2);
+  assert.equal(first.profile.schemaVersion, 3);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 2);
+  assert.equal(disk.schemaVersion, 3);
   assert.equal(disk.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
 });
 
-test('schema 1 profile is rebuilt from events as schema 2 and is not returned raw', async () => {
+test('schema 1 profile is rebuilt from events as schema 3 and is not returned raw', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = evaluation();
@@ -118,13 +118,13 @@ test('schema 1 profile is rebuilt from events as schema 2 and is not returned ra
     },
   }));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 2);
+  assert.equal(shown.schemaVersion, 3);
   assert.equal(shown.activeSegmentId, 'local-preflop-baseline@2.0.0');
   assert.equal(shown.overall.evaluatedDecisions, 1);
   assert.equal(shown.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
   assert.equal(shown.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 2);
+  assert.equal(disk.schemaVersion, 3);
   assert.equal(disk.overall.evaluatedDecisions, 1);
 });
 
@@ -156,7 +156,7 @@ test('schema 1 load fails closed when events cannot support the nested schema', 
   await assert.rejects(() => store.show(), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('schema 1 processed digest mismatch fails closed without writing schema 2', async () => {
+test('schema 1 processed digest mismatch fails closed without writing schema 3', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const row = evaluation();
@@ -201,7 +201,7 @@ test('schema 1 event with unsafe skillKey fails closed', async () => {
   await assert.rejects(() => store.show(), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('schema 2 file is not read as schema 1 mixed totals; duplicate apply projects', async () => {
+test('schema 3 file is not read as legacy mixed totals; duplicate apply projects', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = evaluation();
@@ -218,15 +218,15 @@ test('schema 2 file is not read as schema 1 mixed totals; duplicate apply projec
   await store.apply(first);
   await store.apply(second);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 2);
+  assert.equal(disk.schemaVersion, 3);
   disk.overall.evaluatedDecisions = 99;
   disk.overall.supportedDecisions = 99;
   fs.writeFileSync(store.profilePath, JSON.stringify(disk));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 2);
+  assert.equal(shown.schemaVersion, 3);
   assert.equal(shown.overall.evaluatedDecisions, 1);
   const again = await store.apply(second);
   assert.equal(again.applied, false);
-  assert.equal(again.profile.schemaVersion, 2);
+  assert.equal(again.profile.schemaVersion, 3);
   assert.equal(again.profile.overall.evaluatedDecisions, 1);
 });
