@@ -260,20 +260,20 @@ export const HANDS = [
       }],
       showdown: {
         reveals: [
-          { playerId: 'p1', cards: ['As', 'Ks'], handName: 'straight flush' },
-          { playerId: 'user', cards: ['Ah', 'Kh'], handName: 'straight flush' },
+          { playerId: 'p1', cards: ['Ad', 'Kd'], handName: '스트레이트' },
+          { playerId: 'user', cards: ['Ah', 'Kh'], handName: '스트레이트' },
         ],
         mucks: ['p2'],
       },
-      holes: { user: ['Ah', 'Kh'], p1: ['As', 'Ks'], p2: ['7s', '8s'] },
-      endStacks: { p1: 5075, p2: 4950, user: 5075 },
+      holes: { user: ['Ah', 'Kh'], p1: ['Ad', 'Kd'], p2: ['2h', '3d'] },
+      endStacks: { p1: 5025, p2: 4950, user: 5025 },
     }),
   },
   {
     file: '10-side-pot.txt',
     record: base({
       startStacks: { p1: 300, p2: 500, user: 100 },
-      allIn: ['user', 'p1', 'p2'],
+      allIn: ['user', 'p1'],
       actions: [
         { playerId: 'user', action: 'raise', amount: 100, street: 'preflop', currentBet: 50 },
         { playerId: 'p1', action: 'raise', amount: 300, street: 'preflop', currentBet: 100 },
@@ -296,14 +296,13 @@ export const HANDS = [
       board: ['2c', '7d', '9h', '3s', '4c'],
       showdown: {
         reveals: [
-          { playerId: 'p2', cards: ['As', 'Ad'], handName: 'a pair of Aces' },
-          { playerId: 'p1', cards: ['Kc', 'Kd'], handName: 'a pair of Kings' },
-          { playerId: 'user', cards: ['Ah', 'Kd'], handName: 'high card' },
+          { playerId: 'p1', cards: ['Kc', 'Kd'], handName: '원페어' },
+          { playerId: 'p2', cards: ['As', 'Ad'], handName: '원페어' },
         ],
-        mucks: [],
+        mucks: ['user'],
       },
-      holes: { user: ['Ah', 'Kd'], p1: ['Kc', 'Kd'], p2: ['As', 'Ad'] },
-      endStacks: { p1: 0, p2: 800, user: 0 },
+      holes: { user: ['Ah', 'Kh'], p1: ['Kc', 'Kd'], p2: ['As', 'Ad'] },
+      endStacks: { p1: 0, p2: 900, user: 0 },
     }),
   },
 ];
