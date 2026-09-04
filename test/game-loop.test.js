@@ -7014,6 +7014,37 @@ test('review_generated with stale view publishes view-only then review', { timeo
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
 });
 
+test('finalizing resume with stale view publishes view-only before review', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1,
+    publishId: 1,
+    view: { gameOver: false, handNo: 1, toAct: 'user' },
+    log: [],
+    coach: [],
+    history: [],
+  }));
+
+  await loop.resume();
+  const completed = await loop.run();
+  assert.equal(completed.phase, 'done');
+
+  const publishes = publishInvocations(calls);
+  const viewIndex = publishes.findIndex((args) => args.includes('--view-only'));
+  const reviewIndex = publishes.findIndex((args) => (
+    path.basename(flagValue(args, '--from') ?? '') === '.review.json'
+  ));
+  assert.equal(viewIndex >= 0, true);
+  assert.equal(reviewIndex >= 0, true);
+  assert.equal(viewIndex < reviewIndex, true);
+  assert.equal(publishes[viewIndex].includes('--deadline-monotonic-ns'), true);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).view.gameOver, true);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
+});
+
 test('review_generated retries a leftover view attempt before posting review', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
