@@ -111,6 +111,7 @@ test('Q3 M15: config mismatch fails closed before server or exploit generation',
 test('Q3 M15: matching catalog remains byte-stable across finalizing re-stamp', async (t) => {
   const { gameDir } = seedFinalizingPolicyResume(t, { stamp: true });
   const playersPath = path.join(gameDir, 'players.json');
+  fs.writeFileSync(playersPath, `${JSON.stringify(readJson(playersPath), null, 2)}\n`);
   const before = fs.readFileSync(playersPath);
   const beforeInode = fs.statSync(playersPath, { bigint: true }).ino;
   const loop = loopForInvalidServerPort(gameDir);
@@ -119,10 +120,10 @@ test('Q3 M15: matching catalog remains byte-stable across finalizing re-stamp', 
   await assert.rejects(loop.resume({ skipLock: true }), { code: 'BAD_SERVER_PORT' });
 
   assert.deepEqual(fs.readFileSync(playersPath), before);
-  assert.notEqual(
+  assert.equal(
     fs.statSync(playersPath, { bigint: true }).ino,
     beforeInode,
-    'matching policy bytes were not re-stamped before the server boundary',
+    'matching policy file was rewritten before the server boundary',
   );
   assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false);
 });

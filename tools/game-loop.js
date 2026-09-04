@@ -1952,11 +1952,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const retryUnresolvedTrainingAttempt = async () => {
+    if (machinePublishHalt || annotationPublishHalt) return;
     try {
       await retryTrainingAttempt(root, { executePublish, storeDir });
     } catch (error) {
       if (error.code === 'NO_ATTEMPT') return;
       log('training-attempt-retry-error', { code: error.code ?? 'ERROR' });
+      if (error.code === 'TRAINING_MARK_FAILED'
+        || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
+        machinePublishHalt = error.code;
+        annotationPublishHalt = error.code;
+        appendNotice(`training retry publish halt: ${error.code}`);
+        throw error;
+      }
     }
   };
 

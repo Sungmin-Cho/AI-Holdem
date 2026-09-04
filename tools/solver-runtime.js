@@ -359,7 +359,16 @@ export async function runSolver({
     });
   } catch (error) {
     clearPersist(gameDir, spawnToken);
-    throw error;
+    const failure = coded('SOLVER_SPAWN', error.message);
+    failure.cause = error;
+    throw failure;
+  }
+  if (!Number.isInteger(child.pid) || child.pid <= 0) {
+    const error = await new Promise((resolve) => child.once('error', resolve));
+    clearPersist(gameDir, spawnToken);
+    const failure = coded('SOLVER_SPAWN', error.message);
+    failure.cause = error;
+    throw failure;
   }
   const startTime = startTimeOf(child.pid);
   live.set(child.pid, { startTime, child });

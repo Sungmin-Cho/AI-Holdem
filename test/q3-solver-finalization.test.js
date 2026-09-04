@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { processStartTime } from '../engine/state.js';
 import { newDeck } from '../engine/cards.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -393,6 +393,38 @@ test('Q3 M13 spawning: synchronous spawn throw removes the reservation', async (
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Q3 M13 spawning: asynchronous ENOENT clears the reservation and rejects as SOLVER_SPAWN', () => {
+  const dir = tmpQ3('holdem-q3-async-spawn-');
+  const solverModule = pathToFileURL(path.join(ROOT, 'tools', 'solver-runtime.js')).href;
+  const script = `
+import fs from 'node:fs';
+import path from 'node:path';
+import { runSolver } from ${JSON.stringify(solverModule)};
+const dir = process.argv[1];
+let code = null;
+try {
+  await runSolver({ argv: ['/definitely/missing-q3-solver'], gameDir: dir });
+} catch (error) {
+  code = error.code;
+}
+await new Promise((resolve) => setTimeout(resolve, 20));
+process.stdout.write(JSON.stringify({
+  code,
+  recordExists: fs.existsSync(path.join(dir, '.solver-child.json')),
+}));
+`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, dir], {
+    encoding: 'utf8',
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    code: 'SOLVER_SPAWN',
+    recordExists: false,
+  });
 });
 
 test('Q3 M13 spawning: a torn tmp leaves the prior spawning reservation authoritative', async () => {
