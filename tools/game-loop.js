@@ -4001,10 +4001,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // A publisher may win the attempt-file race after the check above. The next loop
         // iteration sees that record and resolves it with --retry before our review body.
         if (error.code === 'ATTEMPT_PENDING') continue;
-        const pending = readJsonOptional(publishAttemptPath, 'BAD_ATTEMPT');
-        const kind = pending?.body && typeof pending.body === 'object'
-          ? Object.keys(pending.body).filter((key) => key !== 'publishId').join(',')
-          : '';
+        let kind = '';
+        try {
+          const pending = JSON.parse(fs.readFileSync(publishAttemptPath, 'utf8'));
+          if (pending?.body && typeof pending.body === 'object' && !Array.isArray(pending.body)) {
+            kind = Object.keys(pending.body).filter((key) => key !== 'publishId').join(',');
+          }
+        } catch { /* malformed leftover attempt must not replace REVIEW_FAILED */ }
         throw haltFinalization(
           'REVIEW_FAILED',
           `종합 리뷰 게시를 완료하지 못했습니다(${error.code ?? 'ERROR'}${kind ? `, attempt=${kind}` : ''}). review_generated에서 재개할 수 있습니다.`,

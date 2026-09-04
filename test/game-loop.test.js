@@ -7172,6 +7172,31 @@ test('Task 7B: review ack 뒤 attempt 삭제 전 crash는 recorded body를 --ret
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, 1);
 });
 
+test('malformed leftover attempt still halts REVIEW_FAILED', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  seedGameOverSnapshot(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), '{not json');
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    reviewSha256: sha256Text(VALID_REVIEW),
+  });
+  const publishCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: { port: 0, onPublishInvoke: (args) => publishCalls.push(args) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+  assert.equal(publishCalls[0].includes('--retry'), true);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.code, 'REVIEW_FAILED');
+  assert.equal(state.phase, 'review_generated');
+});
+
 test('Task 7B: review_generated의 pending attempt는 --retry로 exact body를 해소한 뒤 done으로 간다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
