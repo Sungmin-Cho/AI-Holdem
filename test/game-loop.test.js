@@ -2991,7 +2991,9 @@ test('BAD_SNAPSHOT verifies the server, removes the corrupt snapshot, and republ
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
 });
 
-test('LOCK_TIMEOUT retries the same publish once after the competing publisher releases', { timeout: 35_000 }, async (t) => {
+// 안쪽 waitWhileRunning 예산이 25s인데 바깥이 35s였다. 러너에서 21.3s로 측정돼 여유가
+// 1.6배뿐이었다 — 같은 파일의 publish-matrix 테스트가 쓰는 120s로 맞춘다.
+test('LOCK_TIMEOUT retries the same publish once after the competing publisher releases', { timeout: 120_000 }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
   const releaseTimer = setTimeout(() => held.release(), 20_500);
