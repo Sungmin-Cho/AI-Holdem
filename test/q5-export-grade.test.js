@@ -130,6 +130,22 @@ test('renderer rejects a raise without currentBet instead of emitting a lossy fa
   );
 });
 
+test('JSON-overflow currentBet is non-numeric and fails closed at validation and rendering', () => {
+  const record = clone(readGeneratedRecord('uncalled'));
+  record.actions[0].currentBet = JSON.parse('1e400');
+  const hand = normalizeHand(record);
+  assert.equal(hand.actions[0].currentBet, Infinity);
+  assert.deepEqual(contracts.validateCanonicalHand(hand), {
+    exportStatus: 'unsupported',
+    reason: 'legacy archive: raise without currentBet',
+  });
+  assert.equal(buildCanonical(writeArchive(record)).hands.length, 0);
+  assert.throws(
+    () => renderPokerStars({ hands: [hand] }, RENDER_OPTS),
+    { code: 'EXPORT_CONTRACT_VIOLATION' },
+  );
+});
+
 test('export CLI reports excluded unsupported hands', () => {
   const record = clone(readGeneratedRecord('uncalled'));
   delete record.posts;

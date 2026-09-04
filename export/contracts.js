@@ -30,7 +30,7 @@ export function validateCanonicalHand(hand) {
     if (!LEGAL_ACTIONS.has(action.action)) {
       return { exportStatus: 'unsupported', reason: 'nonstandard action' };
     }
-    if (action.action === 'raise' && typeof action.currentBet !== 'number') {
+    if (action.action === 'raise' && !Number.isFinite(action.currentBet)) {
       return { exportStatus: 'unsupported', reason: 'legacy archive: raise without currentBet' };
     }
   }

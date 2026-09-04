@@ -60,10 +60,10 @@ function formatActionLine(hand, action, index) {
   if (action.action === 'call') return `${action.playerId}: calls ${action.amount}${suffix}`;
   if (action.action === 'raise') {
     const currentBet = action.currentBet;
-    if (typeof currentBet === 'number' && currentBet === 0) {
+    if (Number.isFinite(currentBet) && currentBet === 0) {
       return `${action.playerId}: bets ${action.amount}${suffix}`;
     }
-    if (typeof currentBet === 'number') {
+    if (Number.isFinite(currentBet)) {
       return `${action.playerId}: raises ${action.amount - currentBet} to ${action.amount}${suffix}`;
     }
     throw coded('EXPORT_CONTRACT_VIOLATION', 'raise action에 currentBet이 없습니다.');
