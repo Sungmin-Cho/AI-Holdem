@@ -62,7 +62,8 @@ export const TRAINING_SUMMARY_LIMITS = Object.freeze({
   explanation: EXPLANATION_MAX_CHARS,
 });
 
-const ALLOWED_ACTIONS = new Set(['fold', 'check', 'call', 'raise', 'bet']);
+export const CHOSEN_ACTION_VOCABULARY = Object.freeze(['fold', 'check', 'call', 'raise']);
+export const RECOMMENDED_ACTION_VOCABULARY = Object.freeze(['fold', 'check', 'call', 'raise', 'bet']);
 
 // D9 결정 identity. `training/contracts.js`가 이것을 import해 생산자·서버가 같은
 // 문법을 쓴다 — 서버는 training 모듈을 부를 수 없으므로 정본이 여기에 있어야 한다.
@@ -352,14 +353,14 @@ function assertCappedString(value, max, label) {
   }
 }
 
-export function compactAction(action) {
+export function compactAction(action, allowedActions = RECOMMENDED_ACTION_VOCABULARY) {
   if (action == null) return null;
   if (typeof action !== 'object' || Array.isArray(action)) {
     throw coded('TRAINING_PROOF_MISMATCH', 'action must be an object');
   }
   const name = action.action;
   if (name != null) {
-    if (typeof name !== 'string' || !ALLOWED_ACTIONS.has(name)) {
+    if (typeof name !== 'string' || !allowedActions.includes(name)) {
       throw coded('TRAINING_PROOF_MISMATCH', 'action leaf type invalid');
     }
   }
@@ -466,7 +467,9 @@ export function projectTrainingSummary(item) {
   assertCappedString(item.spotKey, TRAINING_SUMMARY_LIMITS.key, 'spotKey');
   assertCappedString(item.handClass, TRAINING_SUMMARY_LIMITS.key, 'handClass');
   assertCappedString(item.code, TRAINING_SUMMARY_LIMITS.key, 'code');
-  const recommended = Array.isArray(item.recommended) ? item.recommended.map(compactAction) : [];
+  const recommended = Array.isArray(item.recommended)
+    ? item.recommended.map((action) => compactAction(action, RECOMMENDED_ACTION_VOCABULARY))
+    : [];
   const out = {
     evaluationId: item.evaluationId,
     handNo: item.handNo,
@@ -475,7 +478,7 @@ export function projectTrainingSummary(item) {
     street: item.street,
     spotKey: item.spotKey ?? null,
     handClass: item.handClass ?? null,
-    chosen: compactAction(item.chosen),
+    chosen: compactAction(item.chosen, CHOSEN_ACTION_VOCABULARY),
     recommended,
     evLossBb: item.evLossBb ?? null,
     grade: item.grade ?? null,

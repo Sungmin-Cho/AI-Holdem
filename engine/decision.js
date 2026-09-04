@@ -1,8 +1,8 @@
 import { positionsOf } from './positions.js';
 
-const PRIOR_ACTION_KEYS = [
+export const PRIOR_ACTION_KEYS = [
   'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks',
+  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
 ];
 
 function throwSnapshot(message) {
