@@ -5,6 +5,12 @@ function streetHeader(street) {
   return null;
 }
 
+function coded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function formatCards(cards) {
   return `[${(cards ?? []).join(' ')}]`;
 }
@@ -60,7 +66,7 @@ function formatActionLine(hand, action, index) {
     if (typeof currentBet === 'number') {
       return `${action.playerId}: raises ${action.amount - currentBet} to ${action.amount}${suffix}`;
     }
-    return `${action.playerId}: raises to ${action.amount}${suffix}`;
+    throw coded('EXPORT_CONTRACT_VIOLATION', 'raise action에 currentBet이 없습니다.');
   }
   return null;
 }

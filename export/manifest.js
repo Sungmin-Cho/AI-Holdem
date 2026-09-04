@@ -1,6 +1,6 @@
 import { listHands, normalizeHand, assertNoSecrets } from './hand-normalizer.js';
 import { renderPokerStars } from './pokerstars.js';
-import { validateCanonicalHand } from './contracts.js';
+import { validateCanonicalHand, warningsFor } from './contracts.js';
 
 export function mergeWarnings(...lists) {
   const seen = new Set();
@@ -34,6 +34,8 @@ export function buildCanonical(gameDir, { exportedAt = '2026-09-01T00:00:00.000Z
     }
     if (verdict.exportStatus === 'unsupported') continue;
     hands.push(hand);
+    const warning = warningsFor(hand);
+    if (warning) warnings.push({ handNo: hand.handNo, ...warning });
   }
   const payload = {
     schemaVersion: 1,

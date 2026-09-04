@@ -83,6 +83,12 @@ function publicHoles(record) {
   return holes;
 }
 
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
 export function normalizeHand(record, { evaluations = [] } = {}) {
   return {
     handNo: record.handNo,
@@ -108,8 +114,10 @@ export function normalizeHand(record, { evaluations = [] } = {}) {
     holes: publicHoles(record),
     startStacks: record.startStacks ?? {},
     endStacks: record.endStacks ?? {},
-    posts: structuredClone(record.posts ?? []),
-    uncalledReturns: { ...(record.uncalledReturns ?? {}) },
+    posts: Array.isArray(record.posts) ? structuredClone(record.posts) : record.posts,
+    uncalledReturns: isPlainObject(record.uncalledReturns)
+      ? { ...record.uncalledReturns }
+      : record.uncalledReturns,
     allIn: [...(record.allIn ?? [])],
     folded: [...(record.folded ?? [])],
   };
