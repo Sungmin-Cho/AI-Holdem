@@ -186,6 +186,27 @@ export function engineInitFlags(args = {}) {
   return extra;
 }
 
+export function applyModeDefaults(args) {
+  const next = { ...args };
+  if (!next.resume && next.mode === 'cash-training' && next.ai === undefined) {
+    next.ai = 5;
+  }
+  return next;
+}
+
+export function gtoEvalNotice(config = {}) {
+  if (config.mode !== 'cash-training') return null;
+  const seats = Number(config.aiCount) + 1;
+  const stackBb = config.startStackBb;
+  const badSeats = !Number.isFinite(seats) || seats !== 6;
+  const badStack = !Number.isFinite(stackBb) || Math.abs(stackBb - 100) > 1;
+  if (!badSeats && !badStack) return null;
+  const parts = [];
+  if (badSeats) parts.push(`${Number.isFinite(seats) ? seats : '?'}인`);
+  if (badStack) parts.push(`startStackBb=${stackBb ?? '없음'}`);
+  return `GTO 프리플랍 평가는 6-max 100BB만 지원합니다 (현재 ${parts.join(', ')}).`;
+}
+
 export function parseGameLoopArgs(argv) {
   const parsed = {
     gameDir: path.resolve('game'),
@@ -2290,6 +2311,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const turnPath = path.join(root, '.turn.json');
+
+  const snapshotViewGameOver = () => (
+    readJsonOptional(coachSnapshotPath, 'UI_SNAPSHOT')?.view?.gameOver === true
+  );
+
+  const ensureGameOverViewPublished = async () => {
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    if (engine?.gameOver !== true) return;
+    for (let step = 0; step < 4; step += 1) {
+      if (snapshotViewGameOver()) return;
+      try {
+        if (fs.existsSync(publishAttemptPath)) {
+          if (!fs.existsSync(turnPath)) writeJsonAtomic(turnPath, { ok: true });
+          await executePublish(['--from', turnPath, '--retry']);
+          continue;
+        }
+        const envelope = await runCli(['step']);
+        writeJsonAtomic(turnPath, envelope);
+        await executePublish(['--from', turnPath, '--view-only']);
+      } catch (error) {
+        if (error.code === 'ATTEMPT_PENDING') continue;
+        appendNotice(`gameOver 뷰 게시 실패: ${error.code ?? 'ERROR'}`);
+        return;
+      }
+    }
+  };
+
   const publishEnvelope = async (envelope, flags = []) => {
     // §9.2 (3): the cutoff stops new play-time publishers locally, before the authority
     // flag exists. Coach seals keep flowing through executeCoachPublish under a deadline.
@@ -3917,6 +3965,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   });
 
   const publishGeneratedReview = async () => {
+    await ensureGameOverViewPublished();
+    if (readJsonOptional(engineStatePath, 'ENGINE_STATE')?.gameOver === true
+      && !snapshotViewGameOver()) {
+      throw haltFinalization(
+        'REVIEW_FAILED',
+        '스냅샷 view.gameOver가 아니라 리뷰 오버레이를 게시하지 않습니다. review_generated에서 재개할 수 있습니다.',
+      );
+    }
     const generated = readGeneratedReview();
     writeJsonAtomic(reviewEnvelopePath, { review: generated.review });
 
@@ -3945,9 +4001,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // A publisher may win the attempt-file race after the check above. The next loop
         // iteration sees that record and resolves it with --retry before our review body.
         if (error.code === 'ATTEMPT_PENDING') continue;
+        const pending = readJsonOptional(publishAttemptPath, 'BAD_ATTEMPT');
+        const kind = pending?.body && typeof pending.body === 'object'
+          ? Object.keys(pending.body).filter((key) => key !== 'publishId').join(',')
+          : '';
         throw haltFinalization(
           'REVIEW_FAILED',
-          `종합 리뷰 게시를 완료하지 못했습니다(${error.code ?? 'ERROR'}). review_generated에서 재개할 수 있습니다.`,
+          `종합 리뷰 게시를 완료하지 못했습니다(${error.code ?? 'ERROR'}${kind ? `, attempt=${kind}` : ''}). review_generated에서 재개할 수 있습니다.`,
         );
       }
       if (Number.isInteger(published?.publishId)) writeLoopState({ lastPublishId: published.publishId });
@@ -4254,6 +4314,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     publishDeadlineNs = finalDeadlineNs;
     try {
       await retryUnresolvedTrainingAttempt();
+      await ensureGameOverViewPublished();
       await drainQueuedCoachPublications();
       await flushTrainingPublish();
       await flushAnnotationPublish();
@@ -4607,9 +4668,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const policyMode = opponentRuntimeOf() === 'policy';
       if (policyMode) stampPlayerPolicies(root);
       const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
+      const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const notices = [
         ...(Array.isArray(resolved?.notices) ? resolved.notices : []),
         ...sweepNotices,
+        ...(gtoNotice ? [gtoNotice] : []),
         // 레거시 --game-dir는 training이 꺼진 채로 도는데, 지금까지는 아무 말도
         // 하지 않아 평가가 왜 비어 있는지 알 길이 없었다.
         ...(trainingOn ? [] : ['이 세션은 레거시 --game-dir라 training이 꺼져 있습니다. 학습 평가를 남기려면 --store-dir로 시작하세요.']),
@@ -5106,7 +5169,7 @@ async function main() {
   let signalStopPromise = null;
   let signalStopError = null;
   try {
-    const args = parseGameLoopArgs(process.argv.slice(2));
+    const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
     if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
     const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
       need,

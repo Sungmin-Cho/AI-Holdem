@@ -1,5 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { validatePrivateEngineState } from '../publish-contract.js';
 import { normalizeHand } from '../export/hand-normalizer.js';
 import { validateCanonicalHand } from '../export/contracts.js';
@@ -34,6 +39,27 @@ function abandonedHandState({ handNo, lastHandNo }) {
     result: 'abort',
   };
 }
+
+test('abort then step yields a publishable envelope', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-abort-step-'));
+  const cli = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
+  const run = (args) => JSON.parse(execFileSync(process.execPath, [cli, ...args, '--game-dir', dir], {
+    encoding: 'utf8',
+    timeout: 20_000,
+  }).trim());
+  run(['init', '--ai', '1']);
+  run(['step', '--new-hand']);
+  const ended = run(['end', '--result', 'abort']);
+  assert.equal(ended.gameOver, true);
+  const step = run(['step']);
+  assert.equal(step.ok, true);
+  assert.equal(step.gameOver, true);
+  assert.equal(typeof step.handOver, 'boolean');
+  assert.equal(step.viewFor, 'user');
+  assert.equal(step.view.handNo !== undefined, true);
+  assert.equal(Number.isInteger(step.stateVersion), true);
+  assert.equal(step.next, null);
+});
 
 test('mid-hand abort leaves a state the security predicate still accepts', () => {
   const aborted = abandonedHandState({ handNo: 8, lastHandNo: 7 });
