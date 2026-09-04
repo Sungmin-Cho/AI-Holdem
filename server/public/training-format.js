@@ -77,9 +77,6 @@ export function formatTrainingCard(item) {
       const adj = primary.adjustment;
       card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue}`;
     }
-  } else if (exploitVal?.accuracy === 'heuristic' && exploitVal.adjustment) {
-    const adj = exploitVal.adjustment;
-    card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue} (heuristic, EV 없음)`;
   }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {

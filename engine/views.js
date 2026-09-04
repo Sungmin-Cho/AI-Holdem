@@ -131,13 +131,14 @@ export function turnSummary(state, playerId) {
   return lines.join('\n');
 }
 
+export const SAFE_ACTION_KEYS = [
+  'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
+  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
+];
+
 function safeAction(action) {
-  const keys = [
-    'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-    'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
-  ];
   const result = {};
-  for (const key of keys) {
+  for (const key of SAFE_ACTION_KEYS) {
     if (key in action) result[key] = structuredClone(action[key]);
   }
   return result;

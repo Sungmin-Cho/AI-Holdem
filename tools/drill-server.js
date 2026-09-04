@@ -25,14 +25,14 @@ function tokensEqual(provided, expected) {
   return timingSafeEqual(a, b);
 }
 
-function sendJson(res, status, obj) {
+function sendJson(res, status, obj, onSent) {
   if (res.headersSent) return;
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
   });
-  res.end(body);
+  res.end(body, onSent);
 }
 
 function statusFor(code) {
@@ -74,8 +74,10 @@ function readRawBody(req, res) {
       resolve(value);
     };
     const rejectTooLarge = () => {
-      sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE' });
-      req.resume();
+      sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE' }, () => {
+        req.destroy();
+        res.socket?.destroy();
+      });
       finish(null);
     };
     const len = Number(req.headers['content-length']);

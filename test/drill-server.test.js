@@ -221,16 +221,54 @@ test('bad JSON returns 400 and the process survives', async () => {
   }
 });
 
-test('body larger than 64KiB returns 413', async () => {
+function rawOversizedRequest(port, { chunked, token = 'tok' }) {
+  return new Promise((resolve, reject) => {
+    let clientSocket = null;
+    const headers = { 'Content-Type': 'application/json', 'x-drill-token': token };
+    if (!chunked) headers['Content-Length'] = String(70 * 1024);
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      method: 'POST',
+      path: '/api/start',
+      headers,
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on('data', (chunk) => chunks.push(chunk));
+      incoming.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* non-JSON */ }
+        const socketClosed = new Promise((res2) => {
+          if (clientSocket == null || clientSocket.destroyed) { res2(true); return; }
+          clientSocket.once('close', () => res2(true));
+          setTimeout(() => res2(false), 2000);
+        });
+        socketClosed.then((closed) => resolve({ status: incoming.statusCode, json, closed }));
+      });
+    });
+    req.on('socket', (socket) => { clientSocket = socket; });
+    req.on('error', reject);
+    if (chunked) {
+      req.write('{"idempotencyKey":"');
+      req.write('x'.repeat(70 * 1024));
+      req.write('"}');
+      req.end();
+    } else {
+      req.end();
+    }
+  });
+}
+
+test('Content-Length가 64KiB를 초과하면 JSON 413을 반환하고 소켓을 닫는다', async () => {
   const storeDir = tmp();
   const { child, port, token } = await spawnDrillServer(storeDir);
   try {
-    const raw = JSON.stringify({ idempotencyKey: 'x'.repeat(64 * 1024) });
-    assert.ok(Buffer.byteLength(raw) > 64 * 1024);
-    const res = await api(port, token, '/api/start', { method: 'POST', raw });
+    const res = await rawOversizedRequest(port, { chunked: false, token });
     assert.equal(res.status, 413);
     assert.equal(res.json?.ok, false);
     assert.equal(res.json?.code, 'PAYLOAD_TOO_LARGE');
+    assert.equal(res.closed, true, '413 응답 후 소켓이 파괴되어 닫혀야 한다 (무제한 drain 금지)');
     assert.equal(child.exitCode, null);
     const started = await api(port, token, '/api/start', {
       method: 'POST',
@@ -243,36 +281,15 @@ test('body larger than 64KiB returns 413', async () => {
   }
 });
 
-test('chunked body over 64KiB returns JSON 413 without resetting the socket', async () => {
+test('chunked body가 64KiB를 초과하면 JSON 413을 반환하고 소켓을 닫는다', async () => {
   const storeDir = tmp();
   const drill = await startDrillServer({ storeDir, port: 0, token: 'tok' });
   try {
-    const res = await new Promise((resolve, reject) => {
-      const req = http.request({
-        hostname: '127.0.0.1',
-        port: drill.port,
-        method: 'POST',
-        path: '/api/start',
-        headers: { 'Content-Type': 'application/json', 'x-drill-token': 'tok' },
-      }, (incoming) => {
-        const chunks = [];
-        incoming.on('data', (chunk) => chunks.push(chunk));
-        incoming.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          let json = null;
-          try { json = JSON.parse(text); } catch { /* non-JSON */ }
-          resolve({ status: incoming.statusCode, json, text });
-        });
-      });
-      req.on('error', reject);
-      req.write('{"idempotencyKey":"');
-      req.write('x'.repeat(70 * 1024));
-      req.write('"}');
-      req.end();
-    });
+    const res = await rawOversizedRequest(drill.port, { chunked: true });
     assert.equal(res.status, 413);
     assert.equal(res.json?.ok, false);
     assert.equal(res.json?.code, 'PAYLOAD_TOO_LARGE');
+    assert.equal(res.closed, true, '413 응답 후 소켓이 파괴되어 닫혀야 한다 (무제한 drain 금지)');
     const started = await api(drill.port, 'tok', '/api/start', {
       method: 'POST',
       body: { mode: 'free', seed: '1', idempotencyKey: 'after-chunked-413' },
