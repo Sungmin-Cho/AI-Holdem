@@ -5,12 +5,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createTrainingControl,
-  hasExplanationCutoff,
+  hasCutoffMarker,
   readAnnotationExactFile,
 } from './training-control.js';
 import { validateExplanation } from '../training/explain.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
+import { killGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   annotationBodyByteLength,
   gameEpochOf,
@@ -28,13 +29,18 @@ const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
 const handPipelineTail = new Map();
 const explainTail = new Map();
 const solveTail = new Map();
+const publishFlushTail = new Map();
+
+function withSessionTail(tails, sessionDir, work) {
+  const key = path.resolve(sessionDir);
+  const prev = tails.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(work);
+  tails.set(key, run.then(() => {}, () => {}));
+  return run;
+}
 
 function withExplainLock(sessionDir, work) {
-  const key = path.resolve(sessionDir);
-  const prev = explainTail.get(key) ?? Promise.resolve();
-  const run = prev.catch(() => {}).then(work);
-  explainTail.set(key, run.then(() => {}, () => {}));
-  return run;
+  return withSessionTail(explainTail, sessionDir, work);
 }
 
 // solver-runtime은 세션당 하나의 자식만 허용한다(`.solver-child.json`). 한 핸드에
@@ -42,11 +48,15 @@ function withExplainLock(sessionDir, work) {
 // SOLVER_BUSY를 맞고 pending으로 되돌아간다 — 자기가 만든 경합이다. 세션별로
 // 직렬화한다.
 function withSolveLock(sessionDir, work) {
-  const key = path.resolve(sessionDir);
-  const prev = solveTail.get(key) ?? Promise.resolve();
-  const run = prev.catch(() => {}).then(work);
-  solveTail.set(key, run.then(() => {}, () => {}));
-  return run;
+  return withSessionTail(solveTail, sessionDir, work);
+}
+
+function withMachineFlushLock(sessionDir, work) {
+  return withSessionTail(publishFlushTail, sessionDir, work);
+}
+
+function withAnnotationFlushLock(sessionDir, work) {
+  return withSessionTail(publishFlushTail, sessionDir, work);
 }
 
 export function isTrainingEnabled(opts = {}) {
@@ -74,7 +84,21 @@ export function toRunnerHandle(out) {
   return { promise: Promise.resolve(out), terminate: async () => ({ confirmed: true }) };
 }
 
-function cliRunner(argv, { timeoutMs, failCode }) {
+async function terminatePersistedSolver(sessionDir) {
+  if (!sessionDir) return { confirmed: true };
+  let persisted = readPersistedSolver(sessionDir);
+  if (persisted.state === 'absent' || persisted.state === 'dead') {
+    return { confirmed: true };
+  }
+  await killGroup(persisted.record?.pid, persisted.record?.startTime);
+  persisted = readPersistedSolver(sessionDir);
+  if (persisted.state === 'absent' || persisted.state === 'dead') {
+    return { confirmed: true };
+  }
+  return { confirmed: false, reason: 'solver_child_live' };
+}
+
+function cliRunner(argv, { timeoutMs, failCode, solverSessionDir = null }) {
   let child = null;
   let settled = false;
   const promise = new Promise((resolve) => {
@@ -103,13 +127,18 @@ function cliRunner(argv, { timeoutMs, failCode }) {
   return {
     promise,
     async terminate() {
-      if (settled || !child) return { confirmed: true };
-      try { child.kill('SIGTERM'); } catch { /* already gone */ }
-      const confirmed = await waitChild(child, 400);
-      if (!confirmed) {
-        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      let wrapperConfirmed = settled || !child;
+      if (!wrapperConfirmed) {
+        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+        wrapperConfirmed = await waitChild(child, 400);
+        if (!wrapperConfirmed) {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+          wrapperConfirmed = await waitChild(child, 400);
+        }
       }
-      return { confirmed: await waitChild(child, 400) };
+      const solver = await terminatePersistedSolver(solverSessionDir);
+      if (!solver.confirmed) return solver;
+      return { confirmed: wrapperConfirmed };
     },
   };
 }
@@ -127,7 +156,7 @@ export function defaultSolve({ sessionDir, decisionId, handNo, adapterId }) {
     '--hand', String(handNo),
     '--decision', decisionId,
     '--adapter', adapterId,
-  ], { timeoutMs: 20_000, failCode: 'SOLVE_FAILED' });
+  ], { timeoutMs: 20_000, failCode: 'SOLVE_FAILED', solverSessionDir: sessionDir });
 }
 
 export function buildExplanationPrompt(evaluation) {
@@ -342,14 +371,14 @@ async function runHandPipelineUnlocked({
     try { await consume(); } catch { /* consumers retry independently */ }
   }
 
-  const sealExplanation = async (item, value) => {
-    await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', value);
+  const sealExplanation = async (item, value, options) => {
+    await tc.sealAnnotation(sessionDir, item.evaluationId, 'explanation', value, options);
     if (typeof publish === 'function') await publish('annotation');
   };
 
   for (const item of acceptedItems) {
-    if (hasExplanationCutoff(sessionDir)) {
-      await sealExplanation(item, 'unavailable');
+    if (hasCutoffMarker(sessionDir)) {
+      await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
       continue;
     }
     const existingAnn = item.annotations?.explanation
@@ -360,10 +389,15 @@ async function runHandPipelineUnlocked({
       sealedExisting = readAnnotationExactFile(sessionDir, item.detailRef, 'explanation');
     } catch { /* first attempt */ }
     if (sealedExisting) {
-      await sealExplanation(
-        item,
-        sealedExisting.status === 'unavailable' ? 'unavailable' : sealedExisting.value,
-      );
+      if (sealedExisting.status === 'unavailable') {
+        if (hasCutoffMarker(sessionDir)) {
+          await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
+        } else {
+          await sealExplanation(item, 'unavailable', { sealReason: 'explain-failed' });
+        }
+      } else {
+        await sealExplanation(item, sealedExisting.value);
+      }
       continue;
     }
     const evaluation = {
@@ -374,14 +408,14 @@ async function runHandPipelineUnlocked({
     if (typeof explain !== 'function') continue;
     let text = null;
     await withExplainLock(sessionDir, async () => {
-      if (hasExplanationCutoff(sessionDir)) return;
+      if (hasCutoffMarker(sessionDir)) return;
       const explainHandle = toRunnerHandle(explain(evaluation));
       try {
         text = await explainHandle.promise;
       } catch { text = null; }
     });
-    if (hasExplanationCutoff(sessionDir)) {
-      await sealExplanation(item, 'unavailable');
+    if (hasCutoffMarker(sessionDir)) {
+      await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
       continue;
     }
     if (typeof text !== 'string' || !text.trim()) continue;
@@ -655,10 +689,11 @@ export function unpublishedEnvelope(sessionDir, { gameEpoch } = {}) {
   };
 }
 
-export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
+function annotationEnvelopeState(sessionDir, { gameEpoch } = {}) {
   const auth = authorityForPublish(sessionDir);
-  if (!auth) return null;
+  if (!auth) return { envelope: null, recoveryNeeded: false };
   const entries = [];
+  let recoveryNeeded = false;
   for (const [evaluationId, fields] of Object.entries(auth.annotationQueue ?? {})) {
     const item = auth.items[evaluationId];
     if (!item) continue;
@@ -668,6 +703,7 @@ export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
       try {
         canonical = readAnnotationExactFile(sessionDir, item.detailRef, field);
       } catch {
+        recoveryNeeded = true;
         continue;
       }
       const projected = projectTrainingAnnotation({
@@ -686,7 +722,7 @@ export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
       });
     }
   }
-  if (entries.length === 0) return null;
+  if (entries.length === 0) return { envelope: null, recoveryNeeded };
   const chunk = [];
   for (const entry of entries) {
     const next = [...chunk, entry];
@@ -709,18 +745,25 @@ export function annotationEnvelope(sessionDir, { gameEpoch } = {}) {
     }
     chunk.push(entry);
   }
-  if (chunk.length === 0) return null;
+  if (chunk.length === 0) return { envelope: null, recoveryNeeded };
   return {
-    trainingAnnotations: chunk,
-    annotationAuthority: {
-      expectedGameEpoch: gameEpoch ?? auth.gameEpoch,
-      items: chunk.map((row) => ({
-        evaluationId: row.evaluationId,
-        field: row.field,
-        valueSha256: row.valueSha256,
-      })),
+    recoveryNeeded,
+    envelope: {
+      trainingAnnotations: chunk,
+      annotationAuthority: {
+        expectedGameEpoch: gameEpoch ?? auth.gameEpoch,
+        items: chunk.map((row) => ({
+          evaluationId: row.evaluationId,
+          field: row.field,
+          valueSha256: row.valueSha256,
+        })),
+      },
     },
   };
+}
+
+export function annotationEnvelope(sessionDir, options = {}) {
+  return annotationEnvelopeState(sessionDir, options).envelope;
 }
 
 export function writeTrainingEnvelope(sessionDir, envelope, { kind = 'mixed' } = {}) {
@@ -751,48 +794,118 @@ async function publishSideEnvelope(executePublish, file) {
   }
 }
 
-export async function flushMachinePublish(sessionDir, {
-  gameEpoch, executePublish, storeDir, shouldStop,
-}) {
-  const tc = createTrainingControl({ storeDir });
-  for (;;) {
-    if (shouldStop?.()) return;
-    const envelope = unpublishedEnvelope(sessionDir, { gameEpoch });
-    if (!envelope) return;
-    const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'machine' });
-    try {
-      await publishSideEnvelope(executePublish, file);
-      for (const item of envelope.training) {
-        try {
-          await tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256);
-        } catch { /* already marked or conflict is logged by caller */ }
-      }
-    } finally {
-      unlinkEnvelope(file);
-    }
+function envelopeItemSet(kind, envelope) {
+  const rows = kind === 'machine' ? envelope.training : envelope.trainingAnnotations;
+  return JSON.stringify(rows.map((row) => (
+    kind === 'machine'
+      ? [row.evaluationId, row.payloadSha256]
+      : [row.evaluationId, row.field, row.valueSha256]
+  )));
+}
+
+function markFailure(error) {
+  const causeCode = error?.code ?? 'ERROR';
+  const wrapped = new Error(`training publish mark failed: ${causeCode}`);
+  wrapped.code = 'TRAINING_MARK_FAILED';
+  wrapped.cause = error;
+  wrapped.causeCode = causeCode;
+  return wrapped;
+}
+
+async function markPublishedOrThrow(work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (error?.code === 'ALREADY_PUBLISHED') return { noop: true };
+    throw markFailure(error);
   }
 }
 
-export async function flushAnnotationPublish(sessionDir, {
-  gameEpoch, executePublish, storeDir, shouldStop,
+export async function reconcileAnnotationQueue(sessionDir, {
+  storeDir,
+  trainingControl,
+  onNotice,
+} = {}) {
+  const tc = trainingControl?.reconcileAnnotationQueue
+    ? trainingControl
+    : createTrainingControl({ storeDir });
+  const result = await tc.reconcileAnnotationQueue(sessionDir);
+  for (const notice of result?.notices ?? []) onNotice?.(notice);
+  return result;
+}
+
+export async function flushMachinePublish(sessionDir, {
+  gameEpoch, executePublish, storeDir, shouldStop, trainingControl,
 }) {
-  const tc = createTrainingControl({ storeDir });
-  for (;;) {
-    if (shouldStop?.()) return;
-    const envelope = annotationEnvelope(sessionDir, { gameEpoch });
-    if (!envelope) return;
-    const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'annotation' });
-    try {
-      await publishSideEnvelope(executePublish, file);
-      for (const item of envelope.trainingAnnotations) {
-        try {
-          await tc.markAnnotationPublished(sessionDir, item.evaluationId, item.field, item.valueSha256);
-        } catch { /* already marked or conflict is logged by caller */ }
+  return withMachineFlushLock(sessionDir, async () => {
+    const tc = trainingControl ?? createTrainingControl({ storeDir });
+    let previousItems = null;
+    for (;;) {
+      if (shouldStop?.()) return;
+      const envelope = unpublishedEnvelope(sessionDir, { gameEpoch });
+      if (!envelope) return;
+      const itemSet = envelopeItemSet('machine', envelope);
+      if (itemSet === previousItems) {
+        const error = new Error('training machine flush made no queue progress');
+        error.code = 'TRAINING_FLUSH_NO_PROGRESS';
+        throw error;
       }
-    } finally {
-      unlinkEnvelope(file);
+      previousItems = itemSet;
+      const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'machine' });
+      try {
+        await publishSideEnvelope(executePublish, file);
+        for (const item of envelope.training) {
+          await markPublishedOrThrow(() => (
+            tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256)
+          ));
+        }
+      } finally {
+        unlinkEnvelope(file);
+      }
     }
-  }
+  });
+}
+
+export async function flushAnnotationPublish(sessionDir, {
+  gameEpoch, executePublish, storeDir, shouldStop, trainingControl, onNotice,
+}) {
+  return withAnnotationFlushLock(sessionDir, async () => {
+    const tc = trainingControl ?? createTrainingControl({ storeDir });
+    let previousItems = null;
+    for (;;) {
+      if (shouldStop?.()) return;
+      const state = annotationEnvelopeState(sessionDir, { gameEpoch });
+      if (state.recoveryNeeded) {
+        await reconcileAnnotationQueue(sessionDir, {
+          storeDir, trainingControl: tc, onNotice,
+        });
+        continue;
+      }
+      const { envelope } = state;
+      if (!envelope) return;
+      const itemSet = envelopeItemSet('annotation', envelope);
+      if (itemSet === previousItems) {
+        const error = new Error('training annotation flush made no queue progress');
+        error.code = 'TRAINING_FLUSH_NO_PROGRESS';
+        throw error;
+      }
+      previousItems = itemSet;
+      const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'annotation' });
+      try {
+        await publishSideEnvelope(executePublish, file);
+        for (const item of envelope.trainingAnnotations) {
+          await markPublishedOrThrow(() => tc.markAnnotationPublished(
+            sessionDir,
+            item.evaluationId,
+            item.field,
+            item.valueSha256,
+          ));
+        }
+      } finally {
+        unlinkEnvelope(file);
+      }
+    }
+  });
 }
 
 export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublish, storeDir }) {
@@ -821,12 +934,17 @@ export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublis
   }
   const tc = createTrainingControl({ storeDir });
   for (const item of record.body?.training ?? []) {
-    try { await tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256); } catch { /* already marked */ }
+    await markPublishedOrThrow(() => (
+      tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256)
+    ));
   }
   for (const item of record.body?.trainingAnnotations ?? []) {
-    try {
-      await tc.markAnnotationPublished(sessionDir, item.evaluationId, item.field, item.valueSha256);
-    } catch { /* already marked */ }
+    await markPublishedOrThrow(() => tc.markAnnotationPublished(
+      sessionDir,
+      item.evaluationId,
+      item.field,
+      item.valueSha256,
+    ));
   }
 }
 

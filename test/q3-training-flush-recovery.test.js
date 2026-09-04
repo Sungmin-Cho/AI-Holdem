@@ -105,13 +105,14 @@ function writeUiSnapshot(dir, item, annotation = null, { machine = item.summary 
 
 async function assertRollbackUnblocked(dir) {
   writeJson(path.join(dir, 'state.json'), { lastHand: null });
+  writeJson(path.join(dir, 'loop-state.json'), { phase: 'done' });
   const guard = await createCoachControl().assertRollbackAllowed(dir);
   assert.equal(
-    guard.reasons?.some((reason) => reason.code === 'pending_annotation'),
+    guard.reasons?.some((reason) => reason.code === 'pending_annotation') ?? false,
     false,
-    JSON.stringify(guard.reasons),
+    JSON.stringify(guard.reasons) ?? 'no rollback reasons',
   );
-  assert.equal(guard.ok, true, JSON.stringify(guard.reasons));
+  assert.equal(guard.ok, true, JSON.stringify(guard.reasons) ?? 'no rollback reasons');
 }
 
 test('Q3 M3: machine and annotation mark failures halt after exactly one publish', async (t) => {

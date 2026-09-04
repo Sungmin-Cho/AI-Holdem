@@ -273,8 +273,18 @@ test('Q3 M13: independent final cleanup detects a solver after its wrapper handl
   const calls = [];
   const loop = finalizingLoop(dir, calls);
   t.after(async () => {
-    await loop.requestStop().catch(() => {});
     await killProcessGroup(pid);
+    try { fs.unlinkSync(recordPath(dir)); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    try {
+      const { serverPid } = readJson(path.join(dir, 'lock.json'));
+      process.kill(serverPid, 'SIGKILL');
+      await waitFor(() => !processIsAlive(serverPid), 'server child did not stop during cleanup');
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
+    }
+    await loop.requestStop().catch(() => {});
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -324,7 +334,7 @@ test('Q3 M14: finalizing resume writes cutoff marker before sealing unavailable 
 
   await withFakePs([], async () => {
     await loop.resume({ skipLock: true });
-    await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+    await loop.run();
   }, { fallbackStart: 'Q3_FINALIZATION_PROCESS_START' });
 
   assert.equal(fs.lstatSync(cutoffPath).isFile(), true);

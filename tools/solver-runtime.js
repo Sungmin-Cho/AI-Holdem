@@ -1,9 +1,9 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { processStartTime } from '../engine/state.js';
+import { processStartTime, writeJsonAtomic } from '../engine/state.js';
 import { assertSolverResult } from '../training/postflop/contracts.js';
 
 const FAKE_CHILD = fileURLToPath(new URL('./fake-solver-child.js', import.meta.url));
@@ -13,7 +13,10 @@ const DEFAULT_RSS_KB = 256 * 1024;
 // ceiling that moves far more slowly than that.
 export const SOLVER_POLL_MS = 250;
 const SOLVER_RECORD = '.solver-child.json';
+const SOLVER_TOKEN_ENV = 'AI_HOLDEM_SOLVER_TOKEN';
+const SPAWN_DISCOVERY_RETRIES = 3;
 const live = new Map();
+const syncSleepCell = new Int32Array(new SharedArrayBuffer(4));
 
 function coded(code, message) {
   const error = new Error(message);
@@ -23,6 +26,10 @@ function coded(code, message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepSync(ms) {
+  Atomics.wait(syncSleepCell, 0, 0, ms);
 }
 
 function rssKb(pid) {
@@ -101,7 +108,7 @@ function occupancyOf(pid, startTime, startTimeOf) {
   return { live: false, readable: true };
 }
 
-export async function killGroup(pid, startTime, startTimeOf) {
+export async function killGroup(pid, startTime, startTimeOf = processStartTime) {
   if (!isStartTime(startTime)) {
     return { confirmed: false, reason: 'termination_unconfirmed' };
   }
@@ -166,9 +173,99 @@ export function hasLiveSolverChild(startTimeOf = processStartTime) {
   return live.size > 0;
 }
 
+function solverRecordPath(gameDir) {
+  return path.join(gameDir, SOLVER_RECORD);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function discoverTokenProcesses(spawnToken) {
+  const listFlag = process.platform === 'darwin' ? '-axE' : '-axe';
+  let output;
+  try {
+    output = execFileSync('ps', [listFlag, '-o', 'pid=,lstart=,command='], { encoding: 'utf8' });
+  } catch {
+    return { ok: false, matches: [] };
+  }
+  const tokenPattern = new RegExp(
+    `(?:^|\\s)${SOLVER_TOKEN_ENV}=${escapeRegExp(spawnToken)}(?:\\s|$)`,
+  );
+  const matches = [];
+  for (const line of output.split('\n')) {
+    if (!tokenPattern.test(line)) continue;
+    const parsed = /^\s*(\d+)\s+(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+/.exec(line);
+    if (!parsed) return { ok: false, matches: [] };
+    const pid = Number(parsed[1]);
+    if (!Number.isInteger(pid) || pid <= 0 || !isStartTime(parsed[2])) {
+      return { ok: false, matches: [] };
+    }
+    matches.push({ pid, startTime: parsed[2] });
+  }
+  const byIdentity = new Map(matches.map((entry) => [`${entry.pid}\0${entry.startTime}`, entry]));
+  return { ok: true, matches: [...byIdentity.values()] };
+}
+
+function clearPersistedReservation(gameDir, spawnToken) {
+  if (!gameDir) return false;
+  const file = solverRecordPath(gameDir);
+  if (spawnToken !== undefined) {
+    try {
+      const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (current?.spawnToken !== spawnToken) return false;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveSpawningRecord(gameDir, rec, startTimeOf) {
+  if (!Number.isInteger(rec.wrapperPid) || rec.wrapperPid <= 0
+    || !isStartTime(rec.wrapperStartTime)
+    || typeof rec.spawnToken !== 'string' || rec.spawnToken.length === 0) {
+    return { state: 'unreadable', record: rec };
+  }
+  const wrapperStart = startTimeOf(rec.wrapperPid);
+  if (wrapperStart === rec.wrapperStartTime) return { state: 'live', record: rec };
+  if (wrapperStart == null && pidAlive(rec.wrapperPid)) {
+    return { state: 'unreadable', record: rec };
+  }
+
+  for (let attempt = 0; attempt <= SPAWN_DISCOVERY_RETRIES; attempt += 1) {
+    if (attempt > 0) sleepSync(SOLVER_POLL_MS);
+    const discovered = discoverTokenProcesses(rec.spawnToken);
+    if (!discovered.ok || discovered.matches.length > 1) {
+      return { state: 'unreadable', record: rec };
+    }
+    if (discovered.matches.length === 1) {
+      const match = discovered.matches[0];
+      if (startTimeOf(match.pid) !== match.startTime) {
+        return { state: 'unreadable', record: rec };
+      }
+      const promoted = {
+        ...rec,
+        state: 'live',
+        pid: match.pid,
+        startTime: match.startTime,
+      };
+      writeJsonAtomic(solverRecordPath(gameDir), promoted);
+      return { state: 'live', record: promoted };
+    }
+  }
+  clearPersistedReservation(gameDir, rec.spawnToken);
+  return { state: 'absent', record: null };
+}
+
 export function readPersistedSolver(gameDir, { processStartTime: startTimeOf = processStartTime } = {}) {
   if (!gameDir) return { state: 'absent', record: null };
-  const file = path.join(gameDir, SOLVER_RECORD);
+  const file = solverRecordPath(gameDir);
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
@@ -184,6 +281,10 @@ export function readPersistedSolver(gameDir, { processStartTime: startTimeOf = p
   }
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) {
     return { state: 'unreadable', record: rec ?? null };
+  }
+  if (rec.state === 'spawning') return resolveSpawningRecord(gameDir, rec, startTimeOf);
+  if (rec.state !== undefined && rec.state !== 'live') {
+    return { state: 'unreadable', record: rec };
   }
   const pid = rec.pid;
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -209,12 +310,11 @@ export function hasPersistedLiveSolver(gameDir) {
 }
 
 function persistSolver(gameDir, record) {
-  fs.writeFileSync(path.join(gameDir, SOLVER_RECORD), JSON.stringify(record));
+  writeJsonAtomic(solverRecordPath(gameDir), record);
 }
 
-function clearPersist(gameDir) {
-  if (!gameDir) return;
-  try { fs.unlinkSync(path.join(gameDir, SOLVER_RECORD)); } catch { /* gone */ }
+function clearPersist(gameDir, spawnToken) {
+  clearPersistedReservation(gameDir, spawnToken);
 }
 
 export async function runSolver({
@@ -236,14 +336,42 @@ export async function runSolver({
       throw coded('SOLVER_BUSY', '살아 있는 solver 자식이 있어 replacement를 기동하지 않습니다.');
     }
   }
-  const child = spawn(argv[0], argv.slice(1), {
-    detached: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...env },
-  });
+  const spawnToken = randomUUID();
+  if (gameDir) {
+    const wrapperStartTime = processStartTime(process.pid);
+    if (!isStartTime(wrapperStartTime)) {
+      throw coded('SOLVER_WRAPPER_IDENTITY_UNAVAILABLE', 'solver wrapper startTime을 얻지 못했습니다.');
+    }
+    persistSolver(gameDir, {
+      state: 'spawning',
+      wrapperPid: process.pid,
+      wrapperStartTime,
+      spawnToken,
+      at: new Date().toISOString(),
+    });
+  }
+  let child;
+  try {
+    child = spawn(argv[0], argv.slice(1), {
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env, [SOLVER_TOKEN_ENV]: spawnToken },
+    });
+  } catch (error) {
+    clearPersist(gameDir, spawnToken);
+    throw error;
+  }
   const startTime = startTimeOf(child.pid);
   live.set(child.pid, { startTime, child });
-  if (gameDir) persistSolver(gameDir, { pid: child.pid, startTime });
+  if (gameDir) {
+    persistSolver(gameDir, {
+      state: 'live',
+      pid: child.pid,
+      startTime,
+      spawnToken,
+      at: new Date().toISOString(),
+    });
+  }
   let stdout = Buffer.alloc(0);
   let settled = false;
   let timer = null;
@@ -264,7 +392,7 @@ export async function runSolver({
       throw unconfirmed;
     }
     live.delete(child.pid);
-    clearPersist(gameDir);
+    clearPersist(gameDir, spawnToken);
     if (error) throw error;
     return value;
   };

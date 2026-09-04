@@ -24,6 +24,7 @@ import { createTrainingControl, enterExplanationCutoff } from './training-contro
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
+import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   buildExplanationPrompt,
   defaultEvaluate,
@@ -1904,8 +1905,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0
   );
 
+  let machinePublishHalt = null;
+  let annotationPublishHalt = null;
+
   const flushTrainingPublish = async () => {
     if (!trainingOn) return;
+    if (machinePublishHalt) return;
     const loop = readLoopState();
     try {
       await flushMachinePublish(root, {
@@ -1916,11 +1921,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       });
     } catch (error) {
       log('training-publish-error', { code: error.code ?? 'ERROR' });
+      if (error.code === 'TRAINING_MARK_FAILED'
+        || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
+        machinePublishHalt = error.code;
+        appendNotice(`training machine publish halt: ${error.code}`);
+      }
     }
   };
 
   const flushAnnotationPublish = async () => {
     if (!trainingOn) return;
+    if (annotationPublishHalt) return;
     const loop = readLoopState();
     try {
       await flushAnnotationEnvelope(root, {
@@ -1928,9 +1939,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         storeDir,
         shouldStop: publishStopped,
         executePublish,
+        onNotice: appendNotice,
       });
     } catch (error) {
       log('training-annotation-publish-error', { code: error.code ?? 'ERROR' });
+      if (error.code === 'TRAINING_MARK_FAILED'
+        || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
+        annotationPublishHalt = error.code;
+        appendNotice(`training annotation publish halt: ${error.code}`);
+      }
     }
   };
 
@@ -2132,6 +2149,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           item.evaluationId,
           'explanation',
           'unavailable',
+          { sealReason: 'cutoff' },
         );
       } catch (error) {
         log('training-unavailable-seal-error', { code: error.code ?? 'ERROR' });
@@ -2158,7 +2176,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }));
     const confirmed = outcomes.every((row) => row.confirmed);
     const tasksSettled = await settleTrainingTasks(deadlineNs);
-    return confirmed && tasksSettled;
+    let persisted = readPersistedSolver(root);
+    if (persisted.state === 'live' || persisted.state === 'unreadable') {
+      const killed = await settleValueBeforeDeadline(
+        killSolverGroup(persisted.record?.pid, persisted.record?.startTime),
+        deadlineNs,
+      );
+      if (killed.error) {
+        log('training-solver-terminate-error', { code: killed.error.code ?? 'ERROR' });
+      }
+      persisted = readPersistedSolver(root);
+    }
+    const solverConfirmed = persisted.state === 'absent' || persisted.state === 'dead';
+    if (!solverConfirmed) {
+      log('training-solver-terminate-unconfirmed', { state: persisted.state });
+    }
+    return confirmed && tasksSettled && solverConfirmed;
   };
 
   const reconcileTrainingNow = async () => {
@@ -4114,7 +4147,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         await createTrainingControl({ storeDir }).writeCutoffMarker(root);
       } catch (error) {
-        await sealUnfinishedExplanations();
         try {
           trainingTerminationConfirmed = await terminateTrainingChildren(finalDeadlineNs);
         } catch (terminateError) {
@@ -4606,6 +4638,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   } = {}) => {
     if (FINAL_PHASES.has(phase)) {
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
+      const policyMode = opponentRuntimeOf() === 'policy'
+        || existingState.opponentRuntime === 'policy';
       const resolved = await createCanaryAndResolve('upper-only');
       selectAdapters(resolved ?? {});
       const notices = [
@@ -4622,6 +4656,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
         ? existingState.port
         : requestedPort;
+      if (policyMode) stampPlayerPolicies(root);
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
       return writeLoopState({ port });
     }
