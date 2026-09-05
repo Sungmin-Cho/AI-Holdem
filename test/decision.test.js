@@ -280,7 +280,8 @@ test('cli hand --redacted 에 user decisions만 있고 상대 홀카드가 없�
     timeout: 20000,
   }).trim());
   run(['init', '--ai', '2']);
-  const started = run(['new-hand']);
+  // Distinct opponent holes so a board/user card cannot substring-match as a leak.
+  const started = run(['new-hand', '--deck', 'Ah,Kd,7h,2c,Qs,Jd,9c,8s,3d,4h,5s,6c,Th']);
   const oppHoles = {};
   for (const event of started.events ?? []) {
     if (event.type === 'deal_hole' && event.playerId !== 'user') {

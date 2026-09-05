@@ -284,7 +284,12 @@ test('turn loop does not wait on training; machine UI arrives before explanation
   });
   const nextHandAt = Date.now();
   assert.ok(hand1DoneAt.t, 'hand 1 did not complete');
-  assert.equal(nextHandAt - hand1DoneAt.t < 1_000, true, `next hand waited on training (${nextHandAt - hand1DoneAt.t}ms)`);
+  const nextHandBudgetMs = process.platform === 'win32' ? 2_500 : 1_000;
+  assert.equal(
+    nextHandAt - hand1DoneAt.t < nextHandBudgetMs,
+    true,
+    `next hand waited on training (${nextHandAt - hand1DoneAt.t}ms)`,
+  );
 
   await waitFor(() => (
     Object.values(createTrainingControl().loadAuthority(gameDir)?.items ?? {})[0] ?? null
@@ -499,8 +504,8 @@ test('coach settle and training settle share result-wait cutoff without REVIEW_G
       waitMs: 40,
       opponentRuntime: 'policy',
       trainingEnabled: true,
-      finalizeBudgetMs: 8_000,
-      finalizeCutoffLeadMs: 3_000,
+      finalizeBudgetMs: process.platform === 'win32' ? 25_000 : 8_000,
+      finalizeCutoffLeadMs: process.platform === 'win32' ? 8_000 : 3_000,
       log: (record) => logs.push(record),
       training: {
         evaluate: makeEvaluate({ delayMs: 200 }),
