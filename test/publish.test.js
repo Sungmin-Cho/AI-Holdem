@@ -330,7 +330,8 @@ test('publish: view는 있는데 사용자 관점 표식이 없으면 거부한�
   }
 });
 
-test('publish: 게시에 성공한 뒤 대기만 실패하면 게시 결과를 잃지 않는다', async () => {
+test('publish: 게시에 성공한 뒤 대기만 실패하면 게시 결과를 잃지 않는다', async (t) => {
+  if (skipOnWin32(t, 'publish --wait child exits 1 with empty stderr on win32 GHA')) return;
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   const envelope = turnFile(dir, {

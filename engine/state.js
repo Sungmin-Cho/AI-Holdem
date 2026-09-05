@@ -23,13 +23,28 @@ function readJson(filePath) {
   }
 }
 
+function commitTmp(tmpPath, filePath) {
+  try {
+    fs.renameSync(tmpPath, filePath);
+    return;
+  } catch (error) {
+    // Windows cannot rename-replace a path that already exists, or that still
+    // has a reader handle. copyFile overwrites; POSIX rename already replaced.
+    if (process.platform !== 'win32' || !['EPERM', 'EEXIST', 'EACCES'].includes(error.code)) {
+      throw error;
+    }
+  }
+  fs.copyFileSync(tmpPath, filePath);
+  try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
+}
+
 export function writeJsonAtomic(filePath, obj) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(obj), 'utf8');
-    fs.renameSync(tmpPath, filePath);
+    commitTmp(tmpPath, filePath);
   } catch (error) {
     try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
     throw error;
