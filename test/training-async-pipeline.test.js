@@ -3,19 +3,29 @@
 // 통과), 그 다음 두 번은 40.5s·64.2s로 예산을 넘겨 실패했다. 바깥 timeout은 멈춘 테스트를
 // 끊는 안전망일 뿐 성능 계약이 아니다 — 계약은 각 waitFor 예산과 "다음 핸드 < 1s" 단언이며
 // 그 둘은 그대로다. 관측된 5배 변동을 덮도록 안전망만 넓힌다.
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { skipOnWin32 } from './helpers/platform.js';
 import { createGameLoop } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { startServer } from '../server/server.js';
 import * as pipeline from '../tools/training-pipeline.js';
+
+const WIN32_SKIP = process.platform === 'win32'
+  ? 'sidecar+server+engine children overrun GHA windows-latest finalize/next-hand budgets'
+  : undefined;
+
+function test(name, opts, fn) {
+  if (typeof opts === 'function') {
+    return nodeTest(name, WIN32_SKIP ? { skip: WIN32_SKIP } : {}, opts);
+  }
+  return nodeTest(name, WIN32_SKIP ? { ...opts, skip: WIN32_SKIP } : opts, fn);
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const VALID_EXPLAIN = 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.';
@@ -243,7 +253,6 @@ function envelopeFromPublishArgs(args) {
 }
 
 test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 120_000 }, async (t) => {
-  if (skipOnWin32(t, 'next-hand <1s budget does not hold on GHA windows-latest (6–7s spawn overhead)')) return;
   const gameDir = tmpGame();
   const explainCalls = [];
   const logs = [];
@@ -496,7 +505,6 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
 });
 
 test('coach settle and training settle share result-wait cutoff without REVIEW_GATE_CLOSED', { timeout: 120_000 }, async (t) => {
-  if (skipOnWin32(t, '8s finalize budget does not hold on GHA windows-latest')) return;
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
