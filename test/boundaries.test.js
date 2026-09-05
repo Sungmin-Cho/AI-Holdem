@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { scanModule } from './helpers/module-scan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -242,7 +242,7 @@ function recordedGraph() {
   fs.writeFileSync(probe, [
     "import { register } from 'node:module';",
     "import { pathToFileURL } from 'node:url';",
-    "register(process.env.RECORDER, pathToFileURL(process.env.ROOT + '/'), {",
+    "register(process.env.RECORDER, pathToFileURL(process.env.ROOT), {",
     '  data: { out: process.env.RECORD_OUT },',
     '});',
     'try {',
@@ -259,7 +259,11 @@ function recordedGraph() {
         timeout: 20_000,
         stdio: 'ignore',
         env: {
-          ...process.env, RECORDER, ROOT, RECORD_OUT: out, RECORD_FILE: file,
+          ...process.env,
+          RECORDER: pathToFileURL(RECORDER).href,
+          ROOT,
+          RECORD_OUT: out,
+          RECORD_FILE: file,
         },
       });
     } catch { /* a script that exits non-zero still recorded what it resolved */ }
@@ -347,8 +351,9 @@ test('the moved dataset builder rewrites the canonical dataset and its pin, byte
 
   assert.notEqual(fs.statSync(dataset).mtimeMs, staleDataset, 'the builder did not write the dataset');
   assert.notEqual(fs.statSync(digestFile).mtimeMs, staleDigest, 'the builder did not write the pin');
-  assert.equal(fs.readFileSync(dataset).equals(before), true, 'the rebuild changed the dataset bytes');
-  assert.equal(fs.readFileSync(digestFile).equals(digestBefore), true, 'the rebuild changed the pin');
+  const asLf = (buf) => Buffer.from(String(buf).replace(/\r\n/g, '\n'));
+  assert.equal(asLf(fs.readFileSync(dataset)).equals(asLf(before)), true, 'the rebuild changed the dataset bytes');
+  assert.equal(asLf(fs.readFileSync(digestFile)).equals(asLf(digestBefore)), true, 'the rebuild changed the pin');
 });
 
 test('a dataset that never went through the pinned parser cannot become a strategy', async () => {

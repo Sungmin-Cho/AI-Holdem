@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -28,6 +28,17 @@ import {
   waitFor,
   writeJson,
 } from './helpers/q3-fixtures.js';
+
+const WIN32_SKIP = process.platform === 'win32'
+  ? 'solver process-group identity is POSIX ps; win32 discover is fail-closed'
+  : undefined;
+
+function test(name, opts, fn) {
+  if (typeof opts === 'function') {
+    return nodeTest(name, WIN32_SKIP ? { skip: WIN32_SKIP } : {}, opts);
+  }
+  return nodeTest(name, WIN32_SKIP ? { ...opts, skip: WIN32_SKIP } : opts, fn);
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE = path.join(ROOT, 'engine', 'cli.js');

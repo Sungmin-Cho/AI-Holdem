@@ -55,8 +55,8 @@ export function assertNotSessionCatalogTarget(gameDir) {
   throwCoded('BAD_DIRECTORY_MODE', '관리되는 session directory는 archive 대상으로 사용할 수 없습니다.');
 }
 
-function assertLoopAllowsInit(gameDir, callerPpid, force) {
-  const loop = readOwnedLock(gameDir, 'loop.lock.d');
+function assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf = processStartTime) {
+  const loop = readOwnedLock(gameDir, 'loop.lock.d', { processStartTime: startTimeOf });
   if (!loop || loop.status === 'dead') return;
   // The parent bypass is deliberately narrower than pid equality: it applies only
   // when pid+startTime positively prove that the caller's parent owns this lock.
@@ -304,12 +304,13 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const alive = deps.isAlive ?? isAlive;
   const clock = deps.now ?? now;
   const callerPpid = deps.callerPpid ?? process.ppid;
+  const startTimeOf = deps.processStartTime ?? processStartTime;
   const { aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit, opponentRuntime } = flags;
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
   // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
   // 활성으로 치지 않는다: 부트스트랩이 자기 락에 막히지 않기 위한 예외다.
-  assertLoopAllowsInit(gameDir, callerPpid, force);
+  assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf);
 
   const lock = readLock(gameDir, { fs: disk });
   const live = Boolean(lock && alive(lock.serverPid));
@@ -317,14 +318,14 @@ export function initGameDir(gameDir, flags, deps = {}) {
   if (force && live) {
     // No server signal is authorized by a stale loop preflight. Re-read immediately
     // before the first possible signal; engine init never signals the loop pid.
-    assertLoopAllowsInit(gameDir, callerPpid, force);
+    assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf);
     stopServer(lock.serverPid, {
       isAlive: alive,
       kill: deps.kill,
-      beforeSignal: () => assertLoopAllowsInit(gameDir, callerPpid, force),
+      beforeSignal: () => assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf),
       sleepSync: deps.sleepSync,
       now: clock,
-      processStartTime: deps.processStartTime ?? processStartTime,
+      processStartTime: startTimeOf,
       expectedStartTime: lock.serverStartTime,
     });
     if (alive(lock.serverPid)) {
@@ -335,7 +336,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   return runExclusive(gameDir, () => {
     // Process waits stay outside this mutex, but the destructive archive/new-state
     // boundary gets its own fresh identity check after mutex acquisition.
-    assertLoopAllowsInit(gameDir, callerPpid, force);
+    assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf);
     const io = { fs: disk, now: clock };
     const closed = closeOpenPartial(gameDir, io);
     const vacated = vacateLive(gameDir, io);

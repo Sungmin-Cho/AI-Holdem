@@ -847,7 +847,11 @@ test('resume-check: loopPidAlive는 loop 락 생존을 보고한다', async () =
 });
 
 test('resume-check: unknown/mismatch/malformed loop identity는 loopPidAlive false다', async (t) => {
-  await t.test('unknown', async () => {
+  await t.test('unknown', async (st) => {
+    if (process.platform === 'win32') {
+      st.skip('CLI subprocess identity unavailable is PATH/ps on POSIX; win32 uses PowerShell');
+      return;
+    }
     const dir = tmpGame();
     initGame(dir, ['--ai', '2']);
     const holder = spawnLockHolder(dir);
