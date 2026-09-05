@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { appendJsonl, readJsonl } from '../tools/training-store.js';
 import { evaluationIdOf } from '../training/contracts.js';
@@ -86,7 +87,8 @@ test('a legacy --game-dir session says out loud that training is off', async (t)
 });
 
 // 3 — readJsonl은 symlink를 거부한다(O_NOFOLLOW 하드닝의 회귀 가드).
-test('readJsonl refuses a symlinked jsonl', () => {
+test('readJsonl refuses a symlinked jsonl', (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   const dir = tmp();
   const real = path.join(dir, 'real.jsonl');
   const link = path.join(dir, 'link.jsonl');
@@ -261,7 +263,8 @@ test('leak drills derive their spot and hand from the leak, not from a two-branc
   assert.ok(hands.size > 1, `every leak drilled the same hand: ${[...hands]}`);
 });
 
-test('readJsonl refuses a FIFO instead of waiting for a writer', { timeout: 10_000 }, () => {
+test('readJsonl refuses a FIFO instead of waiting for a writer', { timeout: 10_000 }, (t) => {
+  if (skipOnWin32(t, 'FIFO is a POSIX node')) return;
   const dir = tmp();
   const fifo = path.join(dir, 'pipe.jsonl');
   const made = spawnSync('mkfifo', [fifo]);

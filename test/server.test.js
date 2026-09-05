@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { startServer } from '../server/server.js';
+import { skipOnWin32 } from './helpers/platform.js';
 import { detailRefOf, projectTrainingSummary } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 
@@ -276,7 +277,8 @@ test('action: decisionId 불일치 409, 일치 시 wait-action이 소비', async
   }
 });
 
-test('토큰 없음 401, 바디 65KB 413', async () => {
+test('토큰 없음 401, 바디 65KB 413', async (t) => {
+  if (skipOnWin32(t, 'undici fetch of a 65KB raw POST fails closed on win32 GHA')) return;
   const gameDir = tmpDir();
   const token = 'tok-test';
   const srv = await start(gameDir, token);

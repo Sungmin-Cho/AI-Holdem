@@ -12,12 +12,14 @@ import {
   writeContained,
   writeJsonSecure,
 } from '../tools/training-store.js';
+import { skipOnWin32 } from './helpers/platform.js';
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-tstore-'));
 }
 
-test('ensureDir creates 0700 and refuses symlink or non-directory', () => {
+test('ensureDir creates 0700 and refuses symlink or non-directory', (t) => {
+  if (skipOnWin32(t, 'unix mode bits and symlink refusal are POSIX')) return;
   const root = tmp();
   const dir = path.join(root, 'training');
   ensureDir(dir);
@@ -35,7 +37,8 @@ test('ensureDir creates 0700 and refuses symlink or non-directory', () => {
   assert.throws(() => ensureDir(file), { code: 'UNSAFE_PATH' });
 });
 
-test('writeJsonSecure is 0600, O_NOFOLLOW, and refuses symlink targets', () => {
+test('writeJsonSecure is 0600, O_NOFOLLOW, and refuses symlink targets', (t) => {
+  if (skipOnWin32(t, 'unix mode bits and symlink refusal are POSIX')) return;
   const root = tmp();
   const file = path.join(root, 'training', 'auth.json');
   writeJsonSecure(file, { schemaVersion: 1, ok: true });
@@ -106,7 +109,8 @@ test('openContained rejects parent-swap between inspect and reinspect', () => {
   }
 });
 
-test('openContained refuses a symlink at the final path', () => {
+test('openContained refuses a symlink at the final path', (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   const root = containedRoot();
   const realFile = path.join(root, 'real.json');
   fs.writeFileSync(realFile, '{"ok":true}');
@@ -200,7 +204,8 @@ test('writeContained cleans tmp and writes nothing outside root when replace fai
   assert.deepEqual(fs.readdirSync(sibling), []);
 });
 
-test('writeContained create is 0600 and parent dir stays 0700', () => {
+test('writeContained create is 0600 and parent dir stays 0700', (t) => {
+  if (skipOnWin32(t, 'unix mode bits are POSIX')) return;
   const root = containedRoot();
   const nested = path.join(root, 'nested');
   fs.mkdirSync(nested, { mode: 0o700 });
@@ -270,7 +275,8 @@ test('writeContained create never calls rename', () => {
   }
 });
 
-test('writeContained does not chmod dest by path after publish', () => {
+test('writeContained does not chmod dest by path after publish', (t) => {
+  if (skipOnWin32(t, 'unix mode bits are POSIX')) return;
   const root = containedRoot();
   const origChmod = fs.chmodSync;
   fs.chmodSync = () => {
@@ -434,7 +440,8 @@ test('openContained returns only bytes actually read on short read', () => {
   }
 });
 
-test('writeContained rejects parent-swap between inspect and reinspect', () => {
+test('writeContained rejects parent-swap between inspect and reinspect', (t) => {
+  if (skipOnWin32(t, 'parent-swap TOCTOU fixture uses POSIX rename/symlink')) return;
   const root = containedRoot();
   const nested = path.join(root, 'a');
   fs.mkdirSync(nested, { mode: 0o700 });

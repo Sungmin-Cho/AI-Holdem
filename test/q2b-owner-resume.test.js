@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,6 +12,17 @@ import { prepareSession } from '../engine/session-catalog.js';
 import { createGameLoop } from '../tools/game-loop.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
+
+const WIN32_SKIP = process.platform === 'win32'
+  ? 'production spawn uses POSIX PATH/ps/shebang fixtures'
+  : undefined;
+
+function test(name, opts, fn) {
+  if (typeof opts === 'function') {
+    return nodeTest(name, WIN32_SKIP ? { skip: WIN32_SKIP } : {}, opts);
+  }
+  return nodeTest(name, WIN32_SKIP ? { ...opts, skip: WIN32_SKIP } : opts, fn);
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine', 'cli.js');

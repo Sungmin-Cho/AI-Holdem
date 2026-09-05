@@ -36,8 +36,10 @@ test('profile lives under store/.training and survives a torn jsonl tail', async
   await store.apply(evaluation());
   const profilePath = path.join(storeDir, '.training', 'profile.json');
   const eventsPath = path.join(storeDir, '.training', 'profile-events.jsonl');
-  assert.equal(fs.lstatSync(path.join(storeDir, '.training')).mode & 0o777, 0o700);
-  assert.equal(fs.lstatSync(profilePath).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.lstatSync(path.join(storeDir, '.training')).mode & 0o777, 0o700);
+    assert.equal(fs.lstatSync(profilePath).mode & 0o777, 0o600);
+  }
   fs.appendFileSync(eventsPath, '{"partial":true');
   const rebuilt = await store.rebuild();
   assert.equal(rebuilt.overall.evaluatedDecisions, 1);
