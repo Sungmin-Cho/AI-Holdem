@@ -1567,24 +1567,14 @@ test('a positively dead loop lock is reclaimed before bootstrap without force', 
 
 test('IDENTITY_UNAVAILABLE is surfaced distinctly and leaves no partial lock', { concurrency: false }, async () => {
   const gameDir = tmpGame();
-  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-no-ps-'));
-  const ps = path.join(fakeBin, 'ps');
-  fs.writeFileSync(ps, '#!/bin/sh\nexit 1\n');
-  fs.chmodSync(ps, 0o755);
-  const oldPath = process.env.PATH;
-  process.env.PATH = fakeBin;
-  try {
-    const loop = createGameLoop({
-      gameDir,
-      resolver: async () => assert.fail('resolver must not run'),
-    });
-    await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'IDENTITY_UNAVAILABLE');
-    assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
-    assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
-  } finally {
-    if (oldPath === undefined) delete process.env.PATH;
-    else process.env.PATH = oldPath;
-  }
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => assert.fail('resolver must not run'),
+    opts: { processStartTime: () => null },
+  });
+  await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'IDENTITY_UNAVAILABLE');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
 });
 
 test('resume rejects missing or mismatched loop-state identity before resolver, server, or log work', { timeout: 20_000 }, async (t) => {
@@ -5822,13 +5812,16 @@ test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 
       finalizeCutoffLeadMs: 1_000,
       orphanTerminateGraceMs: 20,
       orphanTerminateKillWaitMs: 20,
-      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (pid !== orphan.pid) process.kill(pid, signal);
+      },
     },
   });
 
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
 
-  assert.deepEqual(signals, [], 'stale authority가 가리킨 live pid에 signal을 보냈다');
+  assert.equal(signals.some((entry) => entry.pid === orphan.pid), false, 'stale authority가 가리킨 live pid에 signal을 보냈다');
   assert.doesNotThrow(() => process.kill(orphan.pid, 0));
   const halted = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(halted.phase, 'finalizing');

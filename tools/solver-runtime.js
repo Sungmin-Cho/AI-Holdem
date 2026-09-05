@@ -33,6 +33,7 @@ function sleepSync(ms) {
 }
 
 function rssKb(pid) {
+  if (process.platform === 'win32') return null;
   try {
     const out = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
     const match = /VmRSS:\s+(\d+)/.exec(out);
@@ -53,6 +54,7 @@ function parsePidList(text) {
 }
 
 function processGroupPids(pgid) {
+  if (process.platform === 'win32') return { ok: false, pids: [] };
   if (!Number.isInteger(pgid) || pgid <= 0) return { ok: false, pids: [] };
   try {
     const out = execFileSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
@@ -129,6 +131,23 @@ export async function killGroup(pid, startTime, startTimeOf = processStartTime) 
     }
     return { confirmed: true };
   }
+  if (process.platform === 'win32') {
+    const again = startTimeOf(pid);
+    if (again !== startTime) {
+      return { confirmed: !pidAlive(pid) || again == null };
+    }
+    const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+    try {
+      execFileSync(exe, ['/PID', String(pid), '/T', '/F'], {
+        timeout: 3_000,
+        windowsHide: true,
+      });
+    } catch { /* identity postcondition decides */ }
+    const after = startTimeOf(pid);
+    if (after !== startTime && !pidAlive(pid)) return { confirmed: true };
+    if (after !== startTime) return { confirmed: true };
+    return { confirmed: false, reason: 'termination_unconfirmed' };
+  }
   try { process.kill(-pid, 'SIGTERM'); } catch (error) {
     if (error.code !== 'ESRCH') {
       try { process.kill(pid, 'SIGTERM'); } catch { /* ignore */ }
@@ -182,6 +201,7 @@ function escapeRegExp(value) {
 }
 
 function discoverTokenProcesses(spawnToken) {
+  if (process.platform === 'win32') return { ok: false, matches: [] };
   const listFlag = process.platform === 'darwin' ? '-axE' : '-axe';
   let output;
   try {
@@ -338,7 +358,7 @@ export async function runSolver({
   }
   const spawnToken = randomUUID();
   if (gameDir) {
-    const wrapperStartTime = processStartTime(process.pid);
+    const wrapperStartTime = startTimeOf(process.pid);
     if (!isStartTime(wrapperStartTime)) {
       throw coded('SOLVER_WRAPPER_IDENTITY_UNAVAILABLE', 'solver wrapper startTime을 얻지 못했습니다.');
     }

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { processStartTime, writeJsonAtomic } from '../engine/state.js';
+import { processStartTime as defaultProcessStartTime, writeJsonAtomic } from '../engine/state.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import {
   FAKE_CHILD, hasLiveSolverChild, killGroup, readPersistedSolver, runSolver,
@@ -138,7 +138,7 @@ test('startTime failure with a live grandchild stays unconfirmed and holds SOLVE
       argv: [process.execPath, '-e', GRANDCHILD_SCRIPT],
       gameDir: dir,
       timeoutMs: 800,
-      processStartTime: () => null,
+      processStartTime: (pid) => (pid === process.pid ? defaultProcessStartTime(pid) : null),
     }),
     (error) => error.code === 'SOLVER_TERMINATION_UNCONFIRMED',
   );
@@ -165,7 +165,7 @@ test('PID reuse with a different startTime does not kill the reused process', as
     killTree(dummy.pid);
     await cleanupSolverDir(dir);
   });
-  const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
+  const realStart = await waitFor(() => defaultProcessStartTime(dummy.pid), 'dummy startTime');
   assert.notEqual(realStart, 'Mon Jan  1 00:00:00 2001');
   fs.writeFileSync(persistPath(dir), JSON.stringify({
     pid: dummy.pid,
@@ -200,7 +200,7 @@ test('leader gone with a descendant still in the process group is live', async (
     stdio: 'ignore',
   });
   const pid = leader.pid;
-  const startTime = await waitFor(() => processStartTime(pid), 'leader startTime');
+  const startTime = await waitFor(() => defaultProcessStartTime(pid), 'leader startTime');
   t.after(async () => {
     killTree(pid);
     await cleanupSolverDir(dir);
@@ -232,7 +232,7 @@ test('killGroup does not signal when startTime cannot be re-read', async (t) => 
   });
   dummy.unref();
   t.after(() => killTree(dummy.pid));
-  const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
+  const realStart = await waitFor(() => defaultProcessStartTime(dummy.pid), 'dummy startTime');
   const result = await killGroup(dummy.pid, realStart, () => null);
   assert.equal(result.confirmed, false);
   assert.equal(result.reason, 'termination_unconfirmed');
@@ -250,7 +250,7 @@ test('reread startTime failure on a live leader stays unreadable', async (t) => 
     killTree(dummy.pid);
     await cleanupSolverDir(dir);
   });
-  const realStart = await waitFor(() => processStartTime(dummy.pid), 'dummy startTime');
+  const realStart = await waitFor(() => defaultProcessStartTime(dummy.pid), 'dummy startTime');
   fs.writeFileSync(persistPath(dir), JSON.stringify({ pid: dummy.pid, startTime: realStart }));
   assert.equal(readPersistedSolver(dir, { processStartTime: () => null })?.state, 'unreadable');
   await assert.rejects(

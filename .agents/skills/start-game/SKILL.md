@@ -87,7 +87,7 @@ node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game
 open "http://127.0.0.1:<port>/?token=<sessionToken>"
 ```
 
-macOS `open`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
+macOS `open`. Windows Git Bash/cmd는 `start "" "http://127.0.0.1:<port>/?token=<sessionToken>"`. 브라우저가 없으면 URL을 사용자에게 보여 준다.
 
 마지막으로 선택된 `gameId`와 영구 `SESSION_DIR`을 보고하고, `notices`에 항목이 있으면 각각을 **한 줄씩** 사용자에게 보고한다. 새 init의 `archivedTo`는 더 이상 사용하지 않는다.
 engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 current로 남으므로,
@@ -166,6 +166,7 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 | Claude Code | `Claude Code=claude` | §2 문면. `run_in_background` Bash로 띄우면 종료 시 자동 보고(권장) | 자동 wake 또는 사용자 질의 시 `loop-state.json` 읽기 |
 | Codex | `Codex=codex` | §2 문면 그대로 | 사용자 질의 시 `loop-state.json` 읽기 (UI 리뷰 오버레이가 1차 통지) |
 | Grok | `Grok=grok` | §2 문면 그대로 | 동일 |
+| Windows (Git Bash) | 위 호스트와 동일 | `nohup` 불필요. 로그는 `%TEMP%\ai-holdem-boot.log` (`os.tmpdir()`). 브라우저는 `start "" "http://127.0.0.1:<port>/?token=..."` (POSIX `open` 예시는 그대로 둔다). `core.symlinks=false`면 `.claude/skills/start-game`이 링크가 아닐 수 있다 — 정본은 `.agents/skills/start-game/SKILL.md`. git config를 바꾸지 마라. | Node `process.kill(SIGTERM)`은 핸들러 없이 즉시 종료다. 잔여 서버는 `--resume`이 회수한다. 롤백 §6은 Windows-capable 리비전에서 identity 확인 정지 후에만 revert한다. |
 
 `--player-runtime`은 **딜러가 명시해야 하는 인자다.** detached 노드 프로세스는 자기를 띄운 호스트를 추론할 수 없으므로, 각 호스트의 딜러가 위 값을 넣는 것이 "기본 런타임 = 시작 호스트"의 유일한 캐리어다. 빠뜨리면 사이드카가 폴백 사다리(claude → codex → grok)의 첫 적격 런타임을 쓰고 `notices`에 남긴다 — 게임은 진행되지만 사용자가 의도한 런타임이 아닐 수 있다.
 

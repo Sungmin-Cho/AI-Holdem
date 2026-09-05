@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { spawn } from 'node:child_process';
 import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime } from '../engine/state.js';
+import { spawnSleeper } from './helpers/platform.js';
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
 
@@ -12,24 +12,6 @@ async function terminateChild(child) {
   child.kill('SIGKILL');
   await exited;
   assert.equal(child.signalCode, 'SIGKILL');
-}
-
-const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
-
-// PATH 맨 앞에 가짜 ps를 꽂아 실제 프로세스 경계(자식 프로세스 실행)로 read-time
-// 실패를 재현한다 — production 코드에 테스트 전용 훅을 넣지 않기 위함.
-function withFakePs(scriptBody, fn) {
-  const binDir = tmpDir();
-  const psPath = path.join(binDir, 'ps');
-  fs.writeFileSync(psPath, `#!/bin/sh\n${scriptBody}\n`);
-  fs.chmodSync(psPath, 0o755);
-  const original = process.env.PATH;
-  process.env.PATH = `${binDir}:${original}`;
-  try {
-    return fn();
-  } finally {
-    process.env.PATH = original;
-  }
 }
 
 test('save는 stateVersion을 올리고 load로 왕복된다', () => {
@@ -296,12 +278,10 @@ test('processStartTime: 존재하지 않는 pid는 null', () => {
 test('owned lock: 자신의 startTime을 알 수 없으면 락을 만들지 않고 LOCKED가 아닌 구분되는 에러로 실패한다', () => {
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
-  withFakePs('exit 1', () => {
-    assert.throws(
-      () => acquireOwnedLock(dir, 'loop.lock.d'),
-      (err) => err.code === 'IDENTITY_UNAVAILABLE' && err.code !== 'LOCKED',
-    );
-  });
+  assert.throws(
+    () => acquireOwnedLock(dir, 'loop.lock.d', { processStartTime: () => null }),
+    (err) => err.code === 'IDENTITY_UNAVAILABLE' && err.code !== 'LOCKED',
+  );
   assert.equal(fs.existsSync(lockDir), false); // mkdir 자체가 실행되지 않는다
 });
 
@@ -309,22 +289,21 @@ test('owned lock: 살아있는 기록 소유자의 read-time startTime을 알 �
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
-  const child = spawn('sleep', ['5']);
+  const child = spawnSleeper(5_000);
   await new Promise(resolve => child.once('spawn', resolve));
   const recorded = `${child.pid}\n기록된-시각`;
   fs.writeFileSync(path.join(lockDir, 'pid'), recorded);
   const past = new Date(Date.now() - 60_000);
   fs.utimesSync(lockDir, past, past);
+  const startTimeOf = (pid) => (pid === child.pid ? null : processStartTime(pid));
   try {
-    withFakePs(
-      `if [ "$2" = "${child.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
-      () => {
-        const seen = readOwnedLock(dir, 'loop.lock.d');
-        assert.equal(seen.alive, false); // 긍정 증명 없이는 시그널을 authorize하지 않는다
-        assert.equal(seen.status, 'unknown'); // destructive caller가 dead와 구분할 공개 근거
-        assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/); // unknown은 회수하지 않는다
-      },
-    );
+    const seen = readOwnedLock(dir, 'loop.lock.d', { processStartTime: startTimeOf });
+    assert.equal(seen.alive, false); // 긍정 증명 없이는 시그널을 authorize하지 않는다
+    assert.equal(seen.status, 'unknown'); // destructive caller가 dead와 구분할 공개 근거
+    assert.throws(
+      () => acquireOwnedLock(dir, 'loop.lock.d', { processStartTime: startTimeOf }),
+      /LOCKED/,
+    ); // unknown은 회수하지 않는다
     assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), recorded); // 기록 보존
   } finally {
     await terminateChild(child);

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createGame } from './hand.js';
 import { generatePersonas } from './personas.js';
 import {
-  readOwnedLock, runExclusive, saveState, writeJsonAtomic,
+  processStartTime, readOwnedLock, runExclusive, saveState, writeJsonAtomic,
 } from './state.js';
 
 // Game-directory archive (init vacate), not the per-hand writeHandArchive.
@@ -271,8 +271,13 @@ export function stopServer(pid, deps = {}) {
   const beforeSignal = deps.beforeSignal ?? (() => {});
   const sleep = deps.sleepSync ?? sleepSync;
   const clock = deps.now ?? now;
+  const startTimeOf = deps.processStartTime ?? processStartTime;
+  const expectedStartTime = deps.expectedStartTime;
 
+  if (typeof expectedStartTime !== 'string' || expectedStartTime.length === 0) return;
   if (!alive(pid)) return;
+  const current = startTimeOf(pid);
+  if (current !== expectedStartTime) return;
   beforeSignal(pid, 'SIGTERM');
   try {
     kill(pid, 'SIGTERM');
@@ -282,6 +287,7 @@ export function stopServer(pid, deps = {}) {
   }
   waitWhileAlive(pid, alive, clock, sleep, 5000, 50);
   if (!alive(pid)) return;
+  if (startTimeOf(pid) !== expectedStartTime) return;
   beforeSignal(pid, 'SIGKILL');
   try {
     kill(pid, 'SIGKILL');
@@ -318,6 +324,8 @@ export function initGameDir(gameDir, flags, deps = {}) {
       beforeSignal: () => assertLoopAllowsInit(gameDir, callerPpid, force),
       sleepSync: deps.sleepSync,
       now: clock,
+      processStartTime: deps.processStartTime ?? processStartTime,
+      expectedStartTime: lock.serverStartTime,
     });
     if (alive(lock.serverPid)) {
       throwCoded('SERVER_ALIVE', '게임 서버가 아직 종료되지 않았습니다.');

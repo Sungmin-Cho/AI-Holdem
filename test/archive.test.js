@@ -507,6 +507,7 @@ test('initGameDir: 서버 시그널 직전 생긴 loop를 재검사해 서버를
   const first = initGameDir(dir, { aiCount: 2 });
   fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
     serverPid: 42, port: 8877, sessionToken: first.sessionToken, startedAt: new Date().toISOString(),
+    serverStartTime: 'opaque-server-start',
   }));
   const before = fs.readFileSync(path.join(dir, 'state.json'));
   let holder;
@@ -516,6 +517,7 @@ test('initGameDir: 서버 시그널 직전 생긴 loop를 재검사해 서버를
     assert.throws(
       () => initGameDir(dir, { aiCount: 2, force: true }, {
         callerPpid: 0,
+        processStartTime: () => 'opaque-server-start',
         isAlive() {
           aliveCalls += 1;
           // 1회차는 init의 server preflight다. 2회차(stopServer 내부의 마지막
@@ -543,6 +545,7 @@ test('initGameDir: SIGTERM 뒤 SIGKILL 직전 생긴 loop는 KILL 없이 LOOP_AL
   const first = initGameDir(dir, { aiCount: 2 });
   fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
     serverPid: 42, port: 8877, sessionToken: first.sessionToken, startedAt: new Date().toISOString(),
+    serverStartTime: 'opaque-server-start',
   }));
   const before = fs.readFileSync(path.join(dir, 'state.json'));
   let holder;
@@ -552,6 +555,7 @@ test('initGameDir: SIGTERM 뒤 SIGKILL 직전 생긴 loop는 KILL 없이 LOOP_AL
     assert.throws(
       () => initGameDir(dir, { aiCount: 2, force: true }, {
         callerPpid: 0,
+        processStartTime: () => 'opaque-server-start',
         isAlive() {
           aliveCalls += 1;
           // init preflight(1), stopServer의 TERM 전 확인(2)은 loop 없음. TERM 뒤
@@ -654,6 +658,8 @@ test('loop startTime 불일치는 dead로 판정해 활성으로 치지 않는�
 test('stopServer: now가 마감을 넘기면 sleep 없이 SIGTERM 후 SIGKILL한다', () => {
   const signals = [];
   stopServer(42, {
+    expectedStartTime: 'opaque-server-start',
+    processStartTime: () => 'opaque-server-start',
     isAlive: () => true,
     kill(pid, signal) {
       assert.equal(pid, 42);

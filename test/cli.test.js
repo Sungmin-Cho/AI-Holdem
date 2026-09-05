@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
-import { acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
+import { acquireOwnedLock, processStartTime, releaseOwnedLock } from '../engine/state.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 const STATE_MODULE_URL = pathToFileURL(
@@ -103,6 +103,7 @@ function writeLock(dir, pid, sessionToken = 'tok') {
     port: 8877,
     sessionToken,
     startedAt: new Date().toISOString(),
+    serverStartTime: processStartTime(pid),
   }));
 }
 
