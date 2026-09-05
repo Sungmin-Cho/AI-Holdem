@@ -1308,6 +1308,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 binding 뒤 바뀌었습니다.');
           }
+          // Windows cannot rename-replace a path that still has an open handle.
+          // The pin already proved binding; drop it before merging serverStartTime.
+          closeServerLockPin(pin);
+          pin = null;
           writeJsonAtomic(lockPath, { ...confirmed, serverStartTime: spawnedStartTime });
           const merged = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
           if (merged.serverStartTime !== spawnedStartTime || merged.serverPid !== lock.serverPid) {

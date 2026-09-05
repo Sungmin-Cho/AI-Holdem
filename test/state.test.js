@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime } from '../engine/state.js';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, writeJsonAtomic } from '../engine/state.js';
 import { spawnSleeper } from './helpers/platform.js';
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
@@ -14,6 +14,13 @@ async function terminateChild(child) {
   assert.equal(child.signalCode, 'SIGKILL');
 }
 
+test('writeJsonAtomic replaces an existing dest', () => {
+  const d = tmpDir();
+  const file = path.join(d, 'lock.json');
+  writeJsonAtomic(file, { n: 1 });
+  writeJsonAtomic(file, { n: 2, extra: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 2, extra: true });
+});
 test('save는 stateVersion을 올리고 load로 왕복된다', () => {
   const d = tmpDir();
   saveState(d, { stateVersion: 0, foo: '가' });
