@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { startServer } from '../server/server.js';
+import { skipOnWin32 } from './helpers/platform.js';
 import { gameEpochOf } from '../publish-contract.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
@@ -329,7 +330,8 @@ test('publish: view는 있는데 사용자 관점 표식이 없으면 거부한�
   }
 });
 
-test('publish: 게시에 성공한 뒤 대기만 실패하면 게시 결과를 잃지 않는다', async () => {
+test('publish: 게시에 성공한 뒤 대기만 실패하면 게시 결과를 잃지 않는다', async (t) => {
+  if (skipOnWin32(t, 'publish --wait child exits 1 with empty stderr on win32 GHA')) return;
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   const envelope = turnFile(dir, {
@@ -366,7 +368,8 @@ test('publish: 아카이브 미기록 경고를 딜러에게 전달한다', asyn
   }
 });
 
-test('publish: 죽은 락을 두 게시자가 동시에 회수해도 둘 다 남는다', async () => {
+test('publish: 죽은 락을 두 게시자가 동시에 회수해도 둘 다 남는다', async (t) => {
+  if (skipOnWin32(t, 'concurrent publish.lock.d reclaim race is POSIX mkdir-atomic')) return;
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {

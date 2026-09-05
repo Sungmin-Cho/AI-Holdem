@@ -11,6 +11,7 @@ import {
   releaseOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
+import { createListenerOwnedBy } from './listener-ownership.js';
 import {
   buildPlayerPrompt,
   extractJsonLine,
@@ -400,6 +401,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? 5_000;
   const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
+  const startTimeOf = opts.processStartTime ?? processStartTime;
+  const listenerOwnedByFn = opts.listenerOwnedBy ?? createListenerOwnedBy({
+    lsofPath,
+    timeoutMs: osVerifyMs,
+  });
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
@@ -768,17 +774,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // acquireOwnedLock은 일반 pid-less mutex와의 호환 때문에 오래된 unknown 기록을
     // mtime으로 회수할 수 있다. loop 락은 init의 파괴 경계를 보호하므로 더 엄격하다:
     // 존재하지만 identity가 불명인 기록은 나이와 무관하게 먼저 fail-closed한다.
-    const observed = readOwnedLock(lockRoot, LOOP_LOCK);
+    const observed = readOwnedLock(lockRoot, LOOP_LOCK, { processStartTime: startTimeOf });
     if (observed?.status === 'unknown') {
       throw codedError('LOOP_LOCK_UNKNOWN', 'loop 락 identity를 확인할 수 없어 중단합니다.');
     }
     try {
-      lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK);
+      lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK, { processStartTime: startTimeOf });
       return;
     } catch (error) {
       if (error.code === 'IDENTITY_UNAVAILABLE') throw error;
       if (error.code !== 'LOCKED') throw error;
-      const owner = readOwnedLock(lockRoot, LOOP_LOCK);
+      const owner = readOwnedLock(lockRoot, LOOP_LOCK, { processStartTime: startTimeOf });
       if (owner?.status === 'unknown') {
         throw codedError('LOOP_LOCK_UNKNOWN', 'loop 락 identity를 확인할 수 없어 중단합니다.');
       }
@@ -788,7 +794,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (mode === 'bootstrap') {
         if (force) {
           await stopExistingLoopForForce(owner);
-          lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK);
+          lockHandle = acquireOwnedLock(lockRoot, LOOP_LOCK, { processStartTime: startTimeOf });
           return;
         }
         throw codedError('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
@@ -910,37 +916,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const listenerOwnedBy = (pid, port) => new Promise((resolve, reject) => {
-    if (!lsofPath) {
-      reject(codedError('SERVER_LISTENER_UNAVAILABLE', 'pid↔port 검증 도구를 찾을 수 없습니다.'));
-      return;
-    }
-    const child = execFile(lsofPath, [
-      '-nP', '-a', '-p', String(pid), `-iTCP:${port}`, '-sTCP:LISTEN', '-Fptn',
-    ], {
-      encoding: 'utf8',
-      timeout: assertAndBoundFinalizationMs(osVerifyMs),
-      killSignal: 'SIGKILL',
-      maxBuffer: 64 * 1024,
-    }, (error, stdout, stderr) => {
-      activeChildren.delete(child);
-      if (error) {
-        if (Number(error.code) === 1 && !error.killed && !error.signal && String(stderr).trim() === '') {
-          resolve(false);
-          return;
-        }
-        reject(codedError(
-          'SERVER_LISTENER_UNAVAILABLE',
-          'pid↔port OS 검증을 완료할 수 없습니다.',
-          { cause: error },
-        ));
-        return;
+  const listenerOwnedBy = async (pid, port) => {
+    try {
+      return await listenerOwnedByFn(pid, port);
+    } catch (error) {
+      if (error?.code === 'SERVER_LISTENER_UNAVAILABLE') {
+        throw codedError('SERVER_LISTENER_UNAVAILABLE', error.message, { cause: error });
       }
-      const lines = String(stdout).split(/\r?\n/);
-      resolve(lines.includes(`p${pid}`) && lines.includes(`n127.0.0.1:${port}`));
-    });
-    activeChildren.add(child);
-  });
+      throw codedError('SERVER_LISTENER_UNAVAILABLE', 'pid↔port OS 검증을 완료할 수 없습니다.', { cause: error });
+    }
+  };
 
   const assertAuthenticatedServer = async (port, sessionToken, { stopAware = false } = {}) => {
     const requestSnapshot = async (token) => {
@@ -1002,7 +987,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const identityStillAlive = (pid, startTime) => {
     if (!processAlive(pid)) return false;
-    const current = processStartTime(pid);
+    const current = startTimeOf(pid);
     if (current === null) {
       throw codedError('IDENTITY_UNAVAILABLE', `pid ${pid} startTime을 재검증할 수 없습니다.`);
     }
@@ -1027,7 +1012,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!processAlive(pid)) return true;
-      const current = processStartTime(pid);
+      const current = startTimeOf(pid);
       if (current === null) {
         // 종료 직후 kill(0)은 아직 성공하지만 ps identity가 먼저 사라지는
         // 짧은 전이 창이 있다. unknown을 사망으로 승격하지 않고 deadline까지 재확인한다.
@@ -1042,7 +1027,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await sleep(pollMs);
     }
     if (!processAlive(pid)) return true;
-    const current = processStartTime(pid);
+    const current = startTimeOf(pid);
     if (current === null) {
       throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
     }
@@ -1053,7 +1038,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const assertSameLoopOwner = (expected) => {
-    const current = readOwnedLock(lockRoot, LOOP_LOCK);
+    const current = readOwnedLock(lockRoot, LOOP_LOCK, { processStartTime: startTimeOf });
     if (
       current?.status !== 'alive'
       || current.pid !== expected.pid
@@ -1134,7 +1119,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     if (processAlive(current.serverPid)) {
       if (expected.startTime !== undefined) {
-        const currentStart = processStartTime(current.serverPid);
+        const currentStart = startTimeOf(current.serverPid);
         if (currentStart === null) {
           throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 후 server pid identity를 확인할 수 없습니다.');
         }
@@ -1159,7 +1144,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         removeStoppedForceServerLock(lock, pin);
         return;
       }
-      const startTime = processStartTime(lock.serverPid);
+      const startTime = startTimeOf(lock.serverPid);
       if (startTime === null) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', 'force server startTime을 확인할 수 없습니다.');
       }
@@ -1208,7 +1193,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
         if (processAlive(existing.serverPid)) {
-          const startTime = processStartTime(existing.serverPid);
+          const startTime = startTimeOf(existing.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
           }
@@ -1219,13 +1204,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             confirmed.serverPid !== existing.serverPid
             || confirmed.port !== existing.port
             || confirmed.sessionToken !== sessionToken
-            || processStartTime(existing.serverPid) !== startTime
+            || startTimeOf(existing.serverPid) !== startTime
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
           }
           await assertServerBinding(confirmed, { stopAware });
           if (stopAware) assertNotStopping();
-          if (processStartTime(existing.serverPid) !== startTime) {
+          if (startTimeOf(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
           }
           serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
@@ -1264,7 +1249,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       serverIdentity = null;
       let spawnError = null;
       child.once('error', (error) => { spawnError = error; });
-      const spawnedStartTime = serverPid === null ? null : processStartTime(serverPid);
+      const spawnedStartTime = serverPid === null ? null : startTimeOf(serverPid);
       if (spawnedStartTime === null) {
         // spawn handle은 이미 우리 소유다. identity를 세울 수 없는 자식은 첫 await 전에
         // 즉시 KILL+exit 확인한다. 확인 실패면 handle을 유지해 bootstrap catch의
@@ -1292,7 +1277,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ) {
           if (stopAware) assertNotStopping();
           serverPid = lock.serverPid;
-          const startTime = processStartTime(lock.serverPid);
+          const startTime = startTimeOf(lock.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '새 server child startTime을 확인할 수 없습니다.');
           }
@@ -1302,7 +1287,37 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 startup 중 바뀌었습니다.');
           }
-          return lock.port;
+          if (pin) closeServerLockPin(pin);
+          pin = openServerLockPin();
+          if (!pin) {
+            throw codedError('SERVER_LOCK_REPLACED', '새 server lock을 고정할 수 없습니다.');
+          }
+          await assertServerBinding(
+            { serverPid: lock.serverPid, port: lock.port, sessionToken },
+            { stopAware },
+          );
+          if (stopAware) assertNotStopping();
+          const confirmed = assertPinnedServerLock(pin);
+          if (
+            confirmed.serverPid !== lock.serverPid
+            || confirmed.port !== lock.port
+            || confirmed.sessionToken !== sessionToken
+            || child.exitCode !== null
+            || child.signalCode !== null
+            || startTimeOf(lock.serverPid) !== spawnedStartTime
+          ) {
+            throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 binding 뒤 바뀌었습니다.');
+          }
+          // Windows cannot rename-replace a path that still has an open handle.
+          // The pin already proved binding; drop it before merging serverStartTime.
+          closeServerLockPin(pin);
+          pin = null;
+          writeJsonAtomic(lockPath, { ...confirmed, serverStartTime: spawnedStartTime });
+          const merged = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+          if (merged.serverStartTime !== spawnedStartTime || merged.serverPid !== lock.serverPid) {
+            throw codedError('SERVER_IDENTITY_CHANGED', 'serverStartTime 병합이 서버 lock을 바꾸었습니다.');
+          }
+          return merged.port;
         }
         await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
         if (recovery) d9Checkpoint('after-startup-sleep');
@@ -1510,7 +1525,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!identity || identity.pid !== child.pid) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child의 시작 identity가 없습니다.');
       }
-      const current = processStartTime(child.pid);
+      const current = startTimeOf(child.pid);
       if (current === null) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child startTime을 시그널 직전 확인할 수 없습니다.');
       }
@@ -1553,7 +1568,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const identity = serverIdentity;
     if (!identity) throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 identity가 없습니다.');
     if (!processAlive(identity.pid)) return 'dead';
-    const current = processStartTime(identity.pid);
+    const current = startTimeOf(identity.pid);
     if (current === null) {
       throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime 재검증에 실패했습니다.');
     }
@@ -1575,7 +1590,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const signalAdoptedServer = (signal) => {
     if (adoptedIdentityStatus() === 'dead') return false;
     try {
-      process.kill(serverIdentity.pid, signal);
+      signalProcess(serverIdentity.pid, signal);
       return true;
     } catch (error) {
       if (error.code === 'ESRCH') return false;
@@ -2606,7 +2621,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const persistedCoachIdentityState = ({ pid, startTime }) => {
     if (!processAlive(pid)) return 'dead';
-    const current = processStartTime(pid);
+    const current = startTimeOf(pid);
     if (current === null) return 'unknown';
     return current === startTime ? 'alive' : 'mismatch';
   };

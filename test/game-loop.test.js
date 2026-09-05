@@ -12,6 +12,7 @@ import {
   readOwnedLock,
   withNamedLock,
 } from '../engine/state.js';
+import { createStartTimeProbe, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
   exitCodeFor,
@@ -750,20 +751,6 @@ async function terminateIfAlive(child) {
   await exit;
 }
 
-async function withFakePs(scriptBody, fn) {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-ps-'));
-  const psPath = path.join(binDir, 'ps');
-  fs.writeFileSync(psPath, `#!/bin/sh\n${scriptBody}\n`);
-  fs.chmodSync(psPath, 0o755);
-  const original = process.env.PATH;
-  process.env.PATH = `${binDir}:${original}`;
-  try {
-    return await fn();
-  } finally {
-    process.env.PATH = original;
-  }
-}
-
 async function withServerLockSwapAtRetirement(lockPath, replacementPath, fn) {
   const originalUnlink = fs.unlinkSync;
   const originalRename = fs.renameSync;
@@ -1212,6 +1199,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
 });
 
 test('bootstrap auto-select ignores a symlink practice-focus and records a notice', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   const gameDir = tmpGame();
   const storeDir = tmpGame();
   const training = path.join(storeDir, '.training');
@@ -1524,6 +1512,7 @@ test('an old-looking pid-less loop lock is still unknown and is never reclaimed 
 });
 
 test('two bootstrap processes racing on one game directory produce exactly one owner', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'owned-lock mkdir race is POSIX directory-mkdir atomic')) return;
   const gameDir = tmpGame();
   const workers = [spawnBootstrapWorker(gameDir), spawnBootstrapWorker(gameDir)];
   t.after(() => Promise.all(workers.map((child) => terminateIfAlive(child))));
@@ -1567,24 +1556,14 @@ test('a positively dead loop lock is reclaimed before bootstrap without force', 
 
 test('IDENTITY_UNAVAILABLE is surfaced distinctly and leaves no partial lock', { concurrency: false }, async () => {
   const gameDir = tmpGame();
-  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-no-ps-'));
-  const ps = path.join(fakeBin, 'ps');
-  fs.writeFileSync(ps, '#!/bin/sh\nexit 1\n');
-  fs.chmodSync(ps, 0o755);
-  const oldPath = process.env.PATH;
-  process.env.PATH = fakeBin;
-  try {
-    const loop = createGameLoop({
-      gameDir,
-      resolver: async () => assert.fail('resolver must not run'),
-    });
-    await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'IDENTITY_UNAVAILABLE');
-    assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
-    assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
-  } finally {
-    if (oldPath === undefined) delete process.env.PATH;
-    else process.env.PATH = oldPath;
-  }
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => assert.fail('resolver must not run'),
+    opts: { processStartTime: () => null },
+  });
+  await assert.rejects(loop.bootstrap({ ai: 2 }), (error) => error.code === 'IDENTITY_UNAVAILABLE');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
 });
 
 test('resume rejects missing or mismatched loop-state identity before resolver, server, or log work', { timeout: 20_000 }, async (t) => {
@@ -2006,6 +1985,7 @@ test('repair_failed halt clears only after resume-check reports a successful rep
 });
 
 test('resume adopts a healthy external server and requestStop identity-confirms its death', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'adopted-server listener proof is POSIX lsof')) return;
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
@@ -2045,16 +2025,20 @@ test('requestStop fails closed without signalling an adopted server when identit
     metrics: [],
   }));
   const external = await startExternalServer(gameDir, init.sessionToken);
-  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  const startTimeOf = createStartTimeProbe();
+  const loop = createGameLoop({
+    gameDir, resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, processStartTime: startTimeOf },
+  });
   t.after(() => terminateIfAlive(external.child));
   await loop.resume();
 
-  await withFakePs('exit 1', async () => {
-    await assert.rejects(
-      loop.requestStop(),
-      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
-    );
-  });
+  startTimeOf.set(() => null);
+  await assert.rejects(
+    loop.requestStop(),
+    (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+  );
+  startTimeOf.reset();
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).cleanupError.code, 'SERVER_IDENTITY_UNAVAILABLE');
@@ -2133,6 +2117,7 @@ test('snapshot endpoint that accepts a fresh wrong token is not treated as authe
 });
 
 test('missing or timed-out listener verifier fails closed without adopting or signalling', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'listener verifier fixture injects POSIX lsof')) return;
   for (const mode of ['missing', 'timeout']) {
     await t.test(mode, async (st) => {
       const gameDir = tmpGame();
@@ -2263,14 +2248,17 @@ test('adopted server startTime mismatch after capture is never signalled', { tim
     ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
   }));
   const external = await startExternalServer(gameDir, init.sessionToken);
-  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  const startTimeOf = createStartTimeProbe();
+  const loop = createGameLoop({
+    gameDir, resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, processStartTime: startTimeOf },
+  });
   t.after(() => terminateIfAlive(external.child));
   await loop.resume();
 
-  await withFakePs(
-    `if [ "$2" = "${external.child.pid}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_IDENTITY_MISMATCH'),
-  );
+  startTimeOf.mismatchWhen((pid) => pid === external.child.pid);
+  await assert.rejects(loop.requestStop(), (error) => error.code === 'SERVER_IDENTITY_MISMATCH');
+  startTimeOf.reset();
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
   await loop.requestStop();
@@ -2280,14 +2268,15 @@ test('adopted server startTime mismatch after capture is never signalled', { tim
 
 test('direct server child startTime mismatch is rechecked before the first stop signal', { timeout: 10_000, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
+  const marker = path.join(os.tmpdir(), `holdem-direct-server-reused-${process.pid}-${Date.now()}`);
+  const startTimeOf = createStartTimeProbe();
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
-    opts: { port: 0 },
+    opts: { port: 0, processStartTime: startTimeOf },
   });
   await loop.bootstrap({ ai: 1, stack: 100 });
   const serverPid = loop.serverPid;
-  const marker = path.join(os.tmpdir(), `holdem-direct-server-reused-${process.pid}-${Date.now()}`);
   fs.writeFileSync(marker, 'reused');
   t.after(async () => {
     try { process.kill(serverPid, 'SIGKILL'); } catch { /* already dead */ }
@@ -2295,13 +2284,12 @@ test('direct server child startTime mismatch is rechecked before the first stop 
     try { fs.unlinkSync(marker); } catch { /* absent */ }
   });
 
-  await withFakePs(
-    `if [ "$2" = "${serverPid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(
-      loop.requestStop(),
-      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
-    ),
+  startTimeOf.mismatchWhen((pid) => pid === serverPid && fs.existsSync(marker));
+  await assert.rejects(
+    loop.requestStop(),
+    (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
   );
+  startTimeOf.reset();
   assert.doesNotThrow(() => process.kill(serverPid, 0), 'identity mismatch server child was signalled');
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
   await loop.requestStop();
@@ -2310,6 +2298,7 @@ test('direct server child startTime mismatch is rechecked before the first stop 
 });
 
 test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'SIGTERM is TerminateProcess on win32; ignoreTerm cannot survive it')) return;
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
@@ -4591,6 +4580,7 @@ test('SIGTERM during D9 health await cannot unlink, spawn, retry, or resolve the
 });
 
 test('D9 preserves an identical-byte replacement lock by pinned path identity and aborts recovery', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'cannot rename-replace a pinned lock.json handle on win32')) return;
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const lockPath = path.join(gameDir, 'lock.json');
   const originalRaw = fs.readFileSync(lockPath, 'utf8');
@@ -4634,6 +4624,7 @@ test('D9 preserves an identical-byte replacement lock by pinned path identity an
 });
 
 test('D9 atomic retirement restores an identical-byte inode swapped at the retirement syscall', { timeout: 15_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'inode pin identity is POSIX; win32 rename of pinned files is EPERM')) return;
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const lockPath = path.join(gameDir, 'lock.json');
   const originalRaw = fs.readFileSync(lockPath, 'utf8');
@@ -4673,6 +4664,7 @@ test('D9 atomic retirement restores an identical-byte inode swapped at the retir
 });
 
 test('D9 quarantine restore never clobbers a second lock created immediately before restore', { timeout: 15_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'inode pin identity is POSIX; win32 rename of pinned files is EPERM')) return;
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const lockPath = path.join(gameDir, 'lock.json');
   const firstRaw = fs.readFileSync(lockPath, 'utf8');
@@ -4762,6 +4754,7 @@ test('D9 stop checkpoints fence retirement, spawn, and recorded-body retry inter
 });
 
 test('production SIGTERM during runtime resolution reaps the registered probe child before releasing loop ownership', { timeout: 15_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'production spawn uses POSIX PATH/shebang fixtures')) return;
   const gameDir = tmpGame();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-resolver-stop-bin-'));
   const runtimeLog = path.join(binDir, 'runtime.pid');
@@ -4806,6 +4799,7 @@ test('production SIGTERM during runtime resolution reaps the registered probe ch
 });
 
 test('SIGTERM during direct server startup owns and reaps the child before health identity capture', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'SIGTERM is TerminateProcess on win32')) return;
   const gameDir = tmpGame();
   const marker = path.join(gameDir, 'startup-health-pending');
   const loopUrl = pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href;
@@ -4891,7 +4885,11 @@ test('initial server startTime failure retains ownership after a failed kill and
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
-    opts: { port: 0, waitMs: 0 },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      processStartTime: (pid) => (pid === process.pid ? processStartTime(pid) : null),
+    },
   });
   const originalKill = ChildProcess.prototype.kill;
   let serverHandle = null;
@@ -4905,12 +4903,9 @@ test('initial server startTime failure retains ownership after a failed kill and
     return originalKill.call(this, signal);
   };
   try {
-    await withFakePs(
-      `if [ "$2" != "${process.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
-      async () => assert.rejects(
-        loop.bootstrap({ ai: 1, stack: 100 }),
-        (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
-      ),
+    await assert.rejects(
+      loop.bootstrap({ ai: 1, stack: 100 }),
+      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
     );
 
     assert.equal(killAttempts.length, 2, 'requestStop did not retry the failed startup SIGKILL');
@@ -4932,7 +4927,11 @@ test('unsettled cleanup retains loop lock, blocks a contender, and releases only
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
-    opts: { port: 0, waitMs: 0 },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      processStartTime: (pid) => (pid === process.pid ? processStartTime(pid) : null),
+    },
   });
   const originalKill = ChildProcess.prototype.kill;
   let serverHandle = null;
@@ -4947,12 +4946,9 @@ test('unsettled cleanup retains loop lock, blocks a contender, and releases only
     return originalKill.call(this, signal);
   };
   try {
-    await withFakePs(
-      `if [ "$2" != "${process.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
-      async () => assert.rejects(
-        loop.bootstrap({ ai: 1, stack: 100 }),
-        (error) => error.code === 'SERVER_STOP_UNCONFIRMED',
-      ),
+    await assert.rejects(
+      loop.bootstrap({ ai: 1, stack: 100 }),
+      (error) => error.code === 'SERVER_STOP_UNCONFIRMED',
     );
 
     assert.equal(killAttempts >= 2, true, 'requestStop did not retry unsettled startup cleanup');
@@ -4994,6 +4990,7 @@ test('unsettled cleanup retains loop lock, blocks a contender, and releases only
 });
 
 test('SIGTERM waits for the real in-flight publish, records stop state, and removes its server child', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'production spawn uses POSIX PATH/shebang fixtures')) return;
   const gameDir = tmpGame();
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
   const loopUrl = pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href;
@@ -5047,6 +5044,7 @@ test('SIGTERM waits for the real in-flight publish, records stop state, and remo
 });
 
 test('production SIGTERM reports cleanup failure and exits nonzero instead of masking it', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'production spawn uses POSIX PATH/ps/shebang fixtures')) return;
   const gameDir = tmpGame();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-main-bin-'));
   const marker = path.join(binDir, 'reuse.marker');
@@ -5152,6 +5150,7 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
 });
 
 test('--force stops loop, rereads replacement server identity, then stops that server before archive', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'force-stop signal log uses POSIX PATH/shebang fixtures')) return;
   const gameDir = tmpGame();
   const signalLog = path.join(os.tmpdir(), `holdem-force-signals-${process.pid}-${Date.now()}.log`);
   const initialized = await initGame(gameDir);
@@ -5248,6 +5247,7 @@ test('--force with no live loop rejects a forged unrelated server pid before any
 });
 
 test('--force stale-lock cleanup atomically preserves an inode swapped at retirement', { timeout: 15_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'inode swap at retirement is POSIX; win32 rename of pinned files is EPERM')) return;
   const gameDir = tmpGame();
   const initialized = await initGame(gameDir);
   const external = await startExternalServer(gameDir, initialized.sessionToken);
@@ -5282,6 +5282,7 @@ test('--force stale-lock cleanup atomically preserves an inode swapped at retire
 });
 
 test('--force leaves the game byte-for-byte unchanged when loop termination is unconfirmed', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'SIGTERM is TerminateProcess on win32; ignoreTerm cannot survive it')) return;
   const gameDir = tmpGame();
   await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'must-survive-force.txt'), 'old-game');
@@ -5343,6 +5344,7 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
 });
 
 test('--force treats loop pid reuse after TERM as an identity error, not death, and blocks archive plus KILL', { timeout: 10_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'SIGTERM is TerminateProcess on win32; ignoreTerm cannot survive it')) return;
   const gameDir = tmpGame();
   await initGame(gameDir);
   await execFileAsync(process.execPath, [CLI, 'step', '--new-hand', '--game-dir', gameDir], {
@@ -5353,6 +5355,7 @@ test('--force treats loop pid reuse after TERM as an identity error, not death, 
   const marker = path.join(os.tmpdir(), `holdem-loop-reused-${process.pid}-${Date.now()}`);
   const before = snapshotTree(gameDir);
   const signals = [];
+  const startTimeOf = createStartTimeProbe();
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
@@ -5360,6 +5363,7 @@ test('--force treats loop pid reuse after TERM as an identity error, not death, 
       port: 0,
       forceStopMs: 100,
       pollMs: 10,
+      processStartTime: startTimeOf,
       signalProcess: (pid, signal) => {
         signals.push([pid, signal]);
         if (pid === holder.pid && signal === 'SIGTERM') {
@@ -5376,13 +5380,12 @@ test('--force treats loop pid reuse after TERM as an identity error, not death, 
     try { fs.unlinkSync(marker); } catch { /* absent */ }
   });
 
-  await withFakePs(
-    `if [ "$2" = "${holder.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(
-      loop.bootstrap({ ai: 1, force: true }),
-      (error) => error.code === 'LOOP_IDENTITY_MISMATCH',
-    ),
+  startTimeOf.mismatchWhen((pid) => pid === holder.pid && fs.existsSync(marker));
+  await assert.rejects(
+    loop.bootstrap({ ai: 1, force: true }),
+    (error) => error.code === 'LOOP_IDENTITY_MISMATCH',
   );
+  startTimeOf.reset();
   assert.deepEqual(signals, [[holder.pid, 'SIGTERM']], 'pid reuse 후 추가 시그널을 보냈다');
   assert.doesNotThrow(() => process.kill(holder.pid, 0));
   assert.deepEqual(snapshotTree(gameDir), before);
@@ -5411,6 +5414,7 @@ test('--force rechecks server startTime immediately after async binding and befo
     ? fs.readdirSync(path.join(gameDir, 'archive')).sort()
     : [];
   const signals = [];
+  const startTimeOf = createStartTimeProbe();
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
@@ -5418,6 +5422,7 @@ test('--force rechecks server startTime immediately after async binding and befo
       port: 0,
       lsofPath,
       forceStopMs: 100,
+      processStartTime: startTimeOf,
       signalProcess: (pid, signal) => {
         signals.push([pid, signal]);
         if (pid === external.child.pid) return;
@@ -5432,13 +5437,12 @@ test('--force rechecks server startTime immediately after async binding and befo
     try { fs.unlinkSync(marker); } catch { /* absent */ }
   });
 
-  await withFakePs(
-    `if [ "$2" = "${external.child.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(
-      loop.bootstrap({ ai: 1, force: true }),
-      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
-    ),
+  startTimeOf.mismatchWhen((pid) => pid === external.child.pid && fs.existsSync(marker));
+  await assert.rejects(
+    loop.bootstrap({ ai: 1, force: true }),
+    (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
   );
+  startTimeOf.reset();
   assert.deepEqual(signals, [[holder.pid, 'SIGTERM']], 'binding 후 재사용된 server pid에 시그널을 보냈다');
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), beforeState);
@@ -5460,12 +5464,14 @@ test('--force aborts before archive when the stopped server pid is observed as r
   const beforeArchives = fs.existsSync(path.join(gameDir, 'archive'))
     ? fs.readdirSync(path.join(gameDir, 'archive')).sort()
     : [];
+  const startTimeOf = createStartTimeProbe();
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
     opts: {
       port: 0,
       forceStopMs: 100,
+      processStartTime: startTimeOf,
       signalProcess: (pid, signal) => {
         if (pid === server.child.pid) {
           fs.writeFileSync(marker, signal);
@@ -5482,13 +5488,12 @@ test('--force aborts before archive when the stopped server pid is observed as r
     try { fs.unlinkSync(marker); } catch { /* already gone */ }
   });
 
-  await withFakePs(
-    `if [ "$2" = "${server.child.pid}" ] && [ -f "${marker}" ]; then echo 'Mon Jan  1 00:00:00 2001'; exit 0; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(
-      loop.bootstrap({ ai: 1, force: true }),
-      (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
-    ),
+  startTimeOf.mismatchWhen((pid) => pid === server.child.pid && fs.existsSync(marker));
+  await assert.rejects(
+    loop.bootstrap({ ai: 1, force: true }),
+    (error) => error.code === 'SERVER_IDENTITY_MISMATCH',
   );
+  startTimeOf.reset();
   assert.equal(fs.readFileSync(marker, 'utf8'), 'SIGTERM');
   assert.doesNotThrow(() => process.kill(server.child.pid, 0));
   assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), beforeState);
@@ -5756,6 +5761,7 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
 });
 
 test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identity에 signal하지 않고 prior cleanup을 released로 닫는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -5822,13 +5828,16 @@ test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 
       finalizeCutoffLeadMs: 1_000,
       orphanTerminateGraceMs: 20,
       orphanTerminateKillWaitMs: 20,
-      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (pid !== orphan.pid) process.kill(pid, signal);
+      },
     },
   });
 
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
 
-  assert.deepEqual(signals, [], 'stale authority가 가리킨 live pid에 signal을 보냈다');
+  assert.equal(signals.some((entry) => entry.pid === orphan.pid), false, 'stale authority가 가리킨 live pid에 signal을 보냈다');
   assert.doesNotThrow(() => process.kill(orphan.pid, 0));
   const halted = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(halted.phase, 'finalizing');
@@ -5870,6 +5879,7 @@ test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked wor
 });
 
 test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spawn/bind하지 않는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseCapture;
@@ -5918,6 +5928,7 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
 });
 
 test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handle 없는 worker를 시작하지 않는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseSpawn;
@@ -5950,6 +5961,7 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
 });
 
 test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시도를 abort하고 review gate를 잠근다', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -5988,6 +6000,7 @@ test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시
 });
 
 test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면 late owner/replacement 없이 durable abort한다', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -6173,6 +6186,16 @@ test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 �
       finalizeBudgetMs: 2_500,
       finalizeCutoffLeadMs: 1_500,
       orphanTerminateGraceMs: 500,
+      processStartTime: (pid) => {
+        if (pid === orphan.pid) {
+          const n = Number(fs.readFileSync(countPath, 'utf8')) + 1;
+          if (n <= 2) {
+            fs.writeFileSync(countPath, String(n));
+            return null;
+          }
+        }
+        return processStartTime(pid);
+      },
       signalProcess: (pid, signal) => {
         if (pid === orphan.pid) signals.push(signal);
         process.kill(pid, signal);
@@ -6180,14 +6203,9 @@ test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 �
     },
   });
 
-  await withFakePs(
-    `if [ "$2" = "${orphan.pid}" ]; then n=$(cat "${countPath}"); if [ "$n" -lt 2 ]; then echo $((n + 1)) > "${countPath}"; exit 1; fi; fi\nexec ${REAL_PS} "$@"`,
-    async () => {
-      await loop.resume();
-      await waitFor(() => upper.starts.length >= 1, 'unknown identity가 해소된 뒤 replacement가 시작되지 않았다');
-      assert.equal((await loop.run()).phase, 'done');
-    },
-  );
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'unknown identity가 해소된 뒤 replacement가 시작되지 않았다');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.equal(Number(fs.readFileSync(countPath, 'utf8')) >= 2, true);
   assert.equal(signals.includes('SIGTERM'), true);
@@ -6213,6 +6231,13 @@ test('Task 7A r3: permanently unknown persisted identity는 result-wait cutoff�
     loopOpts: {
       finalizeBudgetMs: 2_200,
       finalizeCutoffLeadMs: 1_100,
+      processStartTime: (pid) => {
+        if (pid === orphan.pid) {
+          fs.writeFileSync(countPath, String(Number(fs.readFileSync(countPath, 'utf8')) + 1));
+          return null;
+        }
+        return processStartTime(pid);
+      },
       signalProcess: (pid, signal) => {
         if (pid === orphan.pid) signals.push(signal);
         process.kill(pid, signal);
@@ -6220,10 +6245,7 @@ test('Task 7A r3: permanently unknown persisted identity는 result-wait cutoff�
     },
   });
 
-  await withFakePs(
-    `if [ "$2" = "${orphan.pid}" ]; then n=$(cat "${countPath}"); echo $((n + 1)) > "${countPath}"; exit 1; fi\nexec ${REAL_PS} "$@"`,
-    async () => assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED'),
-  );
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
 
   assert.equal(Number(fs.readFileSync(countPath, 'utf8')) > 1, true);
   assert.deepEqual(signals, []);
@@ -7332,6 +7354,7 @@ test('Task 7B: gameOver resume phase 유도는 loop-state 유무와 무관하게
 });
 
 test('production --store-dir creates permanent sessions and resume reuses current', { timeout: 60_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'production spawn uses POSIX PATH/shebang fixtures')) return;
   const storeDir = tmpGame();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-store-main-bin-'));
   const claudePath = path.join(binDir, 'claude');
@@ -7423,7 +7446,7 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     '--blinds', '15/30', '--force', '--player-runtime', 'codex',
     '--practice-focus-file', '/tmp/focus.json',
   ]), {
-    gameDir: '/tmp/g',
+    gameDir: path.resolve('/tmp/g'),
     ai: 3,
     stack: 900,
     levelEvery: 4,
@@ -7431,7 +7454,7 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     force: true,
     resume: false,
     playerRuntime: 'codex',
-    practiceFocusFile: '/tmp/focus.json',
+    practiceFocusFile: path.resolve('/tmp/focus.json'),
     mode: undefined,
     stackBb: undefined,
     hands: undefined,
@@ -7448,7 +7471,7 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     ['--opponent-runtime', 'policy'],
   );
   assert.equal(parseGameLoopArgs(['--resume', '--game-dir', '/tmp/g']).resume, true);
-  assert.equal(parseGameLoopArgs(['--store-dir', '/tmp/store', '--ai', '2']).storeDir, '/tmp/store');
+  assert.equal(parseGameLoopArgs(['--store-dir', '/tmp/store', '--ai', '2']).storeDir, path.resolve('/tmp/store'));
   assert.throws(
     () => parseGameLoopArgs(['--store-dir', '/tmp/store', '--game-dir', '/tmp/game', '--ai', '2']),
     (error) => error.code === 'USAGE',

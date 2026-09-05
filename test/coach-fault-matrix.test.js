@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeJsonAtomic } from '../engine/state.js';
 import { startServer } from '../server/server.js';
 import {
@@ -687,7 +687,7 @@ test('교차 프로세스 heartbeat는 실제 hrtime으로 만료된 reservation
   auth.hands['1'].deadlineMono = (process.hrtime.bigint() - 1_000_000n).toString();
   writeJsonAtomic(authPath, auth);
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-    import { createCoachControl } from ${JSON.stringify(path.join(ROOT, 'tools/coach-control.js'))};
+    import { createCoachControl } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'tools/coach-control.js')).href)};
     const cc = createCoachControl();
     const out = await cc.heartbeat({ gameDir: process.argv[1], owner: process.argv[2] });
     process.stdout.write(JSON.stringify(out));
@@ -702,59 +702,70 @@ test('Gate A: 실제 publish.js child가 lock을 잡은 채 cutoff되면 종료 
   const dir = tmpGame();
   const owner = '11111111-1111-4111-8111-111111111111';
   const hung = http.createServer(() => { /* never responds */ });
-  await new Promise((resolve) => hung.listen(0, '127.0.0.1', resolve));
-  const port = hung.address().port;
-  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
-    serverPid: process.pid, port, sessionToken: 'tok-live', startedAt: new Date().toISOString(),
-  }));
-  writeJsonAtomic(path.join(dir, 'ui-snapshot.json'), { revision: 0, coach: [] });
-  writeJsonAtomic(path.join(dir, 'stats.json'), { perPlayer: { user: { sample: 1, vpip: 0.3 } } });
-  const cc = createCoachControl();
-  await cc.beginOwner({
-    gameDir: dir, owner, completed: 1,
-    statsFile: path.join(dir, 'stats.json'),
-    snapshotFile: path.join(dir, 'ui-snapshot.json'),
-  });
-  const envelope = path.join(dir, 'turn.json');
-  fs.writeFileSync(envelope, JSON.stringify({
-    ok: true, stateVersion: 1, handOver: false, gameOver: false,
-    view: { handNo: 1 }, viewFor: 'user', events: [], next: null,
-  }));
-  const child = spawn(process.execPath, [PUBLISH, '--from', envelope, '--game-dir', dir, '--lock-wait-ms', '8000'], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  child.unref();
-  const startedAt = Date.now();
-  while (!hasLiveLockHolder(dir) && Date.now() - startedAt < 3000) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.equal(hasLiveLockHolder(dir), true, 'publish child가 lock을 잡지 않았다');
-  process.kill(child.pid, 0);
+  let child;
+  try {
+    await new Promise((resolve) => hung.listen(0, '127.0.0.1', resolve));
+    const port = hung.address().port;
+    fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+      serverPid: process.pid, port, sessionToken: 'tok-live', startedAt: new Date().toISOString(),
+    }));
+    writeJsonAtomic(path.join(dir, 'ui-snapshot.json'), { revision: 0, coach: [] });
+    writeJsonAtomic(path.join(dir, 'stats.json'), { perPlayer: { user: { sample: 1, vpip: 0.3 } } });
+    const cc = createCoachControl();
+    await cc.beginOwner({
+      gameDir: dir, owner, completed: 1,
+      statsFile: path.join(dir, 'stats.json'),
+      snapshotFile: path.join(dir, 'ui-snapshot.json'),
+    });
+    const envelope = path.join(dir, 'turn.json');
+    fs.writeFileSync(envelope, JSON.stringify({
+      ok: true, stateVersion: 1, handOver: false, gameOver: false,
+      view: { handNo: 1 }, viewFor: 'user', events: [], next: null,
+    }));
+    child = spawn(process.execPath, [PUBLISH, '--from', envelope, '--game-dir', dir, '--lock-wait-ms', '8000'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    const startedAt = Date.now();
+    while (!hasLiveLockHolder(dir) && Date.now() - startedAt < 3000) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(hasLiveLockHolder(dir), true, 'publish child가 lock을 잡지 않았다');
+    process.kill(child.pid, 0);
 
-  let sawLive = false;
-  const host = {
-    stopNewPlayTimePublishers() {},
-    listLivePublishers() { return [{ pid: child.pid }]; },
-    async terminateLive(live) {
-      process.kill(live[0].pid, 0);
-      sawLive = true;
-      const results = await Promise.all(live.map((item) => terminateProcessGroup(item.pid)));
-      return { confirmed: results.every((row) => row.confirmed) };
-    },
-    hasLiveLockHolder,
-  };
-  const out = await cc.finalizeCutoff({
-    gameDir: dir, owner, completed: 1,
-    snapshotFile: path.join(dir, 'ui-snapshot.json'),
-    statsFile: path.join(dir, 'stats.json'),
-    host,
-  });
-  hung.close();
-  assert.equal(sawLive, true);
-  assert.equal(out.ok, true, JSON.stringify(out));
-  assert.equal(hasLiveLockHolder(dir), false);
-  assert.equal(cc.loadAuthority(dir).publishQueue['1'].noteKind, 'unavailable');
+    let sawLive = false;
+    const host = {
+      stopNewPlayTimePublishers() {},
+      listLivePublishers() { return [{ pid: child.pid }]; },
+      async terminateLive(live) {
+        try {
+          process.kill(live[0].pid, 0);
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+        sawLive = true;
+        const results = await Promise.all(live.map((item) => terminateProcessGroup(item.pid)));
+        return { confirmed: results.every((row) => row.confirmed) };
+      },
+      hasLiveLockHolder,
+    };
+    const out = await cc.finalizeCutoff({
+      gameDir: dir, owner, completed: 1,
+      snapshotFile: path.join(dir, 'ui-snapshot.json'),
+      statsFile: path.join(dir, 'stats.json'),
+      host,
+    });
+    assert.equal(sawLive, true);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    assert.equal(hasLiveLockHolder(dir), false);
+    assert.equal(cc.loadAuthority(dir).publishQueue['1'].noteKind, 'unavailable');
+  } finally {
+    await new Promise((resolve) => hung.close(resolve));
+    if (child?.pid) {
+      try { process.kill(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
 });
 
 test('stale owner finalize-cutoff는 live publisher를 종료하지 않는다', async () => {

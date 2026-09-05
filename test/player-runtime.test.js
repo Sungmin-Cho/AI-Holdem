@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import {
   RUNTIME_TABLE,
   SESSION_ID_MAX_LENGTH,
@@ -212,7 +213,11 @@ test('자식 cwd는 레포·게임 밖 빈 tmp 디렉터리이고 env는 최소 
     // 어댑터 allowlist(HOME·PATH) + 이 테스트가 주입한 두 키가 전부다. `__CF_...`는
     // macOS CoreFoundation이 exec 뒤 자식에 스스로 붙이는 값으로 상속 경로가 아니다.
     const fromAdapter = new Set(['HOME', 'PATH', 'FAKE_CLI_SCRIPT', 'FAKE_CLI_LOG']);
-    const fromPlatform = new Set(['__CF_USER_TEXT_ENCODING']);
+    const fromPlatform = new Set([
+      '__CF_USER_TEXT_ENCODING',
+      'HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'SYSTEMROOT',
+      'TEMP', 'TMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR',
+    ]);
     assert.deepEqual(call.envKeys.filter((k) => !fromAdapter.has(k) && !fromPlatform.has(k)), []);
     assert.equal(call.envKeys.some((k) => /PWD|WORKSPACE|PROJECT|KEY|SECRET|TOKEN|^npm_/i.test(k)), false);
     assert.ok(call.envKeys.includes('HOME') && call.envKeys.includes('PATH'));
@@ -608,7 +613,8 @@ test('probe(grok): 핀 시작 argv(세션 플래그 없음)로 돌고, 센티널
   }
 });
 
-test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async () => {
+test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async (t) => {
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
   const upperArgv = ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', ''];
   const f = fakeRuntime('claude', {
@@ -624,14 +630,14 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
     assert.deepEqual(roundtrip.argv, upperArgv, '상위 왕복은 정확한 상위 oneshot argv다');
     assert.deepEqual(containment.argv, upperArgv, '상위 컨테인먼트도 정확한 상위 oneshot argv다');
     assert.equal(roundtrip.stdin, 'ok 한 단어만 출력\n');
-    const freshPath = containment.stdin.match(/\/[^\s'"]+/)?.[0];
+    const freshPath = containment.stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
     assert.ok(freshPath && freshPath !== file, '상위 컨테인먼트는 플레이어 카나리가 아닌 fresh 카나리를 쓴다');
     assert.equal(fs.existsSync(freshPath), false, 'fresh 카나리는 probe 뒤 정리된다');
     assert.equal(containment.argv.join(' ').includes(freshPath), false, '카나리 경로는 stdin으로만 간다');
 
     const res2 = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res2.containment, true);
-    const freshPath2 = f.calls().at(-1).stdin.match(/\/[^\s'"]+/)?.[0];
+    const freshPath2 = f.calls().at(-1).stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
     assert.notEqual(freshPath2, freshPath, '상위 컨테인먼트 카나리는 probe마다 새로 만든다');
   } finally {
     f.cleanup();
@@ -649,7 +655,8 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
   }
 });
 
-test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async () => {
+test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async (t) => {
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
   const f = fakeRuntime('grok', {
     matchers: [{ includes: '다음 파일을 읽어', reply: '읽었습니다: ', echoCanary: true }],
@@ -946,7 +953,8 @@ test('oneshotStart: pid·startTime을 spawn 직후 제공하고 done이 raw를 �
   }
 });
 
-test('oneshotStart: done 타임아웃은 자식을 죽이지 않고, terminate가 TERM→KILL로 종료를 확인한다', async () => {
+test('oneshotStart: done 타임아웃은 자식을 죽이지 않고, terminate가 TERM→KILL로 종료를 확인한다', async (t) => {
+  if (skipOnWin32(t, 'SIGTERM is TerminateProcess on win32; ignoreTerm cannot survive it')) return;
   const f = fakeRuntime(
     'claude',
     { default: { reply: '늦은 본문', delayMs: 30_000, ignoreTerm: true } },
@@ -1296,7 +1304,8 @@ test('terminate: done 거부는 종료 증거가 아니다 — close 미확정�
   }
 });
 
-test('terminate: 재검증에서 identity가 mismatch/unknown으로 바뀌면 그 즉시 시그널을 멈추고 confirmed false', async () => {
+test('terminate: 재검증에서 identity가 mismatch/unknown으로 바뀌면 그 즉시 시그널을 멈추고 confirmed false', async (t) => {
+  if (skipOnWin32(t, 'identity revalidation stub uses POSIX startTime mismatch via PATH/ps')) return;
   let mismatchCalls = 0;
   const mismatch = fakeRuntime(
     'claude',

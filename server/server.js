@@ -45,7 +45,15 @@ function writeJsonAtomic(filePath, obj) {
   const tmpPath = `${filePath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(obj), 'utf8');
-    fs.renameSync(tmpPath, filePath);
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      if (process.platform !== 'win32' || !['EPERM', 'EEXIST', 'EACCES'].includes(error.code)) {
+        throw error;
+      }
+      fs.copyFileSync(tmpPath, filePath);
+      try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
+    }
   } catch (error) {
     try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
     throw error;

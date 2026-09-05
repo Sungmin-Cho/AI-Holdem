@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import { applyAction, createGame, startHand } from '../engine/hand.js';
 import { writeHandArchive } from '../engine/state.js';
 import { vacateLive } from '../engine/game-archive.js';
@@ -231,7 +232,8 @@ test('export CLI refuses an existing output file with EXISTS', () => {
   assert.equal(fs.readFileSync(out, 'utf8'), 'keep-me');
 });
 
-test('export CLI refuses ancestor-symlink output and input symlink', () => {
+test('export CLI refuses ancestor-symlink output and input symlink', (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   const dir = tmp();
   run(ENGINE, ['init', '--ai', '2', '--game-dir', dir]);
   run(ENGINE, ['new-hand', '--game-dir', dir]);

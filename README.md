@@ -66,6 +66,8 @@ nohup node tools/game-loop.js --store-dir game --ai 3 --player-runtime claude \
 open "http://127.0.0.1:<port>/?token=<t>"
 ```
 
+Windows Git Bash에서는 `nohup`/`/tmp` 대신 `node tools/game-loop.js ... > "%TEMP%\ai-holdem-boot.log" 2>&1 &` 와 `start "" "http://127.0.0.1:<port>/?token=<t>"` 를 쓴다. `ps -o lstart=` 는 쓰지 않는다 — 사이드카가 플랫폼 identity를 소유한다.
+
 재개는 `--ai` 대신 `--resume`.
 
 ### 엔진·서버만 (LLM 없이, legacy 개발 디렉터리)
