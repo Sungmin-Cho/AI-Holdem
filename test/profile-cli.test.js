@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import {
   detailRefOf,
   legacyTrainingPayloadSha256,
@@ -106,7 +107,8 @@ function writeFocusFile(storeDir, value, { symlinkTo } = {}) {
   return file;
 }
 
-test('defaultPracticeFocusFile ignores a symlink practice-focus and surfaces a notice', async () => {
+test('defaultPracticeFocusFile ignores a symlink practice-focus and surfaces a notice', async (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   const {
     defaultPracticeFocusFile,
     loadAutoPracticeFocus,

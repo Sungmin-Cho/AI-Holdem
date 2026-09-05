@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import {
@@ -360,7 +361,8 @@ function writeSessionDoneMigration(sessionDir, map = {
   );
 }
 
-test('Q2b session store migration rejects symlinked marker and map without outside or store writes', async () => {
+test('Q2b session store migration rejects symlinked marker and map without outside or store writes', async (t) => {
+  if (skipOnWin32(t, 'symlink fixtures require POSIX privilege semantics')) return;
   for (const linked of ['marker', 'map']) {
     const storeDir = tmp();
     const sessionDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
@@ -516,7 +518,8 @@ test('Q2b sweep and CLI surface item failures without halting valid items', asyn
   assert.equal(cli.failed, 1);
 });
 
-test('Q2b uninjected sweep uses defaultSolve for installed and missing adapters', async () => {
+test('Q2b uninjected sweep uses defaultSolve for installed and missing adapters', async (t) => {
+  if (skipOnWin32(t, 'defaultSolve process-group identity is POSIX')) return;
   const storeDir = tmp();
   const installedDir = sessionDirOf(storeDir, '11111111-1111-4111-8111-111111111111');
   const missingDir = sessionDirOf(storeDir, '22222222-2222-4222-8222-222222222222');

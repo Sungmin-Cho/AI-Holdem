@@ -613,7 +613,8 @@ test('probe(grok): 핀 시작 argv(세션 플래그 없음)로 돌고, 센티널
   }
 });
 
-test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async () => {
+test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async (t) => {
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
   const upperArgv = ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', ''];
   const f = fakeRuntime('claude', {
@@ -629,14 +630,14 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
     assert.deepEqual(roundtrip.argv, upperArgv, '상위 왕복은 정확한 상위 oneshot argv다');
     assert.deepEqual(containment.argv, upperArgv, '상위 컨테인먼트도 정확한 상위 oneshot argv다');
     assert.equal(roundtrip.stdin, 'ok 한 단어만 출력\n');
-    const freshPath = containment.stdin.match(/\/[^\s'"]+/)?.[0];
+    const freshPath = containment.stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
     assert.ok(freshPath && freshPath !== file, '상위 컨테인먼트는 플레이어 카나리가 아닌 fresh 카나리를 쓴다');
     assert.equal(fs.existsSync(freshPath), false, 'fresh 카나리는 probe 뒤 정리된다');
     assert.equal(containment.argv.join(' ').includes(freshPath), false, '카나리 경로는 stdin으로만 간다');
 
     const res2 = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res2.containment, true);
-    const freshPath2 = f.calls().at(-1).stdin.match(/\/[^\s'"]+/)?.[0];
+    const freshPath2 = f.calls().at(-1).stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
     assert.notEqual(freshPath2, freshPath, '상위 컨테인먼트 카나리는 probe마다 새로 만든다');
   } finally {
     f.cleanup();
@@ -654,7 +655,8 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
   }
 });
 
-test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async () => {
+test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async (t) => {
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
   const f = fakeRuntime('grok', {
     matchers: [{ includes: '다음 파일을 읽어', reply: '읽었습니다: ', echoCanary: true }],
