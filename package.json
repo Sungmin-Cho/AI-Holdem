@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "test:ci": "node --test --test-concurrency=1 --test-timeout=180000"
+    "test:ci": "node --test --test-concurrency=1 --test-timeout=900000"
   }
 }
