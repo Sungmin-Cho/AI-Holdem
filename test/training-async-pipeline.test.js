@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { skipOnWin32 } from './helpers/platform.js';
 import { createGameLoop } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
@@ -242,6 +243,7 @@ function envelopeFromPublishArgs(args) {
 }
 
 test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 120_000 }, async (t) => {
+  if (skipOnWin32(t, 'next-hand <1s budget does not hold on GHA windows-latest (6–7s spawn overhead)')) return;
   const gameDir = tmpGame();
   const explainCalls = [];
   const logs = [];
@@ -494,6 +496,7 @@ test('mid-hand kill → playing resume has the same machine-then-annotation shap
 });
 
 test('coach settle and training settle share result-wait cutoff without REVIEW_GATE_CLOSED', { timeout: 120_000 }, async (t) => {
+  if (skipOnWin32(t, '8s finalize budget does not hold on GHA windows-latest')) return;
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({

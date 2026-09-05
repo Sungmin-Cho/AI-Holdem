@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 
-const IDENTITY_TIMEOUT_MS = 3_000;
+const IDENTITY_TIMEOUT_MS = process.platform === 'win32' ? 15_000 : 3_000;
 const IDENTITY_MAX_BUFFER = 256;
 export const WIN32_START_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/;
 
