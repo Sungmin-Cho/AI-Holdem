@@ -14,6 +14,11 @@ import { setup3 } from './helpers/fixtures.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
+function stackedDeck(front) {
+  const used = new Set(front);
+  return [...front, ...newDeck().filter((card) => !used.has(card))].join(',');
+}
+
 function blindsOf(state) {
   return blindsForLevel(state.level, state.config.blinds0);
 }
@@ -281,7 +286,7 @@ test('cli hand --redacted 에 user decisions만 있고 상대 홀카드가 없�
   }).trim());
   run(['init', '--ai', '2']);
   // Distinct opponent holes so a board/user card cannot substring-match as a leak.
-  const started = run(['new-hand', '--deck', 'Ah,Kd,7h,2c,Qs,Jd,9c,8s,3d,4h,5s,6c,Th']);
+  const started = run(['new-hand', '--deck', stackedDeck(['Ah', 'Kd', '7h', '2c', 'Qs', 'Jd'])]);
   const oppHoles = {};
   for (const event of started.events ?? []) {
     if (event.type === 'deal_hole' && event.playerId !== 'user') {
