@@ -284,3 +284,90 @@ test('S2 detail verification rejects a summary identity changed while hashing', 
   item.handNo = 2;
   assert.equal(await pending, null, 'a receipt must stay bound to the initially verified summary');
 });
+
+test('formatter exposes source classification without upgrading synthetic or unverified detail', async () => {
+  const synthetic = await canonicalFormat({ status: 'supported', handClass: 'AJo', spotKey: '6max-100bb-btn-rfi-unopened', source: { id: 'fake-solver', version: '9.9.9', contentSha256: 'f'.repeat(64) } });
+  assert.equal(synthetic.sourceQuality, 'synthetic', 'a verified digest does not turn a synthetic provider into heuristic evidence');
+  assert.match(synthetic.sourceLabel, /테스트용 합성/); assert.doesNotMatch(synthetic.sourceLabel, /휴리스틱/);
+  assert.equal(synthetic.practiceTarget, null);
+  const unverified = formatTrainingCard({ status: 'supported', handClass: 'AJo', spotKey: '6max-100bb-btn-rfi-unopened', source: { id: 'local-preflop-baseline', version: '1.0.0', contentSha256: CONTENT_SHA256 } });
+  assert.equal(unverified.sourceQuality, 'unverified'); assert.equal(unverified.practiceTarget, null);
+  assert.doesNotMatch(unverified.sourceLabel, /휴리스틱/);
+});
+
+test('specific practice target comes only from supported identity-bound detail and leaves compact bytes unchanged', async () => {
+  const fixture = await canonicalFixture({ status: 'supported', handClass: 'AJo', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop' });
+  const before = JSON.stringify(fixture.item);
+  const compact = formatTrainingCard(fixture.item);
+  assert.equal(compact.practiceTarget, null);
+  const card = formatTrainingCard(fixture.item, { verifiedDetail: fixture.verifiedDetail });
+  assert.equal(card.sourceQuality, 'heuristic-reference'); assert.match(card.sourceLabel, /휴리스틱 참고 자료/);
+  assert.deepEqual(card.practiceTarget, { spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' });
+  assert.equal(JSON.stringify(fixture.item), before);
+  for (const overrides of [{ status: 'unsupported' }, { street: 'river' }, { forced: true }, { spotKey: 'postflop-river-heads-up' }, { handClass: 'JAs' }]) {
+    const other = await canonicalFormat({ status: 'supported', handClass: 'AJo', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop', ...overrides });
+    assert.equal(other.practiceTarget, null, JSON.stringify(overrides));
+  }
+});
+
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { studyLink } from '../server/public/table-controls.js';
+
+// A small DOM boundary double executes the actual renderer; it does not replace
+// its source formatter or navigation decision with test implementations.
+function renderTrainingCards(items, receipts = new Map()) {
+  class Node {
+    constructor(tag, className = '', text = '') {
+      this.tag = tag; this.className = className; this.text = text; this.children = [];
+      this.dataset = {}; this.scrollTop = 0; this.open = false;
+      this.classList = { toggle() {} };
+    }
+    append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+    replaceChildren(...children) { this.children = []; this.append(...children); }
+    addEventListener() {}
+    contains() { return false; }
+    remove() { this.parent.children = this.parent.children.filter((child) => child !== this); }
+    querySelectorAll(selector) {
+      const matches = (node) => selector.startsWith('.') ? node.className.split(' ').includes(selector.slice(1))
+        : selector === '[data-evaluation-id]' ? Boolean(node.dataset.evaluationId) : node.tag === selector;
+      return this.children.flatMap((child) => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
+  }
+  const list = new Node('div'); const panel = new Node('div');
+  const src = readFileSync(new URL('../server/public/app.js', import.meta.url), 'utf8');
+  const functionSource = src.slice(src.indexOf('function paintTraining()'), src.indexOf('function paintReview('));
+  runInNewContext(`${functionSource}; paintTraining();`, {
+    ui: { training: items }, document: { activeElement: null },
+    $: (id) => id === 'training-list' ? list : panel,
+    el: (tag, cls, text) => new Node(tag, cls, text),
+    detailKey: (item) => `${item.evaluationId}:${item.detailSha256}`,
+    detailCache: receipts, detailErrors: new Set(),
+    formatTrainingCard, studyLink,
+    authenticatedStudyUrl: `http://127.0.0.1:1234/#token=${'a'.repeat(64)}`,
+    loadTrainingDetail: () => { throw new Error('closed cards should not load detail'); },
+  });
+  return list;
+}
+
+test('training DOM renders synthetic source caveat and only a generic study link', () => {
+  const item = { evaluationId: 'synthetic-display', source: { id: 'fake-solver', version: '9.9.9' }, status: 'supported', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' };
+  const dom = renderTrainingCards([item]);
+  const source = dom.querySelector('.training-source').text;
+  assert.match(source, /fake-solver@9.9.9.*테스트용 합성/);
+  assert.doesNotMatch(source, /휴리스틱/);
+  const link = dom.querySelector('a');
+  assert.equal(new URL(link.href).search, ''); assert.match(link.text, /지원 상황/);
+});
+
+test('training DOM routes a verified supported practice target without altering compact summaries', async () => {
+  const fixture = await canonicalFixture({ status: 'supported', handClass: 'AJo', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop' });
+  const before = JSON.stringify(fixture.item);
+  const cache = new Map([[`${fixture.item.evaluationId}:${fixture.item.detailSha256}`, fixture.verifiedDetail]]);
+  const dom = renderTrainingCards([fixture.item], cache);
+  assert.match(dom.querySelector('.training-source').text, /휴리스틱 참고 자료/);
+  const href = new URL(dom.querySelector('a').href);
+  assert.equal(href.searchParams.get('spotKey'), '6max-100bb-btn-rfi-unopened'); assert.equal(href.searchParams.get('handClass'), 'AJo');
+  assert.equal(JSON.stringify(fixture.item), before);
+});

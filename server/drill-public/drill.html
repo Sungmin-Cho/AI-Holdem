@@ -2,14 +2,41 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>AI 홀덤 스팟 드릴</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>AI 홀덤 · 학습실</title>
   <link rel="stylesheet" href="/drill.css">
 </head>
 <body>
-  <h1>스팟 드릴</h1>
-  <p id="prompt"></p>
-  <div id="actions"></div>
-  <pre id="feedback"></pre>
+  <header class="header"><span class="brand">♠ AI 홀덤</span><span class="eyebrow">학습실</span><p>한 가지 상황을 이해하고, 다시 선택해 보세요.</p></header>
+  <main>
+    <section class="workspace" aria-labelledby="study-title">
+      <div class="section-head"><span class="eyebrow">REFERENCE PRACTICE</span><h1 id="study-title">다음 선택을 위한 연습</h1><p>게임이 끝난 뒤에도 이 학습실에서 이어갈 수 있습니다.</p></div>
+      <div class="mode-controls"><div class="mode-field"><label for="mode">연습 모드</label><select id="mode"><option value="free">자유 연습</option><option value="leak">연습 후보</option><option value="daily">오늘 복습</option><option value="mistake-review">기준표와 다른 선택 복습</option><option value="assessment">새 문제 평가</option><option value="retest">지연 재평가</option></select></div><button id="start" class="primary" type="button" disabled>연습 시작</button></div>
+      <p class="mode-help">새 문제 평가는 추적된 기록에서 보지 않은 상황을 고릅니다. 과거 미추적 노출은 알 수 없으며, 지연 재평가는 완료 후 24시간이 지나야 열립니다.</p>
+      <div class="status-row"><p id="status" role="status" aria-live="polite">저장된 연습을 확인하고 있습니다…</p><button id="recover" class="quiet" type="button">현재 상태 확인</button><button id="retry" class="quiet" type="button" hidden>같은 답안 다시 확인</button></div>
+      <article class="question" aria-labelledby="prompt">
+        <p id="run-progress" class="eyebrow">연습 준비</p>
+        <h2 id="prompt">오늘은 어떤 상황을 연습할까요</h2>
+        <p id="context" class="context"></p>
+        <div id="actions" class="actions" aria-label="가능한 액션"></div>
+        <div id="feedback" class="feedback" aria-live="polite" hidden></div>
+        <button id="next" class="primary" type="button" hidden>다음 문제</button>
+        <p id="notices" class="notice"></p>
+        <p id="question-source" class="source-note"></p>
+      </article>
+    </section>
+    <aside class="learning" aria-label="학습 요약">
+      <section class="goal-card"><span class="eyebrow">오늘의 연습 목표</span><h2 id="goal">기록을 확인하고 있습니다</h2><p id="due"></p></section>
+      <div class="metrics-grid">
+        <section class="metric"><h2>게임 기록</h2><p class="metric-label">기준표 허용률</p><strong id="game-rate">—</strong><p id="game-samples"></p><p id="game-coverage"></p><p class="metric-label">빈도 일치도</p><p id="game-calibration"></p></section>
+        <section class="metric"><h2>연습 기록</h2><p class="metric-label">기준표 허용률</p><strong id="practice-rate">—</strong><p id="practice-samples"></p><p id="practice-coverage"></p><p class="metric-label">빈도 일치도</p><p id="practice-calibration"></p></section>
+      </div>
+      <p id="source" class="source-note"></p><p id="summary-status" role="status"></p>
+      <section class="assessments"><h2>평가와 재평가</h2><p class="source-note">같은 출처의 기준표 측정치를 따로 비교합니다. 이 수치만으로 실력 향상을 단정하지 않습니다.</p><div id="assessments"></div></section>
+    </aside>
+  </main>
+  <footer>지원 범위: 6인 · 약 100BB 프리플롭. 다른 상황은 참고 복기이며 이 기준표의 점수에 포함하지 않습니다.</footer>
   <script type="module" src="/drill.js"></script>
 </body>
 </html>
