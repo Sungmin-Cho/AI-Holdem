@@ -38,6 +38,25 @@ const GRADE = Object.freeze({
   'off-policy': '기준표와 다른 선택',
 });
 
+const SOURCE_LABEL = Object.freeze({
+  'heuristic-reference': '휴리스틱 참고 자료',
+  synthetic: '테스트용 합성 자료 · 학습 근거 제외',
+  unverified: '출처 미검증 · 기준표 비교 불가',
+});
+
+// This is only a navigation shape check. Source/status authority comes from the
+// verified detail below, never from compact card fields or a second digest path.
+function practiceTargetOf(item, sourceEligible) {
+  if (!sourceEligible || item.status !== 'supported' || item.forced
+    || (item.street !== undefined && item.street !== 'preflop')
+    || !/^6max-100bb-(?:(?:utg|hj|co|btn|sb)-rfi-unopened|(?:bb|sb|btn)-vs-single-raise)$/.test(item.spotKey ?? '')) return null;
+  const hand = /^([AKQJT2-9])([AKQJT2-9])([so]?)$/.exec(item.handClass ?? '');
+  if (!hand) return null;
+  const ranks = 'AKQJT98765432';
+  if (hand[1] === hand[2] ? hand[3] !== '' : (!hand[3] || ranks.indexOf(hand[1]) >= ranks.indexOf(hand[2]))) return null;
+  return Object.freeze({ spotKey: item.spotKey, handClass: item.handClass });
+}
+
 function actionLabel(action) {
   return ACTION[action] ?? action ?? '—';
 }
@@ -127,6 +146,9 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
       ? 'unavailable'
       : (sourceEligible && referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
+    sourceQuality: quality.quality,
+    sourceLabel: SOURCE_LABEL[quality.quality] ?? SOURCE_LABEL.unverified,
+    practiceTarget: practiceTargetOf(item, sourceEligible),
     status: item.status ?? null,
     exploit: '',
   };

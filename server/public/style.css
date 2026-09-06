@@ -865,6 +865,7 @@ main {
   display: flex;
   flex-direction: column;
   width: min(640px, 100%);
+  min-width: 0;
   max-height: min(86dvh, 700px);
   padding: 24px 30px 28px;
   background: linear-gradient(180deg, #151B16 0%, #101510 100%);
@@ -905,7 +906,7 @@ main {
   background: linear-gradient(90deg, rgba(201, 168, 96, 0.5) 0%, rgba(201, 168, 96, 0.06) 100%);
 }
 
-.review-body { flex: 1; min-height: 0; overflow: auto; }
+.review-body { flex: 1; min-width: 0; min-height: 0; overflow: auto; overflow-wrap: anywhere; }
 .review-body h1, .review-body h2, .review-body h3 {
   margin: 20px 0 8px;
   font-size: 13px;
@@ -965,3 +966,35 @@ main {
   .plate-tag { font-size: 9px; padding: 1px 5px; }
   .dealer-btn { width: 17px; height: 17px; font-size: 9px; right: -6px; top: -6px; }
 }
+
+/* Reading and recovery controls keep the existing felt / gold visual language. */
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid #f3d58d; outline-offset: 4px; }
+.action-feedback { min-height: 34px; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 0 16px; }
+.action-feedback p { font-size: 12px; color: #d2c8b2; margin: 4px 0; }
+.action-feedback .btn { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+.study-entry { padding: 14px 18px 10px; border-bottom: 1px solid rgba(201,168,96,.18); }
+.study-entry p { margin: 8px 0 0; font-size: 11px; line-height: 1.65; color: #adaf9f; }
+.study-link { color: #e8c880; font-weight: 600; text-decoration: underline; text-underline-offset: 4px; display: inline-block; padding: 5px 0; }
+.study-entry .btn { font-size: 11px; min-height: 28px; padding: 4px 8px; }
+.unread { border-radius: 10px; background: #bb9147; color: #141712; padding: 2px 5px; font-size: 9px; white-space: nowrap; }
+.presets { flex-wrap: wrap; }
+.training-card summary { cursor: pointer; }
+.training-body { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .topbar { flex-wrap: wrap; height: auto; min-height: 72px; gap: 8px; padding: 10px 14px; }
+  .topbar .meta { order: 3; width: 100%; gap: 12px; flex-wrap: wrap; }
+  .meta-seg { display: flex !important; }
+  .meta-seg[hidden] { display: none !important; }
+  .meta-label { font-size: 9px; }
+  .meta-value { font-size: 12px; }
+  .action-bar { gap: 8px; padding: 12px; }
+  .raise-top { gap: 8px; flex-wrap: wrap; }
+  .raise-panel { min-width: 0; width: 100%; }
+  .amount-field { min-width: 112px; }
+  .presets { gap: 4px; }
+  .preset { min-height: 32px; padding: 5px 8px; }
+  .action-feedback { flex-wrap: wrap; gap: 4px; text-align: center; }
+  .study-entry { padding: 10px 14px; }
+}
+@media (max-width: 900px) { .raise-range { display: block; font-size: 10px; } }

@@ -1,4 +1,7 @@
-import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems } from './training-format.js';
+import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
+
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
+import { createActionController } from './action-controller.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -11,10 +14,16 @@ const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '�
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
 const ui = { view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined };
-let pendingAction = false;
+let pendingAction = true;
+let actionController = null;
+let selectedTab = 'log';
+const unread = { coach: 0, training: 0 };
+const detailCache = new Map();
+const detailLoading = new Set();
+const detailErrors = new Set();
+let authenticatedStudyUrl = null;
 let raiseTo = 0;
 let lastDecisionId = null;
-let overlayDismissed = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -151,16 +160,6 @@ function actionVerbs(items) {
   return verbs;
 }
 
-function clampRaiseTo(value, legal) {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return legal.minRaiseTo;
-  return Math.max(legal.minRaiseTo, Math.min(legal.maxRaiseTo, n));
-}
-
-function potRaiseTo(legal, myBet, fraction) {
-  return clampRaiseTo(myBet + legal.callAmount + legal.potTotal * fraction, legal);
-}
-
 function myBetOf(view) {
   const seat = view?.seats?.find((s) => s.playerId === 'user');
   return seat?.bet ?? 0;
@@ -225,7 +224,15 @@ function reviewBody(src) {
 }
 
 function paintTop(view) {
-  $('hand-no').textContent = view?.handNo ?? '—';
+  $('hand-no').textContent = view?.handLimit ? `${view.handNo} / ${view.handLimit}` : (view?.handNo ?? '—');
+  const cash = view?.mode === 'cash-training';
+  $('game-mode').textContent = cash ? '캐시 연습' : '토너먼트';
+  for (const row of document.querySelectorAll('[data-tournament-meta]')) row.hidden = cash;
+  const net = view?.sessionNet?.user;
+  $('session-net').textContent = Number.isFinite(net) ? `${net > 0 ? '+' : ''}${formatChip(net)}` : '—';
+  $('learning-scope').textContent = cash
+    ? '6인 · 약 100BB 프리플롭의 휴리스틱 기준표를 참고합니다. 다른 상황은 정성 복기이며 집계에서 제외됩니다.'
+    : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
   $('level').textContent = view == null ? '—' : String((view.level ?? 0) + 1);
   $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])}/${formatChip(view.blinds[1])}` : '—';
   const left = view ? handsUntilLevel(view) : null;
@@ -402,7 +409,7 @@ function setRaiseTo(value, { fromInput = false } = {}) {
   if (!legal) return;
   raiseTo = clampRaiseTo(value, legal);
   $('raise-slider').value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
   if (!fromInput) writeAmountField(raiseTo);
 }
 
@@ -427,9 +434,9 @@ function syncRaisePanel(legal) {
   slider.min = String(legal.minRaiseTo);
   slider.max = String(legal.maxRaiseTo);
   slider.value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
   writeAmountField(raiseTo);
-  $('raise-range').textContent = `${formatChip(legal.minRaiseTo)} – ${formatChip(legal.maxRaiseTo)}`;
+  $('raise-range').textContent = `이번 스트리트 총액 · ${formatChip(legal.minRaiseTo)} – ${formatChip(legal.maxRaiseTo)}`;
 }
 
 function paintActionBar(view) {
@@ -457,7 +464,10 @@ function paintActionBar(view) {
   amount.disabled = raiseOff;
   amount.closest('.amount-field').classList.toggle('is-disabled', raiseOff);
   for (const btn of $('raise-panel').querySelectorAll('[data-preset]')) {
-    btn.disabled = raiseOff;
+    const multiple = btn.dataset.preset === 'rfi' ? 2.5 : btn.dataset.preset === 'threebet' ? 8.5 : null;
+    const available = multiple === null || (view.street === 'preflop' && bbRaiseTo(legal, view.blinds?.[1], multiple) !== null);
+    btn.hidden = !available;
+    btn.disabled = raiseOff || !available;
   }
 
   $('btn-allin-only').hidden = !shortAllIn;
@@ -592,48 +602,94 @@ function paintCoach() {
   }
 }
 
+function detailKey(item) { return `${item.evaluationId}:${item.detailSha256}`; }
+
+async function loadTrainingDetail(item) {
+  const key = detailKey(item);
+  if (detailLoading.has(key) || detailCache.has(key)) return;
+  detailLoading.add(key);
+  detailErrors.delete(key);
+  try {
+    const params = new URLSearchParams({ token, ref: item.detailRef });
+    const response = await fetch(`/api/training-detail?${params}`);
+    if (!response.ok) throw new Error('DETAIL_UNAVAILABLE');
+    const payload = await response.json();
+    const verifiedDetail = await verifyTrainingDetail(item, payload.detail);
+    if (!verifiedDetail) throw new Error('DETAIL_UNVERIFIED');
+    detailCache.set(key, verifiedDetail);
+  } catch { detailErrors.add(key); }
+  finally { detailLoading.delete(key); paintTraining(); }
+}
+
 function paintTraining() {
   const list = $('training-list');
   if (!list) return;
+  const panel = $('panel-training');
+  const scroll = { list: list.scrollTop, panel: panel.scrollTop };
   if (!ui.training.length) {
     list.replaceChildren(el('div', 'coach-empty', '핸드가 끝나면 결정 리뷰가 쌓입니다.'));
     return;
   }
-  list.replaceChildren();
+  for (const empty of list.querySelectorAll('.coach-empty')) empty.remove();
+  const existing = new Map([...list.querySelectorAll('[data-evaluation-id]')].map((node) => [node.dataset.evaluationId, node]));
   for (const item of ui.training) {
-    const card = formatTrainingCard(item);
-    const box = el('details', 'training-card');
-    if (item.status === 'unsupported') box.classList.add('is-unsupported');
-    if (card.grade) box.classList.add(`grade-${card.grade}`);
-    if (card.forced) box.classList.add('is-forced');
-    const summary = el('summary', 'training-summary');
-    summary.append(
-      el('div', 'training-title', card.title),
-      el('div', 'training-choice', card.choice),
+    const key = detailKey(item);
+    let box = existing.get(item.evaluationId);
+    const card = formatTrainingCard(item, { verifiedDetail: detailCache.get(key) });
+    if (!box) {
+      box = el('details', 'training-card');
+      box.dataset.evaluationId = item.evaluationId;
+      box.addEventListener('toggle', () => {
+        if (box.open) void loadTrainingDetail(ui.training.find((row) => row.evaluationId === box.dataset.evaluationId));
+      });
+      box.append(el('summary', 'training-summary'), el('div', 'training-body'));
+      list.append(box);
+    }
+    existing.delete(item.evaluationId);
+    const signature = JSON.stringify([card, authenticatedStudyUrl, detailErrors.has(key)]);
+    if (box._signature === signature) continue;
+    box._signature = signature;
+    const focused = box.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+    box.classList.toggle('is-unsupported', item.status === 'unsupported');
+    box.classList.toggle('is-forced', card.forced);
+    box.querySelector('summary').replaceChildren(
+      el('div', 'training-title', card.title), el('div', 'training-choice', card.choice),
       el('div', 'training-rec', card.recommendation),
-      el('div', 'training-grade', card.forced ? card.note : (card.grade ?? card.note)),
+      el('div', 'training-grade', card.forced ? card.note : (card.gradeLabel || card.note)),
     );
-    box.append(summary);
-    const body = el('div', 'training-body');
+    const body = box.querySelector('.training-body');
+    body.replaceChildren();
     if (card.note && !card.forced) body.append(el('div', 'training-note', card.note));
     if (card.exploit) body.append(el('div', 'training-exploit', card.exploit));
-    if (card.explanation) body.append(el('div', 'training-explain', card.explanation));
-    if (card.source) body.append(el('div', 'training-source', card.source));
-    if (Array.isArray(item.recommended)) {
-      for (const action of item.recommended) {
-        const freq = action.frequency != null ? ` ${(action.frequency * 100).toFixed(0)}%` : '';
-        const size = action.sizeBb != null ? ` ${action.sizeBb}bb` : '';
-        body.append(el('div', 'training-action', `${action.action}${size}${freq}`));
+    if (card.explanation) body.append(el('div', 'training-explain', card.explanation === 'unavailable' ? '설명을 준비하지 못했습니다.' : card.explanation));
+    body.append(el('div', 'training-source', [card.source, card.sourceLabel].filter(Boolean).join(' · ')));
+    if (detailErrors.has(key)) {
+      const retry = el('button', 'btn btn-ghost', '출처 확인 다시 시도');
+      retry.type = 'button'; retry.dataset.focus = 'source-retry';
+      retry.addEventListener('click', () => void loadTrainingDetail(item));
+      body.append(el('p', 'training-note', '검증된 상세 근거를 불러오지 못했습니다.'), retry);
+    }
+    if (authenticatedStudyUrl) {
+      const href = studyLink(authenticatedStudyUrl, card.practiceTarget ? { mode: 'free', ...card.practiceTarget } : {});
+      if (href) {
+        const link = el('a', 'study-link', card.practiceTarget ? '이 상황 연습하기' : '학습실에서 지원 상황 보기');
+        link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.dataset.focus = 'practice';
+        body.append(link);
       }
     }
-    box.append(body);
-    list.append(box);
+    if (focused) box.querySelector(`[data-focus="${focused}"]`)?.focus({ preventScroll: true });
+    if (box.open && !detailCache.has(key) && !detailErrors.has(key)) void loadTrainingDetail(item);
   }
+  for (const node of existing.values()) node.remove();
+  list.scrollTop = scroll.list;
+  panel.scrollTop = scroll.panel;
 }
 
 function paintReview(view) {
   const overlay = $('review-overlay');
-  const show = Boolean(view?.gameOver && ui.review) && !overlayDismissed;
+  $('review-reopen').hidden = !ui.review;
+  const dismissed = overlay.dataset.dismissed === 'true';
+  const show = Boolean(view?.gameOver && ui.review) && !dismissed;
   overlay.hidden = !show;
   if (!show) return;
   const result = $('review-result');
@@ -643,7 +699,12 @@ function paintReview(view) {
         : '';
   result.classList.toggle('is-win', view.result === 'win');
   result.classList.toggle('is-lose', view.result === 'lose');
-  $('review-body').innerHTML = renderMarkdown(reviewBody(ui.review));
+  const review = $('review-body');
+  if (review._source !== ui.review) {
+    const scroll = review.scrollTop;
+    review.innerHTML = renderMarkdown(reviewBody(ui.review));
+    review._source = ui.review; review.scrollTop = scroll;
+  }
 }
 
 function paint() {
@@ -655,8 +716,11 @@ function paint() {
   paintThinking(view);
   paintActionBar(view);
   paintLog();
+  const coachScroll = $('panel-coach').scrollTop;
   paintCoach();
+  $('panel-coach').scrollTop = coachScroll;
   paintTraining();
+  paintUnread();
   paintReview(view);
 }
 
@@ -676,20 +740,23 @@ function renderSnapshot(snap) {
     : [];
   for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
-  pendingAction = false;
-  lastDecisionId = null;
-  overlayDismissed = false;
+  authenticatedStudyUrl = studyLink(snap.studyUrl);
+  const study = $('study-open');
+  study.hidden = !authenticatedStudyUrl;
+  if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
+  else study.removeAttribute('href');
   paint();
 }
 
 function render(m) {
   if (m.view !== undefined) {
     ui.view = m.view;
-    pendingAction = false;
+    actionController?.observe(ui.view, { revision: m.revision });
   }
   if (Array.isArray(m.events) && m.events.length) ui.log.push(...m.events);
   if (Array.isArray(m.messages) && m.messages.length) ui.log.push(...m.messages);
   if (Array.isArray(m.coach) && m.coach.length) {
+    if (selectedTab !== 'coach') unread.coach += m.coach.length;
     // Notes arrive whenever their background coach finishes, not in hand order.
     for (const note of m.coach) {
       const at = ui.coach.findIndex((existing) => existing.handNo === note.handNo);
@@ -699,10 +766,12 @@ function render(m) {
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (Array.isArray(m.training) && m.training.length) {
+    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
     ui.training = mergeTrainingItems(ui.training, m.training);
     for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   }
   if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {
+    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
     for (const ann of m.trainingAnnotations) {
       const at = ui.trainingAnnotations.findIndex((existing) => (
         existing.evaluationId === ann.evaluationId && existing.field === ann.field
@@ -713,28 +782,18 @@ function render(m) {
     }
   }
   if (m.review !== undefined) {
+    const overlay = $('review-overlay');
+    overlay.dataset.dismissed = String(reviewDismissalAfterUpdate(
+      overlay.dataset.dismissed === 'true', ui.review, m.review,
+    ));
     ui.review = m.review;
-    overlayDismissed = false;
   }
   paint();
 }
 
 async function sendAction(action, amount) {
-  const legal = ui.view?.legal;
-  if (!legal || pendingAction) return;
-  pendingAction = true;
-  paint();
-  const body = { token, decisionId: legal.decisionId, action };
-  if (amount !== undefined) body.amount = Number(amount);
-  try {
-    await fetch('/api/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch {
-    /* 재활성은 다음 view 게시 */
-  }
+  if (!ui.view?.legal || pendingAction) return;
+  await actionController?.send(action, amount === undefined ? undefined : Number(amount));
 }
 
 $('btn-fold').addEventListener('click', () => sendAction('fold'));
@@ -758,6 +817,10 @@ $('raise-panel').addEventListener('click', (ev) => {
   else if (preset === 'half') setRaiseTo(potRaiseTo(legal, myBet, 0.5));
   else if (preset === 'pot') setRaiseTo(potRaiseTo(legal, myBet, 1));
   else if (preset === 'allin') setRaiseTo(legal.maxRaiseTo);
+  else if (preset === 'rfi' || preset === 'threebet') {
+    const amount = bbRaiseTo(legal, ui.view.blinds?.[1], preset === 'rfi' ? 2.5 : 8.5);
+    if (amount !== null) setRaiseTo(amount);
+  }
   markAmountValid(true);
 });
 
@@ -801,7 +864,18 @@ $('raise-amount').addEventListener('keydown', (ev) => {
   markAmountValid(true);
 });
 
+function paintUnread() {
+  for (const name of ['coach', 'training']) {
+    const badge = $(`unread-${name}`);
+    badge.textContent = unread[name] ? `새 ${unread[name]}` : '';
+    badge.hidden = !unread[name];
+  }
+}
+
 function selectTab(which) {
+  selectedTab = which;
+  if (which in unread) unread[which] = 0;
+  paintUnread();
   for (const name of ['log', 'coach', 'training']) {
     const on = name === which;
     $(`tab-${name}`)?.classList.toggle('on', on);
@@ -816,30 +890,91 @@ $('tab-coach').addEventListener('click', () => selectTab('coach'));
 $('tab-training')?.addEventListener('click', () => selectTab('training'));
 
 $('review-close').addEventListener('click', () => {
-  overlayDismissed = true;
-  $('review-overlay').hidden = true;
+  const overlay = $('review-overlay');
+  overlay.dataset.dismissed = 'true';
+  overlay.hidden = true;
+  $('review-reopen').focus();
 });
+$('review-reopen').addEventListener('click', () => {
+  $('review-overlay').dataset.dismissed = 'false';
+  paintReview(ui.view);
+  $('review-close').focus();
+});
+$('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
+$('action-retry').addEventListener('click', () => void actionController?.retry());
 
 const token = new URLSearchParams(location.search).get('token');
-let revision = 0; const buffer = [];
+let revision = 0;
+const buffer = [];
 let booted = false;
-const es = new EventSource(`/api/events?token=${token}&after=0`);
-es.onmessage = (m) => {
-  const msg = { revision: Number(m.lastEventId), ...JSON.parse(m.data) };
-  if (!booted) { buffer.push(msg); return; }
-  applyMessage(msg);                       // revision <= 현재면 무시
-};
-es.onopen = async () => {
-  const snap = await (await fetch(`/api/snapshot?token=${token}`)).json();
-  renderSnapshot(snap); revision = snap.revision;
-  booted = true;
-  for (const m of buffer.splice(0)) applyMessage(m); // snap 이후분만 적용됨
-};
-es.onerror = () => { booted = false; };     // 재접속 시 onopen이 다시 스냅샷 로드
-function applyMessage(m) { if (m.revision <= revision) return; revision = m.revision; render(m); }
-
-es.addEventListener('open', () => setConn(true));
-es.addEventListener('error', () => setConn(false));
-if (!token) showBootError('접속 토큰이 없습니다. /?token=... 으로 열어 주세요.');
-
+let opening = false;
+async function getSnapshot({ signal } = {}) {
+  const response = await fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal });
+  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  return response.json();
+}
+async function getStatus({ signal } = {}) {
+  const response = await fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal });
+  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  return response.json();
+}
+async function initializeController() {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  const gameEpoch = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  actionController = createActionController({
+    gameEpoch, getSnapshot, getStatus, storage: sessionStorage,
+    postAction: async (body, { signal }) => {
+      const response = await fetch('/api/action', { method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...body }) });
+      const result = await response.json();
+      return response.ok ? result : { ...result, ok: false };
+    },
+    onSnapshot: (snapshot) => {
+      if (snapshot.revision < revision) return;
+      renderSnapshot(snapshot); revision = snapshot.revision;
+    },
+    onState: (state) => {
+      pendingAction = state.disabled;
+      $('action-status').textContent = state.message;
+      $('action-retry').hidden = !state.canRetry;
+      $('action-retry').disabled = !state.canRetry;
+      $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(state.phase);
+      paintActionBar(ui.view);
+    },
+  });
+}
+function applyMessage(m) {
+  if (m.revision <= revision) return;
+  revision = m.revision; render(m);
+}
+if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
+else {
+  const es = new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
+  es.onmessage = (event) => {
+    try {
+      const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data) };
+      if (!booted) { buffer.push(msg); return; }
+      applyMessage(msg);
+    } catch { setConn(false); actionController?.disconnect(); }
+  };
+  es.onopen = async () => {
+    if (opening) return;
+    opening = true;
+    try {
+      const snapshot = await getSnapshot();
+      if (!actionController) await initializeController();
+      await actionController.connect(snapshot);
+      booted = true; setConn(true);
+      for (const msg of buffer.splice(0)) applyMessage(msg);
+    } catch {
+      booted = false; setConn(false); actionController?.disconnect();
+      $('action-status').textContent = '현재 상태를 불러오지 못했습니다. 연결 또는 접속 링크를 확인하세요.';
+    } finally { opening = false; }
+  };
+  es.onerror = () => { booted = false; setConn(false); actionController?.disconnect(); };
+  const poll = setInterval(() => {
+    if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(actionController.state.phase)) void actionController.reconcile();
+  }, 2500);
+  window.addEventListener('pagehide', () => { clearInterval(poll); es.close(); });
+}
 paint();
