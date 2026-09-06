@@ -1,4 +1,4 @@
-import { platformTimeout } from '../shared/platform-files.js';
+import { platformTimeout, windowsPowerShellEnvironment } from '../shared/platform-files.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 
@@ -69,6 +69,7 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
     ], {
       encoding: 'utf8',
       timeout: platformTimeout(IDENTITY_TIMEOUT_MS),
+      env: windowsPowerShellEnvironment(),
       maxBuffer: IDENTITY_MAX_BUFFER,
       windowsHide: true,
     });

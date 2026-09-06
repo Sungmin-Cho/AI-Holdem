@@ -22,12 +22,21 @@ export function extendPlatformDeadline(deadline) {
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+// pwsh 7 exports its module search path to children. Windows PowerShell 5.1
+// cannot load those Core modules. Use the system modules of the executable's
+// root, never a custom payload environment's SystemRoot or inherited PSHOME.
+export function windowsPowerShellEnvironment(env = process.env, systemRoot = process.env.SystemRoot || 'C:\\Windows') {
+  const clean = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+  clean.PSModulePath = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  return clean;
+}
+
 const denied = () => Object.assign(new Error('PRIVATE_PATH_UNVERIFIED'), { code: 'PRIVATE_PATH_UNVERIFIED' });
 const quote = (text) => `'${String(text).replaceAll("'", "''")}'`;
 function powershell(script, spawn = spawnSync) {
   return spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', timeout: platformTimeout(15_000), maxBuffer: 64 * 1024, windowsHide: true });
+    { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: platformTimeout(15_000), maxBuffer: 64 * 1024, windowsHide: true });
 }
 
 // Windows mode bits do not describe a DACL. Read the actual ACL without changing

@@ -15,7 +15,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
-import { isPrivatePath } from '../shared/platform-files.js';
+import { isPrivatePath, windowsPowerShellEnvironment } from '../shared/platform-files.js';
 import { ownedProcessStartTime } from '../engine/state.js';
 import { resolveRuntimes, RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { ensureStudyService, inspectStudyService, stopStudyService } from '../tools/study-service.js';
@@ -505,8 +505,13 @@ function processCommandLine(pid) {
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`],
-  { encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
+  { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
 }
+
+test('S8 fixture: runner process command line is observable with inherited shell environment', () => {
+  const commandLine = processCommandLine(process.pid);
+  assert.ok(commandLine.includes(path.basename(process.execPath)), commandLine);
+});
 
 function captureCliRelay(gameDir) {
   const file = gameDir && path.join(gameDir, 'lock.json');

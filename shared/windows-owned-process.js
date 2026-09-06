@@ -1,3 +1,4 @@
+import { windowsPowerShellEnvironment } from './platform-files.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -74,7 +75,7 @@ export function spawnOwnedCommand(command, args, options = {}) {
   }
   if ([powershell, ...argv].map(quoteWindowsArgument).join(' ').length + 1 > 32767)
     throw windowsInvalid('WINDOWS_OWNED_WRAPPER_TOO_LARGE');
-  const child = spawn(powershell, argv, windowsOwnedSpawnOptions(options));
+  const child = spawn(powershell, argv, windowsOwnedSpawnOptions({ ...options, env: windowsPowerShellEnvironment(options.env ?? process.env) }));
   child.ownedWindowsJob = true;
   owned.add(child);
   return child;

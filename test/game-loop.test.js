@@ -3634,8 +3634,13 @@ test('코치 프롬프트는 상대 비공개 홀카드와 아키타입 literal�
   const record = readJson(path.join(gameDir, 'state.json')).lastHand;
   const privateCards = record.holes.p1;
   const prompt = upper.prompts[0];
+  // Cards are JSON string values in the inline process input. A raw substring
+  // check mistakes "Ac" inside "chosenAction"/"priorActions" for a leaked card.
+  assert.equal(JSON.stringify({ chosenAction: 'fold' }).includes('Ac'), true);
+  for (const card of privateCards) {
+    assert.equal(prompt.includes(JSON.stringify(card)), false, `private card leaked into prompt: ${card}`);
+  }
   for (const literal of [
-    ...privateCards,
     villain.archetype,
     villain.personality,
     String(villain.bluffFreq),

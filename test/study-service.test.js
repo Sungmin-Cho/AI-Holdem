@@ -451,8 +451,13 @@ test('REQ-010: replaced loop lock invalidates a still-running registered parent'
   const original = acquireOwnedLock(storeDir, 'loop.lock.d');
   const launched = await launch(t, { parentIdentity: { pid: original.pid, startTime: original.startTime },
     testOptions: { idleTimeoutMs: 250, checkpointMs: 50 } }, storeDir);
-  releaseOwnedLock(original);
+  // Keep the original directory allocated while replacing the pathname. An
+  // unlink/recreate may reuse its inode immediately on Linux filesystems.
+  const retiredDir = path.join(storeDir, 'retired-loop.lock.d');
+  fs.renameSync(original.dir, retiredDir);
+  t.after(() => releaseOwnedLock({ ...original, dir: retiredDir }));
   const replacement = acquireOwnedLock(storeDir, 'loop.lock.d');
+  assert.equal(fs.statSync(retiredDir, { bigint: true }).ino, original.ino);
   t.after(() => releaseOwnedLock(replacement));
   assert.equal(original.pid, replacement.pid);
   assert.notEqual(original.ino, replacement.ino);

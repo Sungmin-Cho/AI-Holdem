@@ -1,3 +1,4 @@
+import { windowsPowerShellEnvironment } from '../shared/platform-files.js';
 import { execFile, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -148,6 +149,7 @@ export function win32ListenerOwnedBy(pid, port, {
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 64 * 1024,
+      env: windowsPowerShellEnvironment(),
       windowsHide: true,
     });
     if (result.status === 0) {
@@ -189,7 +191,7 @@ async function win32ListenerOwnedByAsync(pid, port, { execFileFn = execFile, onC
   const run = (exe, args) => new Promise((resolve, reject) => {
     const remaining = Math.floor(deadline - performance.now());
     if (remaining <= 0) { reject(unavailable('Listener probe deadline exhausted')); return; }
-    const child = execFileFn(exe, args, { encoding: 'utf8', timeout: remaining,
+    const child = execFileFn(exe, args, { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: remaining,
       killSignal: 'SIGKILL', maxBuffer: 256 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       onChild?.('close', child);
       resolve({ error, stdout, stderr });
