@@ -119,6 +119,24 @@ test('Windows ACL proof rejects generic writes and permits only explicit read ri
   assert.equal(mod.privateAclAllowed({ ...snapshot, reparse: true }, false), false);
 });
 
+test('elevated token ownership is proof only for its own trusted creation owner', async () => {
+  const mod = await import('../shared/platform-files.js');
+  const user = 'S-1-5-21-42';
+  const admins = 'S-1-5-32-544';
+  const elevated = { owner: admins, tokenOwner: admins, user, reparse: false,
+    rules: [{ sid: user, type: 'Allow', rights: 2032127 }] };
+  assert.equal(mod.privateAclAllowed(elevated, true), true, 'a lock this token created is still ours');
+  assert.equal(mod.privateAclAllowed(elevated, false), true);
+  assert.equal(mod.privateAclAllowed({ ...elevated, tokenOwner: undefined }, true), false,
+    'ownership by a group this token does not create objects as proves nothing');
+  assert.equal(mod.privateAclAllowed({ ...elevated, tokenOwner: user }, true), false);
+  assert.equal(mod.privateAclAllowed({ ...elevated, owner: 'S-1-5-21-99', tokenOwner: 'S-1-5-21-99' }, true), false,
+    'only SYSTEM and Administrators are platform authorities');
+  assert.equal(mod.privateAclAllowed({ ...elevated, owner: null, tokenOwner: null, user: null }, true), false);
+  assert.equal(mod.privateAclAllowed({ ...elevated, rules: [{ sid: admins, type: 'Allow', rights: 2032127 }] }, true), false,
+    'the DACL must still grant this user explicitly');
+});
+
 test('Windows listener fallback consumes the original deadline and closes its tracked child', async () => {
   const events = []; let calls = 0;
   const adapter = createListenerOwnedBy({ platform: 'win32', timeoutMs: 20,

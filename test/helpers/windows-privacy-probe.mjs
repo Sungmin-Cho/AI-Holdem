@@ -30,7 +30,9 @@ async function main() {
     try {
       for (const [label, file] of [['root', target], ['loop-lock', owner.dir], ['loop-pid', path.join(owner.dir, 'pid')]]) {
         console.log(JSON.stringify({ aclTarget: label }));
-        console.log(JSON.stringify({ aclTarget: label, verified: isPrivatePath(file, { privateMode: false }) }));
+        const verified = isPrivatePath(file, { privateMode: false });
+        console.log(JSON.stringify({ aclTarget: label, verified }));
+        if (!verified) throw new Error(`OWNED_LOCK_ACL_UNVERIFIED:${label}`);
       }
     } finally { releaseOwnedLock(owner); }
   } finally {
