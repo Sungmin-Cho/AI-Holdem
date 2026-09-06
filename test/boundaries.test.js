@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { scanModule } from './helpers/module-scan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,16 +157,30 @@ test('server imports only the publish contract and named containment primitives'
 
 // S1: 서버는 `state.json`·`players.json`·`hands/`를 **읽기 전용 보안 술어**로만 본다.
 // 그 파일들이 쓰기 원시자 옆에 나타나는 순간 "중계만 하는 서버"가 깨진다.
-const SERVER_WRITE_TARGETS = new Set(['ui-snapshot.json', 'lock.json']);
-const WRITE_PRIMITIVE_RE = /\b(?:fs\.(?:write|append|rename|unlink|rm|truncate|copyFile|mkdir)\w*|writeJsonAtomic|writeContained)\(/;
+const SERVER_WRITE_TARGETS = new Set(['ui-snapshot.json', 'ui-action-receipt.json', 'lock.json']);
+const WRITE_PRIMITIVE_RE = /\b(?:fs\.(?:write|append|rename|unlink|rm|truncate|copyFile|mkdir)\w*|writeJsonAtomic|writeContained|writeRelayJsonAtomic)\(/;
 const SECURITY_INPUT_RE = /'(?:state|players)\.json'|'hands'|'\.coach-authority\.json'/;
 
-test('the server writes only the two files it owns, never the ones it reads as security predicates', () => {
+test('the server writes only its UI, receipt and lock files, never its security predicates', () => {
   const offenders = [];
   for (const file of jsFilesUnder('server')) {
     const relative = path.relative(ROOT, file);
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
+    const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
+      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json']) : new Set();
+    for (const call of source.matchAll(/\bwriteRelayJsonAtomic\(([^\n]*)/g)) {
+      if (source.slice(Math.max(0, call.index - 16), call.index).endsWith('function ')) {
+        if (relative !== 'server/action-receipts.js') offenders.push(`${relative} -> unowned writer declaration`);
+        continue;
+      }
+      const target = /^owner, '([^']+)',/.exec(call[1])?.[1];
+      if (!relayTargets.has(target)) offenders.push(`${relative} -> unapproved relay destination`);
+    }
+    if (relative === 'server/action-receipts.js') {
+      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes('!owners.has(owner) || !RELAY_FILES.has(name)'));
+    }
     for (const call of source.matchAll(/writeJsonAtomic\(\s*path\.join\(([^)]*)\)/g)) {
       const literals = [...call[1].matchAll(/'([^']+)'/g)].map((row) => row[1]);
       const target = literals[literals.length - 1];
@@ -260,7 +275,7 @@ let recordedCache = null;
  */
 function recordedGraph() {
   if (recordedCache) return recordedCache;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-graph-'));
+  const dir = createOwnedTempDir('holdem-graph');
   const out = path.join(dir, 'edges.jsonl');
   const probe = path.join(dir, 'probe.mjs');
   fs.writeFileSync(probe, [

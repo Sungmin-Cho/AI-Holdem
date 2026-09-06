@@ -15,6 +15,7 @@ import {
   projectTrainingAnnotation,
   projectTrainingSummary,
   utf8ByteLength,
+  validateActionAck,
 } from '../publish-contract.js';
 import { createCoachControl } from './coach-control.js';
 
@@ -47,7 +48,7 @@ function parseArgs(argv) {
     gameDir: 'game', from: null, narrations: [],
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
-    printGameEpoch: false, deadlineMonotonicNs: null,
+    printGameEpoch: false, deadlineMonotonicNs: null, actionAckFile: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -64,6 +65,7 @@ function parseArgs(argv) {
     };
     if (arg === '--game-dir') out.gameDir = needsValue(arg);
     else if (arg === '--from') out.from = needsValue(arg);
+    else if (arg === '--action-ack') out.actionAckFile = needsValue(arg);
     else if (arg === '--narration') out.narrations.push(needsValue(arg));
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
@@ -157,6 +159,8 @@ function buildBody(envelope, opts) {
   // Tells the server this republish re-shows a state rather than acknowledging an
   // action, so a user action whose response was lost survives a dealer's resume.
   if (opts.viewOnly) body.viewOnly = true;
+  const actionAck = opts.actionAck ?? envelope.actionAck;
+  if (actionAck !== undefined) body.actionAck = actionAck;
   if (!opts.viewOnly) {
     const events = (envelope.events ?? []).filter((event) => event.visibility === 'public');
     if (events.length) body.events = events;
@@ -421,6 +425,13 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         }
         body = { publishId: nextId, ...buildBody(envelope, opts) };
       }
+      if (body.actionAck !== undefined) {
+        try {
+          body.actionAck = validateActionAck(body.actionAck, {
+            gameEpoch: epoch, view: body.view, viewOnly: body.viewOnly === true,
+          });
+        } catch { bail('BAD_ACTION_ACK', '액션 확인이 현재 게임과 authoritative view에 묶이지 않았습니다.'); }
+      }
       assertCoachQueue(auth, coachAuthority, epoch);
       assertTrainingQueue(trainingAuth, trainingAuthority, epoch);
       assertAnnotationQueue(trainingAuth, annotationAuthority, epoch);
@@ -580,6 +591,16 @@ async function main() {
   // otherwise block the very recovery the dealer was told to run.
   const resolvingAttempt = opts.retry && fs.existsSync(attemptPath(gameDir));
   if (!resolvingAttempt) checkEnvelope(envelope, opts.from);
+  if (!resolvingAttempt && opts.actionAckFile) {
+    let fd;
+    try {
+      fd = fs.openSync(opts.actionAckFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || st.nlink !== 1 || st.size > 1024) throw new Error('unsafe ack file');
+      opts.actionAck = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    } catch { bail('BAD_ACTION_ACK', '액션 확인 파일을 안전하게 읽지 못했습니다.'); }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+  }
 
   const lock = readLock(gameDir);
 

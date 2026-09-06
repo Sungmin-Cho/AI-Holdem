@@ -52,6 +52,66 @@ export function gameEpochOf(sessionToken) {
   return sha256Hex(sessionToken);
 }
 
+const ACTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const ACTION_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const ACTION_DIGEST_RE = /^[0-9a-f]{64}$/;
+const ACTION_REASON_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+function actionContractError(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+// Shape validation belongs at HTTP ingress; poker legality remains engine-owned.
+export function normalizeActionRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || typeof body.decisionId !== 'string' || !ACTION_ID_RE.test(body.decisionId)
+    || !['fold', 'check', 'call', 'raise'].includes(body.action)) {
+    throw actionContractError('BAD_ACTION');
+  }
+  const amount = body.amount ?? null;
+  if (body.action === 'raise'
+    ? !Number.isSafeInteger(amount) || amount <= 0
+    : amount !== null) throw actionContractError('BAD_ACTION');
+  const digest = sha256Hex(JSON.stringify({ action: body.action, amount }));
+  const requestId = body.requestId === undefined
+    ? `legacy-${sha256Hex(JSON.stringify({ decisionId: body.decisionId, digest }))}`
+    : body.requestId;
+  if (typeof requestId !== 'string' || !ACTION_REQUEST_ID_RE.test(requestId)) {
+    throw actionContractError('BAD_ACTION');
+  }
+  return { decisionId: body.decisionId, requestId, action: body.action, amount, digest };
+}
+
+export function sameActionIdentity(left, right) {
+  return Boolean(left && right && ['gameEpoch', 'decisionId', 'requestId', 'digest']
+    .every((key) => left[key] === right[key]));
+}
+
+// Both the transport and server use this pure validator. Only the server can bind
+// an acknowledgement to its durable receipt, and only on an authoritative view.
+export function validateActionAck(ack, { receipt, gameEpoch, view, viewOnly = false } = {}) {
+  if (!ack || typeof ack !== 'object' || Array.isArray(ack)
+    || Object.keys(ack).some((key) => !['gameEpoch', 'decisionId', 'requestId', 'digest', 'phase', 'reason'].includes(key))
+    || typeof ack.gameEpoch !== 'string' || !ACTION_DIGEST_RE.test(ack.gameEpoch)
+    || typeof ack.decisionId !== 'string' || !ACTION_ID_RE.test(ack.decisionId)
+    || typeof ack.requestId !== 'string' || !ACTION_REQUEST_ID_RE.test(ack.requestId)
+    || typeof ack.digest !== 'string' || !ACTION_DIGEST_RE.test(ack.digest)
+    || !['consumed', 'rejected'].includes(ack.phase)
+    || typeof ack.reason !== 'string' || !ACTION_REASON_RE.test(ack.reason)
+    || viewOnly || view === undefined || view === null || typeof view !== 'object' || Array.isArray(view)
+    || (gameEpoch !== undefined && ack.gameEpoch !== gameEpoch)
+    || (receipt !== undefined && !sameActionIdentity(ack, receipt))
+    || (ack.phase === 'rejected' && view.legal?.decisionId !== ack.decisionId)
+    || (ack.phase === 'consumed' && view.legal?.decisionId === ack.decisionId)) {
+    throw actionContractError('BAD_ACTION_ACK');
+  }
+  if (receipt && ['consumed', 'rejected'].includes(receipt.phase)
+    && (receipt.phase !== ack.phase || receipt.reason !== ack.reason)) {
+    throw actionContractError('BAD_ACTION_ACK');
+  }
+  return { ...ack };
+}
+
 export const SUPPORTED_TRAINING_AUTHORITY_SCHEMAS = Object.freeze([1, 2]);
 export const TRAINING_CHUNK_SLACK_BYTES = 4096;
 export const EXPLANATION_MAX_CHARS = 600;

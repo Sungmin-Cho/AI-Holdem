@@ -18,7 +18,7 @@ import {
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
-import { collectPrivateLiterals, gameEpochOf } from '../publish-contract.js';
+import { collectPrivateLiterals, gameEpochOf, validateActionAck } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
@@ -2455,12 +2455,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return out;
   };
 
-  const runAtomicStepPublish = async (stepArgs, publishFlags = []) => {
+  const runAtomicStepPublish = async (stepArgs, publishFlags = [], actionAck) => {
     const atomicUnit = beginAtomicTransition();
     try {
       const envelope = await runCli(stepArgs);
       const flags = typeof publishFlags === 'function' ? publishFlags(envelope) : publishFlags;
-      return await publishEnvelope(envelope, flags);
+      return await publishEnvelope(actionAck ? { ...envelope, actionAck } : envelope, flags);
     } finally {
       atomicUnit.finish();
     }
@@ -4486,18 +4486,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--wait-only', '--wait-ms', String(waitMs),
   ]);
 
-  const republishAfterRejectedUserAction = async (code) => {
+  const userActionAck = (submitted, phase, reason) => {
+    const { gameEpoch, decisionId, requestId, digest } = submitted;
+    try {
+      return validateActionAck({ gameEpoch, decisionId, requestId, digest, phase, reason }, {
+        gameEpoch: readLoopState()?.gameEpoch,
+        view: { legal: { decisionId: phase === 'rejected' ? decisionId : null } },
+      });
+    } catch {
+      throw codedError('BAD_ACTION_RECEIPT', '접수 identity가 없는 사용자 액션은 적용하지 않습니다.');
+    }
+  };
+
+  const republishAfterRejectedUserAction = async (code, submitted) => {
     const synchronized = await runCli(['step']);
     const narration = code === 'VERSION_MISMATCH'
       ? '게임 상태가 변경되어 최신 결정으로 다시 기다립니다.'
       : '입력한 액션이 허용되지 않아 같은 결정을 다시 기다립니다.';
-    // First emit the contract's view-only+narration republish. The relay retains a
-    // possibly response-lost action for view-only publishes, so an authoritative
-    // empty-event publish follows to acknowledge this positively rejected action
-    // before entering the next wait; otherwise the rejected action is replayed forever.
-    await publishEnvelope(synchronized, ['--view-only', '--narration', narration]);
+    const phase = synchronized.next?.decisionId === submitted.decisionId ? 'rejected' : 'consumed';
+    const actionAck = userActionAck(submitted, phase, code);
     log('user-action-rejected', { code, decisionId: synchronized.next?.decisionId ?? null });
-    return publishEnvelope(synchronized, waitFlags());
+    return publishEnvelope({ ...synchronized, actionAck }, ['--narration', narration, ...waitFlags()]);
   };
 
   const handleUserTurn = async (out) => {
@@ -4527,7 +4536,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         expectedDecisionId: next.decisionId,
         receivedDecisionId: submitted.decisionId ?? null,
       });
-      return waitOnlyForUser();
+      return republishAfterRejectedUserAction('STALE_DECISION', submitted);
     }
 
     // Relay payload는 외부 입력이다. action/amount를 semantic argv로 검증한 뒤에만
@@ -4535,18 +4544,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const action = validatedUserAction(submitted);
     if (!action) {
       if (stopRequested) return null;
-      return republishAfterRejectedUserAction('ILLEGAL_ACTION');
+      return republishAfterRejectedUserAction('ILLEGAL_ACTION', submitted);
     }
 
     const stepArgs = ['step', 'user', action.action];
     if (action.amount !== undefined) stepArgs.push(String(action.amount));
     stepArgs.push('--expect-version', String(out.stateVersion));
+    const actionAck = userActionAck(submitted, 'consumed', 'ACTION_APPLIED');
     try {
-      return await runAtomicStepPublish(stepArgs, waitFlags());
+      return await runAtomicStepPublish(stepArgs, waitFlags(), actionAck);
     } catch (error) {
       if (error.code !== 'ILLEGAL_ACTION' && error.code !== 'VERSION_MISMATCH') throw error;
       if (stopRequested) return null;
-      return republishAfterRejectedUserAction(error.code);
+      return republishAfterRejectedUserAction(error.code, submitted);
     }
   };
 
