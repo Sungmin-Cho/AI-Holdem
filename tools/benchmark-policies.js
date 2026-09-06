@@ -55,10 +55,14 @@ export function buildPreflopScenarios() {
     state = applyAction(state, playerId, 'fold').state;
   }
   const unopenedLegal = legalFor(state);
-  const unopenedSnapshot = snapshotDecision(state, unopenedLegal.toAct, null, { blinds: [50, 100] });
+  const unopenedSnapshot = snapshotDecision(state, unopenedLegal.toAct, null, {
+    blinds: [50, 100], legal: unopenedLegal,
+  });
   state = applyAction(state, unopenedLegal.toAct, 'raise', 250).state;
   const facingOpenLegal = legalFor(state);
-  const facingOpenSnapshot = snapshotDecision(state, facingOpenLegal.toAct, null, { blinds: [50, 100] });
+  const facingOpenSnapshot = snapshotDecision(state, facingOpenLegal.toAct, null, {
+    blinds: [50, 100], legal: facingOpenLegal,
+  });
   return {
     unopened: { snapshot: unopenedSnapshot, legal: unopenedLegal },
     facingOpen: { snapshot: facingOpenSnapshot, legal: facingOpenLegal },
