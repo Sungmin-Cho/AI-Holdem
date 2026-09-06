@@ -25,6 +25,7 @@ import { prepareSession } from '../engine/session-catalog.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -7454,7 +7455,7 @@ test('Task 7B: gameOver resume phase 유도는 loop-state 유무와 무관하게
 
 test('production --store-dir creates permanent sessions and resume reuses current', { timeout: 60_000, concurrency: false }, async (t) => {
   const storeDir = tmpGame();
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-store-main-bin-'));
+  const binDir = createOwnedTempDir('holdem-store-main-bin');
   const claudePath = path.join(binDir, 'claude');
   fs.writeFileSync(claudePath, `#!/usr/bin/env node
     const fs = require('node:fs');
@@ -7469,12 +7470,39 @@ test('production --store-dir creates permanent sessions and resume reuses curren
   `);
   fs.chmodSync(claudePath, 0o755);
   const children = new Set();
+  const sessions = new Set();
+  const stopSessionRelay = async (sessionDir) => {
+    const file = path.join(sessionDir, 'lock.json');
+    if (!fs.existsSync(file)) return;
+    const lock = readJson(file);
+    const start = processStartTime(lock.serverPid);
+    if (start === null) { await waitUntilDead(lock.serverPid); return; }
+    const { stdout } = await execFileAsync(REAL_PS, ['-p', String(lock.serverPid), '-o', 'args=']);
+    const args = stdout.trim();
+    assert.ok(args.includes(SERVER) && args.includes(sessionDir));
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      if (processStartTime(lock.serverPid) === null) { await waitUntilDead(lock.serverPid); return; }
+      assert.equal(processStartTime(lock.serverPid), start);
+      assert.equal((await execFileAsync(REAL_PS, ['-p', String(lock.serverPid), '-o', 'args='])).stdout.trim(), args);
+      assert.equal(processStartTime(lock.serverPid), start);
+      process.kill(lock.serverPid, signal);
+      try { await waitUntilDead(lock.serverPid); return; } catch (error) { if (signal === 'SIGKILL') throw error; }
+    }
+  };
   t.after(async () => {
     await Promise.all([...children].map((child) => terminateIfAlive(child)));
+    for (const sessionDir of sessions) await stopSessionRelay(sessionDir);
+    if (fs.existsSync(path.join(storeDir, '.training', 'study-service.json'))) {
+      const service = await inspectStudyService(storeDir);
+      if (service.status === 'running') {
+        await stopStudyService(storeDir, { expectedInstanceId: service.instanceId });
+        assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+      }
+    }
   });
 
   const launch = async (mode, expectedPreviousGameId = null) => {
-    const argv = [GAME_LOOP, '--store-dir', storeDir, '--player-runtime', 'claude'];
+    const argv = [GAME_LOOP, '--store-dir', storeDir, '--player-runtime', 'claude', '--port', '0'];
     if (mode === 'resume') argv.push('--resume');
     else argv.push('--ai', '1', '--stack', '100');
     const child = spawn(process.execPath, argv, {
@@ -7488,6 +7516,7 @@ test('production --store-dir creates permanent sessions and resume reuses curren
         if (mode === 'new' && expectedPreviousGameId !== null && current.gameId === expectedPreviousGameId) return null;
         if (mode === 'resume' && expectedPreviousGameId !== null && current.gameId !== expectedPreviousGameId) return null;
         const sessionDir = path.join(storeDir, '.session-store', current.sessionRel);
+        sessions.add(sessionDir);
         const loopState = readJson(path.join(sessionDir, 'loop-state.json'));
         if (loopState.phase !== 'playing') return null;
         return { current, sessionDir, loopState };
@@ -7511,13 +7540,7 @@ test('production --store-dir creates permanent sessions and resume reuses curren
       true,
       JSON.stringify(outcome),
     );
-    try {
-      const lock = readJson(path.join(selected.sessionDir, 'lock.json'));
-      if (Number.isInteger(lock.serverPid)) {
-        try { process.kill(lock.serverPid, 'SIGTERM'); } catch { /* already dead */ }
-        await waitUntilDead(lock.serverPid).catch(() => {});
-      }
-    } catch { /* graceful requestStop already removed the lock */ }
+    await stopSessionRelay(selected.sessionDir);
     children.delete(child);
     return selected;
   };

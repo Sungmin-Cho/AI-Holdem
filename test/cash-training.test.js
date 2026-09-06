@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -168,7 +169,7 @@ test('archiveTag는 completed를 인식한다', () => {
 });
 
 test('cli --mode/--stack-bb/--hands 와 tournament 전용 거절', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-cash-'));
+  const dir = createOwnedTempDir('holdem-cash');
   const run = (args) => {
     try {
       return {
@@ -221,7 +222,10 @@ test('applyModeDefaults: cash-training --ai 생략은 5, 명시는 유지, 토�
     '--mode', 'cash-training', '--ai', '3', '--store-dir', '/tmp/x',
   ]));
   assert.equal(explicit.ai, 3);
-  const tourney = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x']));
+  const learning = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x']));
+  assert.equal(learning.ai, 5);
+  assert.equal(learning.opponentRuntime, 'policy');
+  const tourney = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x', '--mode', 'tournament']));
   assert.equal(tourney.ai, undefined);
 });
 
@@ -230,10 +234,11 @@ test('gtoEvalNotice: cash-training만, 6-max 100BB가 아니면 문면', () => {
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 100 }), null);
   assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 100 }), null);
   const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 });
-  assert.match(four, /6-max 100BB/);
+  assert.match(four, /휴리스틱.*기준표.*6인·100BB/);
   assert.match(four, /4인/);
   const stack = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 50 });
-  assert.match(stack, /startStackBb=50/);
+  assert.match(stack, /시작 스택 50BB/);
+  assert.doesNotMatch(stack, /GTO|startStackBb/);
 });
 
 test('parseGameLoopArgs는 --mode/--stack-bb/--hands를 읽는다', () => {

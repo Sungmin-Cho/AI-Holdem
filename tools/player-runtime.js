@@ -870,7 +870,7 @@ export async function resolveRuntimes({
     notices.push(result.notice ?? `상위 모델 런타임 ${kind} 부적격: probe 미통과.`);
   }
   if (!upper) {
-    notices.push('상위 모델 런타임이 없습니다 — 코치는 고정 문구로 대체되고 리뷰는 생성되지 않습니다.');
+    notices.push('상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.');
   }
 
   return { player, upper, notices };
