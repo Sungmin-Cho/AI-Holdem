@@ -276,6 +276,11 @@ let recordedCache = null;
 function recordedGraph() {
   if (recordedCache) return recordedCache;
   const dir = createOwnedTempDir('holdem-graph');
+  const sourceDir = path.join(dir, 'source');
+  fs.mkdirSync(sourceDir);
+  const sourceRoot = fs.realpathSync(sourceDir);
+  for (const name of SCANNED) fs.cpSync(path.join(ROOT, name), path.join(sourceRoot, name), { recursive: true });
+  for (const name of ['package.json', 'publish-contract.js']) fs.copyFileSync(path.join(ROOT, name), path.join(sourceRoot, name));
   const out = path.join(dir, 'edges.jsonl');
   const probe = path.join(dir, 'probe.mjs');
   fs.writeFileSync(probe, [
@@ -294,11 +299,11 @@ function recordedGraph() {
   for (const file of files) {
     try {
       execFileSync(process.execPath, [probe], {
-        cwd: ROOT,
+        cwd: sourceRoot,
         timeout: 20_000,
         stdio: 'ignore',
         env: {
-          ...process.env, RECORDER, ROOT, RECORD_OUT: out, RECORD_FILE: file,
+          ...process.env, RECORDER, ROOT: sourceRoot, RECORD_OUT: out, RECORD_FILE: path.join(sourceRoot, path.relative(ROOT, file)),
         },
       });
     } catch { /* a script that exits non-zero still recorded what it resolved */ }
@@ -308,10 +313,10 @@ function recordedGraph() {
     if (!line) continue;
     const row = JSON.parse(line);
     if (!row.parent?.startsWith('file:')) continue;
-    const from = path.relative(ROOT, fileURLToPath(row.parent));
+    const from = path.relative(sourceRoot, fs.realpathSync(fileURLToPath(row.parent)));
     // The probe's own import of the target is not an edge of the tree.
     if (from.startsWith('..')) continue;
-    const to = row.url?.startsWith('file:') ? path.relative(ROOT, fileURLToPath(row.url)) : row.url;
+    const to = row.url?.startsWith('file:') ? path.relative(sourceRoot, fs.realpathSync(fileURLToPath(row.url))) : row.url;
     edges.push({ from, to, specifier: row.specifier });
   }
   fs.rmSync(dir, { recursive: true, force: true });
@@ -346,6 +351,7 @@ test('the process entry points that spawn or touch the filesystem live in tools'
   for (const entry of [
     'tools/evaluate-cli.js',
     'tools/drill-server.js',
+    'tools/study-service.js',
     'tools/fake-solver-adapter.js',
     'tools/solver-adapter.js',
     'tools/build-preflop-baseline.js',
@@ -366,8 +372,14 @@ test('the process entry points that spawn or touch the filesystem live in tools'
 });
 
 test('the moved dataset builder rewrites the canonical dataset and its pin, byte for byte', () => {
-  const dataset = path.join(ROOT, 'training/data/preflop-baseline-v1.json');
-  const digestFile = path.join(ROOT, 'training/data/preflop-baseline-v1.sha256');
+  const builderRoot = createOwnedTempDir('holdem-builder-copy');
+  for (const name of ['tools', 'training/data']) fs.mkdirSync(path.join(builderRoot, name), { recursive: true });
+  for (const name of ['package.json', 'tools/build-preflop-baseline.js', 'training/cards.js',
+    'training/data/preflop-baseline-v1.json', 'training/data/preflop-baseline-v1.sha256']) {
+    fs.copyFileSync(path.join(ROOT, name), path.join(builderRoot, name));
+  }
+  const dataset = path.join(builderRoot, 'training/data/preflop-baseline-v1.json');
+  const digestFile = path.join(builderRoot, 'training/data/preflop-baseline-v1.sha256');
   const before = fs.readFileSync(dataset);
   const digestBefore = fs.readFileSync(digestFile);
   // Comparing bytes alone cannot tell "rebuilt identically" from "wrote
@@ -379,7 +391,7 @@ test('the moved dataset builder rewrites the canonical dataset and its pin, byte
   const staleDataset = fs.statSync(dataset).mtimeMs;
   const staleDigest = fs.statSync(digestFile).mtimeMs;
 
-  execFileSync(process.execPath, [path.join(ROOT, 'tools/build-preflop-baseline.js')], {
+  execFileSync(process.execPath, [path.join(builderRoot, 'tools/build-preflop-baseline.js')], {
     encoding: 'utf8',
     timeout: 60_000,
   });
@@ -461,4 +473,17 @@ test('the tools injector supplies every helper the training stores require', asy
   const store = path.join(ROOT, 'test');
   assert.doesNotThrow(() => createProfileStore(store, { io: trainingStoreIo }));
   assert.doesNotThrow(() => createMistakeBank(store, { io: trainingStoreIo }));
+});
+
+test('study service reaches engine only through named ownership primitives', () => {
+  const edges = staticGraph().edges.filter(edge => edge.from === 'tools/study-service.js' && layerOf(edge.to) === 'engine');
+  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'parseOwnedLockIdentity']);
+  assert.ok(edges.length > 0);
+  for (const edge of edges) {
+    assert.equal(edge.to, 'engine/state.js');
+    assert.equal(edge.dynamic, false);
+    assert.ok(edge.bindings.length > 0);
+    assert.deepEqual(edge.bindings.filter(binding => !allowed.has(binding)), []);
+  }
+  assert.deepEqual(edgesFrom('server').filter(edge => edge.to === 'tools/study-service.js'), []);
 });

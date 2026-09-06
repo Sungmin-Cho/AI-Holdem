@@ -4,7 +4,6 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startDrillServer } from '../tools/drill-server.js';
@@ -17,6 +16,7 @@ import { loadPreflopDataset } from '../tools/preflop-dataset.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
+import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_HREF = pathToFileURL(path.resolve(ROOT, '../tools/drill-server.js')).href;
@@ -24,7 +24,7 @@ const CLIENT = path.resolve(ROOT, '../server/drill-public/drill.js');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-dsrv-'));
+  return createOwnedTempDir('holdem-dsrv');
 }
 
 function profileEvents(storeDir) {
@@ -155,7 +155,9 @@ async function spawnDrillServer(storeDir) {
     fs.writeFileSync(${JSON.stringify(readyFile)}, JSON.stringify({ port: started.port }));
     await new Promise(() => {});
   `);
-  const child = spawn(process.execPath, [scriptPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = registerOwnedProcess(spawn(process.execPath, [scriptPath], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  }), 'standalone drill server');
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const deadline = Date.now() + 5000;
@@ -564,5 +566,26 @@ test('HTTP maps known invalid modes to 400 while internal errors remain 500', as
     assert.equal(internal.status, 500);
     assert.equal(internal.json.code, 'UNSUPPORTED_PROFILE');
     assert.deepEqual(trainingBytes(storeDir), corrupted);
+  } finally { await drill.close(); }
+});
+
+test('study start selection errors are authoritative 400 responses and preserve the current session', async () => {
+  const storeDir = tmp();
+  const drill = await startDrillServer({ storeDir, token: 'typed-start' });
+  try {
+    const original = await startDrill(storeDir, { mode: 'free', idempotencyKey: 'keep-current' });
+    const bytes = fs.readFileSync(sessionPath(storeDir));
+    for (const [selector, code] of [
+      [{ spotKey: 'unsupported' }, 'UNSUPPORTED_SPOT'],
+      [{ handClass: 'invalid' }, 'UNSUPPORTED_HAND'],
+      [{ mode: 'unsupported' }, 'INVALID_DRILL_MODE'],
+      [{ limit: 99 }, 'USAGE'],
+    ]) {
+      const result = await api(drill.port, drill.token, '/api/start', { method: 'POST',
+        body: { mode: 'free', idempotencyKey: 'rejected-start', ...selector } });
+      assert.equal(result.status, 400); assert.equal(result.json.code, code);
+      assert.deepEqual(fs.readFileSync(sessionPath(storeDir)), bytes);
+    }
+    assert.equal((await api(drill.port, drill.token, '/api/current')).json.sessionId, original.sessionId);
   } finally { await drill.close(); }
 });
