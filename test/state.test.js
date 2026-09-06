@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os';
-import { spawn } from 'node:child_process';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime } from '../engine/state.js';
+import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
 
-function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-')); }
+function tmpDir() { return createOwnedTempDir('holdem-state'); }
 
 async function terminateChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -191,13 +193,13 @@ test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   // 살아 있는 pid(자기 자신)를 기록하되 startTime을 조작한다
-  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n다른-시각-문자열`);
+  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`);
   const seen = readOwnedLock(dir, 'loop.lock.d');
   assert.equal(seen.alive, false); // 시그널 금지 판정의 근거
   assert.equal(seen.status, 'dead');
   const h = acquireOwnedLock(dir, 'loop.lock.d'); // 회수 후 선점 성공
   assert.equal(h.pid, process.pid); // 회수 후 선점한 락은 진짜 나 자신의 identity를 기록한다
-  assert.equal(h.startTime, processStartTime(process.pid));
+  assert.equal(h.startTime, ownedProcessStartTime(process.pid));
   releaseOwnedLock(h);
 });
 
@@ -208,7 +210,7 @@ test('owned lock: 죽은 pid는 회수된다', () => {
   fs.writeFileSync(path.join(lockDir, 'pid'), '99999999\n어떤-시각');
   const h = acquireOwnedLock(dir, 'loop.lock.d');
   assert.equal(h.pid, process.pid);
-  assert.equal(h.startTime, processStartTime(process.pid));
+  assert.equal(h.startTime, ownedProcessStartTime(process.pid));
   releaseOwnedLock(h);
 });
 
@@ -220,7 +222,7 @@ test('readOwnedLock: 락 없음 → null, 자기 자신 → alive true·startTim
   assert.equal(seen.pid, process.pid);
   assert.equal(seen.alive, true);
   assert.equal(seen.status, 'alive');
-  assert.equal(seen.startTime, processStartTime(process.pid));
+  assert.equal(seen.startTime, ownedProcessStartTime(process.pid));
   assert.equal(seen.startTime, h.startTime);
   releaseOwnedLock(h);
 });
@@ -311,7 +313,7 @@ test('owned lock: 살아있는 기록 소유자의 read-time startTime을 알 �
   fs.mkdirSync(lockDir);
   const child = spawn('sleep', ['5']);
   await new Promise(resolve => child.once('spawn', resolve));
-  const recorded = `${child.pid}\n기록된-시각`;
+  const recorded = `${child.pid}\nutc-v1\n${ownedProcessStartTime(child.pid).slice(7)}`;
   fs.writeFileSync(path.join(lockDir, 'pid'), recorded);
   const past = new Date(Date.now() - 60_000);
   fs.utimesSync(lockDir, past, past);
@@ -357,13 +359,15 @@ test('readOwnedLock: 1줄 레거시 기록은 존재하는 unknown owned 락으�
   });
 });
 
-test('owned lock: pid 파일 하나만, 정확히 "pid\\nstartTime" 2줄', () => {
+test('owned lock: pid 파일 하나만, 정확히 버전이 명시된 3줄', () => {
   const dir = tmpDir();
   const h = acquireOwnedLock(dir, 'loop.lock.d');
   const lockDir = path.join(dir, 'loop.lock.d');
   assert.deepEqual(fs.readdirSync(lockDir), ['pid']);
   const content = fs.readFileSync(path.join(lockDir, 'pid'), 'utf8');
-  assert.equal(content, `${process.pid}\n${h.startTime}`);
+  assert.equal(content, `${process.pid}\nutc-v1\n${h.startTime.slice(7)}`);
+  assert.deepEqual(parseOwnedLockIdentity(content), { pid: h.pid, startTime: h.startTime });
+  assert.equal(parseOwnedLockIdentity(content + '\n'), null);
   releaseOwnedLock(h);
 });
 
@@ -388,4 +392,80 @@ test('releaseOwnedLock: 같은 디렉터리 inode의 owner 기록이 교체돼�
   releaseOwnedLock(h);
   assert.ok(fs.existsSync(lockDir));
   assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), '12345\n대체-소유자-시각');
+});
+
+
+for (const [ownerTz, readerTz] of [['Asia/Seoul', 'UTC'], ['UTC', 'America/Los_Angeles']]) {
+  test(`owned identity stays alive across timezones: ${ownerTz} to ${readerTz}`, { timeout: 10_000 }, async (t) => {
+    const dir = createOwnedTempDir('holdem-owned-tz');
+    const stateUrl = new URL('../engine/state.js', import.meta.url).href;
+    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', `
+      import { acquireOwnedLock, releaseOwnedLock } from ${JSON.stringify(stateUrl)};
+      const handle = acquireOwnedLock(${JSON.stringify(dir)}, 'loop.lock.d');
+      process.on('SIGTERM', () => { releaseOwnedLock(handle); process.exit(0); });
+      process.send({ ready: true });
+      setInterval(() => {}, 1000);
+    `], { env: { ...process.env, TZ: ownerTz }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }), 'timezone owner');
+    t.after(() => terminateChild(child));
+    const [ready] = await once(child, 'message');
+    assert.equal(ready.ready, true);
+    const before = fs.readFileSync(path.join(dir, 'loop.lock.d', 'pid'));
+    const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import { readOwnedLock, acquireOwnedLock } from ${JSON.stringify(stateUrl)};
+      const seen = readOwnedLock(${JSON.stringify(dir)}, 'loop.lock.d');
+      let acquisition = 'not-attempted';
+      if (seen.status === 'alive') {
+        try { acquireOwnedLock(${JSON.stringify(dir)}, 'loop.lock.d'); acquisition = 'acquired'; }
+        catch (error) { acquisition = error.code ?? error.message; }
+      }
+      console.log(JSON.stringify({ seen, acquisition }));
+    `], { env: { ...process.env, TZ: readerTz, LANG: 'C', LC_ALL: 'C' }, encoding: 'utf8', timeout: 5000 }));
+    assert.equal(result.seen.status, 'alive', 'a timezone change must not make a live owner reclaimable');
+    assert.equal(result.seen.pid, child.pid);
+    assert.equal(result.acquisition, 'LOCKED');
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'loop.lock.d', 'pid')), before);
+  });
+}
+
+
+test('live unversioned and unknown-version lifetime identities are protected without writes', () => {
+  for (const stamp of [processStartTime(process.pid), ownedProcessStartTime(process.pid), 'utc-v2:Sun Sep  6 00:00:00 2026', 'utc-v1:not-a-timestamp']) {
+    const dir = createOwnedTempDir('holdem-owned-legacy');
+    const lock = path.join(dir, 'loop.lock.d');
+    fs.mkdirSync(lock);
+    const raw = `${process.pid}\n${stamp}`;
+    fs.writeFileSync(path.join(lock, 'pid'), raw);
+    assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown');
+    assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+    assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
+  }
+});
+
+
+test('owned identity rejects malformed canonical dates and preserves legacy query output', () => {
+  const plain = processStartTime(process.pid);
+  assert.ok(plain && !plain.startsWith('utc-v1:'));
+  assert.match(ownedProcessStartTime(process.pid), /^utc-v1:/);
+  assert.equal(processStartTime(process.pid), plain);
+  for (const stamp of ['Sun Feb 30 00:00:00 2026', 'Sun Sep  6 24:00:00 2026', 'Mon Sep  6 00:00:00 2026']) {
+    const dir = tmpDir(); const lock = path.join(dir, 'loop.lock.d'); fs.mkdirSync(lock);
+    const raw = `${process.pid}\nutc-v1\n${stamp}`; fs.writeFileSync(path.join(lock, 'pid'), raw);
+    assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown');
+    assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+    assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
+  }
+});
+
+
+test('noncanonical zero-padded day cannot make a live owned identity reclaimable', () => {
+  const dir = tmpDir(); const lock = path.join(dir, 'loop.lock.d'); fs.mkdirSync(lock);
+  const raw = `${process.pid}\nutc-v1\nSun Sep 06 00:00:00 2026`;
+  fs.writeFileSync(path.join(lock, 'pid'), raw);
+  withFakePs("echo 'Sun Sep  6 00:00:00 2026'", () => {
+    assert.equal(ownedProcessStartTime(process.pid), 'utc-v1:Sun Sep  6 00:00:00 2026');
+    assert.equal(parseOwnedLockIdentity(raw), null);
+    assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown', 'equivalent noncanonical spelling must not prove owner death');
+    assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
+    assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
+  });
 });

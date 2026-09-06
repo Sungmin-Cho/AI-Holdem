@@ -5432,7 +5432,7 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
   const holder = await startOwnedLoopHolder(gameDir, { signalLog });
   fs.writeFileSync(
     path.join(gameDir, 'loop.lock.d', 'pid'),
-    `${holder.pid}\nMon Jan  1 00:00:00 2001`,
+    `${holder.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
   );
   const signals = [];
   const loop = createGameLoop({

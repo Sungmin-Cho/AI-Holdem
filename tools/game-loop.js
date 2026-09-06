@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   acquireOwnedLock,
   processStartTime,
+  ownedProcessStartTime,
   readOwnedLock,
   releaseOwnedLock,
   writeJsonAtomic,
@@ -1021,9 +1022,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopAware) assertNotStopping();
   };
 
-  const identityStillAlive = (pid, startTime) => {
+  const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
     if (!processAlive(pid)) return false;
-    const current = processStartTime(pid);
+    const current = owned ? ownedProcessStartTime(pid) : processStartTime(pid);
     if (current === null) {
       throw codedError('IDENTITY_UNAVAILABLE', `pid ${pid} startTime을 재검증할 수 없습니다.`);
     }
@@ -1044,11 +1045,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     unavailableCode,
     mismatchCode,
     label,
+    owned = false,
   }) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!processAlive(pid)) return true;
-      const current = processStartTime(pid);
+      const current = owned ? ownedProcessStartTime(pid) : processStartTime(pid);
       if (current === null) {
         // 종료 직후 kill(0)은 아직 성공하지만 ps identity가 먼저 사라지는
         // 짧은 전이 창이 있다. unknown을 사망으로 승격하지 않고 deadline까지 재확인한다.
@@ -1063,7 +1065,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await sleep(pollMs);
     }
     if (!processAlive(pid)) return true;
-    const current = processStartTime(pid);
+    const current = owned ? ownedProcessStartTime(pid) : processStartTime(pid);
     if (current === null) {
       throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
     }
@@ -1090,7 +1092,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const signalLoopOwner = (signal) => {
       assertSameLoopOwner(expected);
       // lock 동일성 검사 직후 startTime을 한 번 더 맞춘 뒤 동기적으로 시그널한다.
-      if (!identityStillAlive(expected.pid, expected.startTime)) {
+      if (!identityStillAlive(expected.pid, expected.startTime, { owned: true })) {
         throw codedError('LOOP_IDENTITY_MISMATCH', '정지 대상 loop pid identity가 바뀌었습니다.');
       }
       return sendSignal(expected.pid, signal, 'LOOP_SIGNAL_FAILED');
@@ -1100,6 +1102,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
       mismatchCode: 'LOOP_IDENTITY_MISMATCH',
       label: 'loop',
+      owned: true,
     })) return;
     // KILL 직전에도 lock pid+startTime이 같은 소유자를 가리킬 때만 신호한다.
     signalLoopOwner('SIGKILL');
@@ -1107,6 +1110,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
       mismatchCode: 'LOOP_IDENTITY_MISMATCH',
       label: 'loop',
+      owned: true,
     })) {
       throw codedError('LOOP_ALIVE', '기존 게임 루프 종료를 확인하지 못해 아카이브하지 않습니다.');
     }
