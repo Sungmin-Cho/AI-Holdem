@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -16,9 +17,8 @@ import { createProfileStore } from '../tools/training-stores.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine', 'cli.js');
 const GAME_LOOP = path.join(ROOT, 'tools', 'game-loop.js');
-
 function tmp(prefix = 'holdem-q2b-resume-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return createOwnedTempDir(prefix.replace(/-+$/, ''));
 }
 
 function readJson(file) {
@@ -70,6 +70,29 @@ async function terminatePid(pid) {
   }, `pid ${pid} did not stop`, 1_000).catch(() => false);
   if (dead) return;
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  await waitFor(() => {
+    try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; }
+  }, `pid ${pid} did not die after SIGKILL`, 1_000);
+}
+
+function hostProcessStartTime(pid) {
+  try {
+    return execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function hostProcessState(pid) {
+  try {
+    return execFileSync('/bin/ps', ['-p', String(pid), '-o', 'state='], {
+      encoding: 'utf8',
+    }).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function trainingHashes(sessionDir) {
@@ -163,7 +186,8 @@ async function leaveSigkilledStoreOwner(storeDir) {
   await waitFor(() => {
     try { process.kill(child.pid, 0); return true; } catch { return false; }
   }, 'dummy owner did not start');
-  const startTime = `TEST_START_${child.pid}`;
+  const startTime = hostProcessStartTime(child.pid);
+  assert.ok(startTime, 'dummy owner host identity was unavailable');
   const lockDir = path.join(storeDir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   fs.writeFileSync(path.join(lockDir, 'pid'), `${child.pid}\n${startTime}`);
@@ -203,19 +227,6 @@ if (args.includes('stream-json')) {
 }
 `);
   fs.chmodSync(claude, 0o755);
-  const ps = path.join(binDir, 'ps');
-  fs.writeFileSync(ps, `#!/bin/sh
-pid=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = '-p' ]; then pid="$2"; shift 2; else shift; fi
-done
-if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-  printf 'TEST_START_%s\\n' "$pid"
-  exit 0
-fi
-exit 1
-`);
-  fs.chmodSync(ps, 0o755);
   return binDir;
 }
 
@@ -226,7 +237,11 @@ function launchResume(storeDir, binDir) {
     '--resume',
     '--player-runtime', 'claude',
   ], {
-    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      TMPDIR: tmp('holdem-q2b-child-tmp-'),
+    },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -249,6 +264,50 @@ async function waitForOwnerRotation(sessionDir, previousOwner, stderr) {
       return null;
     }
   }, `resume did not rotate owner: ${stderr()}`);
+}
+
+async function waitForCompletedResume(sessionDir, previousOwner, stderr) {
+  return waitFor(() => {
+    try {
+      const current = readJson(path.join(sessionDir, 'loop-state.json'));
+      if (current.ownerSessionId === previousOwner
+        || !Number.isInteger(current.port) || current.port <= 0) return null;
+      const authority = readJson(path.join(
+        sessionDir,
+        'training',
+        '.training-authority.json',
+      ));
+      const ready = readLoopLog(sessionDir).find((entry) => (
+        entry.event === 'resume-ready' && entry.phase === 'finalizing'
+      ));
+      if (!ready || authority.ownerSessionId !== current.ownerSessionId) return null;
+      return { current, ready };
+    } catch {
+      return null;
+    }
+  }, `resume did not reach a quiescent ready boundary: ${stderr()}`);
+}
+
+async function pauseAtQuiescentTrainingBoundary(child, sessionDir, stderr) {
+  const trainingLock = path.join(sessionDir, 'training.lock.d');
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!child.kill('SIGSTOP')) throw new Error(`resume process could not be paused: ${stderr()}`);
+    await waitFor(
+      () => hostProcessState(child.pid)?.includes('T'),
+      `resume process did not stop: ${stderr()}`,
+      1_000,
+    );
+    if (!fs.existsSync(trainingLock)) return;
+    if (!child.kill('SIGCONT')) throw new Error(`resume process could not continue: ${stderr()}`);
+    await waitFor(
+      () => !hostProcessState(child.pid)?.includes('T'),
+      `resume process did not continue: ${stderr()}`,
+      1_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`resume never reached a quiescent training boundary: ${stderr()}`);
 }
 
 async function cleanupSession(child, sessionDir) {
@@ -476,7 +535,11 @@ test('Q2b finalizing resume after SIGKILL transfers owner before reconcile', { t
   const run = launchResume(storeDir, binDir);
   t.after(() => cleanupSession(run.child, seeded.sessionDir));
 
-  const resumed = await waitForOwnerRotation(seeded.sessionDir, 'owner-0', run.stderr);
+  const completed = await waitForCompletedResume(seeded.sessionDir, 'owner-0', run.stderr);
+  const resumed = completed.current;
+  assert.equal(completed.ready.phase, 'finalizing');
+  await pauseAtQuiescentTrainingBoundary(run.child, seeded.sessionDir, run.stderr);
+  assert.equal(fs.existsSync(path.join(seeded.sessionDir, 'training.lock.d')), false);
   await killChild(run.child, 'SIGKILL');
   const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
 
