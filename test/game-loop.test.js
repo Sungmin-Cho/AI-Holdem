@@ -5788,8 +5788,8 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 1_500,
-      finalizeCutoffLeadMs: 1_000,
+      // This tests PID identity and durable cleanup, with the normal finalization
+      // budget. Five real recovery/capture children need not finish within 500 ms.
       signalProcess: (pid, signal) => {
         signalled.push({ pid, signal });
         process.kill(pid, signal);
@@ -5900,8 +5900,6 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 1_200,
-      finalizeCutoffLeadMs: 800,
       coachCaptureCheckpoint: async () => {
         captureEntered();
         await captureGate;
@@ -5910,19 +5908,17 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   });
 
   await loop.resume();
-  // The checkpoint is a deterministic scheduler only. Against the old implementation it
-  // is absent, so continue after one short turn and let the behavior assertions prove the
-  // worker crossed cutoff instead of hanging on the missing hook.
-  await Promise.race([
-    entered,
-    new Promise((resolve) => setTimeout(resolve, 100)),
-  ]);
+  await entered;
   const running = startRun(loop);
-  await waitFor(
-    () => Boolean(readJson(path.join(gameDir, 'loop-state.json')).finalization),
-    'finalization checkpoint did not appear',
+  // The deadline starts during resume, before capture. Observe the real cutoff
+  // under the normal budget rather than sleeping relative to the end of resume.
+  const cutoff = await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
+    'capture stayed blocked without reaching the result-wait cutoff',
+    15_000,
   );
-  await new Promise((resolve) => setTimeout(resolve, 550));
+  assert.equal(cutoff.settled, false, 'the blocked capture did not cross the cutoff');
+  assert.equal(cutoff.pending, 1);
   releaseCapture();
   assert.equal((await running).phase, 'done');
 
@@ -5943,8 +5939,6 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 1_200,
-      finalizeCutoffLeadMs: 800,
       coachSpawnCheckpoint: async () => {
         spawnEntered();
         await spawnGate;
@@ -5955,7 +5949,13 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
   await loop.resume();
   await entered;
   const running = startRun(loop);
-  await new Promise((resolve) => setTimeout(resolve, 550));
+  const cutoff = await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
+    'spawn stayed blocked without reaching the result-wait cutoff',
+    15_000,
+  );
+  assert.equal(cutoff.settled, false, 'the blocked spawn did not cross the cutoff');
+  assert.equal(cutoff.pending, 1);
   releaseSpawn();
   assert.equal((await running).phase, 'done');
 
@@ -5976,24 +5976,24 @@ test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시
     },
   });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const heldOwner = readOwnedLock(gameDir, 'publish.lock.d');
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
     held.release();
   };
-  const timer = setTimeout(release, 700);
   t.after(async () => {
-    clearTimeout(timer);
     release();
     await held.done;
   });
 
-  const startedAt = Date.now();
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
-  const elapsed = Date.now() - startedAt;
 
-  assert.equal(elapsed < 650, true, `deadline abort가 lock release까지 ${elapsed}ms 기다렸다`);
+  // Keep the lock held until rejection. A stopwatch around resume also counts
+  // server/identity setup before the cutoff clock and cleanup after the abort.
+  assert.equal(released, false, 'deadline abort waited for the lock release');
+  assert.deepEqual(readOwnedLock(gameDir, 'publish.lock.d'), heldOwner);
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
   assert.equal(state.finalization.cutoff.reason, 'result_wait_cutoff_exceeded');
@@ -6350,13 +6350,13 @@ test('Task 7A r2: persisted authority fence/cleanup은 shared deadline 아래 ha
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     stateOverrides: { port: external.lock.port },
-    loopOpts: { finalizeBudgetMs: 3_000, finalizeCutoffLeadMs: 2_000 },
   });
 
   const resuming = loop.resume();
   resuming.catch(() => {});
-  await waitFor(() => coachInvocations(calls, 'fence').length >= 1, 'first persisted fence did not start');
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  // Both real children must start while the same lock is still held. Releasing
+  // after an arbitrary delay can hide serialization on a slow scheduler.
+  await waitFor(() => coachInvocations(calls, 'fence').length === 2, 'persisted fence children did not start concurrently');
   const concurrentFences = coachInvocations(calls, 'fence').length;
   release();
   await resuming;
