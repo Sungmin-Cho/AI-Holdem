@@ -11,12 +11,15 @@ permissions:
 
 jobs:
   test:
-    name: Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: Node ${{ matrix.node-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
         node-version:
           - 20.x
           - 22.x
@@ -27,5 +30,7 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Verify learning runtime on the runner platform
+        run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Run tests
         run: npm run test:ci

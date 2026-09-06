@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { isPrivatePath } from '../shared/platform-files.js';
 import { startDrillServer } from '../tools/drill-server.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 test('REQ-010: drill health advertises an authenticated study capability', async () => {
@@ -89,7 +90,7 @@ function unfinishedRequest(port, route, headers = {}) {
 
 test('REQ-010: API authentication precedes incomplete body and training I/O', async (t) => {
   const { storeDir, port } = await standalone(t);
-  fs.symlinkSync('/does-not-exist', path.join(storeDir, '.training'));
+  fs.symlinkSync(path.join(storeDir, 'does-not-exist'), path.join(storeDir, '.training'), process.platform === 'win32' ? 'junction' : 'dir');
   for (const headers of [{}, { 'x-drill-token': 'game-token' }]) {
     const result = await unfinishedRequest(port, '/api/start?token=study-http', headers);
     assert.equal(result.status, 401);
@@ -215,7 +216,7 @@ test('REQ-010: service is a real detached child with a single private two-capabi
   assert.notEqual(handle.pid, process.pid); assert.equal(children.length, 1);
   assert.equal(processStartTime(handle.pid), handle.startTime);
   const descriptor = readDescriptor(storeDir);
-  assert.equal(fs.statSync(descriptorPath(storeDir)).mode & 0o777, 0o600);
+  assert.equal(isPrivatePath(descriptorPath(storeDir)), true);
   assert.deepEqual(Object.keys(descriptor).filter((key) => /token/i.test(key)).sort(), ['controlToken', 'drillToken']);
   assert.match(descriptor.drillToken, /^[0-9a-f]{64}$/); assert.match(descriptor.controlToken, /^[0-9a-f]{64}$/);
   assert.notEqual(descriptor.drillToken, descriptor.controlToken); assert.equal(token, descriptor.drillToken);
@@ -347,10 +348,10 @@ test('REQ-010: startup rejects unsafe root and training containment before spawn
   const api = await service();
   const root = createOwnedTempDir('holdem-study-root');
   const foreign = createOwnedTempDir('holdem-study-foreign');
-  const link = path.join(root, 'store-link'); fs.symlinkSync(foreign, link);
+  const link = path.join(root, 'store-link'); fs.symlinkSync(foreign, link, process.platform === 'win32' ? 'junction' : 'dir');
   let spawns = 0;
   await assert.rejects(api.ensureStudyService(link, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
-  fs.symlinkSync(foreign, path.join(root, '.training'));
+  fs.symlinkSync(foreign, path.join(root, '.training'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(api.ensureStudyService(root, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   assert.equal(spawns, 0); assert.deepEqual(fs.readdirSync(foreign), []);
 });
@@ -635,7 +636,7 @@ test('REQ-010: a canonical service is reused and attached by a parent in another
   assert.equal(result.code, 0);
   const reused=JSON.parse(result.output);
   assert.equal(reused.pid, handle.pid); assert.equal(reused.instanceId, handle.instanceId);
-  assert.equal(reused.startTime, handle.startTime); assert.match(reused.startTime, /^utc-v1:/);
+  assert.equal(reused.startTime, handle.startTime); assert.match(reused.startTime, /^(?:utc-v1:|win32-v1:)/);
   assert.equal(reused.urlHash, createHash('sha256').update(handle.studyUrl).digest('hex'));
   assert.equal((await request(handle.port, token, '/api/health')).status, 200);
 });
@@ -653,7 +654,7 @@ test('REQ-010: malformed or legacy private lock wire stays unknown before PID li
   }
 });
 
-test('S7 repair: child startup is private under caller umask002 without changing caller or existing modes', async () => {
+test('S7 repair: child startup is private under caller umask002 without changing caller or existing modes', { skip: process.platform === 'win32' ? 'POSIX umask/mode contract; Windows privacy is checked via DACL in the detached service test' : false }, async () => {
   const storeDir = createOwnedTempDir('holdem-study-umask');
   const href = new URL('../tools/study-service.js', import.meta.url).href;
   fs.mkdirSync(path.join(storeDir,'.training'),{mode:0o700});

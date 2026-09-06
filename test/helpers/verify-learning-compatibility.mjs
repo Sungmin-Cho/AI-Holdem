@@ -2,6 +2,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { isPrivatePath } from '../../shared/platform-files.js';
+import { stopOwnedProcessTree, spawnOwnedCommand } from './platform.js';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -124,7 +126,7 @@ async function until(read, timeoutMs = 8_000) {
 
 function commandEnvironment(tmpDir) {
   return {
-    ...Object.fromEntries(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM']
+    ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'COMSPEC', 'TEMP', 'TMP', 'USERPROFILE', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM']
       .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
     TMPDIR: tmpDir,
     LANG: 'C',
@@ -141,19 +143,13 @@ export async function runOwned(command, args, { cwd = ROOT, tmpDir, timeoutMs = 
   let timedOut = false;
   let outputLimited = false;
   let spawnError = null;
-  const child = registerOwnedProcess(spawn(command, args, {
+  const child = registerOwnedProcess(spawnOwnedCommand(command, args, {
     cwd,
     env: commandEnvironment(tmpDir),
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   }), `compatibility ${path.basename(command)}`);
-  const kill = () => {
-    // The leader may exit before descendants close their inherited pipes.
-    if (Number.isSafeInteger(child.pid) && child.pid > 1) {
-      try { process.kill(-child.pid, 'SIGKILL'); }
-      catch (error) { if (error.code !== 'ESRCH') throw error; }
-    }
-  };
+  const kill = () => stopOwnedProcessTree(child);
   const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
   const append = (kind, chunk) => {
     if (kind === 'stdout') stdout += chunk;
@@ -403,7 +399,7 @@ async function priorLockProtection({ baselineTree, storeDir, tmpDir }) {
 function descriptor(storeDir) {
   const file = path.join(storeDir, '.training', 'study-service.json');
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !isPrivatePath(file)) {
     throw coded('STUDY_DESCRIPTOR_UNSAFE');
   }
   const bytes = fs.readFileSync(file);

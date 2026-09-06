@@ -41,7 +41,6 @@ export const requiredJourneyChecks = REQUIRED;
 
 export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_STORE }) {
   assert.ok(outDir, '--out-dir is required');
-  assert.equal(process.version, 'v26.0.0', `use ${NODE26}`);
   const output = path.resolve(outDir);
   fs.mkdirSync(output, { recursive: true });
   assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolicLink());
@@ -121,6 +120,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       result.error = 'protected user store must be an existing directory';
       return result;
     }
+    assert.equal(process.version, 'v26.0.0', 'qualified browser journey requires Node v26.0.0');
     const deps = await productionDependencies();
     if (!deps.ready) { result.blocked = deps.reason; return result; }
     const version = await browser(['--version'], { json: false });

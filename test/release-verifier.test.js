@@ -414,7 +414,7 @@ test('actual archived readers reject new identities without writes and compatibl
   assert.equal(result.rollback.actionRecovery.engine.chosenAction, 'fold');
   assert.ok(result.rollback.actionRecovery.engine.afterStateVersion > result.rollback.actionRecovery.engine.beforeStateVersion);
   assert.equal(result.rollback.actionRecovery.recoveryRelay.dead, true);
-  assert.match(result.rollback.actionRecovery.recoveryRelay.startTime, /^utc-v1:/);
+  assert.match(result.rollback.actionRecovery.recoveryRelay.startTime, /^(?:utc-v1:|win32-v1:)/);
   assert.equal(result.rollback.serviceRotation.firstStop.stopped, true);
   assert.equal(result.rollback.serviceRotation.rebootstrap.instanceRotated, true);
   assert.equal(result.rollback.serviceRotation.rebootstrap.drillTokenRotated, true);
@@ -582,14 +582,12 @@ for (const helper of ['release', 'compatibility']) {
     const { runOwned } = await import('./helpers/verify-learning-compatibility.mjs');
     const code = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setTimeout(()=>{},2500)'],{stdio:['ignore',1,2]});console.log(child.pid);child.unref();`;
     const result = await (helper === 'release' ? runProcess : runOwned)(process.execPath, ['-e', code],
-      { cwd: root, tmpDir: root, timeoutMs: 400, allowFailure: true });
+      { cwd: root, tmpDir: root, timeoutMs: process.platform === 'win32' ? 15000 : 400, allowFailure: true });
     assert.equal(result.exitCode, 0, 'leader must have exited before deadline');
-    assert.equal(result.timedOut, true);
-    assert.ok(result.durationMs < 1800, `descendant kept pipes open for ${result.durationMs}ms`);
+    assert.equal(result.timedOut, process.platform !== 'win32', 'Windows Job closes descendants at leader exit');
+    assert.ok(result.durationMs < (process.platform === 'win32' ? 15000 : 1800), `descendant kept pipes open for ${result.durationMs}ms`);
     const pid = Number(result.stdout.trim()); assert.ok(Number.isSafeInteger(pid) && pid > 1);
-    let state = '';
-    try { state = execFileSync('ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-    catch (error) { assert.equal(error.status, 1, 'ps must only report a missing process'); }
+    const state = processState(pid);
     assert.ok(!state || /^Z/.test(state), 'descendant must be dead or awaiting OS reaping');
   });
 }
@@ -659,12 +657,10 @@ for (const helper of ['release', 'compatibility']) {
     // A broken supervisor still leaves only a finite owned fixture.
     t.after(() => new Promise((resolve) => setTimeout(resolve, 1600)));
     const result = await (helper === 'release' ? runProcess : runOwned)(process.execPath, ['-e', code],
-      { cwd: root, tmpDir: root, timeoutMs: 400, allowFailure: true });
+      { cwd: root, tmpDir: root, timeoutMs: process.platform === 'win32' ? 15000 : 400, allowFailure: true });
     assert.equal(result.exitCode, 0); assert.equal(result.timedOut, false);
     const pid = Number(result.stdout.trim()); assert.ok(Number.isSafeInteger(pid) && pid > 1);
-    let state = '';
-    try { state = execFileSync('ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-    catch (error) { assert.equal(error.status, 1); }
+    const state = processState(pid);
     assert.ok(!state || /^Z/.test(state), `normal exit left descendant alive: ${state}`);
   });
 }
@@ -690,3 +686,28 @@ test('malformed release CLI retry preserves the prior evidence bundle', async ()
   assert.equal(fs.readFileSync(file, 'utf8'), 'previous result');
   assert.match(result.stderr, /RELEASE_OUTPUT_NOT_FRESH/);
 });
+
+function processState(pid) {
+  if (process.platform === 'win32') {
+    try { process.kill(pid, 0); return 'alive'; }
+    catch (error) { assert.equal(error.code, 'ESRCH'); return ''; }
+  }
+  try { return execFileSync('ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch (error) { assert.equal(error.status, 1, 'ps must only report a missing process'); return ''; }
+}
+
+for (const helper of ['release', 'compatibility']) {
+  test(`${helper} owned command preserves literal argv and a nonzero leader exit`, async () => {
+    const root = createOwnedTempDir('holdem-owned-argv');
+    const { runProcess } = await import('../tools/verify-learning-release.js');
+    const { runOwned } = await import('./helpers/verify-learning-compatibility.mjs');
+    const literal = ['', 'two words', 'trailing\\', 'quote"inside', 'slashes\\\\"quote',
+      '$HOME; $(echo forbidden)', '`echo forbidden`', '한글', 'line\nbreak'];
+    const result = await (helper === 'release' ? runProcess : runOwned)(process.execPath,
+      ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)));process.exitCode=7', '--', ...literal],
+      { cwd: root, tmpDir: root, timeoutMs: 15000, allowFailure: true });
+    assert.equal(result.exitCode, 7); assert.equal(result.signal, null);
+    assert.equal(result.timedOut, false); assert.equal(result.outputLimited, false);
+    assert.equal(result.spawnError, null); assert.deepEqual(JSON.parse(result.stdout), literal);
+  });
+}

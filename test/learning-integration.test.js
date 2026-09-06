@@ -14,6 +14,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
+import { isPrivatePath } from '../shared/platform-files.js';
 import { ownedProcessStartTime } from '../engine/state.js';
 import { resolveRuntimes, RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { ensureStudyService, inspectStudyService, stopStudyService } from '../tools/study-service.js';
@@ -156,17 +157,30 @@ function failedCliFixtures({ hold = false } = {}) {
   const log = path.join(root, 'invocations.jsonl');
   const release = path.join(root, 'release');
   for (const kind of ['claude', 'codex', 'grok']) {
-    fs.writeFileSync(path.join(root, kind), `#!/usr/bin/env node
+    fs.writeFileSync(path.join(root, `${kind}.cjs`), `
 const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({kind:${JSON.stringify(kind)},argv:process.argv.slice(2)})+'\\n');
 process.stdin.resume();
 ${hold ? `setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) process.exit(1); }, 10);` : 'process.stdin.on("end", () => process.exit(1));'}
 `, { mode: 0o700 });
   }
+  const preload = path.join(root, 'fixture-preload.mjs');
+  fs.writeFileSync(preload, `import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = cp.spawn;
+const fixtures = ${JSON.stringify(Object.fromEntries(['claude', 'codex', 'grok'].map(kind => [kind, path.join(root, `${kind}.cjs`)])))};
+cp.spawn = (command, args, options) => Object.hasOwn(fixtures, command)
+  ? spawn(process.execPath, [fixtures[command], ...args], options) : spawn(command, args, options);
+syncBuiltinESMExports();
+// IPC is a fixture transport into the CLI's registered graceful shutdown handler.
+// It makes no claim that Windows SIGTERM delivers a catchable signal.
+process.on('message', message => { if (message === 'fixture-request-stop') process.emit('SIGTERM'); });
+process.channel?.unref();
+`);
   return {
     log,
     release() { fs.writeFileSync(release, 'fail the owned probe'); },
-    env: { ...process.env, PATH: `${root}:${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin` },
+    env: { ...process.env, HOLDEM_FIXTURE_PRELOAD: preload },
   };
 }
 
@@ -176,14 +190,18 @@ function startCli(args, env, { umask } = {}) {
   if (!args.includes('--port')) args = [...args, '--port', '0'];
   const argv = umask === undefined ? [LOOP, ...args] : ['--input-type=module', '--eval',
     `process.umask(${umask});process.argv=[process.execPath,${JSON.stringify(LOOP)},...${JSON.stringify(args)}];await import(${JSON.stringify(pathToFileURL(LOOP).href)});`];
-  const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (env?.HOLDEM_FIXTURE_PRELOAD) argv.unshift('--import', pathToFileURL(env.HOLDEM_FIXTURE_PRELOAD).href);
+  const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   registerOwnedProcess(child, 's8-store-cli');
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const closed = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })));
-  return { child, closed };
+  return { child, closed, requestStop() {
+    if (process.platform === 'win32') child.send('fixture-request-stop');
+    else child.kill('SIGTERM');
+  } };
 }
 
 async function within(promise, milliseconds, label = 'owned CLI') {
@@ -213,7 +231,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env);
   t.after(async () => {
-    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.child.kill('SIGTERM');
+    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
     await within(cli.closed, 8000);
   });
   const invocation = await until(() => {
@@ -241,7 +259,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
   assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === '2.0.0'));
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
   assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false, 'the held probe keeps this test before relay startup');
-  cli.child.kill('SIGTERM');
+  cli.requestStop();
   const result = await within(cli.closed, 8000);
   assert.equal(result.code, 0, JSON.stringify(result));
   assert.equal(result.signal, null);
@@ -321,16 +339,14 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env, { umask: 0o002 });
   t.after(async () => {
-    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.child.kill('SIGTERM');
+    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
     await within(cli.closed, 8000);
     await stopOwnedStudy(store);
   });
   await until(() => fs.existsSync(fake.log), cli);
-  assert.equal(fs.statSync(path.join(store, 'loop.lock.d')).mode & 0o777, 0o700,
-    'the actual store CLI must create private loop ownership metadata');
-  assert.equal(fs.statSync(path.join(store, 'loop.lock.d', 'pid')).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(store).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(parent).mode & 0o777, 0o755, 'existing caller directories retain their mode');
+  for (const file of [store, path.join(store, 'loop.lock.d'), path.join(store, 'loop.lock.d', 'pid')])
+    assert.equal(isPrivatePath(file), true, 'actual CLI ownership paths must be private');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(parent).mode & 0o777, 0o755, 'existing caller directories retain their mode');
   assert.equal(process.umask(), hostMask, 'the host process umask is unchanged');
 });
 
@@ -411,7 +427,7 @@ for (const variant of ['missing study URL', 'rotated study URL', 'actual legacy 
       sourceRoot = createOwnedTempDir('holdem-s8-old-relay-source');
       const archive = path.join(sourceRoot, 'baseline.tar');
       await command('git', ['archive', '--format=tar', '--output', archive, 'a4822d74a4251f199b52e0f02914ef659ea905dd'], { cwd: ROOT });
-      await command('/usr/bin/tar', ['-xf', archive, '-C', sourceRoot]);
+      await command('tar', ['-xf', archive, '-C', sourceRoot]);
     }
     const old = await launchRelay(t, gameDir, initialized.json.sessionToken, { studyUrl: oldStudyUrl, sourceRoot });
     const loop = createGameLoop({ gameDir, lockDir: storeDir,
@@ -483,6 +499,15 @@ async function studyRequest(service, route, body) {
   return result;
 }
 
+function processCommandLine(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 1);
+  if (process.platform !== 'win32') return execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 5000 }).trim();
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`],
+  { encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
+}
+
 function captureCliRelay(gameDir) {
   const file = gameDir && path.join(gameDir, 'lock.json');
   if (!file || !fs.existsSync(file)) return null;
@@ -494,7 +519,7 @@ function captureCliRelay(gameDir) {
     assert.throws(() => process.kill(lock.serverPid, 0), (error) => error.code === 'ESRCH');
     return null;
   }
-  const args = execFileSync('/bin/ps', ['-p', String(lock.serverPid), '-o', 'args='], { encoding: 'utf8' }).trim();
+  const args = processCommandLine(lock.serverPid);
   assert.ok(args.includes(path.join(ROOT, 'server/server.js')));
   assert.ok(args.includes(gameDir) || args.includes(fs.realpathSync(gameDir)));
   return { pid: lock.serverPid, startTime, args };
@@ -503,7 +528,7 @@ function captureCliRelay(gameDir) {
 async function cleanupCli(cli, gameDir) {
   const relay = captureCliRelay(gameDir);
   if (cli.child.exitCode === null && cli.child.signalCode === null) {
-    cli.child.kill('SIGTERM');
+    cli.requestStop();
     try { await within(cli.closed, 1000, 'fixture cleanup CLI'); }
     catch { cli.child.kill('SIGKILL'); }
   }
@@ -513,7 +538,7 @@ async function cleanupCli(cli, gameDir) {
     for (const signal of ['SIGTERM', 'SIGKILL']) {
       if (!alive()) break;
       assert.equal(ownedProcessStartTime(relay.pid), relay.startTime);
-      assert.equal(execFileSync('/bin/ps', ['-p', String(relay.pid), '-o', 'args='], { encoding: 'utf8' }).trim(), relay.args);
+      assert.equal(processCommandLine(relay.pid), relay.args);
       process.kill(relay.pid, signal);
       const deadline = Date.now() + 2000;
       while (alive() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -530,7 +555,7 @@ async function stopWaitingCli(cli, gameDir) {
     return snapshot.body.view?.legal?.toAct === 'user' ? { lock, legal: snapshot.body.view.legal } : null;
   }, 8000);
   const before = fs.readFileSync(path.join(gameDir, 'state.json'));
-  cli.child.kill('SIGTERM');
+  cli.requestStop();
   await waitValue(() => JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'))).stopping === true);
   const action = { decisionId: waiting.legal.decisionId, requestId: randomUUID(), action: 'fold' };
   assert.equal((await relayRequest(waiting.lock, '/api/action', action)).status, 200);
@@ -566,7 +591,7 @@ test('S8 full: default 20-hand production session records support then study rem
     if (failures.length) throw new AggregateError(failures, 'default20 fixture cleanup failed');
   });
   await until(() => fs.existsSync(fake.log), initialCli);
-  initialCli.child.kill('SIGTERM');
+  initialCli.requestStop();
   assert.equal((await within(initialCli.closed, 8000)).code, 0);
   const selected = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
   gameDir = path.join(storeDir, '.session-store', selected.sessionRel);
@@ -777,27 +802,27 @@ test('S8 full: private CLI creation never relabels an existing live foreign loop
   fs.writeFileSync(pidFile, bytes);
   fs.chmodSync(pidFile, 0o664);
   const before = fs.statSync(lock);
+  const priorModes = [lock, pidFile, storeDir].map(file => fs.statSync(file).mode);
   const cli = startCli(['--store-dir', storeDir], failedCliFixtures().env, { umask: 0o002 });
   const result = await within(cli.closed, 8000);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /ACTIVE_GAME/);
   assert.equal(fs.statSync(lock).ino, before.ino);
-  assert.equal(fs.statSync(lock).mode & 0o777, 0o775);
-  assert.equal(fs.statSync(pidFile).mode & 0o777, 0o664);
+  assert.deepEqual([lock, pidFile, storeDir].map(file => fs.statSync(file).mode), priorModes);
   assert.equal(fs.readFileSync(pidFile, 'utf8'), bytes);
-  assert.equal(fs.statSync(storeDir).mode & 0o777, 0o755);
 });
 
 test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: 15000 }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-command');
   t.after(() => stopOwnedStudy(storeDir));
-  const npm = path.join(path.dirname(process.execPath), 'npm');
-  await assert.rejects(command(npm, ['run', '--silent', 'study'], { cwd: ROOT }), /usage:/);
+  const npm = process.platform === 'win32' ? process.execPath : path.join(path.dirname(process.execPath), 'npm');
+  const npmArgs = process.platform === 'win32' ? [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')] : [];
+  await assert.rejects(command(npm, [...npmArgs, 'run', '--silent', 'study'], { cwd: ROOT }), /usage:/);
   assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
-  const output = await command(npm, ['run', '--silent', 'study', '--', storeDir], { cwd: ROOT });
+  const output = await command(npm, [...npmArgs, 'run', '--silent', 'study', '--', storeDir], { cwd: ROOT });
   const service = await inspectStudyService(storeDir);
   assert.equal(output.trim(), service.studyUrl);
-  await command(npm, ['run', '--silent', 'study:stop', '--', storeDir], { cwd: ROOT });
+  await command(npm, [...npmArgs, 'run', '--silent', 'study:stop', '--', storeDir], { cwd: ROOT });
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 });
 

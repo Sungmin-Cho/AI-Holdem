@@ -5,14 +5,14 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import * as journey from './browser/learning-journey.mjs';
-import { createBrowserWorkspace, runOwnedCommand, startResponseProxy, hashTree, NODE26 } from './helpers/learning-browser-fixture.mjs';
+import { createBrowserWorkspace, runOwnedCommand, startResponseProxy, hashTree } from './helpers/learning-browser-fixture.mjs';
 import './helpers/owned-fixtures.mjs';
 
 test('browser CLI is inert under NODE_TEST_CONTEXT without spawning a browser or fixture', async () => {
   const workspace = createBrowserWorkspace();
   try {
     const output = path.join(workspace.root, 'forbidden-output');
-    const result = await runOwnedCommand(NODE26, ['test/browser/learning-journey.mjs', '--out-dir', output], { env: { NODE_TEST_CONTEXT: 'child-v8' } });
+    const result = await runOwnedCommand(process.execPath, ['test/browser/learning-journey.mjs', '--out-dir', output], { env: { NODE_TEST_CONTEXT: 'child-v8' } });
     assert.equal(result.exitCode, 0); assert.equal(result.signal, null); assert.equal(result.timedOut, false);
     assert.equal(result.stdout.trim(), 'BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT');
     assert.equal(fs.existsSync(output), false); assert.equal(result.stderr, '');
@@ -111,4 +111,62 @@ test('missing and non-directory protected stores fail the real journey gate befo
       assert.equal(result.error, 'protected user store must be an existing directory');
     }
   } finally { workspace.close(); }
+});
+
+test('owned process tree adapter routes Windows taskkill without POSIX negative PIDs', async () => {
+  const { stopOwnedProcessTree } = await import('./helpers/platform.js');
+  const calls = [];
+  const child = { pid: 4321, exitCode: null, signalCode: null };
+  stopOwnedProcessTree(child, { platform: 'win32', exec: (command, args) => calls.push({ command, args }),
+    kill: () => assert.fail('Windows must not use POSIX process-group signals') });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].command.endsWith('taskkill.exe'));
+  assert.deepEqual(calls[0].args, ['/PID', '4321', '/T', '/F']);
+  stopOwnedProcessTree({ ...child, exitCode: 0 }, { platform: 'win32', exec: () => assert.fail('exited PID has no kill authority') });
+  stopOwnedProcessTree(child, { platform: 'linux', kill: (pid, signal) => {
+    assert.equal(pid, -4321); assert.equal(signal, 'SIGKILL');
+  } });
+});
+
+test('valid protected store cannot bypass the exact browser qualification runtime', async () => {
+  if (process.version === 'v26.0.0') return; // Executed by the Node20/22 CI matrix.
+  const workspace = createBrowserWorkspace();
+  try {
+    const store = path.join(workspace.root, 'store'); fs.mkdirSync(store);
+    const result = await journey.runLearningJourney({ outDir: path.join(workspace.root, 'proof'), userStoreDir: store });
+    assert.equal(result.pass, false);
+    assert.match(result.error, /qualified browser journey requires Node v26\.0\.0/);
+  } finally { workspace.close(); }
+});
+
+test('Windows owned launch rejects malformed and oversized payloads before process creation', async () => {
+  const { windowsOwnedPayload, quoteWindowsArgument } = await import('./helpers/platform.js');
+  const valid = { command: 'C:\\Program Files\\node.exe', args: ['', 'quote"', 'tail\\', '한글'], cwd: 'C:\\work space' };
+  assert.deepEqual(JSON.parse(Buffer.from(windowsOwnedPayload(valid), 'base64').toString('utf8')), valid);
+  for (const invalid of [null, [], { ...valid, unexpected: true }, { ...valid, command: 'node.exe' },
+    { ...valid, cwd: '\\root-relative' }, { ...valid, command: '\\root-node.exe' }, { ...valid, command: 'C:\\npm.cmd' }, { ...valid, cwd: 'relative' }, { ...valid, args: 'text' },
+    { ...valid, args: [null] }, { ...valid, args: [1] }, { ...valid, args: ['nul\0suffix'] },
+    { ...valid, args: Array(1025).fill('') }]) {
+    assert.throws(() => windowsOwnedPayload(invalid), { code: 'WINDOWS_OWNED_PAYLOAD_INVALID' });
+  }
+  assert.throws(() => windowsOwnedPayload({ ...valid, args: ['a'.repeat(24576)] }), { code: 'WINDOWS_OWNED_PAYLOAD_TOO_LARGE' });
+  assert.throws(() => windowsOwnedPayload({ ...valid, args: ['\\'.repeat(20000)] }), { code: 'WINDOWS_OWNED_COMMAND_TOO_LARGE' });
+  assert.equal(quoteWindowsArgument(''), '""');
+  assert.equal(quoteWindowsArgument('tail\\'), '"tail\\\\"');
+  assert.equal(quoteWindowsArgument('quote"'), '"quote\\""');
+});
+
+
+test('Windows launcher option envelope preserves the Job owner and structured argv', async () => {
+  const { windowsOwnedSpawnOptions } = await import('./helpers/platform.js');
+  for (const shell of [true, 'cmd.exe']) {
+    const caller = { shell, windowsVerbatimArguments: true, detached: true, windowsHide: false,
+      cwd: 'C:\\work space', env: { PATH: 'C:\\Windows' }, stdio: ['ignore', 'pipe', 'pipe'] };
+    const actual = windowsOwnedSpawnOptions(caller);
+    assert.equal(actual.shell, false, 'the tracked process must be the PowerShell Job owner');
+    assert.equal(actual.windowsVerbatimArguments, false, 'the spawn layer must preserve the quoted argv boundary');
+    assert.equal(actual.detached, false); assert.equal(actual.windowsHide, true);
+    assert.equal(actual.cwd, caller.cwd); assert.equal(actual.env, caller.env); assert.equal(actual.stdio, caller.stdio);
+    assert.equal(caller.shell, shell); assert.equal(caller.windowsVerbatimArguments, true, 'caller options stay unchanged');
+  }
 });

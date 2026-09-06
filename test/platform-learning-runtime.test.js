@@ -1,0 +1,148 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { parseOwnedLockIdentity } from '../engine/state.js';
+import { createListenerOwnedBy } from '../tools/listener-ownership.js';
+
+test('Windows owned lock preserves submillisecond start precision and rejects legacy or invalid calendar dates', () => {
+  const stamp = '2026-09-07T01:02:03.1234567Z';
+  assert.deepEqual(parseOwnedLockIdentity(`42\nwin32-v1\n${stamp}`), { pid: 42, startTime: `win32-v1:${stamp}` });
+  for (const bytes of [`42\n${stamp}`, `42\nwin32-v1\n2026-02-30T01:02:03.1234567Z`, `42\nwin32-v1\n${stamp}\n`]) {
+    assert.equal(parseOwnedLockIdentity(bytes), null);
+  }
+});
+
+test('Windows listener factory tracks asynchronous probe children', async () => {
+  const events = [];
+  const child = { pid: 123 };
+  const adapter = createListenerOwnedBy({ platform: 'win32', onChild: (event, proc) => events.push([event, proc]),
+    execFileFn: (exe, args, options, callback) => {
+      queueMicrotask(() => callback(null, JSON.stringify({ OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 'Listen' }), ''));
+      return child;
+    },
+    spawn: () => ({ status: 0, stdout: JSON.stringify({ OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 'Listen' }) }),
+  });
+  assert.equal(await adapter(42, 12345), true);
+  assert.deepEqual(events, [['open', child], ['close', child]]);
+});
+
+test('private path helper refuses permissive Windows ACL and never treats mode bits as privacy', async () => {
+  const mod = await import('../shared/platform-files.js').catch(() => ({}));
+  assert.equal(typeof mod.isPrivatePath, 'function');
+  assert.equal(mod.isPrivatePath('/fixture', { platform: 'win32', spawn: () => ({ status: 1, stdout: '' }) }), false);
+});
+
+test('atomic state write never copy-overwrites after Windows sharing violation', async () => {
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { writeJsonAtomic } = await import('../engine/state.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'platform-atomic-'));
+  const file = path.join(root, 'state.json'); fs.writeFileSync(file, 'original');
+  const originalRename = fs.renameSync; const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    fs.renameSync = () => { throw Object.assign(new Error('sharing'), { code: 'EPERM' }); };
+    assert.throws(() => writeJsonAtomic(file, { changed: true }), { code: 'EPERM' });
+    assert.equal(fs.readFileSync(file, 'utf8'), 'original');
+  } finally { fs.renameSync = originalRename; Object.defineProperty(process, 'platform', platform); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('actual platform fresh private store owns, reuses and stops study service', { timeout: process.platform === 'win32' ? 600000 : 30000 }, async () => {
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { randomUUID } = await import('node:crypto');
+  const { createPrivateDirectory, isPrivatePath } = await import('../shared/platform-files.js');
+  const { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus } = await import('../engine/state.js');
+  const { ensureStudyService, inspectStudyService, stopStudyService } = await import('../tools/study-service.js');
+  const root = path.join(os.tmpdir(), `platform-study-${randomUUID()}`);
+  createPrivateDirectory(root);
+  let owner, service;
+  try {
+    assert.equal(isPrivatePath(root), true);
+    owner = acquireOwnedLock(root, 'loop.lock.d');
+    const options = { parentIdentity: { pid: owner.pid, startTime: owner.startTime } };
+    service = await ensureStudyService(root, options);
+    assert.equal(isPrivatePath(path.join(root, '.training')), true);
+    assert.equal(isPrivatePath(path.join(root, '.training', 'study-service.json')), true);
+    assert.equal(ownedIdentityStatus(service.pid, service.startTime), 'alive');
+    const again = await ensureStudyService(root, options);
+    assert.equal(again.instanceId, service.instanceId);
+    assert.equal(again.studyUrl, service.studyUrl);
+    assert.equal((await inspectStudyService(root)).instanceId, service.instanceId);
+    assert.equal((await stopStudyService(root, { expectedInstanceId: service.instanceId })).stopped, true);
+    assert.equal(ownedIdentityStatus(service.pid, service.startTime), 'dead');
+    service = null;
+  } finally {
+    if (service) await stopStudyService(root, { expectedInstanceId: service.instanceId });
+    if (owner) releaseOwnedLock(owner);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows solver cannot confirm termination when last identity probe becomes unknown', async () => {
+  const { killGroup } = await import('../tools/solver-runtime.js');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  let probes = 0;
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const result = await killGroup(process.pid, 'expected-start', () => ++probes === 1 ? 'expected-start' : null);
+    assert.equal(result.confirmed, false);
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+test('owned lock adapter preserves legacy probe injection without storing an unversioned identity', async () => {
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { acquireOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime } = await import('../engine/state.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'owned-probe-'));
+  let lock;
+  try {
+    lock = acquireOwnedLock(root, 'loop.lock.d', { processStartTime: (pid) => processStartTime(pid) });
+    assert.equal(lock.startTime, ownedProcessStartTime(process.pid));
+  } finally { if (lock) releaseOwnedLock(lock); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Windows ACL proof rejects generic writes and permits only explicit read rights for strangers', async () => {
+  const mod = await import('../shared/platform-files.js');
+  assert.equal(typeof mod.privateAclAllowed, 'function');
+  const snapshot = { owner: 'S-1-5-21-42', user: 'S-1-5-21-42', reparse: false, rules: [
+    { sid: 'S-1-5-21-42', type: 'Allow', rights: 2032127 },
+    { sid: 'S-1-1-0', type: 'Allow', rights: 1179817 },
+  ] };
+  assert.equal(mod.privateAclAllowed(snapshot, false), true);
+  assert.equal(mod.privateAclAllowed(snapshot, true), false);
+  for (const rights of [0x40000000, 0x10000000, 2, 0x80000, 0x40000, 64, -1]) {
+    assert.equal(mod.privateAclAllowed({ ...snapshot, rules: [snapshot.rules[0], { ...snapshot.rules[1], rights }] }, false), false);
+  }
+  assert.equal(mod.privateAclAllowed({ ...snapshot, reparse: true }, false), false);
+});
+
+test('Windows listener fallback consumes the original deadline and closes its tracked child', async () => {
+  const events = []; let calls = 0;
+  const adapter = createListenerOwnedBy({ platform: 'win32', timeoutMs: 20,
+    onChild: (event) => events.push(event),
+    execFileFn: (exe, args, options, callback) => {
+      calls += 1; setTimeout(() => callback(null, '', ''), 35); return { pid: 123 };
+    },
+  });
+  await assert.rejects(adapter(42, 12345), { code: 'SERVER_LISTENER_UNAVAILABLE' });
+  assert.equal(calls, 1, 'fallback cannot receive a second full probe budget');
+  assert.deepEqual(events, ['open', 'close']);
+});
+
+test('Windows owned identity rejects noncanonical fractions before classifying a live PID', async () => {
+  const { ownedIdentityStatus } = await import('../engine/state.js');
+  const prefix = '2026-09-07T01:02:03';
+  const canonical = `win32-v1:${prefix}.1230000Z`;
+  for (const stamp of [`${prefix}Z`, `${prefix}.123Z`, `${prefix}.123000Z`]) {
+    assert.equal(ownedIdentityStatus(process.pid, `win32-v1:${stamp}`, () => canonical), 'unknown');
+    assert.equal(parseOwnedLockIdentity(`${process.pid}\nwin32-v1\n${stamp}`), null);
+  }
+  assert.equal(ownedIdentityStatus(process.pid, canonical, () => canonical), 'alive');
+  assert.equal(ownedIdentityStatus(process.pid, `win32-v1:${prefix}.1230001Z`, () => canonical), 'dead');
+  assert.deepEqual(parseOwnedLockIdentity(`${process.pid}\nwin32-v1\n${prefix}.1230001Z`), {
+    pid: process.pid, startTime: `win32-v1:${prefix}.1230001Z`,
+  });
+});

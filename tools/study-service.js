@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isPrivatePath, arePrivatePaths, createPrivateDirectory } from '../shared/platform-files.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -11,7 +12,8 @@ const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
 const DESCRIPTOR = 'study-service.json';
 const MAX_DESCRIPTOR = 4096;
-const WAIT_MS = 5000;
+const WAIT_MS = process.platform === 'win32' ? 120_000 : 5000;
+const HTTP_WAIT_MS = process.platform === 'win32' ? 8000 : 500;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
@@ -26,14 +28,36 @@ function fail(code = 'STUDY_DESCRIPTOR_CORRUPT') { const error = new Error(code)
 function statOrNull(file) {
   try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
 }
+// A synchronous read transaction batches mutable ACL proof before and after
+// all inode/bytes checks. No proof is cached across awaits or transactions.
+let aclScope = null;
+function privatePath(file, privateMode) {
+  return aclScope?.has(file) || isPrivatePath(file, { privateMode });
+}
+function aclTransaction(ctx, fn) {
+  if (process.platform !== 'win32' || aclScope) return fn();
+  const entries = [
+    { file: ctx.root, privateMode: false }, { file: ctx.training, privateMode: true },
+    { file: path.join(ctx.training, DESCRIPTOR), privateMode: true },
+    { file: path.join(ctx.training, LOCK), privateMode: false },
+    { file: path.join(ctx.training, LOCK, 'pid'), privateMode: false },
+    { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
+    { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
+  ].filter(({ file }) => statOrNull(file));
+  if (!arePrivatePaths(entries)) fail();
+  aclScope = new Set(entries.map(({ file }) => file));
+  try { return fn(); }
+  finally { aclScope = null; if (!arePrivatePaths(entries.filter(({ file }) => statOrNull(file)))) fail(); }
+}
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
 function directory(file, { privateMode = false } = {}) {
   const stat = statOrNull(file);
   if (!stat?.isDirectory() || stat.isSymbolicLink() || !ownUid(stat)
-    || (stat.mode & 0o022) !== 0 || (privateMode && (stat.mode & 0o777) !== 0o700)) fail();
+    || (process.platform === 'win32' ? !privatePath(file, privateMode) : ((stat.mode & 0o022) !== 0 || (privateMode && (stat.mode & 0o777) !== 0o700)))) fail();
   return stat;
 }
 function assertContext(ctx) {
+  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => assertContext(ctx));
   if (!sameInode(directory(ctx.root), ctx.rootStat) || fs.realpathSync(ctx.root) !== ctx.root) fail();
   if (ctx.trainingStat && !sameInode(directory(ctx.training, { privateMode: true }), ctx.trainingStat)) fail();
 }
@@ -49,7 +73,7 @@ function context(storeDir, { create = false } = {}) {
   let stat = statOrNull(training);
   if (!stat && create) {
     assertContext(ctx);
-    try { fs.mkdirSync(training, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') fail(); }
+    try { createPrivateDirectory(training); } catch (error) { if (error.code !== 'EEXIST') fail(); }
     stat = statOrNull(training);
   }
   if (stat) ctx.trainingStat = directory(training, { privateMode: true });
@@ -57,26 +81,27 @@ function context(storeDir, { create = false } = {}) {
   assertContext(ctx);
   return ctx;
 }
-function safeFile(stat, privateMode) {
+function safeFile(stat, privateMode, file) {
   return stat?.isFile() && !stat.isSymbolicLink() && ownUid(stat) && stat.nlink === 1
-    && (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0);
+    && (process.platform === 'win32' ? privatePath(file, privateMode) : (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0));
 }
 function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
+  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
-  if (!safeFile(before, privateMode) || (!allowOversized && before.size > maxBytes)) fail();
+  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) fail();
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
     const opened = fs.fstatSync(fd);
-    if (!sameInode(before, opened) || !safeFile(opened, privateMode) || (!allowOversized && opened.size > maxBytes)) fail();
+    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) fail();
     assertContext(ctx);
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
     const after = fs.fstatSync(fd);
-    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode)) fail();
+    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) fail();
     assertContext(ctx);
     return { text: bytes.subarray(0, length).toString('utf8'), stat: opened };
   } catch (error) {
@@ -88,6 +113,7 @@ function identityStatus(pid, startTime) {
   return ownedIdentityStatus(pid, startTime);
 }
 function readLock(ctx, parent = false) {
+  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => readLock(ctx, parent));
   assertContext(ctx);
   if (!parent && !ctx.trainingStat) return null;
   const file = path.join(parent ? ctx.root : ctx.training, parent ? 'loop.lock.d' : LOCK);
@@ -142,7 +168,7 @@ async function httpJson(value, route, { control = false, body, badToken = false,
     headers: { [control ? 'x-study-control' : 'x-drill-token']:
       badToken ? 'invalid-study-health-probe' : (control ? value.controlToken : value.drillToken) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(deadline === undefined ? 500 : Math.max(1, Math.min(500, deadline - Date.now()))), redirect: 'error',
+    signal: AbortSignal.timeout(deadline === undefined ? HTTP_WAIT_MS : Math.max(1, Math.min(HTTP_WAIT_MS, deadline - Date.now()))), redirect: 'error',
   });
   // Health/control responses are small; never trust an arbitrary listener's stream.
   const reader = response.body.getReader(); let size = 0; const chunks = [];
@@ -251,7 +277,7 @@ async function ensureOwned(ctx, options, deadline) {
       cwd: path.dirname(SELF), detached: true, stdio: 'ignore',
       // Existing owned locks use ps lstart in the caller's locale/timezone.
       // Preserve that identity format without inheriting game/provider secrets.
-      env: Object.fromEntries(['PATH','LANG','LC_ALL','LC_TIME','TZ']
+      env: Object.fromEntries(['PATH','SystemRoot','WINDIR','TEMP','TMP','LANG','LC_ALL','LC_TIME','TZ']
         .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
     });
     let spawnError = null;
@@ -338,6 +364,7 @@ function assertOwnLock(ctx, own) {
   return current;
 }
 function publish(ctx, own, value) {
+  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => publish(ctx, own, value));
   assertOwnLock(ctx, own);
   const file = path.join(ctx.training, DESCRIPTOR);
   const before = readPrivate(ctx, file, MAX_DESCRIPTOR, { allowOversized: true });
@@ -347,14 +374,14 @@ function publish(ctx, own, value) {
     fd = fs.openSync(file, fs.constants.O_WRONLY | NOFOLLOW | NONBLOCK
       | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
     const opened = fs.fstatSync(fd);
-    if (!safeFile(opened, true) || (before && !sameInode(before.stat, opened))) fail();
+    if (!safeFile(opened, true, file) || (before && !sameInode(before.stat, opened))) fail();
     assertContext(ctx);
     if (!sameInode(opened, statOrNull(file))) fail();
     const bytes = Buffer.from(JSON.stringify(value));
     fs.ftruncateSync(fd, 0);
     fs.writeFileSync(fd, bytes); fs.fsyncSync(fd);
     assertContext(ctx);
-    if (!sameInode(opened, statOrNull(file)) || !safeFile(fs.fstatSync(fd), true)) fail();
+    if (!sameInode(opened, statOrNull(file)) || !safeFile(fs.fstatSync(fd), true, file)) fail();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 async function runService(storeDir, config, expectedStore, expectedTraining) {
@@ -369,7 +396,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   let lastActivity = Date.now();
   let hadLiveParent = false;
   const stop = async () => {
-    if (stopping) return; stopping = true; clearInterval(timer);
+    if (stopping) return; stopping = true; clearTimeout(timer);
     await server?.close();
     try {
       assertOwnLock(ctx, own);
@@ -426,7 +453,10 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     health.port = server.port;
     value = { schemaVersion: 1, ...health, drillToken, controlToken };
     publish(ctx, own, value);
-    timer = setInterval(checkpoint, config.checkpointMs);
+    const scheduleCheckpoint = () => {
+      timer = setTimeout(() => { checkpoint(); if (!stopping) scheduleCheckpoint(); }, config.checkpointMs);
+    };
+    scheduleCheckpoint();
     process.once('SIGTERM', () => { void stop(); });
     process.once('SIGINT', () => { void stop(); });
   } catch (error) { await stop(); throw error; }

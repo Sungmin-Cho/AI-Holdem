@@ -1,9 +1,10 @@
 import { after } from 'node:test';
 import { createHash, randomBytes } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { processStartTime } from '../../engine/process-identity.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createPrivateDirectory } from '../../shared/platform-files.js';
 
 const ownedDirs = [];
 const ownedServers = [];
@@ -17,16 +18,7 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function processIdentity(pid) {
-  try {
-    return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || null;
-  } catch {
-    return null;
-  }
-}
+const processIdentity = processStartTime;
 
 function processAlive(pid) {
   try {
@@ -81,7 +73,10 @@ export function createOwnedTempDir(prefix = 'ai-holdem-test-') {
   if (!/^[a-z0-9][a-z0-9-]{0,48}$/i.test(prefix)) {
     throw new TypeError('owned fixture prefix must be a short safe token');
   }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  const dir = process.platform === 'win32'
+    ? path.join(os.tmpdir(), `${prefix}-${randomBytes(16).toString('hex')}`)
+    : fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  if (process.platform === 'win32') createPrivateDirectory(dir);
   const real = fs.realpathSync(dir);
   const stat = fs.lstatSync(dir);
   if (path.dirname(real) !== fs.realpathSync(os.tmpdir()) || !stat.isDirectory()) {

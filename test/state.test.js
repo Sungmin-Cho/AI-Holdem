@@ -4,7 +4,8 @@ import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os'
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
+import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
+import { spawnSleeper } from './helpers/platform.js';
 
 function tmpDir() { return createOwnedTempDir('holdem-state'); }
 
@@ -16,24 +17,13 @@ async function terminateChild(child) {
   assert.equal(child.signalCode, 'SIGKILL');
 }
 
-const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
-
-// PATH 맨 앞에 가짜 ps를 꽂아 실제 프로세스 경계(자식 프로세스 실행)로 read-time
-// 실패를 재현한다 — production 코드에 테스트 전용 훅을 넣지 않기 위함.
-function withFakePs(scriptBody, fn) {
-  const binDir = tmpDir();
-  const psPath = path.join(binDir, 'ps');
-  fs.writeFileSync(psPath, `#!/bin/sh\n${scriptBody}\n`);
-  fs.chmodSync(psPath, 0o755);
-  const original = process.env.PATH;
-  process.env.PATH = `${binDir}:${original}`;
-  try {
-    return fn();
-  } finally {
-    process.env.PATH = original;
-  }
-}
-
+test('writeJsonAtomic replaces an existing dest', () => {
+  const d = tmpDir();
+  const file = path.join(d, 'lock.json');
+  writeJsonAtomic(file, { n: 1 });
+  writeJsonAtomic(file, { n: 2, extra: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 2, extra: true });
+});
 test('save는 stateVersion을 올리고 load로 왕복된다', () => {
   const d = tmpDir();
   saveState(d, { stateVersion: 0, foo: '가' });
@@ -193,7 +183,8 @@ test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   // 살아 있는 pid(자기 자신)를 기록하되 startTime을 조작한다
-  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`);
+  const historical = process.platform === 'win32' ? 'win32-v1\n2001-01-01T00:00:00.0000000Z' : 'utc-v1\nMon Jan  1 00:00:00 2001';
+  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n${historical}`);
   const seen = readOwnedLock(dir, 'loop.lock.d');
   assert.equal(seen.alive, false); // 시그널 금지 판정의 근거
   assert.equal(seen.status, 'dead');
@@ -298,12 +289,10 @@ test('processStartTime: 존재하지 않는 pid는 null', () => {
 test('owned lock: 자신의 startTime을 알 수 없으면 락을 만들지 않고 LOCKED가 아닌 구분되는 에러로 실패한다', () => {
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
-  withFakePs('exit 1', () => {
-    assert.throws(
-      () => acquireOwnedLock(dir, 'loop.lock.d'),
-      (err) => err.code === 'IDENTITY_UNAVAILABLE' && err.code !== 'LOCKED',
-    );
-  });
+  assert.throws(
+    () => acquireOwnedLock(dir, 'loop.lock.d', { processStartTime: () => null }),
+    (err) => err.code === 'IDENTITY_UNAVAILABLE' && err.code !== 'LOCKED',
+  );
   assert.equal(fs.existsSync(lockDir), false); // mkdir 자체가 실행되지 않는다
 });
 
@@ -311,22 +300,23 @@ test('owned lock: 살아있는 기록 소유자의 read-time startTime을 알 �
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
-  const child = spawn('sleep', ['5']);
+  const child = spawnSleeper(5_000);
   await new Promise(resolve => child.once('spawn', resolve));
-  const recorded = `${child.pid}\nutc-v1\n${ownedProcessStartTime(child.pid).slice(7)}`;
+  const identity = ownedProcessStartTime(child.pid);
+  const separator = identity.indexOf(':');
+  const recorded = `${child.pid}\n${identity.slice(0, separator)}\n${identity.slice(separator + 1)}`;
   fs.writeFileSync(path.join(lockDir, 'pid'), recorded);
   const past = new Date(Date.now() - 60_000);
   fs.utimesSync(lockDir, past, past);
+  const startTimeOf = (pid) => (pid === child.pid ? null : processStartTime(pid));
   try {
-    withFakePs(
-      `if [ "$2" = "${child.pid}" ]; then exit 1; fi\nexec ${REAL_PS} "$@"`,
-      () => {
-        const seen = readOwnedLock(dir, 'loop.lock.d');
-        assert.equal(seen.alive, false); // 긍정 증명 없이는 시그널을 authorize하지 않는다
-        assert.equal(seen.status, 'unknown'); // destructive caller가 dead와 구분할 공개 근거
-        assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/); // unknown은 회수하지 않는다
-      },
-    );
+    const seen = readOwnedLock(dir, 'loop.lock.d', { processStartTime: startTimeOf });
+    assert.equal(seen.alive, false); // 긍정 증명 없이는 시그널을 authorize하지 않는다
+    assert.equal(seen.status, 'unknown'); // destructive caller가 dead와 구분할 공개 근거
+    assert.throws(
+      () => acquireOwnedLock(dir, 'loop.lock.d', { processStartTime: startTimeOf }),
+      /LOCKED/,
+    ); // unknown은 회수하지 않는다
     assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), recorded); // 기록 보존
   } finally {
     await terminateChild(child);
@@ -365,7 +355,8 @@ test('owned lock: pid 파일 하나만, 정확히 버전이 명시된 3줄', () 
   const lockDir = path.join(dir, 'loop.lock.d');
   assert.deepEqual(fs.readdirSync(lockDir), ['pid']);
   const content = fs.readFileSync(path.join(lockDir, 'pid'), 'utf8');
-  assert.equal(content, `${process.pid}\nutc-v1\n${h.startTime.slice(7)}`);
+  const separator = h.startTime.indexOf(':');
+  assert.equal(content, `${process.pid}\n${h.startTime.slice(0, separator)}\n${h.startTime.slice(separator + 1)}`);
   assert.deepEqual(parseOwnedLockIdentity(content), { pid: h.pid, startTime: h.startTime });
   assert.equal(parseOwnedLockIdentity(content + '\n'), null);
   releaseOwnedLock(h);
@@ -445,7 +436,7 @@ test('live unversioned and unknown-version lifetime identities are protected wit
 test('owned identity rejects malformed canonical dates and preserves legacy query output', () => {
   const plain = processStartTime(process.pid);
   assert.ok(plain && !plain.startsWith('utc-v1:'));
-  assert.match(ownedProcessStartTime(process.pid), /^utc-v1:/);
+  assert.match(ownedProcessStartTime(process.pid), process.platform === 'win32' ? /^win32-v1:/ : /^utc-v1:/);
   assert.equal(processStartTime(process.pid), plain);
   for (const stamp of ['Sun Feb 30 00:00:00 2026', 'Sun Sep  6 24:00:00 2026', 'Mon Sep  6 00:00:00 2026']) {
     const dir = tmpDir(); const lock = path.join(dir, 'loop.lock.d'); fs.mkdirSync(lock);
@@ -461,11 +452,11 @@ test('noncanonical zero-padded day cannot make a live owned identity reclaimable
   const dir = tmpDir(); const lock = path.join(dir, 'loop.lock.d'); fs.mkdirSync(lock);
   const raw = `${process.pid}\nutc-v1\nSun Sep 06 00:00:00 2026`;
   fs.writeFileSync(path.join(lock, 'pid'), raw);
-  withFakePs("echo 'Sun Sep  6 00:00:00 2026'", () => {
-    assert.equal(ownedProcessStartTime(process.pid), 'utc-v1:Sun Sep  6 00:00:00 2026');
+  {
+    assert.deepEqual(parseOwnedLockIdentity(`${process.pid}\nutc-v1\nSun Sep  6 00:00:00 2026`), { pid: process.pid, startTime: 'utc-v1:Sun Sep  6 00:00:00 2026' });
     assert.equal(parseOwnedLockIdentity(raw), null);
     assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown', 'equivalent noncanonical spelling must not prove owner death');
     assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
     assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
-  });
+  }
 });

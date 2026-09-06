@@ -81,6 +81,9 @@ export function writeRelayJsonAtomic(owner, name, value) {
     owner.assert();
     fs.closeSync(fd);
     fd = undefined;
+    // Node cannot open/fsync directories on Windows. File bytes were flushed
+    // before atomic rename; directory crash durability is unavailable there.
+    if (process.platform === 'win32') { owner.assert(); return; }
     fd = fs.openSync(owner.root, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     owner.assert(fd);
     try { fs.fsyncSync(fd); } catch (error) {

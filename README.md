@@ -71,6 +71,9 @@ open "http://127.0.0.1:<port>/?token=<t>"
 
 개발용 임시 store에서는 `--port 0`으로 OS가 고르는 relay 포트를 사용한다. `--port` 범위는 0..65535이며 생략 시 기존 8877을 쓴다. 재개는 이미 기록된 포트를 보존한다. 이 옵션은 엔진의 게임 설정을 바꾸지 않는다.
 
+Windows Git Bash에서는 `nohup`/`/tmp` 대신 `node tools/game-loop.js ... > "%TEMP%\ai-holdem-boot.log" 2>&1 &` 와 `start "" "http://127.0.0.1:<port>/?token=<t>"` 를 쓴다. `ps -o lstart=` 는 쓰지 않는다 — 사이드카가 플랫폼 identity를 소유한다.
+
+
 ### 엔진·서버만 (LLM 없이, legacy 개발 디렉터리)
 
 session store root인 `game/`에는 engine `init`을 직접 실행하지 않는다. 독립 임시 directory를

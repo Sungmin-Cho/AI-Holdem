@@ -2,6 +2,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { stopOwnedProcessTree, spawnOwnedCommand } from '../test/helpers/platform.js';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -391,7 +392,7 @@ export function validateCompatibilityResult(result) {
     || !(result.rollback.actionRecovery.engine.afterStateVersion > result.rollback.actionRecovery.engine.beforeStateVersion)
     || result.rollback.actionRecovery?.recoveryRelay?.dead !== true
     || !Number.isSafeInteger(result.rollback.actionRecovery.recoveryRelay.pid)
-    || !/^utc-v1:/.test(result.rollback.actionRecovery.recoveryRelay.startTime ?? '')
+    || !/^(?:utc-v1:|win32-v1:)/.test(result.rollback.actionRecovery.recoveryRelay.startTime ?? '')
     || !Array.isArray(result.rollback.actionRecovery.setupCommands)
     || result.rollback.actionRecovery.setupCommands.length !== 2
     || result.rollback?.serviceRotation?.firstStop?.stopped !== true
@@ -671,7 +672,7 @@ export function assertBrowserEvidence({
 }
 
 function commandEnvironment(tmpDir) {
-  const allowed = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'CI', 'NO_COLOR'];
+  const allowed = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'COMSPEC', 'TEMP', 'TMP', 'USERPROFILE', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'CI', 'NO_COLOR'];
   return {
     ...Object.fromEntries(allowed.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
     TMPDIR: tmpDir,
@@ -698,19 +699,13 @@ export async function runProcess(command, args, {
   let timedOut = false;
   let outputLimited = false;
   let spawnError = null;
-  const child = spawn(command, args, {
+  const child = spawnOwnedCommand(command, args, {
     cwd,
     env: commandEnvironment(tmpDir),
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const stop = () => {
-    // The leader may exit before descendants close their inherited pipes.
-    if (Number.isSafeInteger(child.pid) && child.pid > 1) {
-      try { process.kill(-child.pid, 'SIGKILL'); }
-      catch (error) { if (error.code !== 'ESRCH') throw error; }
-    }
-  };
+  const stop = () => stopOwnedProcessTree(child);
   const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
   const append = (which, chunk) => {
     if (which === 'stdout') stdout += chunk;

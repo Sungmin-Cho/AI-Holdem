@@ -3,15 +3,21 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import { createPrivateDirectory } from '../../shared/platform-files.js';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { prependPath, stopOwnedProcessTree, spawnOwnedCommand } from './platform.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-export const NODE26 = '/opt/homebrew/Cellar/node/26.0.0/bin/node';
+// Qualification is checked at the journey entrypoint, not by a machine-local path.
+export const NODE26 = process.execPath;
 
 export function createBrowserWorkspace() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-learning-browser-'));
+  const root = process.platform === 'win32' ? path.join(os.tmpdir(), `holdem-learning-browser-${randomUUID()}`)
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-learning-browser-'));
+  if (process.platform === 'win32') createPrivateDirectory(root);
   const identity = fs.lstatSync(root);
   assert.equal(path.dirname(fs.realpathSync(root)), fs.realpathSync(os.tmpdir()));
   let closed = false;
@@ -26,9 +32,9 @@ export function createBrowserWorkspace() {
 
 export async function runOwnedCommand(command, args, { cwd = ROOT, timeoutMs = 30000, env = {}, maxBytes = 4 * 1024 * 1024 } = {}) {
   const started = Date.now();
-  const child = spawn(command, args, { cwd, env: { ...process.env, PATH: `${path.dirname(NODE26)}:${process.env.PATH}`, ...env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnOwnedCommand(command, args, { cwd, env: { ...prependPath(path.dirname(process.execPath)), ...env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = ''; let timedOut = false; let overflow = false; let spawnError;
-  const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
+  const stop = () => stopOwnedProcessTree(child);
   const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
   for (const [stream, output] of [[child.stdout, true], [child.stderr, false]]) stream.on('data', (chunk) => {
     if (output) stdout += chunk; else stderr += chunk;
@@ -119,7 +125,7 @@ export async function startResponseProxy(targetPort, { onRequest = () => {} } = 
 export async function productionDependencies() {
   const servicePath = path.join(ROOT, 'tools/study-service.js');
   if (!fs.existsSync(servicePath)) return { ready: false, reason: 'S7_PRODUCTION_STUDY_NOT_INTEGRATED' };
-  const [service, relay] = await Promise.all([import(servicePath), import(path.join(ROOT, 'server/server.js'))]);
+  const [service, relay] = await Promise.all([import(pathToFileURL(servicePath).href), import(pathToFileURL(path.join(ROOT, 'server/server.js')).href)]);
   if (typeof service.ensureStudyService !== 'function' || typeof service.stopStudyService !== 'function' || typeof service.inspectStudyService !== 'function') return { ready: false, reason: 'S7_PRODUCTION_HELPER_CONTRACT_UNAVAILABLE' };
   return { ready: true, service, relay };
 }
@@ -191,7 +197,7 @@ export async function createLearningBrowserFixture({ stackBb = 100, stackChips =
     if (failures.length) throw new AggregateError(failures, 'owned browser fixture cleanup failed');
   }
   try {
-    const { prepareSession, commitSession } = await import(path.join(ROOT, 'engine/session-catalog.js'));
+    const { prepareSession, commitSession } = await import(pathToFileURL(path.join(ROOT, 'engine/session-catalog.js')).href);
     const prepared = prepareSession(storeDir);
     assert.ok(Number.isSafeInteger(hands) && hands > 0);
     assert.ok(stackChips === null || (Number.isSafeInteger(stackChips) && stackChips > 0));
@@ -244,9 +250,9 @@ export async function createLearningBrowserFixture({ stackBb = 100, stackChips =
           await engineStep([legal.toAct, legal.canCheck ? 'check' : 'fold']);
         }
         assert.equal(legal?.handOver, true, 'could not finish the production hand');
-        const pipeline = await import(path.join(ROOT, 'tools/training-pipeline.js'));
-        const { createTrainingControl } = await import(path.join(ROOT, 'tools/training-control.js'));
-        const { gameEpochOf } = await import(path.join(ROOT, 'publish-contract.js'));
+        const pipeline = await import(pathToFileURL(path.join(ROOT, 'tools/training-pipeline.js')).href);
+        const { createTrainingControl } = await import(pathToFileURL(path.join(ROOT, 'tools/training-control.js')).href);
+        const { gameEpochOf } = await import(pathToFileURL(path.join(ROOT, 'publish-contract.js')).href);
         const executePublish = (args) => command('tools/publish.js', ['--game-dir', sessionDir, ...args]);
         const training = await pipeline.runHandPipeline({ sessionDir, handNo: legal.handNo,
           gameEpoch: gameEpochOf(token), owner: trainingOwner, storeDir,
@@ -310,7 +316,7 @@ export async function createReviewBrowserFixture() {
   let loop; let runPromise = null;
   try {
     fs.mkdirSync(gameDir, { mode: 0o700 });
-    const { createGameLoop } = await import(path.join(ROOT, 'tools/game-loop.js'));
+    const { createGameLoop } = await import(pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href);
     loop = createGameLoop({ gameDir,
       resolver: async ({ need }) => {
         assert.equal(need, 'upper-only');
