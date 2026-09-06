@@ -75,6 +75,32 @@ export function userView(state) {
 const STREET_KO = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION_KO = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈' };
 
+function completedHandObservation(state) {
+  const record = state.lastHand;
+  if (!record || !Number.isInteger(record.handNo)) return null;
+  const nameOf = (pid) => state.seats.find((seat) => seat.playerId === pid)?.name ?? pid;
+  const actions = (record.actions ?? []).slice(-12).map((entry) => {
+    const amount = entry.action === 'raise' || entry.action === 'call' ? ` ${entry.amount}` : '';
+    return `${STREET_KO[entry.street] ?? entry.street} ${nameOf(entry.playerId)} ${ACTION_KO[entry.action] ?? entry.action}${amount}`;
+  });
+  const reveals = (record.showdown?.reveals ?? []).slice(0, 7).map((entry) => (
+    `${nameOf(entry.playerId)} ${Array.isArray(entry.cards) ? entry.cards.join(' ') : ''}`.trim()
+  ));
+  const publicStats = state.seats.slice(0, 7).map((seat) => {
+    const raw = state.stats?.[seat.playerId] ?? {};
+    const sample = raw.hands ?? 0;
+    const vpip = sample > 0 ? (raw.vpip ?? 0) / sample : 0;
+    const pfr = sample > 0 ? (raw.pfr ?? 0) / sample : 0;
+    const calls = raw.calls ?? 0;
+    const af = calls > 0 ? (raw.betsRaises ?? 0) / calls : (raw.betsRaises ?? 0);
+    return `${seat.name}(표본 ${sample}, VPIP ${vpip.toFixed(2)}, PFR ${pfr.toFixed(2)}, AF ${af.toFixed(2)})`;
+  });
+  return [
+    `최근 완료 핸드 공개 관측: 핸드 ${record.handNo}; 액션 ${actions.length ? actions.join(' → ') : '없음'}; 공개 쇼다운 ${reveals.length ? reveals.join(' / ') : '없음'}`,
+    `누적 공개 관측 통계: ${publicStats.join(' / ')}`,
+  ];
+}
+
 export function turnSummary(state, playerId) {
   const legal = legalFor(state);
   if (legal.handOver || legal.toAct !== playerId) return null;
@@ -127,6 +153,8 @@ export function turnSummary(state, playerId) {
   if (legal.canRaise && legal.minRaiseTo > legal.maxRaiseTo) {
     lines.push(`minRaiseTo>maxRaiseTo 이므로 합법 레이즈는 ${legal.maxRaiseTo}(올인)뿐이다.`);
   }
+  const observation = completedHandObservation(state);
+  if (observation) lines.push(...observation);
   lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?}`);
   return lines.join('\n');
 }

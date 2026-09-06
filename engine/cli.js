@@ -415,6 +415,7 @@ function cmdDecisionPeek(gameDir, flags) {
   if (legal.toAct !== flags.for) throwCoded('SNAPSHOT_INVALID', '지금 행동자가 아닙니다.');
   const snapshot = snapshotDecision(state, flags.for, null, {
     blinds: blindsForLevel(state.level, state.config.blinds0),
+    legal,
   });
   succeed({
     stateVersion: state.stateVersion,

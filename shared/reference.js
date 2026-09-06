@@ -131,6 +131,7 @@ export function validateMixObservation(value) {
 }
 
 const REASONS = Object.freeze({
+  LEARNING_AUTHORITY_UNAVAILABLE: '봉인된 출처 상세를 확인할 수 없어 기준표 비교를 제공하지 않습니다.',
   SOURCE_MISSING: '출처 정보가 없어 기준표 비교를 제공할 수 없습니다.',
   SOURCE_IDENTITY_UNVERIFIED: '출처 식별값이 확인되지 않아 기준표 비교에서 제외했습니다.',
   SYNTHETIC_SOURCE: '테스트용 합성 출처는 학습 집계에서 제외됩니다.',
@@ -146,15 +147,30 @@ export function formatReferenceReason(code, reason) {
 
 export function referenceClaimAllowed(value) {
   if (typeof value !== 'string' || value.length === 0) return true;
-  const explicitCaveats = [
-    /(?:검증된\s*)?GTO\s*정답(?:이|은|는)?\s*(?:아닙니다|아니다|아님|아니며|아닌)/gi,
-    /EV\s*손실(?:을|이|은|는)?\s*(?:검증한\s*것|검증된\s*값)?(?:이|은|는)?\s*(?:아닙니다|아니다|아님|아니며|아닌)/gi,
-    /solver.?verified(?:\s*결과)?(?:가|이|은|는)?\s*(?:아닙니다|아니다|아님|아니며|아닌)/gi,
-    /포커\s*실수(?:가|이|은|는)?\s*(?:아닙니다|아니다|아님|아니며|아닌)/gi,
-    /not\s+(?:a\s+)?(?:solver.?verified|verified\s+GTO|GTO\s+answer)/gi,
-  ];
-  let remaining = value;
-  for (const caveat of explicitCaveats) remaining = remaining.replace(caveat, '');
-  const authority = /solver.?verified|검증된\s*GTO|GTO\s*정답|포커\s*실수|EV\s*손실/i;
-  return !authority.test(remaining);
+  const normalized = value.normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  const authority = new RegExp([
+    // Match the complete attribution noun phrase before checking its predicate.
+    // This keeps "GTO-based strategy is not verified" bound to its own negation,
+    // while conjunctions/other predicates cannot become part of that phrase.
+    String.raw`(?:verified\s+|검증된\s*)?GTO(?:[\s_-]*(?:based|기반(?:의)?|최적(?:의)?|optimal(?:ity)?|optimum|정답|전략|해법|정책|플레이|분석|결과|answer|strategy|solution|policy|play|move|analysis|result|correct(?:ness)?)){0,4}`,
+    String.raw`solver[\s_-]*(?:verified|certified|proven)`,
+    String.raw`(?:verified\s+)?(?:optimal(?:ity)?|optimum)(?:\s+(?:play|choice|move|result|strategy|answer))?`,
+    String.raw`(?:검증된\s*)?최적(?:의)?(?:\s*(?:플레이|선택|행동|전략|결과|답))?`,
+    String.raw`확정(?:된)?\s*누수|정답|포커\s*실수`,
+    String.raw`기대(?:값|수익)|expected\s+value|\bEV\b(?:\s*(?:손실|loss))?`,
+  ].join('|'), 'gi');
+  const claims = [...normalized.matchAll(authority)];
+  return claims.every((claim, index) => {
+    const prior = normalized.slice(0, claim.index);
+    const before = prior.slice(Math.max(prior.lastIndexOf('.'), prior.lastIndexOf('!'), prior.lastIndexOf('?'), prior.lastIndexOf('\n')) + 1);
+    const tail = normalized.slice(claim.index + claim[0].length, claims[index + 1]?.index);
+    // Negation must describe this claim directly, never a different proposition later
+    // in a compound sentence ("optimal and not a bad choice" is still an optimum claim).
+    const after = tail.split(/[.!?\n]/, 1)[0];
+    if (/(?:\bEV\b|기대(?:값|수익)|expected\s+value)/i.test(claim[0]) && /[+−-]?\d+(?:\.\d+)?/.test(before + after)) return false;
+    if (/(?:not\s+(?:(?:a|an|the)\s+)?|no\s+|unverified\s+|검증되지\s*않은\s*)$/i.test(before)) return true;
+    const negative = /^(?:\s*(?:결과|기준|수치|answer|result))?\s*(?:(?:이라고|이라는|라고|으로|[이가은는을를의])\s*)?(?:아닙니다|아니다|아님|아니며|근거(?:가|는)?\s*없(?:습니다|다|음)|없(?:습니다|다|음)|아닌\s*(?:참고|기준)|검증한\s*것이\s*아닙니다|검증하지\s*않(?:습니다|음)|(?:으로\s*)?볼\s*수\s*없(?:습니다|다|음)|(?:으로\s*)?단정할\s*수\s*없(?:습니다|다|음)|확정할\s*수\s*없(?:습니다|다|음)|(?:수치를?\s*)?(?:제공하지|제공되지|계산하지|산출하지|추정하지)\s*않(?:았습니다|습니다|음)|(?:계산|산출)할\s*수\s*없(?:습니다|다|음)|(?:is\s+not|isn't|is\s+unavailable)\b|not\s+verified\b|unverified\b)/i;
+    if (!negative.test(after)) return false;
+    return !/(?:아니(?:라는|라고|란)|아닌\s*것|not\s+unverified)/i.test(after);
+  });
 }

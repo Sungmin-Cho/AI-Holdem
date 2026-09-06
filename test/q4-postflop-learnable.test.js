@@ -259,8 +259,21 @@ test('S2 ⑦ a solve result remains present in canonical export evaluations', ()
     seats: [{ playerId: 'user' }, { playerId: 'p1' }],
   }));
 
+  const sourceBytes = JSON.stringify(solved);
   const canonical = buildCanonical(gameDir, { evaluationsByHand: { 3: [solved] } });
-  assert.deepEqual(canonical.hands[0].evaluations, [solved]);
+  assert.equal(JSON.stringify(solved), sourceBytes, 'source solve evaluation was rewritten');
+  assert.equal(canonical.hands[0].evaluations.length, 1);
+  const qualified = canonical.hands[0].evaluations[0];
+  assert.equal(qualified.schemaVersion, 2);
+  assert.equal(qualified.referenceQuality, 'synthetic');
+  assert.equal(qualified.referenceReason, 'SYNTHETIC_SOURCE');
+  assert.equal(qualified.recommended, undefined);
+  assert.equal(qualified.grade, undefined);
+  assert.deepEqual(qualified.chosen, { action: 'check' });
+  assert.equal(qualified.chosen.frequency, undefined, 'synthetic frequency must not be exported as evidence');
+  assert.equal(qualified.chosen.evBb, undefined);
+  assert.deepEqual(qualified.source, { id: solved.source.id, version: solved.source.version });
+  assert.equal(qualified.sourcePayloadSha256, undefined, 'missing source digest was inferred');
 });
 
 test('schema 2 legacy replay preserves processed ids as unverified evidence and drops polluted skills', async () => {
@@ -423,6 +436,7 @@ test('drill-cli start surfaces one persisted prune notice and keeps session.queu
 });
 
 const supportedWithoutEv = {
+  source: SOURCE,
   status: 'supported',
   handNo: 17,
   chosen: { action: 'fold', frequency: 0.04, evBb: null },
@@ -432,7 +446,7 @@ const supportedWithoutEv = {
 test('M11 supported branch rejects handNo inside an EV clause but permits it outside', () => {
   assert.deepEqual(
     validateExplanation(supportedWithoutEv, 'EV loss 17'),
-    { ok: false, code: 'NUMBER_CONTRADICTION' },
+    { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
   );
   assert.deepEqual(validateExplanation(supportedWithoutEv, '핸드 17'), { ok: true });
 });
@@ -441,7 +455,7 @@ test('M11 unsupported branch rejects handNo inside an EV clause but permits it o
   const unsupported = { status: 'unsupported', handNo: 17, code: 'UNSUPPORTED_SPOT' };
   assert.deepEqual(
     validateExplanation(unsupported, 'EV loss 17'),
-    { ok: false, code: 'NUMBER_CONTRADICTION' },
+    { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
   );
   assert.deepEqual(validateExplanation(unsupported, '핸드 17'), { ok: true });
 });
@@ -551,7 +565,7 @@ test('M11 rejects every number in supported EV clauses even when EV data exists'
   for (const explanation of ['EV loss 17', 'raise EV 96%']) {
     assert.deepEqual(
       validateExplanation(supportedWithEv, explanation),
-      { ok: false, code: 'NUMBER_CONTRADICTION' },
+      { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
     );
   }
 });

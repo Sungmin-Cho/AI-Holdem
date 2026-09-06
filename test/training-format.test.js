@@ -1,11 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTrainingCard } from '../server/public/training-format.js';
+import { formatTrainingCard, verifyTrainingDetail } from '../server/public/training-format.js';
+
+import { toPublicSummary } from '../training/public-view.js';
+import { createHash } from 'node:crypto';
+import './helpers/owned-fixtures.mjs';
 
 const CONTENT_SHA256 = '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf';
 
-test('formatter: collapsed card, unsupported reason, forced is not a mistake', () => {
-  const supported = formatTrainingCard({
+async function canonicalFixture(overrides) {
+  const handNo = overrides.handNo ?? 1;
+  const decisionId = `d-${handNo}-preflop-0`;
+  const source = overrides.source ?? { id: 'local-preflop-baseline', version: '1.0.0', contentSha256: CONTENT_SHA256 };
+  const detail = { schemaVersion: 1, forced: false, ...overrides, handNo, decisionId, source,
+    evaluationId: `${'a'.repeat(64)}:${decisionId}:${source.id}@${source.version}` };
+  const item = toPublicSummary(detail, { handNo,
+    detailSha256: createHash('sha256').update(JSON.stringify(detail)).digest('hex') });
+  const verifiedDetail = await verifyTrainingDetail(item, detail);
+  assert.ok(verifiedDetail, 'canonical fixture must supply verified detail evidence');
+  return { item: { ...item, explanation: overrides.explanation }, verifiedDetail };
+}
+
+async function canonicalFormat(overrides) {
+  const { item, verifiedDetail } = await canonicalFixture(overrides);
+  return formatTrainingCard(item, { verifiedDetail });
+}
+
+test('formatter: collapsed card, unsupported reason, forced is not a mistake', async () => {
+  const supported = await canonicalFormat({
     handNo: 17,
     spotKey: '6max-100bb-btn-rfi-unopened',
     handClass: 'AJo',
@@ -102,11 +124,13 @@ test('SSE-style merge keeps the machine card and fills explanation later', async
     grade: 'mixed',
     status: 'supported',
   };
-  const ui = { training: [machine], trainingAnnotations: [] };
-  const firstCard = format(ui.training[0]);
+  const fixture = await canonicalFixture(machine);
+  const ui = { training: [fixture.item], trainingAnnotations: [] };
+  const options = { verifiedDetail: fixture.verifiedDetail };
+  const firstCard = format(ui.training[0], options);
   assert.equal(firstCard.explanation, '');
   const ann = {
-    evaluationId: 'eval-sse',
+    evaluationId: fixture.item.evaluationId,
     field: 'explanation',
     status: 'ready',
     value: 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.',
@@ -114,14 +138,14 @@ test('SSE-style merge keeps the machine card and fills explanation later', async
   };
   ui.trainingAnnotations.push(ann);
   ui.training[0] = applyTrainingAnnotation(ui.training[0], ann);
-  assert.equal(ui.training[0].payloadSha256, 'aa'.repeat(32));
+  assert.equal(ui.training[0].payloadSha256, fixture.item.payloadSha256);
   assert.equal(ui.training[0].handClass, 'AJo');
-  const filled = format(ui.training[0]);
+  const filled = format(ui.training[0], options);
   assert.match(filled.explanation, /0\.96/);
 });
 
-test('canonical cards use qualified reference wording without solver authority', () => {
-  const card = formatTrainingCard({
+test('canonical cards use qualified reference wording without solver authority', async () => {
+  const card = await canonicalFormat({
     handNo: 17,
     spotKey: '6max-100bb-btn-rfi-unopened',
     handClass: 'AJo',
@@ -160,8 +184,8 @@ test('fake and spoofed sources expose no recommendation or process grade', () =>
   }
 });
 
-test('unsupported solver-authority explanations are not displayed as feedback', () => {
-  const card = formatTrainingCard({
+test('unsupported solver-authority explanations are not displayed as feedback', async () => {
+  const card = await canonicalFormat({
     handNo: 1,
     status: 'supported',
     grade: 'preferred',
@@ -217,4 +241,46 @@ test('authority claims require negation bound to the claim itself', async () => 
     'EV 손실을 검증한 것이 아닙니다.',
     'solver-verified 결과가 아닙니다.',
   ]) assert.equal(referenceClaimAllowed(caveat), true);
+});
+
+test('S2 separately verified detail restores canonical cards without mutating compact summaries', async () => {
+  const { verifyTrainingDetail } = await import('../server/public/training-format.js');
+  assert.equal(typeof verifyTrainingDetail, 'function', 'formatter needs an identity-bound detail path');
+  const { toPublicSummary } = await import('../training/public-view.js');
+  const { createHash } = await import('node:crypto');
+  const evaluation = {
+    schemaVersion: 1,
+    evaluationId: `${'a'.repeat(64)}:d-1-preflop-0:local-preflop-baseline@1.0.0`,
+    decisionId: 'd-1-preflop-0', handNo: 1, status: 'supported', grade: 'mixed',
+    street: 'preflop', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo', forced: false,
+    chosen: { action: 'fold', frequency: 0.2 }, recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.8 }],
+    source: { id: 'local-preflop-baseline', version: '1.0.0', contentSha256: CONTENT_SHA256 },
+  };
+  const digest = createHash('sha256').update(JSON.stringify(evaluation)).digest('hex');
+  const item = toPublicSummary(evaluation, { handNo: 1, detailSha256: digest });
+  const bytes = JSON.stringify(item);
+  const verifiedDetail = await verifyTrainingDetail(item, evaluation);
+  assert.ok(verifiedDetail);
+  const card = formatTrainingCard({ ...item, explanation: '레이즈가 주력입니다.' }, { verifiedDetail });
+  assert.match(card.recommendation, /80%/);
+  assert.equal(card.explanation, '레이즈가 주력입니다.');
+  assert.equal(JSON.stringify(item), bytes);
+  assert.equal(await verifyTrainingDetail(item, { ...evaluation, grade: 'preferred' }), null);
+  assert.equal(formatTrainingCard(item, { verifiedDetail: { source: evaluation.source } }).recommendation, '');
+  assert.equal(formatTrainingCard({ ...item, payloadSha256: 'b'.repeat(64) }, { verifiedDetail }).recommendation, '');
+  assert.equal(formatTrainingCard({ ...item, source: evaluation.source }).recommendation, '');
+});
+
+test('S2 detail verification rejects a summary identity changed while hashing', async () => {
+  const { item } = await canonicalFixture({ handNo: 1, status: 'supported', grade: 'mixed',
+    chosen: { action: 'fold', frequency: 0.2 }, recommended: [{ action: 'raise', frequency: 0.8 }] });
+  const detail = { schemaVersion: 1, forced: false, handNo: 1, status: 'supported', grade: 'mixed',
+    chosen: { action: 'fold', frequency: 0.2 }, recommended: [{ action: 'raise', frequency: 0.8 }],
+    decisionId: item.decisionId,
+    source: { id: 'local-preflop-baseline', version: '1.0.0', contentSha256: CONTENT_SHA256 },
+    evaluationId: item.evaluationId };
+  assert.equal(createHash('sha256').update(JSON.stringify(detail)).digest('hex'), item.detailSha256);
+  const pending = verifyTrainingDetail(item, detail);
+  item.handNo = 2;
+  assert.equal(await pending, null, 'a receipt must stay bound to the initially verified summary');
 });

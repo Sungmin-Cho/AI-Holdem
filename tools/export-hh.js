@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveExportDir } from '../export/hand-normalizer.js';
-import { buildCanonical, buildText } from '../export/manifest.js';
+import { buildCanonical, buildText, loadReferenceEvaluations } from '../export/manifest.js';
 import { ensureDir, writeContained } from './training-store.js';
 
 function fail(code, message) {
@@ -84,7 +84,8 @@ function main() {
     }
     const format = flags.format ?? 'canonical-json';
     const exportedAt = flags['exported-at'] ?? new Date().toISOString();
-    const canonical = buildCanonical(gameDir, { exportedAt });
+    const evaluationsByHand = loadReferenceEvaluations(gameDir);
+    const canonical = buildCanonical(gameDir, { exportedAt, evaluationsByHand });
     let body;
     let warnings = canonical.warnings;
     if (format === 'canonical-json') {

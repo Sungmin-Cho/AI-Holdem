@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateExplanation } from '../training/explain.js';
 import * as pipeline from '../tools/training-pipeline.js';
+import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 
 const supported = {
+  source: CANONICAL_REFERENCE_SOURCE,
   status: 'supported',
   handNo: 17,
   handClass: 'AJo',
@@ -72,4 +74,9 @@ test('buildExplanationPrompt states allowed number forms, aliases, and no new nu
   assert.match(prompt, /0\.nn|n%/);
   assert.match(prompt, /evaluationId/);
   assert.match(prompt, /JSON/);
+});
+
+test('S2 supported explanation fails closed when source is absent', () => {
+  const { source, ...unverified } = supported;
+  assert.equal(validateExplanation(unverified, '레이즈가 주력입니다.').ok, false);
 });

@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { processStartTime as defaultProcessStartTime } from '../engine/state.js';
+import { personaGuidance } from './persona-guidance.js';
 
 export const RUNTIME_TABLE = {
   claude: { player: 'haiku', upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
@@ -321,6 +322,7 @@ export function buildPlayerPrompt({ persona, summaryPlaceholder = DEFAULT_SUMMAR
   if (promptTemplate === null) promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
   const values = {
     ...Object.fromEntries(PERSONA_FIELDS.map((f) => [f, String(persona[f])])),
+    behaviorGuidance: personaGuidance(String(persona.archetype)),
     summaryPlaceholder: String(summaryPlaceholder),
   };
   const filled = promptTemplate.replace(/\{\{(\w+)\}\}/g, (match, key) => (

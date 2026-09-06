@@ -753,6 +753,7 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     }, {
       forced,
       blinds: blindsForLevel(next.level, next.config.blinds0),
+      legal,
     }));
   }
   hand.actions.push(record);

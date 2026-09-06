@@ -24,6 +24,8 @@ import { createTrainingControl, enterExplanationCutoff } from './training-contro
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
+import { buildProcessInput } from '../training/process-review.js';
+import { referenceClaimAllowed } from '../shared/reference.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   buildExplanationPrompt,
@@ -882,6 +884,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const runCliBeforeResultCutoff = (args) => runCli(args, resultWaitSupervisor());
   const runCoachBeforeResultCutoff = (args) => runCoach(args, resultWaitSupervisor());
   const runPublish = (args) => {
+    // Replayed bodies and queued/fallback envelopes cross the same output boundary.
+    const from = args.indexOf('--from');
+    let envelope;
+    try {
+      envelope = args.includes('--retry')
+        ? readJsonOptional(path.join(root, '.publish-attempt.json'), 'PUBLISH_ATTEMPT')?.body
+        : (from >= 0 ? readJsonOptional(args[from + 1], 'PUBLISH_ENVELOPE') : null);
+    } catch (error) {
+      // The publisher owns malformed-attempt rejection and its BAD_ATTEMPT code
+      // drives the existing bounded recovery matrix. A syntax-invalid JSON file
+      // has no publishable feedback; let that parser reject it, without bypassing
+      // claim validation for a readable replay or swallowing I/O failures.
+      if (!args.includes('--retry') || error.code !== 'BAD_PUBLISH_ATTEMPT'
+        || !(error.cause instanceof SyntaxError)) throw error;
+    }
+    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
+    if (feedback.some((text) => !referenceClaimAllowed(text))) {
+      throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
+    }
     // After the cutoff every publication must carry the single finalization deadline:
     // publish.js refuses new play-time bodies once `noNewPlayTimePublishers` is set, and
     // the deadline is what bounds the residual drain to the remaining budget.
@@ -2521,17 +2542,60 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return { path: filePath, literals };
   };
 
+  const parseCapturedHand = (raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const processPracticeFocus = (raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      const goal = parsed?.goal && typeof parsed.goal === 'object' && !Array.isArray(parsed.goal)
+        ? {
+          id: parsed.goal.id ?? null,
+          recommendedDrill: parsed.goal.recommendedDrill ?? null,
+          severity: parsed.goal.severity ?? null,
+          sampleWeight: parsed.goal.sampleWeight ?? parsed.goal.confidence ?? null,
+          reason: parsed.goal.reason ?? null,
+        }
+        : null;
+      return JSON.stringify({
+        origin: parsed?.origin ?? null,
+        focus: parsed?.focus ?? null,
+        goal,
+      });
+    } catch {
+      return '없음';
+    }
+  };
+
+  const eligibleProcessInput = (input) => ({
+    schemaVersion: input.schemaVersion,
+    hands: input.hands.map((hand) => ({
+      schemaVersion: hand.schemaVersion, handNo: hand.handNo,
+      decisions: hand.decisions.filter((decision) => decision.processStatus === 'available'),
+    })).filter((hand) => hand.decisions.length > 0),
+  });
+
+  const unavailableProcessNotice = (input) => {
+    if (input.unavailableReasons.length === 0) return '';
+    const hands = [...new Set(input.unavailableReasons.map((row) => row.handNo).filter(Number.isSafeInteger))];
+    return `과정 판정 불가: ${hands.length ? `핸드 ${hands.join(', ')}` : '일부 결정'}의 결정 시점 증거가 없거나 올바르지 않아 해당 결정은 평가에서 제외했습니다.`;
+  };
+
   const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
-    const practiceFocus = readInstalledPracticeFocus(root) ?? '없음';
+    const practiceFocus = processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null');
+    const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     const prompt = [
       '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
       '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
       '',
       `hand ${handNo} (redacted):`,
-      inputs.hand.raw,
-      '',
-      'stats (reserve가 읽은 동일 캡처):',
-      inputs.stats.raw,
+      JSON.stringify(eligibleProcessInput(processInput)),
       '',
       'practiceFocus:',
       practiceFocus,
@@ -2542,6 +2606,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 공개 근거로 무난한 폴드라고 평가한다.',
       '특별한 누수가 없다면 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.',
       '팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.',
+      '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
       overfoldReserved
         ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
         : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
@@ -2569,6 +2634,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || Object.keys(note).some((field) => !allowed.has(field))
     ) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력 필드 계약이 올바르지 않습니다.');
+    }
+    if (!referenceClaimAllowed(note.text)) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 근거 범위를 벗어납니다.');
     }
     if (forbiddenLiterals.some((literal) => literal && note.text.includes(literal))) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력에 private literal이 포함됐습니다.');
@@ -3110,6 +3178,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     }
     if (coachWorkSuspended()) return;
+    const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
+    if (eligibleProcessInput(processInput).hands.length === 0) {
+      await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
+        reason: 'process-evidence-unavailable', fallbackEnvelopePath: descriptor.exactEnvelopePath });
+      return;
+    }
     for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
       const currentDescriptor = descriptor;
       if (attempt > 1 && !coachReplacementAllowed()) {
@@ -3167,6 +3241,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
         const note = validateCoachNote(completed?.raw, handNo, deny.literals);
+        const unavailableNotice = unavailableProcessNotice(processInput);
+        if (unavailableNotice) note.text += `\n${unavailableNotice}`;
         writeJsonAtomic(currentDescriptor.exactResultPath, note);
         await runCoachBeforeResultCutoff([
           'accept',
@@ -3451,6 +3527,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let accepted = false;
     try {
       const deny = writeCoachDeny(action.handNo);
+      validateCoachNote(fs.readFileSync(action.exactResultPath, 'utf8'), action.handNo, deny.literals);
       await runCoachBeforeResultCutoff([
         'accept',
         '--owner', owner,
@@ -3711,6 +3788,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
     }
     const text = raw.trim();
+    if (!referenceClaimAllowed(text)) {
+      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 출력이 근거 범위를 벗어납니다.');
+    }
     if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
       throw codedError('INVALID_REVIEW_OUTPUT', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
     }
@@ -3777,7 +3857,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('REVIEW_ATTEMPTS_EXHAUSTED', `${stage} 시도를 완료하지 못했습니다.`);
   };
 
-  const buildEvaluatorPrompt = ({ completed, hands, statsRaw }) => [
+  const buildEvaluatorPrompt = ({ completed, processInput }) => [
     '역할: 격리 evaluator',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     '각 결정 시점에 사용자가 볼 수 있었던 공개 정보만으로 과정 품질을 한국어로 평가하라.',
@@ -3785,20 +3865,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '표본이 30핸드 미만이면 반드시 참고용이라고 명시하라.',
     ...(trainingOn ? [
       '',
-      'training aggregate (frequency grades, independent of chip result):',
+      'training aggregate (qualified reference grades, independent of chip result):',
       JSON.stringify(trainingAggregate(root)),
     ] : []),
     '',
     `completed hands: ${completed}`,
-    ...hands.flatMap(({ handNo, raw }) => [
-      '',
-      `hand ${handNo} (redacted):`,
-      raw,
-    ]),
+    'decision-time process input:',
+    JSON.stringify(eligibleProcessInput(processInput)),
     '',
-    'stats:',
-    statsRaw,
-    '',
+    '정성적 과정 평가만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
 
@@ -3813,17 +3888,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     })),
   }));
 
-  const buildSynthesizerPrompt = ({ evaluator, result, playersRaw, exploitRaw }) => [
+  const outcomeRecord = (record) => {
+    const out = {};
+    for (const key of [
+      'handNo', 'board', 'endStacks', 'pots', 'showdown', 'folded', 'allIn', 'uncalledReturns',
+    ]) {
+      if (Object.hasOwn(record ?? {}, key)) out[key] = structuredClone(record[key]);
+    }
+    return out;
+  };
+
+  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw }) => [
     '역할: 종합자',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
     '결과가 좋았다고 나쁜 과정을 칭찬하거나 결과가 나쁘다고 좋은 과정을 비난하지 마라.',
+    '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
     '',
     'evaluator output:',
     evaluator,
     '',
     'game result:',
     JSON.stringify({ result }),
+    '',
+    'redacted outcome records (provided only after evaluator completion):',
+    JSON.stringify(outcomeRecords),
     '',
     'players.json:',
     playersRaw,
@@ -3874,7 +3963,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--redacted']));
         hands.push({ handNo, raw: JSON.stringify(captured) });
       }
-      const evaluatorPrompt = buildEvaluatorPrompt({ completed, hands, statsRaw });
+      const processInput = buildProcessInput(hands.map(({ raw }) => parseCapturedHand(raw)));
+      const eligibleHands = new Set(eligibleProcessInput(processInput).hands.map((hand) => hand.handNo));
+      const unavailableNotice = unavailableProcessNotice(processInput);
+      if (eligibleHands.size === 0) {
+        return appendTrainingPendingToReview([
+          '## 내 성향 통계', '과정 평가는 판정 불가입니다.',
+          '## 결정적 핸드 2~3개 리플레이', unavailableNotice,
+          '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '결정 시점 증거가 없어 읽기 평가는 제공할 수 없습니다.',
+          '## 다음 게임에서 연습할 것', '다음 게임에서 결정 시점의 공개 정보와 합법 액션을 확인하세요.',
+        ].join('\n'));
+      }
+      const evaluatorPrompt = buildEvaluatorPrompt({ completed: eligibleHands.size, processInput });
       const evaluator = await runReviewStage({
         stage: 'evaluator',
         prompt: evaluatorPrompt,
@@ -3891,6 +3991,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const synthesizerPrompt = buildSynthesizerPrompt({
         evaluator,
         result: engine.result,
+        outcomeRecords: hands.filter((hand) => eligibleHands.has(hand.handNo)).map(({ raw }) => outcomeRecord(parseCapturedHand(raw))),
         playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
       });
@@ -3899,7 +4000,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         prompt: synthesizerPrompt,
         requireHeadings: true,
       });
-      return appendTrainingPendingToReview(synthesized);
+      return appendTrainingPendingToReview([synthesized, unavailableNotice].filter(Boolean).join('\n\n'));
     } catch (error) {
       throw haltFinalization(
         'REVIEW_FAILED',
@@ -3909,6 +4010,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const checkpointGeneratedReview = (review) => {
+    validateReviewOutput(review, { requireHeadings: true });
     writeTextAtomic(reviewPath, review);
     const persisted = fs.readFileSync(reviewPath, 'utf8');
     const reviewSha256 = sha256Text(persisted);
