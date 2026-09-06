@@ -645,7 +645,7 @@ test('loop startTime 불일치는 dead로 판정해 활성으로 치지 않는�
   // 추측하는 임의의 큰 pid에는 기대지 않는다.
   fs.writeFileSync(
     path.join(dir, 'loop.lock.d', 'pid'),
-    `${process.pid}\nbogus-mismatched-start-time`,
+    `${process.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
   );
   const result = initGameDir(dir, { aiCount: 2 });
   assert.ok(result.sessionToken);
