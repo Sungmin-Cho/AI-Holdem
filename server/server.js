@@ -50,6 +50,8 @@ function sendJson(res, status, obj) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
   });
   res.end(body);
 }
@@ -421,9 +423,10 @@ function legacyTrainingProvenance(gameDir) {
   }
 }
 
-export function loadUiState(gameDir, expectedSessionToken) {
+export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {}) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
+    assertRaw(raw);
     const legacyProvenance = legacyTrainingProvenance(gameDir);
     const migrated = migrateLoadedTraining(raw.training, { legacyProvenance });
     const machineById = new Map(migrated.training.map((row) => [row.evaluationId, row]));
@@ -677,6 +680,16 @@ function publicSnapshot(state) {
   return snap;
 }
 
+function validatedStudyUrl(value) {
+  if (value === undefined) return undefined;
+  const match = typeof value === 'string'
+    && /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/#token=([0-9a-f]{64})$/.exec(value);
+  if (!match || match[0] !== value || Number(match[1]) > 65535) {
+    throw coded('STUDY_URL_INVALID', 'Invalid study service URL');
+  }
+  return value;
+}
+
 function persistUiStateAtomic(owner, state) {
   const file = {
     revision: state.revision,
@@ -705,6 +718,7 @@ function parseArgs(argv) {
     if (arg === '--game-dir' && next != null) { out.gameDir = next; i += 1; }
     else if (arg === '--port' && next != null) { out.port = Number(next); i += 1; }
     else if (arg === '--token' && next != null) { out.token = next; i += 1; }
+    else if (arg === '--study-url' && next != null) { out.studyUrl = next; i += 1; }
   }
   return out;
 }
@@ -806,14 +820,22 @@ function serveStatic(pathname, res) {
   });
 }
 
-export function startServer({ gameDir, port = 8877, token, receiptCheckpoint, publishCheckpoint = () => {} }) {
+export function startServer({ gameDir, port = 8877, token, studyUrl, receiptCheckpoint, publishCheckpoint = () => {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
+  const trustedStudyUrl = validatedStudyUrl(studyUrl);
+  const studyCapability = trustedStudyUrl?.split('#token=')[1];
+  const assertNoStudyCapability = (value) => {
+    if (studyCapability && JSON.stringify(value).includes(studyCapability)) {
+      throw coded('FORBIDDEN_LITERAL', 'Study capability is not public game content');
+    }
+  };
   const root = path.resolve(gameDir);
   fs.mkdirSync(root, { recursive: true });
 
   const owner = createRelayRootOwner(root);
-  const state = loadUiState(root, token);
+  const state = loadUiState(root, token, assertNoStudyCapability);
+  assertNoStudyCapability(state);
   owner.assert();
   const sseClients = new Set();
   const waiters = new Set();
@@ -861,12 +883,15 @@ export function startServer({ gameDir, port = 8877, token, receiptCheckpoint, pu
   };
 
   const handlePublish = (body, res) => {
+    try { assertNoStudyCapability(body); }
+    catch { sendJson(res, 400, { ok: false, code: 'FORBIDDEN_LITERAL' }); return; }
     if (recoveryRequired) {
       try {
         owner.assert();
-        const restored = loadUiState(root, token);
+        const restored = loadUiState(root, token, assertNoStudyCapability);
         owner.assert();
         const durable = (restored.publishId ?? 0) >= (state.publishId ?? 0) ? restored : state;
+        assertNoStudyCapability(durable);
         receiptStore.reconcile(durable.view, durable.lastActionAck, durable.publishId);
         Object.assign(state, durable);
         fanoutCommitted();
@@ -1107,7 +1132,7 @@ export function startServer({ gameDir, port = 8877, token, receiptCheckpoint, pu
 
     if (req.method === 'GET' && pathname === '/api/snapshot') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
-      sendJson(res, 200, publicSnapshot(state));
+      sendJson(res, 200, { ...publicSnapshot(state), ...(trustedStudyUrl ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
 

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import {
   annotationValueSha256,
@@ -29,7 +28,7 @@ const EPOCH = 'ab'.repeat(32);
 const TOKEN = 'tok';
 
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-secgate-'));
+  return createOwnedTempDir('holdem-secgate');
 }
 
 function evaluationId(decisionId = 'd-1-preflop-0', gameEpoch = EPOCH) {
@@ -960,3 +959,171 @@ test('M4: unsigned legacy text and every duplicate final authority key are dropp
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
   });
 });
+
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createOwnedTempDir, registerOwnedProcess, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { ensureStudyService, stopStudyService } from '../tools/study-service.js';
+
+const STUDY_TOKEN = 'd'.repeat(64);
+const STUDY_URL = `http://127.0.0.1:45678/#token=${STUDY_TOKEN}`;
+
+async function linkedRelay(t, studyUrl, gameDir = createOwnedTempDir('holdem-study-relay')) {
+  const relay = await startServer({ gameDir, port: 0, token: TOKEN, studyUrl });
+  registerOwnedServer(relay.server, 'study-linked relay');
+  t.after(async () => { if (relay.server.listening) await relay.close(); });
+  return { ...relay, gameDir };
+}
+function persistedFiles(dir) {
+  const result=[];
+  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file=path.join(dir,item.name);
+    if (item.isDirectory()) result.push(...persistedFiles(file));
+    else if (item.isFile()) result.push({ file, bytes: fs.readFileSync(file, 'utf8') });
+  }
+  return result;
+}
+
+test('REQ-010: only authenticated snapshots synthesize the trusted startup study link', async (t) => {
+  const relay = await linkedRelay(t, STUDY_URL);
+  assert.equal((await snapshotOf(relay.port)).studyUrl, STUDY_URL);
+  for (const suffix of ['', '?token=wrong', `?token=${STUDY_TOKEN}`]) {
+    const response = await fetch(`http://127.0.0.1:${relay.port}/api/snapshot${suffix}`);
+    assert.equal(response.status, 401);
+    assert.equal((await response.text()).includes(STUDY_TOKEN), false);
+  }
+  const before = await snapshotOf(relay.port);
+  assert.equal((await post(relay.port, { publishId: 1, studyUrl: 'http://attacker.invalid/#token=spoof',
+    view: { handNo: 1, legal: { decisionId: null } }, review: 'Completed local fixture.' })).status, 200);
+  assert.equal((await snapshotOf(relay.port)).studyUrl, before.studyUrl);
+  const stream = await collectSse(relay.port);
+  assert.equal(stream.includes(STUDY_URL), false); assert.equal(stream.includes(STUDY_TOKEN), false);
+  for (const row of persistedFiles(relay.gameDir)) {
+    assert.equal(row.bytes.includes(STUDY_TOKEN), false, path.basename(row.file));
+    assert.equal(row.bytes.includes(STUDY_URL), false, path.basename(row.file));
+    assert.equal(row.bytes.includes('attacker.invalid'), false, path.basename(row.file));
+  }
+});
+
+test('REQ-010: invalid startup study URLs fail before any relay store creation', () => {
+  for (const url of [null, {}, '', `https://127.0.0.1:1234/#token=${STUDY_TOKEN}`,
+    `http://localhost:1234/#token=${STUDY_TOKEN}`, `http://127.1:1234/#token=${STUDY_TOKEN}`,
+    `http://127.0.0.1:0/#token=${STUDY_TOKEN}`, `http://127.0.0.1:65536/#token=${STUDY_TOKEN}`,
+    `http://127.0.0.1:01234/#token=${STUDY_TOKEN}`, `http://127.0.0.1:1234/path#token=${STUDY_TOKEN}`,
+    `http://127.0.0.1:1234/?token=${STUDY_TOKEN}`, `http://127.0.0.1:1234/#token=${STUDY_TOKEN}&control=x`,
+    `http://user@127.0.0.1:1234/#token=${STUDY_TOKEN}`, `http://127.0.0.1:1234/#token=short`,
+    ` http://127.0.0.1:1234/#token=${STUDY_TOKEN}`, `${STUDY_URL}\n`]) {
+    const root = createOwnedTempDir('holdem-study-bad-url');
+    const gameDir = path.join(root, 'uncreated');
+    assert.throws(() => startServer({ gameDir, port: 0, token: TOKEN, studyUrl: url }), { code: 'STUDY_URL_INVALID' });
+    assert.equal(fs.existsSync(gameDir), false);
+  }
+});
+
+test('REQ-010: persisted studyUrl cannot restore capability and an unlinked legacy relay stays unlinked', async (t) => {
+  const root = createOwnedTempDir('holdem-study-stale-link');
+  fs.writeFileSync(path.join(root, 'ui-snapshot.json'), JSON.stringify({ revision: 1, publishId: 1,
+    history: [], studyUrl: STUDY_URL, view: null, log: [], coach: [] }));
+  const relay = await linkedRelay(t, undefined, root);
+  assert.equal('studyUrl' in await snapshotOf(relay.port), false);
+  assert.equal((await post(relay.port, { publishId: 2 })).status, 200);
+  assert.equal(fs.readFileSync(path.join(root, 'ui-snapshot.json'), 'utf8').includes(STUDY_TOKEN), false);
+});
+
+test('REQ-010: study outlives relay completion and another relay reuses the same private service', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-after-relay');
+  const handle = await ensureStudyService(storeDir, { onChild(child) { child.ref(); registerOwnedProcess(child, 'independent study lifetime'); } });
+  t.after(() => stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }));
+  const descriptor = JSON.parse(fs.readFileSync(path.join(storeDir, '.training', 'study-service.json'), 'utf8'));
+  let relay = await linkedRelay(t, handle.studyUrl);
+  const gameDir = relay.gameDir;
+  assert.equal((await post(relay.port, { publishId: 1, view: { gameOver: true, toAct: null, legal: null },
+    review: 'Game completed.' })).status, 200);
+  const linked = (await snapshotOf(relay.port)).studyUrl;
+  await relay.close();
+  const token = new URL(linked).hash.slice(7);
+  const summary = await fetch(`http://127.0.0.1:${handle.port}/api/summary`, { headers: { 'x-drill-token': token } });
+  assert.equal(summary.status, 200); await summary.json();
+  const current = await ensureStudyService(storeDir);
+  assert.equal(current.instanceId, handle.instanceId);
+  relay = await linkedRelay(t, current.studyUrl, gameDir);
+  assert.equal((await snapshotOf(relay.port)).studyUrl, linked);
+  for (const row of persistedFiles(gameDir)) {
+    for (const secret of [descriptor.drillToken, descriptor.controlToken, linked]) {
+      assert.equal(row.bytes.includes(secret), false, path.basename(row.file));
+    }
+  }
+  for (const endpoint of ['/.training/study-service.json','/study-service.json','/shared/study-service.js','/shared/study-contract.js']) {
+    for (const port of [handle.port, relay.port]) {
+      const response = await fetch(`http://127.0.0.1:${port}${endpoint}`);
+      assert.equal(response.status, 404); await response.text();
+    }
+  }
+  const shared = await fetch(`http://127.0.0.1:${relay.port}/shared/reference.js`);
+  assert.equal(shared.status, 200); assert.ok((await shared.text()).includes('referenceQuality'));
+});
+
+test('REQ-010: the relay CLI accepts a trusted study link without printing or persisting its capability', async () => {
+  const dir = createOwnedTempDir('holdem-study-cli');
+  const child = registerOwnedProcess(spawn(process.execPath, [path.resolve('server/server.js'),
+    '--game-dir',dir,'--port','0','--token',TOKEN,'--study-url',STUDY_URL], { stdio:['ignore','pipe','pipe'] }), 'study relay CLI');
+  let output='', error='';
+  child.stdout.on('data', chunk=>{output+=chunk;}); child.stderr.on('data', chunk=>{error+=chunk;});
+  try {
+    const deadline=Date.now()+4000;
+    while(!/listening 127\.0\.0\.1:(\d+)/.test(output)) {
+      assert.equal(child.exitCode,null);
+      assert.ok(Date.now()<deadline,'relay did not start');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    const port=Number(/listening 127\.0\.0\.1:(\d+)/.exec(output)[1]);
+    assert.equal((await snapshotOf(port)).studyUrl,STUDY_URL);
+    assert.equal(output.includes(STUDY_TOKEN),false); assert.equal(error.includes(STUDY_TOKEN),false);
+    assert.equal(persistedFiles(dir).some(row=>row.bytes.includes(STUDY_TOKEN)),false);
+  } finally {
+    child.kill('SIGTERM'); if(child.exitCode===null && child.signalCode===null) await once(child,'exit');
+  }
+});
+
+test('REQ-010: known study capabilities cannot be published into view, log, coach or review sinks', async (t) => {
+  const relay = await linkedRelay(t, STUDY_URL);
+  await post(relay.port, { publishId: 1, view: { legal: null } });
+  const before = fs.readFileSync(path.join(relay.gameDir, 'ui-snapshot.json'));
+  for (const content of [{ view: { legal: null, note: STUDY_URL } }, { log: [STUDY_TOKEN] },
+    { coach: [STUDY_URL] }, { review: STUDY_TOKEN }]) {
+    const result = await post(relay.port, { publishId: 2, ...content });
+    assert.equal(result.status, 400);
+    assert.equal(result.json.code, 'FORBIDDEN_LITERAL');
+    assert.deepEqual(fs.readFileSync(path.join(relay.gameDir, 'ui-snapshot.json')), before);
+  }
+});
+
+test('REQ-010: preexisting study capabilities in persisted public state block startup without rewriting evidence', async (t) => {
+  const root = createOwnedTempDir('holdem-study-persisted-secret');
+  const raw = JSON.stringify({ revision: 1, publishId: 1, history: [], view: { legal: null, note: STUDY_TOKEN } });
+  fs.writeFileSync(path.join(root, 'ui-snapshot.json'), raw);
+  let relay;
+  t.after(async () => { if(relay?.server.listening) await relay.close(); });
+  await assert.rejects(async () => {
+    relay = await startServer({ gameDir: root, port: 0, token: TOKEN, studyUrl: STUDY_URL });
+    registerOwnedServer(relay.server, 'persisted capability negative');
+  }, { code: 'FORBIDDEN_LITERAL' });
+  assert.equal(fs.readFileSync(path.join(root, 'ui-snapshot.json'), 'utf8'), raw);
+  assert.equal(fs.existsSync(path.join(root, 'lock.json')), false);
+});
+
+for(const [field,value] of [['studyUrl',STUDY_URL],['unknown',{nested:STUDY_TOKEN}]]) {
+  test(`S7 repair: active capability in raw ${field} blocks startup before projection`,async(t)=>{
+    const dir=createOwnedTempDir('holdem-study-raw-capability');
+    const raw=JSON.stringify({revision:0,history:[],[field]:value});
+    fs.writeFileSync(path.join(dir,'ui-snapshot.json'),raw);
+    let relay;
+    t.after(async()=>{if(relay?.server.listening)await relay.close();});
+    await assert.rejects(async()=>{
+      relay=await startServer({gameDir:dir,port:0,token:TOKEN,studyUrl:STUDY_URL});
+      registerOwnedServer(relay.server,'raw capability negative');
+    },{code:'FORBIDDEN_LITERAL'});
+    assert.equal(fs.readFileSync(path.join(dir,'ui-snapshot.json'),'utf8'),raw);
+    assert.equal(fs.existsSync(path.join(dir,'lock.json')),false);
+  });
+}

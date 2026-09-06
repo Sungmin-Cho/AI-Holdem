@@ -1,0 +1,442 @@
+#!/usr/bin/env node
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, parseOwnedLockIdentity } from '../engine/state.js';
+import { startDrillServer } from './drill-server.js';
+
+const SELF = fileURLToPath(import.meta.url);
+const LOCK = 'study.lock.d';
+const DESCRIPTOR = 'study-service.json';
+const MAX_DESCRIPTOR = 4096;
+const WAIT_MS = 5000;
+const HEX = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
+const inFlight = new Map();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sameInode = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
+const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
+  ctx.training, ctx.trainingStat?.dev, ctx.trainingStat?.ino,
+])).digest('hex');
+function fail(code = 'STUDY_DESCRIPTOR_CORRUPT') { const error = new Error(code); error.code = code; throw error; }
+function statOrNull(file) {
+  try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
+}
+function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
+function directory(file, { privateMode = false } = {}) {
+  const stat = statOrNull(file);
+  if (!stat?.isDirectory() || stat.isSymbolicLink() || !ownUid(stat)
+    || (stat.mode & 0o022) !== 0 || (privateMode && (stat.mode & 0o777) !== 0o700)) fail();
+  return stat;
+}
+function assertContext(ctx) {
+  if (!sameInode(directory(ctx.root), ctx.rootStat) || fs.realpathSync(ctx.root) !== ctx.root) fail();
+  if (ctx.trainingStat && !sameInode(directory(ctx.training, { privateMode: true }), ctx.trainingStat)) fail();
+}
+function context(storeDir, { create = false } = {}) {
+  if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
+  const requested = path.resolve(storeDir);
+  const original = directory(requested); // Reject a symlink store itself before canonicalizing ancestors.
+  const root = fs.realpathSync(requested);
+  if (!sameInode(directory(root), original)) fail();
+  const training = path.join(root, '.training');
+  const ctx = { root, rootStat: original, training, trainingStat: null };
+  assertContext(ctx);
+  let stat = statOrNull(training);
+  if (!stat && create) {
+    assertContext(ctx);
+    try { fs.mkdirSync(training, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') fail(); }
+    stat = statOrNull(training);
+  }
+  if (stat) ctx.trainingStat = directory(training, { privateMode: true });
+  ctx.storeIdentity = createHash('sha256').update(JSON.stringify([root, original.dev, original.ino])).digest('hex');
+  assertContext(ctx);
+  return ctx;
+}
+function safeFile(stat, privateMode) {
+  return stat?.isFile() && !stat.isSymbolicLink() && ownUid(stat) && stat.nlink === 1
+    && (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0);
+}
+function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
+  assertContext(ctx);
+  const before = statOrNull(file);
+  if (!before) return null;
+  if (!safeFile(before, privateMode) || (!allowOversized && before.size > maxBytes)) fail();
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+    const opened = fs.fstatSync(fd);
+    if (!sameInode(before, opened) || !safeFile(opened, privateMode) || (!allowOversized && opened.size > maxBytes)) fail();
+    assertContext(ctx);
+    if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
+    const bytes = Buffer.alloc(opened.size);
+    const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    const after = fs.fstatSync(fd);
+    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode)) fail();
+    assertContext(ctx);
+    return { text: bytes.subarray(0, length).toString('utf8'), stat: opened };
+  } catch (error) {
+    if (error.code === 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+    fail();
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+function identityStatus(pid, startTime) {
+  return ownedIdentityStatus(pid, startTime);
+}
+function readLock(ctx, parent = false) {
+  assertContext(ctx);
+  if (!parent && !ctx.trainingStat) return null;
+  const file = path.join(parent ? ctx.root : ctx.training, parent ? 'loop.lock.d' : LOCK);
+  const stat = statOrNull(file);
+  if (!stat) return null;
+  const checked = directory(file);
+  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
+  if (!sameInode(checked, directory(file))) fail();
+  if (!pidFile) return { status: 'unknown', stat: checked };
+  const parsed = parseOwnedLockIdentity(pidFile.text);
+  if (!parsed) return { status: 'unknown', stat: checked };
+  const { pid, startTime } = parsed;
+  return { pid, startTime, stat: checked, pidStat: pidFile.stat, status: identityStatus(pid, startTime) };
+}
+function descriptorFields(value) {
+  const keys = ['schemaVersion','pid','startTime','instanceId','storeIdentity','port','drillToken','controlToken'];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+    && value.schemaVersion === 1 && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.startTime === 'string' && value.startTime.length > 0 && value.startTime.length <= 128
+    && UUID.test(value.instanceId) && HEX.test(value.storeIdentity)
+    && Number.isSafeInteger(value.port) && value.port > 0 && value.port <= 65535
+    && HEX.test(value.drillToken) && HEX.test(value.controlToken) && value.drillToken !== value.controlToken;
+}
+function readDescriptor(ctx) {
+  if (!ctx.trainingStat) return { state: 'missing' };
+  const file = readPrivate(ctx, path.join(ctx.training, DESCRIPTOR), MAX_DESCRIPTOR, { allowOversized: true });
+  if (!file) return { state: 'missing' };
+  if (file.text === null) return { state: 'corrupt', stat: file.stat };
+  let value;
+  try { value = JSON.parse(file.text); } catch { return { state: 'corrupt', stat: file.stat }; }
+  if (!descriptorFields(value)) return { state: 'corrupt', stat: file.stat };
+  return { state: 'valid', value, stat: file.stat };
+}
+function descriptorMatches(value, ctx, owner) {
+  return owner?.status === 'alive' && value.storeIdentity === ctx.storeIdentity
+    && value.pid === owner.pid && value.startTime === owner.startTime;
+}
+function sameLock(a, b) {
+  return sameInode(a?.stat, b?.stat) && sameInode(a?.pidStat, b?.pidStat)
+    && a.pid === b.pid && a.startTime === b.startTime;
+}
+function publicHandle(value) {
+  return { pid: value.pid, startTime: value.startTime, instanceId: value.instanceId,
+    storeIdentity: value.storeIdentity, port: value.port,
+    studyUrl: `http://127.0.0.1:${value.port}/#token=${value.drillToken}` };
+}
+async function httpJson(value, route, { control = false, body, badToken = false, deadline } = {}) {
+  if (deadline !== undefined && Date.now() >= deadline) fail();
+  const response = await fetch(`http://127.0.0.1:${value.port}${route}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { [control ? 'x-study-control' : 'x-drill-token']:
+      badToken ? 'invalid-study-health-probe' : (control ? value.controlToken : value.drillToken) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(deadline === undefined ? 500 : Math.max(1, Math.min(500, deadline - Date.now()))), redirect: 'error',
+  });
+  // Health/control responses are small; never trust an arbitrary listener's stream.
+  const reader = response.body.getReader(); let size = 0; const chunks = [];
+  try {
+    while (true) {
+      const { done, value: bytes } = await reader.read(); if (done) break;
+      size += bytes.length;
+      if (size > MAX_DESCRIPTOR) { await reader.cancel(); fail(); }
+      chunks.push(bytes);
+    }
+  } finally { reader.releaseLock(); }
+  return { status: response.status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+}
+async function verified(ctx, descriptor, owner, deadline) {
+  if (descriptor.state !== 'valid' || !descriptorMatches(descriptor.value, ctx, owner)) fail();
+  const value = descriptor.value;
+  let denied, health;
+  try {
+    denied = await httpJson(value, '/api/health', { badToken: true, deadline });
+    health = await httpJson(value, '/api/health', { deadline });
+  } catch { fail(); }
+  if (denied.status !== 401 || health.status !== 200 || health.body.ok !== true
+    || health.body.protocolVersion !== 1 || health.body.capabilities?.study !== true
+    || !['pid','startTime','instanceId','storeIdentity','port'].every((key) => health.body[key] === value[key])) fail();
+  const after = readDescriptor(ctx), lock = readLock(ctx);
+  if (after.state !== 'valid' || JSON.stringify(after.value) !== JSON.stringify(value)
+    || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();
+  return value;
+}
+async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, staleDescriptor } = {}) {
+  if (owner?.status !== 'alive') fail();
+  // Only the already observed live owner may repair this descriptor. None of
+  // these reads grants permission to start a process or reclaim its metadata.
+  while (Date.now() < deadline) {
+    const currentOwner = readLock(ctx);
+    if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) fail();
+    const descriptor = readDescriptor(ctx);
+    // ensure may observe the previous, positively dead instance's descriptor
+    // between a new child's lock acquisition and first descriptor publication.
+    // Inspect/stop never pass this startup-only exception.
+    const awaitingFirstCheckpoint = staleDescriptor && descriptor.state === 'valid'
+      && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
+      && identityStatus(staleDescriptor.pid, staleDescriptor.startTime) === 'dead';
+    if (descriptor.state === 'valid' && !awaitingFirstCheckpoint) {
+      if (expectedInstanceId !== undefined && descriptor.value.instanceId !== expectedInstanceId) {
+        fail('STUDY_IDENTITY_MISMATCH');
+      }
+      if (!descriptorMatches(descriptor.value, ctx, currentOwner)) fail();
+      try { return await verified(ctx, descriptor, currentOwner, deadline); }
+      catch (error) {
+        // An owner checkpoint can overlap verification. Retry only safe missing
+        // or corrupt JSON; a valid conflicting record or failed health stays closed.
+        const afterOwner = readLock(ctx);
+        if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT' || afterOwner?.status !== 'alive'
+          || !sameLock(owner, afterOwner) || readDescriptor(ctx).state === 'valid') throw error;
+      }
+    }
+    await sleep(Math.max(1, Math.min(50, deadline - Date.now())));
+  }
+  fail();
+}
+function validateParent(ctx, identity) {
+  if (!identity || Object.keys(identity).some((key) => !['pid','startTime'].includes(key))
+    || !Number.isSafeInteger(identity.pid) || identity.pid < 1 || typeof identity.startTime !== 'string') fail('PARENT_IDENTITY_MISMATCH');
+  const actual = readLock(ctx, true);
+  if (actual?.status !== 'alive' || actual.pid !== identity.pid || actual.startTime !== identity.startTime) fail('PARENT_IDENTITY_MISMATCH');
+  return actual;
+}
+async function attachParent(ctx, value, identity, deadline) {
+  validateParent(ctx, identity);
+  const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
+  if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
+  validateParent(ctx, identity);
+}
+function optionsForChild(options) {
+  if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
+  const testOptions = options.testOptions ?? {};
+  if (!testOptions || typeof testOptions !== 'object' || Array.isArray(testOptions)
+    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs'].includes(key))) throw new TypeError('invalid study test options');
+  const idleTimeoutMs = testOptions.idleTimeoutMs ?? 10 * 60 * 1000;
+  const checkpointMs = testOptions.checkpointMs ?? 1000;
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 600000
+    || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000) throw new TypeError('invalid study lifetime');
+  return { idleTimeoutMs, checkpointMs };
+}
+
+async function ensureOwned(ctx, options, deadline) {
+  const config = optionsForChild(options);
+  let owner = readLock(ctx);
+  let descriptor = readDescriptor(ctx);
+  const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
+    && identityStatus(descriptor.value.pid, descriptor.value.startTime) === 'dead' ? descriptor.value : undefined;
+  if (owner?.status === 'alive') return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
+  if (!owner || owner.status === 'dead') {
+    if (descriptor.state === 'corrupt') fail();
+    if (descriptor.state === 'valid') {
+      if (descriptor.value.storeIdentity !== ctx.storeIdentity
+        || identityStatus(descriptor.value.pid, descriptor.value.startTime) !== 'dead') fail();
+      if (owner && (owner.pid !== descriptor.value.pid || owner.startTime !== descriptor.value.startTime)) fail();
+    }
+    assertContext(ctx);
+    // Only the detached service child acquires/reclaims its lifetime lock. Clients
+    // never remove a lock or send process signals, including failed startup paths.
+    const child = spawn(process.execPath, [SELF, '--serve', ctx.root, JSON.stringify(config),
+      ctx.storeIdentity, trainingIdentity(ctx)], {
+      cwd: path.dirname(SELF), detached: true, stdio: 'ignore',
+      // Existing owned locks use ps lstart in the caller's locale/timezone.
+      // Preserve that identity format without inheriting game/provider secrets.
+      env: Object.fromEntries(['PATH','LANG','LC_ALL','LC_TIME','TZ']
+        .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
+    });
+    let spawnError = null;
+    child.on('error', (error) => { spawnError = error; });
+    child.unref();
+    options.onChild?.(child);
+    await sleep(25);
+    if (spawnError) fail();
+  }
+  while (Date.now() < deadline) {
+    assertContext(ctx);
+    owner = readLock(ctx);
+    descriptor = readDescriptor(ctx);
+    if (owner?.status === 'alive') return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
+    await sleep(Math.max(1, Math.min(50, deadline - Date.now())));
+  }
+  fail();
+}
+
+export async function ensureStudyService(storeDir, options = {}) {
+  const deadline = Date.now() + WAIT_MS;
+  const ctx = context(storeDir, { create: true });
+  optionsForChild(options);
+  if (options.parentIdentity !== undefined) validateParent(ctx, options.parentIdentity);
+  let pending = inFlight.get(ctx.storeIdentity);
+  if (!pending) {
+    pending = ensureOwned(ctx, options, deadline);
+    inFlight.set(ctx.storeIdentity, pending);
+    pending.finally(() => { if (inFlight.get(ctx.storeIdentity) === pending) inFlight.delete(ctx.storeIdentity); }).catch(() => {});
+  }
+  const value = await pending;
+  // Revalidate the caller's own context after awaiting another concurrent ensure.
+  const current = readDescriptor(ctx), owner = readLock(ctx);
+  const restored = current.state === 'valid' ? current.value
+    : await waitForLiveService(ctx, owner, deadline, { expectedInstanceId: value.instanceId });
+  if (JSON.stringify(restored) !== JSON.stringify(value) || !descriptorMatches(value, ctx, owner)) fail();
+  if (options.parentIdentity !== undefined) await attachParent(ctx, value, options.parentIdentity, deadline);
+  return publicHandle(value);
+}
+export async function inspectStudyService(storeDir) {
+  const deadline = Date.now() + WAIT_MS;
+  const ctx = context(storeDir);
+  const descriptor = readDescriptor(ctx), owner = readLock(ctx);
+  if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
+  if (owner?.status === 'dead' && descriptor.state === 'valid'
+    && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime
+    && descriptor.value.storeIdentity === ctx.storeIdentity) return { status: 'stopped' };
+  const value = await waitForLiveService(ctx, owner, deadline);
+  return { status: 'running', ...publicHandle(value) };
+}
+export async function stopStudyService(storeDir, { expectedInstanceId } = {}) {
+  const deadline = Date.now() + WAIT_MS;
+  if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
+  const ctx = context(storeDir);
+  const descriptor = readDescriptor(ctx), owner = readLock(ctx);
+  if (!owner && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
+  if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
+    && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
+    && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime) {
+    return { stopped: true, alreadyStopped: true };
+  }
+  const value = await waitForLiveService(ctx, owner, deadline, { expectedInstanceId });
+  let response;
+  try { response = await httpJson(value, '/internal/shutdown', { control: true, body: { expectedInstanceId }, deadline }); }
+  catch { fail(); }
+  if (response.status !== 200 || response.body.ok !== true) fail();
+  while (Date.now() < deadline) {
+    assertContext(ctx);
+    const current = readDescriptor(ctx), lock = readLock(ctx);
+    if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
+      return { stopped: true, alreadyStopped: false };
+    }
+    // A replacement belongs to the next caller; it is never ours to stop.
+    if (current.state === 'valid' && current.value.instanceId !== expectedInstanceId) fail('STUDY_IDENTITY_MISMATCH');
+    await sleep(25);
+  }
+  fail();
+}
+
+function assertOwnLock(ctx, own) {
+  const current = readLock(ctx);
+  if (current?.status !== 'alive' || current.pid !== own.pid || current.startTime !== own.startTime
+    || BigInt(current.stat.dev) !== own.dev || BigInt(current.stat.ino) !== own.ino) fail();
+  return current;
+}
+function publish(ctx, own, value) {
+  assertOwnLock(ctx, own);
+  const file = path.join(ctx.training, DESCRIPTOR);
+  const before = readPrivate(ctx, file, MAX_DESCRIPTOR, { allowOversized: true });
+  let fd;
+  try {
+    assertOwnLock(ctx, own);
+    fd = fs.openSync(file, fs.constants.O_WRONLY | NOFOLLOW | NONBLOCK
+      | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
+    const opened = fs.fstatSync(fd);
+    if (!safeFile(opened, true) || (before && !sameInode(before.stat, opened))) fail();
+    assertContext(ctx);
+    if (!sameInode(opened, statOrNull(file))) fail();
+    const bytes = Buffer.from(JSON.stringify(value));
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, bytes); fs.fsyncSync(fd);
+    assertContext(ctx);
+    if (!sameInode(opened, statOrNull(file)) || !safeFile(fs.fstatSync(fd), true)) fail();
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+async function runService(storeDir, config, expectedStore, expectedTraining) {
+  const ctx = context(storeDir);
+  if (!ctx.trainingStat || ctx.storeIdentity !== expectedStore || trainingIdentity(ctx) !== expectedTraining) fail();
+  readDescriptor(ctx); readLock(ctx); // Validate private boundaries before owned-lock primitives.
+  // runService is child-only; do not change the caller umask or existing modes.
+  process.umask(0o077);
+  const own = acquireOwnedLock(ctx.training, LOCK);
+  let server, timer, value, stopping = false;
+  const parents = new Map();
+  let lastActivity = Date.now();
+  let hadLiveParent = false;
+  const stop = async () => {
+    if (stopping) return; stopping = true; clearInterval(timer);
+    await server?.close();
+    try {
+      assertOwnLock(ctx, own);
+      const descriptor = readDescriptor(ctx);
+      if (value && descriptor.state === 'valid' && JSON.stringify(descriptor.value) === JSON.stringify(value)) {
+        assertOwnLock(ctx, own);
+        const file = path.join(ctx.training, DESCRIPTOR);
+        if (!sameInode(statOrNull(file), descriptor.stat)) fail();
+        fs.unlinkSync(file);
+      }
+    } catch { /* Unsafe/foreign descriptor stays untouched; HTTP still closes. */ }
+    try { assertOwnLock(ctx, own); releaseOwnedLock(own); } catch { /* Never traverse a replaced owner boundary. */ }
+  };
+  const checkpoint = () => {
+    if (stopping) return;
+    try {
+      assertOwnLock(ctx, own);
+      const descriptor = readDescriptor(ctx);
+      if (descriptor.state !== 'valid' || JSON.stringify(descriptor.value) !== JSON.stringify(value)) publish(ctx, own, value);
+      let liveParent = false;
+      for (const [key, parent] of parents) {
+        let current;
+        try { current = readLock(ctx, true); } catch { current = null; }
+        if (current?.status === 'alive' && sameLock(parent, current)) liveParent = true;
+        else parents.delete(key);
+      }
+      if (liveParent || hadLiveParent) lastActivity = Date.now();
+      hadLiveParent = liveParent;
+      if (Date.now() - lastActivity >= config.idleTimeoutMs) void stop();
+    } catch { void stop(); }
+  };
+  try {
+    const drillToken = randomBytes(32).toString('hex'), controlToken = randomBytes(32).toString('hex');
+    const instanceId = randomUUID();
+    const health = { pid: own.pid, startTime: own.startTime, instanceId, storeIdentity: ctx.storeIdentity };
+    server = await startDrillServer({ storeDir: ctx.root, token: drillToken, health,
+      beforeRequest() {
+        try { assertOwnLock(ctx, own); readDescriptor(ctx); }
+        catch (error) { void stop(); throw error; }
+        if (stopping) fail();
+      },
+      onActivity() { lastActivity = Date.now(); },
+      parentRegistry: { controlToken,
+        attach(identity) {
+          const parent = validateParent(ctx, identity);
+          parents.set(`${parent.pid}:${parent.startTime}`, parent); lastActivity = Date.now(); hadLiveParent = true;
+        },
+        shutdown({ expectedInstanceId }) {
+          if (expectedInstanceId !== instanceId) fail('STUDY_IDENTITY_MISMATCH');
+          return () => { void stop(); };
+        },
+      },
+    });
+    health.port = server.port;
+    value = { schemaVersion: 1, ...health, drillToken, controlToken };
+    publish(ctx, own, value);
+    timer = setInterval(checkpoint, config.checkpointMs);
+    process.once('SIGTERM', () => { void stop(); });
+    process.once('SIGINT', () => { void stop(); });
+  } catch (error) { await stop(); throw error; }
+}
+const direct = process.argv[1] && path.resolve(process.argv[1]) === SELF;
+if (direct) {
+  try {
+    if (process.argv[2] !== '--serve' || process.argv.length !== 7) fail();
+    const config = JSON.parse(process.argv[4]);
+    optionsForChild({ testOptions: config });
+    await runService(process.argv[3], config, process.argv[5], process.argv[6]);
+  } catch { process.exitCode = 1; }
+}

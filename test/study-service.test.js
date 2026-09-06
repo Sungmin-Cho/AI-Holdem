@@ -1,0 +1,757 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { startDrillServer } from '../tools/drill-server.js';
+import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+test('REQ-010: drill health advertises an authenticated study capability', async () => {
+  const storeDir = createOwnedTempDir('holdem-study-health');
+  const drill = await startDrillServer({ storeDir, token: 'health-token' });
+  registerOwnedServer(drill.server);
+  try {
+    const response = await fetch(`http://127.0.0.1:${drill.port}/api/health`, {
+      headers: { 'x-drill-token': 'health-token' },
+    });
+    assert.equal(response.status, 200, 'study health must be an authenticated capability endpoint');
+    assert.equal((await response.json()).capabilities.study, true);
+  } finally { await drill.close(); }
+});
+
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+import { acquireOwnedLock, releaseOwnedLock, ownedProcessStartTime as processStartTime } from '../engine/state.js';
+import { startDrill, nextQuestion, answerQuestion } from '../tools/drill-cli.js';
+import { createProfileStore } from '../tools/training-stores.js';
+import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
+
+const descriptorPath = (storeDir) => path.join(storeDir, '.training', 'study-service.json');
+const lockPath = (storeDir) => path.join(storeDir, '.training', 'study.lock.d');
+const service = () => import('../tools/study-service.js');
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const source = CANONICAL_REFERENCE_SOURCE;
+
+async function request(port, token, route, { body, headers = {}, method = body === undefined ? 'GET' : 'POST' } = {}) {
+  const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+    method, headers: { ...(token ? { 'x-drill-token': token } : {}), ...headers },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(2000),
+  });
+  return { status: response.status, body: await response.json() };
+}
+async function standalone(t) {
+  const storeDir = createOwnedTempDir('holdem-study-http');
+  const server = await startDrillServer({ storeDir, token: 'study-http' });
+  registerOwnedServer(server.server);
+  t.after(() => server.close());
+  return { storeDir, ...server };
+}
+async function launch(t, options = {}, storeDir = createOwnedTempDir('holdem-study-child')) {
+  const api = await service();
+  const children = [];
+  const handle = await api.ensureStudyService(storeDir, {
+    ...options, onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(async () => {
+    try { await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }); }
+    catch (error) {
+      if (error.code === 'STUDY_IDENTITY_MISMATCH') {
+        assert.notEqual((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
+      } else if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+    }
+  });
+  return { storeDir, handle, children, api, token: new URL(handle.studyUrl).hash.slice(7) };
+}
+async function until(predicate, timeout = 3500) {
+  const deadline = Date.now() + timeout;
+  while (!await predicate()) {
+    if (Date.now() >= deadline) assert.fail('owned state did not converge before deadline');
+    await wait(25);
+  }
+}
+function readDescriptor(storeDir) { return JSON.parse(fs.readFileSync(descriptorPath(storeDir), 'utf8')); }
+
+// An unauthenticated body remains deliberately unfinished: authorization must
+// produce a response without waiting for JSON, touching files, or draining it.
+function unfinishedRequest(port, route, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, method: 'POST', path: route,
+      headers: { 'content-length': '99999999', ...headers } }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => { req.destroy(); resolve({ status: res.statusCode, body: JSON.parse(text) }); });
+    });
+    req.setTimeout(1500, () => req.destroy(new Error('authorization waited for request body')));
+    req.on('error', reject);
+    req.flushHeaders();
+  });
+}
+
+test('REQ-010: API authentication precedes incomplete body and training I/O', async (t) => {
+  const { storeDir, port } = await standalone(t);
+  fs.symlinkSync('/does-not-exist', path.join(storeDir, '.training'));
+  for (const headers of [{}, { 'x-drill-token': 'game-token' }]) {
+    const result = await unfinishedRequest(port, '/api/start?token=study-http', headers);
+    assert.equal(result.status, 401);
+    assert.equal(result.body.code, 'UNAUTHORIZED');
+  }
+  assert.equal(fs.lstatSync(path.join(storeDir, '.training')).isSymbolicLink(), true);
+});
+
+test('REQ-010: only header tokens authenticate every API route', async (t) => {
+  const { port, token } = await standalone(t);
+  for (const route of ['/api/health', '/api/summary', '/api/current', '/api/next', '/api/unknown']) {
+    assert.equal((await request(port, undefined, `${route}?token=${token}`)).status, 401);
+    assert.equal((await request(port, 'game-token', route)).status, 401);
+  }
+  assert.equal((await request(port, token, '/api/unknown')).status, 404);
+});
+
+test('REQ-010: mutations reject foreign origins and cross-site fetches before body', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  for (const headers of [{ origin: 'https://elsewhere.invalid' }, { 'sec-fetch-site': 'cross-site' }]) {
+    const result = await unfinishedRequest(port, '/api/start', { 'x-drill-token': token, ...headers });
+    assert.equal(result.status, 403);
+  }
+  assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
+  assert.equal((await request(port, token, '/api/heartbeat', {
+    body: {}, headers: { origin: `http://127.0.0.1:${port}` },
+  })).status, 200);
+});
+
+test('REQ-010: explicit static whitelist hides private files and serves shared reference', async (t) => {
+  const { port } = await standalone(t);
+  for (const route of ['/', '/drill.html', '/drill.js', '/drill.css', '/shared/reference.js']) {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`);
+    assert.equal(response.status, 200, route); await response.text();
+  }
+  for (const route of ['/package.json', '/.training/study-service.json', '/shared/study-contract.js',
+    '/%2e%2e/tools/study-service.js', '/drill.html/extra', '/api/drill.html']) {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { headers: { 'x-drill-token': 'study-http' } });
+    assert.equal(response.status, 404, route); assert.equal((await response.json()).ok, false);
+  }
+});
+
+test('REQ-010: typed bounded selectors reject paths, clocks and coercions without writes', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  for (const change of [{ storeDir: '/tmp/other' }, { now: '2099-01-01' }, { seed: {} }, { mode: [] },
+    { spotKey: {} }, { handClass: 22 }, { assessmentId: {} }, { idempotencyKey: 'x'.repeat(300) }]) {
+    const result = await request(port, token, '/api/start', { body: { mode: 'free', idempotencyKey: 'key', ...change } });
+    assert.equal(result.status, 400, JSON.stringify(change));
+  }
+  assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
+  assert.equal((await request(port, token, '/api/heartbeat', { body: { now: 0 } })).status, 400);
+});
+
+test('REQ-010: current preserves committed progress and selected question context', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const started = await request(port, token, '/api/start', { body: { mode: 'free', seed: 's7',
+    spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo', idempotencyKey: 'selected' } });
+  assert.equal(started.status, 200);
+  const current = (await request(port, token, '/api/current')).body;
+  assert.equal(current.count, 1); assert.equal(current.question.prompt.handClass, 'AJo');
+  const answer = { action: 'fold', sessionId: current.sessionId, questionId: current.question.questionId, attemptNo: 0 };
+  assert.equal((await request(port, token, '/api/answer', { body: answer })).status, 200);
+  const refreshed = (await request(port, token, '/api/current')).body;
+  assert.equal(refreshed.index, 1); assert.equal(refreshed.sessionId, current.sessionId);
+  assert.ok(refreshed.lastFeedback);
+  assert.equal((await request(port, token, '/api/answer', { body: { ...answer, attemptNo: '0' } })).status, 400);
+  assert.equal((await createProfileStore(storeDir).readEventSnapshot()).length, 1);
+});
+
+test('REQ-010: internal errors expose stable codes without paths or messages', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  fs.mkdirSync(path.join(storeDir, '.training'), { mode: 0o700 });
+  fs.writeFileSync(path.join(storeDir, '.training', 'profile.json'), '{"schemaVersion":999}', { mode: 0o600 });
+  const response = await request(port, token, '/api/summary');
+  assert.equal(response.status, 500);
+  assert.equal(response.body.code, 'UNSUPPORTED_PROFILE');
+  assert.equal(JSON.stringify(response.body).includes(storeDir), false);
+  assert.equal(JSON.stringify(response.body).includes('999'), false);
+});
+
+test('REQ-002: summary is origin-explicit and practice cannot alter game evidence', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const before = (await request(port, token, '/api/summary')).body.summary;
+  const run = await startDrill(storeDir, { mode: 'free', idempotencyKey: 'practice-summary' });
+  const question = await nextQuestion(storeDir);
+  await answerQuestion(storeDir, { action: 'fold', sessionId: run.sessionId,
+    questionId: question.question.questionId, attemptNo: 0 });
+  const summary = (await request(port, token, '/api/summary')).body.summary;
+  assert.deepEqual(summary.game, before.game);
+  assert.equal(summary.practice.overall.supportedDecisions, 1);
+  assert.equal(summary.practice.calibration.distributionAgreement, null);
+  assert.deepEqual(summary.source, source);
+  assert.equal(before.game.overall.allowedActionRate, null);
+  for (const forbidden of ['processed', 'mixGroups', 'events', 'mastery', 'evLossBb', storeDir]) {
+    assert.equal(JSON.stringify(summary).includes(forbidden), false, forbidden);
+  }
+  assert.deepEqual(Object.keys(summary).sort(), ['schemaVersion','source','game','practice','bank','goal','assessments','retests'].sort());
+});
+
+test('REQ-011: assessment summary omits question records and reports retest wait', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const run = await startDrill(storeDir, { mode: 'assessment', idempotencyKey: 'assessment-summary' });
+  for (let index = 0; index < run.queue.length; index += 1) {
+    await answerQuestion(storeDir, { action: 'fold', sessionId: run.sessionId,
+      questionId: run.queue[index].questionId, attemptNo: index });
+  }
+  const summary = (await request(port, token, '/api/summary')).body.summary;
+  assert.equal(summary.assessments.length, 1);
+  const baseline = summary.assessments[0];
+  assert.equal(baseline.id, run.studyRun.id); assert.equal(baseline.complete, true);
+  assert.deepEqual(baseline.sourceIdentity, source);
+  assert.equal(baseline.retest.eligible, false); assert.ok(baseline.retest.nextAvailableAt);
+  assert.equal('questions' in baseline, false); assert.equal('retests' in baseline, false);
+  const early = await request(port, token, '/api/start', { body: {
+    mode: 'retest', assessmentId: baseline.id, idempotencyKey: 'early-retest',
+  } });
+  assert.equal(early.status, 409); assert.equal(early.body.code, 'RETEST_NOT_DUE');
+  assert.equal(early.body.nextAvailableAt, baseline.retest.nextAvailableAt);
+});
+
+test('REQ-010: service is a real detached child with a single private two-capability descriptor', async (t) => {
+  const { storeDir, handle, token, api, children } = await launch(t);
+  assert.notEqual(handle.pid, process.pid); assert.equal(children.length, 1);
+  assert.equal(processStartTime(handle.pid), handle.startTime);
+  const descriptor = readDescriptor(storeDir);
+  assert.equal(fs.statSync(descriptorPath(storeDir)).mode & 0o777, 0o600);
+  assert.deepEqual(Object.keys(descriptor).filter((key) => /token/i.test(key)).sort(), ['controlToken', 'drillToken']);
+  assert.match(descriptor.drillToken, /^[0-9a-f]{64}$/); assert.match(descriptor.controlToken, /^[0-9a-f]{64}$/);
+  assert.notEqual(descriptor.drillToken, descriptor.controlToken); assert.equal(token, descriptor.drillToken);
+  assert.equal('controlToken' in handle, false); assert.equal('drillToken' in handle, false);
+  const inspected = await api.inspectStudyService(storeDir);
+  assert.equal(inspected.status, 'running'); assert.equal(inspected.instanceId, handle.instanceId);
+  assert.equal(JSON.stringify(inspected).includes(descriptor.controlToken), false);
+  const health = await request(handle.port, token, '/api/health');
+  assert.equal(health.body.instanceId, handle.instanceId); assert.equal(health.body.storeIdentity, handle.storeIdentity);
+  assert.equal(JSON.stringify(health).includes(descriptor.controlToken), false);
+});
+
+test('REQ-010: concurrent ensure calls and relay reuse resolve one live store service', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-concurrent');
+  const api = await service();
+  const handles = await Promise.all(Array.from({ length: 5 }, () => api.ensureStudyService(storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'concurrent study child'); },
+  })));
+  t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }));
+  assert.equal(new Set(handles.map((handle) => handle.instanceId)).size, 1);
+  assert.equal(new Set(handles.map((handle) => handle.studyUrl)).size, 1);
+  assert.deepEqual(await api.ensureStudyService(storeDir), handles[0]);
+});
+
+test('REQ-010: browser capability cannot attach parents or stop the service', async (t) => {
+  const { handle, token, storeDir } = await launch(t);
+  for (const route of ['/internal/parent-attach', '/internal/shutdown']) {
+    const denied = await unfinishedRequest(handle.port, route, { 'x-drill-token': token, 'x-study-control': token });
+    assert.equal(denied.status, 401);
+  }
+  const descriptor = readDescriptor(storeDir);
+  const invalidParent = await request(handle.port, null, '/internal/parent-attach', {
+    headers: { 'x-study-control': descriptor.controlToken }, body: { pid: process.pid, startTime: processStartTime(process.pid) },
+  });
+  assert.equal(invalidParent.status, 409); assert.equal(invalidParent.body.code, 'PARENT_IDENTITY_MISMATCH');
+  assert.equal((await request(handle.port, token, '/api/health')).status, 200);
+});
+
+test('REQ-010: actual loop-lock parent keeps service alive and release starts idle expiry', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-parent');
+  const parent = acquireOwnedLock(storeDir, 'loop.lock.d');
+  t.after(() => releaseOwnedLock(parent));
+  const { handle, api } = await launch(t, { parentIdentity: { pid: parent.pid, startTime: parent.startTime },
+    testOptions: { idleTimeoutMs: 300, checkpointMs: 50 } }, storeDir);
+  await wait(650);
+  assert.equal((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
+  releaseOwnedLock(parent);
+  await until(() => !fs.existsSync(descriptorPath(storeDir)) && !fs.existsSync(lockPath(storeDir)));
+  assert.equal(fs.existsSync(lockPath(storeDir)), false);
+});
+
+test('REQ-010: authenticated heartbeat keeps orphan service alive then idle shutdown removes only owned files', async (t) => {
+  const { storeDir, handle, token } = await launch(t, { testOptions: { idleTimeoutMs: 300, checkpointMs: 50 } });
+  fs.writeFileSync(path.join(storeDir, 'state.json'), 'USER GAME SENTINEL');
+  for (let i = 0; i < 4; i += 1) {
+    await wait(150); assert.equal((await request(handle.port, token, '/api/heartbeat', { body: {} })).status, 200);
+  }
+  await until(() => !fs.existsSync(descriptorPath(storeDir)) && !fs.existsSync(lockPath(storeDir)));
+  assert.equal(fs.existsSync(lockPath(storeDir)), false);
+  assert.equal(fs.readFileSync(path.join(storeDir, 'state.json'), 'utf8'), 'USER GAME SENTINEL');
+  await assert.rejects(fetch(`http://127.0.0.1:${handle.port}/api/health`));
+});
+
+test('REQ-010: live owner repairs missing and corrupt regular descriptor without credential rotation', async (t) => {
+  const { storeDir, handle, api } = await launch(t);
+  const original = readDescriptor(storeDir);
+  fs.unlinkSync(descriptorPath(storeDir));
+  assert.deepEqual(await api.ensureStudyService(storeDir), handle);
+  assert.deepEqual(readDescriptor(storeDir), original);
+  fs.writeFileSync(descriptorPath(storeDir), '{', { mode: 0o600 });
+  assert.deepEqual(await api.ensureStudyService(storeDir), handle);
+  assert.deepEqual(readDescriptor(storeDir), original);
+});
+
+test('REQ-010: unsafe descriptor symlink is preserved and owner self-stops without a competitor', async (t) => {
+  const { storeDir, handle, api } = await launch(t, { testOptions: { checkpointMs: 100 } });
+  const foreign = path.join(storeDir, 'foreign.json'); fs.writeFileSync(foreign, 'FOREIGN');
+  fs.unlinkSync(descriptorPath(storeDir)); fs.symlinkSync(foreign, descriptorPath(storeDir));
+  let spawns = 0;
+  await assert.rejects(api.ensureStudyService(storeDir, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  assert.equal(spawns, 0);
+  await until(() => !fs.existsSync(lockPath(storeDir)));
+  assert.equal(fs.lstatSync(descriptorPath(storeDir)).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(foreign, 'utf8'), 'FOREIGN');
+  await assert.rejects(fetch(`http://127.0.0.1:${handle.port}/api/health`));
+});
+
+test('REQ-010: hard-linked or nonprivate descriptors fail closed without modifying foreign bytes', async (t) => {
+  for (const kind of ['hardlink', 'mode']) await t.test(kind, async (t) => {
+    const { storeDir, api } = await launch(t, { testOptions: { checkpointMs: 100 } });
+    const foreign = path.join(storeDir, 'foreign-descriptor');
+    const before = fs.readFileSync(descriptorPath(storeDir));
+    if (kind === 'hardlink') fs.linkSync(descriptorPath(storeDir), foreign);
+    else fs.chmodSync(descriptorPath(storeDir), 0o644);
+    await assert.rejects(api.ensureStudyService(storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+    await until(() => !fs.existsSync(lockPath(storeDir)));
+    assert.deepEqual(fs.readFileSync(descriptorPath(storeDir)), before);
+    if (kind === 'hardlink') assert.deepEqual(fs.readFileSync(foreign), before);
+  });
+});
+
+test('REQ-010: mismatched descriptor process identity cannot authorize stop or registration', async (t) => {
+  const { storeDir, handle, api } = await launch(t, { testOptions: { checkpointMs: 200 } });
+  const descriptor = readDescriptor(storeDir);
+  fs.writeFileSync(descriptorPath(storeDir), JSON.stringify({ ...descriptor, pid: process.pid, startTime: processStartTime(process.pid) }));
+  await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  assert.equal(processStartTime(process.pid) !== null, true);
+  await until(() => readDescriptor(storeDir).pid === handle.pid);
+  await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: randomUUID() }), { code: 'STUDY_IDENTITY_MISMATCH' });
+  assert.equal((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
+});
+
+test('REQ-010: explicit restart rotates both credentials and old capabilities return 401', async (t) => {
+  const first = await launch(t);
+  const old = readDescriptor(first.storeDir);
+  const stopped = await first.api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  assert.equal(stopped.stopped, true);
+  const second = await launch(t, {}, first.storeDir);
+  const fresh = readDescriptor(first.storeDir);
+  assert.notEqual(fresh.instanceId, old.instanceId); assert.notEqual(fresh.drillToken, old.drillToken);
+  assert.notEqual(fresh.controlToken, old.controlToken);
+  assert.equal((await request(second.handle.port, old.drillToken, '/api/health')).status, 401);
+  assert.equal((await request(second.handle.port, null, '/internal/shutdown', {
+    body: {}, headers: { 'x-study-control': old.controlToken },
+  })).status, 401);
+});
+
+test('REQ-010: startup rejects unsafe root and training containment before spawning', async () => {
+  const api = await service();
+  const root = createOwnedTempDir('holdem-study-root');
+  const foreign = createOwnedTempDir('holdem-study-foreign');
+  const link = path.join(root, 'store-link'); fs.symlinkSync(foreign, link);
+  let spawns = 0;
+  await assert.rejects(api.ensureStudyService(link, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  fs.symlinkSync(foreign, path.join(root, '.training'));
+  await assert.rejects(api.ensureStudyService(root, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  assert.equal(spawns, 0); assert.deepEqual(fs.readdirSync(foreign), []);
+});
+
+async function assessmentEvent(storeDir) {
+  const run = await startDrill(storeDir, { mode: 'assessment', idempotencyKey: randomUUID(),
+    spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' });
+  await answerQuestion(storeDir, { action: 'fold', sessionId: run.sessionId, questionId: run.queue[0].questionId, attemptNo: 0 });
+  return (await createProfileStore(storeDir).readEventSnapshot())[0];
+}
+function replaceEvents(storeDir, events) {
+  fs.writeFileSync(path.join(storeDir, '.training', 'profile-events.jsonl'), events.map((event) => JSON.stringify(event)).join('\n') + '\n');
+}
+
+test('REQ-011: future assessment scores remain unavailable in summaries', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const event = await assessmentEvent(storeDir);
+  event.appliedAt = '2099-01-02T00:00:00.000Z';
+  event.studyRun.startedAt = '2099-01-01T00:00:00.000Z';
+  replaceEvents(storeDir, [event]);
+  const summary = (await request(port, token, '/api/summary')).body.summary;
+  assert.equal(summary.practice.overall.allowedActionRate, null);
+  assert.equal(summary.practice.overall.supportedDecisions, 0);
+  assert.equal(summary.assessments[0].reason, 'FUTURE_EVIDENCE');
+  assert.equal(summary.assessments[0].result.allowedActionRate, null);
+  assert.equal(summary.assessments[0].retest.eligible, false);
+});
+
+test('REQ-002: unknown reference tuples are preserved as unverified and cannot become candidates', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const event = await assessmentEvent(storeDir);
+  event.mixObservation.sourceIdentity.contentSha256 = 'f'.repeat(64);
+  replaceEvents(storeDir, [event]);
+  const summary = (await request(port, token, '/api/summary')).body.summary;
+  assert.deepEqual(summary.source, source);
+  assert.equal(summary.practice.overall.allowedActionRate, null);
+  assert.equal(summary.practice.coverage.unverifiedDecisions, 1);
+  assert.deepEqual(summary.practice.candidates, []);
+  assert.equal(summary.assessments[0].sourceIdentity.contentSha256, 'f'.repeat(64));
+  assert.equal(summary.assessments[0].reason, 'UNVERIFIED_SOURCE');
+});
+
+test('REQ-002: source-claimed arbitrary pair text is never exposed as a summary goal', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const event = await assessmentEvent(storeDir);
+  event.grade = 'off-policy';
+  event.mixObservation.spotKey = '/private/user/hidden-token';
+  event.mixObservation.handClass = 'opponent private cards';
+  replaceEvents(storeDir, [event]);
+  const result = await request(port, token, '/api/summary');
+  assert.equal(JSON.stringify(result.body).includes('/private/user/hidden-token'), false);
+  assert.equal(JSON.stringify(result.body).includes('opponent private cards'), false);
+  assert.equal(result.status, 500);
+});
+
+test('REQ-011: public assessment history is bounded and excludes raw question evidence', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const base = await assessmentEvent(storeDir);
+  const events = Array.from({ length: 110 }, (_, index) => ({ ...structuredClone(base),
+    evaluationId: `${index.toString(16).padStart(64, '0')}:d-1-preflop-0:local-preflop-baseline@1.0.0`,
+    payloadSha256: index.toString(16).padStart(64, '0'), studyRun: { ...base.studyRun, id: randomUUID() },
+  }));
+  fs.unlinkSync(path.join(storeDir, '.training', 'profile.json'));
+  replaceEvents(storeDir, events);
+  const result = await request(port, token, '/api/summary');
+  assert.equal(result.status, 200);
+  assert.equal(result.body.summary.assessments.length, 100);
+  assert.ok(result.body.summary.practice.candidates.length <= 10);
+  for (const key of ['evaluationId', 'payloadSha256', 'questions', 'seenPairs', 'processed', 'mixGroups']) {
+    assert.equal(JSON.stringify(result.body).includes(`"${key}"`), false, key);
+  }
+  assert.ok(JSON.stringify(result.body).length < 150_000);
+});
+
+test('REQ-010: separate Node ensure clients converge on one owned listener', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-multi-client');
+  const href = new URL('../tools/study-service.js', import.meta.url).href;
+  const clients = Array.from({ length: 4 }, () => registerOwnedProcess(spawn(process.execPath, [
+    '--input-type=module', '-e', `import { ensureStudyService } from ${JSON.stringify(href)};
+      const handle=await ensureStudyService(process.argv[1],{testOptions:{idleTimeoutMs:3000,checkpointMs:50}});
+      process.stdout.write(JSON.stringify(handle));`, storeDir,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] }), 'independent ensure client'));
+  const handles = await Promise.all(clients.map((child) => new Promise((resolve, reject) => {
+    let output = '', error = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { error += chunk; });
+    child.on('close', (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`ensure client ${code}: ${error}`)));
+  })));
+  const api = await service();
+  t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }));
+  assert.equal(new Set(handles.map((handle) => handle.pid)).size, 1);
+  assert.equal(new Set(handles.map((handle) => handle.studyUrl)).size, 1);
+});
+
+test('REQ-010: replaced loop lock invalidates a still-running registered parent', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-parent-replace');
+  const original = acquireOwnedLock(storeDir, 'loop.lock.d');
+  const launched = await launch(t, { parentIdentity: { pid: original.pid, startTime: original.startTime },
+    testOptions: { idleTimeoutMs: 250, checkpointMs: 50 } }, storeDir);
+  releaseOwnedLock(original);
+  const replacement = acquireOwnedLock(storeDir, 'loop.lock.d');
+  t.after(() => releaseOwnedLock(replacement));
+  assert.equal(original.pid, replacement.pid);
+  assert.notEqual(original.ino, replacement.ino);
+  await until(() => !fs.existsSync(descriptorPath(storeDir)) && !fs.existsSync(lockPath(storeDir)));
+  assert.equal(processStartTime(process.pid), original.startTime);
+  assert.equal(fs.existsSync(path.join(storeDir, 'loop.lock.d')), true);
+  assert.equal((await launched.api.inspectStudyService(storeDir)).status, 'stopped');
+});
+
+test('REQ-010: parent death cannot keep a study service alive through stale lock metadata', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-parent-death');
+  const href = new URL('../engine/state.js', import.meta.url).href;
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e',
+    `import { acquireOwnedLock } from ${JSON.stringify(href)};
+     const lock=acquireOwnedLock(process.argv[1],'loop.lock.d');
+     process.stdout.write(JSON.stringify({pid:lock.pid,startTime:lock.startTime})+'\\n');setInterval(()=>{},1000);`, storeDir,
+  ], { stdio: ['ignore','pipe','pipe'] }), 'owned loop identity fixture');
+  const parentIdentity = await new Promise((resolve, reject) => {
+    let line = ''; child.stdout.on('data', (chunk) => { line += chunk; if (line.includes('\n')) resolve(JSON.parse(line)); });
+    child.on('error', reject);
+  });
+  await launch(t, { parentIdentity, testOptions: { idleTimeoutMs: 250, checkpointMs: 50 } }, storeDir);
+  child.kill('SIGTERM');
+  await until(() => child.signalCode !== null);
+  await until(() => !fs.existsSync(descriptorPath(storeDir)) && !fs.existsSync(lockPath(storeDir)));
+  assert.equal(fs.existsSync(path.join(storeDir, 'loop.lock.d', 'pid')), true);
+});
+
+test('REQ-010: killed owned child can rebootstrap with new identity and capabilities', async (t) => {
+  const first = await launch(t);
+  first.children[0].kill('SIGKILL');
+  await until(() => first.children[0].signalCode !== null);
+  const second = await launch(t, {}, first.storeDir);
+  assert.notEqual(second.handle.instanceId, first.handle.instanceId);
+  assert.notEqual(second.token, first.token);
+  assert.equal((await request(second.handle.port, first.token, '/api/health')).status, 401);
+});
+
+test('REQ-010: oversized safe regular descriptors are repaired without unbounded reads', async (t) => {
+  const { storeDir, handle, api } = await launch(t);
+  fs.writeFileSync(descriptorPath(storeDir), 'x'.repeat(10_000));
+  assert.deepEqual(await api.ensureStudyService(storeDir), handle);
+  assert.ok(fs.statSync(descriptorPath(storeDir)).size < 4096);
+});
+
+test('REQ-010: descriptor is the sole persisted capability sink during authenticated study activity', async (t) => {
+  const { storeDir, handle, token } = await launch(t);
+  const descriptor = readDescriptor(storeDir);
+  await request(handle.port, token, '/api/start', { body: { mode: 'free', idempotencyKey: 'private-cap-scan' } });
+  await request(handle.port, token, '/api/summary');
+  const sinks = [];
+  function scan(dir) {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, item.name);
+      if (item.isDirectory()) scan(file);
+      else if (item.isFile()) {
+        const bytes = fs.readFileSync(file, 'utf8');
+        if ([descriptor.drillToken, descriptor.controlToken, handle.studyUrl].some((secret) => bytes.includes(secret))) sinks.push(file);
+      }
+    }
+  }
+  scan(storeDir);
+  assert.deepEqual(sinks, [descriptorPath(storeDir)]);
+});
+
+test('REQ-010: unrepaired live-owned metadata fails within five seconds without client lock removal or spawn', async () => {
+  const storeDir = createOwnedTempDir('holdem-study-unrepaired');
+  const training = path.join(storeDir, '.training'); fs.mkdirSync(training, { mode: 0o700 });
+  const own = acquireOwnedLock(training, 'study.lock.d');
+  const before = fs.readFileSync(path.join(lockPath(storeDir), 'pid'));
+  const api = await service(); let spawns = 0;
+  const started = Date.now();
+  try {
+    await assert.rejects(api.ensureStudyService(storeDir, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+    assert.ok(Date.now() - started < 5500);
+    assert.equal(spawns, 0);
+    assert.deepEqual(fs.readFileSync(path.join(lockPath(storeDir), 'pid')), before);
+    assert.equal(processStartTime(process.pid), own.startTime);
+  } finally { releaseOwnedLock(own); }
+});
+
+test('REQ-010: stopped helper confirms a dead owned instance without deleting its recovery metadata', async (t) => {
+  const { storeDir, handle, children, api } = await launch(t);
+  const before = fs.readFileSync(descriptorPath(storeDir));
+  children[0].kill('SIGKILL');
+  await until(() => children[0].signalCode !== null);
+  assert.deepEqual(await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }), { stopped: true, alreadyStopped: true });
+  assert.deepEqual(fs.readFileSync(descriptorPath(storeDir)), before);
+  assert.equal(fs.existsSync(lockPath(storeDir)), true);
+});
+
+test('REQ-010: detached startup refuses a replacement training directory before acquiring its lock', async () => {
+  const storeDir = createOwnedTempDir('holdem-study-startup-replace');
+  const api = await service(); let child;
+  await assert.rejects(api.ensureStudyService(storeDir, { onChild(spawned) {
+    spawned.ref();
+    child = registerOwnedProcess(spawned, 'replaced startup context');
+    fs.renameSync(path.join(storeDir, '.training'), path.join(storeDir, 'original-training'));
+    fs.mkdirSync(path.join(storeDir, '.training'), { mode: 0o700 });
+  } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  await until(() => child.exitCode !== null || child.signalCode !== null);
+  assert.deepEqual(fs.readdirSync(path.join(storeDir, '.training')), []);
+});
+
+test('REQ-002: summary rejects an invalid canonical pair before writing a derived profile', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const event = await assessmentEvent(storeDir);
+  event.mixObservation.handClass = 'invalid';
+  replaceEvents(storeDir, [event]);
+  fs.unlinkSync(path.join(storeDir, '.training', 'profile.json'));
+  assert.equal((await request(port, token, '/api/summary')).status, 500);
+  assert.equal(fs.existsSync(path.join(storeDir, '.training', 'profile.json')), false);
+});
+
+test('REQ-002: summary preserves the profile reader preflop-only learning boundary', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  const event = await assessmentEvent(storeDir);
+  event.evaluationId = event.evaluationId.replace('-preflop-', '-flop-');
+  event.street = 'flop';
+  event.skillKey = 'postflop.flop';
+  event.grade = 'off-policy';
+  replaceEvents(storeDir, [event]);
+  fs.unlinkSync(path.join(storeDir, '.training', 'profile.json'));
+  const summary = (await request(port, token, '/api/summary')).body.summary;
+  assert.equal(summary.practice.overall.supportedDecisions, 0);
+  assert.equal(summary.practice.overall.allowedActionRate, null);
+  assert.deepEqual(summary.assessments, []);
+  assert.equal(summary.goal.origin, 'default');
+});
+
+test('REQ-010: non-UTC parent and service preserve the existing process identity format', async () => {
+  const storeDir = createOwnedTempDir('holdem-study-parent-timezone');
+  const serviceHref = new URL('../tools/study-service.js', import.meta.url).href;
+  const stateHref = new URL('../engine/state.js', import.meta.url).href;
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e',
+    `import { ensureStudyService,stopStudyService } from ${JSON.stringify(serviceHref)};
+     import { acquireOwnedLock,releaseOwnedLock } from ${JSON.stringify(stateHref)};
+     const parent=acquireOwnedLock(process.argv[1],'loop.lock.d');let owned,handle;
+     try {
+       handle=await ensureStudyService(process.argv[1],{parentIdentity:{pid:parent.pid,startTime:parent.startTime},
+         testOptions:{idleTimeoutMs:150,checkpointMs:50},onChild(child){owned=child;child.ref();}});
+       await new Promise(resolve=>setTimeout(resolve,350));
+       const stopped=await stopStudyService(process.argv[1],{expectedInstanceId:handle.instanceId});
+       process.stdout.write(JSON.stringify({stopped:stopped.stopped}));
+     } finally {
+       releaseOwnedLock(parent);
+       if(owned && owned.exitCode===null && owned.signalCode===null) {
+         owned.kill('SIGTERM');await new Promise(resolve=>owned.once('exit',resolve));
+       }
+     }`, storeDir,
+  ], { env: { ...process.env, TZ: 'Asia/Seoul', LANG: 'C', LC_ALL: 'C' }, stdio: ['ignore','pipe','pipe'] }), 'non-UTC study client');
+  const result = await new Promise((resolve) => {
+    let output='', error='';
+    child.stdout.on('data', (chunk) => { output += chunk; }); child.stderr.on('data', (chunk) => { error += chunk; });
+    child.on('close', (code) => resolve({ code, output, error }));
+  });
+  assert.equal(result.code, 0, 'study child must preserve its parent timezone identity');
+  assert.deepEqual(JSON.parse(result.output), { stopped: true });
+  assert.equal(fs.existsSync(descriptorPath(storeDir)), false);
+});
+
+test('REQ-010: a canonical service is reused and attached by a parent in another timezone', async (t) => {
+  const { storeDir, handle, token } = await launch(t);
+  const serviceHref = new URL('../tools/study-service.js', import.meta.url).href;
+  const stateHref = new URL('../engine/state.js', import.meta.url).href;
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e',
+    `import { ensureStudyService } from ${JSON.stringify(serviceHref)};
+     import { acquireOwnedLock,releaseOwnedLock } from ${JSON.stringify(stateHref)};
+     import { createHash } from 'node:crypto';
+     const parent=acquireOwnedLock(process.argv[1],'loop.lock.d');
+     try {
+       const handle=await ensureStudyService(process.argv[1],{parentIdentity:{pid:parent.pid,startTime:parent.startTime}});
+       process.stdout.write(JSON.stringify({pid:handle.pid,instanceId:handle.instanceId,startTime:handle.startTime,
+         urlHash:createHash('sha256').update(handle.studyUrl).digest('hex')}));
+     } finally { releaseOwnedLock(parent); }`, storeDir,
+  ], { env: { ...process.env, TZ: 'Asia/Seoul', LANG: 'C', LC_ALL: 'C' }, stdio: ['ignore','pipe','pipe'] }), 'cross-timezone reuse client');
+  const result = await new Promise((resolve) => {
+    let output=''; child.stdout.on('data', (chunk) => { output += chunk; });
+    child.on('close', (code) => resolve({ code, output }));
+  });
+  assert.equal(result.code, 0);
+  const reused=JSON.parse(result.output);
+  assert.equal(reused.pid, handle.pid); assert.equal(reused.instanceId, handle.instanceId);
+  assert.equal(reused.startTime, handle.startTime); assert.match(reused.startTime, /^utc-v1:/);
+  assert.equal(reused.urlHash, createHash('sha256').update(handle.studyUrl).digest('hex'));
+  assert.equal((await request(handle.port, token, '/api/health')).status, 200);
+});
+
+test('REQ-010: malformed or legacy private lock wire stays unknown before PID liveness', async () => {
+  const api = await service();
+  for (const raw of ['99999999\nutc-v2\nSun Sep  6 00:00:00 2026',
+    '99999999\nutc-v1\nSun Sep 06 00:00:00 2026', '99999999\nSun Sep  6 00:00:00 2026']) {
+    const storeDir = createOwnedTempDir('holdem-study-wire');
+    fs.mkdirSync(lockPath(storeDir), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.join(storeDir, '.training'), 0o700);
+    fs.writeFileSync(path.join(lockPath(storeDir), 'pid'), raw, { mode: 0o600 });
+    await assert.rejects(api.inspectStudyService(storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+    assert.equal(fs.readFileSync(path.join(lockPath(storeDir), 'pid'), 'utf8'), raw);
+  }
+});
+
+test('S7 repair: child startup is private under caller umask002 without changing caller or existing modes', async () => {
+  const storeDir = createOwnedTempDir('holdem-study-umask');
+  const href = new URL('../tools/study-service.js', import.meta.url).href;
+  fs.mkdirSync(path.join(storeDir,'.training'),{mode:0o700});
+  fs.writeFileSync(path.join(storeDir,'user-file'),'preserve',{mode:0o640});
+  const child = registerOwnedProcess(spawn(process.execPath,['--input-type=module','-e',
+    `import fs from 'node:fs';import {ensureStudyService,stopStudyService} from ${JSON.stringify(href)};
+     process.umask(0o002);let service,handle;const store=process.argv[1];
+     try {
+       handle=await ensureStudyService(store,{onChild(child){service=child;child.ref();}});
+       const modes={caller:process.umask(),root:fs.statSync(store).mode&0o777,
+         training:fs.statSync(store+'/.training').mode&0o777,user:fs.statSync(store+'/user-file').mode&0o777,
+         lock:fs.statSync(store+'/.training/study.lock.d').mode&0o777,
+         pid:fs.statSync(store+'/.training/study.lock.d/pid').mode&0o777,
+         descriptor:fs.statSync(store+'/.training/study-service.json').mode&0o777};
+       await stopStudyService(store,{expectedInstanceId:handle.instanceId});process.stdout.write(JSON.stringify(modes));
+     } catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exitCode=1;}
+     finally{if(service&&service.exitCode===null&&service.signalCode===null){service.kill('SIGTERM');await new Promise(resolve=>service.once('exit',resolve));}}`,storeDir],
+    {stdio:['ignore','pipe','pipe']}),'umask002 client');
+  const observed = await new Promise(resolve=>{let output='';child.stdout.on('data',chunk=>{output+=chunk;});child.on('close',code=>resolve({code,output}));});
+  assert.equal(observed.code,0,'umask002 must not make the owned child lock unsafe');
+  assert.deepEqual(JSON.parse(observed.output),{caller:0o002,root:0o700,training:0o700,user:0o640,lock:0o700,pid:0o600,descriptor:0o600});
+});
+
+for (const operation of ['inspect','stop']) for (const damage of ['missing','corrupt']) {
+  test(`S7 repair: ${operation} waits for live owner ${damage} descriptor repair`,async(t)=>{
+    const {storeDir,handle,api}=await launch(t);
+    const original=readDescriptor(storeDir);
+    if(damage==='missing')fs.unlinkSync(descriptorPath(storeDir));
+    else fs.writeFileSync(descriptorPath(storeDir),'{');
+    const started=Date.now();
+    if(operation==='inspect'){
+      const result=await api.inspectStudyService(storeDir);
+      assert.equal(result.status,'running');assert.equal(result.instanceId,handle.instanceId);
+      assert.equal(readDescriptor(storeDir).controlToken===original.controlToken,true);
+    }else{
+      const result=await api.stopStudyService(storeDir,{expectedInstanceId:handle.instanceId});
+      assert.equal(result.stopped,true);assert.equal(fs.existsSync(descriptorPath(storeDir)),false);
+    }
+    assert.ok(Date.now()-started<5500,'repair must stay within the five-second deadline');
+  });
+}
+
+test('S7 repair: stop retains expected instance through a missing-descriptor wait',async(t)=>{
+  const {storeDir,handle,api,token}=await launch(t);
+  fs.unlinkSync(descriptorPath(storeDir));
+  await assert.rejects(api.stopStudyService(storeDir,{expectedInstanceId:randomUUID()}),{code:'STUDY_IDENTITY_MISMATCH'});
+  assert.equal((await request(handle.port,token,'/api/health')).status,200);
+});
+
+for(const operation of ['inspect','stop']) {
+  test(`S7 repair: ${operation} times out without changing a live owner's unrepaired metadata`,async()=>{
+    const storeDir=createOwnedTempDir('holdem-study-repair-timeout');
+    const training=path.join(storeDir,'.training');fs.mkdirSync(training,{mode:0o700});
+    const owner=acquireOwnedLock(training,'study.lock.d');
+    const raw='{';fs.writeFileSync(descriptorPath(storeDir),raw,{mode:0o600});
+    const lockStat=fs.statSync(lockPath(storeDir));
+    const pidBytes=fs.readFileSync(path.join(lockPath(storeDir),'pid'));
+    const api=await service();const signals=[];const kill=process.kill;
+    process.kill=(pid,signal)=>{if(signal!==0)signals.push({pid,signal});return kill(pid,signal);};
+    const started=Date.now();
+    try {
+      const call=operation==='inspect' ? api.inspectStudyService(storeDir)
+        : api.stopStudyService(storeDir,{expectedInstanceId:randomUUID()});
+      await assert.rejects(call,{code:'STUDY_DESCRIPTOR_CORRUPT'});
+      const elapsed=Date.now()-started;
+      assert.ok(elapsed>=4500&&elapsed<5500,`repair deadline was ${elapsed}ms`);
+      assert.deepEqual(signals,[]);
+      assert.equal(fs.readFileSync(descriptorPath(storeDir),'utf8'),raw);
+      assert.deepEqual(fs.readFileSync(path.join(lockPath(storeDir),'pid')),pidBytes);
+      assert.equal(fs.statSync(lockPath(storeDir)).ino,lockStat.ino);
+    } finally {process.kill=kill;releaseOwnedLock(owner);}
+  });
+}
+
+test('S7 repair: inspect and stop refuse unknown ownership immediately without changing files',async()=>{
+  const storeDir=createOwnedTempDir('holdem-study-unknown-owner');
+  fs.mkdirSync(lockPath(storeDir),{recursive:true,mode:0o700});fs.chmodSync(path.join(storeDir,'.training'),0o700);
+  fs.writeFileSync(descriptorPath(storeDir),'{',{mode:0o600});
+  const api=await service();
+  for(const call of [()=>api.inspectStudyService(storeDir),()=>api.stopStudyService(storeDir,{expectedInstanceId:randomUUID()})]){
+    const started=Date.now();await assert.rejects(call(),{code:'STUDY_DESCRIPTOR_CORRUPT'});
+    assert.ok(Date.now()-started<1000);
+    assert.equal(fs.readFileSync(descriptorPath(storeDir),'utf8'),'{');
+    assert.deepEqual(fs.readdirSync(lockPath(storeDir)),[]);
+  }
+});
+
+test('S7 repair: waiting stop cannot target a replacement service instance',async(t)=>{
+  const first=await launch(t);const descriptor=readDescriptor(first.storeDir);
+  fs.unlinkSync(descriptorPath(first.storeDir));
+  const pending=first.api.stopStudyService(first.storeDir,{expectedInstanceId:first.handle.instanceId}).then(
+    value=>({value}),error=>({error}));
+  await request(first.handle.port,null,'/internal/shutdown',{body:{expectedInstanceId:first.handle.instanceId},
+    headers:{'x-study-control':descriptor.controlToken}});
+  await until(()=>first.children[0].exitCode!==null||first.children[0].signalCode!==null);
+  const second=await launch(t,{},first.storeDir);
+  const result=await pending;
+  assert.ok(['STUDY_DESCRIPTOR_CORRUPT','STUDY_IDENTITY_MISMATCH'].includes(result.error?.code));
+  assert.equal((await request(second.handle.port,second.token,'/api/health')).status,200);
+  assert.equal(readDescriptor(first.storeDir).instanceId,second.handle.instanceId);
+});
