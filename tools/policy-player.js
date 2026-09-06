@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic } from '../engine/state.js';
-import { assignmentFor, policyById } from '../training/policies/catalog.js';
+import { assignmentFor, policyById, resolveExactPolicy } from '../training/policies/catalog.js';
 import { validatePolicyOutput } from '../training/policies/contracts.js';
 import { applyDeviations } from '../training/policies/deviation.js';
 import { loadPreflopDataset } from './preflop-dataset.js';
@@ -14,14 +14,22 @@ function baselineDataset() {
 }
 import { deriveUnit, sampleWeighted } from '../training/policies/rng.js';
 import { ruleBasedDistribution } from '../training/policies/rule-based.js';
+import { distributionV2 } from '../training/policies/strategy-v2.js';
 
-export function distributionFor(snapshot, legal, policy) {
-  const config = typeof policy === 'string' ? policyById(policy) : policy;
-  if (!config) {
+function resolvePolicyInput(policy) {
+  if (typeof policy === 'string') {
+    const config = policyById(policy);
+    if (config) return config;
     const error = new Error('unknown policy');
     error.code = 'UNKNOWN_POLICY';
     throw error;
   }
+  return resolveExactPolicy(policy);
+}
+
+export function distributionFor(snapshot, legal, policy) {
+  const config = resolvePolicyInput(policy);
+  if (config.policyVersion === '2.0.0') return distributionV2(snapshot, legal, config);
   const bb = snapshot?.blinds?.[1];
   const base = config.base === 'baseline-v1' || config.policyId === 'baseline-v1' || config.base == null
     ? baselineDistribution(snapshot, legal, { dataset: baselineDataset(), config: config.frequencies })
@@ -31,7 +39,7 @@ export function distributionFor(snapshot, legal, policy) {
 }
 
 export function decide({ snapshot, legal, policy, policySeed, gameEpoch }) {
-  const config = typeof policy === 'string' ? policyById(policy) : (policyById(policy?.policyId) ?? policy);
+  const config = resolvePolicyInput(policy);
   const items = distributionFor(snapshot, legal, config);
   const unit = deriveUnit(policySeed, gameEpoch, snapshot.decisionId, config.policyId);
   const sampled = sampleWeighted(items, unit);
@@ -57,16 +65,7 @@ export function stampPlayerPolicies(gameDir) {
   for (const player of players) {
     if (player.playerId === 'user') continue;
     if (player.policy) {
-      const catalog = policyById(player.policy.policyId);
-      if (
-        !catalog
-        || catalog.policyVersion !== player.policy.policyVersion
-        || catalog.configDigest !== player.policy.configDigest
-      ) {
-        const error = new Error('players.json policy가 catalog와 일치하지 않습니다.');
-        error.code = 'POLICY_CONFIG_MISMATCH';
-        throw error;
-      }
+      resolveExactPolicy(player.policy);
       continue;
     }
     player.policy = assignmentFor(player.archetype);

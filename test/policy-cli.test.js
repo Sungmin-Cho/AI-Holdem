@@ -69,7 +69,7 @@ test('decision-peek is stable; view hides policySeed; redacted hand strips polic
   assert.equal(raw.includes(state.policySeed), false);
 });
 
-test('sanitized review projection drops configDigest and policySeed', () => {
+test('sanitized review projection stays private pre-game and resolves exact post-game identity', () => {
   const players = [{
     playerId: 'p1',
     seat: 1,
@@ -78,18 +78,18 @@ test('sanitized review projection drops configDigest and policySeed', () => {
     speech: 'hi',
     personality: 'calm',
     archetype: 'TAG',
-    policy: {
-      policyId: 'tag-v1',
-      policyVersion: '1.0.0',
-      configDigest: 'deadbeef',
-    },
+    policy: assignmentFor('TAG'),
   }];
   const pre = JSON.stringify(sanitizePlayersForReview(players, { gameOver: false }));
-  assert.equal(pre.includes('tag-v1'), false);
-  assert.equal(pre.includes('deadbeef'), false);
+  assert.equal(pre.includes('tag-v2'), false);
+  assert.equal(pre.includes('policyTraits'), false);
   const post = sanitizePlayersForReview(players, { gameOver: true });
-  assert.equal(post[0].policyId, 'tag-v1');
-  assert.equal(JSON.stringify(post).includes('deadbeef'), false);
+  assert.equal(post[0].policyId, 'tag-v2');
+  assert.equal(post[0].policyModelKind, 'qualitative-config-v2');
+  assert.throws(() => sanitizePlayersForReview([{ ...players[0], policy: {
+    ...players[0].policy,
+    configDigest: 'deadbeef',
+  } }], { gameOver: true }), { code: 'POLICY_CONFIG_MISMATCH' });
 });
 
 function snapshot(over = {}) {
