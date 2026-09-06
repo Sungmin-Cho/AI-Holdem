@@ -2,21 +2,37 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import http from 'node:http';
+import { createServer as createRawHttpServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { startServer } from '../server/server.js';
-import { gameEpochOf } from '../publish-contract.js';
+import { startServer as startRawServer } from '../server/server.js';
+import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+
+function createHttpServer(...args) {
+  return registerOwnedServer(createRawHttpServer(...args), 'publish-http');
+}
+
+async function startServer(opts) {
+  const relay = await startRawServer(opts);
+  registerOwnedServer(relay.server, 'publish');
+  return relay;
+}
+import { gameEpochOf, normalizeActionRequest } from '../publish-contract.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-pub-'));
+  return createOwnedTempDir('holdem-pub');
 }
 
-const execFileAsync = promisify(execFile);
+const execFilePromise = promisify(execFile);
+function execFileAsync(...args) {
+  const pending = execFilePromise(...args);
+  queueMicrotask(() => registerOwnedProcess(pending.child, 'node-cli'));
+  return pending;
+}
 
 // The relay server runs in this process: a sync spawn would block its event loop and deadlock.
 async function run(dir, args) {
@@ -183,7 +199,7 @@ async function runFailing(dir, args) {
 }
 
 async function deadPort() {
-  const probe = await startServer({ gameDir: fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-probe-')), port: 0, token: 'x' });
+  const probe = await startServer({ gameDir: createOwnedTempDir('holdem-probe'), port: 0, token: 'x' });
   const port = probe.port;
   await probe.close();
   return port;
@@ -505,7 +521,7 @@ test('publish --wait: 사용자 차례면 게시와 액션 수신을 한 호출�
       body: JSON.stringify({ decisionId: 'd-1-preflop-2', action: 'raise', amount: 300 }),
     });
     const out = await pending;
-    assert.deepEqual(out.userAction, { decisionId: 'd-1-preflop-2', action: 'raise', amount: 300 });
+    assert.deepEqual(out.userAction, { gameEpoch: gameEpochOf('tok'), ...normalizeActionRequest({ decisionId: 'd-1-preflop-2', action: 'raise', amount: 300 }) });
   } finally {
     await started.close();
   }
@@ -520,6 +536,74 @@ test('publish --wait: 사용자가 조용하면 timeout으로 돌아온다', asy
   } finally {
     await started.close();
   }
+});
+
+async function acceptedReceipt(dir, started) {
+  await run(dir, ['--from', turnFile(dir, userTurn())]);
+  const submitted = { decisionId: 'd-1-preflop-2', requestId: 'cli-request', action: 'raise', amount: 300 };
+  const received = await fetch(`http://127.0.0.1:${started.port}/api/action?token=tok`, {
+    method: 'POST', body: JSON.stringify(submitted),
+  });
+  assert.equal(received.status, 200);
+  await received.text();
+  const wait = await run(dir, ['--from', path.join(dir, '.turn.json'), '--wait-only', '--wait-ms', '10']);
+  const { gameEpoch, decisionId, requestId, digest } = wait.userAction;
+  return { gameEpoch, decisionId, requestId, digest, phase: 'rejected', reason: 'ILLEGAL_ACTION' };
+}
+
+test('publish transports a bounded ack file and the server alone durably commits it', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const actionAck = await acceptedReceipt(dir, started);
+    const ackFile = path.join(dir, '.action-ack.json');
+    fs.writeFileSync(ackFile, JSON.stringify(actionAck));
+    const out = await run(dir, ['--from', turnFile(dir, userTurn()), '--action-ack', ackFile]);
+    const receipt = JSON.parse(fs.readFileSync(path.join(dir, 'ui-action-receipt.json')));
+    const snapshot = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json')));
+    assert.equal(receipt.phase, 'rejected');
+    assert.equal(receipt.publishId, out.publishId);
+    assert.deepEqual(snapshot.lastActionAck, { ...actionAck, publishId: out.publishId });
+    assert.equal(JSON.stringify(snapshot.history).includes('cli-request'), false);
+    assert.equal(JSON.stringify(await snapshotOf(started.port)).includes('cli-request'), false);
+  } finally { await started.close(); }
+});
+
+test('publish retry retains the original bound ack across a UI-commit response failure', async () => {
+  const dir = tmpDir();
+  let armed = false;
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok', publishCheckpoint: (point) => {
+    if (armed && point === 'after-ui-commit') { armed = false; throw new Error('response lost'); }
+  } });
+  try {
+    const actionAck = await acceptedReceipt(dir, started);
+    const ackFile = path.join(dir, '.action-ack.json');
+    fs.writeFileSync(ackFile, JSON.stringify(actionAck));
+    armed = true;
+    assert.equal((await runFailing(dir, ['--from', turnFile(dir, userTurn()), '--action-ack', ackFile])).json.code, 'PUBLISH_REJECTED');
+    const pending = JSON.parse(fs.readFileSync(path.join(dir, '.publish-attempt.json')));
+    assert.deepEqual(pending.body.actionAck, actionAck);
+    fs.writeFileSync(ackFile, '{changed invalid ack');
+    const out = await run(dir, ['--from', turnFile(dir, { ok: false }), '--action-ack', ackFile, '--retry']);
+    assert.equal(out.publishId, pending.body.publishId);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'ui-action-receipt.json'))).phase, 'rejected');
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+  } finally { await started.close(); }
+});
+
+test('publish rejects oversized and view-only acknowledgements before recording an attempt', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const actionAck = await acceptedReceipt(dir, started);
+    const ackFile = path.join(dir, '.action-ack.json');
+    fs.writeFileSync(ackFile, ' '.repeat(1025));
+    assert.equal((await runFailing(dir, ['--from', turnFile(dir, userTurn()), '--action-ack', ackFile])).json.code, 'BAD_ACTION_ACK');
+    fs.writeFileSync(ackFile, JSON.stringify(actionAck));
+    assert.equal((await runFailing(dir, ['--from', turnFile(dir, userTurn()), '--action-ack', ackFile, '--view-only'])).json.code, 'BAD_ACTION_ACK');
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'ui-action-receipt.json'))).phase, 'delivered');
+  } finally { await started.close(); }
 });
 
 test('publish --wait-only: 재게시 없이 대기만 한다', async () => {
@@ -706,21 +790,18 @@ test('publish: coachAuthority exact match는 게시 후 reconcile로 tombstone�
 test('publish: coach reconcile가 일시 실패하면 stdout에 hadCoach=true·reconcilePending=true를 반환한다', async () => {
   const dir = tmpDir();
   const authPath = path.join(dir, '.coach-authority.json');
-  const attemptPath = path.join(dir, '.publish-attempt.json');
-  let restoreTimer = null;
-  const server = http.createServer((req, res) => {
+  let originalAuthority = null;
+  const server = createHttpServer((req, res) => {
     if (req.method !== 'POST' || !req.url.startsWith('/api/publish')) {
       res.writeHead(404).end();
       return;
     }
     const original = fs.readFileSync(authPath, 'utf8');
+    originalAuthority = original;
     const invalid = { ...JSON.parse(original), schemaVersion: 999 };
     fs.writeFileSync(authPath, JSON.stringify(invalid));
-    const poll = setInterval(() => {
-      if (fs.existsSync(attemptPath)) return;
-      clearInterval(poll);
-      restoreTimer = setTimeout(() => fs.writeFileSync(authPath, original), 10);
-    }, 1);
+    // Keep this fault in place until the CLI has actually attempted reconciliation.
+    // A 10ms restore timer raced the child on slower runtimes and skipped the fault.
     req.resume();
     req.once('end', () => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -759,8 +840,7 @@ test('publish: coach reconcile가 일시 실패하면 stdout에 hadCoach=true·r
     assert.equal(out.hadCoach, true);
     assert.equal(out.reconcilePending, true);
   } finally {
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    if (restoreTimer) clearTimeout(restoreTimer);
+    if (originalAuthority !== null) fs.writeFileSync(authPath, originalAuthority);
     await new Promise((resolve) => server.close(resolve));
   }
 });

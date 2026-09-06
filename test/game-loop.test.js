@@ -3189,7 +3189,7 @@ test('wait-only child supervision exceeds waitMs plus network margin (the defaul
   assert.equal(Date.now() - started >= 1_800, true, 'child supervisor killed wait before waitMs');
 });
 
-test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않고 같은 결정을 다시 기다린다', { timeout: 15_000 }, async (t) => {
+test('user action·amount의 잘못된 shape는 HTTP에서 거부되고 engine argv로 넘어가지 않는다', { timeout: 15_000 }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
   const running = startRun(loop);
   let current = await waitForUserSnapshot(gameDir);
@@ -3203,12 +3203,7 @@ test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않
   ];
 
   for (const payload of invalids) {
-    const rejectedBefore = readLoopLog(gameDir)
-      .filter((entry) => entry.event === 'user-action-rejected').length;
-    assert.deepEqual(await postUserAction(current.lock, payload), { status: 200, body: { ok: true } });
-    await waitWhileRunning(running, () => (
-      readLoopLog(gameDir).filter((entry) => entry.event === 'user-action-rejected').length > rejectedBefore
-    ), `invalid user payload was not rejected: ${JSON.stringify(payload)}`);
+    assert.deepEqual(await postUserAction(current.lock, payload), { status: 400, body: { ok: false, code: 'BAD_ACTION' } });
     assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0,
       `invalid payload reached engine mutation: ${JSON.stringify(payload)}`);
     current = await waitForUserSnapshot(gameDir);
@@ -3296,13 +3291,120 @@ test('user VERSION_MISMATCH republishes the authoritative decision with narratio
   assert.equal(readJson(path.join(gameDir, 'state.json')).stateVersion, staleVersion + 1);
   assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
   const refreshed = await waitForUserSnapshot(gameDir);
-  await postUserAction(refreshed.lock, preferredUserAction(refreshed.snapshot.view.legal));
+  await postUserAction(refreshed.lock, { ...preferredUserAction(refreshed.snapshot.view.legal), requestId: 'version-correction' });
   await waitWhileRunning(
     running,
     () => waitForUserAction(gameDir),
     'user action was not accepted after VERSION_MISMATCH resync',
   );
   await stopRun(loop, running);
+});
+
+test('REQ-007: a moved engine decision consumes a VERSION_MISMATCH receipt without another effect', { timeout: 20_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t);
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const action = preferredUserAction(snapshot.view.legal);
+  const before = readJson(path.join(gameDir, 'state.json'));
+  const args = ['step', 'user', action.action];
+  if (action.amount !== undefined) args.push(String(action.amount));
+  args.push('--expect-version', String(before.stateVersion));
+  await cliJson(gameDir, args);
+  assert.equal((await postUserAction(lock, { ...action, requestId: 'moved-decision' })).status, 200);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'consumed',
+    'moved decision did not consume the stale receipt');
+  assert.equal(readJson(receiptFile).reason, 'VERSION_MISMATCH');
+  await stopRun(loop, running);
+  const after = readJson(path.join(gameDir, 'state.json'));
+  const original = after.handNo === before.handNo && after.hand ? after.hand : after.lastHand;
+  assert.equal(original.actions.filter((row) => row.decisionId === action.decisionId).length, 1);
+});
+
+test('REQ-007: sidecar synchronizes an engine-applied action after lost publish and applies it once', { timeout: 20_000 }, async (t) => {
+  let interrupted = false;
+  let fixtureDir;
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: {
+    onPublishInvoke() {
+      const envelope = readJson(path.join(fixtureDir, '.turn.json'));
+      if (!interrupted && envelope.actionAck?.reason === 'ACTION_APPLIED') {
+        interrupted = true;
+        throw Object.assign(new Error('engine applied before publisher ran'), { code: 'INJECTED_PUBLISH_LOSS' });
+      }
+    },
+  } });
+  fixtureDir = gameDir;
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  const illegal = { decisionId: snapshot.view.legal.decisionId, requestId: 'rejected-before-loss',
+    action: 'raise', amount: snapshot.view.legal.maxRaiseTo + 1 };
+  assert.equal((await postUserAction(lock, illegal)).status, 200);
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'rejected',
+    'first rejection was not published before the corrected action');
+  const historicalAck = readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck;
+  assert.equal(historicalAck.requestId, illegal.requestId);
+  const submitted = { ...preferredUserAction(snapshot.view.legal), requestId: 'lost-publish-request' };
+  assert.equal((await postUserAction(lock, submitted)).status, 200);
+  await assert.rejects(running, (error) => error.code === 'INJECTED_PUBLISH_LOSS');
+  assert.equal(readJson(receiptFile).phase, 'delivered');
+  assert.equal(readJson(receiptFile).rejections[0].publishId, historicalAck.publishId);
+  assert.deepEqual(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck, historicalAck);
+  const before = readJson(path.join(gameDir, 'state.json'));
+  assert.equal(before.hand.actions.filter((row) => row.decisionId === submitted.decisionId).length, 1);
+  const oldServerPid = loop.serverPid;
+  await loop.requestStop();
+  await waitUntilDead(oldServerPid);
+
+  const resumedAdapter = makeAdapter();
+  const resumed = createGameLoop({ gameDir, resolver: resolverFor(resumedAdapter), opts: { port: 0, waitMs: 30 } });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  const rerun = startRun(resumed);
+  await waitWhileRunning(rerun, () => readJson(receiptFile).phase === 'consumed', 'old receipt did not retire after engine synchronization', 5_000);
+  const recoveredReceipt = readJson(receiptFile);
+  assert.equal(recoveredReceipt.requestId, submitted.requestId);
+  assert.equal(recoveredReceipt.reason, 'DECISION_ADVANCED');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck, undefined);
+  // The durable server commit precedes the publisher's response. Let resume finish
+  // that response and enter the loop before requesting a graceful fixture stop.
+  await waitWhileRunning(rerun, () => resumedAdapter.decideCalls.length > 0, 'synchronized view did not reach the AI turn');
+  await stopRun(resumed, rerun);
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  const original = engine.handNo === before.handNo && engine.hand ? engine.hand : engine.lastHand;
+  assert.equal(original.actions.filter((row) => row.decisionId === submitted.decisionId).length, 1,
+    'restart applied the same request a second time');
+  const restored = await startExternalServer(gameDir, before.sessionToken);
+  t.after(() => terminateIfAlive(restored.child));
+  const status = await fetch(`http://127.0.0.1:${restored.lock.port}/api/action-status?token=${before.sessionToken}`);
+  assert.equal(status.status, 200, 'the retired receipt must restore after its historical anchor was cleared');
+  await status.text();
+  await terminateIfAlive(restored.child);
+});
+
+test('REQ-007: sidecar rejection survives restart and a corrected new request resumes controls', { timeout: 20_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t);
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const decisionId = snapshot.view.legal.decisionId;
+  const submitted = { decisionId, requestId: 'illegal-request', action: 'raise', amount: snapshot.view.legal.maxRaiseTo + 1 };
+  await postUserAction(lock, submitted);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'rejected', 'sidecar did not persist a rejection');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck.reason, 'ILLEGAL_ACTION');
+  await stopRun(loop, running);
+
+  const resumed = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 30 } });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  const rerun = startRun(resumed);
+  const refreshed = await waitForUserSnapshot(gameDir);
+  assert.equal((await postUserAction(refreshed.lock, submitted)).body.code, 'ACTION_REJECTED');
+  assert.equal((await postUserAction(refreshed.lock, {
+    ...preferredUserAction(refreshed.snapshot.view.legal), requestId: 'corrected-request',
+  })).status, 200);
+  await waitWhileRunning(rerun, () => waitForUserAction(gameDir, (row) => row.decisionId === decisionId), 'corrected request was not applied');
+  await stopRun(resumed, rerun);
 });
 
 test('user waitError restarts a dead server, republishes view-only, and re-waits for the action', { timeout: 15_000 }, async (t) => {
