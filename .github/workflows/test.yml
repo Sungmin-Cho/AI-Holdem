@@ -30,6 +30,9 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Verify Windows private directory creation
+        if: runner.os == 'Windows'
+        run: node test/helpers/windows-privacy-probe.mjs
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Run tests
