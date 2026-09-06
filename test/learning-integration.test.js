@@ -1,3 +1,4 @@
+import { readFirstFixtureRecord } from './helpers/fixture-readiness.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyModeDefaults, parseGameLoopArgs, engineInitFlags, gtoEvalNotice, createGameLoop } from '../tools/game-loop.js';
@@ -235,8 +236,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
     await within(cli.closed, 8000);
   });
   const invocation = await until(() => {
-    if (!fs.existsSync(fake.log)) return null;
-    return JSON.parse(fs.readFileSync(fake.log, 'utf8').trim().split('\n')[0]);
+    return readFirstFixtureRecord(fake.log, cli.child);
   }, cli);
   assert.equal(invocation.kind, 'claude');
   assert.ok(invocation.argv.includes(RUNTIME_TABLE.claude.upper));
@@ -343,7 +343,7 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
     await within(cli.closed, 8000);
     await stopOwnedStudy(store);
   });
-  await until(() => fs.existsSync(fake.log), cli);
+  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);
   for (const file of [store, path.join(store, 'loop.lock.d'), path.join(store, 'loop.lock.d', 'pid')])
     assert.equal(isPrivatePath(file), true, 'actual CLI ownership paths must be private');
   if (process.platform !== 'win32') assert.equal(fs.statSync(parent).mode & 0o777, 0o755, 'existing caller directories retain their mode');
@@ -572,7 +572,7 @@ async function stopWaitingCli(cli, gameDir) {
     stoppingBeforeDelivery: true, receiptPhase: receipt.phase, engineApplied: false, queuedForResume: true };
 }
 
-test('S8 full: default 20-hand production session records support then study remains usable and reusable', { timeout: 120000 }, async (t) => {
+test('S8 full: default 20-hand production session records support then study remains usable and reusable', { timeout: 240000 }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-default20');
   const fake = failedCliFixtures({ hold: true });
   const initialCli = startCli(['--store-dir', storeDir], fake.env);
@@ -590,9 +590,9 @@ test('S8 full: default 20-hand production session records support then study rem
     ]) { try { await cleanup(); } catch (error) { failures.push(error); } }
     if (failures.length) throw new AggregateError(failures, 'default20 fixture cleanup failed');
   });
-  await until(() => fs.existsSync(fake.log), initialCli);
+  await until(() => readFirstFixtureRecord(fake.log, initialCli.child), initialCli);
   initialCli.requestStop();
-  assert.equal((await within(initialCli.closed, 8000)).code, 0);
+  assert.equal((await within(initialCli.closed, 8000, 'default20 initialized CLI stop')).code, 0);
   const selected = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
   gameDir = path.join(storeDir, '.session-store', selected.sessionRel);
   const stateFile = path.join(gameDir, 'state.json');
@@ -618,6 +618,8 @@ test('S8 full: default 20-hand production session records support then study rem
   const service = await inspectStudyService(storeDir);
   assert.equal(service.status, 'running');
   const relayPid = loop.serverPid;
+  const phaseObservations = [];
+  const driveStarted = Date.now();
   const observedHands = new Map();
   const actions = [];
   const sent = new Set();
@@ -625,7 +627,9 @@ test('S8 full: default 20-hand production session records support then study rem
   const running = loop.run().finally(() => { settled = true; });
   running.catch(() => {});
   const driver = (async () => {
-    const deadline = Date.now() + 100000;
+    // Isolated default20 took 68s; a full-suite run reached 117s. Preserve
+    // all 20 random production hands and leave 40s for finalization/cleanup.
+    const deadline = Date.now() + 200000;
     while (!settled && Date.now() < deadline) {
       const state = JSON.parse(fs.readFileSync(stateFile));
       if (state.hand && !observedHands.has(state.handNo)) {
@@ -633,6 +637,10 @@ test('S8 full: default 20-hand production session records support then study rem
           holes: state.hand.holes, board: state.hand.board, remainingDeck: state.hand.deck });
       }
       const phase = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'))).phase;
+      const previous = phaseObservations.at(-1);
+      if (previous?.handNo !== state.handNo || previous?.phase !== phase) {
+        phaseObservations.push({ elapsedMs: Date.now() - driveStarted, handNo: state.handNo, phase });
+      }
       if (phase === 'done') break;
       const lock = JSON.parse(fs.readFileSync(path.join(gameDir, 'lock.json')));
       let snapshot;
@@ -662,10 +670,18 @@ test('S8 full: default 20-hand production session records support then study rem
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    if (!settled) await within(running, 15000);
+    if (!settled) {
+      const state = JSON.parse(fs.readFileSync(stateFile));
+      const phase = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'))).phase;
+      if (phase !== 'done' && !state.gameOver) {
+        throw new Error(`default20 action driver deadline: ${JSON.stringify({ handNo: state.handNo, phase, actions: actions.length, phaseObservations })}`);
+      }
+      await within(running, 15000, `default20 finalization ${JSON.stringify({ handNo: state.handNo, phase, phaseObservations })}`);
+    }
   })();
   driver.catch(() => loop.requestStop());
   const [finished] = await Promise.all([running, driver]);
+  console.log(`S8_DEFAULT20_PHASES ${JSON.stringify(phaseObservations)}`);
   assert.equal(finished.phase, 'done', JSON.stringify(finished.halt));
   const finalBytes = fs.readFileSync(stateFile);
   const finalState = JSON.parse(finalBytes);
@@ -695,7 +711,7 @@ test('S8 full: default 20-hand production session records support then study rem
     const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
     if (current.gameId === selected.gameId) return null;
     nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
-    return fs.existsSync(nextFake.log);
+    return readFirstFixtureRecord(nextFake.log, nextCli.child);
   }, nextCli, 10000);
   const nextStateFile = path.join(nextGameDir, 'state.json');
   const nextInitial = JSON.parse(fs.readFileSync(nextStateFile));
@@ -728,7 +744,7 @@ test('S8 full: default 20-hand production session records support then study rem
     return receipt.requestId === nextStop.requestId && receipt.phase === 'consumed';
   });
   await loop.requestStop();
-  await recovering;
+  await within(recovering, 8000, 'default20 delivered-action recovery stop');
   assert.equal(recoveredUserApplies.length, 1, 'resume applies the delivered action exactly once');
   const recoveredState = JSON.parse(fs.readFileSync(nextStateFile));
   const applied = [recoveredState.hand, recoveredState.lastHand].filter(Boolean)
@@ -934,7 +950,7 @@ test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated
   const cli = startCli(['--store-dir', storeDir, '--port', '0'], fake.env);
   let gameDir;
   t.after(async () => { await cleanupCli(cli, gameDir); await stopOwnedStudy(storeDir); });
-  await until(() => fs.existsSync(fake.log), cli);
+  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);
   const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
   gameDir = path.join(storeDir, '.session-store', current.sessionRel);
   const file = path.join(gameDir, 'state.json');

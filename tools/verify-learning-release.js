@@ -1260,7 +1260,7 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     }
 
     const fullSuite = await runProcess('npm', ['run', 'test:ci', '--', '--test-reporter=tap'], {
-      cwd: ROOT, tmpDir: commandTmp, timeoutMs: 15 * 60_000,
+      cwd: ROOT, tmpDir: commandTmp, timeoutMs: 30 * 60_000,
       resultFile: path.join(output, 'full-suite.json'),
     });
     fs.writeFileSync(path.join(output, 'full-suite.tap'), fullSuite.stdout, { mode: 0o600 });
@@ -1336,7 +1336,7 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     const integrationProcess = await runProcess(process.execPath, [
       '--test', '--test-reporter=tap', '--', 'test/learning-integration.test.js',
     ], {
-      cwd: ROOT, tmpDir: commandTmp, timeoutMs: 180_000,
+      cwd: ROOT, tmpDir: commandTmp, timeoutMs: 360_000,
       resultFile: path.join(output, 'default-learning-integration.json'),
     });
     const integrationParsed = assertDefaultIntegrationResult(integrationProcess);

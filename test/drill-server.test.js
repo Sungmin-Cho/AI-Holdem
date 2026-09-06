@@ -18,6 +18,28 @@ import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 
+import { readFirstFixtureRecord } from './helpers/fixture-readiness.mjs';
+
+test('fixture readiness waits for a complete JSONL record', () => {
+  const file = path.join(tmp(), 'partial.jsonl');
+  assert.equal(readFirstFixtureRecord(file), null);
+  for (const text of ['', '{"kind":', '{"kind":"claude"}']) {
+    fs.writeFileSync(file, text);
+    assert.equal(readFirstFixtureRecord(file), null);
+  }
+  fs.appendFileSync(file, '\n{"partial":');
+  assert.deepEqual(readFirstFixtureRecord(file), { kind: 'claude' });
+  fs.writeFileSync(file, '{bad}\n');
+  assert.throws(() => readFirstFixtureRecord(file), SyntaxError);
+});
+
+test('fixture readiness rejects a terminated producer with an incomplete record', () => {
+  const file = path.join(tmp(), 'partial.jsonl');
+  fs.writeFileSync(file, '{"kind":');
+  assert.throws(() => readFirstFixtureRecord(file, { exitCode: 1, signalCode: null }), /producer terminated.*1/);
+  assert.throws(() => readFirstFixtureRecord(file, { exitCode: null, signalCode: 'SIGTERM' }), /producer terminated.*SIGTERM/);
+});
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_HREF = pathToFileURL(path.resolve(ROOT, '../tools/drill-server.js')).href;
 const CLIENT = path.resolve(ROOT, '../server/drill-public/drill.js');
@@ -126,14 +148,14 @@ async function api(port, token, pathname, { method = 'GET', body, raw, signal } 
 
 function stopChild(child) {
   return new Promise((resolve) => {
-    if (child.exitCode != null || child.killed) {
+    if (child.exitCode != null || child.signalCode != null) {
       resolve();
       return;
     }
     child.once('exit', () => resolve());
     child.kill('SIGTERM');
     setTimeout(() => {
-      if (child.exitCode == null) child.kill('SIGKILL');
+      if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
     }, 1000).unref();
   });
 }
@@ -152,7 +174,8 @@ async function spawnDrillServer(storeDir) {
     process.on('SIGTERM', () => {
       started.close().finally(() => process.exit(0));
     });
-    fs.writeFileSync(${JSON.stringify(readyFile)}, JSON.stringify({ port: started.port }));
+    fs.writeFileSync(${JSON.stringify(readyFile + '.tmp')}, JSON.stringify({ port: started.port }));
+    fs.renameSync(${JSON.stringify(readyFile + '.tmp')}, ${JSON.stringify(readyFile)});
     await new Promise(() => {});
   `);
   const child = registerOwnedProcess(spawn(process.execPath, [scriptPath], {
@@ -162,8 +185,8 @@ async function spawnDrillServer(storeDir) {
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const deadline = Date.now() + 5000;
   while (!fs.existsSync(readyFile)) {
-    if (child.exitCode != null) {
-      throw new Error(`drill server exited ${child.exitCode}: ${stderr}`);
+    if (child.exitCode != null || child.signalCode != null) {
+      throw new Error(`drill server exited ${child.exitCode}/${child.signalCode}: ${stderr}`);
     }
     if (Date.now() > deadline) {
       await stopChild(child);
@@ -171,8 +194,14 @@ async function spawnDrillServer(storeDir) {
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const { port } = JSON.parse(fs.readFileSync(readyFile, 'utf8'));
-  return { child, port, token: 'tok-child' };
+  try {
+    const { port } = JSON.parse(fs.readFileSync(readyFile, 'utf8'));
+    assert.ok(Number.isInteger(port) && port > 0 && port <= 65535);
+    return { child, port, token: 'tok-child' };
+  } catch (error) {
+    await stopChild(child);
+    throw error;
+  }
 }
 
 test('drill server uses its own token and game server does not serve drill.html', async () => {
