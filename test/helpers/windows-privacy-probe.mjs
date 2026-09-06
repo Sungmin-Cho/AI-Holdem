@@ -25,6 +25,14 @@ async function main() {
     createPrivateDirectory(target);
     if (!isPrivatePath(target)) throw new Error('PRIVATE_PROBE_FAILED');
     console.log(JSON.stringify({ privateDirectoryVerified: true }));
+    const { acquireOwnedLock, releaseOwnedLock } = await import('../../engine/state.js');
+    const owner = acquireOwnedLock(target, 'loop.lock.d');
+    try {
+      for (const [label, file] of [['root', target], ['loop-lock', owner.dir], ['loop-pid', path.join(owner.dir, 'pid')]]) {
+        console.log(JSON.stringify({ aclTarget: label }));
+        console.log(JSON.stringify({ aclTarget: label, verified: isPrivatePath(file, { privateMode: false }) }));
+      }
+    } finally { releaseOwnedLock(owner); }
   } finally {
     cp.spawnSync = original;
     syncBuiltinESMExports();
