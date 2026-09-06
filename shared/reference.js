@@ -44,6 +44,28 @@ export function actionKey(action) {
   return action.sizeBb === undefined ? action.action : `${action.action}@${action.sizeBb}`;
 }
 
+// The same chip-rounding tolerance applies to spot eligibility and every
+// reference comparison. This only projects a match; it never edits raw choices.
+export const REFERENCE_SIZE_TOLERANCE_BB = 0.05;
+export function referenceSizeMatches(left, right) {
+  return typeof left === 'number' && Number.isFinite(left) && left >= 0
+    && typeof right === 'number' && Number.isFinite(right) && right >= 0
+    && Math.abs(left - right) <= REFERENCE_SIZE_TOLERANCE_BB
+      + Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right));
+}
+
+export function matchReferenceAction(actions, chosen) {
+  if (!Array.isArray(actions) || !plainObject(chosen) || !ACTIONS.has(chosen.action)) return null;
+  const matches = actions.filter((row) => {
+    if (!plainObject(row) || row.action !== chosen.action) return false;
+    if (['raise', 'bet'].includes(chosen.action)) return referenceSizeMatches(row.sizeBb, chosen.sizeBb);
+    return row.sizeBb === undefined && chosen.sizeBb === undefined;
+  });
+  // Never choose the first of overlapping reference sizes, including an exact
+  // match that also lies in another row's tolerance interval.
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function normalizeReferenceAction(action) {
   const key = actionKey(action);
   if (typeof action.frequency !== 'number'

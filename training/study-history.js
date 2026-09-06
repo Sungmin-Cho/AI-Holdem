@@ -1,4 +1,4 @@
-import { validateMixObservation, actionKey, referenceQuality } from '../shared/reference.js';
+import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { assertProfileEvent } from './profile-aggregator.js';
 import { assertEvaluationId, coded } from './contracts.js';
@@ -119,7 +119,7 @@ function summarizeRun(entries, now) {
       spotKey: observation.spotKey,
       handClass: observation.handClass,
       grade: entry.event.grade ?? null,
-      allowed: observation.referenceActions.some((action) => actionKey(action) === actionKey(observation.chosenAction) && action.frequency > 0),
+      allowed: (matchReferenceAction(observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0,
       appliedAt: entry.event.appliedAt,
     });
   }

@@ -84,12 +84,13 @@ export function formatFeedbackStep(current) {
 function originSummary(origin, allowed) {
   const overall = origin?.overall ?? {};
   const supported = count(overall.supportedDecisions);
+  const coverage = origin?.coverage ?? overall;
   const calibration = origin?.calibration ?? {};
   const eligible = count(calibration.eligibleObservations);
   return {
     rate: allowed && supported > 0 ? percent(overall.allowedActionRate) : '측정 자료 없음',
     samples: `${supported}개 지원 표본 · 표본 가중치 ${number(overall.sampleWeight) ?? 0}`,
-    coverage: `${supported} / ${count(overall.evaluatedDecisions)}개 결정이 기준표 범위에 포함`,
+    coverage: `${count(coverage.supportedDecisions)} / ${count(coverage.evaluatedDecisions)}개 결정이 기준표 범위에 포함 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개(지원 제외와 중복 가능)`,
     calibration: allowed && eligible > 0 && !calibration.reason
       ? `${percent(calibration.distributionAgreement)} · ${eligible}개 관측`
       : (calibration.reason === 'insufficient-observations' ? '표본 부족 · 같은 상황에서 20회 이상 필요' : '빈도 관측 자료 없음'),

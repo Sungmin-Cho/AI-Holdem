@@ -102,6 +102,16 @@ export function loadReferenceEvaluations(gameDir) {
   const unavailable = () => Object.fromEntries(records.map((record) => [record.handNo, [{
     handNo: record.handNo, status: 'unavailable', referenceReason: 'LEARNING_AUTHORITY_UNAVAILABLE',
   }]]));
+  // Hand archives carry no epoch. A sealed learning payload can be transported
+  // only when this directory also supplies a valid, consistent session identity.
+  let epoch = null;
+  if (isPlainObject(state)) {
+    if (typeof state.sessionToken === 'string' && state.sessionToken.length > 0) {
+      epoch = gameEpochOf(state.sessionToken);
+      if (state.gameEpoch !== undefined && state.gameEpoch !== epoch) epoch = null;
+    } else if (state.sessionToken === undefined && HEX64.test(state.gameEpoch ?? '')) epoch = state.gameEpoch;
+  }
+  if (!HEX64.test(epoch ?? '')) return unavailable();
   let raw;
   try {
     raw = openContained(gameDir, ['training', '.training-authority.json'], { maxBytes: EXPORT_MAX_BYTES });
@@ -118,8 +128,7 @@ export function loadReferenceEvaluations(gameDir) {
     || !HEX64.test(auth.gameEpoch ?? '')) {
     throw coded('LEARNING_AUTHORITY_INVALID', 'learning authority is invalid');
   }
-  const epoch = state?.sessionToken ? gameEpochOf(state.sessionToken) : state?.gameEpoch;
-  if (epoch != null && epoch !== auth.gameEpoch) {
+  if (epoch !== auth.gameEpoch) {
     throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning authority belongs to another game');
   }
   const marker = readContainedJson(gameDir, ['training', '.migration-v2.json']);

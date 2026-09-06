@@ -1,3 +1,4 @@
+import { referenceSizeMatches } from '../shared/reference.js';
 import { assertSnapshot } from './contracts.js';
 
 const ENGINE_TO_TRAINING_6MAX = Object.freeze({
@@ -9,8 +10,6 @@ const ENGINE_TO_TRAINING_6MAX = Object.freeze({
   SB: 'SB',
   BB: 'BB',
 });
-
-const SIZE_TOLERANCE_BB = 0.05;
 
 export function trainingPosition(engineLabel, { seated = 6 } = {}) {
   if (seated === 2) {
@@ -80,19 +79,19 @@ export function normalizePreflopSpot(snapshot) {
     context = 'rfi-unopened';
     if (chosen === 'raise') {
       const size = sizeBb(snapshot);
-      if (size == null || Math.abs(size - 2.5) > SIZE_TOLERANCE_BB) {
+      if (size == null || !referenceSizeMatches(size, 2.5)) {
         return { ok: false, code: 'UNSUPPORTED_SIZE', reason: 'RFI size must be 2.5bb' };
       }
     }
   } else if (raises.length === 1) {
     context = 'vs-single-raise';
     const facing = facingSizeBb(snapshot, bb);
-    if (facing == null || Math.abs(facing - 2.5) > SIZE_TOLERANCE_BB) {
+    if (facing == null || !referenceSizeMatches(facing, 2.5)) {
       return { ok: false, code: 'UNSUPPORTED_SIZE', reason: 'open size must be 2.5bb' };
     }
     if (chosen === 'raise') {
       const size = sizeBb(snapshot);
-      if (size == null || Math.abs(size - 8.5) > SIZE_TOLERANCE_BB) {
+      if (size == null || !referenceSizeMatches(size, 8.5)) {
         return { ok: false, code: 'UNSUPPORTED_SIZE', reason: '3bet size must be 8.5bb' };
       }
     }

@@ -1,4 +1,4 @@
-import { referenceQuality } from '../shared/reference.js';
+import { referenceQuality, matchReferenceAction } from '../shared/reference.js';
 
 function coded(code, message) {
   const error = new Error(message);
@@ -37,14 +37,7 @@ export function evaluateDrillAnswer(question, answer, strategy) {
     };
   }
   const actions = strategy.actions ?? [];
-  const chosen = answer?.action;
-  const hit = actions.find((action) => {
-    if (action.action !== chosen) return false;
-    if (chosen === 'raise' && answer.sizeBb != null && action.sizeBb != null) {
-      return Math.abs(action.sizeBb - answer.sizeBb) <= 0.05;
-    }
-    return true;
-  });
+  const hit = matchReferenceAction(actions, answer);
   const frequency = hit?.frequency ?? 0;
   const grade = gradeFrequency(frequency, actions);
   return {

@@ -1,6 +1,6 @@
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
-import { actionKey, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
+import { actionKey, matchReferenceAction, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
@@ -31,7 +31,7 @@ function emptyCalibration() {
 function emptyProjection() {
   return {
     overall: emptyOverall(), skills: {}, leaks: [], candidates: [], coverageGaps: [],
-    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0 },
+    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0, unverifiedDecisions: 0 },
     calibration: emptyCalibration(), mixGroups: {}, studyRuns: {}, unverifiedEvidence: [],
   };
 }
@@ -159,9 +159,7 @@ function applyToOverall(overall, event) {
 function allowedChoice(event) {
   if (!event.mixObservation) return isAllowedGrade(event.grade);
   if (referenceQuality(event.mixObservation.sourceIdentity).quality !== 'heuristic-reference') return false;
-  const chosen = actionKey(event.mixObservation.chosenAction);
-  return event.mixObservation.referenceActions
-    .some((row) => actionKey(row) === chosen && row.frequency > 0);
+  return (matchReferenceAction(event.mixObservation.referenceActions, event.mixObservation.chosenAction)?.frequency ?? 0) > 0;
 }
 
 function applyToSkill(skills, event) {
@@ -199,7 +197,8 @@ function applyMixObservation(projection, raw) {
     expected: Object.fromEntries(observation.referenceActions.map((row) => [actionKey(row), row.frequency])),
     observed: {},
   };
-  const chosen = actionKey(observation.chosenAction);
+  const matched = matchReferenceAction(observation.referenceActions, observation.chosenAction);
+  const chosen = matched ? actionKey(matched) : `unmatched:${actionKey(observation.chosenAction)}`;
   group.n += 1;
   group.observed[chosen] = (group.observed[chosen] ?? 0) + 1;
   projection.mixGroups[key] = group;
@@ -236,16 +235,22 @@ function finishProjection(projection) {
   projection.leaks = detected.leaks;
   projection.candidates = detected.candidates;
   projection.coverageGaps = detected.coverageGaps;
-  projection.coverage = {
-    evaluatedDecisions: projection.overall.evaluatedDecisions,
-    supportedDecisions: projection.overall.supportedDecisions,
-    unsupportedDecisions: projection.overall.unsupportedDecisions,
-    supportedRate: projection.overall.evaluatedDecisions
-      ? projection.overall.supportedDecisions / projection.overall.evaluatedDecisions : 0,
-    unverifiedDecisions: projection.unverifiedEvidence?.length ?? 0,
-  };
+  const coverage = projection.coverage;
+  coverage.supportedRate = coverage.evaluatedDecisions
+    ? coverage.supportedDecisions / coverage.evaluatedDecisions : 0;
   finishCalibration(projection);
   return projection;
+}
+
+// Coverage records the opportunity population, not score authority. Explicit
+// unsupported status and absent source proof are independent, overlapping facts.
+function applyCoverage(projection, event) {
+  const coverage = projection.coverage;
+  coverage.evaluatedDecisions += 1;
+  if (!event.forced && event.status === 'unsupported') coverage.unsupportedDecisions += 1;
+  if (shouldAggregate(event)) {
+    if (!event.forced && event.status === 'supported') coverage.supportedDecisions += 1;
+  } else coverage.unverifiedDecisions += 1;
 }
 
 function segmentKey(event) {
@@ -257,10 +262,13 @@ function applyToSegment(next, event, origin, finalize = true) {
   const segment = next.segments[key] ?? { game: emptyProjection(), practice: emptyProjection() };
   segment.game = segment.game ?? emptyProjection();
   segment.practice = segment.practice ?? emptyProjection();
-  applyToOverall(segment[origin].overall, event);
-  applyToSkill(segment[origin].skills, event);
-  if (event.mixObservation && event.status === 'supported' && !event.forced) {
-    applyMixObservation(segment[origin], event.mixObservation);
+  applyCoverage(segment[origin], event);
+  if (shouldAggregate(event)) {
+    applyToOverall(segment[origin].overall, event);
+    applyToSkill(segment[origin].skills, event);
+    if (event.mixObservation && event.status === 'supported' && !event.forced) {
+      applyMixObservation(segment[origin], event.mixObservation);
+    }
   }
   if (finalize) finishProjection(segment[origin]);
   const active = segment.game.overall.evaluatedDecisions ? segment.game : segment.practice;
@@ -281,7 +289,7 @@ export function projectActive(profile) {
   profile.leaks = clone(active.leaks);
   profile.candidates = clone(active.candidates);
   profile.coverageGaps = clone(active.coverageGaps);
-  profile.coverage = clone(active.coverage);
+  profile.coverage = clone((profile.game.coverage.evaluatedDecisions ? profile.game : profile.practice).coverage);
   profile.calibration = clone(active.calibration);
   return profile;
 }
@@ -300,7 +308,9 @@ function applyEventMutable(next, event, finalize = true) {
   }
   next.processed[event.evaluationId] = event.payloadSha256;
   const origin = originOf(event);
+  applyCoverage(next[origin], event);
   if (shouldAggregate(event)) {
+    applyToSegment(next, event, origin, finalize);
     applyToOverall(next[origin].overall, event);
     applyToSkill(next[origin].skills, event);
     if (event.mixObservation && event.status === 'supported' && !event.forced) {
@@ -309,7 +319,6 @@ function applyEventMutable(next, event, finalize = true) {
     if (event.studyRun && event.status === 'supported' && !event.forced) {
       next[origin].studyRuns[event.studyRun.id] = validateStudyRun(event.studyRun);
     }
-    applyToSegment(next, event, origin, finalize);
     if (origin === 'game') {
       next.hasGameEvents = true;
       next.activeSegmentId = segmentKey(event);

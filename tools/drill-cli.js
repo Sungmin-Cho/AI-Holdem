@@ -160,6 +160,74 @@ function assertSession(session, now = new Date().toISOString()) {
   return { legacy, source };
 }
 
+// Committed feedback is a projection of the immutable learning journal, not
+// authority supplied by the mutable session cache. Validate every prior answer
+// before replay can touch any consumer or start can replace the session.
+async function committedProof(storeDir, session, now = new Date().toISOString()) {
+  let events;
+  try {
+    if (session?.schemaVersion === 2) events = await loadProfileEvents(storeDir);
+    // Recover ownership from each immutable event's original question and
+    // attempt, never from the mutable session's run id or remaining queue.
+    // The producer hashes sessionId/questionId/attempt; there is no parseable
+    // session prefix in that digest, so reproduce the exact derivation.
+    if (events && isSessionId(session.sessionId)) {
+      for (const prior of events) {
+        if (!prior.studyRun || !prior.mixObservation || !['drill', 'retest'].includes(prior.origin)) continue;
+        const index = prior.studyRun.index;
+        const { spotKey, handClass, sourceIdentity } = prior.mixObservation;
+        const questionId = `drill:${prior.providerVersion}:${spotKey}:${handClass}:${index + 1}`;
+        const identity = profileEventIdentity(session.sessionId, questionId, index, {
+          id: prior.providerId, version: prior.providerVersion,
+        });
+        if (identity.evaluationId !== prior.evaluationId) continue;
+        if (!isDeepStrictEqual(prior.studyRun, { ...session.studyRun, index })
+          || session.queue?.[index]?.questionId !== questionId
+          || !sameSource(session.sourceIdentity, sourceIdentity)
+          || (index >= session.index && !(session.pending && index === session.index))) {
+          throw coded('PENDING_UNRESOLVED', 'session omits or reassigns its confirmed learning evidence');
+        }
+      }
+    }
+    const contract = assertSession(session, now);
+    if (contract.legacy) return { ...contract, events: undefined };
+    const byId = new Map(events.map((event) => [event.evaluationId, event]));
+    const byIndex = new Map();
+    for (const event of events) {
+      if (!session.studyRun || event.studyRun?.id !== session.studyRun.id) continue;
+      const index = event.studyRun.index;
+      if (index >= session.index && !(session.pending && index === session.index)) {
+        throw coded('PENDING_UNRESOLVED', 'session omits a confirmed answer');
+      }
+      if (byIndex.has(index)) throw coded('PENDING_UNRESOLVED', 'run has ambiguous committed answer evidence');
+      byIndex.set(index, event);
+    }
+    for (let index = 0; index < session.index; index += 1) {
+      const question = session.queue[index];
+      const prior = byIndex.get(index);
+      if (!prior) throw coded('PENDING_UNRESOLVED', 'committed answer has no learning evidence');
+      const answer = assertAnswer(prior.mixObservation?.chosenAction, question);
+      const result = evaluateDrillAnswer(question, answer, lookupStrategy(question));
+      const expected = profileEventOf(session, question, index, result, contract.source, answer);
+      if (byId.get(expected.evaluationId) !== prior
+        || typeof prior.appliedAt !== 'string' || !Number.isFinite(Date.parse(prior.appliedAt))
+        || new Date(prior.appliedAt).toISOString() !== prior.appliedAt
+        || Date.parse(prior.appliedAt) > Date.parse(now)
+        || Date.parse(prior.appliedAt) < Date.parse(session.studyRun.startedAt)
+        || learningEventKey(prior) !== learningEventKey(eventFromEvaluation(expected, prior.appliedAt))
+        || !isDeepStrictEqual(session.answers[index], result)) {
+        throw coded('PENDING_UNRESOLVED', 'committed answer differs from its confirmed learning evidence');
+      }
+    }
+    return { ...contract, events };
+  } catch (error) {
+    if (error.code === 'PENDING_UNRESOLVED'
+      || (error.code === 'SOURCE_CHANGED' && session?.index === 0
+        && events && !events.some((event) => event.studyRun?.id === session.studyRun?.id))) throw error;
+    throw coded('PENDING_UNRESOLVED', error.message);
+  }
+}
+
 function sourceIdentityOfDataset(loaded) {
   return {
     id: loaded.data.id,
@@ -191,9 +259,9 @@ function attemptKeyOf(sessionId, questionId, attemptNo) {
   return `drill:${sessionId}:${questionId}:${attemptNo}`;
 }
 
-function profileEventOf(session, question, attemptNo, result, source, answer) {
+function profileEventIdentity(sessionId, questionId, attemptNo, source) {
   const digest = createHash('sha256')
-    .update(attemptKeyOf(session.sessionId, question.questionId, attemptNo))
+    .update(attemptKeyOf(sessionId, questionId, attemptNo))
     .digest('hex');
   return {
     evaluationId: evaluationIdOf({
@@ -203,6 +271,12 @@ function profileEventOf(session, question, attemptNo, result, source, answer) {
       providerVersion: source.version,
     }),
     payloadSha256: digest,
+  };
+}
+
+function profileEventOf(session, question, attemptNo, result, source, answer) {
+  return {
+    ...profileEventIdentity(session.sessionId, question.questionId, attemptNo, source),
     status: 'supported',
     street: 'preflop',
     spotKey: question.prompt.spotKey,
@@ -336,11 +410,11 @@ function assertPending(session, now) {
   return { legacy, source, question, expectedEvent, expectedResult };
 }
 
-async function pendingProof(storeDir, session) {
+async function pendingProof(storeDir, session, eventSnapshot) {
   const serverNow = new Date().toISOString();
   const { legacy, source, question, expectedEvent, expectedResult } = assertPending(session, serverNow);
   const pending = session.pending;
-  const events = await loadProfileEvents(storeDir);
+  const events = eventSnapshot ?? await loadProfileEvents(storeDir);
   const prior = events.find((event) => event.evaluationId === expectedEvent.evaluationId);
   if (prior && (typeof prior.appliedAt !== 'string' || !Number.isFinite(Date.parse(prior.appliedAt))
     || Date.parse(prior.appliedAt) > Date.parse(serverNow)
@@ -399,11 +473,11 @@ async function pendingProof(storeDir, session) {
   return { profileDone: Boolean(prior), bankDone: !shouldBank || Boolean(banked), srsDone, legacy };
 }
 
-async function replayPending(storeDir, session) {
+async function replayPending(storeDir, session, eventSnapshot) {
   const pending = session.pending;
   if (!pending) return session;
   try {
-    const proof = await pendingProof(storeDir, session);
+    const proof = await pendingProof(storeDir, session, eventSnapshot);
     if (!pending.applied.profile) {
       if (!proof.profileDone) await createProfileStore(storeDir).apply(pending.profileEvent);
       pending.applied.profile = true;
@@ -430,8 +504,11 @@ async function replayPending(storeDir, session) {
 
 async function loadLiveSession(storeDir) {
   const session = loadSession(storeDir);
-  if (session?.pending) await replayPending(storeDir, session);
-  if (session) assertSession(session);
+  if (session) {
+    const proof = await committedProof(storeDir, session);
+    if (session.pending) await replayPending(storeDir, session, proof.events);
+    assertSession(session);
+  }
   return session;
 }
 
@@ -497,12 +574,23 @@ export async function startDrill(storeDir, {
       mode, source: sourceIdentity, spotKey, handClass, limit: 0,
       ...(mode === 'retest' ? { questionSet: [] } : {}),
     });
+    let existingProof = null;
+    if (existing) {
+      try { existingProof = await committedProof(storeDir, existing, serverNow); }
+      catch (error) {
+        // A fresh run may replace an unanswered obsolete-source question, as
+        // before. No committed feedback or pending consumer may be discarded.
+        if (error.code !== 'SOURCE_CHANGED' || existing.index !== 0
+          || existing.answers?.length !== 0 || existing.pending
+          || (idempotencyKey && existing.idempotencyKey === idempotencyKey)) throw error;
+      }
+    }
     if (existing?.pending) throw coded('PENDING_UNRESOLVED', 'resume the captured answer with next or retry before starting another run');
     if (existing && idempotencyKey && existing.idempotencyKey === idempotencyKey) {
       assertSession(existing, serverNow);
       return existing;
     }
-    const history = studyHistory(await loadProfileEvents(storeDir), serverNow);
+    const history = studyHistory(existingProof?.events ?? await loadProfileEvents(storeDir), serverNow);
     let assessment = null;
     let questionSet;
     if (mode === 'retest') {
@@ -605,10 +693,11 @@ export async function answerQuestion(storeDir, { action, sizeBb, sessionId, ques
       || sessionId !== session.sessionId || attempt == null || typeof questionId !== 'string') {
       throw coded('STALE_QUESTION', '문항 요청이 현재 세션과 일치하지 않습니다.');
     }
+    const committed = await committedProof(storeDir, session);
     if (session.pending) {
       if (attempt !== session.pending.attemptNo || questionId !== session.pending.questionId
         || !isDeepStrictEqual(answer, session.pending.answer)) throw coded('STALE_QUESTION', 'request differs from the captured pending answer');
-      await replayPending(storeDir, session);
+      await replayPending(storeDir, session, committed.events);
     }
     const { legacy } = assertSession(session);
     if (attempt < session.index) return storedAnswer(session, questionId, attempt);
@@ -648,9 +737,9 @@ export async function answerQuestion(storeDir, { action, sizeBb, sessionId, ques
       questionId,
       attemptNo: attempt,
     };
-    await pendingProof(storeDir, session);
+    await pendingProof(storeDir, session, committed.events);
     persistSession(storeDir, session);
-    await replayPending(storeDir, session);
+    await replayPending(storeDir, session, committed.events);
     return answerPayload(session);
   });
 }

@@ -46,7 +46,11 @@ function parseListenRows(payload) {
     const owningProcess = Number(row.OwningProcess ?? row.owningProcess);
     const localAddress = String(row.LocalAddress ?? row.localAddress ?? '');
     const localPort = Number(row.LocalPort ?? row.localPort);
-    const state = String(row.State ?? row.state ?? '');
+    // MSFT_NetTCPConnection.State is uint8; PowerShell 5.1 serializes
+    // Listen as numeric 2. Accept only that exact enum value, not coercible
+    // strings/booleans, while retaining the explicit text form from adapters.
+    const rawState = row.State ?? row.state;
+    const state = rawState === 2 ? 'Listen' : (typeof rawState === 'string' ? rawState : '');
     if (!Number.isInteger(owningProcess) || owningProcess < 1) {
       throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
     }

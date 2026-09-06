@@ -146,3 +146,47 @@ test('Windows owned identity rejects noncanonical fractions before classifying a
     pid: process.pid, startTime: `win32-v1:${prefix}.1230001Z`,
   });
 });
+
+test('Windows listener accepts the PowerShell numeric Listen enum in both query paths', async () => {
+  const { win32ListenerOwnedBy } = await import('../tools/listener-ownership.js');
+  const row = { OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 2 };
+  const events = []; let syncCalls = 0; let asyncCalls = 0;
+  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: () => {
+    syncCalls += 1; return { status: 0, stdout: JSON.stringify(row), stderr: '' };
+  } }), true);
+  const adapter = createListenerOwnedBy({ platform: 'win32', onChild: (event) => events.push(event),
+    execFileFn: (exe, args, options, callback) => {
+      asyncCalls += 1; queueMicrotask(() => callback(null, JSON.stringify(row), '')); return { pid: 123 };
+    },
+  });
+  assert.equal(await adapter(42, 12345), true);
+  assert.equal(syncCalls, 1); assert.equal(asyncCalls, 1);
+  assert.deepEqual(events, ['open', 'close']);
+});
+
+test('Windows numeric listener proof rejects non-listen, unknown and mismatched owners in both query paths', async () => {
+  const { win32ListenerOwnedBy } = await import('../tools/listener-ownership.js');
+  const base = { OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 2 };
+  for (const patch of [{ State: 1 }, { State: 5 }, { State: 999 }, { State: null }, { State: '2' },
+    { State: true }, { State: 'Established' }, { State: {} }, { OwningProcess: 43 },
+    { LocalPort: 12346 }, { LocalAddress: '0.0.0.0' }]) {
+    const stdout = JSON.stringify({ ...base, ...patch });
+    assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: () => ({ status: 0, stdout, stderr: '' }) }), false);
+    const adapter = createListenerOwnedBy({ platform: 'win32', execFileFn: (exe, args, options, callback) => {
+      queueMicrotask(() => callback(null, stdout, '')); return { pid: 123 };
+    } });
+    assert.equal(await adapter(42, 12345), false);
+  }
+});
+
+test('actual platform listener query proves an owned loopback socket and rejects a different PID', { timeout: 60000 }, async () => {
+  const net = await import('node:net');
+  const server = net.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  try {
+    const port = server.address().port;
+    const owned = createListenerOwnedBy({ timeoutMs: process.platform === 'win32' ? 15000 : 1000 });
+    assert.equal(await owned(process.pid, port), true);
+    assert.equal(await owned(process.pid + 100000, port), false);
+  } finally { await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+});

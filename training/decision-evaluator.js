@@ -1,3 +1,4 @@
+import { matchReferenceAction } from '../shared/reference.js';
 import { evaluationIdOf } from './contracts.js';
 import { handClassOf } from './cards.js';
 import { normalizePreflopSpot } from './preflop-spot.js';
@@ -17,12 +18,8 @@ function matchChosen(strategyActions, snapshot) {
   const size = snapshot.chosenAction?.action === 'raise'
     ? (snapshot.blinds?.[1] ? snapshot.chosenAction.amount / snapshot.blinds[1] : null)
     : null;
-  const hit = strategyActions.find((action) => {
-    if (action.action !== chosen) return false;
-    if (chosen === 'raise' && action.sizeBb != null && size != null) {
-      return Math.abs(action.sizeBb - size) <= 0.05;
-    }
-    return true;
+  const hit = matchReferenceAction(strategyActions, {
+    action: chosen, ...(size != null ? { sizeBb: size } : {}),
   });
   return {
     frequency: hit?.frequency ?? 0,

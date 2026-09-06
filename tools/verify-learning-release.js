@@ -976,6 +976,50 @@ function userStoreGate({ before, actualBefore, sourcePin, outDir, userStoreTarge
   return gateReceipt('protected-store', sourcePin, comparison);
 }
 
+// Failure diagnostics have their own namespace: prior gate receipts remain immutable.
+// Each check is independent, so an unreadable store cannot suppress source evidence.
+export async function collectFailureInvariants({
+  storeContext, sourceStart, sourcePin, outDir, tmpDir, repoRoot = ROOT,
+} = {}) {
+  const checks = {};
+  const diagnosticDir = path.join(outDir, 'failure-invariants');
+  try {
+    if (!storeContext) throw coded('USER_STORE_PROOF_UNAVAILABLE');
+    const receipt = userStoreGate({ ...storeContext, sourcePin, outDir: diagnosticDir });
+    checks['protected-store'] = { status: 'passed', pass: true, receipt };
+  } catch (error) {
+    checks['protected-store'] = {
+      status: error.code === 'USER_STORE_CHANGED' ? 'failed' : 'unavailable', pass: false,
+      code: error.code === 'USER_STORE_CHANGED' ? error.code : 'USER_STORE_PROOF_UNAVAILABLE',
+      causeCode: error.code ?? 'UNKNOWN_ERROR',
+    };
+  }
+  try {
+    if (!sourceStart || !tmpDir) throw coded('SOURCE_PROOF_UNAVAILABLE');
+    const snapshot = {
+      ...sourceStart,
+      endHead: await gitText(['rev-parse', 'HEAD'], { cwd: repoRoot, tmpDir }),
+      endTree: await gitText(['rev-parse', 'HEAD^{tree}'], { cwd: repoRoot, tmpDir }),
+      endChanges: await gitText(['diff', '--name-only', 'HEAD', '--'], { cwd: repoRoot, tmpDir }),
+      endUntracked: await gitText(['ls-files', '--others', '--exclude-standard'], { cwd: repoRoot, tmpDir }),
+    };
+    writeJson(path.join(diagnosticDir, 'source-snapshot.json'), snapshot);
+    const evidence = assertSourceSnapshot(snapshot);
+    checks['source-stability'] = { status: 'passed', pass: true, evidence };
+  } catch (error) {
+    checks['source-stability'] = {
+      status: error.code === 'SOURCE_PIN_CHANGED' ? 'failed' : 'unavailable', pass: false,
+      code: error.code === 'SOURCE_PIN_CHANGED' ? error.code : 'SOURCE_PROOF_UNAVAILABLE',
+      causeCode: error.code ?? 'UNKNOWN_ERROR',
+    };
+  }
+  const result = seal({ schemaVersion: 1, ...checks });
+  // An evidence write failure must not prevent the caller's owned cleanup.
+  try { writeJson(path.join(outDir, 'failure-invariants.json'), result); }
+  catch (error) { return seal({ ...result, persistenceCode: error.code ?? 'FAILURE_INVARIANTS_WRITE_FAILED' }); }
+  return result;
+}
+
 function exactKeys(value, keys) {
   return record(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
@@ -1155,7 +1199,8 @@ export function validateProducerSummary(kind, terminal, result) {
 
 export function reserveReleaseOutput(output) {
   // Inputs may be prepared by the parent; execution artifacts must be new.
-  for (const name of ['browser', 'compatibility', 'result.json', 'full-suite.json', 'execution-owner.json']) {
+  for (const name of ['browser', 'compatibility', 'result.json', 'full-suite.json', 'execution-owner.json',
+    'failure-invariants', 'failure-invariants.json']) {
     try { fs.lstatSync(path.join(output, name)); throw coded('RELEASE_OUTPUT_NOT_FRESH'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
@@ -1174,6 +1219,9 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
   let tempRoot;
   let tempIdentity;
   let sourcePin = null;
+  let sourceStart = null;
+  let storeContext = null;
+  let commandTmp;
   try {
     if (baseline !== REQUIRED_BASELINE) throw coded('RELEASE_USAGE');
     if (process.version !== 'v26.0.0') throw coded('NODE_RUNTIME_UNSUPPORTED');
@@ -1183,12 +1231,12 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-learning-release-'));
     fs.chmodSync(tempRoot, 0o700);
     tempIdentity = fs.lstatSync(tempRoot);
-    const commandTmp = path.join(tempRoot, 'command-tmp');
+    commandTmp = path.join(tempRoot, 'command-tmp');
     fs.mkdirSync(commandTmp, { mode: 0o700 });
     await gitText(['cat-file', '-e', `${baseline}^{commit}`], { tmpDir: commandTmp });
     sourcePin = await gitText(['rev-parse', 'HEAD'], { tmpDir: commandTmp });
     if (!SHA1.test(sourcePin)) throw coded('SOURCE_PIN_INVALID');
-    const sourceStart = {
+    sourceStart = {
       startHead: sourcePin,
       startTree: await gitText(['rev-parse', 'HEAD^{tree}'], { tmpDir: commandTmp }),
       startChanges: await gitText(['diff', '--name-only', 'HEAD', '--'], { tmpDir: commandTmp }),
@@ -1205,6 +1253,7 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     const userStoreTarget = protectedStoreFromManifest(beforeManifest, mainRoot);
     const protectedBeforeManifest = readBeforeManifest(beforeManifest);
     const protectedBefore = listManifestFiles(userStoreTarget);
+    storeContext = { before: protectedBeforeManifest, actualBefore: protectedBefore, userStoreTarget };
     writeJson(path.join(output, 'user-store-before-actual.json'), protectedBefore);
     if (JSON.stringify(protectedBefore) !== JSON.stringify(protectedBeforeManifest)) {
       throw coded('USER_STORE_CHANGED');
@@ -1366,6 +1415,9 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     writeJson(path.join(output, 'result.json'), result);
     return result;
   } catch (error) {
+    const failureInvariants = await collectFailureInvariants({
+      storeContext, sourceStart, sourcePin, outDir: output, tmpDir: commandTmp,
+    });
     if (tempRoot && tempIdentity) {
       try {
         receipts['owned-cleanup'] = cleanupReceipt(tempRoot, tempIdentity, sourcePin ?? baseline, output);
@@ -1381,6 +1433,8 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
       sourcePin,
       code: error.code ?? 'RELEASE_VERIFICATION_FAILED',
       ...(error.cleanupCode ? { cleanupCode: error.cleanupCode } : {}),
+      failureInvariants,
+      receipts,
       completedGates,
     });
     writeJson(path.join(output, 'result.json'), result);

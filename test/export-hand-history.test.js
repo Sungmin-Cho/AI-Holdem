@@ -351,6 +351,7 @@ test('normalizeHand exports a reference-qualified copy and retains the source pa
   };
   const tc = createTrainingControl();
   await tc.acceptEvaluations(dir, { gameEpoch: epoch, owner: 'export-owner', handNo: 1, evaluations: [evaluation] });
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionToken: 'export-test' }));
   const verified = loadReferenceEvaluations(dir)[1][0];
   const sourceBytes = JSON.stringify(evaluation);
   const hand = normalizeHand({ handNo: 1, holes: { user: ['Ah', 'Kd'] } }, {
@@ -360,4 +361,44 @@ test('normalizeHand exports a reference-qualified copy and retains the source pa
   assert.equal(hand.evaluations[0].schemaVersion, 2);
   assert.equal(hand.evaluations[0].sourcePayloadSha256, verified.payloadSha256);
   assert.equal(hand.evaluations[0].payloadSha256, undefined);
+});
+
+
+async function sealedExportFixture() {
+  const dir = tmp(), token = 'export-identity-test', epoch = gameEpochOf(token);
+  const decisionId = 'd-1-preflop-0';
+  const evaluation = { schemaVersion: 1, evaluationId: evaluationIdOf({ gameEpoch: epoch, decisionId,
+    providerId: CANONICAL_REFERENCE_SOURCE.id, providerVersion: CANONICAL_REFERENCE_SOURCE.version }),
+    handNo: 1, decisionId, street: 'preflop', forced: false, status: 'supported', grade: 'preferred',
+    source: CANONICAL_REFERENCE_SOURCE, chosen: { action: 'call' }, recommended: [{ action: 'raise', frequency: 0.8 }] };
+  await createTrainingControl().acceptEvaluations(dir, { gameEpoch: epoch, owner: 'export-identity-owner', handNo: 1, evaluations: [evaluation] });
+  fs.mkdirSync(path.join(dir, 'hands'));
+  fs.writeFileSync(path.join(dir, 'hands/hand-0001.json'), JSON.stringify({ handNo: 1, holes: { user: ['Ah', 'Kd'] } }));
+  return { dir, token, epoch };
+}
+
+test('export never qualifies sealed learning evidence without validated session identity', async () => {
+  const { dir, token, epoch } = await sealedExportFixture();
+  const authFile = path.join(dir, 'training/.training-authority.json');
+  const before = fs.readFileSync(authFile);
+  for (const state of [null, {}, { sessionToken: '' }, { sessionToken: 123 }, { gameEpoch: 'broken' }, { sessionToken: token, gameEpoch: 'f'.repeat(64) }]) {
+    if (state === null) fs.rmSync(path.join(dir, 'state.json'), { force: true });
+    else fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state));
+    const evaluations = loadReferenceEvaluations(dir)[1];
+    const hand = normalizeHand({ handNo: 1 }, { evaluations });
+    assert.equal(evaluations[0].status, 'unavailable');
+    assert.equal(hand.evaluations[0].sourcePayloadSha256, undefined);
+    assert.equal(hand.evaluations[0].recommended, undefined);
+    assert.deepEqual(fs.readFileSync(authFile), before);
+  }
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionToken: token, gameEpoch: epoch }));
+  assert.equal(loadReferenceEvaluations(dir)[1][0].status, 'supported');
+});
+
+test('copied learning authority cannot qualify same-numbered hands in another session', async () => {
+  const { dir } = await sealedExportFixture();
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionToken: 'different-game' }));
+  const before = fs.readFileSync(path.join(dir, 'training/.training-authority.json'));
+  assert.throws(() => loadReferenceEvaluations(dir), { code: 'LEARNING_DETAIL_IDENTITY_MISMATCH' });
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'training/.training-authority.json')), before);
 });

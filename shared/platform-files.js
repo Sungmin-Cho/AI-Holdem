@@ -1,4 +1,24 @@
 import fs from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { performance } from 'node:perf_hooks';
+
+const budgets = new AsyncLocalStorage();
+export const platformNow = () => (budgets.getStore()?.now ?? (() => performance.now()))();
+export function withPlatformDeadline(deadline, fn, { now = budgets.getStore()?.now ?? (() => performance.now()) } = {}) {
+  return budgets.run({ deadline, now }, fn);
+}
+export function platformTimeout(maximum) {
+  const budget = budgets.getStore();
+  if (!budget) return maximum;
+  const remaining = Math.floor(budget.deadline - budget.now());
+  if (remaining <= 0) throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  return Math.min(maximum, remaining);
+}
+export function extendPlatformDeadline(deadline) {
+  const budget = budgets.getStore();
+  if (budget) budget.deadline = deadline;
+}
+
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -7,7 +27,7 @@ const quote = (text) => `'${String(text).replaceAll("'", "''")}'`;
 function powershell(script, spawn = spawnSync) {
   return spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024, windowsHide: true });
+    { encoding: 'utf8', timeout: platformTimeout(15_000), maxBuffer: 64 * 1024, windowsHide: true });
 }
 
 // Windows mode bits do not describe a DACL. Read the actual ACL without changing

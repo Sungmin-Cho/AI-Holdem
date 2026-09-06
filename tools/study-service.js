@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { isPrivatePath, arePrivatePaths, createPrivateDirectory } from '../shared/platform-files.js';
+import { isPrivatePath, arePrivatePaths, createPrivateDirectory, withPlatformDeadline, platformNow, platformTimeout, extendPlatformDeadline } from '../shared/platform-files.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -12,7 +12,9 @@ const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
 const DESCRIPTOR = 'study-service.json';
 const MAX_DESCRIPTOR = 4096;
-const WAIT_MS = process.platform === 'win32' ? 120_000 : 5000;
+const WAIT_MS = 5000;
+// Only positively absent/dead ownership may enter the cold-start allowance.
+const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
 const HTTP_WAIT_MS = process.platform === 'win32' ? 8000 : 500;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -26,6 +28,7 @@ const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
 ])).digest('hex');
 function fail(code = 'STUDY_DESCRIPTOR_CORRUPT') { const error = new Error(code); error.code = code; throw error; }
 function statOrNull(file) {
+  platformTimeout(WAIT_MS);
   try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
 }
 // A synchronous read transaction batches mutable ACL proof before and after
@@ -64,6 +67,9 @@ function assertContext(ctx) {
 function context(storeDir, { create = false } = {}) {
   if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
   const requested = path.resolve(storeDir);
+  if (process.platform === 'win32' && !aclScope) {
+    return aclTransaction({ root: requested, training: path.join(requested, '.training') }, () => context(storeDir, { create }));
+  }
   const original = directory(requested); // Reject a symlink store itself before canonicalizing ancestors.
   const root = fs.realpathSync(requested);
   if (!sameInode(directory(root), original)) fail();
@@ -110,7 +116,10 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 function identityStatus(pid, startTime) {
-  return ownedIdentityStatus(pid, startTime);
+  platformTimeout(WAIT_MS);
+  const status = ownedIdentityStatus(pid, startTime);
+  platformTimeout(WAIT_MS);
+  return status;
 }
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => readLock(ctx, parent));
@@ -161,14 +170,22 @@ function publicHandle(value) {
     storeIdentity: value.storeIdentity, port: value.port,
     studyUrl: `http://127.0.0.1:${value.port}/#token=${value.drillToken}` };
 }
+// AbortSignal.timeout accepts integers only. Both the request-local deadline
+// and the caller's shared monotonic budget must still permit a whole millisecond.
+export function studyHttpTimeout(deadline, maximum = HTTP_WAIT_MS) {
+  const localRemaining = deadline === undefined ? maximum : Math.floor(deadline - platformNow());
+  const timeout = Math.min(localRemaining, platformTimeout(maximum));
+  if (!Number.isSafeInteger(timeout) || timeout <= 0) fail();
+  return timeout;
+}
 async function httpJson(value, route, { control = false, body, badToken = false, deadline } = {}) {
-  if (deadline !== undefined && Date.now() >= deadline) fail();
+  const timeout = studyHttpTimeout(deadline);
   const response = await fetch(`http://127.0.0.1:${value.port}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { [control ? 'x-study-control' : 'x-drill-token']:
       badToken ? 'invalid-study-health-probe' : (control ? value.controlToken : value.drillToken) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(deadline === undefined ? HTTP_WAIT_MS : Math.max(1, Math.min(HTTP_WAIT_MS, deadline - Date.now()))), redirect: 'error',
+    signal: AbortSignal.timeout(timeout), redirect: 'error',
   });
   // Health/control responses are small; never trust an arbitrary listener's stream.
   const reader = response.body.getReader(); let size = 0; const chunks = [];
@@ -202,7 +219,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   if (owner?.status !== 'alive') fail();
   // Only the already observed live owner may repair this descriptor. None of
   // these reads grants permission to start a process or reclaim its metadata.
-  while (Date.now() < deadline) {
+  while (platformNow() < deadline) {
     const currentOwner = readLock(ctx);
     if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) fail();
     const descriptor = readDescriptor(ctx);
@@ -226,7 +243,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
           || !sameLock(owner, afterOwner) || readDescriptor(ctx).state === 'valid') throw error;
       }
     }
-    await sleep(Math.max(1, Math.min(50, deadline - Date.now())));
+    await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
   }
   fail();
 }
@@ -255,13 +272,16 @@ function optionsForChild(options) {
   return { idleTimeoutMs, checkpointMs };
 }
 
-async function ensureOwned(ctx, options, deadline) {
+async function ensureOwned(ctx, options, deadline, coldDeadline) {
   const config = optionsForChild(options);
   let owner = readLock(ctx);
   let descriptor = readDescriptor(ctx);
   const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
     && identityStatus(descriptor.value.pid, descriptor.value.startTime) === 'dead' ? descriptor.value : undefined;
-  if (owner?.status === 'alive') return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
+  if (owner?.status === 'alive') {
+    extendPlatformDeadline(deadline);
+    return waitForLiveService(ctx, owner, deadline);
+  }
   if (!owner || owner.status === 'dead') {
     if (descriptor.state === 'corrupt') fail();
     if (descriptor.state === 'valid') {
@@ -272,6 +292,8 @@ async function ensureOwned(ctx, options, deadline) {
     assertContext(ctx);
     // Only the detached service child acquires/reclaims its lifetime lock. Clients
     // never remove a lock or send process signals, including failed startup paths.
+    deadline = coldDeadline ?? platformNow() + COLD_START_MS;
+    extendPlatformDeadline(deadline);
     const child = spawn(process.execPath, [SELF, '--serve', ctx.root, JSON.stringify(config),
       ctx.storeIdentity, trainingIdentity(ctx)], {
       cwd: path.dirname(SELF), detached: true, stdio: 'ignore',
@@ -287,28 +309,48 @@ async function ensureOwned(ctx, options, deadline) {
     await sleep(25);
     if (spawnError) fail();
   }
-  while (Date.now() < deadline) {
+  while (platformNow() < deadline) {
     assertContext(ctx);
     owner = readLock(ctx);
-    descriptor = readDescriptor(ctx);
-    if (owner?.status === 'alive') return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
-    await sleep(Math.max(1, Math.min(50, deadline - Date.now())));
+    if (owner?.status === 'alive') {
+      deadline = Math.min(deadline, platformNow() + WAIT_MS);
+      extendPlatformDeadline(deadline);
+      return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
+    }
+    await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
   }
   fail();
 }
 
-export async function ensureStudyService(storeDir, options = {}) {
-  const deadline = Date.now() + WAIT_MS;
-  const ctx = context(storeDir, { create: true });
+async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
+  let deadline = platformNow() + WAIT_MS;
+  let ctx = context(storeDir);
+  let coldDeadline;
   optionsForChild(options);
+  if (!ctx.trainingStat) {
+    // Safe root identity plus positively absent training metadata authorizes
+    // cold directory creation. This does not authorize a raced-in live owner.
+    coldDeadline = platformNow() + COLD_START_MS;
+    extendPlatformDeadline(coldDeadline);
+    assertContext(ctx);
+    const created = context(storeDir, { create: true });
+    if (created.root !== ctx.root || !sameInode(created.rootStat, ctx.rootStat)) fail();
+    ctx = created;
+    deadline = Math.min(coldDeadline, platformNow() + WAIT_MS);
+    extendPlatformDeadline(deadline);
+  }
   if (options.parentIdentity !== undefined) validateParent(ctx, options.parentIdentity);
   let pending = inFlight.get(ctx.storeIdentity);
   if (!pending) {
-    pending = ensureOwned(ctx, options, deadline);
+    pending = ensureOwned(ctx, options, deadline, coldDeadline);
     inFlight.set(ctx.storeIdentity, pending);
     pending.finally(() => { if (inFlight.get(ctx.storeIdentity) === pending) inFlight.delete(ctx.storeIdentity); }).catch(() => {});
   }
-  const value = await pending;
+  let timer;
+  const value = await Promise.race([pending, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT' })), platformTimeout(COLD_START_MS));
+  })]).finally(() => clearTimeout(timer));
+  deadline = platformNow() + platformTimeout(WAIT_MS);
   // Revalidate the caller's own context after awaiting another concurrent ensure.
   const current = readDescriptor(ctx), owner = readLock(ctx);
   const restored = current.state === 'valid' ? current.value
@@ -317,8 +359,8 @@ export async function ensureStudyService(storeDir, options = {}) {
   if (options.parentIdentity !== undefined) await attachParent(ctx, value, options.parentIdentity, deadline);
   return publicHandle(value);
 }
-export async function inspectStudyService(storeDir) {
-  const deadline = Date.now() + WAIT_MS;
+async function inspectStudyServiceWithinBudget(storeDir) {
+  const deadline = platformNow() + WAIT_MS;
   const ctx = context(storeDir);
   const descriptor = readDescriptor(ctx), owner = readLock(ctx);
   if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
@@ -328,8 +370,8 @@ export async function inspectStudyService(storeDir) {
   const value = await waitForLiveService(ctx, owner, deadline);
   return { status: 'running', ...publicHandle(value) };
 }
-export async function stopStudyService(storeDir, { expectedInstanceId } = {}) {
-  const deadline = Date.now() + WAIT_MS;
+async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {}) {
+  const deadline = platformNow() + WAIT_MS;
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
   const ctx = context(storeDir);
   const descriptor = readDescriptor(ctx), owner = readLock(ctx);
@@ -344,7 +386,7 @@ export async function stopStudyService(storeDir, { expectedInstanceId } = {}) {
   try { response = await httpJson(value, '/internal/shutdown', { control: true, body: { expectedInstanceId }, deadline }); }
   catch { fail(); }
   if (response.status !== 200 || response.body.ok !== true) fail();
-  while (Date.now() < deadline) {
+  while (platformNow() < deadline) {
     assertContext(ctx);
     const current = readDescriptor(ctx), lock = readLock(ctx);
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
@@ -352,9 +394,19 @@ export async function stopStudyService(storeDir, { expectedInstanceId } = {}) {
     }
     // A replacement belongs to the next caller; it is never ours to stop.
     if (current.state === 'valid' && current.value.instanceId !== expectedInstanceId) fail('STUDY_IDENTITY_MISMATCH');
-    await sleep(25);
+    await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
   }
   fail();
+}
+
+export function ensureStudyService(storeDir, options = {}) {
+  return withPlatformDeadline(platformNow() + WAIT_MS, () => ensureStudyServiceWithinBudget(storeDir, options));
+}
+export function inspectStudyService(storeDir) {
+  return withPlatformDeadline(platformNow() + WAIT_MS, () => inspectStudyServiceWithinBudget(storeDir));
+}
+export function stopStudyService(storeDir, options = {}) {
+  return withPlatformDeadline(platformNow() + WAIT_MS, () => stopStudyServiceWithinBudget(storeDir, options));
 }
 
 function assertOwnLock(ctx, own) {

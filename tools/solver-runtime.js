@@ -1,3 +1,4 @@
+import { spawnOwnedCommand, terminateOwnedWindowsChild, isOwnedWindowsChild } from '../shared/windows-owned-process.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -110,7 +111,12 @@ function occupancyOf(pid, startTime, startTimeOf) {
   return { live: false, readable: true };
 }
 
-export async function killGroup(pid, startTime, startTimeOf = processStartTime) {
+export async function killGroup(pid, startTime, startTimeOf = processStartTime, { platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    const rec = live.get(pid);
+    if (!rec || rec.terminationUnconfirmed || rec.startTime !== startTime || !isOwnedWindowsChild(rec.child)) return { confirmed: false, reason: 'termination_unconfirmed' };
+    return terminateOwnedWindowsChild(rec.child);
+  }
   if (!isStartTime(startTime)) {
     return { confirmed: false, reason: 'termination_unconfirmed' };
   }
@@ -130,23 +136,6 @@ export async function killGroup(pid, startTime, startTimeOf = processStartTime) 
       return { confirmed: false, reason: 'termination_unconfirmed' };
     }
     return { confirmed: true };
-  }
-  if (process.platform === 'win32') {
-    const again = startTimeOf(pid);
-    if (again !== startTime) {
-      return { confirmed: false, reason: 'termination_unconfirmed' };
-    }
-    const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
-    try {
-      execFileSync(exe, ['/PID', String(pid), '/T', '/F'], {
-        timeout: 3_000,
-        windowsHide: true,
-      });
-    } catch { /* identity postcondition decides */ }
-    const after = startTimeOf(pid);
-    if (after !== startTime && !pidAlive(pid)) return { confirmed: true };
-    if (after != null && after !== startTime) return { confirmed: true };
-    return { confirmed: false, reason: 'termination_unconfirmed' };
   }
   try { process.kill(-pid, 'SIGTERM'); } catch (error) {
     if (error.code !== 'ESRCH') {
@@ -186,6 +175,11 @@ export async function killGroup(pid, startTime, startTimeOf = processStartTime) 
 
 export function hasLiveSolverChild(startTimeOf = processStartTime) {
   for (const [pid, rec] of [...live.entries()]) {
+    if (process.platform === 'win32') {
+      // Only finish() with checked Job cleanup may release this reservation.
+      // Windows forced handle termination can surface as a numeric exitCode.
+      continue;
+    }
     const occupancy = occupancyOf(pid, rec.startTime, startTimeOf);
     if (!occupancy.live && occupancy.readable) live.delete(pid);
   }
@@ -372,7 +366,8 @@ export async function runSolver({
   }
   let child;
   try {
-    child = spawn(argv[0], argv.slice(1), {
+    child = (process.platform === 'win32' ? spawnOwnedCommand : spawn)(argv[0], argv.slice(1), {
+      ...(process.platform === 'win32' ? { ownedTimeoutMs: timeoutMs } : {}),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...env, [SOLVER_TOKEN_ENV]: spawnToken },
@@ -412,6 +407,8 @@ export async function runSolver({
     if (rssTimer) clearInterval(rssTimer);
     const killed = await killGroup(child.pid, startTime, startTimeOf);
     if (!killed.confirmed) {
+      const tracked = live.get(child.pid);
+      if (tracked) tracked.terminationUnconfirmed = true;
       const unconfirmed = coded(
         'SOLVER_TERMINATION_UNCONFIRMED',
         'solver 자식 종료를 확인하지 못했습니다.',
@@ -426,7 +423,7 @@ export async function runSolver({
     return value;
   };
 
-  if (startTime == null) {
+  if (startTime == null && process.platform !== 'win32') {
     return finish(coded('SOLVER_TERMINATION_UNCONFIRMED', 'solver startTime을 얻지 못했습니다.'));
   }
 
@@ -442,7 +439,9 @@ export async function runSolver({
     if (rss != null && rss > maxRssKb) child.emit('solver-rss');
   }, SOLVER_POLL_MS);
 
-  timer = setTimeout(() => child.emit('solver-timeout'), timeoutMs);
+  // Windows timeout is enforced inside the owning Job launcher, which confirms
+  // zero active processes before exiting 124. A stuck launcher fails closed.
+  timer = setTimeout(() => child.emit('solver-timeout'), process.platform === 'win32' ? timeoutMs + 120_000 : timeoutMs);
   child.stdin.write(`${JSON.stringify(input)}\n`);
   child.stdin.end();
 
@@ -456,6 +455,7 @@ export async function runSolver({
     child.once('error', (error) => fail(error.code ?? 'SOLVER_SPAWN', error.message));
     child.once('close', (code) => {
       if (settled) return;
+      if (process.platform === 'win32' && code === 124) { fail('SOLVER_TIMEOUT', 'solver deadline exceeded'); return; }
       const text = stdout.toString('utf8').trim();
       if (!text) {
         fail('SOLVER_EXIT', `solver exited ${code ?? 'null'}`);

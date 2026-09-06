@@ -1,3 +1,4 @@
+import { platformTimeout } from '../shared/platform-files.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 
@@ -38,7 +39,7 @@ export function posixProcessStartTime(pid, { exec = execFileSync } = {}) {
   try {
     const out = exec('ps', ['-p', String(id), '-o', 'lstart='], {
       encoding: 'utf8',
-      timeout: IDENTITY_TIMEOUT_MS,
+      timeout: platformTimeout(IDENTITY_TIMEOUT_MS),
     });
     const trimmed = String(out).trim();
     return trimmed || null;
@@ -67,7 +68,7 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
       '-Command', script,
     ], {
       encoding: 'utf8',
-      timeout: IDENTITY_TIMEOUT_MS,
+      timeout: platformTimeout(IDENTITY_TIMEOUT_MS),
       maxBuffer: IDENTITY_MAX_BUFFER,
       windowsHide: true,
     });
