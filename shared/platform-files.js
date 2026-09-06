@@ -63,7 +63,12 @@ export function arePrivatePaths(entries, { platform = process.platform, spawn = 
     const proofs = JSON.parse(String(result.stdout ?? '').replace(/^\uFEFF/, ''));
     return Array.isArray(proofs) && proofs.length === entries.length
       && proofs.every((proof, i) => privateAclAllowed(proof, entries[i].privateMode ?? true));
-  } catch { return false; }
+  } catch (error) {
+    // An exhausted deadline says nothing about the path. Reporting it as "not
+    // private" turns a budget shortfall into a false privacy verdict.
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+    return false;
+  }
 }
 
 const AUTHORITY = new Set(['S-1-5-18', 'S-1-5-32-544']);

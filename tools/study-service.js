@@ -12,7 +12,11 @@ const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
 const DESCRIPTOR = 'study-service.json';
 const MAX_DESCRIPTOR = 4096;
-const WAIT_MS = 5000;
+// Every Windows privacy or identity proof is a PowerShell child, and a single
+// client call makes several of them. A POSIX-sized budget cannot bound that
+// work: a cold ensure on a CI runner spent over 13s before its budget expired
+// mid-proof. This is a ceiling on waiting, never a delay that is spent.
+const WAIT_MS = process.platform === 'win32' ? 60_000 : 5000;
 // Only positively absent/dead ownership may enter the cold-start allowance.
 const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
 const HTTP_WAIT_MS = process.platform === 'win32' ? 8000 : 500;

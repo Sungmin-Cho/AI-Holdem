@@ -22,6 +22,19 @@ test('one monotonic deadline bounds sequential ACL and identity children', () =>
  } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });
 
+test('an exhausted deadline surfaces as a budget failure, never as a privacy verdict', () => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runtime-budget-exhausted-'));
+ let clock=0;
+ const spawn=()=>{clock+=6000; return {status:0,stdout:'[]',stderr:''};};
+ try {
+  files.withPlatformDeadline(5000, () => {
+   assert.equal(files.arePrivatePaths([{file:dir}],{platform:'win32',spawn}),false);
+   assert.throws(()=>files.arePrivatePaths([{file:dir}],{platform:'win32',spawn}),{code:'STUDY_DESCRIPTOR_CORRUPT'});
+   assert.throws(()=>files.isPrivatePath(dir,{platform:'win32',spawn}),{code:'STUDY_DESCRIPTOR_CORRUPT'});
+  },{now:()=>clock});
+ } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 import * as windows from '../shared/windows-owned-process.js';
 import { killGroup } from '../tools/solver-runtime.js';
 test('untracked Windows identity never grants numeric PID termination', async () => {
