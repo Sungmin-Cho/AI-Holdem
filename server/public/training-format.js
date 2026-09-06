@@ -56,9 +56,57 @@ export function applyTrainingAnnotation(item, annotation) {
   return next;
 }
 
-export function formatTrainingCard(item) {
-  const quality = referenceQuality(item.source);
-  const sourceEligible = quality.quality === 'heuristic-reference';
+const verifiedDetails = new WeakMap();
+const HEX64 = /^[0-9a-f]{64}$/;
+const detailBinding = (item) => JSON.stringify([
+  item.evaluationId, item.payloadSha256, item.detailRef, item.detailSha256,
+  item.decisionId, item.handNo, item.source?.id, item.source?.version,
+]);
+
+// The compact item is obtained from the authenticated snapshot/SSE channel. The
+// detail API returns parsed JSON, serialized exactly as the immutable detail writer.
+// Keep verification outside card rendering and never enrich the compact item itself.
+export async function verifyTrainingDetail(item, detail) {
+  try {
+    const binding = detailBinding(item);
+    if (!item || !detail || !HEX64.test(item.payloadSha256 ?? '')
+      || !HEX64.test(item.detailSha256 ?? '') || !HEX64.test(item.detailRef ?? '')
+      || typeof item.evaluationId !== 'string') return null;
+    const identity = /^([0-9a-f]{64}):(d-([1-9][0-9]*)-[a-z]+-[0-9]+):([a-z0-9-]+)@(\d+\.\d+\.\d+)$/.exec(item.evaluationId);
+    if (!identity || item.decisionId !== identity[2] || item.handNo !== Number(identity[3])
+      || detail.evaluationId !== item.evaluationId || detail.decisionId !== item.decisionId
+      || (detail.handNo !== undefined && detail.handNo !== item.handNo)
+      || detail.source?.id !== identity[4] || detail.source?.version !== identity[5]
+      || item.source?.id !== identity[4] || item.source?.version !== identity[5]) return null;
+    const bytes = JSON.stringify(detail);
+    if (bytes.length > 1_000_000) return null;
+    const sha256 = async (text) => Array.from(new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)),
+    ), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    if (await sha256(bytes) !== item.detailSha256 || await sha256(item.evaluationId) !== item.detailRef) return null;
+    if (binding !== detailBinding(item)) return null;
+    const receipt = Object.freeze({ evaluationId: item.evaluationId, detailSha256: item.detailSha256 });
+    verifiedDetails.set(receipt, { binding, detail: JSON.parse(bytes) });
+    return receipt;
+  } catch {
+    return null;
+  }
+}
+
+export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
+  const receipt = verifiedDetail && verifiedDetails.get(verifiedDetail);
+  const verified = receipt?.binding === detailBinding(item);
+  if (verified) {
+    const detail = receipt.detail;
+    item = { ...item };
+    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced']) {
+      item[key] = detail[key];
+    }
+  }
+  const identityQuality = referenceQuality(item.source);
+  const quality = verified || identityQuality.quality !== 'heuristic-reference' ? identityQuality
+    : { quality: 'unverified', reason: 'LEARNING_AUTHORITY_UNAVAILABLE' };
+  const sourceEligible = verified && quality.quality === 'heuristic-reference';
   const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
@@ -77,7 +125,7 @@ export function formatTrainingCard(item) {
     note: '',
     explanation: item.explanationStatus === 'unavailable'
       ? 'unavailable'
-      : (referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
+      : (sourceEligible && referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     status: item.status ?? null,
     exploit: '',

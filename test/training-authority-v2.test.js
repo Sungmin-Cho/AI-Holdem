@@ -1314,18 +1314,13 @@ test('SSE payload is projected (no nested extra keys) and includes trainingAnnot
 
 // --- client formatter ---
 
-test('formatter merges annotations by evaluationId+field; unavailable is displayed; payloadSha256 no-op is machine-only', () => {
+test('formatter merges annotations by evaluationId+field; unavailable is displayed; payloadSha256 no-op is machine-only', async () => {
   assert.equal(typeof trainingFormat.applyTrainingAnnotation, 'function');
-  const item = {
-    evaluationId: evaluationId(),
-    handNo: 1,
-    handClass: 'AA',
-    chosen: { action: 'raise' },
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1 }],
-    status: 'supported',
-    grade: 'preferred',
-    payloadSha256: 'aa'.repeat(32),
-  };
+  const detail = evaluation();
+  const item = toPublicSummary(detail, { handNo: 1, detailSha256: sha(JSON.stringify(detail)) });
+  const before = JSON.stringify(item);
+  const verifiedDetail = await trainingFormat.verifyTrainingDetail(item, detail);
+  assert.ok(verifiedDetail, 'canonical positive rendering requires an actual detail receipt');
   const withExplain = trainingFormat.applyTrainingAnnotation(item, {
     evaluationId: item.evaluationId,
     field: 'explanation',
@@ -1333,7 +1328,9 @@ test('formatter merges annotations by evaluationId+field; unavailable is display
     value: '병합된 해설',
     payloadSha256: 'ff'.repeat(32),
   });
-  const card = formatTrainingCard(withExplain);
+  assert.equal(withExplain.payloadSha256, item.payloadSha256, 'annotation cannot replace the machine digest');
+  assert.equal(JSON.stringify(item), before, 'detail verification and annotation merge cannot mutate the compact item');
+  const card = formatTrainingCard(withExplain, { verifiedDetail });
   assert.match(card.explanation, /병합된 해설/);
   const unavailable = trainingFormat.applyTrainingAnnotation(item, {
     evaluationId: item.evaluationId,
@@ -1341,8 +1338,17 @@ test('formatter merges annotations by evaluationId+field; unavailable is display
     status: 'unavailable',
     value: null,
   });
-  const unavailableCard = formatTrainingCard(unavailable);
+  const unavailableCard = formatTrainingCard(unavailable, { verifiedDetail });
   assert.match(String(unavailableCard.explanation), /unavailable/i);
+
+  const { source, detailRef, detailSha256, ...legacy } = item;
+  const legacyWithExplain = trainingFormat.applyTrainingAnnotation(legacy, {
+    evaluationId: legacy.evaluationId, field: 'explanation', status: 'ready', value: '병합된 해설',
+  });
+  assert.equal(legacyWithExplain.explanation, '병합된 해설', 'merge still retains the annotation for identity checks');
+  assert.equal(legacyWithExplain.payloadSha256, item.payloadSha256);
+  assert.equal(formatTrainingCard(legacyWithExplain).explanation, '', 'source-less legacy strategy text must stay hidden');
+  assert.equal(formatTrainingCard(legacyWithExplain, { verifiedDetail }).explanation, '', 'a receipt for another summary binding cannot elevate legacy text');
 });
 
 // --- coach rollback ---

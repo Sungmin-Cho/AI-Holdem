@@ -47,7 +47,33 @@ function effectiveStack(state, actorId) {
   return best ?? actorTotal;
 }
 
-export function snapshotDecision(state, playerId, chosenAction, { forced = false, blinds } = {}) {
+function authoritativeLegal(legal, playerId, expectedDecisionId) {
+  if (!legal || typeof legal !== 'object' || Array.isArray(legal)
+    || legal.toAct !== playerId
+    || legal.decisionId !== expectedDecisionId
+    || typeof legal.canCheck !== 'boolean'
+    || typeof legal.canRaise !== 'boolean') {
+    throwSnapshot('legal');
+  }
+  for (const key of ['callAmount', 'minRaiseTo', 'maxRaiseTo']) {
+    if (!Number.isInteger(legal[key]) || legal[key] < 0) throwSnapshot(`legal.${key}`);
+  }
+  return {
+    decisionId: legal.decisionId,
+    canCheck: legal.canCheck,
+    canRaise: legal.canRaise,
+    callAmount: legal.callAmount,
+    minRaiseTo: legal.minRaiseTo,
+    maxRaiseTo: legal.maxRaiseTo,
+  };
+}
+
+export function snapshotDecision(
+  state,
+  playerId,
+  chosenAction,
+  { forced = false, blinds, legal } = {},
+) {
   const hand = state.hand;
   if (!hand) throwSnapshot('no hand');
   const seat = state.seats.find((s) => s.playerId === playerId);
@@ -60,11 +86,11 @@ export function snapshotDecision(state, playerId, chosenAction, { forced = false
 
   const pos = positionsOf(state);
   const myBet = hand.bets[playerId] ?? 0;
-  const callRaw = Math.max(0, hand.currentBet - myBet);
-  const toCall = Math.min(callRaw, seat.stack);
+  const decisionId = `d-${state.handNo}-${hand.street}-${hand.actionIndex}`;
+  const legalEvidence = authoritativeLegal(legal, playerId, decisionId);
   const snapshot = {
-    schemaVersion: 1,
-    decisionId: `d-${state.handNo}-${hand.street}-${hand.actionIndex}`,
+    schemaVersion: 2,
+    decisionId,
     gameMode: state.config?.mode ?? 'tournament',
     handNo: state.handNo,
     actorId: playerId,
@@ -76,9 +102,9 @@ export function snapshotDecision(state, playerId, chosenAction, { forced = false
     potBefore: potBefore(hand),
     currentBet: hand.currentBet,
     actorBet: myBet,
-    toCall,
-    minRaiseTo: hand.currentBet + hand.lastRaiseSize,
-    maxRaiseTo: myBet + seat.stack,
+    toCall: legalEvidence.callAmount,
+    minRaiseTo: legalEvidence.minRaiseTo,
+    maxRaiseTo: legalEvidence.maxRaiseTo,
     effectiveStack: effectiveStack(state, playerId),
     forced: Boolean(forced),
     publicSeats: state.seats.map((entry) => ({
@@ -92,6 +118,7 @@ export function snapshotDecision(state, playerId, chosenAction, { forced = false
       out: Boolean(entry.out),
     })),
     priorActions: (hand.actions ?? []).map(safePrior),
+    legal: legalEvidence,
   };
 
   if (chosenAction != null) {

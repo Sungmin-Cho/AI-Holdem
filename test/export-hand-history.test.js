@@ -15,6 +15,12 @@ import { renderPokerStars } from '../export/pokerstars.js';
 import { assertNoSecrets } from '../export/hand-normalizer.js';
 import { HANDS } from './fixtures/hand-history/hands.js';
 import { fixedDeck } from './helpers/fixtures.js';
+import { createTrainingControl } from '../tools/training-control.js';
+import { evaluationIdOf } from '../training/contracts.js';
+import { gameEpochOf } from '../publish-contract.js';
+import { loadReferenceEvaluations } from '../export/manifest.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
+import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE = path.join(ROOT, 'engine/cli.js');
@@ -23,7 +29,7 @@ const FIXTURE_DIR = path.join(ROOT, 'test/fixtures/hand-history');
 const RENDER_OPTS = { gameId: '1', exportedAt: '2026/09/01 0:00:00 ET' };
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-hh-'));
+  return createOwnedTempDir('holdem-hh');
 }
 
 function run(bin, args) {
@@ -325,4 +331,31 @@ test('normalizeHand copies posts, uncalledReturns, and action currentBet', () =>
   assert.deepEqual(hand.posts, [{ playerId: 'p1', amount: 25, allIn: false }]);
   assert.deepEqual(hand.uncalledReturns, { user: 20 });
   assert.equal(hand.actions[0].currentBet, 50);
+});
+
+test('normalizeHand exports a reference-qualified copy and retains the source payload identity', async () => {
+  const dir = tmp();
+  const epoch = gameEpochOf('export-test');
+  const decisionId = 'd-1-preflop-0';
+  const evaluation = {
+    schemaVersion: 1,
+    evaluationId: evaluationIdOf({ gameEpoch: epoch, decisionId, providerId: CANONICAL_REFERENCE_SOURCE.id, providerVersion: CANONICAL_REFERENCE_SOURCE.version }),
+    handNo: 1, decisionId, street: 'preflop', forced: false,
+    status: 'supported',
+    grade: 'preferred',
+    source: CANONICAL_REFERENCE_SOURCE,
+    chosen: { action: 'call' },
+    recommended: [{ action: 'raise', frequency: 0.8 }],
+  };
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, { gameEpoch: epoch, owner: 'export-owner', handNo: 1, evaluations: [evaluation] });
+  const verified = loadReferenceEvaluations(dir)[1][0];
+  const sourceBytes = JSON.stringify(evaluation);
+  const hand = normalizeHand({ handNo: 1, holes: { user: ['Ah', 'Kd'] } }, {
+    evaluations: [verified],
+  });
+  assert.equal(JSON.stringify(evaluation), sourceBytes);
+  assert.equal(hand.evaluations[0].schemaVersion, 2);
+  assert.equal(hand.evaluations[0].sourcePayloadSha256, verified.payloadSha256);
+  assert.equal(hand.evaluations[0].payloadSha256, undefined);
 });

@@ -36,7 +36,7 @@ test('fold/check/call/raise/숏 올인 스냅샷이 액션 적용 전 상태를 
   st = userSnapshot(st, 'fold');
   assert.equal(st.hand.decisions.length, 1);
   const snap = st.hand.decisions[0];
-  assert.equal(snap.schemaVersion, 1);
+  assert.equal(snap.schemaVersion, 2);
   assert.equal(snap.decisionId, before.decisionId);
   assert.equal(snap.gameMode, 'tournament');
   assert.equal(snap.actorId, 'user');
@@ -104,6 +104,7 @@ test('effectiveStack: 블라인드 게시 후 100BB, 헤즈업 vs 올인, 멀티
   const hundred = setup3(5000, 5000, 5000);
   const hundredSnap = snapshotDecision(hundred, 'user', { action: 'fold', amount: 0 }, {
     blinds: blindsOf(hundred),
+    legal: legalFor(hundred),
   });
   assert.equal(hundredSnap.effectiveStack, 5000);
 
@@ -115,6 +116,7 @@ test('effectiveStack: 블라인드 게시 후 100BB, 헤즈업 vs 올인, 멀티
   assert.ok(dealtHu.hand.allIn.includes('p1'));
   const huSnap = snapshotDecision(dealtHu, 'user', { action: 'call', amount: legalFor(dealtHu).callAmount }, {
     blinds: blindsOf(dealtHu),
+    legal: legalFor(dealtHu),
   });
   assert.equal(huSnap.effectiveStack, Math.min(
     dealtHu.seats[0].stack + (dealtHu.hand.contribs.user ?? 0),
@@ -127,6 +129,7 @@ test('effectiveStack: 블라인드 게시 후 100BB, 헤즈업 vs 올인, 멀티
   multi = applyAction(multi, 'p1', 'fold').state;
   const multiSnap = snapshotDecision(multi, 'p2', { action: 'call', amount: legalFor(multi).callAmount }, {
     blinds: blindsOf(multi),
+    legal: legalFor(multi),
   });
   const totals = {};
   for (const seat of multi.seats) {
@@ -141,8 +144,9 @@ test('effectiveStack: 블라인드 게시 후 100BB, 헤즈업 vs 올인, 멀티
 test('JSON round-trip 동일, chosenAction 생략 시 공개 투영 동일', () => {
   const st = setup3(5000, 5000, 5000);
   const blinds = blindsOf(st);
-  const withAction = snapshotDecision(st, 'user', { action: 'raise', amount: 150 }, { blinds });
-  const without = snapshotDecision(st, 'user', undefined, { blinds });
+  const legal = legalFor(st);
+  const withAction = snapshotDecision(st, 'user', { action: 'raise', amount: 150 }, { blinds, legal });
+  const without = snapshotDecision(st, 'user', undefined, { blinds, legal });
   assert.deepEqual(JSON.parse(JSON.stringify(withAction)), withAction);
   assert.equal('chosenAction' in without, false);
   assert.deepEqual(publicProjection(withAction), without);
@@ -249,7 +253,7 @@ test('positionsOf 엔진 라벨 2인·6인 (positions.js)', () => {
 test('snapshotDecision: 핸드 없으면 SNAPSHOT_INVALID', () => {
   const st = createGame({ aiCount: 2 });
   assert.throws(
-    () => snapshotDecision(st, 'user', { action: 'fold', amount: 0 }, { blinds: [25, 50] }),
+    () => snapshotDecision(st, 'user', { action: 'fold', amount: 0 }, { blinds: [25, 50], legal: null }),
     { code: 'SNAPSHOT_INVALID' },
   );
 });

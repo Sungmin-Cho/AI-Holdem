@@ -25,6 +25,7 @@ import { prepareSession } from '../engine/session-catalog.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,7 +47,7 @@ const VALID_REVIEW = [
 ].join('\n\n');
 
 function tmpGame() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
+  return createOwnedTempDir('holdem-loop');
 }
 
 function readJson(filePath) {
@@ -954,6 +955,10 @@ async function setupCoachHand(t, {
   t.after(() => loop.requestStop().catch(() => {}));
   await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile });
   putAiFirst(gameDir);
+  await cliJson(gameDir, ['step', '--new-hand']);
+  await cliJson(gameDir, ['apply', 'p1', 'call']);
+  await cliJson(gameDir, ['apply', 'user', 'check']);
+  await cliJson(gameDir, ['apply', 'user', 'raise', '50']);
   return { gameDir, loop, player, upper };
 }
 
@@ -1024,12 +1029,12 @@ function putUserOnTheButton(gameDir) {
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
-// Both blinds are all-in at the post, so startHand runs the rigged board out with no
-// actions at all: exactly one completed hand and a deterministic user bust.
+// A real user call against the all-in big blind supplies decision evidence before the deterministic bust.
 async function seedFinishedGame(gameDir) {
-  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '25']);
+  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '50']);
   putUserOnTheButton(gameDir);
-  const over = await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  const over = await cliJson(gameDir, ['apply', 'user', 'call']);
   assert.equal(over.handOver, true);
   assert.equal(over.gameOver, true);
   return init;
@@ -1040,8 +1045,14 @@ function expandFinishedGameToTwoHands(gameDir) {
   const state = readJson(statePath);
   const second = structuredClone(state.lastHand);
   second.handNo = 2;
+  second.decisions = structuredClone(state.lastHand.decisions);
+  for (const decision of second.decisions) {
+    decision.handNo = 2;
+    decision.decisionId = decision.decisionId.replace('d-1-', 'd-2-');
+    decision.legal.decisionId = decision.decisionId;
+  }
   second.actions = [...(second.actions ?? []), {
-    decisionId: 'TRACE_ONLY_SENTINEL',
+    decisionId: 'FUTURE_ACTION_SENTINEL',
     playerId: 'user',
     action: 'fold',
     street: 'river',
@@ -3427,7 +3438,7 @@ test('AI 3 plus user runs the finalization cutoff through the real loop with chi
   assert.equal(sent.size > 0, true);
 });
 
-test('코치는 redacted hand·stats를 reserve 전에 캡처하고 동일 stats·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
+test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only hand·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
   const events = [];
   const coachCalls = [];
   const engineCalls = [];
@@ -3483,7 +3494,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 동일 stats
   const snapshotPath = reserve[reserve.indexOf('--snapshot-file') + 1];
   assert.equal(path.resolve(snapshotPath), path.join(gameDir, 'ui-snapshot.json'));
   const capturedStats = fs.readFileSync(statsPath, 'utf8');
-  assert.equal(upper.prompts[0].includes(capturedStats), true, 'prompt did not reuse the exact stats capture');
+  assert.equal(upper.prompts[0].includes(capturedStats), false, 'outcome-bearing stats leaked into coach prompt');
+  assert.match(upper.prompts[0], /"processStatus":"available"/);
   assert.equal(upper.starts[0].timeoutMs, 120_000);
   for (const args of coachCalls.filter((args) => ['heartbeat', 'reserve', 'bind-handle', 'accept'].includes(args[0]))) {
     assert.equal(args[args.indexOf('--owner') + 1], owner, `${args[0]} minted a per-hand owner`);
@@ -3601,8 +3613,10 @@ test('코치 1차 빈 text는 종료 확인 후 동일 입력 attempt 2로 교�
   assert.equal(upper.starts.length, 2);
   assert.equal(upper.terminations.length, 2);
   const statsRaw = fs.readFileSync(path.join(gameDir, '.coach-stats-1.json'), 'utf8');
-  assert.equal(upper.prompts[0].includes(statsRaw), true);
-  assert.equal(upper.prompts[1].includes(statsRaw), true);
+  assert.equal(upper.prompts[0].includes(statsRaw), false);
+  assert.equal(upper.prompts[1].includes(statsRaw), false);
+  assert.equal(upper.prompts[0].includes('confidence'), false);
+  assert.equal(upper.prompts[1].includes('confidence'), false);
   const reserves = coachCalls.filter((args) => args[0] === 'reserve');
   assert.deepEqual(reserves.map((args) => args[args.indexOf('--attempt') + 1]), ['1', '2']);
   const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
@@ -6746,7 +6760,7 @@ test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시�
   assert.deepEqual(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.sealed, []);
 });
 
-test('Task 7B: evaluator는 전 redacted hand와 stats만 받고 종합자는 결과와 players로 review를 원자 게시한 뒤 done 정리한다', { timeout: 40_000 }, async (t) => {
+test('Task 7B: evaluator는 decision-time process만 받고 종합자는 별도 결과와 players로 review를 원자 게시한 뒤 done 정리한다', { timeout: 40_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   expandFinishedGameToTwoHands(gameDir);
@@ -6780,15 +6794,20 @@ test('Task 7B: evaluator는 전 redacted hand와 stats만 받고 종합자는 �
     assert.equal(start.timeoutMs, 300_000);
   }
   const evaluatorPrompt = upper.evaluatorStarts[0].prompt;
-  assert.match(evaluatorPrompt, /hand 1 \(redacted\):/);
-  assert.match(evaluatorPrompt, /hand 2 \(redacted\):/);
-  assert.match(evaluatorPrompt, /TRACE_ONLY_SENTINEL/);
-  assert.match(evaluatorPrompt, /"sample":2/);
+  assert.match(evaluatorPrompt, /decision-time process input:/);
+  assert.match(evaluatorPrompt, /d-2-preflop-0/);
+  assert.equal(evaluatorPrompt.includes('FUTURE_ACTION_SENTINEL'), false);
+  assert.equal(evaluatorPrompt.includes('endStacks'), false);
+  assert.equal(evaluatorPrompt.includes('showdown'), false);
+  assert.equal(evaluatorPrompt.includes('"sample":2'), false);
   assert.equal(evaluatorPrompt.includes('PRIVATE_ARCHETYPE_SENTINEL'), false);
   assert.equal(evaluatorPrompt.includes('"result":"lose"'), false);
   const synthesizerPrompt = upper.synthesizerStarts[0].prompt;
   assert.match(synthesizerPrompt, new RegExp(evaluatorText));
   assert.match(synthesizerPrompt, /"result":"lose"/);
+  assert.match(synthesizerPrompt, /redacted outcome records/);
+  assert.match(synthesizerPrompt, /endStacks/);
+  assert.equal(synthesizerPrompt.includes('FUTURE_ACTION_SENTINEL'), false);
   assert.match(synthesizerPrompt, /PRIVATE_ARCHETYPE_SENTINEL/);
   assert.equal(synthesizerPrompt.includes('TRACE_ONLY_SENTINEL'), true, 'evaluator output was not preserved verbatim');
 
@@ -7460,4 +7479,132 @@ test('CLI parser covers the full surface and halt errors map to stable process e
   assert.equal(exitCodeFor({ code: 'REVIEW_FAILED' }), 3);
   assert.equal(exitCodeFor({ code: 'NO_PLAYER_RUNTIME' }), 4);
   assert.equal(exitCodeFor({ code: 'STOPPING' }), 5);
+});
+
+// S2 accepted-review regressions use the real capture/reserve/seal/publish lifecycle.
+function removeProcessDecisions(gameDir) {
+  const file = path.join(gameDir, 'state.json');
+  const state = readJson(file);
+  if (state.lastHand) state.lastHand.decisions = [];
+  if (state.hand) state.hand.decisions = [];
+  fs.writeFileSync(file, JSON.stringify(state));
+  for (const name of fs.existsSync(path.join(gameDir, 'hands')) ? fs.readdirSync(path.join(gameDir, 'hands')) : []) {
+    const target = path.join(gameDir, 'hands', name);
+    const record = readJson(target);
+    record.decisions = [];
+    fs.writeFileSync(target, JSON.stringify(record));
+  }
+}
+
+test('S2 unavailable-only coaching seals and publishes without any model call', { timeout: 20_000 }, async (t) => {
+  const calls = [];
+  const upper = makeCoachAdapter();
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper, loopOpts: { onCoachInvoke: (args) => calls.push({ kind: 'coach', args }) },
+  });
+  removeProcessDecisions(gameDir);
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 0, 'missing decisions must never receive ordinary coaching');
+  assert.equal(note.unavailable, true);
+  assert.equal(coachInvocations(calls, 'reserve').length, 1);
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
+  const completed = coachInvocations(calls, 'complete-unavailable');
+  assert.equal(completed.length, 1);
+  assert.notEqual(flagValue(completed[0], '--generation'), null);
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.ok(auth.publishedSeals['1']);
+  assert.deepEqual(auth.publishQueue, {});
+});
+
+test('S2 unavailable-only final review closes the existing lifecycle without evaluator or synthesizer', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  removeProcessDecisions(gameDir);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length + upper.starts.length, 0);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.match(snapshot.review, /판정 불가/);
+  assert.match(snapshot.review, /결정 시점/);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reviewGate, 'open');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('S2 coach rejects unsupported authority through both existing attempts and publishes unavailable', { timeout: 20_000 }, async (t) => {
+  const upper = makeCoachAdapter({ rounds: [
+    { raw: JSON.stringify({ handNo: 1, text: '이것이 GTO 전략입니다.' }) },
+    { raw: JSON.stringify({ handNo: 1, text: 'EV 3bb를 벌었으므로 확정 누수는 없습니다.' }) },
+  ] });
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 2);
+  assert.equal(note.unavailable, true);
+  assert.doesNotMatch(note.text, /GTO 전략|EV 3bb/);
+});
+
+test('S2 evaluator and synthesizer authority claims cannot cross retries or publication', { timeout: 30_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: 'This is the optimal choice.' }, { raw: '참고용 과정 평가입니다.' }],
+    synthesizerRounds: [{ raw: `${VALID_REVIEW}\nThis move is solver certified.` }, { raw: VALID_REVIEW }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length, 2);
+  assert.equal(upper.synthesizerStarts.length, 2);
+  assert.equal(upper.synthesizerStarts.some((row) => row.prompt.includes('the optimal choice')), false);
+  assert.doesNotMatch(readJson(path.join(gameDir, 'ui-snapshot.json')).review, /the optimal choice|solver certified/);
+});
+
+test('S2 mixed coaching sends eligible decisions only and appends a separate unavailable notice', { timeout: 20_000 }, async (t) => {
+  const upper = makeCoachAdapter();
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const stateFile = path.join(gameDir, 'state.json');
+  const state = readJson(stateFile);
+  const decision = structuredClone(state.hand.decisions.find((row) => row.actorId === 'user'));
+  decision.decisionId = 'd-1-turn-999';
+  decision.legal = null;
+  decision.chosenAction.outcome = 'UNAVAILABLE_PRIVATE_SENTINEL';
+  state.hand.decisions.push(decision);
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 1);
+  assert.doesNotMatch(upper.prompts[0], /d-1-turn-999|UNAVAILABLE_PRIVATE_SENTINEL|"processStatus":"unavailable"/);
+  assert.match(upper.prompts[0], /"processStatus":"available"/);
+  assert.match(note.text, /과정 판정 불가/);
+  assert.match(note.text, /기본 코치 응답/);
+});
+
+test('S2 mixed review sends eligible hands only and retains deterministic excluded-hand notices', { timeout: 25_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const archiveFile = path.join(gameDir, 'hands', 'hand-0001.json');
+  const archive = readJson(archiveFile);
+  archive.decisions[0].legal = null;
+  archive.endStacks = { user: 'UNAVAILABLE_OUTCOME_SENTINEL' };
+  fs.writeFileSync(archiveFile, JSON.stringify(archive));
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length, 1);
+  assert.equal(upper.synthesizerStarts.length, 1);
+  assert.doesNotMatch(upper.evaluatorStarts[0].prompt, /d-1-preflop-0|UNAVAILABLE_OUTCOME_SENTINEL|"processStatus":"unavailable"/);
+  assert.match(upper.evaluatorStarts[0].prompt, /d-2-preflop-0/);
+  assert.doesNotMatch(upper.synthesizerStarts[0].prompt, /UNAVAILABLE_OUTCOME_SENTINEL|과정 판정 불가/);
+  const review = readJson(path.join(gameDir, 'ui-snapshot.json')).review;
+  assert.match(review, /과정 판정 불가: 핸드 1/);
+  assert.match(review, /팟 오즈 확인/);
 });
