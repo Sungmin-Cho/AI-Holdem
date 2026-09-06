@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { stopOwnedProcessTree, spawnOwnedCommand } from '../test/helpers/platform.js';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertBenchmark } from './benchmark-policies.js';
 import { isDeepStrictEqual } from 'node:util';
 import { assertTapResult, verifyCleanupReceipt } from '../test/helpers/assert-tap.mjs';
@@ -814,11 +814,11 @@ function parseJsonOutput(result, code) {
 function mutationSpecs() {
   return [
     {
-      name: 'allowed-grade-acceptance', file: 'shared/reference.js',
-      search: "new Set(['preferred', 'mixed', 'low-frequency'])",
-      replace: "new Set(['preferred', 'mixed'])",
+      name: 'positive-frequency-acceptance', file: 'training/profile-aggregator.js',
+      search: '(matchReferenceAction(event.mixObservation.referenceActions, event.mixObservation.chosenAction)?.frequency ?? 0) > 0',
+      replace: '(matchReferenceAction(event.mixObservation.referenceActions, event.mixObservation.chosenAction)?.frequency ?? 0) >= 0.5',
       test: 'test/learning-metrics.test.js',
-      expected: /not ok .*mixed and low-frequency actions do not create practice candidates/m,
+      expected: /not ok .*REQ-003: positive-frequency choices stay allowed/m,
     },
     {
       name: 'tv-calibration', file: 'training/profile-aggregator.js',
@@ -877,7 +877,7 @@ function replaceExactlyOnce(file, search, replacement) {
   fs.writeFileSync(file, source.replace(search, replacement));
 }
 
-async function mutationGate({ sourcePin, outDir, cleanTree, tempRoot, tmpDir }) {
+export async function mutationGate({ sourcePin, outDir, cleanTree, tempRoot, tmpDir }) {
   const evidence = [];
   for (const [index, spec] of mutationSpecs().entries()) {
     const root = path.join(tempRoot, `mutation-${index}`);
@@ -889,7 +889,8 @@ async function mutationGate({ sourcePin, outDir, cleanTree, tempRoot, tmpDir }) 
       timeoutMs: 30_000,
       resultFile: path.join(outDir, 'mutations', `${spec.name}-syntax.json`),
     });
-    const result = await runProcess(process.execPath, ['--test', '--test-reporter=tap', '--', spec.test], {
+    const cleanupBootstrap = pathToFileURL(fs.realpathSync(path.join(root, 'test/helpers/owned-fixtures.mjs'))).href;
+    const result = await runProcess(process.execPath, ['--import', cleanupBootstrap, '--test', '--test-reporter=tap', '--', spec.test], {
       cwd: root,
       tmpDir,
       timeoutMs: 120_000,
