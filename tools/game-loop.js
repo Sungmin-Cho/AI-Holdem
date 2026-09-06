@@ -51,6 +51,7 @@ import {
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from './training-stores.js';
+import { ensureStudyService } from './study-service.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -170,10 +171,11 @@ function readStrictServerLock(gameDir) {
   }
 }
 
-function integerValue(value, flag) {
-  if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 양의 정수여야 합니다.`);
+function integerValue(value, flag, minimum = 1) {
+  const label = minimum === 0 ? '0 이상의 정수' : '양의 정수';
+  if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) throw codedError('USAGE', `${flag}는 양의 정수여야 합니다.`);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
   return parsed;
 }
 
@@ -191,8 +193,17 @@ export function engineInitFlags(args = {}) {
 
 export function applyModeDefaults(args) {
   const next = { ...args };
+  const freshStore = next.storeDir !== undefined && !next.resume;
+  if (freshStore && next.mode === undefined && next.stack === undefined && next.levelEvery === undefined) {
+    next.mode = 'cash-training';
+  }
   if (!next.resume && next.mode === 'cash-training' && next.ai === undefined) {
     next.ai = 5;
+  }
+  if (freshStore && next.mode === 'cash-training') {
+    if (next.stack === undefined && next.stackBb === undefined) next.stackBb = 100;
+    if (next.hands === undefined) next.hands = 20;
+    if (next.opponentRuntime === undefined) next.opponentRuntime = 'policy';
   }
   return next;
 }
@@ -205,9 +216,9 @@ export function gtoEvalNotice(config = {}) {
   const badStack = !Number.isFinite(stackBb) || Math.abs(stackBb - 100) > 1;
   if (!badSeats && !badStack) return null;
   const parts = [];
-  if (badSeats) parts.push(`${Number.isFinite(seats) ? seats : '?'}인`);
-  if (badStack) parts.push(`startStackBb=${stackBb ?? '없음'}`);
-  return `GTO 프리플랍 평가는 6-max 100BB만 지원합니다 (현재 ${parts.join(', ')}).`;
+  if (badSeats) parts.push(Number.isFinite(seats) ? `${seats}인` : '좌석 수 확인 불가');
+  if (badStack) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
+  return `휴리스틱 프리플롭 기준표 비교는 6인·100BB 조건의 지원 스팟에서만 제공됩니다 (현재 ${parts.join(', ')}).`;
 }
 
 export function parseGameLoopArgs(argv) {
@@ -245,6 +256,7 @@ export function parseGameLoopArgs(argv) {
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
     ['--solver', 'solverAdapterId'],
+    ['--port', 'port'],
   ]);
   let sawGameDir = false;
 
@@ -262,8 +274,8 @@ export function parseGameLoopArgs(argv) {
     index += 1;
     if (valueName === 'gameDir') sawGameDir = true;
     if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery'
-      || valueName === 'stackBb' || valueName === 'hands') {
-      parsed[valueName] = integerValue(value, arg);
+      || valueName === 'stackBb' || valueName === 'hands' || valueName === 'port') {
+      parsed[valueName] = integerValue(value, arg, valueName === 'port' ? 0 : 1);
     } else if (valueName === 'gameDir' || valueName === 'storeDir' || valueName === 'practiceFocusFile') {
       parsed[valueName] = path.resolve(value);
     } else {
@@ -272,6 +284,9 @@ export function parseGameLoopArgs(argv) {
   }
   if (parsed.storeDir !== undefined && sawGameDir) {
     throw codedError('USAGE', '--store-dir와 --game-dir는 함께 사용할 수 없습니다.');
+  }
+  if (parsed.port !== undefined && (parsed.port < 0 || parsed.port > 65535)) {
+    throw codedError('USAGE', '--port는 0..65535 정수여야 합니다.');
   }
   if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
     throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
@@ -408,6 +423,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
   const storeDir = opts.storeDir ?? null;
+  // The store launcher owns the store loop lock. Legacy API callers may use a
+  // separate profile store while keeping their game-dir ownership unchanged.
+  const ownsStore = storeDir !== null && path.resolve(storeDir) === lockRoot;
   // 플래그는 새 solve pending 생성만 게이트한다. 이미 pending에 적힌 adapterId는
   // 플래그 없이도 resume에서 재개된다.
   const solverAdapterId = typeof opts.solverAdapterId === 'string' && opts.solverAdapterId
@@ -453,6 +471,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
+  let studyPromise = null;
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
   let finalizeResultWaitCutoffNs = null;
@@ -1000,6 +1019,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ) {
         throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 응답이 relay snapshot 계약과 다릅니다.');
       }
+      return snapshot;
     } catch (error) {
       if (error.code === 'STOPPING') throw error;
       if (error.code === 'SERVER_AUTH_FAILED') throw error;
@@ -1018,8 +1038,41 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!ownsListener) {
       throw codedError('SERVER_LISTENER_MISMATCH', 'lock.serverPid가 lock.port listener를 소유하지 않습니다.');
     }
-    await assertAuthenticatedServer(port, sessionToken, { stopAware });
+    const snapshot = await assertAuthenticatedServer(port, sessionToken, { stopAware });
     if (stopAware) assertNotStopping();
+    return snapshot;
+  };
+
+  const ensureStudyForOwner = async () => {
+    if (!ownsStore) return null;
+    assertNotStopping();
+    if (!lockHandle) throw codedError('PARENT_IDENTITY_MISMATCH', 'store loop ownership가 없습니다.');
+    const pending = ensureStudyService(storeDir, {
+      parentIdentity: { pid: lockHandle.pid, startTime: lockHandle.startTime },
+    });
+    studyPromise = pending;
+    try {
+      const service = await pending;
+      assertNotStopping();
+      return service;
+    } finally {
+      if (studyPromise === pending) studyPromise = null;
+    }
+  };
+
+  const matchesStoreRelay = async ({ port, sessionToken }, snapshot, study, { stopAware }) => {
+    if (!study) return true;
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { 'x-session-token': sessionToken },
+      signal: AbortSignal.timeout(assertAndBoundFinalizationMs(500)),
+    });
+    if (stopAware) assertNotStopping();
+    let health = null;
+    try { health = await response.json(); } catch { /* incompatible owned relay */ }
+    if (stopAware) assertNotStopping();
+    return response.ok && health?.ok === true && health.protocolVersion === 2
+      && health.capabilities?.actionReceipts === true && health.capabilities?.studyLink === true
+      && snapshot.studyUrl === study.studyUrl;
   };
 
   const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
@@ -1224,6 +1277,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!Number.isSafeInteger(desiredPort) || desiredPort < 0 || desiredPort > 65_535) {
       throw codedError('BAD_SERVER_PORT', `서버 재기동 port가 올바르지 않습니다: ${desiredPort}`);
     }
+    const study = ownsStore ? await ensureStudyForOwner() : null;
+    if (recovery) d9Checkpoint('after-study-ensure');
     const ownsPin = providedPin === null;
     let pin = providedPin ?? openServerLockPin();
     try {
@@ -1248,17 +1303,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
           }
-          await assertServerBinding(confirmed, { stopAware });
+          const snapshot = await assertServerBinding(confirmed, { stopAware });
           if (stopAware) assertNotStopping();
           if (processStartTime(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
+          }
+          const compatible = study ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
+          if (study) {
+            assertPinnedServerLock(pin);
+            if (processStartTime(existing.serverPid) !== startTime) {
+              throw codedError('SERVER_IDENTITY_CHANGED', 'store relay identity가 capability 검증 중 바뀌었습니다.');
+            }
           }
           serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
           serverPid = existing.serverPid;
           serverIdentity = { pid: existing.serverPid, startTime };
           serverAdopted = serverChild === null;
           serverStartupIdentityMissing = false;
-          return existing.port;
+          if (compatible) return existing.port;
+          // Ownership/authentication is already proved. Retire only this pinned
+          // relay when it lacks receipts or the current service capability URL.
+          await stopServer({ boundToFinalizationDeadline: recovery });
+          if (recovery) d9Checkpoint('after-incompatible-relay-stop');
+          else if (stopAware) assertNotStopping();
+          log('server-capability-replaced', { pid: existing.serverPid });
         }
 
         const confirmed = assertPinnedServerLock(pin);
@@ -1277,6 +1345,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--game-dir', root,
         '--port', String(desiredPort),
         '--token', sessionToken,
+        ...(study ? ['--study-url', study.studyUrl] : []),
       ];
       const child = spawn(process.execPath, argv, {
         cwd: ROOT,
@@ -1326,6 +1395,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             || serverIdentity.startTime !== startTime
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 startup 중 바뀌었습니다.');
+          }
+          if (study) {
+            const startupPin = openServerLockPin();
+            try {
+              const pinned = assertPinnedServerLock(startupPin);
+              if (pinned.serverPid !== child.pid || pinned.port !== lock.port || pinned.sessionToken !== sessionToken) {
+                throw codedError('SERVER_LOCK_REPLACED', '새 store relay의 lock identity가 바뀌었습니다.');
+              }
+              const snapshot = await assertServerBinding(pinned, { stopAware });
+              if (!await matchesStoreRelay(pinned, snapshot, study, { stopAware })) {
+                throw codedError('SERVER_CAPABILITY_MISMATCH', '새 store relay의 학습 capability 연결이 올바르지 않습니다.');
+              }
+              assertPinnedServerLock(startupPin);
+              if (processStartTime(lock.serverPid) !== startTime) {
+                throw codedError('SERVER_IDENTITY_CHANGED', '새 store relay의 identity가 검증 중 바뀌었습니다.');
+              }
+            } finally {
+              closeServerLockPin(startupPin);
+            }
           }
           return lock.port;
         }
@@ -3932,23 +4020,48 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
   ].join('\n');
 
-  const machineReview = ({ statsRaw, players, result }) => [
-    '## 내 성향 통계',
-    statsRaw || 'unavailable',
-    '## 결정적 핸드 2~3개 리플레이',
-    'machine-only: LLM review unavailable',
-    '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
-    JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
-    JSON.stringify(exploitReveal(players)),
-    `result: ${result}`,
-    '## 다음 게임에서 연습할 것',
-    'machine-only fallback',
-  ].join('\n');
+  const machineReview = ({ statsRaw, players, result }) => {
+    const stats = JSON.parse(statsRaw).perPlayer;
+    const user = stats?.user;
+    const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(value) : '확인 불가';
+    const percent = (value, sample) => Number.isFinite(value) && value >= 0 && value <= 1 && sample > 0
+      ? `${(100 * value).toFixed(1)}%` : '표본 없음';
+    const chips = Number.isSafeInteger(user?.net)
+      ? `${user.net > 0 ? '+' : ''}${user.net}칩` : '확인 불가';
+    const labels = { TAG: '신중한 공격형 (TAG)', LAG: '폭넓은 공격형 (LAG)', Nit: '매우 신중한 유형 (Nit)',
+      CallingStation: '콜을 선호하는 유형 (CallingStation)', Maniac: '매우 공격적인 유형 (Maniac)',
+      Trickster: '변화를 섞는 유형 (Trickster)' };
+    const names = sanitizePlayersForReview(players, { gameOver: true })
+      .filter((player) => player.playerId !== 'user').map((player) => {
+        const observed = stats?.[player.playerId];
+        const name = String(player.name ?? '이름 미확인').replace(/[\\`*_[\]<>|\r\n]/g, ' ');
+        return `- ${name} — 설정된 성향: ${labels[player.archetype] ?? '확인 불가'}. `
+          + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, observed?.sample)}, `
+          + `프리플롭 레이즈 ${percent(observed?.pfr, observed?.sample)}.`;
+      });
+    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배', loss: '패배' }[result] ?? '종료';
+    return [
+      '## 내 성향 통계', '',
+      `- 플레이한 핸드: ${count(user?.sample)}핸드`,
+      `- 자발적 프리플롭 참여: ${percent(user?.vpip, user?.sample)}`,
+      `- 프리플롭 레이즈: ${percent(user?.pfr, user?.sample)}`,
+      `- 칩 증감: ${chips}`,
+      `- 게임 결과: ${resultText}`, '',
+      '이 값은 이번 세션의 관찰 기록입니다. 실력이나 전략의 우열을 판정하지 않습니다.', '',
+      '## 결정적 핸드 2~3개 리플레이', '',
+      'LLM 설명을 제공할 수 없습니다. 결정적 핸드 선정과 과정 해설은 생성하지 않았습니다. 핸드별 기록과 지원 범위 내 휴리스틱 기준표 비교를 확인하세요.', '',
+      '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '',
+      '설정된 성향은 게임 시작 시의 정책 설정입니다. 아래 관찰 기록만으로 그 성향이 입증되거나 상대 읽기가 정확했다고 판단할 수는 없습니다.',
+      ...(names.length ? names : ['AI 성향 기록을 확인할 수 없습니다.']), '',
+      '## 다음 게임에서 연습할 것', '',
+      '이 자동 요약만으로는 개별 연습 목표를 확정할 근거가 부족합니다. 학습 페이지에서 지원되는 결정과 제외 이유를 먼저 확인하세요.',
+    ].join('\n');
+  };
 
   const appendTrainingPendingToReview = (text) => {
     if (!trainingOn) return text;
     const pending = trainingAggregate(root).pending ?? 0;
-    return `${text}\n\n학습 평가 pending: ${pending}`;
+    return `${text}\n\n미완료 학습 평가: ${pending}건`;
   };
 
   const generateReview = async ({ completed, statsRaw }) => {
@@ -4629,6 +4742,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (resolving) {
         try { await resolving; } catch { /* bootstrap/resume 호출자가 원래 오류를 관찰한다 */ }
       }
+      if (studyPromise) {
+        // Study has an independent lifetime, but parent attachment must settle
+        // before this process releases the store-loop ownership it attests.
+        try { await studyPromise; } catch { /* caller observes the startup error */ }
+      }
       // resolver settlement 뒤에는 더 이상 새 adapter가 생기지 않는다. 전부 settle한
       // 뒤에만 loop lock을 풀어 probe child가 ownership 밖으로 탈출하지 못하게 한다.
       for (const adapter of adapters) startAdapterDisposal(adapter);
@@ -4851,6 +4969,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return writeLoopState({ port });
     }
     if (phase === 'done') {
+      await ensureStudyForOwner();
       const liveLock = readServerLock();
       if (liveLock && processAlive(liveLock.serverPid)) {
         const port = await ensureServer(engineState.sessionToken, { port: liveLock.port });
@@ -5298,6 +5417,9 @@ async function main() {
     });
     if (args.storeDir !== undefined) {
       if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
+      // main runs only in the store CLI child. Restrict newly created paths
+      // before the catalog/loop lock; never chmod existing caller directories.
+      process.umask(0o077);
       ensureSessionStore(args.storeDir);
       let storeLockHandle;
       try {
@@ -5316,6 +5438,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              port: args.port,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5338,6 +5461,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              port: args.port,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5354,7 +5478,7 @@ async function main() {
       loop = createGameLoop({
         gameDir: args.gameDir,
         resolver,
-        opts: { opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
+        opts: { port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
     process.once('SIGTERM', () => {

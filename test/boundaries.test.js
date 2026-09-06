@@ -487,3 +487,10 @@ test('study service reaches engine only through named ownership primitives', () 
   }
   assert.deepEqual(edgesFrom('server').filter(edge => edge.to === 'tools/study-service.js'), []);
 });
+
+test('store game loop attaches study through its verified lifetime helper', () => {
+  const edges = staticGraph().edges.filter(edge => edge.from === 'tools/game-loop.js' && edge.to === 'tools/study-service.js');
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].dynamic, false);
+  assert.deepEqual(edges[0].bindings, ['ensureStudyService']);
+});
