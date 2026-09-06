@@ -1,3 +1,5 @@
+import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
+
 /**
  * An evaluationId's machine digest is set-once (R3/R5). A later publish carrying
  * a different digest for the same id is a conflict, not an update, so the card
@@ -29,6 +31,13 @@ const ACTION = Object.freeze({
   raise: '레이즈',
 });
 
+const GRADE = Object.freeze({
+  preferred: '기준표 주력 선택',
+  mixed: '기준표 허용 선택',
+  'low-frequency': '기준표 저빈도 허용 선택',
+  'off-policy': '기준표와 다른 선택',
+});
+
 function actionLabel(action) {
   return ACTION[action] ?? action ?? '—';
 }
@@ -48,7 +57,9 @@ export function applyTrainingAnnotation(item, annotation) {
 }
 
 export function formatTrainingCard(item) {
-  const rec = Array.isArray(item.recommended) ? item.recommended[0] : null;
+  const quality = referenceQuality(item.source);
+  const sourceEligible = quality.quality === 'heuristic-reference';
+  const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
   const title = [
@@ -59,13 +70,14 @@ export function formatTrainingCard(item) {
   const card = {
     title,
     choice: `내 선택: ${actionLabel(item.chosen?.action)}`,
-    recommendation: rec ? `추천: ${actionLabel(rec.action)}${recSize}${recFreq}` : '',
-    grade: item.status === 'supported' ? (item.grade ?? null) : null,
+    recommendation: rec ? `기준표 참고: ${actionLabel(rec.action)}${recSize}${recFreq}` : '',
+    grade: item.status === 'supported' && sourceEligible ? (item.grade ?? null) : null,
+    gradeLabel: item.status === 'supported' && sourceEligible ? (GRADE[item.grade] ?? '') : '',
     forced: Boolean(item.forced),
     note: '',
     explanation: item.explanationStatus === 'unavailable'
       ? 'unavailable'
-      : (item.explanation ?? ''),
+      : (referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     status: item.status ?? null,
     exploit: '',
@@ -80,7 +92,11 @@ export function formatTrainingCard(item) {
   }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {
-    card.note = item.reason ? `지원되지 않는 스팟 (${item.reason})` : '지원되지 않는 스팟';
+    card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);
+  } else if (!sourceEligible) {
+    card.note = formatReferenceReason(quality.reason);
+  } else if (!referenceClaimAllowed(item.explanation)) {
+    card.note = '근거 범위를 벗어난 표현을 제외했습니다.';
   }
   if (['flop', 'turn', 'river'].includes(item.street)
     || (typeof item.spotKey === 'string' && item.spotKey.startsWith('postflop-'))) {

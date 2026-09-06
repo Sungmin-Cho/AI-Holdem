@@ -1,8 +1,10 @@
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
+import { actionKey, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
+import { validateStudyRun } from '../shared/study-contract.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
-export const PROFILE_SCHEMA_VERSION = 3;
+export const PROFILE_SCHEMA_VERSION = 4;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -12,68 +14,127 @@ function coded(code, message) {
 
 function emptyOverall() {
   return {
-    evaluatedDecisions: 0,
-    supportedDecisions: 0,
-    unsupportedDecisions: 0,
-    forfeits: 0,
-    preferred: 0,
-    offPolicy: 0,
-    evLossBb: null,
-    evLossBbPer100: null,
+    evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0,
+    forfeits: 0, preferred: 0, offPolicy: 0, allowed: 0,
+    allowedActionRate: 0, modalActionRate: 0, sampleWeight: 0,
+    evLossBb: null, evLossBbPer100: null,
+  };
+}
+
+function emptyCalibration() {
+  return {
+    distributionAgreement: null, eligibleObservations: 0, totalObservations: 0,
+    reason: 'legacy-evidence-unavailable',
+  };
+}
+
+function emptyProjection() {
+  return {
+    overall: emptyOverall(), skills: {}, leaks: [], candidates: [], coverageGaps: [],
+    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0 },
+    calibration: emptyCalibration(), mixGroups: {}, studyRuns: {}, unverifiedEvidence: [],
   };
 }
 
 export function emptyProfile() {
-  return {
+  return projectActive({
     schemaVersion: PROFILE_SCHEMA_VERSION,
     updatedAt: null,
     processed: {},
-    overall: emptyOverall(),
-    skills: {},
-    leaks: [],
-    coverageGaps: [],
+    game: emptyProjection(),
+    practice: emptyProjection(),
     segments: {},
     activeSegmentId: DEFAULT_ACTIVE_SEGMENT_ID,
     hasGameEvents: false,
-  };
+  });
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isSafeMapKey(key) {
+  return typeof key === 'string' && key.length > 0
+    && !['__proto__', 'constructor', 'prototype'].includes(key);
+}
+
+export function assertProfileEvent(event) {
+  if (!event || (event.schemaVersion !== undefined
+      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 4))) {
+    throw coded('PROFILE_EVENT_INVALID', 'profile event schema is invalid');
+  }
+  if (typeof event.evaluationId !== 'string' || event.evaluationId.length === 0) {
+    throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 없습니다.');
+  }
+  if (typeof event.payloadSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(event.payloadSha256)) {
+    throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
+  }
+  if (!isSafeMapKey(event.skillKey)) throw coded('PROFILE_EVENT_INVALID', 'skillKey가 없습니다.');
+  if (!isSafeMapKey(event.providerId) || typeof event.providerVersion !== 'string' || !event.providerVersion) {
+    throw coded('PROFILE_EVENT_INVALID', 'provider가 없습니다.');
+  }
+  if (event.origin !== undefined && !['game', 'practice', 'drill', 'retest'].includes(event.origin)) {
+    throw coded('PROFILE_EVENT_INVALID', 'origin is invalid');
+  }
+  if (!['supported', 'unsupported'].includes(event.status)
+    || typeof event.forced !== 'boolean'
+    || (event.evLossBb !== null && event.evLossBb !== undefined
+      && (typeof event.evLossBb !== 'number' || !Number.isFinite(event.evLossBb)))) {
+    throw coded('PROFILE_EVENT_INVALID', 'profile event result fields are invalid');
+  }
+  if (event.mixObservation !== undefined) validateMixObservation(event.mixObservation);
+  if (event.mixObservation !== undefined
+    && (event.mixObservation.sourceIdentity.id !== event.providerId
+      || event.mixObservation.sourceIdentity.version !== event.providerVersion)) {
+    throw coded('PROFILE_EVENT_INVALID', 'mix source identity does not match the event provider');
+  }
+  if (event.studyRun !== undefined) validateStudyRun(event.studyRun);
+  return event;
+}
+
+function originOf(event) {
+  return ['practice', 'drill', 'retest'].includes(event.origin) ? 'practice' : 'game';
+}
+
+function shouldAggregate(event) {
+  return Boolean(event.mixObservation
+    && referenceQuality(event.mixObservation.sourceIdentity).quality === 'heuristic-reference');
 }
 
 function bumpEv(current, add) {
-  if (add == null) return current;
-  return (current ?? 0) + add;
+  return add == null ? current : (current ?? 0) + add;
 }
 
 function per100(loss, supported) {
-  if (loss == null || !supported) return null;
-  return (loss / supported) * 100;
+  return loss == null || !supported ? null : (loss / supported) * 100;
 }
 
 function skillRow() {
   return {
-    opportunities: 0,
-    supported: 0,
-    preferred: 0,
-    offPolicy: 0,
-    preferredActionRate: 0,
-    evLossBb: null,
-    evLossBbPer100: null,
-    mastery: 0,
-    confidence: 0,
+    opportunities: 0, supported: 0, preferred: 0, offPolicy: 0, allowed: 0,
+    preferredActionRate: 0, allowedActionRate: 0, modalActionRate: 0, sampleWeight: 0,
+    evLossBb: null, evLossBbPer100: null, mastery: 0, confidence: 0,
   };
 }
 
+function finishRates(row, supportedKey = 'supported') {
+  const supported = row[supportedKey] ?? 0;
+  row.allowedActionRate = supported ? (row.allowed ?? 0) / supported : 0;
+  row.modalActionRate = supported ? (row.preferred ?? 0) / supported : 0;
+  row.preferredActionRate = row.modalActionRate;
+  row.sampleWeight = Math.min(1, supported / 20);
+}
+
 function finishSkill(skill) {
-  skill.preferredActionRate = skill.supported ? skill.preferred / skill.supported : 0;
+  finishRates(skill);
   skill.confidence = confidenceOf(skill.opportunities);
-  skill.mastery = masteryOf({
-    preferredActionRate: skill.preferredActionRate,
-    opportunities: skill.opportunities,
-  });
+  skill.mastery = masteryOf({ preferredActionRate: skill.modalActionRate, opportunities: skill.opportunities });
   skill.evLossBbPer100 = per100(skill.evLossBb, skill.supported);
   return skill;
 }
 
 function finishOverall(overall) {
+  finishRates(overall, 'supportedDecisions');
   overall.evLossBbPer100 = per100(overall.evLossBb, overall.supportedDecisions);
   return overall;
 }
@@ -88,34 +149,19 @@ function applyToOverall(overall, event) {
     overall.supportedDecisions += 1;
     if (event.grade === 'preferred') overall.preferred += 1;
     if (event.grade === 'off-policy') overall.offPolicy += 1;
+    if (allowedChoice(event)) overall.allowed += 1;
     overall.evLossBb = bumpEv(overall.evLossBb, event.evLossBb);
   } else {
     overall.unsupportedDecisions += 1;
   }
 }
 
-function isSafeMapKey(key) {
-  return typeof key === 'string'
-    && key.length > 0
-    && key !== '__proto__'
-    && key !== 'constructor'
-    && key !== 'prototype';
-}
-
-export function assertProfileEvent(event) {
-  if (typeof event?.evaluationId !== 'string' || event.evaluationId.length === 0) {
-    throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 없습니다.');
-  }
-  if (typeof event?.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
-    throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
-  }
-  if (!isSafeMapKey(event.skillKey)) {
-    throw coded('PROFILE_EVENT_INVALID', 'skillKey가 없습니다.');
-  }
-  if (!isSafeMapKey(event.providerId) || typeof event.providerVersion !== 'string'
-    || event.providerVersion.length === 0) {
-    throw coded('PROFILE_EVENT_INVALID', 'provider가 없습니다.');
-  }
+function allowedChoice(event) {
+  if (!event.mixObservation) return isAllowedGrade(event.grade);
+  if (referenceQuality(event.mixObservation.sourceIdentity).quality !== 'heuristic-reference') return false;
+  const chosen = actionKey(event.mixObservation.chosenAction);
+  return event.mixObservation.referenceActions
+    .some((row) => actionKey(row) === chosen && row.frequency > 0);
 }
 
 function applyToSkill(skills, event) {
@@ -126,96 +172,175 @@ function applyToSkill(skills, event) {
     row.supported += 1;
     if (event.grade === 'preferred') row.preferred += 1;
     if (event.grade === 'off-policy') row.offPolicy += 1;
+    if (allowedChoice(event)) row.allowed += 1;
     row.evLossBb = bumpEv(row.evLossBb, event.evLossBb);
   }
   skills[event.skillKey] = finishSkill(row);
+}
+
+function vectorKey(observation) {
+  return observation.referenceActions.map((row) => `${actionKey(row)}=${row.frequency}`).sort().join(',');
+}
+
+function mixGroupKey(observation) {
+  const source = observation.sourceIdentity;
+  return JSON.stringify([
+    source.id, source.version, source.contentSha256,
+    observation.spotKey, observation.handClass, vectorKey(observation),
+  ]);
+}
+
+function applyMixObservation(projection, raw) {
+  const observation = validateMixObservation(raw);
+  if (referenceQuality(observation.sourceIdentity).quality !== 'heuristic-reference') return;
+  const key = mixGroupKey(observation);
+  const group = projection.mixGroups[key] ?? {
+    n: 0,
+    expected: Object.fromEntries(observation.referenceActions.map((row) => [actionKey(row), row.frequency])),
+    observed: {},
+  };
+  const chosen = actionKey(observation.chosenAction);
+  group.n += 1;
+  group.observed[chosen] = (group.observed[chosen] ?? 0) + 1;
+  projection.mixGroups[key] = group;
+}
+
+function finishCalibration(projection) {
+  let weighted = 0;
+  let eligible = 0;
+  let total = 0;
+  for (const group of Object.values(projection.mixGroups ?? {})) {
+    total += group.n;
+    if (group.n < 20) continue;
+    const keys = new Set([...Object.keys(group.expected), ...Object.keys(group.observed)]);
+    let difference = 0;
+    for (const key of keys) {
+      difference += Math.abs((group.observed[key] ?? 0) / group.n - (group.expected[key] ?? 0));
+    }
+    const agreement = Math.round(Math.max(0, 1 - 0.5 * difference) * 1e12) / 1e12;
+    weighted += agreement * group.n;
+    eligible += group.n;
+  }
+  projection.calibration = {
+    distributionAgreement: eligible ? weighted / eligible : null,
+    eligibleObservations: eligible,
+    totalObservations: total,
+    reason: eligible ? null : (total ? 'insufficient-observations' : 'legacy-evidence-unavailable'),
+  };
+}
+
+function finishProjection(projection) {
+  projection.overall = finishOverall(projection.overall ?? emptyOverall());
+  for (const [key, skill] of Object.entries(projection.skills ?? {})) projection.skills[key] = finishSkill(skill);
+  const detected = detectLeaks(projection.skills);
+  projection.leaks = detected.leaks;
+  projection.candidates = detected.candidates;
+  projection.coverageGaps = detected.coverageGaps;
+  projection.coverage = {
+    evaluatedDecisions: projection.overall.evaluatedDecisions,
+    supportedDecisions: projection.overall.supportedDecisions,
+    unsupportedDecisions: projection.overall.unsupportedDecisions,
+    supportedRate: projection.overall.evaluatedDecisions
+      ? projection.overall.supportedDecisions / projection.overall.evaluatedDecisions : 0,
+    unverifiedDecisions: projection.unverifiedEvidence?.length ?? 0,
+  };
+  finishCalibration(projection);
+  return projection;
 }
 
 function segmentKey(event) {
   return `${event.providerId}@${event.providerVersion}`;
 }
 
-function clone(profile) {
-  return JSON.parse(JSON.stringify(profile));
-}
-
-function emptySegment() {
-  return { overall: emptyOverall(), skills: {} };
-}
-
-function normalizeSegment(prev) {
-  if (!prev) return emptySegment();
-  if (prev.overall && prev.skills && typeof prev.skills === 'object' && !Array.isArray(prev.skills)) {
-    return { overall: prev.overall, skills: prev.skills };
+function applyToSegment(next, event, origin, finalize = true) {
+  const key = segmentKey(event);
+  const segment = next.segments[key] ?? { game: emptyProjection(), practice: emptyProjection() };
+  segment.game = segment.game ?? emptyProjection();
+  segment.practice = segment.practice ?? emptyProjection();
+  applyToOverall(segment[origin].overall, event);
+  applyToSkill(segment[origin].skills, event);
+  if (event.mixObservation && event.status === 'supported' && !event.forced) {
+    applyMixObservation(segment[origin], event.mixObservation);
   }
-  const overall = emptyOverall();
-  for (const key of Object.keys(overall)) {
-    if (prev[key] !== undefined) overall[key] = prev[key];
-  }
-  return { overall, skills: {} };
-}
-
-function isDrill(event) {
-  return event.origin === 'drill';
-}
-
-function hasGameEventsOf(profile) {
-  if (Object.prototype.hasOwnProperty.call(profile, 'hasGameEvents')) {
-    return Boolean(profile.hasGameEvents);
-  }
-  return Object.keys(profile.processed ?? {}).length > 0;
+  if (finalize) finishProjection(segment[origin]);
+  const active = segment.game.overall.evaluatedDecisions ? segment.game : segment.practice;
+  segment.overall = clone(active.overall);
+  segment.skills = clone(active.skills);
+  next.segments[key] = segment;
 }
 
 export function projectActive(profile) {
-  const key = profile.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
-  const seg = profile.segments?.[key];
-  if (!seg) {
-    profile.overall = emptyOverall();
-    profile.skills = {};
-    profile.leaks = [];
-    profile.coverageGaps = [];
-    return profile;
-  }
-  const normalized = normalizeSegment(seg);
-  profile.overall = finishOverall({ ...normalized.overall });
-  profile.skills = { ...normalized.skills };
-  const detected = detectLeaks(profile.skills);
-  profile.leaks = detected.leaks;
-  profile.coverageGaps = detected.coverageGaps;
+  profile.game = finishProjection(profile.game ?? emptyProjection());
+  profile.practice = finishProjection(profile.practice ?? emptyProjection());
+  const segment = profile.segments?.[profile.activeSegmentId];
+  const active = segment
+    ? (profile.hasGameEvents ? segment.game : segment.practice)
+    : (profile.hasGameEvents ? profile.game : profile.practice);
+  profile.overall = clone(active.overall);
+  profile.skills = clone(active.skills);
+  profile.leaks = clone(active.leaks);
+  profile.candidates = clone(active.candidates);
+  profile.coverageGaps = clone(active.coverageGaps);
+  profile.coverage = clone(active.coverage);
+  profile.calibration = clone(active.calibration);
   return profile;
 }
 
-export function applyEvent(profile, event) {
+function applyEventMutable(next, event, finalize = true) {
   assertProfileEvent(event);
-  const next = clone(profile);
   next.schemaVersion = PROFILE_SCHEMA_VERSION;
+  next.processed = next.processed ?? {};
+  next.game = next.game ?? emptyProjection();
+  next.practice = next.practice ?? emptyProjection();
   next.segments = next.segments ?? {};
-  next.hasGameEvents = hasGameEventsOf(next);
-  next.activeSegmentId = next.activeSegmentId ?? DEFAULT_ACTIVE_SEGMENT_ID;
   const seen = next.processed[event.evaluationId];
-  if (seen === event.payloadSha256) return projectActive(next);
+  if (seen === event.payloadSha256) return finalize ? projectActive(next) : next;
   if (seen && seen !== event.payloadSha256) {
     throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
   }
   next.processed[event.evaluationId] = event.payloadSha256;
-  const key = segmentKey(event);
-  const seg = normalizeSegment(next.segments[key]);
-  applyToOverall(seg.overall, event);
-  applyToSkill(seg.skills, event);
-  seg.overall = finishOverall(seg.overall);
-  next.segments[key] = seg;
-  if (!isDrill(event)) {
-    next.hasGameEvents = true;
-    next.activeSegmentId = key;
-  } else if (!next.hasGameEvents) {
-    next.activeSegmentId = key;
+  const origin = originOf(event);
+  if (shouldAggregate(event)) {
+    applyToOverall(next[origin].overall, event);
+    applyToSkill(next[origin].skills, event);
+    if (event.mixObservation && event.status === 'supported' && !event.forced) {
+      applyMixObservation(next[origin], event.mixObservation);
+    }
+    if (event.studyRun && event.status === 'supported' && !event.forced) {
+      next[origin].studyRuns[event.studyRun.id] = validateStudyRun(event.studyRun);
+    }
+    applyToSegment(next, event, origin, finalize);
+    if (origin === 'game') {
+      next.hasGameEvents = true;
+      next.activeSegmentId = segmentKey(event);
+    } else if (!next.hasGameEvents) next.activeSegmentId = segmentKey(event);
+  } else {
+    next[origin].unverifiedEvidence = next[origin].unverifiedEvidence ?? [];
+    next[origin].unverifiedEvidence.push({
+      evaluationId: event.evaluationId,
+      payloadSha256: event.payloadSha256,
+      providerId: event.providerId,
+      providerVersion: event.providerVersion,
+      reason: event.providerId === 'fake-solver' ? 'SYNTHETIC_SOURCE' : 'SOURCE_IDENTITY_UNVERIFIED',
+    });
   }
   next.updatedAt = event.appliedAt ?? next.updatedAt;
-  return projectActive(next);
+  return finalize ? projectActive(next) : next;
+}
+
+export function applyEvent(profile, event) {
+  return applyEventMutable(clone(profile), event, true);
 }
 
 export function rebuildFromEvents(events) {
   let profile = emptyProfile();
-  for (const event of events) profile = applyEvent(profile, event);
-  return profile;
+  for (const event of events) profile = applyEventMutable(profile, event, false);
+  for (const segment of Object.values(profile.segments)) {
+    segment.game = finishProjection(segment.game);
+    segment.practice = finishProjection(segment.practice);
+    const active = segment.game.overall.evaluatedDecisions ? segment.game : segment.practice;
+    segment.overall = clone(active.overall);
+    segment.skills = clone(active.skills);
+  }
+  return projectActive(profile);
 }

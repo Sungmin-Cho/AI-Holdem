@@ -1,3 +1,5 @@
+import { referenceQuality } from '../shared/reference.js';
+
 function coded(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -22,6 +24,18 @@ export function evaluateDrillAnswer(question, answer, strategy) {
   if (expected.providerVersion && source.version && expected.providerVersion !== source.version) {
     throw coded('PROVIDER_VERSION_MISMATCH', 'provider version mismatch');
   }
+  const quality = referenceQuality(source);
+  if (quality.quality !== 'heuristic-reference') {
+    return {
+      questionId: question.questionId,
+      status: 'unverified',
+      grade: null,
+      frequency: null,
+      recommended: [],
+      feedback: '출처 식별값이 확인되지 않아 기준표 채점에서 제외했습니다.',
+      providerVersion: source.version,
+    };
+  }
   const actions = strategy.actions ?? [];
   const chosen = answer?.action;
   const hit = actions.find((action) => {
@@ -35,10 +49,13 @@ export function evaluateDrillAnswer(question, answer, strategy) {
   const grade = gradeFrequency(frequency, actions);
   return {
     questionId: question.questionId,
+    status: 'reference-adherence',
     grade,
     frequency,
     recommended: [...actions].sort((a, b) => b.frequency - a.frequency),
-    feedback: '빈도 기반 피드백입니다. mixed strategy에서 한 액션이 곧 오답은 아닙니다.',
+    feedback: grade === 'off-policy'
+      ? '기준표와 다른 선택입니다. 이 스팟을 연습 후보로 기록할 수 있습니다.'
+      : '기준표 빈도에 포함된 허용 선택입니다. 한 번의 액션은 분포 일치도를 뜻하지 않습니다.',
     providerVersion: source.version,
   };
 }

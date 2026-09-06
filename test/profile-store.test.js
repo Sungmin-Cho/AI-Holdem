@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { createProfileStore } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-profile-'));
+  return createOwnedTempDir('holdem-profile');
 }
 
 function evaluation(overrides = {}) {
@@ -22,10 +23,16 @@ function evaluation(overrides = {}) {
     status: 'supported',
     street: 'preflop',
     spotKey: '6max-100bb-btn-rfi-unopened',
+    handClass: 'AA',
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }],
+    chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null },
     grade: 'preferred',
     forced: false,
     evLossBb: null,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: {
+      id: 'local-preflop-baseline', version: '1.0.0',
+      contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+    },
     ...overrides,
   };
 }
@@ -65,17 +72,17 @@ test('apply returns {applied}; missing payloadSha256 is PROFILE_EVENT_INVALID', 
   });
 });
 
-test('new profile persist uses schemaVersion 3', async () => {
+test('new profile persist uses schemaVersion 4', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = await store.apply(evaluation());
-  assert.equal(first.profile.schemaVersion, 3);
+  assert.equal(first.profile.schemaVersion, 4);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.schemaVersion, 4);
   assert.equal(disk.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
 });
 
-test('schema 1 profile is rebuilt from events as schema 3 and is not returned raw', async () => {
+test('schema 1 profile is rebuilt from events as schema 4 and is not returned raw', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = evaluation();
@@ -118,13 +125,14 @@ test('schema 1 profile is rebuilt from events as schema 3 and is not returned ra
     },
   }));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 3);
-  assert.equal(shown.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(shown.schemaVersion, 4);
+  assert.equal(shown.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(shown.overall.evaluatedDecisions, 1);
   assert.equal(shown.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
-  assert.equal(shown.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(shown.segments['local-preflop-baseline@2.0.0'], undefined);
+  assert.equal(shown.game.coverage.unverifiedDecisions, 1);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.schemaVersion, 4);
   assert.equal(disk.overall.evaluatedDecisions, 1);
 });
 
@@ -156,7 +164,7 @@ test('schema 1 load fails closed when events cannot support the nested schema', 
   await assert.rejects(() => store.show(), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('schema 1 processed digest mismatch fails closed without writing schema 3', async () => {
+test('schema 1 processed digest mismatch fails closed without writing schema 4', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const row = evaluation();
@@ -218,15 +226,291 @@ test('schema 3 file is not read as legacy mixed totals; duplicate apply projects
   await store.apply(first);
   await store.apply(second);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.schemaVersion, 4);
+  disk.schemaVersion = 3;
   disk.overall.evaluatedDecisions = 99;
   disk.overall.supportedDecisions = 99;
   fs.writeFileSync(store.profilePath, JSON.stringify(disk));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 3);
+  assert.equal(shown.schemaVersion, 4);
   assert.equal(shown.overall.evaluatedDecisions, 1);
   const again = await store.apply(second);
   assert.equal(again.applied, false);
-  assert.equal(again.profile.schemaVersion, 3);
+  assert.equal(again.profile.schemaVersion, 4);
   assert.equal(again.profile.overall.evaluatedDecisions, 1);
+});
+
+test('schema 1, 2 and 3 profiles replay to schema 4 without rewriting event bytes', async () => {
+  for (const schemaVersion of [1, 2, 3]) {
+    const storeDir = createOwnedTempDir(`profile-migrate-${schemaVersion}`);
+    const store = createProfileStore(storeDir);
+    const row = evaluation({
+      chosen: { action: 'fold', frequency: 0.2, evBb: null },
+      recommended: [
+        { action: 'raise', sizeBb: 2.5, frequency: 0.8, evBb: null },
+        { action: 'fold', frequency: 0.2, evBb: null },
+      ],
+      handClass: 'AJo',
+      source: {
+        id: 'local-preflop-baseline',
+        version: '1.0.0',
+        contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+      },
+    });
+    await store.apply(row);
+    const legacy = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
+    legacy.schemaVersion = schemaVersion;
+    fs.writeFileSync(store.profilePath, JSON.stringify(legacy));
+    const eventBytes = fs.readFileSync(store.eventsPath);
+    const processed = structuredClone(legacy.processed);
+
+    const shown = await store.show();
+
+    assert.equal(shown.schemaVersion, 4);
+    assert.deepEqual(shown.processed, processed);
+    assert.deepEqual(fs.readFileSync(store.eventsPath), eventBytes);
+  }
+});
+
+test('prospective profile events retain validated mix observations in the existing journal', async () => {
+  const storeDir = createOwnedTempDir('profile-mix-journal');
+  const store = createProfileStore(storeDir);
+  const source = {
+    id: 'local-preflop-baseline',
+    version: '1.0.0',
+    contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+  };
+  const row = evaluation({
+    grade: 'mixed',
+    chosen: { action: 'fold', frequency: 0.2, evBb: null, hidden: 'drop' },
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.8, evBb: null, hidden: 'drop' },
+      { action: 'fold', frequency: 0.2, evBb: null },
+    ],
+    handClass: 'AJo',
+    source,
+    detailSha256: 'dd'.repeat(32),
+  });
+
+  const applied = await store.apply(row);
+  const raw = fs.readFileSync(store.eventsPath, 'utf8');
+  const events = raw.trim().split('\n').map(JSON.parse);
+
+  assert.equal(applied.profile.schemaVersion, 4);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].mixObservation, {
+    spotKey: row.spotKey,
+    handClass: row.handClass,
+    referenceActions: [
+      { action: 'fold', frequency: 0.2, evBb: null },
+      { action: 'raise', sizeBb: 2.5, frequency: 0.8, evBb: null },
+    ],
+    chosenAction: { action: 'fold', frequency: 0.2, evBb: null },
+    sourceIdentity: source,
+    detailSha256: row.detailSha256,
+  });
+  await store.rebuild();
+  assert.equal(fs.readFileSync(store.eventsPath, 'utf8'), raw);
+});
+
+test('future, corrupt and conflicting profile inputs fail without any writes', async () => {
+  const cases = [
+    {
+      name: 'future',
+      profile: { schemaVersion: 99, processed: {} },
+      events: '',
+      code: 'UNSUPPORTED_PROFILE',
+    },
+    {
+      name: 'derived-without-journal',
+      profile: {
+        schemaVersion: 4,
+        processed: {},
+        game: { overall: { evaluatedDecisions: 1 } },
+        practice: { overall: { evaluatedDecisions: 0 } },
+        segments: {},
+      },
+      events: '',
+      code: 'UNSUPPORTED_PROFILE',
+    },
+    {
+      name: 'corrupt',
+      profile: { schemaVersion: 2, processed: {} },
+      events: '{"schemaVersion":4,"evaluationId":null}\n',
+      code: 'PROFILE_EVENT_INVALID',
+    },
+    {
+      name: 'conflict',
+      profile: { schemaVersion: 2, processed: {} },
+      events: [
+        {
+          evaluationId: `${'ab'.repeat(32)}:d-1-preflop-0:local-preflop-baseline@1.0.0`,
+          payloadSha256: 'aa'.repeat(32),
+          skillKey: 'preflop.rfi.BTN',
+          status: 'supported',
+          grade: 'preferred',
+          forced: false,
+          providerId: 'local-preflop-baseline',
+          providerVersion: '1.0.0',
+          origin: 'game',
+        },
+        {
+          evaluationId: `${'ab'.repeat(32)}:d-1-preflop-0:local-preflop-baseline@1.0.0`,
+          payloadSha256: 'bb'.repeat(32),
+          skillKey: 'preflop.rfi.BTN',
+          status: 'supported',
+          grade: 'preferred',
+          forced: false,
+          providerId: 'local-preflop-baseline',
+          providerVersion: '1.0.0',
+          origin: 'game',
+        },
+      ].map((row) => JSON.stringify(row)).join('\n') + '\n',
+      code: 'PROFILE_EVENT_CONFLICT',
+    },
+  ];
+  for (const fixture of cases) {
+    const storeDir = createOwnedTempDir(`profile-reject-${fixture.name}`);
+    const store = createProfileStore(storeDir);
+    fs.mkdirSync(path.dirname(store.profilePath), { recursive: true });
+    fs.writeFileSync(store.profilePath, JSON.stringify(fixture.profile));
+    fs.writeFileSync(store.eventsPath, fixture.events);
+    const profileBefore = fs.readFileSync(store.profilePath);
+    const eventsBefore = fs.readFileSync(store.eventsPath);
+
+    await assert.rejects(() => store.show(), { code: fixture.code });
+
+    assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
+    assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
+  }
+});
+
+test('journal append followed by profile write failure recovers exactly once', async () => {
+  const storeDir = createOwnedTempDir('profile-append-crash');
+  const { createProfileStore: createRawProfileStore } = await import('../training/profile-store.js');
+  const { trainingStoreIo } = await import('../tools/training-stores.js');
+  let failProfileWrite = true;
+  const failingIo = {
+    ...trainingStoreIo,
+    writeJsonSecure(file, value) {
+      if (failProfileWrite && file.endsWith('/profile.json')) {
+        failProfileWrite = false;
+        const error = new Error('injected profile write failure');
+        error.code = 'INJECTED_WRITE_FAILURE';
+        throw error;
+      }
+      return trainingStoreIo.writeJsonSecure(file, value);
+    },
+  };
+  const row = evaluation();
+  await assert.rejects(
+    () => createRawProfileStore(storeDir, { io: failingIo }).apply(row),
+    { code: 'INJECTED_WRITE_FAILURE' },
+  );
+  const normal = createProfileStore(storeDir);
+  const shown = await normal.show();
+  assert.equal(shown.overall.evaluatedDecisions, 1);
+  assert.equal((await normal.apply(row)).applied, false);
+  assert.equal(fs.readFileSync(normal.eventsPath, 'utf8').trim().split('\n').length, 1);
+});
+
+test('rebuild and digest migration reject unbacked ledgers before any rewrite', async () => {
+  for (const operation of ['rebuild', 'migrateDigests']) {
+    const storeDir = createOwnedTempDir(`profile-ledger-${operation}`);
+    const store = createProfileStore(storeDir);
+    const row = evaluation();
+    await store.apply(row);
+    const profile = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
+    profile.processed[`${'ab'.repeat(32)}:d-99-preflop-0:local-preflop-baseline@1.0.0`] = 'ff'.repeat(32);
+    fs.writeFileSync(store.profilePath, JSON.stringify(profile));
+    const profileBefore = fs.readFileSync(store.profilePath);
+    const eventsBefore = fs.readFileSync(store.eventsPath);
+
+    await assert.rejects(() => store[operation](), { code: 'UNSUPPORTED_PROFILE' });
+
+    assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
+    assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
+  }
+});
+
+test('digest migration rejects a future profile before rewriting the event journal', async () => {
+  const storeDir = createOwnedTempDir('profile-future-digest-migrate');
+  const store = createProfileStore(storeDir);
+  await store.apply(evaluation());
+  fs.writeFileSync(store.profilePath, JSON.stringify({ schemaVersion: 99, processed: {} }));
+  const profileBefore = fs.readFileSync(store.profilePath);
+  const eventsBefore = fs.readFileSync(store.eventsPath);
+
+  await assert.rejects(() => store.migrateDigests({ oldToNew: { ['aa'.repeat(32)]: 'bb'.repeat(32) } }), {
+    code: 'UNSUPPORTED_PROFILE',
+  });
+
+  assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
+  assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
+  await assert.rejects(() => store.rebuild(), { code: 'UNSUPPORTED_PROFILE' });
+  assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
+  assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
+});
+
+test('study runs are validated before append and valid evidence uses the profile journal', async () => {
+  const invalidDir = createOwnedTempDir('profile-study-invalid');
+  const invalidStore = createProfileStore(invalidDir);
+  await assert.rejects(() => invalidStore.apply(evaluation({
+    origin: 'practice',
+    studyRun: { id: 'not-a-uuid', mode: 'assessment', total: 2, index: 0, startedAt: 'bad' },
+  })), { code: 'STUDY_RUN_INVALID' });
+  assert.equal(fs.existsSync(invalidStore.profilePath), false);
+  assert.equal(fs.existsSync(invalidStore.eventsPath), false);
+
+  const validDir = createOwnedTempDir('profile-study-valid');
+  const validStore = createProfileStore(validDir);
+  const studyRun = {
+    id: '11111111-1111-4111-8111-111111111111',
+    mode: 'assessment',
+    total: 2,
+    index: 0,
+    startedAt: '2026-09-06T00:00:00.000Z',
+    assessmentId: '22222222-2222-4222-8222-222222222222',
+  };
+  await validStore.apply(evaluation({ origin: 'practice', studyRun }));
+  const event = JSON.parse(fs.readFileSync(validStore.eventsPath, 'utf8').trim());
+  assert.deepEqual(event.studyRun, studyRun);
+  assert.deepEqual((await validStore.show()).practice.studyRuns[studyRun.id], studyRun);
+});
+
+test('digest-map retry recovers journal-new profile-old crash state', async () => {
+  const storeDir = createOwnedTempDir('profile-digest-crash');
+  const normal = createProfileStore(storeDir);
+  const row = evaluation();
+  await normal.apply(row);
+  const oldDigest = row.payloadSha256;
+  const newDigest = 'bb'.repeat(32);
+  const map = {
+    oldToNew: { [oldDigest]: newDigest },
+    byEvaluationId: { [row.evaluationId]: { old: oldDigest, new: newDigest } },
+  };
+  const { createProfileStore: createRawProfileStore } = await import('../training/profile-store.js');
+  const { trainingStoreIo } = await import('../tools/training-stores.js');
+  let fail = true;
+  const failingIo = {
+    ...trainingStoreIo,
+    writeJsonSecure(file, value) {
+      if (fail && file.endsWith('/profile.json')) {
+        fail = false;
+        const error = new Error('injected profile write failure');
+        error.code = 'INJECTED_WRITE_FAILURE';
+        throw error;
+      }
+      return trainingStoreIo.writeJsonSecure(file, value);
+    },
+  };
+  await assert.rejects(() => createRawProfileStore(storeDir, { io: failingIo }).migrateDigests(map), {
+    code: 'INJECTED_WRITE_FAILURE',
+  });
+  assert.equal(JSON.parse(fs.readFileSync(normal.eventsPath, 'utf8')).payloadSha256, newDigest);
+  assert.equal(JSON.parse(fs.readFileSync(normal.profilePath, 'utf8')).processed[row.evaluationId], oldDigest);
+
+  const recovered = await normal.migrateDigests(map);
+  assert.equal(recovered.processed[row.evaluationId], newDigest);
+  assert.equal(JSON.parse(fs.readFileSync(normal.profilePath, 'utf8')).processed[row.evaluationId], newDigest);
 });

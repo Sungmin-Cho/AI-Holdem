@@ -10,7 +10,7 @@ import { scanModule } from './helpers/module-scan.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECORDER = path.join(ROOT, 'test/helpers/import-recorder.mjs');
 const FIXTURES = path.join(ROOT, 'test/fixtures/boundaries');
-const SCANNED = ['engine', 'training', 'server', 'tools', 'export'];
+const SCANNED = ['engine', 'training', 'server', 'tools', 'export', 'shared'];
 
 // R12 계층 방향. 결함 #20은 engine과 training이 tools를 불러 쓰는 역전이었고,
 // 이 가드가 없으면 다시 스며든다.
@@ -93,6 +93,28 @@ test('training imports no tools module', () => {
   assert.deepEqual(offenders, []);
 });
 
+test('training imports only named state locks plus the predeclared pure evaluator edge from engine', () => {
+  const allowed = new Set([
+    'training/profile-store.js -> engine/state.js',
+    'training/mistake-bank.js -> engine/state.js',
+    'training/opponent-notes.js -> engine/state.js',
+    'training/policies/hand-strength.js -> engine/evaluator.js',
+  ]);
+  const offenders = edgesFrom('training')
+    .filter((edge) => layerOf(edge.to) === 'engine')
+    .map((edge) => `${edge.from} -> ${edge.to}`)
+    .filter((edge) => !allowed.has(edge));
+  assert.deepEqual(offenders, []);
+});
+
+test('shared contracts remain pure of engine, training, server and tools imports', () => {
+  const forbidden = new Set(['engine', 'training', 'server', 'tools']);
+  const offenders = edgesFrom('shared')
+    .filter((edge) => forbidden.has(layerOf(edge.to)))
+    .map((edge) => `${edge.from} -> ${edge.to}`);
+  assert.deepEqual(offenders, []);
+});
+
 test('training does no filesystem I/O of its own', () => {
   const offenders = edgesFrom('training')
     .filter((edge) => /^(node:)?fs(\/promises)?$/.test(edge.to))
@@ -105,6 +127,7 @@ test('training does no filesystem I/O of its own', () => {
 // 재구현하는 쪽이 더 나쁘다.
 const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
 const CONTAINMENT_MODULE = path.join('tools', 'training-store.js');
+const SERVER_ALLOWED_REFERENCE = path.join('shared', 'reference.js');
 
 test('server imports only the publish contract and named containment primitives', () => {
   const offenders = [];
@@ -112,6 +135,7 @@ test('server imports only the publish contract and named containment primitives'
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
+    if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
       offenders.push(`${edge.from} -> ${edge.to}`);
       continue;

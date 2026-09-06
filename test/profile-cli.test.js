@@ -11,11 +11,12 @@ import {
   sha256Hex,
 } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/profile-cli.js');
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-pcli-'));
+  return createOwnedTempDir('holdem-pcli');
 }
 
 function run(args) {
@@ -42,8 +43,14 @@ test('profile-cli apply/show/rebuild/reset/sweep', async () => {
     grade: 'off-policy',
     forced: false,
     evLossBb: null,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    source: {
+      id: 'local-preflop-baseline', version: '1.0.0',
+      contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+    },
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
     chosen: { action: 'fold', frequency: 0.15, evBb: null },
   };
   const file = path.join(storeDir, 'eval.json');
@@ -86,11 +93,14 @@ test('writePracticeFocus and defaultPracticeFocusFile', async () => {
   const { writePracticeFocus, defaultPracticeFocusFile } = await import('../tools/profile-cli.js');
   const storeDir = tmp();
   const file = writePracticeFocus(storeDir, {
-    leaks: [{ id: 'preflop.rfi.BTN', recommendedDrill: 'preflop.rfi.BTN', severity: 1, confidence: 0.5 }],
+    game: {
+      candidates: [{ id: 'preflop.rfi.BTN', recommendedDrill: 'preflop.rfi.BTN', severity: 1, confidence: 0.5 }],
+    },
   });
   assert.equal(defaultPracticeFocusFile(storeDir), file);
   const json = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(json.focus, 'preflop.rfi.BTN');
+  assert.equal(json.origin, 'game');
 });
 
 function writeFocusFile(storeDir, value, { symlinkTo } = {}) {
@@ -168,9 +178,15 @@ function evaluationRow(overrides = {}) {
     grade: 'off-policy',
     forced: false,
     evLossBb: null,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: {
+      id: 'local-preflop-baseline', version: '1.0.0',
+      contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+    },
     decisionId: overrides.decisionId ?? 'd-1-preflop-0',
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
     chosen: { action: 'fold', frequency: 0.15, evBb: null },
     ...overrides,
   };

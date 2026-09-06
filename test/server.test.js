@@ -7,9 +7,10 @@ import path from 'node:path';
 import { startServer } from '../server/server.js';
 import { detailRefOf, projectTrainingSummary } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-srv-'));
+  return createOwnedTempDir('holdem-srv');
 }
 
 // M1: machine item의 identity는 D9 문법이고 detailRef는 그 identity에서 파생된다.
@@ -45,6 +46,13 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
     assert.equal(js.status, 200);
     assert.match(js.text, /formatTrainingCard/);
+    const shared = await req(srv.port, '/shared/reference.js', { token: 'tok-mod' });
+    assert.equal(shared.status, 200);
+    assert.match(shared.headers['content-type'], /javascript/);
+    assert.match(shared.text, /export function referenceQuality/);
+    for (const denied of ['/shared/study-contract.js', '/shared/%2e%2e%2fpublish-contract.js', '/shared/reference.js/extra']) {
+      assert.notEqual((await req(srv.port, denied, { token: 'tok-mod' })).status, 200);
+    }
   } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });
@@ -76,7 +84,7 @@ async function req(port, pathname, { method = 'GET', token, queryToken, body, ra
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* non-JSON */ }
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: Object.fromEntries(res.headers.entries()) };
 }
 
 function publish(port, token, body) {
@@ -780,7 +788,7 @@ test('training-detail GET parent-swap is rejected', async () => {
   const detailsDir = path.join(gameDir, 'training', 'details');
   fs.mkdirSync(detailsDir, { recursive: true });
   fs.writeFileSync(path.join(detailsDir, `${ref}.json`), raw);
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-detail-outside-'));
+  const outside = createOwnedTempDir('holdem-detail-outside');
   fs.writeFileSync(path.join(outside, `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,

@@ -28,6 +28,7 @@ import {
   writeJsonSecure,
   writeTextSecure,
 } from './training-store.js';
+import { referenceClaimAllowed } from '../shared/reference.js';
 
 export const TRAINING_LOCK = 'training.lock.d';
 export const SUPPORTED_SCHEMAS = SUPPORTED_TRAINING_AUTHORITY_SCHEMAS;
@@ -41,6 +42,7 @@ const ALLOWED_SEAL_REASONS = new Set([
   'post-cutoff',
   'explain-failed',
 ]);
+
 
 function coded(code, message) {
   const error = new Error(message);
@@ -875,7 +877,11 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       byEvaluationId[id] = { old: item.payloadSha256, new: summary.payloadSha256 };
 
       const annotations = {};
-      const legacyAnnotation = legacyExplanationAnnotation(explanation);
+      const projectedLegacy = legacyExplanationAnnotation(explanation);
+      const legacyAnnotation = projectedLegacy?.status === 'ready'
+        && !referenceClaimAllowed(projectedLegacy.value)
+        ? { status: 'unavailable', value: null, sealReason: 'LEGACY_AUTHORITY_FORBIDDEN' }
+        : projectedLegacy;
       if (legacyAnnotation) {
         const projected = projectTrainingAnnotation({
           evaluationId: id,
@@ -1114,6 +1120,76 @@ function profileConsumerReady(sessionDir) {
   const marker = validateMigrationMarker(readMarker(sessionDir));
   if (!marker) return true;
   return marker.status === 'complete';
+}
+
+function detailIdentityOf(evaluationId) {
+  const match = /^([0-9a-f]{64}):(d-\d+-[a-z]+-\d+):([a-z0-9-]{1,64})@(\d+\.\d+\.\d+)$/.exec(evaluationId);
+  if (!match) throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'evaluation identity is invalid');
+  return { decisionId: match[2], providerId: match[3], providerVersion: match[4] };
+}
+
+export function materializeLearningEvaluation(sessionDir, item) {
+  if (!item || !item.summary
+    || item.summary.evaluationId !== item.evaluationId
+    || item.summary.payloadSha256 !== item.payloadSha256) {
+    throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning summary identity does not match authority');
+  }
+  let canonicalSummary;
+  try {
+    canonicalSummary = projectTrainingSummary(item.summary);
+  } catch {
+    throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'learning summary is not canonical');
+  }
+  if (canonicalSummary.payloadSha256 !== item.payloadSha256) {
+    throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'learning summary digest does not match authority');
+  }
+  const proofDeclared = [
+    item.detailRef, item.detailSha256, item.summary.detailRef, item.summary.detailSha256,
+  ].some((value) => value !== undefined);
+  if (!proofDeclared) return canonicalSummary;
+  if (item.detailRef !== detailRefOf(item.evaluationId)
+    || !/^[0-9a-f]{64}$/.test(item.detailSha256 ?? '')
+    || item.summary?.detailRef !== item.detailRef
+    || item.summary?.detailSha256 !== item.detailSha256) {
+    throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'declared learning detail proof is inconsistent');
+  }
+  let raw;
+  try {
+    raw = openContained(sessionDir, ['training', 'details', `${item.detailRef}.json`], {
+      maxBytes: SECURITY_READ_MAX_BYTES,
+    });
+  } catch (error) {
+    throw coded(
+      error.code === 'ENOENT' ? 'LEARNING_DETAIL_MISSING' : 'LEARNING_DETAIL_PROOF_MISMATCH',
+      'declared learning detail could not be read',
+    );
+  }
+  if (sha256Hex(raw) !== item.detailSha256) {
+    throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'learning detail digest does not match authority');
+  }
+  let detail;
+  try {
+    detail = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'learning detail is not JSON');
+  }
+  const identity = detailIdentityOf(item.evaluationId);
+  if (detail.evaluationId !== item.evaluationId
+    || detail.decisionId !== item.decisionId
+    || detail.decisionId !== item.summary?.decisionId
+    || detail.decisionId !== identity.decisionId
+    || detail.source?.id !== identity.providerId
+    || detail.source?.version !== identity.providerVersion
+    || item.summary?.source?.id !== identity.providerId
+    || item.summary?.source?.version !== identity.providerVersion) {
+    throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning detail identity does not match authority');
+  }
+  return {
+    ...detail,
+    payloadSha256: item.payloadSha256,
+    detailSha256: item.detailSha256,
+    detailRef: item.detailRef,
+  };
 }
 
 export function createTrainingControl({ storeDir, io } = {}) {
@@ -1492,6 +1568,9 @@ export function createTrainingControl({ storeDir, io } = {}) {
         value = null;
         effectiveSealReason = 'cutoff';
       }
+      if (field === 'explanation' && status === 'ready' && !referenceClaimAllowed(value)) {
+        return { ok: false, code: 'REFERENCE_AUTHORITY_FORBIDDEN' };
+      }
       if (status === 'unavailable' && !ALLOWED_SEAL_REASONS.has(effectiveSealReason)) {
         return { ok: false, code: 'INVALID_SEAL_REASON' };
       }
@@ -1598,9 +1677,11 @@ export function createTrainingControl({ storeDir, io } = {}) {
           item.consumers = item.consumers ?? { published: false, profiled: false, banked: false };
           try {
             let attempted = false;
+            if (item.consumers.profiled && item.consumers.banked) continue;
+            const learningEvaluation = materializeLearningEvaluation(sessionDir, item);
             if (!item.consumers.profiled) {
               attempted = true;
-              const result = await store.apply(item.summary);
+              const result = await store.apply(learningEvaluation);
               if (result?.applied === true || result?.applied === false) {
                 item.consumers.profiled = true;
                 profiled += 1;
@@ -1616,7 +1697,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
             }
             if (!item.consumers.banked) {
               attempted = true;
-              await bank.collect(item.summary);
+              await bank.collect(learningEvaluation);
               item.consumers.banked = true;
               banked += 1;
             }

@@ -29,6 +29,7 @@ const KEEP_ALIVE_MS = 120_000;
 const HEADERS_MS = 125_000;
 const DEFAULT_WAIT_MS = 25_000;
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const SHARED_REFERENCE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'shared', 'reference.js');
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -777,6 +778,18 @@ function readTrainingDetail(root, ref, expectedSha) {
 }
 
 function serveStatic(pathname, res) {
+  if (pathname === '/shared/reference.js') {
+    fs.readFile(SHARED_REFERENCE_FILE, (error, data) => {
+      if (error) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      res.writeHead(200, { 'Content-Type': MIME['.js'] });
+      res.end(data);
+    });
+    return;
+  }
+  if (pathname.startsWith('/shared/')) {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    return;
+  }
   const rel = pathname === '/' ? '/index.html' : pathname;
   const abs = path.normalize(path.join(PUBLIC_DIR, rel));
   const root = path.normalize(`${PUBLIC_DIR}${path.sep}`);

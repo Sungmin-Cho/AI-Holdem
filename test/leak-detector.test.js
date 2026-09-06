@@ -50,3 +50,28 @@ test('unsupported-only skills are absent from leaks and present in coverageGaps'
   assert.equal(gaps.some((row) => row.id === 'preflop.other.UTG'), true);
   assert.equal(leaks[0].id, 'preflop.rfi.BTN');
 });
+
+test('practice candidates use allowed action rate and exclude positive-frequency deviations', () => {
+  const result = detectLeaks({
+    'preflop.rfi.BTN': {
+      opportunities: 20,
+      supported: 20,
+      allowedActionRate: 1,
+      modalActionRate: 0,
+      offPolicy: 0,
+      sampleWeight: 1,
+    },
+    'preflop.bbDefense.vsRaise': {
+      opportunities: 20,
+      supported: 20,
+      allowedActionRate: 0.75,
+      modalActionRate: 0.75,
+      offPolicy: 5,
+      sampleWeight: 1,
+    },
+  });
+  const candidates = result.candidates ?? result.leaks;
+  assert.equal(candidates.some((row) => row.id === 'preflop.rfi.BTN'), false);
+  assert.equal(candidates.find((row) => row.id === 'preflop.bbDefense.vsRaise').evidence, 5);
+  assert.equal(candidates.some((row) => /GTO|mistake|error/i.test(JSON.stringify(row))), false);
+});

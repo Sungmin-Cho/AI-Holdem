@@ -1,37 +1,40 @@
 const SMALL_SAMPLE = 8;
 
 export function detectLeaks(skills = {}) {
-  const leaks = [];
+  const candidates = [];
   const coverageGaps = [];
   for (const [id, skill] of Object.entries(skills)) {
     const opportunities = skill.opportunities ?? 0;
     const supported = skill.supported ?? 0;
     if (supported === 0) {
-      coverageGaps.push({
-        id,
-        opportunities,
-        supported: 0,
-        recommendedDrill: id,
-      });
+      coverageGaps.push({ id, opportunities, supported: 0, recommendedDrill: id });
       continue;
     }
-    const preferred = skill.preferredActionRate ?? 0;
-    const deviation = 1 - preferred;
-    const impact = skill.evLossBb != null ? skill.evLossBb : deviation * supported;
-    const confidence = skill.confidence ?? 0;
+    const modalActionRate = skill.modalActionRate ?? skill.preferredActionRate ?? 0;
+    const evidence = Number.isFinite(skill.offPolicy)
+      ? Math.max(0, skill.offPolicy)
+      : Math.max(0, supported * (1 - modalActionRate));
+    if (evidence === 0) continue;
+    const confidence = skill.sampleWeight ?? skill.confidence ?? Math.min(1, opportunities / 20);
     const small = opportunities < SMALL_SAMPLE;
-    leaks.push({
+    const severity = evidence * confidence * (small ? 0.3 : 1);
+    if (severity <= 0) continue;
+    candidates.push({
       id,
-      severity: impact * confidence * (small ? 0.3 : 1),
+      severity,
       confidence,
       opportunities,
-      evLossBb: skill.evLossBb ?? null,
-      preferredActionRate: preferred,
+      evidence,
+      evLossBb: null,
+      allowedActionRate: skill.allowedActionRate ?? null,
+      modalActionRate,
+      preferredActionRate: modalActionRate,
       recommendedDrill: id,
+      reason: 'reference-deviation',
       ...(small ? { note: 'small-sample' } : {}),
     });
   }
-  leaks.sort((a, b) => b.severity - a.severity || a.id.localeCompare(b.id));
-  coverageGaps.sort((a, b) => a.id.localeCompare(b.id));
-  return { leaks, coverageGaps };
+  candidates.sort((left, right) => right.severity - left.severity || left.id.localeCompare(right.id));
+  coverageGaps.sort((left, right) => left.id.localeCompare(right.id));
+  return { leaks: candidates, candidates, coverageGaps };
 }

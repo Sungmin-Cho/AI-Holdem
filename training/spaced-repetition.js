@@ -7,7 +7,7 @@ export function nextSchedule({ grade, intervalDays = 1, ease = 2.3, lapses = 0, 
     nextInterval = Math.max(1, Math.round(intervalDays * 2));
   } else if (grade === 'mixed') {
     nextInterval = intervalDays;
-  } else {
+  } else if (grade === 'off-policy') {
     nextInterval = 1;
     nextLapses = lapses + 1;
   }

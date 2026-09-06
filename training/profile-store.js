@@ -2,6 +2,8 @@ import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from './contracts.js';
 import { classifyOpportunity } from './opportunities.js';
+import { validateMixObservation } from '../shared/reference.js';
+import { validateStudyRun } from '../shared/study-contract.js';
 
 function requireIo(io, names) {
   for (const name of names) {
@@ -20,6 +22,7 @@ import {
   emptyProfile,
   PROFILE_SCHEMA_VERSION,
   projectActive,
+  rebuildFromEvents,
 } from './profile-aggregator.js';
 
 const PROFILE_LOCK = 'profile.lock.d';
@@ -31,7 +34,8 @@ function coded(code, message) {
 }
 
 function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
-  return {
+  const event = {
+    schemaVersion: PROFILE_SCHEMA_VERSION,
     evaluationId: evaluation.evaluationId,
     payloadSha256: evaluation.payloadSha256,
     skillKey: classified.skillKey,
@@ -43,8 +47,32 @@ function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportu
     providerId: classified.providerId,
     providerVersion: classified.providerVersion,
     appliedAt,
-    ...(evaluation.origin === 'drill' ? { origin: 'drill' } : {}),
+    ...(['game', 'practice', 'drill', 'retest'].includes(evaluation.origin)
+      ? { origin: evaluation.origin }
+      : { origin: 'game' }),
   };
+  if (evaluation.status === 'supported'
+    && evaluation.source?.contentSha256
+    && Array.isArray(evaluation.recommended)
+    && evaluation.recommended.length > 0
+    && evaluation.chosen) {
+    const observation = {
+      spotKey: evaluation.spotKey,
+      handClass: evaluation.handClass,
+      referenceActions: evaluation.recommended,
+      chosenAction: evaluation.chosen,
+      sourceIdentity: {
+        id: evaluation.source.id,
+        version: evaluation.source.version,
+        contentSha256: evaluation.source.contentSha256,
+      },
+      ...(evaluation.detailSha256 ? { detailSha256: evaluation.detailSha256 } : {}),
+    };
+    event.mixObservation = validateMixObservation(observation);
+  }
+  if (evaluation.studyRun !== undefined) event.studyRun = validateStudyRun(evaluation.studyRun);
+  assertProfileEvent(event);
+  return event;
 }
 
 function streetFromEvaluationId(evaluationId) {
@@ -57,27 +85,45 @@ function streetFromEvaluationId(evaluationId) {
   return decisionId.split('-')[2];
 }
 
-function retainProcessed(profile, event) {
-  assertProfileEvent(event);
-  const seen = profile.processed[event.evaluationId];
-  if (seen === event.payloadSha256) return profile;
-  if (seen && seen !== event.payloadSha256) {
-    throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
-  }
-  profile.processed[event.evaluationId] = event.payloadSha256;
-  profile.updatedAt = event.appliedAt ?? profile.updatedAt;
-  return profile;
-}
-
 function rebuildLearnableFromEvents(events) {
-  let profile = emptyProfile();
+  const learnable = [];
+  const processed = {};
+  let updatedAt = null;
   for (const event of events) {
     const street = streetFromEvaluationId(event?.evaluationId);
-    profile = street === 'preflop'
-      ? applyEvent(profile, event)
-      : retainProcessed(profile, event);
+    assertProfileEvent(event);
+    const seen = processed[event.evaluationId];
+    if (seen && seen !== event.payloadSha256) {
+      throw coded('PROFILE_EVENT_CONFLICT', '같은 evaluationId에 다른 digest가 있습니다.');
+    }
+    if (!seen) processed[event.evaluationId] = event.payloadSha256;
+    if (street === 'preflop') learnable.push(event);
+    updatedAt = event.appliedAt ?? updatedAt;
   }
+  const profile = rebuildFromEvents(learnable);
+  profile.processed = processed;
+  profile.updatedAt = updatedAt;
   return projectActive(profile);
+}
+
+function assertProcessedBacked(profile, rebuilt) {
+  for (const [id, digest] of Object.entries(profile?.processed ?? {})) {
+    if (rebuilt.processed[id] !== digest) {
+      throw coded('UNSUPPORTED_PROFILE', `processed evidence is not backed by the journal: ${id}`);
+    }
+  }
+}
+
+function assertDigestMigrationBacked(profile, rebuilt, { oldToNew = {}, byEvaluationId = {} }) {
+  for (const [id, digest] of Object.entries(profile?.processed ?? {})) {
+    const journalDigest = rebuilt.processed[id];
+    if (journalDigest === digest) continue;
+    const mapping = byEvaluationId[id];
+    if (!mapping || mapping.old !== digest || mapping.new !== journalDigest
+      || oldToNew[digest] !== journalDigest) {
+      throw coded('UNSUPPORTED_PROFILE', `processed evidence is not authorized by digest map: ${id}`);
+    }
+  }
 }
 
 // R12: fs helper는 주입받는다. 기본값 없음.
@@ -101,15 +147,10 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     const events = readJsonl(eventsPath);
     const processedIds = Object.keys(profile.processed ?? {});
     if (processedIds.length > 0 && events.length === 0) {
-      throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 3`);
+      throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 4`);
     }
     const rebuilt = rebuildLearnableFromEvents(events);
-    for (const id of processedIds) {
-      if (!Object.prototype.hasOwnProperty.call(rebuilt.processed, id)
-        || rebuilt.processed[id] !== profile.processed[id]) {
-        throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 3`);
-      }
-    }
+    assertProcessedBacked(profile, rebuilt);
     if (persist) writeJsonSecure(profilePath, rebuilt);
     return rebuilt;
   }
@@ -118,14 +159,34 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     try {
       const profile = readJsonSecure(profilePath);
       if (profile.schemaVersion === PROFILE_SCHEMA_VERSION) {
-        return projectActive(profile);
+        const events = readJsonl(eventsPath);
+        if (events.length === 0 && Object.keys(profile.processed ?? {}).length === 0) {
+          const hasDerivedEvidence = (profile.game?.overall?.evaluatedDecisions ?? 0) !== 0
+            || (profile.practice?.overall?.evaluatedDecisions ?? 0) !== 0
+            || Object.keys(profile.segments ?? {}).length !== 0;
+          if (hasDerivedEvidence) {
+            throw coded('UNSUPPORTED_PROFILE', 'schema 4 derived evidence has no journal');
+          }
+          return projectActive(profile);
+        }
+        const rebuilt = rebuildLearnableFromEvents(events);
+        assertProcessedBacked(profile, rebuilt);
+        if (Object.keys(rebuilt.processed).length > Object.keys(profile.processed ?? {}).length
+          && persistLegacy) writeJsonSecure(profilePath, rebuilt);
+        return rebuilt;
       }
-      if (profile.schemaVersion === 1 || profile.schemaVersion === 2) {
+      if ([1, 2, 3].includes(profile.schemaVersion)) {
         return migrateLegacyProfile(profile, { persist: persistLegacy });
       }
       throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion}`);
     } catch (error) {
-      if (error.code === 'ENOENT') return emptyProfile();
+      if (error.code === 'ENOENT') {
+        const events = readJsonl(eventsPath);
+        if (events.length === 0) return emptyProfile();
+        const rebuilt = rebuildLearnableFromEvents(events);
+        if (persistLegacy) writeJsonSecure(profilePath, rebuilt);
+        return rebuilt;
+      }
       throw error;
     }
   }
@@ -145,27 +206,32 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       let profile = loadProfile();
       const seen = profile.processed[event.evaluationId];
       const duplicate = Boolean(seen && seen === event.payloadSha256);
+      if (duplicate) return { applied: false, profile };
       profile = applyEvent(profile, event);
-      if (!duplicate && !readJsonl(eventsPath).some((row) => row.evaluationId === event.evaluationId
+      if (!readJsonl(eventsPath).some((row) => row.evaluationId === event.evaluationId
         && row.payloadSha256 === event.payloadSha256)) {
         appendJsonl(eventsPath, event);
       }
       writeJsonSecure(profilePath, profile);
-      return { applied: !duplicate, profile };
+      return { applied: true, profile };
     });
   }
 
   async function migrateDigests({ oldToNew = {}, byEvaluationId = {} } = {}) {
     return withLock(() => {
+      let current = null;
       try {
-        const current = readJsonSecure(profilePath);
-        if (current.schemaVersion === 1 || current.schemaVersion === 2) {
-          migrateLegacyProfile(current);
+        current = readJsonSecure(profilePath);
+        if (![1, 2, 3, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+          throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
         }
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }
-      const events = readJsonl(eventsPath).map((event) => {
+      const originalEvents = readJsonl(eventsPath);
+      const originalProfile = rebuildLearnableFromEvents(originalEvents);
+      if (current) assertDigestMigrationBacked(current, originalProfile, { oldToNew, byEvaluationId });
+      const events = originalEvents.map((event) => {
         const mapped = byEvaluationId[event.evaluationId]?.new
           ?? oldToNew[event.payloadSha256]
           ?? event.payloadSha256;
@@ -182,6 +248,15 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withLock(() => {
       const events = readJsonl(eventsPath);
       const profile = rebuildLearnableFromEvents(events);
+      try {
+        const current = readJsonSecure(profilePath);
+        if (![1, 2, 3, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+          throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
+        }
+        assertProcessedBacked(current, profile);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
       writeJsonSecure(profilePath, profile);
       return profile;
     });
