@@ -8,9 +8,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startDrillServer } from '../tools/drill-server.js';
+import { startDrill } from '../tools/drill-cli.js';
 import { startServer } from '../server/server.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { readJsonl } from '../tools/training-store.js';
+import { createMistakeBank } from '../tools/training-stores.js';
+import { loadPreflopDataset } from '../tools/preflop-dataset.js';
+import { lookup } from '../training/providers/preflop-json.js';
+import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
+import { nextSchedule } from '../training/spaced-repetition.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_HREF = pathToFileURL(path.resolve(ROOT, '../tools/drill-server.js')).href;
@@ -52,17 +58,23 @@ function writePending(storeDir) {
   const question = session.queue[attemptNo];
   const key = attemptKey(session.sessionId, question.questionId, attemptNo);
   const digest = digestOf(key);
+  const dataset = loadPreflopDataset(path.resolve(ROOT, '../training/data/preflop-baseline-v1.json'));
+  const strategy = lookup(dataset, question.prompt);
+  const result = evaluateDrillAnswer(question, { action: 'fold' }, strategy);
+  let srsPatch = null;
+  if (question.candidateMistakeId) {
+    const bank = JSON.parse(fs.readFileSync(path.join(storeDir, '.training', 'mistakes.json'), 'utf8'));
+    const before = bank.reviewState[question.candidateMistakeId];
+    const at = new Date().toISOString();
+    srsPatch = { mistakeId: question.candidateMistakeId, before, patch: {
+      lastReviewedAt: at, attempts: before.attempts + 1,
+      ...nextSchedule({ ...before, grade: result.grade, now: Date.parse(at) }),
+    } };
+  }
   session.pending = {
     answer: { action: 'fold' },
-    result: {
-      questionId: question.questionId,
-      grade: 'mixed',
-      frequency: 0.4,
-      recommended: [],
-      feedback: 'pending-fixture',
-      providerVersion: '1.0.0',
-    },
-    srsPatch: null,
+    result,
+    srsPatch,
     profileEvent: {
       evaluationId: evaluationIdOf({
         gameEpoch: digest,
@@ -75,15 +87,20 @@ function writePending(storeDir) {
       street: 'preflop',
       spotKey: question.prompt.spotKey,
       handClass: question.prompt.handClass,
-      grade: 'mixed',
+      grade: result.grade,
       forced: false,
       evLossBb: null,
-      source: { id: 'local-preflop-baseline', version: '1.0.0' },
+      source: { id: strategy.source.id, version: strategy.source.version, contentSha256: strategy.source.contentSha256 },
+      origin: 'drill',
+      recommended: result.recommended,
+      chosen: { action: 'fold' },
+      studyRun: { ...session.studyRun, index: attemptNo },
     },
-    applied: { srs: false, profile: false },
+    applied: { srs: false, bank: false, profile: false },
     questionId: question.questionId,
     attemptNo,
   };
+  session.pending.bankEvent = structuredClone(session.pending.profileEvent);
   writeSession(storeDir, session);
   return session;
 }
@@ -401,15 +418,51 @@ test('delayed retry from a previous sessionId returns 409', async () => {
   }
 });
 
-test('start while pending exists replays then continues; replay failure is 409', async () => {
+test('start preserves pending with 409 until explicit recovery applies bank, profile and SRS exactly once', async () => {
   const storeDir = tmp();
+  const bank = createMistakeBank(storeDir);
+  const source = {
+    id: 'local-preflop-baseline', version: '1.0.0',
+    contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+  };
+  const candidate = await bank.collect({
+    evaluationId: evaluationIdOf({ gameEpoch: 'ab'.repeat(32), decisionId: 'd-9-preflop-0', providerId: source.id, providerVersion: source.version }),
+    payloadSha256: 'cd'.repeat(32), status: 'supported', street: 'preflop',
+    spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AA', grade: 'off-policy',
+    forced: false, evLossBb: null, source, origin: 'game',
+  });
+  const originalEvidence = await bank.listEvidence({ origin: 'game' });
+  const bytes = () => Object.fromEntries(['drill-session.json', 'profile.json', 'profile-events.jsonl', 'mistakes.json'].map((name) => {
+    const file = path.join(storeDir, '.training', name);
+    return [name, fs.existsSync(file) ? fs.readFileSync(file).toString('base64') : null];
+  }));
   const drill = await startDrillServer({ storeDir, port: 0, token: 'tok' });
   try {
     const first = await api(drill.port, 'tok', '/api/start', {
       method: 'POST',
-      body: { mode: 'free', seed: '1', idempotencyKey: 'pend-a' },
+      body: { mode: 'mistake-review', seed: '1', idempotencyKey: 'pend-a' },
     });
-    writePending(storeDir);
+    const captured = writePending(storeDir);
+    const before = bytes();
+    const blocked = await api(drill.port, 'tok', '/api/start', {
+      method: 'POST', body: { mode: 'free', seed: '1', idempotencyKey: 'pend-b' },
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.json.code, 'PENDING_UNRESOLVED');
+    assert.deepEqual(bytes(), before);
+    const recovered = await api(drill.port, 'tok', '/api/next');
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.json.index, 1);
+    const retried = await api(drill.port, 'tok', '/api/answer', {
+      method: 'POST', body: { action: 'fold', sessionId: captured.sessionId,
+        questionId: captured.queue[0].questionId, attemptNo: 0 },
+    });
+    assert.equal(retried.status, 200);
+    assert.deepEqual(retried.json.result, captured.pending.result);
+    assert.equal(profileEvents(storeDir).length, 1);
+    assert.deepEqual(await bank.listEvidence({ origin: 'game' }), originalEvidence);
+    assert.equal((await bank.listEvidence({ origin: 'practice' })).length, 1);
+    assert.equal((await bank.list()).find((item) => item.mistakeId === candidate.item.mistakeId).attempts, 1);
     const continued = await api(drill.port, 'tok', '/api/start', {
       method: 'POST',
       body: { mode: 'free', seed: '1', idempotencyKey: 'pend-b' },
@@ -420,12 +473,18 @@ test('start while pending exists replays then continues; replay failure is 409',
 
     writePending(storeDir);
     fs.writeFileSync(path.join(storeDir, '.training', 'profile.json'), JSON.stringify({ schemaVersion: 99 }));
+    const unresolved = bytes();
     const failed = await api(drill.port, 'tok', '/api/start', {
       method: 'POST',
       body: { mode: 'free', seed: '1', idempotencyKey: 'pend-c' },
     });
     assert.equal(failed.status, 409);
     assert.equal(failed.json?.code, 'PENDING_UNRESOLVED');
+    assert.deepEqual(bytes(), unresolved);
+    const retryFailed = await api(drill.port, 'tok', '/api/next');
+    assert.equal(retryFailed.status, 409);
+    assert.equal(retryFailed.json.code, 'PENDING_UNRESOLVED');
+    assert.deepEqual(bytes(), unresolved);
     const session = readSession(storeDir);
     assert.ok(session.pending);
     assert.equal(session.sessionId, continued.json.sessionId);
@@ -463,4 +522,47 @@ test('drill client sends sessionId, questionId, attemptNo and handles 409', () =
   assert.match(src, /questionId/);
   assert.match(src, /attemptNo/);
   assert.match(src, /409/);
+});
+
+function trainingBytes(storeDir) {
+  return Object.fromEntries(['drill-session.json', 'profile.json', 'profile-events.jsonl', 'mistakes.json'].map((name) => {
+    const file = path.join(storeDir, '.training', name);
+    return [name, fs.existsSync(file) ? fs.readFileSync(file).toString('base64') : null];
+  }));
+}
+
+test('HTTP rejects unoffered actions and sizes as 400 with unchanged practice evidence', async (t) => {
+  for (const answer of [{ action: 'check' }, { action: 'call' }, { action: 'raise', sizeBb: 8.5 }]) await t.test(JSON.stringify(answer), async () => {
+    const storeDir = tmp();
+    const session = await startDrill(storeDir, { mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AA' });
+    const drill = await startDrillServer({ storeDir, port: 0, token: 'offered-actions' });
+    try {
+      const before = trainingBytes(storeDir);
+      const response = await api(drill.port, drill.token, '/api/answer', { method: 'POST', body: {
+        ...answer, sessionId: session.sessionId, questionId: session.queue[0].questionId, attemptNo: 0,
+      } });
+      assert.equal(response.status, 400);
+      assert.equal(response.json.code, 'INVALID_DRILL_ANSWER');
+      assert.deepEqual(trainingBytes(storeDir), before);
+    } finally { await drill.close(); }
+  });
+});
+
+test('HTTP maps known invalid modes to 400 while internal errors remain 500', async () => {
+  const storeDir = tmp();
+  await startDrill(storeDir, { mode: 'free' });
+  const drill = await startDrillServer({ storeDir, port: 0, token: 'mode-errors' });
+  try {
+    const before = trainingBytes(storeDir);
+    const invalid = await api(drill.port, drill.token, '/api/start', { method: 'POST', body: { mode: 'invalid-mode', idempotencyKey: 'bad-mode' } });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.json.code, 'INVALID_DRILL_MODE');
+    assert.deepEqual(trainingBytes(storeDir), before);
+    fs.writeFileSync(path.join(storeDir, '.training', 'profile.json'), JSON.stringify({ schemaVersion: 99 }));
+    const corrupted = trainingBytes(storeDir);
+    const internal = await api(drill.port, drill.token, '/api/start', { method: 'POST', body: { mode: 'free', idempotencyKey: 'internal-error' } });
+    assert.equal(internal.status, 500);
+    assert.equal(internal.json.code, 'UNSUPPORTED_PROFILE');
+    assert.deepEqual(trainingBytes(storeDir), corrupted);
+  } finally { await drill.close(); }
 });

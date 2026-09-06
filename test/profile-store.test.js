@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { createProfileStore } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
-import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
+import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 
 function tmp() {
   return createOwnedTempDir('holdem-profile');
@@ -36,6 +38,68 @@ function evaluation(overrides = {}) {
     ...overrides,
   };
 }
+
+test('readEventSnapshot shares the profile lock and reads committed validated events without writes', async () => {
+  const store = createProfileStore(tmp());
+  await store.apply(evaluation());
+  assert.equal(typeof store.readEventSnapshot, 'function');
+  const original = JSON.parse(fs.readFileSync(store.eventsPath, 'utf8').trim());
+  const second = { ...original, evaluationId: evaluationIdOf({ gameEpoch: 'cd'.repeat(32), decisionId: 'd-2-preflop-0', providerId: original.providerId, providerVersion: original.providerVersion }), payloadSha256: 'bb'.repeat(32) };
+  fs.appendFileSync(store.eventsPath, JSON.stringify(second));
+  const beforeProfile = fs.readFileSync(store.profilePath);
+  const beforeEvents = fs.readFileSync(store.eventsPath);
+  assert.deepEqual(await store.readEventSnapshot(), [original]);
+  assert.deepEqual(fs.readFileSync(store.eventsPath), beforeEvents);
+  assert.deepEqual(fs.readFileSync(store.profilePath), beforeProfile);
+  const ready = path.join(store.root, 'snapshot-holder-ready');
+  const holder = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs';
+    import { withNamedLock } from ${JSON.stringify(pathToFileURL(path.resolve('engine/state.js')).href)};
+    const [root, events, ready] = process.argv.slice(1);
+    await withNamedLock(root, 'profile.lock.d', async () => {
+      fs.writeFileSync(ready, 'ready');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      fs.appendFileSync(events, '\\n');
+    });
+  `, store.root, store.eventsPath, ready], { stdio: ['ignore', 'ignore', 'pipe'] }), 'profile snapshot lock holder');
+  let stderr = '';
+  holder.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exit = new Promise((resolve) => holder.once('exit', resolve));
+  const deadline = Date.now() + 3000;
+  while (!fs.existsSync(ready) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(fs.existsSync(ready), true, stderr);
+  const started = Date.now();
+  assert.deepEqual(await store.readEventSnapshot(), [original, second]);
+  assert.ok(Date.now() - started >= 100, 'snapshot must wait for the profile writer lock');
+  assert.equal(await exit, 0, stderr);
+  assert.deepEqual(fs.readFileSync(store.profilePath), beforeProfile);
+});
+
+test('event snapshot rejects future, noncanonical and conflicting metadata without repairing files', async (t) => {
+  for (const kind of ['schema', 'id', 'digest', 'metadata']) await t.test(kind, async () => {
+    const store = createProfileStore(tmp()); await store.apply(evaluation());
+    assert.equal(typeof store.readEventSnapshot, 'function');
+    const original = JSON.parse(fs.readFileSync(store.eventsPath, 'utf8').trim());
+    const row = structuredClone(original);
+    if (kind === 'schema') row.schemaVersion = 99;
+    if (kind === 'id') row.evaluationId = 'bad-id';
+    if (kind === 'digest') row.payloadSha256 = 'bad-digest';
+    if (kind === 'metadata') row.origin = 'practice';
+    fs.appendFileSync(store.eventsPath, `${JSON.stringify(row)}\n`);
+    const beforeProfile = fs.readFileSync(store.profilePath), beforeEvents = fs.readFileSync(store.eventsPath);
+    await assert.rejects(() => store.readEventSnapshot());
+    assert.deepEqual(fs.readFileSync(store.eventsPath), beforeEvents);
+    assert.deepEqual(fs.readFileSync(store.profilePath), beforeProfile);
+  });
+});
+
+test('same-id same-digest apply rejects changed learning metadata before writes', async () => {
+  const store = createProfileStore(tmp()); await store.apply(evaluation());
+  const beforeProfile = fs.readFileSync(store.profilePath), beforeEvents = fs.readFileSync(store.eventsPath);
+  await assert.rejects(() => store.apply(evaluation({ origin: 'practice' })), { code: 'PROFILE_EVENT_CONFLICT' });
+  assert.deepEqual(fs.readFileSync(store.eventsPath), beforeEvents);
+  assert.deepEqual(fs.readFileSync(store.profilePath), beforeProfile);
+});
 
 test('profile lives under store/.training and survives a torn jsonl tail', async () => {
   const storeDir = tmp();
