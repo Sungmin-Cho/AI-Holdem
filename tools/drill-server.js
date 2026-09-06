@@ -37,7 +37,7 @@ function sendJson(res, status, obj, onSent) {
 
 function statusFor(code) {
   if (code === 'PAYLOAD_TOO_LARGE') return 413;
-  if (code === 'BAD_JSON' || code === 'USAGE') return 400;
+  if (['BAD_JSON', 'USAGE', 'INVALID_DRILL_ANSWER', 'INVALID_DRILL_MODE'].includes(code)) return 400;
   if (code === 'NO_SESSION' || code === 'STALE_QUESTION' || code === 'PENDING_UNRESOLVED') return 409;
   if (code === 'UNAUTHORIZED') return 401;
   if (code === 'FORBIDDEN') return 403;

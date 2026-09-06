@@ -4,6 +4,7 @@ import { assertEvaluationId } from './contracts.js';
 import { classifyOpportunity } from './opportunities.js';
 import { validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
+import { learningEventKey, validateLearningEvents } from './study-history.js';
 
 function requireIo(io, names) {
   for (const name of names) {
@@ -33,7 +34,7 @@ function coded(code, message) {
   return error;
 }
 
-function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
+export function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
   const event = {
     schemaVersion: PROFILE_SCHEMA_VERSION,
     evaluationId: evaluation.evaluationId,
@@ -89,7 +90,7 @@ function rebuildLearnableFromEvents(events) {
   const learnable = [];
   const processed = {};
   let updatedAt = null;
-  for (const event of events) {
+  for (const event of validateLearningEvents(events)) {
     const street = streetFromEvaluationId(event?.evaluationId);
     assertProfileEvent(event);
     const seen = processed[event.evaluationId];
@@ -203,6 +204,10 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       if (typeof event.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
         throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
       }
+      const prior = validateLearningEvents(readJsonl(eventsPath)).find((row) => row.evaluationId === event.evaluationId);
+      if (prior && learningEventKey(prior, { includeTime: false }) !== learningEventKey(event, { includeTime: false })) {
+        throw coded('PROFILE_EVENT_CONFLICT', 'same evaluationId has different learning metadata');
+      }
       let profile = loadProfile();
       const seen = profile.processed[event.evaluationId];
       const duplicate = Boolean(seen && seen === event.payloadSha256);
@@ -266,6 +271,10 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     return withLock(() => loadProfile());
   }
 
+  async function readEventSnapshot() {
+    return withLock(() => JSON.parse(JSON.stringify(validateLearningEvents(readJsonl(eventsPath)))));
+  }
+
   async function reset() {
     return withLock(() => {
       const profile = emptyProfile();
@@ -276,5 +285,5 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
     });
   }
 
-  return { apply, rebuild, show, reset, migrateDigests, profilePath, eventsPath, root };
+  return { apply, rebuild, show, readEventSnapshot, reset, migrateDigests, profilePath, eventsPath, root };
 }
