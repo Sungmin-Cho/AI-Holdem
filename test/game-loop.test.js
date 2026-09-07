@@ -7341,6 +7341,7 @@ test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행
 });
 
 test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finalize-cutoff가 봉인한다', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
