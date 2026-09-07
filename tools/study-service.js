@@ -433,7 +433,18 @@ export function stopStudyService(storeDir, options = {}) {
 function assertOwnLock(ctx, own) {
   const current = readLock(ctx);
   if (current?.status !== 'alive' || current.pid !== own.pid || current.startTime !== own.startTime
-    || BigInt(current.stat.dev) !== own.dev || BigInt(current.stat.ino) !== own.ino) fail();
+    || BigInt(current.stat.dev) !== own.dev || BigInt(current.stat.ino) !== own.ino) {
+    // Four different losses reach this guard and the caller cannot tell them
+    // apart. Name the one that happened, and for an identity that no longer
+    // reads alive, what the probe answers now: null is a probe that cannot run,
+    // a different stamp is two processes disagreeing about the same instant.
+    fail('STUDY_DESCRIPTOR_CORRUPT', current
+      ? `own lock status=${current.status} pid=${current.pid}/${own.pid}`
+        + ` start=${current.startTime}/${own.startTime}`
+        + ` dev=${current.stat.dev}/${own.dev} ino=${current.stat.ino}/${own.ino}`
+        + (current.status === 'alive' ? '' : ` probed=${ownedProcessStartTime(current.pid)}`)
+      : 'own lock absent');
+  }
   return current;
 }
 function publish(ctx, own, value) {
