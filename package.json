@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test",
     "test:ci": "node --test --test-concurrency=1 --test-timeout=900000",
-    "test:ci:windows": "node --test --test-concurrency=1 --test-timeout=3600000",
+    "test:ci:windows": "node test/helpers/ci-shards.mjs run",
     "benchmark:policies": "node tools/benchmark-policies.js --assert --json",
     "study": "node --input-type=module -e \"import fs from 'node:fs'; import {ensureStudyService} from './tools/study-service.js'; if(process.argv.length!==2) throw new Error('usage: npm run study -- /absolute/store'); const handle=await ensureStudyService(process.argv[1]); fs.writeSync(1,handle.studyUrl+'\\n'); process.exit(0);\" --",
     "study:stop": "node --input-type=module -e \"import fs from 'node:fs'; import {inspectStudyService,stopStudyService} from './tools/study-service.js'; if(process.argv.length!==2) throw new Error('usage: npm run study:stop -- /absolute/store'); const handle=await inspectStudyService(process.argv[1]); if(handle.status==='running') await stopStudyService(process.argv[1],{expectedInstanceId:handle.instanceId}); fs.writeSync(1,'학습 서비스를 정지했습니다.\\n'); process.exit(0);\" --"
