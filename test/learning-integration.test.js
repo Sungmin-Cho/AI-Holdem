@@ -505,7 +505,8 @@ function processCommandLine(pid) {
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`],
-  { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
+  // Get-CimInstance lives in a module, so this call needs the system module path.
+  { env: windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }), encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
 }
 
 test('S8 fixture: runner process command line is observable with inherited shell environment', () => {

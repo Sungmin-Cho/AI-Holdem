@@ -35,7 +35,7 @@ jobs:
       - name: Verify Windows private directory creation
         if: runner.os == 'Windows'
         run: node test/helpers/windows-privacy-probe.mjs
-      - name: Observe Windows child environment and console isolation
+      - name: Verify the Windows child environment can prove privacy
         if: runner.os == 'Windows'
         run: node test/helpers/windows-child-environment-probe.mjs
       - name: Verify learning runtime on the runner platform

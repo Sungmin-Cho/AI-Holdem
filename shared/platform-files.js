@@ -25,9 +25,23 @@ import { spawnSync } from 'node:child_process';
 // pwsh 7 exports its module search path to children. Windows PowerShell 5.1
 // cannot load those Core modules. Use the system modules of the executable's
 // root, never a custom payload environment's SystemRoot or inherited PSHOME.
-export function windowsPowerShellEnvironment(env = process.env, systemRoot = process.env.SystemRoot || 'C:\\Windows') {
-  const clean = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
-  clean.PSModulePath = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+//
+// Discovery, not the cmdlets, is what costs: analysing that module directory
+// runs past 15s wherever no pre-warmed cache is inherited, and a child holding
+// an environment allowlist inherits none, so it pays that on every call. Every
+// script here uses cmdlets built into powershell.exe, so they are handed no
+// module path at all and no cache to build — measured at 0.9s against 20s.
+// Only the listener query needs a module, and it asks for the system path.
+export function windowsPowerShellEnvironment(env = process.env, systemRoot = process.env.SystemRoot || 'C:\\Windows', { modules = 'none' } = {}) {
+  const system = modules === 'system';
+  const clean = Object.fromEntries(Object.entries(env)
+    .filter(([key]) => key.toLowerCase() !== 'psmodulepath'
+      && (system || key.toLowerCase() !== 'psmoduleanalysiscachepath')));
+  clean.PSModulePath = system ? path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') : '';
+  // An invalid location is the documented way to disable the cache. With nothing
+  // to analyse it has nothing to hold, and never inheriting it keeps a caller
+  // from aiming the file that decides how commands resolve.
+  if (!system) clean.PSModuleAnalysisCachePath = 'NUL';
   return clean;
 }
 

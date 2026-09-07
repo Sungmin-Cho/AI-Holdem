@@ -1,10 +1,11 @@
 // The study service child gets an environment allowlist, so it inherits none of
-// the variables PowerShell leans on. Shrinking the working environment named the
-// one that matters: PSModuleAnalysisCachePath. Where a pre-warmed cache is
-// inherited PowerShell proves in 415ms; with no cache location it re-analyses
-// every module and overruns the proof cap. Pinning a fresh cache file is not the
-// answer either — building one overran the cap in the parent too. So measure the
-// settings themselves before choosing between them.
+// the variables PowerShell leans on — including the pre-warmed module analysis
+// cache its parent holds. Measuring the settings, rather than guessing at them,
+// showed the cost is analysing the system module directory: over 15s without an
+// inherited cache, unaffected by disabling the cache, and not fixed by building
+// one (25s cold, and the rebuild came back). An empty module path answers in
+// 0.9s. Scripts that need no module now get none, so the allowlist is enough.
+// Gate on that, and report the measurements whenever it stops being true.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,13 +91,17 @@ async function main() {
   const target = path.join(root, 'private');
   createPrivateDirectory(target);
   try {
-    measureCacheSettings(root);
-    const full = Object.keys(process.env).filter((key) => process.env[key] !== undefined);
-    if (!proves(pick(full), target, { report: 'full-env control' })) {
-      console.log(JSON.stringify({ childEnvironmentMinimized: false, reason: 'the full environment cannot prove either' }));
+    // Twice: a proof that only works once is a cache being warmed, not a fix.
+    if (proves(pick(CLIENT), target, { report: 'client-allowlist first' })
+      && proves(pick(CLIENT), target, { report: 'client-allowlist again' })) {
+      console.log(JSON.stringify({ childEnvironmentSufficient: true }));
       return;
     }
-    proves(pick(CLIENT), target, { report: 'client-allowlist control' });
+    // The allowlist stopped being enough. Say what the environment now costs
+    // rather than leaving the next reader to rediscover it.
+    proves(pick(Object.keys(process.env)), target, { report: 'full-env control' });
+    measureCacheSettings(root);
+    throw new Error('CHILD_ENVIRONMENT_INSUFFICIENT: the allowlist can no longer prove a private path');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 

@@ -6,13 +6,25 @@ import * as files from '../shared/platform-files.js';
 test('Windows PowerShell environment removes all poisoned key variants without mutation', () => {
  const source={SystemRoot:'E:\\payload-root',PSModulePath:'C:\\Program Files\\PowerShell\\7\\Modules',psmodulepath:'C:\\foreign',PsMoDuLePaTh:'C:\\another',PATH:'unchanged-path',PROVIDER_SENTINEL:'unchanged-provider'};
  const before={...source};
- const result=files.windowsPowerShellEnvironment(source,'D:\\Windows');
+ const result=files.windowsPowerShellEnvironment(source,'D:\\Windows',{modules:'system'});
  assert.deepEqual(source,before);
  assert.notEqual(result,source);
  assert.deepEqual(Object.keys(result).filter(key=>key.toLowerCase()==='psmodulepath'),['PSModulePath']);
  assert.equal(result.PSModulePath,'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
  assert.equal(result.PATH,source.PATH);
  assert.equal(result.PROVIDER_SENTINEL,source.PROVIDER_SENTINEL);
+ // Analysing that directory runs past 15s without an inherited warm cache, and a
+ // child holding an allowlist inherits none. Scripts that need no module get no
+ // module path and no cache to build; only a module cmdlet asks for the system path.
+ const bare=files.windowsPowerShellEnvironment(source,'D:\\Windows');
+ assert.deepEqual(source,before);
+ assert.equal(bare.PSModulePath,'');
+ assert.deepEqual(Object.keys(bare).filter(key=>key.toLowerCase()==='psmoduleanalysiscachepath'),['PSModuleAnalysisCachePath']);
+ assert.equal(bare.PSModuleAnalysisCachePath,'NUL');
+ assert.equal(bare.PATH,source.PATH);
+ assert.equal(bare.PROVIDER_SENTINEL,source.PROVIDER_SENTINEL);
+ // A caller keeps its own cache location only where a module must be found.
+ assert.equal(files.windowsPowerShellEnvironment(source,'D:\\Windows',{modules:'system'}).psmoduleanalysiscachepath,source.psmoduleanalysiscachepath);
 });
 
 test('every Windows PowerShell production spawn receives a sanitized environment', () => {
@@ -54,11 +66,15 @@ test('every Windows PowerShell production spawn receives a sanitized environment
  assert.equal(await listener.createListenerOwnedBy({platform:'win32'})(123,3210),true);
  job.spawnOwnedCommand('C:\\node.exe',[],{cwd:'C:\\fixture',env:{...process.env,SystemRoot:'E:\\payload-root',systemroot:'F:\\other-root',PROVIDER_SENTINEL:'caller-provider'},ownedTimeoutMs:100});
  assert.equal(captured.length,7);
- for(const {exe,opts} of captured){
+ for(const {exe,args,opts} of captured){
   assert.match(exe,/powershell\.exe$/);
   assert.ok(opts.env,'production spawn must explicitly sanitize inherited module paths');
   assert.deepEqual(Object.keys(opts.env).filter(key=>key.toLowerCase()==='psmodulepath'),['PSModulePath']);
-  assert.equal(opts.env.PSModulePath,'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
+  // Only Get-NetTCPConnection needs a module; every other script is given none,
+  // so it never pays for analysing a module directory it does not read.
+  const needsModule=String(args.at(-1)).includes('Get-NetTCPConnection');
+  assert.equal(opts.env.PSModulePath,needsModule?'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules':'');
+  assert.equal(opts.env.PSModuleAnalysisCachePath,needsModule?undefined:'NUL');
  }
  assert.equal(captured.at(-1).opts.env.PROVIDER_SENTINEL,'caller-provider');
  assert.equal(captured.at(-1).opts.env.SystemRoot,'E:\\payload-root');
