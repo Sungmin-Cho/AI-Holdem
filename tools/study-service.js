@@ -52,21 +52,25 @@ function privatePath(file, privateMode) {
 }
 // A path can be removed between the moment it is listed and the moment the proof
 // reads it, and on Windows that proof is a PowerShell child, so the window is
-// wide: releasing a lock while a client polls does exactly this. A path that is
-// gone is absent, not unproven, so a listing that changed under the proof earns
-// one fresh attempt. A listing that did not change closes the transaction.
+// about a second wide. A service shutting down does exactly this, twice in a
+// row: it unlinks its descriptor, then releases its lock, each behind its own
+// second of proofs — so one retry can lose the lock while re-proving the
+// descriptor's absence. A path that is gone is absent, not unproven. Re-prove for
+// as long as the listing keeps changing under the proof; only a listing that held
+// still across a proof makes an unproven path final. The bound is the number of
+// candidates: a listing can only change that many times before it is empty.
 function proveEntries(candidates, phase) {
   const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
   let entries = candidates.filter(({ file }) => statOrNull(file));
-  for (let attempt = 0; ; attempt += 1) {
-    const reasons = [];
+  let reasons = [];
+  for (let attempt = 0; attempt <= candidates.length; attempt += 1) {
+    reasons = [];
     if (arePrivatePaths(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
     const relisted = candidates.filter(({ file }) => statOrNull(file));
-    if (attempt > 0 || listing(relisted) === listing(entries)) {
-      fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
-    }
+    if (listing(relisted) === listing(entries)) break;
     entries = relisted;
   }
+  fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
 }
 function aclTransaction(ctx, fn) {
   if (process.platform !== 'win32' || aclScope) return fn();
