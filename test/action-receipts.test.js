@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer } from '../server/server.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { skipOnWin32 } from './helpers/platform.js';
 test('REQ-007: authenticated action status is available', async () => {
   const gameDir = createOwnedTempDir('holdem-action-status');
   const relay = await startServer({ gameDir, port: 0, token: 'receipt-test-token' });
@@ -315,9 +316,13 @@ test('the server fsyncs UI file and directory before receipt file and directory'
   fs.renameSync = (from, to) => { events.push(`rename-${path.basename(to)}`); return rename(from, to); };
   try { assert.equal((await f.publish(2, { actionAck })).status, 200); }
   finally { fs.fsyncSync = sync; fs.renameSync = rename; }
+  // Node cannot open or fsync a directory on Windows, so the writer flushes the
+  // file, renames, and stops there by design. The order that remains — each
+  // file flushed before its rename, UI before receipt — still holds.
+  const directorySync = process.platform === 'win32' ? [] : ['directory-sync'];
   assert.deepEqual(events, [
-    'file-sync', 'rename-ui-snapshot.json', 'directory-sync',
-    'file-sync', 'rename-ui-action-receipt.json', 'directory-sync',
+    'file-sync', 'rename-ui-snapshot.json', ...directorySync,
+    'file-sync', 'rename-ui-action-receipt.json', ...directorySync,
   ]);
 });
 
@@ -627,6 +632,10 @@ test('S4 root: a receipt store cannot borrow another relay root owner', async ()
 for (const writer of ['ui', 'receipt']) {
   for (const stage of ['after-temp-open', 'after-file-write', 'after-file-fsync', 'after-rename', 'after-directory-open', 'after-directory-fsync']) {
     test(`S4 root: ${writer} writer preserves replacement at ${stage}`, async (t) => {
+      // The fixture displaces the live root by renaming it while a file inside
+      // is open; Windows refuses that rename, and its writer never opens the
+      // directory, so two of the stages do not exist there at all.
+      if (skipOnWin32(t, 'renaming a directory with an open handle is EPERM on win32; directory stages do not exist there')) return;
       const f = await fixture(t);
       const holder = createOwnedTempDir('holdem-owner-stages');
       const displaced = path.join(holder, 'original');

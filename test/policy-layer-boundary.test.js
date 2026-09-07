@@ -51,7 +51,7 @@ test('the heuristic strength estimate is consumed only by opponent policy strate
       else if (entry.isFile() && /\.js$/.test(entry.name)) {
         for (const edge of scanModule(fs.readFileSync(full, 'utf8')).imports) {
           if (edge.specifier.endsWith('/hand-strength.js') || edge.specifier === './hand-strength.js') {
-            consumers.push(path.relative(ROOT, full));
+            consumers.push(path.relative(ROOT, full).split(path.sep).join('/'));
           }
         }
       }

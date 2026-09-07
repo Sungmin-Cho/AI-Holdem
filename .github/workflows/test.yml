@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# A Windows run takes over an hour and bills at twice the rate. A push that
+# supersedes one must not leave it running to completion beside the new run.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Node ${{ matrix.node-version }} (${{ matrix.os }})

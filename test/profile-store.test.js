@@ -459,7 +459,7 @@ test('journal append followed by profile write failure recovers exactly once', a
   const failingIo = {
     ...trainingStoreIo,
     writeJsonSecure(file, value) {
-      if (failProfileWrite && file.endsWith('/profile.json')) {
+      if (failProfileWrite && /[\\/]profile\.json$/.test(file)) {
         failProfileWrite = false;
         const error = new Error('injected profile write failure');
         error.code = 'INJECTED_WRITE_FAILURE';
@@ -561,7 +561,7 @@ test('digest-map retry recovers journal-new profile-old crash state', async () =
   const failingIo = {
     ...trainingStoreIo,
     writeJsonSecure(file, value) {
-      if (fail && file.endsWith('/profile.json')) {
+      if (fail && /[\\/]profile\.json$/.test(file)) {
         fail = false;
         const error = new Error('injected profile write failure');
         error.code = 'INJECTED_WRITE_FAILURE';

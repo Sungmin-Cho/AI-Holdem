@@ -40,17 +40,21 @@ function jsFilesUnder(dir) {
 
 let staticCache = null;
 
+// The graph describes source, not the host: a module's identity is its
+// POSIX-relative path whichever separator path.relative produced it with.
+const posixRelative = (file) => path.relative(ROOT, file).split(path.sep).join('/');
+
 function staticGraph() {
   if (staticCache) return staticCache;
   const edges = [];
   const unresolved = [];
   for (const dir of SCANNED) {
     for (const file of jsFilesUnder(dir)) {
-      const relative = path.relative(ROOT, file);
+      const relative = posixRelative(file);
       const scan = scanModule(fs.readFileSync(file, 'utf8'));
       for (const entry of scan.imports) {
         const target = entry.specifier.startsWith('.')
-          ? path.relative(ROOT, path.resolve(path.dirname(file), entry.specifier))
+          ? posixRelative(path.resolve(path.dirname(file), entry.specifier))
           : entry.specifier;
         edges.push({ from: relative, to: target, ...entry });
       }
@@ -65,7 +69,7 @@ function staticGraph() {
 
 function layerOf(target) {
   if (typeof target !== 'string' || target.startsWith('..') || target.includes(':')) return null;
-  return target.split(path.sep)[0];
+  return target.split('/')[0];
 }
 
 function edgesFrom(layer) {
@@ -164,7 +168,7 @@ const SECURITY_INPUT_RE = /'(?:state|players)\.json'|'hands'|'\.coach-authority\
 test('the server writes only its UI, receipt and lock files, never its security predicates', () => {
   const offenders = [];
   for (const file of jsFilesUnder('server')) {
-    const relative = path.relative(ROOT, file);
+    const relative = posixRelative(file);
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
     const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
