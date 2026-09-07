@@ -55,8 +55,29 @@ test('actual platform fresh private store owns, reuses and stops study service',
   const { createPrivateDirectory, isPrivatePath } = await import('../shared/platform-files.js');
   const { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus } = await import('../engine/state.js');
   const { ensureStudyService, inspectStudyService, stopStudyService } = await import('../tools/study-service.js');
+  const cp = (await import('node:child_process')).default;
+  const { syncBuiltinESMExports } = await import('node:module');
   const root = path.join(os.tmpdir(), `platform-study-${randomUUID()}`);
   createPrivateDirectory(root);
+  // The detached service child runs on 'ignore' stdio, so a cold start that dies
+  // is indistinguishable from one that is merely slow: the client only ever
+  // reports its own expired budget. Pipe that one child so its own account of
+  // the failure reaches this assertion instead of a bare timeout code.
+  let childOutput = '';
+  const originalSpawn = cp.spawn;
+  cp.spawn = (command, args, options) => {
+    if (!Array.isArray(args) || args[1] !== '--serve') return originalSpawn(command, args, options);
+    const child = originalSpawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.setEncoding('utf8');
+      stream.on('data', (chunk) => { childOutput += chunk; });
+      stream.on('error', () => {});
+      stream.unref();
+    }
+    child.on('exit', (code, signal) => { childOutput += `[study child exit code=${code} signal=${signal}]\n`; });
+    return child;
+  };
+  syncBuiltinESMExports();
   let owner, service;
   try {
     assert.equal(isPrivatePath(root), true);
@@ -73,7 +94,12 @@ test('actual platform fresh private store owns, reuses and stops study service',
     assert.equal((await stopStudyService(root, { expectedInstanceId: service.instanceId })).stopped, true);
     assert.equal(ownedIdentityStatus(service.pid, service.startTime), 'dead');
     service = null;
+  } catch (error) {
+    error.message = `${error.message}\nstudy child output: ${childOutput || '(the child produced no output)'}`;
+    throw error;
   } finally {
+    cp.spawn = originalSpawn;
+    syncBuiltinESMExports();
     if (service) await stopStudyService(root, { expectedInstanceId: service.instanceId });
     if (owner) releaseOwnedLock(owner);
     fs.rmSync(root, { recursive: true, force: true });

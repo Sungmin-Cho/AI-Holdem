@@ -524,5 +524,12 @@ if (direct) {
     const config = JSON.parse(process.argv[4]);
     optionsForChild({ testOptions: config });
     await runService(process.argv[3], config, process.argv[5], process.argv[6]);
-  } catch { process.exitCode = 1; }
+  } catch (error) {
+    // Production stdio is 'ignore', so this write lands on the null device and
+    // costs nothing. A caller that pipes this child is otherwise unable to tell
+    // a failed cold start from a slow one: it only ever sees its own timeout.
+    try { process.stderr.write(`STUDY_CHILD_FAILED ${error?.code ?? error?.name ?? 'unknown'}\n${error?.stack ?? ''}\n`); }
+    catch { /* A closed or full stdio never changes the exit status. */ }
+    process.exitCode = 1;
+  }
 }
