@@ -234,14 +234,26 @@ test('S8 full: default 20-hand production session records support then study rem
     assert.equal(after.practice.overall.supportedDecisions, before.practice.overall.supportedDecisions + 3);
     checkpoint = 'next-cli-bootstrap';
     diagnostic('next-cli-start');
-    const nextFake = failedCliFixtures({ hold: true });
-    nextCli = startCli(['--store-dir', storeDir], nextFake.env);
-    await until(() => {
-      const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
-      if (current.gameId === selected.gameId) return null;
-      nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
-      return readFirstFixtureRecord(nextFake.log, nextCli.child);
-    }, nextCli, studyBudget({ coldStarts: 1, extraMs: 5000 }));
+    const nextCliBudget = studyBudget({ coldStarts: 1, extraMs: 5000 });
+    const nextCliDeadline = Date.now() + nextCliBudget;
+    let nextFake;
+    let nextRecord = null;
+    while (nextRecord == null) {
+      const remaining = nextCliDeadline - Date.now();
+      if (remaining <= 0) assert.fail('owned CLI bootstrap checkpoint was not reached');
+      nextFake = failedCliFixtures({ hold: true });
+      nextCli = startCli(['--store-dir', storeDir], nextFake.env);
+      try {
+        nextRecord = await until(() => {
+          const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
+          if (current.gameId === selected.gameId) return null;
+          nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
+          return readFirstFixtureRecord(nextFake.log, nextCli.child);
+        }, nextCli, remaining);
+      } catch (error) {
+        if (!String(error?.message ?? error).includes('ACTIVE_GAME')) throw error;
+      }
+    }
     const nextStateFile = path.join(nextGameDir, 'state.json');
     const nextInitial = JSON.parse(fs.readFileSync(nextStateFile));
     assert.equal(nextInitial.handNo, 0);
