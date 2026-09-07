@@ -339,33 +339,44 @@ function detachStalePidFile(dir, expectedPidFile, hooks) {
       throw error;
     }
   }
-  hooks?.afterLink?.(dir, aside);
-  let matches = false;
-  let fd;
-  try {
-    fd = fs.openSync(aside, 'r');
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
-  try {
-    const st = fs.fstatSync(fd, { bigint: true });
-    matches = st.dev === expectedPidFile.dev && st.ino === expectedPidFile.ino;
-  } finally {
-    fs.closeSync(fd);
-  }
-  if (!matches) {
+  let pinned = true;
+  const dropAside = () => {
+    pinned = false;
     try { fs.unlinkSync(aside); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    // 그 사이 소유자가 해제하며 우리 aside 때문에 rmdir에 실패했다면 여기서 치운다.
-    try { fs.rmdirSync(dir); } catch (error) {
-      if (error.code !== 'ENOTEMPTY' && error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
+  };
+  try {
+    hooks?.afterLink?.(dir, aside);
+    let matches = false;
+    let fd;
+    try {
+      fd = fs.openSync(aside, 'r');
+    } catch (error) {
+      if (error.code === 'ENOENT') { pinned = false; return false; }
+      throw error;
     }
-    return false;
+    try {
+      const st = fs.fstatSync(fd, { bigint: true });
+      matches = st.dev === expectedPidFile.dev && st.ino === expectedPidFile.ino;
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (!matches) {
+      dropAside();
+      // 그 사이 소유자가 해제하며 우리 aside 때문에 rmdir에 실패했다면 여기서 치운다.
+      try { fs.rmdirSync(dir); } catch (error) {
+        if (error.code !== 'ENOTEMPTY' && error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
+      }
+      return false;
+    }
+    hooks?.beforeUnlinkPid?.(dir);
+    try { fs.unlinkSync(pidPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    dropAside();
+    return true;
+  } finally {
+    if (pinned) {
+      try { fs.unlinkSync(aside); } catch { /* best-effort unpin on throw */ }
+    }
   }
-  hooks?.beforeUnlinkPid?.(dir);
-  try { fs.unlinkSync(pidPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  try { fs.unlinkSync(aside); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  return true;
 }
 
 function reclaimMutex(dir, hooks) {
@@ -524,7 +535,7 @@ function acquireMutex(dir, ctx) {
 
 function releaseMutex(dir, mine) {
   // Our pid is alive, so no reclaimer may have deleted our lock: if the inode still
-  // matches the one mkdir gave us, the lock is ours to dismantle — pid file first,
+  // matches the one rename installed, the lock is ours to dismantle — pid file first,
   // then the (now empty) directory. Never recursive, never rename.
   if (!sameInode(mine, inodeKey(dir))) return;
   try {

@@ -40,7 +40,7 @@ try {
       pidEnter,
       pidExit,
     };
-  }, { timeoutMs: 30_000 });
+  }, { timeoutMs: 30_000, retryMs: 10 });
 } catch (error) {
   rec = {
     pid: process.pid,

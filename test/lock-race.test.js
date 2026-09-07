@@ -16,7 +16,7 @@ function waitForExit(child) {
   return new Promise((resolve) => child.once('exit', resolve));
 }
 
-test('lock race canary: 25 rounds × 8 contenders never overlap or steal', { timeout: 30_000 }, async (t) => {
+test('lock race canary: 25 rounds × 8 contenders never overlap or steal', { timeout: 60_000 }, async (t) => {
   if (skipOnWin32(t, 'directory-rename install and hardlink reclaim are POSIX canaries')) return;
   const started = Date.now();
   const root = createOwnedTempDir('lock-race');

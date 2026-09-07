@@ -586,6 +586,19 @@ test('T2: 동료가 link 뒤에 stale pid를 지워도 우리는 회수를 마�
   assert.deepEqual(tmpLeftovers(d), []);
 });
 
+test('T2c: afterLink가 throw해도 우리 aside는 남지 않는다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  const hooks = { afterLink() { throw new Error('boom'); } };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    /boom/,
+  );
+  const names = fs.existsSync(mutex) ? fs.readdirSync(mutex) : [];
+  assert.equal(names.some((n) => n.startsWith(`pid.reclaim.${process.pid}.`)), false);
+});
+
 test('T2b: 살아 있는 회수자의 aside가 rmdir을 막으면 LOCKED이고 그 aside는 보존된다', () => {
   const d = tmpDir();
   const mutex = deadMutex(d);
