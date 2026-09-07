@@ -2,6 +2,7 @@ import { readFirstFixtureRecord } from './helpers/fixture-readiness.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyModeDefaults, parseGameLoopArgs, engineInitFlags, gtoEvalNotice, createGameLoop } from '../tools/game-loop.js';
+import { VERSION_V2 } from '../training/policies/catalog.js';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 test('REQ-001: new store sessions default to policy learning', () => {
   const parsed = parseGameLoopArgs(['--store-dir', '/tmp/s8-new-store']);
@@ -177,7 +178,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
   assert.equal(state.handNo, 0, 'this test checks initialization, not a 20-hand learning outcome');
   assert.match(state.policySeed, /^[a-f0-9]{64}$/);
   assert.equal(players.filter((player) => player.playerId !== 'user').length, 5);
-  assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === '2.0.0'));
+  assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === VERSION_V2));
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
   assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false, 'the held probe keeps this test before relay startup');
   cli.requestStop();

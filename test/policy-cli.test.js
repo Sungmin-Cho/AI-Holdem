@@ -165,3 +165,58 @@ test('stampPlayerPolicies is idempotent for existing seats and fail-closes on ca
   fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(broken));
   assert.throws(() => stampPlayerPolicies(dir), { code: 'POLICY_CONFIG_MISMATCH' });
 });
+
+const DIGEST_V2_2_0_0 = Object.freeze({
+  'baseline-v2': '336abab921c7c8381aeb555e483df79931d6e83180ed5cf1f8ace17c474a4271',
+  'tag-v2': '4dd8bfeca2becb1ab610df7a3ebd8d361835ccb0e8923ef18e71432c63525f6f',
+  'lag-v2': '597de71b9b3843621a35a0ebbf2eee8bbfdfab9c35ff4d92006a6f12a84035fe',
+  'nit-v2': 'efc2bd49e4c5e2ba8fc7049d0145cfdfc087be11c6d45a22b6af661ebbfa1bfe',
+  'calling-station-v2': '4b2333d1fcef41fca2370f2006166c83571d7ff6c4b324faf3317d35355b9713',
+  'maniac-v2': 'f0ac07cc2c08ce44ad3678585a9dfd0ca769aa10aca4fb52295f7a4adf5f1d71',
+  'trickster-v2': '7dc73778b5a3dd6a309cf227c249b5b0240318f583ef147d0bd0f6cd89db03c7',
+});
+
+test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves extra keys', () => {
+  const dir = tmp();
+  run(['init', '--ai', '2', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  stampPlayerPolicies(dir);
+  const playersPath = path.join(dir, 'players.json');
+  const marked = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  for (const player of marked) {
+    if (player.playerId === 'user' || !player.policy) continue;
+    const digest = DIGEST_V2_2_0_0[player.policy.policyId];
+    assert.ok(digest, player.policy.policyId);
+    player.policy = {
+      ...player.policy,
+      policyVersion: '2.0.0',
+      configDigest: digest,
+      extra: 'keep',
+    };
+  }
+  fs.writeFileSync(playersPath, JSON.stringify(marked));
+
+  const notices = [];
+  const first = stampPlayerPolicies(dir, { onNotice: (message) => notices.push(message) });
+  const ai = first.filter((player) => player.playerId !== 'user');
+  assert.equal(ai.length, 2);
+  for (const player of ai) {
+    assert.equal(player.policy.policyVersion, '2.1.0');
+    assert.equal(player.policy.extra, 'keep');
+    assert.deepEqual(
+      {
+        policyId: player.policy.policyId,
+        policyVersion: player.policy.policyVersion,
+        configDigest: player.policy.configDigest,
+      },
+      assignmentFor(player.archetype),
+    );
+  }
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0], `policy roll-forward 2.0.0→2.1.0: ${ai.map((player) => player.playerId).join(',')}`);
+
+  const afterFirst = fs.readFileSync(playersPath);
+  const secondNotices = [];
+  stampPlayerPolicies(dir, { onNotice: (message) => secondNotices.push(message) });
+  assert.deepEqual(secondNotices, []);
+  assert.deepEqual(fs.readFileSync(playersPath), afterFirst);
+});

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 export const POLICY_ACTIONS = new Set(['fold', 'check', 'call', 'raise']);
+export const VERSION_V2 = '2.1.0';
+export const PREDECESSOR_VERSIONS_V2 = Object.freeze(['2.0.0']);
 
 export function coded(code, message) {
   const error = new Error(message);
@@ -24,6 +26,14 @@ export function raiseAmount(legal, { sizeBb, bb } = {}) {
   return legal.minRaiseTo;
 }
 
+export function clampRaiseTo(target, legal) {
+  if (!legal?.canRaise) return null;
+  if (legal.minRaiseTo > legal.maxRaiseTo) return legal.maxRaiseTo;
+  if (target < legal.minRaiseTo) return legal.minRaiseTo;
+  if (target > legal.maxRaiseTo) return legal.maxRaiseTo;
+  return target;
+}
+
 export function legalizeOne(entry, legal, { bb } = {}) {
   if (!entry || !POLICY_ACTIONS.has(entry.action)) return null;
   if (entry.action === 'fold') {
@@ -38,7 +48,9 @@ export function legalizeOne(entry, legal, { bb } = {}) {
     if (legal.canCheck || !(legal.callAmount > 0)) return null;
     return { action: 'call', amount: legal.callAmount };
   }
-  const amount = raiseAmount(legal, { sizeBb: entry.sizeBb, bb });
+  const amount = Number.isSafeInteger(entry.raiseTo)
+    ? clampRaiseTo(entry.raiseTo, legal)
+    : raiseAmount(legal, { sizeBb: entry.sizeBb, bb });
   if (amount == null) return null;
   return { action: 'raise', amount };
 }

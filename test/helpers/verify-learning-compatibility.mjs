@@ -11,7 +11,7 @@ import { acquireOwnedLock, ownedProcessStartTime, releaseOwnedLock } from '../..
 import { newDeck } from '../../engine/cards.js';
 import { CANONICAL_REFERENCE_SOURCE } from '../../shared/reference.js';
 import { evaluationIdOf } from '../../training/contracts.js';
-import { assignmentFor, resolveExactPolicy } from '../../training/policies/catalog.js';
+import { assignmentFor, resolveExactPolicy, VERSION_V2 } from '../../training/policies/catalog.js';
 import { createMistakeBank, createProfileStore } from '../../tools/training-stores.js';
 import { createGameLoop } from '../../tools/game-loop.js';
 import { ensureStudyService, inspectStudyService, stopStudyService } from '../../tools/study-service.js';
@@ -286,7 +286,7 @@ async function buildCurrentFixtures(storeDir) {
   const collected = await bank.collect(evaluation);
   if (collected.added !== true) throw coded('CURRENT_BANK_FIXTURE_FAILED');
   const policy = assignmentFor('TAG');
-  if (policy.policyVersion !== '2.0.0') throw coded('CURRENT_POLICY_FIXTURE_FAILED');
+  if (policy.policyVersion !== VERSION_V2) throw coded('CURRENT_POLICY_FIXTURE_FAILED');
   const policyFile = path.join(storeDir, '.training', 'policy-v2.json');
   const evaluationFile = path.join(storeDir, '.training', 'evaluation.json');
   fs.writeFileSync(policyFile, JSON.stringify(policy), { mode: 0o600 });

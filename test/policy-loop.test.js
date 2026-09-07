@@ -156,6 +156,15 @@ test('policy resume re-stamps seats missing after init crash and reproduces init
   assert.deepEqual(readJson(path.join(gameDir, 'players.json')), stamped);
 });
 
+test('game-loop policy stamps pass appendNotice at bootstrap and both resume sites', () => {
+  const src = fs.readFileSync(new URL('../tools/game-loop.js', import.meta.url), 'utf8');
+  const calls = [...src.matchAll(/stampPlayerPolicies\(([^)]*)\)/g)].map((match) => match[1]);
+  assert.equal(calls.length, 3);
+  for (const args of calls) {
+    assert.match(args, /onNotice:\s*appendNotice/);
+  }
+});
+
 test('early learning defaults preserve a legacy v1 policy session on resume', { timeout: 15000 }, async (t) => {
   const gameDir = tmp();
   execFileSync(process.execPath, [ENGINE, 'init', '--ai', '2', '--stack', '900', '--opponent-runtime', 'policy', '--game-dir', gameDir], {
