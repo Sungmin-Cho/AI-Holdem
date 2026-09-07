@@ -34,19 +34,19 @@ function sleepSync(ms) {
 }
 
 function removeOwnedDirectory(dir) {
-  const attempts = process.platform === 'win32' ? 10 : 1;
+  const deadline = Date.now() + (process.platform === 'win32' ? 10_000 : 0);
   let last;
-  for (let i = 0; i < attempts; i += 1) {
+  for (;;) {
     try {
       fs.rmSync(dir, { recursive: true, force: false });
       return;
     } catch (error) {
       last = error;
       if (process.platform !== 'win32' || !['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(error.code)) throw error;
-      sleepSync(50 * (i + 1));
+      if (Date.now() >= deadline) throw last;
+      sleepSync(50);
     }
   }
-  throw last;
 }
 
 function waitForExit(child, timeoutMs = 2_000) {

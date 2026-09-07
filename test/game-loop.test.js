@@ -1615,7 +1615,7 @@ test('IDENTITY_UNAVAILABLE is surfaced distinctly and leaves no partial lock', {
   assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
 });
 
-test('resume rejects missing or mismatched loop-state identity before resolver, server, or log work', { timeout: 20_000 }, async (t) => {
+test('resume rejects missing or mismatched loop-state identity before resolver, server, or log work', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const cases = [
     ['missing-sessionToken', (state) => { delete state.sessionToken; }],
     ['mismatched-sessionToken', (state) => { state.sessionToken = 'different-session-token'; }],
@@ -1787,7 +1787,7 @@ test('resume from bootstrap never calls init, preserves engine files, and comple
   assert.equal(state.port > 0, true);
 });
 
-test('playing resume reuses every valid matching player session without warmup', { timeout: 10_000 }, async (t) => {
+test('playing resume reuses every valid matching player session without warmup', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
