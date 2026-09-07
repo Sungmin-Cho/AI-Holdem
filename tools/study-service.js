@@ -129,6 +129,17 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
     fail();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
+// Windows inode numbers run past 2^53, where a Number-valued stat rounds them.
+// Converting that rounded value with BigInt() cannot recover what it lost, so an
+// identity recorded exactly at creation never matches one re-read as a Number.
+// Read the identity the same exact way it was recorded.
+function exactInode(file) {
+  platformTimeout(WAIT_MS);
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
+}
 function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   const status = ownedIdentityStatus(pid, startTime);
@@ -143,13 +154,14 @@ function readLock(ctx, parent = false) {
   const stat = statOrNull(file);
   if (!stat) return null;
   const checked = directory(file);
+  const exact = exactInode(file);
   const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
   if (!sameInode(checked, directory(file))) fail();
-  if (!pidFile) return { status: 'unknown', stat: checked };
+  if (!pidFile) return { status: 'unknown', stat: checked, exact };
   const parsed = parseOwnedLockIdentity(pidFile.text);
-  if (!parsed) return { status: 'unknown', stat: checked };
+  if (!parsed) return { status: 'unknown', stat: checked, exact };
   const { pid, startTime } = parsed;
-  return { pid, startTime, stat: checked, pidStat: pidFile.stat, status: identityStatus(pid, startTime) };
+  return { pid, startTime, stat: checked, exact, pidStat: pidFile.stat, status: identityStatus(pid, startTime) };
 }
 function descriptorFields(value) {
   const keys = ['schemaVersion','pid','startTime','instanceId','storeIdentity','port','drillToken','controlToken'];
@@ -433,7 +445,7 @@ export function stopStudyService(storeDir, options = {}) {
 function assertOwnLock(ctx, own) {
   const current = readLock(ctx);
   if (current?.status !== 'alive' || current.pid !== own.pid || current.startTime !== own.startTime
-    || BigInt(current.stat.dev) !== own.dev || BigInt(current.stat.ino) !== own.ino) {
+    || current.exact?.dev !== own.dev || current.exact?.ino !== own.ino) {
     // Four different losses reach this guard and the caller cannot tell them
     // apart. Name the one that happened, and for an identity that no longer
     // reads alive, what the probe answers now: null is a probe that cannot run,
@@ -441,7 +453,7 @@ function assertOwnLock(ctx, own) {
     fail('STUDY_DESCRIPTOR_CORRUPT', current
       ? `own lock status=${current.status} pid=${current.pid}/${own.pid}`
         + ` start=${current.startTime}/${own.startTime}`
-        + ` dev=${current.stat.dev}/${own.dev} ino=${current.stat.ino}/${own.ino}`
+        + ` dev=${current.exact?.dev}/${own.dev} ino=${current.exact?.ino}/${own.ino}`
         + (current.status === 'alive' ? '' : ` probed=${ownedProcessStartTime(current.pid)}`)
       : 'own lock absent');
   }
