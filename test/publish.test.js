@@ -409,7 +409,11 @@ test('publish: 죽은 락을 두 게시자가 동시에 회수해도 둘 다 남
         run(dir, ['--from', a, '--lock-wait-ms', '15000']),
         run(dir, ['--from', b, '--lock-wait-ms', '15000']),
       ]);
-      for (const result of results) assert.equal(result.ok, true, JSON.stringify(result));
+      for (const [index, name] of [[0, 'a'], [1, 'b']]) {
+        const result = results[index];
+        assert.equal(result.ok, true, `round ${round} ${name} ${JSON.stringify(result)}`);
+        assert.equal(result.applied, true, `round ${round} ${name} ${JSON.stringify(result)}`);
+      }
       assert.equal(fs.existsSync(lockDir), false, '락이 남았다');
     }
 
@@ -1061,5 +1065,76 @@ test('publish: 속이 빈 step envelope는 거부한다', async () => {
     assert.equal((await snapshotOf(started.port)).revision, 0);
   } finally {
     await started.close();
+  }
+});
+
+async function listenFakePublish(handler) {
+  const server = createHttpServer((req, res) => {
+    if (req.method !== 'POST' || !String(req.url).startsWith('/api/publish')) {
+      res.writeHead(404).end();
+      return;
+    }
+    req.resume();
+    req.once('end', () => handler(res));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return server;
+}
+
+test('publish: applied false without --retry is PUBLISH_ID_REUSED and drops the attempt', async () => {
+  const dir = tmpDir();
+  const server = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, revision: 7, applied: false }));
+  });
+  const port = server.address().port;
+  writeLockJson(dir, port, 'tok');
+  try {
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(failed.json.ok, false);
+    assert.equal(failed.json.code, 'PUBLISH_ID_REUSED');
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('publish --retry: applied false is still success and clears the attempt', async () => {
+  const dir = tmpDir();
+  const server = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, revision: 7, applied: false }));
+  });
+  const port = server.address().port;
+  writeLockJson(dir, port, 'tok');
+  fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: gameEpochOf('tok'),
+    body: { publishId: 1, view: { handNo: 1 } },
+  }));
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(out.ok, true);
+    assert.equal(out.applied, false);
+    assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('publish: a response without applied is treated as applied true', async () => {
+  const dir = tmpDir();
+  const server = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, revision: 7 }));
+  });
+  const port = server.address().port;
+  writeLockJson(dir, port, 'tok');
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    assert.equal(out.ok, true);
+    assert.equal(out.applied, true);
+    assert.equal(out.revision, 7);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });

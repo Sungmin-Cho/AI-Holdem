@@ -929,7 +929,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       return;
     }
     if (alreadyApplied) {
-      sendJson(res, 200, { ok: true, revision: state.revision });
+      sendJson(res, 200, { ok: true, revision: state.revision, applied: false });
       return;
     }
 
@@ -1026,7 +1026,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
 
     Object.assign(state, next);
     fanoutCommitted();
-    sendJson(res, 200, { ok: true, revision: state.revision });
+    sendJson(res, 200, { ok: true, revision: state.revision, applied: true });
   };
 
   const handleAction = (body, res) => {

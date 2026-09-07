@@ -4,8 +4,8 @@ import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os'
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
-import { spawnSleeper } from './helpers/platform.js';
+import { loadState, saveState, withMutation, withNamedLock, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
+import { spawnSleeper, skipOnWin32 } from './helpers/platform.js';
 
 function tmpDir() { return createOwnedTempDir('holdem-state'); }
 
@@ -134,6 +134,7 @@ test('회수는 rename 부산물 없이 제자리 삭제로만 이루어진다',
   // 살아있는 락을 rename으로 밀어내는 경로가 사라졌음을 잔여물 부재로 고정한다.
   const leftovers = fs.readdirSync(d).filter(name => name.startsWith('.mutex'));
   assert.deepEqual(leftovers, []);
+  assert.deepEqual(fs.readdirSync(d).filter((n) => n.startsWith('pid.reclaim.') || /^\.mutex\.\d+\.[0-9a-f]{8}\.tmp$/.test(n)), []);
 });
 
 test('회수는 비재귀다 — 예상 밖 파일이 있으면 락 디렉터리를 지우지 않는다', () => {
@@ -459,4 +460,380 @@ test('noncanonical zero-padded day cannot make a live owned identity reclaimable
     assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
     assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
   }
+});
+
+// #148: 회수자가 죽은 락을 판정·검증한 뒤 pid를 지우기 직전, 동료가 그 락을 완전히 회수하고
+// 자기 락을 세운다. 회수자는 동료의 산 락을 파괴해서는 안 된다.
+function reclaimTheftHooks() {
+  let peerAcquired = false;
+  let peerIno = null;
+  let calls = 0;
+  const hooks = {
+    beforeUnlinkPid(dir) {
+      calls += 1;
+      if (calls > 1) return;
+      try { fs.unlinkSync(path.join(dir, 'pid')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      try { fs.rmdirSync(dir); } catch (e) { if (e.code === 'ENOTEMPTY') return; throw e; }
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      peerIno = fs.statSync(dir, { bigint: true }).ino;
+      peerAcquired = true;
+    },
+  };
+  return { hooks, get calls() { return calls; }, get peerAcquired() { return peerAcquired; }, get peerIno() { return peerIno; } };
+}
+
+test('T1: 회수자는 검증과 unlink 사이에 동료가 세운 산 락을 파괴하지 않는다', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), '2147480000');
+  saveState(d, { stateVersion: 0 });
+  const sim = reclaimTheftHooks();
+  let error = null;
+  try {
+    withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks: sim.hooks });
+  } catch (e) { error = e; }
+  assert.ok(sim.calls >= 1, 'hook never reached');
+  if (sim.peerAcquired) {
+    assert.equal(error?.code, 'LOCKED', `stole the peer lock: ${error ? error.code : 'acquired'}`);
+    assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid), 'peer pid destroyed');
+    assert.equal(fs.statSync(mutex, { bigint: true }).ino, sim.peerIno, 'peer lock directory replaced');
+    assert.equal(loadState(d).ran, undefined);
+  } else {
+    assert.equal(error, null, `peer was pinned out but we did not acquire: ${error?.code}`);
+    assert.equal(loadState(d).ran, true);
+    assert.equal(fs.existsSync(mutex), false);
+  }
+});
+
+test('T1 named: withNamedLock도 같은 창에서 동료의 산 락을 파괴하지 않는다', async () => {
+  const d = tmpDir();
+  const lockDir = path.join(d, 'publish.lock.d');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), '2147480000');
+  const sim = reclaimTheftHooks();
+  let error = null;
+  let ran = false;
+  try {
+    await withNamedLock(d, 'publish.lock.d', async () => { ran = true; }, { ...fastLock, hooks: sim.hooks });
+  } catch (e) { error = e; }
+  assert.ok(sim.calls >= 1, 'hook never reached');
+  if (sim.peerAcquired) {
+    assert.equal(error?.code, 'LOCKED', `stole the peer lock: ${error ? error.code : 'acquired'}`);
+    assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), String(process.pid), 'peer pid destroyed');
+    assert.equal(fs.statSync(lockDir, { bigint: true }).ino, sim.peerIno, 'peer lock directory replaced');
+    assert.equal(ran, false);
+  } else {
+    assert.equal(error, null, `peer was pinned out but we did not acquire: ${error?.code}`);
+    assert.equal(ran, true);
+    assert.equal(fs.existsSync(lockDir), false);
+  }
+});
+
+const DEAD = '2147480000';
+function deadMutex(d, name = '.mutex') {
+  const dir = path.join(d, name);
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'pid'), DEAD);
+  return dir;
+}
+const inodeOf = (p) => fs.statSync(p, { bigint: true }).ino;
+function onceHook(fn) {
+  let n = 0;
+  return (...a) => { n += 1; if (n === 1) return fn(...a); return undefined; };
+}
+const tmpLeftovers = (d, base = '.mutex') => fs.readdirSync(d).filter((n) => n.startsWith(`${base}.`) && n.endsWith('.tmp'));
+
+test('T1b: link가 교체된 산 pid에 붙으면 물러나고 동료 락은 보존된다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  let peerIno;
+  const hooks = {
+    afterJudge: onceHook((dir) => {
+      fs.unlinkSync(path.join(dir, 'pid'));
+      fs.rmdirSync(dir);
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      peerIno = inodeOf(dir);
+    }),
+  };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    { code: 'LOCKED' },
+  );
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
+  assert.equal(inodeOf(mutex), peerIno);
+  assert.deepEqual(fs.readdirSync(mutex), ['pid']);
+  assert.equal(loadState(d).ran, undefined);
+  assert.deepEqual(tmpLeftovers(d), []);
+});
+
+test('T2: 동료가 link 뒤에 stale pid를 지워도 우리는 회수를 마치고 획득한다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  const hooks = {
+    afterLink: onceHook((dir) => {
+      fs.unlinkSync(path.join(dir, 'pid'));
+      assert.throws(() => fs.rmdirSync(dir), { code: 'ENOTEMPTY' });
+    }),
+  };
+  const r = withMutation(d, (s) => ({ state: { ...s, ok: true, seen: fs.readdirSync(mutex) }, response: null }), { ...fastLock, hooks });
+  assert.deepEqual(r.state.seen, ['pid']);
+  assert.equal(fs.existsSync(mutex), false);
+  assert.deepEqual(tmpLeftovers(d), []);
+});
+
+test('T2c: afterLink가 throw해도 우리 aside는 남지 않는다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  const hooks = { afterLink() { throw new Error('boom'); } };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    /boom/,
+  );
+  const names = fs.existsSync(mutex) ? fs.readdirSync(mutex) : [];
+  assert.equal(names.some((n) => n.startsWith(`pid.reclaim.${process.pid}.`)), false);
+});
+
+test('T2b: 살아 있는 회수자의 aside가 rmdir을 막으면 LOCKED이고 그 aside는 보존된다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  const foreign = `pid.reclaim.${process.pid}.deadbeef`;
+  const hooks = {
+    afterLink: onceHook((dir) => {
+      fs.linkSync(path.join(dir, 'pid'), path.join(dir, foreign));
+    }),
+  };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    { code: 'LOCKED' },
+  );
+  assert.deepEqual(fs.readdirSync(mutex), [foreign]);
+});
+
+test('T3: 늦은 회수자의 rmdir은 방금 설치된 산 락을 쓸 수 없다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  let peerIno;
+  const hooks = {
+    beforeRmdir: onceHook((dir) => {
+      fs.rmdirSync(dir);
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      peerIno = inodeOf(dir);
+    }),
+  };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    { code: 'LOCKED' },
+  );
+  assert.equal(inodeOf(mutex), peerIno);
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
+  assert.deepEqual(tmpLeftovers(d), []);
+});
+
+test('T3b: rename 직전에 산 락이 나타나면 ENOTEMPTY로 LOCKED이고 tmp는 정리된다', () => {
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const mutex = path.join(d, '.mutex');
+  let peerIno;
+  const hooks = {
+    beforeInstall: onceHook((dir) => {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      peerIno = inodeOf(dir);
+    }),
+  };
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks }),
+    { code: 'LOCKED' },
+  );
+  assert.equal(inodeOf(mutex), peerIno);
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
+  assert.deepEqual(tmpLeftovers(d), []);
+});
+
+test('T4: rename 직전에 빈(죽은) 디렉터리가 나타나면 원자 교체 후 획득한다', (t) => {
+  if (skipOnWin32(t, 'POSIX rename replaces an empty destination directory; win32 refuses it')) return;
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const mutex = path.join(d, '.mutex');
+  const hooks = { beforeInstall: onceHook((dir) => { fs.mkdirSync(dir); }) };
+  const r = withMutation(d, (s) => ({ state: { ...s, pid: fs.readFileSync(path.join(mutex, 'pid'), 'utf8') }, response: null }), { ...fastLock, hooks });
+  assert.equal(r.state.pid, String(process.pid));
+  assert.equal(fs.existsSync(mutex), false);
+  assert.deepEqual(tmpLeftovers(d), []);
+});
+
+test('T5a: pid 없이 고아 aside만 있으면 즉시 회수된다', () => {
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, `pid.reclaim.${DEAD}.00000000`), DEAD);
+  const t0 = Date.now();
+  const r = withMutation(d, (s) => ({ state: { ...s, ok: true }, response: null }), fastLock);
+  assert.equal(r.state.ok, true);
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(fs.existsSync(mutex), false);
+});
+
+test('T5b: 살아 있는 회수자의 aside만 있으면 LOCKED이고 aside는 보존된다', () => {
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  const name = `pid.reclaim.${process.pid}.00000000`;
+  fs.writeFileSync(path.join(mutex, name), DEAD);
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.deepEqual(fs.readdirSync(mutex), [name]);
+});
+
+test('T5c: 고아 aside와 foreign 파일이 함께 있으면 LOCKED, aside만 지우고 extra는 남긴다', () => {
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, `pid.reclaim.${DEAD}.00000000`), DEAD);
+  fs.writeFileSync(path.join(mutex, 'extra'), 'x');
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.deepEqual(fs.readdirSync(mutex), ['extra']);
+});
+
+test('T5d: owned 락은 고아 aside만 있으면 회수되고, 빈 디렉터리는 여전히 LOCKED다', () => {
+  const d = tmpDir();
+  const lockDir = path.join(d, 'loop.lock.d');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, `pid.reclaim.${DEAD}.00000000`), `${DEAD}\nutc-v1\nMon Jan  1 00:00:00 2001`);
+  const h = acquireOwnedLock(d, 'loop.lock.d');
+  assert.deepEqual(fs.readdirSync(lockDir), ['pid']);
+  releaseOwnedLock(h);
+  assert.deepEqual(tmpLeftovers(d, 'loop.lock.d'), []);
+  const e = tmpDir();
+  fs.mkdirSync(path.join(e, 'loop.lock.d'));
+  assert.throws(() => acquireOwnedLock(e, 'loop.lock.d'), /LOCKED/);
+  assert.deepEqual(fs.readdirSync(path.join(e, 'loop.lock.d')), []);
+  assert.deepEqual(tmpLeftovers(e, 'loop.lock.d'), []);
+});
+
+test('T6: link 미지원이면 legacy 폴백으로 회수한다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  let linkCalls = 0;
+  const hooks = {
+    link() {
+      linkCalls += 1;
+      const err = new Error('nope');
+      err.code = 'ENOTSUP';
+      throw err;
+    },
+  };
+  const r = withMutation(d, (s) => ({ state: { ...s, ok: true }, response: null }), { ...fastLock, hooks });
+  assert.equal(r.state.ok, true);
+  assert.equal(linkCalls, 1);
+  assert.equal(fs.existsSync(mutex), false);
+});
+
+test('T6b: link의 일시 EINVAL은 재판정 후 재시도한다', () => {
+  const d = tmpDir();
+  const mutex = deadMutex(d);
+  saveState(d, { stateVersion: 0 });
+  let calls = 0;
+  const hooks = {
+    link(src, dst) {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('x');
+        err.code = 'EINVAL';
+        throw err;
+      }
+      return fs.linkSync(src, dst);
+    },
+  };
+  const r = withMutation(d, (s) => ({ state: { ...s, ok: true }, response: null }), { ...fastLock, hooks });
+  assert.equal(r.state.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(fs.existsSync(mutex), false);
+});
+
+test('T7: owned 죽은 기록은 link 경로로 회수되고, 도난 시도는 물러난다', () => {
+  const d = tmpDir();
+  const lockDir = path.join(d, 'loop.lock.d');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), `${DEAD}\nutc-v1\nMon Jan  1 00:00:00 2001`);
+  let sawAside = null;
+  const h = acquireOwnedLock(d, 'loop.lock.d', { hooks: { afterLink(dir, aside) { sawAside = path.basename(aside); } } });
+  assert.match(sawAside, /^pid\.reclaim\.\d+\.[0-9a-f]{8}$/);
+  assert.deepEqual(fs.readdirSync(lockDir), ['pid']);
+  releaseOwnedLock(h);
+  const e = tmpDir();
+  const lock2 = path.join(e, 'loop.lock.d');
+  fs.mkdirSync(lock2);
+  fs.writeFileSync(path.join(lock2, 'pid'), `${DEAD}\nutc-v1\nMon Jan  1 00:00:00 2001`);
+  const mine = ownedProcessStartTime(process.pid);
+  const sep = mine.indexOf(':');
+  const live = `${process.pid}\n${mine.slice(0, sep)}\n${mine.slice(sep + 1)}`;
+  let thirdIno;
+  const hooks = {
+    afterJudge: onceHook((dir) => {
+      fs.unlinkSync(path.join(dir, 'pid'));
+      fs.rmdirSync(dir);
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), live);
+      thirdIno = inodeOf(dir);
+    }),
+  };
+  assert.throws(() => acquireOwnedLock(e, 'loop.lock.d', { hooks }), /LOCKED/);
+  assert.equal(inodeOf(lock2), thirdIno);
+  assert.equal(fs.readFileSync(path.join(lock2, 'pid'), 'utf8'), live);
+  assert.deepEqual(fs.readdirSync(lock2), ['pid']);
+  assert.deepEqual(tmpLeftovers(e, 'loop.lock.d'), []);
+});
+
+test('T8: withNamedLock 정상 회수 뒤 aside·tmp 부산물이 없다', async () => {
+  const d = tmpDir();
+  const lockDir = deadMutex(d, 'publish.lock.d');
+  const seen = await withNamedLock(d, 'publish.lock.d', async () => fs.readdirSync(lockDir), fastLock);
+  assert.deepEqual(seen, ['pid']);
+  assert.equal(fs.existsSync(lockDir), false);
+  assert.deepEqual(fs.readdirSync(d).filter((n) => n.includes('reclaim') || n.includes('.tmp')), []);
+});
+
+test('T9: 죽은 pid의 tmp는 쓸리고 산 pid의 tmp는 보존되며, LOCKED 타임아웃은 우리 tmp를 남기지 않는다', () => {
+  const d = tmpDir();
+  saveState(d, { stateVersion: 0 });
+  const dead = path.join(d, `.mutex.${DEAD}.deadbeef.tmp`);
+  fs.mkdirSync(dead);
+  fs.writeFileSync(path.join(dead, 'pid'), DEAD);
+  const live = path.join(d, `.mutex.${process.pid}.cafebabe.tmp`);
+  fs.mkdirSync(live);
+  fs.writeFileSync(path.join(live, 'pid'), String(process.pid));
+  const r = withMutation(d, (s) => ({ state: { ...s, ok: true }, response: null }), fastLock);
+  assert.equal(r.state.ok, true);
+  assert.equal(fs.existsSync(dead), false);
+  assert.ok(fs.existsSync(live));
+  fs.unlinkSync(path.join(live, 'pid'));
+  fs.rmdirSync(live);
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), String(process.pid));
+  assert.throws(
+    () => withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), fastLock),
+    { code: 'LOCKED' },
+  );
+  assert.deepEqual(tmpLeftovers(d), []);
+  assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid));
 });

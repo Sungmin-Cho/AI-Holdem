@@ -527,8 +527,17 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');
       const httpMs = afterLock == null ? PUBLISH_TIMEOUT_MS : Math.min(PUBLISH_TIMEOUT_MS, afterLock);
       const json = await postPublish(lock, body, httpMs);
+      if (!opts.retry && json.applied === false) {
+        try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
+        bail('PUBLISH_ID_REUSED', '이 publishId는 이미 다른 본문이 소비했습니다. 기록을 지웠으니 새 id로 다시 게시하세요.');
+      }
       try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
-      return { publishId: body.publishId, revision: json.revision, hadCoach: Array.isArray(body.coach) };
+      return {
+        publishId: body.publishId,
+        revision: json.revision,
+        hadCoach: Array.isArray(body.coach),
+        applied: json.applied !== false,
+      };
     }, { timeoutMs: lockWaitMs });
     if (published.hadCoach) {
       const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
@@ -612,6 +621,7 @@ async function main() {
     out.revision = published.revision;
     out.hadCoach = published.hadCoach === true;
     out.reconcilePending = published.reconcilePending === true;
+    out.applied = published.applied;
   }
   // The dealer never reopens the envelope file, so its next command's inputs ship here.
   if (envelope.stateVersion !== undefined) out.stateVersion = envelope.stateVersion;
