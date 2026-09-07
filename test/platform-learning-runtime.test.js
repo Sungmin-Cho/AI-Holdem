@@ -95,6 +95,9 @@ test('actual platform fresh private store owns, reuses and stops study service',
     assert.equal(ownedIdentityStatus(service.pid, service.startTime), 'dead');
     service = null;
   } catch (error) {
+    // A child that died moments before this throw has not had its exit or its
+    // last stderr delivered yet. Give the loop a turn so the account is complete.
+    await new Promise((resolve) => { setTimeout(resolve, 500); });
     error.message = `${error.message}\nstudy child output: ${childOutput || '(the child produced no output)'}`;
     throw error;
   } finally {

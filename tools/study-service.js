@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, parseOwnedLockIdentity } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -236,7 +236,12 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   while (platformNow() < deadline) {
     const currentOwner = readLock(ctx);
     if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
-      fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${currentOwner ? `${currentOwner.status} pid=${currentOwner.pid}` : 'absent'}, expected alive pid=${owner.pid}`);
+      // Name both identities: a recorded stamp that never matches is a format
+      // disagreement, while one that stops matching is the process going away.
+      const observed = currentOwner
+        ? `${currentOwner.status} pid=${currentOwner.pid} recorded=${currentOwner.startTime} probed=${ownedProcessStartTime(currentOwner.pid)}`
+        : 'absent';
+      fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${observed}, expected alive pid=${owner.pid} recorded=${owner.startTime}`);
     }
     const descriptor = readDescriptor(ctx);
     // ensure may observe the previous, positively dead instance's descriptor
