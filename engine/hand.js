@@ -2,6 +2,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { newDeck, shuffle } from './cards.js';
 import { snapshotDecision } from './decision.js';
 import { compareScore, evaluate7 } from './evaluator.js';
+import { positionsOf } from './positions.js';
 import { awardPots, buildPots } from './sidepots.js';
 
 const DEFAULT_BLINDS = [25, 50];
@@ -58,6 +59,8 @@ export function createGame({
   mode,
   startStackBb,
   handLimit,
+  showdownPolicy,
+  replayReveal,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
   if (resolvedMode !== 'tournament' && resolvedMode !== 'cash-training') {
@@ -89,11 +92,22 @@ export function createGame({
   const stats = {};
   for (const seat of seats) stats[seat.playerId] = emptyStats();
 
+  const resolvedShowdown = showdownPolicy ?? 'standard';
+  if (resolvedShowdown !== 'open' && resolvedShowdown !== 'standard') {
+    throwBadConfig('showdownPolicy는 open 또는 standard여야 합니다.');
+  }
+  const resolvedReplay = replayReveal ?? 'showdown';
+  if (resolvedReplay !== 'all' && resolvedReplay !== 'showdown') {
+    throwBadConfig('replayReveal는 all 또는 showdown이어야 합니다.');
+  }
+
   const config = {
     aiCount,
     startStack,
     blinds0: [...blinds0],
     levelEvery: resolvedMode === 'cash-training' ? null : levelEvery,
+    showdownPolicy: resolvedShowdown,
+    replayReveal: resolvedReplay,
   };
   if (resolvedMode === 'cash-training') {
     config.mode = 'cash-training';
@@ -422,7 +436,10 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
       }
       return compareScore(scores.get(pid), bestShown) > 0;
     });
-    if (mustShow) {
+    const forcedReveal = state.config?.showdownPolicy === 'open' && pid !== 'user';
+    // reveals and shown stay in lockstep; otherwise a losing user hand leaks
+    // when a prior forced AI reveal is not counted as shown.
+    if (forcedReveal || mustShow) {
       reveals.push({
         playerId: pid,
         cards: [...hand.holes[pid]],
@@ -561,6 +578,7 @@ function finishHand(state, events) {
     endStacks,
     posts: structuredClone(hand.posts ?? []),
     uncalledReturns,
+    positions: positionsOf(state),
   };
 
   if (isCashTraining(state)) {
@@ -702,7 +720,7 @@ function markActed(hand, pid) {
   if (!hand.acted.includes(pid)) hand.acted.push(pid);
 }
 
-export function applyAction(state, playerId, action, amount, { forced = false, policyMeta = null } = {}) {
+export function applyAction(state, playerId, action, amount, { forced = false, policyMeta = null, meta } = {}) {
   const legal = legalSnapshot(state);
   if (legal.toAct !== playerId) throwIllegal('not your turn');
   if (action !== 'fold' && action !== 'check' && action !== 'call' && action !== 'raise') {
@@ -740,10 +758,15 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     board: [...hand.board],
     stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
   };
+  if (forced) record.forced = true;
   if (policyMeta && playerId !== 'user') {
     for (const key of ['policyId', 'policyVersion', 'sampledProbability', 'reasonCode']) {
       if (policyMeta[key] !== undefined) record[key] = policyMeta[key];
     }
+  }
+  if (meta) {
+    if (playerId !== 'user' && meta.reason != null) record.reason = meta.reason;
+    if (playerId === 'user' && meta.note != null) record.note = meta.note;
   }
   if (playerId === 'user') {
     if (!hand.decisions) hand.decisions = [];

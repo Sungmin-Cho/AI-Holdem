@@ -256,7 +256,7 @@ test('completedHandObservation: 9인 open 쇼다운은 공개·통계 항목 9�
   for (let round = 0; round < 2; round += 1) {
     for (const pid of dealOrder) pinned.push(holes[pid][round]);
   }
-  pinned.push('Ks', 'Qh', 'Jd', '7s', '6h');
+  pinned.push('Ks', 'Qd', '7c', '4h', '8s');
   let st = createGame({ aiCount: 8, showdownPolicy: 'open' });
   st.button = 8;
   st = startHand(st, { deck: deckWith(pinned) }).state;

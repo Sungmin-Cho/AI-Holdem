@@ -307,7 +307,10 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const clock = deps.now ?? now;
   const callerPpid = deps.callerPpid ?? process.ppid;
   const startTimeOf = deps.processStartTime ?? processStartTime;
-  const { aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit, opponentRuntime } = flags;
+  const {
+    aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
+    opponentRuntime, showdownPolicy, replayReveal,
+  } = flags;
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
   // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
@@ -354,6 +357,8 @@ export function initGameDir(gameDir, flags, deps = {}) {
       mode,
       startStackBb,
       handLimit,
+      showdownPolicy,
+      replayReveal,
     });
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');

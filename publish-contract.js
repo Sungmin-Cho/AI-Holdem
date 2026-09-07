@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS } from './shared/free-text.js';
+
 export const MAX_PUBLISH_BODY_BYTES = 65_536;
 export const MAX_PUBLISH_ID = Number.MAX_SAFE_INTEGER;
 export const SUPPORTED_COACH_AUTHORITY_SCHEMAS = Object.freeze([2]);
