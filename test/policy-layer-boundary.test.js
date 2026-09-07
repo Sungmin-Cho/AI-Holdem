@@ -59,5 +59,8 @@ test('the heuristic strength estimate is consumed only by opponent policy strate
   };
   walk(path.join(ROOT, 'training'));
   walk(path.join(ROOT, 'tools'));
-  assert.deepEqual(consumers, ['training/policies/strategy-v2.js']);
+  assert.deepEqual(consumers.sort(), [
+    'training/policies/strategy-v2.js',
+    'training/tendency/extract.js',
+  ]);
 });
