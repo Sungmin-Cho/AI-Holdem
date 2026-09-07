@@ -13,7 +13,11 @@ jobs:
   test:
     name: Node ${{ matrix.node-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 40 }}
+    # Every privacy proof on Windows is a PowerShell child of about a second, and
+    # the suite runs its files one at a time because they spawn real services and
+    # share lock state. That puts a full Windows run near 75 minutes against 10 on
+    # Linux; the run cancelled at 60 was still progressing, 1346 tests in.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 120 || 40 }}
     strategy:
       fail-fast: false
       matrix:
