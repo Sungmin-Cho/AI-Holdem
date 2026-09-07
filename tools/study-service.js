@@ -30,7 +30,11 @@ const sameInode = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
   ctx.training, ctx.trainingStat?.dev, ctx.trainingStat?.ino,
 ])).digest('hex');
-function fail(code = 'STUDY_DESCRIPTOR_CORRUPT') { const error = new Error(code); error.code = code; throw error; }
+function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail) {
+  // The code is the contract; the detail only ever reaches logs and stderr.
+  // formatStudyError renders from the code alone, so no path reaches a viewer.
+  const error = new Error(detail ? `${code} ${detail}` : code); error.code = code; throw error;
+}
 function statOrNull(file) {
   platformTimeout(WAIT_MS);
   try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
@@ -51,10 +55,16 @@ function aclTransaction(ctx, fn) {
     { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
     { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
   ].filter(({ file }) => statOrNull(file));
-  if (!arePrivatePaths(entries)) fail();
+  const reasons = [];
+  const onUnproven = (reason) => { if (reasons.length < 4) reasons.push(reason); };
+  if (!arePrivatePaths(entries, { onUnproven })) fail('STUDY_DESCRIPTOR_CORRUPT', `before ${reasons.join(' | ')}`);
   aclScope = new Set(entries.map(({ file }) => file));
   try { return fn(); }
-  finally { aclScope = null; if (!arePrivatePaths(entries.filter(({ file }) => statOrNull(file)))) fail(); }
+  finally {
+    aclScope = null;
+    reasons.length = 0;
+    if (!arePrivatePaths(entries.filter(({ file }) => statOrNull(file)), { onUnproven })) fail('STUDY_DESCRIPTOR_CORRUPT', `after ${reasons.join(' | ')}`);
+  }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
 function directory(file, { privateMode = false } = {}) {

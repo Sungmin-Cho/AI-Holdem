@@ -41,33 +41,44 @@ function powershell(script, spawn = spawnSync) {
 
 // Windows mode bits do not describe a DACL. Read the actual ACL without changing
 // existing files. SYSTEM and Administrators are the platform's trusted authority.
-export function isPrivatePath(file, { platform = process.platform, spawn = spawnSync, privateMode = true } = {}) {
+export function isPrivatePath(file, { platform = process.platform, spawn = spawnSync, privateMode = true, onUnproven } = {}) {
   if (platform !== 'win32') {
     try {
       const st = fs.lstatSync(file);
-      return !st.isSymbolicLink() && (typeof process.getuid !== 'function' || st.uid === process.getuid())
+      const allowed = !st.isSymbolicLink() && (typeof process.getuid !== 'function' || st.uid === process.getuid())
         && (privateMode ? (st.mode & 0o777) === (st.isDirectory() ? 0o700 : 0o600) : (st.mode & 0o022) === 0);
-    } catch { return false; }
+      if (!allowed) onUnproven?.(`mode:${file} ${(st.mode & 0o7777).toString(8)}`);
+      return allowed;
+    } catch (error) { onUnproven?.(`stat:${file} ${error?.code ?? 'unknown'}`); return false; }
   }
-  return arePrivatePaths([{ file, privateMode }], { platform, spawn });
+  return arePrivatePaths([{ file, privateMode }], { platform, spawn, onUnproven });
 }
 
-export function arePrivatePaths(entries, { platform = process.platform, spawn = spawnSync } = {}) {
-  if (platform !== 'win32') return entries.every(({ file, privateMode }) => isPrivatePath(file, { platform, privateMode }));
+// A path that cannot be proved is not the same claim as a path proved public,
+// and callers that are told only "false" cannot tell the two apart. The verdict
+// stays conservative either way; onUnproven carries the reason for the verdict.
+export function arePrivatePaths(entries, { platform = process.platform, spawn = spawnSync, onUnproven } = {}) {
+  const unproven = (reason) => { onUnproven?.(reason); return false; };
+  if (platform !== 'win32') return entries.every(({ file, privateMode }) => isPrivatePath(file, { platform, privateMode, onUnproven }));
   try {
-    if (!entries.every(({ file }) => { const st = fs.lstatSync(file); return !st.isSymbolicLink() && (st.isFile() || st.isDirectory()); })) return false;
+    const shape = entries.find(({ file }) => { const st = fs.lstatSync(file); return st.isSymbolicLink() || !(st.isFile() || st.isDirectory()); });
+    if (shape) return unproven(`shape:${shape.file}`);
     const paths = entries.map(({ file }) => quote(file)).join(',');
     const script = `$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); $me=$id.User.Value; $tokenOwner=$id.Owner.Value; $proofs=@(); foreach($p in @(${paths})) { $a=Get-Acl -LiteralPath $p; $rules=@(); foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { $rules+=@{sid=$r.IdentityReference.Value;type=$r.AccessControlType.ToString();rights=[long]$r.FileSystemRights} }; $proofs+=@{user=$me;tokenOwner=$tokenOwner;owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;reparse=(([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0);rules=$rules} }; ConvertTo-Json -InputObject @($proofs) -Depth 5 -Compress`;
     const result = powershell(script, spawn);
-    if (result.status !== 0 || String(result.stderr ?? '').trim()) return false;
+    if (result.status !== 0 || String(result.stderr ?? '').trim()) {
+      return unproven(`powershell:status=${result.status} error=${result.error?.code ?? 'none'} stderr=${String(result.stderr ?? '').trim().slice(0, 300)}`);
+    }
     const proofs = JSON.parse(String(result.stdout ?? '').replace(/^\uFEFF/, ''));
-    return Array.isArray(proofs) && proofs.length === entries.length
-      && proofs.every((proof, i) => privateAclAllowed(proof, entries[i].privateMode ?? true));
+    if (!Array.isArray(proofs) || proofs.length !== entries.length) return unproven(`proofs:${Array.isArray(proofs) ? proofs.length : typeof proofs}/${entries.length}`);
+    const rejected = entries.findIndex((entry, i) => !privateAclAllowed(proofs[i], entry.privateMode ?? true));
+    if (rejected !== -1) return unproven(`acl:${entries[rejected].file} ${JSON.stringify(proofs[rejected]).slice(0, 400)}`);
+    return true;
   } catch (error) {
     // An exhausted deadline says nothing about the path. Reporting it as "not
     // private" turns a budget shortfall into a false privacy verdict.
     if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT') throw error;
-    return false;
+    return unproven(`error:${error?.code ?? error?.name ?? 'unknown'}`);
   }
 }
 
