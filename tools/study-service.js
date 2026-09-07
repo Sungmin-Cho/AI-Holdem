@@ -235,7 +235,9 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   // these reads grants permission to start a process or reclaim its metadata.
   while (platformNow() < deadline) {
     const currentOwner = readLock(ctx);
-    if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) fail();
+    if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
+      fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${currentOwner ? `${currentOwner.status} pid=${currentOwner.pid}` : 'absent'}, expected alive pid=${owner.pid}`);
+    }
     const descriptor = readDescriptor(ctx);
     // ensure may observe the previous, positively dead instance's descriptor
     // between a new child's lock acquisition and first descriptor publication.
@@ -461,8 +463,12 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   const parents = new Map();
   let lastActivity = Date.now();
   let hadLiveParent = false;
-  const stop = async () => {
+  // A service that ends on its own is invisible to its client, which can only
+  // report that the lock stopped being alive. Say why, on the same stderr the
+  // startup failure uses: discarded in production, read by a piped caller.
+  const stop = async (reason = 'requested') => {
     if (stopping) return; stopping = true; clearTimeout(timer);
+    try { process.stderr.write(`STUDY_CHILD_STOPPED ${reason}\n`); } catch { /* closed stdio */ }
     await server?.close();
     try {
       assertOwnLock(ctx, own);
@@ -491,8 +497,8 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
       }
       if (liveParent || hadLiveParent) lastActivity = Date.now();
       hadLiveParent = liveParent;
-      if (Date.now() - lastActivity >= config.idleTimeoutMs) void stop();
-    } catch { void stop(); }
+      if (Date.now() - lastActivity >= config.idleTimeoutMs) void stop('idle');
+    } catch (error) { void stop(`checkpoint ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); }
   };
   try {
     const drillToken = randomBytes(32).toString('hex'), controlToken = randomBytes(32).toString('hex');
@@ -501,7 +507,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     server = await startDrillServer({ storeDir: ctx.root, token: drillToken, health,
       beforeRequest() {
         try { assertOwnLock(ctx, own); readDescriptor(ctx); }
-        catch (error) { void stop(); throw error; }
+        catch (error) { void stop(`request ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); throw error; }
         if (stopping) fail();
       },
       onActivity() { lastActivity = Date.now(); },
@@ -512,7 +518,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
         },
         shutdown({ expectedInstanceId }) {
           if (expectedInstanceId !== instanceId) fail('STUDY_IDENTITY_MISMATCH');
-          return () => { void stop(); };
+          return () => { void stop('shutdown requested'); };
         },
       },
     });
@@ -523,9 +529,9 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
       timer = setTimeout(() => { checkpoint(); if (!stopping) scheduleCheckpoint(); }, config.checkpointMs);
     };
     scheduleCheckpoint();
-    process.once('SIGTERM', () => { void stop(); });
-    process.once('SIGINT', () => { void stop(); });
-  } catch (error) { await stop(); throw error; }
+    process.once('SIGTERM', () => { void stop('SIGTERM'); });
+    process.once('SIGINT', () => { void stop('SIGINT'); });
+  } catch (error) { await stop(`startup ${error?.code ?? error?.name ?? 'unknown'}`); throw error; }
 }
 const direct = process.argv[1] && path.resolve(process.argv[1]) === SELF;
 if (direct) {
