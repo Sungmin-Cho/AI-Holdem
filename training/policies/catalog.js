@@ -1,7 +1,8 @@
 import { configDigestOf } from './contracts.js';
 
 const VERSION = '1.0.0';
-const VERSION_V2 = '2.0.0';
+export const VERSION_V2 = '2.1.0';
+export const PREDECESSOR_VERSIONS_V2 = Object.freeze(['2.0.0']);
 
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -104,6 +105,50 @@ export function policyById(policyId) {
   return POLICIES[policyId];
 }
 
+export function isStrategyV2(config) {
+  return config?.base === 'strategy-v2';
+}
+
+export function resolveStoredPolicy(stored) {
+  const descriptors = stored && typeof stored === 'object'
+    ? Object.fromEntries(['policyId', 'policyVersion', 'configDigest'].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(stored, key)],
+    ))
+    : {};
+  const complete = ['policyId', 'policyVersion', 'configDigest'].every(
+    (key) => descriptors[key] && Object.hasOwn(descriptors[key], 'value'),
+  );
+  const policyId = complete ? descriptors.policyId.value : null;
+  const config = typeof policyId === 'string' && Object.hasOwn(POLICIES, policyId)
+    ? POLICIES[policyId]
+    : null;
+  if (!config) {
+    const error = new Error('stored policy identity does not match the catalog');
+    error.code = 'POLICY_CONFIG_MISMATCH';
+    throw error;
+  }
+  if (
+    descriptors.policyVersion.value === config.policyVersion
+    && descriptors.configDigest.value === config.configDigest
+  ) {
+    return { config, rolledForwardFrom: null };
+  }
+  if (isStrategyV2(config)) {
+    for (const prev of PREDECESSOR_VERSIONS_V2) {
+      const digest = configDigestOf({ ...config, policyVersion: prev });
+      if (
+        descriptors.policyVersion.value === prev
+        && descriptors.configDigest.value === digest
+      ) {
+        return { config, rolledForwardFrom: prev };
+      }
+    }
+  }
+  const error = new Error('stored policy identity does not match the catalog');
+  error.code = 'POLICY_CONFIG_MISMATCH';
+  throw error;
+}
+
 export function resolveExactPolicy(stored) {
   const descriptors = stored && typeof stored === 'object'
     ? Object.fromEntries(['policyId', 'policyVersion', 'configDigest'].map(
@@ -153,10 +198,10 @@ export function sanitizePlayersForReview(players, { gameOver = false } = {}) {
       archetype: player.archetype,
     };
     if (gameOver && player.policy) {
-      const config = resolveExactPolicy(player.policy);
+      const config = resolveStoredPolicy(player.policy).config;
       out.policyId = config.policyId;
       out.policyVersion = config.policyVersion;
-      if (config.policyVersion === VERSION_V2) {
+      if (isStrategyV2(config)) {
         out.policyModelKind = 'qualitative-config-v2';
         out.policyTraitsEvidence = 'configured-not-observed-action-frequencies';
         out.policyTraits = { ...config.traits };

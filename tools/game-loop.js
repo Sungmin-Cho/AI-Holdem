@@ -4909,7 +4909,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (sweepFailed > 0) log('profile-sweep-consume-failed', { failed: sweepFailed });
 
       const policyMode = opponentRuntimeOf() === 'policy';
-      if (policyMode) stampPlayerPolicies(root);
+      if (policyMode) stampPlayerPolicies(root, { onNotice: appendNotice });
       const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const notices = [
@@ -4970,7 +4970,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
         ? existingState.port
         : requestedPort;
-      if (policyMode) stampPlayerPolicies(root);
+      if (policyMode) stampPlayerPolicies(root, { onNotice: appendNotice });
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
       return writeLoopState({ port });
     }
@@ -5009,7 +5009,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
     if (policyMode) {
-      stampPlayerPolicies(root);
+      stampPlayerPolicies(root, { onNotice: appendNotice });
     } else {
       if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
       await restorePlayers();

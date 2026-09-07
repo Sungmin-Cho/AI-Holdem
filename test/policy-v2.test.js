@@ -136,8 +136,8 @@ test('canonical policy configs and nested strategy inputs cannot be mutated behi
 });
 
 test('v2 catalog publishes only the strategy traits it actually applies', async () => {
-  const { POLICIES } = await import('../training/policies/catalog.js');
-  for (const config of Object.values(POLICIES).filter((row) => row.policyVersion === '2.0.0')) {
+  const { POLICIES, VERSION_V2 } = await import('../training/policies/catalog.js');
+  for (const config of Object.values(POLICIES).filter((row) => row.policyVersion === VERSION_V2)) {
     assert.strictEqual(Object.hasOwn(config, 'frequencies'), false, config.policyId);
     assert.strictEqual(Object.hasOwn(config, 'deviations'), false, config.policyId);
     assert.deepEqual(Object.keys(config.traits).sort(), ['aggression', 'bluff', 'calling', 'tightness']);
@@ -145,14 +145,14 @@ test('v2 catalog publishes only the strategy traits it actually applies', async 
 });
 
 test('post-game sanitization resolves exact identity and reveals qualitative v2 traits only', async () => {
-  const { assignmentFor: assign, sanitizePlayersForReview } = await import('../training/policies/catalog.js');
+  const { assignmentFor: assign, sanitizePlayersForReview, VERSION_V2 } = await import('../training/policies/catalog.js');
   const player = { playerId: 'p1', archetype: 'TAG', policy: assign('TAG') };
   const pre = sanitizePlayersForReview([player], { gameOver: false })[0];
   assert.strictEqual(Object.hasOwn(pre, 'policyId'), false);
   assert.strictEqual(Object.hasOwn(pre, 'policyTraits'), false);
   const post = sanitizePlayersForReview([player], { gameOver: true })[0];
   assert.equal(post.policyId, 'tag-v2');
-  assert.equal(post.policyVersion, '2.0.0');
+  assert.equal(post.policyVersion, VERSION_V2);
   assert.equal(post.policyModelKind, 'qualitative-config-v2');
   assert.equal(post.policyTraitsEvidence, 'configured-not-observed-action-frequencies');
   assert.deepEqual(post.policyTraits, {

@@ -179,6 +179,7 @@ const DIGEST_V2_2_0_0 = Object.freeze({
 test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves extra keys', () => {
   const dir = tmp();
   run(['init', '--ai', '2', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  stampPlayerPolicies(dir);
   const playersPath = path.join(dir, 'players.json');
   const marked = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
   for (const player of marked) {
