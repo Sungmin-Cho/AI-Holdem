@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, parseOwnedLockIdentity } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -43,6 +43,16 @@ function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail) {
   // formatStudyError renders from the code alone, so no path reaches a viewer.
   const error = new Error(detail ? `${code} ${detail}` : code); error.code = code; throw error;
 }
+export function nextCheckpointDelay(minMs, lastDurationMs, platform = process.platform) {
+  if (platform !== 'win32') return minMs;
+  return Math.max(minMs, 2 * lastDurationMs);
+}
+export function memoizedStartTimeOf(memo, startTimeOf) {
+  return (pid) => {
+    if (!memo.has(pid)) memo.set(pid, startTimeOf(pid));
+    return memo.get(pid);
+  };
+}
 function statOrNull(file) {
   platformTimeout(WAIT_MS);
   try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
@@ -50,6 +60,7 @@ function statOrNull(file) {
 // A synchronous read transaction batches mutable ACL proof before and after
 // all inode/bytes checks. No proof is cached across awaits or transactions.
 let aclScope = null;
+let identityMemo = null;
 function privatePath(file, privateMode) {
   return aclScope?.has(file) || isPrivatePath(file, { privateMode });
 }
@@ -79,8 +90,13 @@ function proveEntries(candidates, phase) {
   }
   fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
 }
-function aclTransaction(ctx, fn) {
-  if (process.platform !== 'win32' || aclScope) return fn();
+function settleTransaction(fn) {
+  const result = fn();
+  if (result && typeof result.then === 'function') fail('STUDY_DESCRIPTOR_CORRUPT', 'async transaction');
+  return result;
+}
+export function aclTransaction(ctx, fn, { platform = process.platform } = {}) {
+  if (platform !== 'win32' || aclScope) return settleTransaction(fn);
   const candidates = [
     { file: ctx.root, privateMode: false }, { file: ctx.training, privateMode: true },
     { file: path.join(ctx.training, DESCRIPTOR), privateMode: true },
@@ -89,9 +105,12 @@ function aclTransaction(ctx, fn) {
     { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
     { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
   ];
-  aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
-  try { return fn(); }
-  finally { aclScope = null; proveEntries(candidates, 'after'); }
+  identityMemo = new Map();
+  try {
+    aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
+    try { return settleTransaction(fn); }
+    finally { aclScope = null; proveEntries(candidates, 'after'); }
+  } finally { identityMemo = null; }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
 function directory(file, { privateMode = false } = {}) {
@@ -169,7 +188,10 @@ function exactInode(file) {
 }
 function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
-  const status = ownedIdentityStatus(pid, startTime);
+  const startTimeOf = identityMemo ? memoizedStartTimeOf(identityMemo, ownedProcessStartTime) : undefined;
+  const status = startTimeOf
+    ? ownedIdentityStatus(pid, startTime, startTimeOf)
+    : ownedIdentityStatus(pid, startTime);
   platformTimeout(WAIT_MS);
   return status;
 }
@@ -225,6 +247,16 @@ function publicHandle(value) {
 }
 // AbortSignal.timeout accepts integers only. Both the request-local deadline
 // and the caller's shared monotonic budget must still permit a whole millisecond.
+export function isStudyTransportFailure(error) {
+  const message = String(error?.message ?? '');
+  if (error?.name === 'TypeError' && message.includes('fetch failed')) return true;
+  return error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && message.includes('transport');
+}
+export function shouldRetryLiveWait(error, { afterOwner, owner, descriptorState, sameOwner }) {
+  if (afterOwner?.status !== 'alive' || sameOwner !== true) return false;
+  if (descriptorState !== 'valid') return error?.code === 'STUDY_DESCRIPTOR_CORRUPT';
+  return isStudyTransportFailure(error);
+}
 export function studyHttpTimeout(deadline, maximum = HTTP_WAIT_MS) {
   const localRemaining = deadline === undefined ? maximum : Math.floor(deadline - platformNow());
   const timeout = Math.min(localRemaining, platformTimeout(maximum));
@@ -269,7 +301,7 @@ async function verified(ctx, descriptor, owner, deadline) {
     fail('STUDY_DESCRIPTOR_CORRUPT', `health answer denied=${denied.status} status=${health.status} ok=${health.body?.ok}`
       + ` identity=${['pid','startTime','instanceId','storeIdentity','port'].filter((key) => health.body?.[key] !== value[key]).join(',') || 'match'}`);
   }
-  const after = readDescriptor(ctx), lock = readLock(ctx);
+  const { after, lock } = aclTransaction(ctx, () => ({ after: readDescriptor(ctx), lock: readLock(ctx) }));
   if (after.state !== 'valid' || JSON.stringify(after.value) !== JSON.stringify(value)
     || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();
   return value;
@@ -279,22 +311,20 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   // Only the already observed live owner may repair this descriptor. None of
   // these reads grants permission to start a process or reclaim its metadata.
   while (platformNow() < deadline) {
-    const currentOwner = readLock(ctx);
-    if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
-        // The status word already separates the two losses: 'unknown' is a probe
-      // that could not run, 'dead' is one that ran and disagreed.
-      const observed = currentOwner
-        ? `${currentOwner.status} pid=${currentOwner.pid} recorded=${currentOwner.startTime}`
-        : 'absent';
-      fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${observed}, expected alive pid=${owner.pid} recorded=${owner.startTime}`);
-    }
-    const descriptor = readDescriptor(ctx);
-    // ensure may observe the previous, positively dead instance's descriptor
-    // between a new child's lock acquisition and first descriptor publication.
-    // Inspect/stop never pass this startup-only exception.
-    const awaitingFirstCheckpoint = staleDescriptor && descriptor.state === 'valid'
-      && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
-      && identityStatus(staleDescriptor.pid, staleDescriptor.startTime) === 'dead';
+    const { currentOwner, descriptor, awaitingFirstCheckpoint } = aclTransaction(ctx, () => {
+      const currentOwner = readLock(ctx);
+      if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
+        const observed = currentOwner
+          ? `${currentOwner.status} pid=${currentOwner.pid} recorded=${currentOwner.startTime}`
+          : 'absent';
+        fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${observed}, expected alive pid=${owner.pid} recorded=${owner.startTime}`);
+      }
+      const descriptor = readDescriptor(ctx);
+      const awaitingFirstCheckpoint = staleDescriptor && descriptor.state === 'valid'
+        && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
+        && identityStatus(staleDescriptor.pid, staleDescriptor.startTime) === 'dead';
+      return { currentOwner, descriptor, awaitingFirstCheckpoint };
+    });
     if (descriptor.state === 'valid' && !awaitingFirstCheckpoint) {
       if (expectedInstanceId !== undefined && descriptor.value.instanceId !== expectedInstanceId) {
         fail('STUDY_IDENTITY_MISMATCH');
@@ -302,11 +332,15 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
       if (!descriptorMatches(descriptor.value, ctx, currentOwner)) fail();
       try { return await verified(ctx, descriptor, currentOwner, deadline); }
       catch (error) {
-        // An owner checkpoint can overlap verification. Retry only safe missing
-        // or corrupt JSON; a valid conflicting record or failed health stays closed.
+        // A checkpoint can overlap verification. Retry missing/corrupt JSON, and
+        // also a transport reset while the same owner is still alive — a blocked
+        // spawnSync on win32 can reset the socket without unlinking the descriptor.
+        // A wrong health *answer* with a valid descriptor stays closed.
         const afterOwner = readLock(ctx);
-        if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT' || afterOwner?.status !== 'alive'
-          || !sameLock(owner, afterOwner) || readDescriptor(ctx).state === 'valid') throw error;
+        if (!shouldRetryLiveWait(error, {
+          afterOwner, owner, descriptorState: readDescriptor(ctx).state,
+          sameOwner: sameLock(owner, afterOwner),
+        })) throw error;
       }
     }
     await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
@@ -322,9 +356,23 @@ function validateParent(ctx, identity) {
 }
 async function attachParent(ctx, value, identity, deadline) {
   validateParent(ctx, identity);
-  const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
-  if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
-  validateParent(ctx, identity);
+  while (platformNow() < deadline) {
+    try {
+      const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
+      if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
+      validateParent(ctx, identity);
+      return;
+    } catch (error) {
+      if (error?.code === 'PARENT_IDENTITY_MISMATCH') throw error;
+      const after = readLock(ctx, true);
+      if (!isStudyTransportFailure(error) || after?.status !== 'alive'
+        || after.pid !== identity.pid || after.startTime !== identity.startTime) {
+        fail('STUDY_DESCRIPTOR_CORRUPT', transportDetail(error));
+      }
+    }
+    await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
+  }
+  fail();
 }
 function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
@@ -422,7 +470,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   })]).finally(() => clearTimeout(timer));
   deadline = platformNow() + platformTimeout(WAIT_MS);
   // Revalidate the caller's own context after awaiting another concurrent ensure.
-  const current = readDescriptor(ctx), owner = readLock(ctx);
+  const { current, owner } = aclTransaction(ctx, () => ({ current: readDescriptor(ctx), owner: readLock(ctx) }));
   const restored = current.state === 'valid' ? current.value
     : await waitForLiveService(ctx, owner, deadline, { expectedInstanceId: value.instanceId });
   if (JSON.stringify(restored) !== JSON.stringify(value) || !descriptorMatches(value, ctx, owner)) fail();
@@ -432,7 +480,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   const ctx = context(storeDir);
-  const descriptor = readDescriptor(ctx), owner = readLock(ctx);
+  const { descriptor, owner } = aclTransaction(ctx, () => ({ descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
   if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
   if (owner?.status === 'dead' && descriptor.state === 'valid'
     && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime
@@ -444,7 +492,7 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
   const ctx = context(storeDir);
-  const descriptor = readDescriptor(ctx), owner = readLock(ctx);
+  const { descriptor, owner } = aclTransaction(ctx, () => ({ descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
   if (!owner && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
   if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
     && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
@@ -458,7 +506,7 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   if (response.status !== 200 || response.body.ok !== true) fail();
   while (platformNow() < deadline) {
     assertContext(ctx);
-    const current = readDescriptor(ctx), lock = readLock(ctx);
+    const { current, lock } = aclTransaction(ctx, () => ({ current: readDescriptor(ctx), lock: readLock(ctx) }));
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
@@ -585,18 +633,20 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     if (stopping) return;
     setProofPhase('checkpoint');
     try {
-      assertOwnLock(ctx, own);
-      const descriptor = readDescriptor(ctx);
-      if (descriptor.state !== 'valid' || JSON.stringify(descriptor.value) !== JSON.stringify(value)) publish(ctx, own, value);
-      let liveParent = false;
-      for (const [key, parent] of parents) {
-        let current;
-        try { current = readLock(ctx, true); } catch { current = null; }
-        if (current?.status === 'alive' && sameLock(parent, current)) liveParent = true;
-        else parents.delete(key);
-      }
-      if (liveParent || hadLiveParent) lastActivity = Date.now();
-      hadLiveParent = liveParent;
+      aclTransaction(ctx, () => {
+        assertOwnLock(ctx, own);
+        const descriptor = readDescriptor(ctx);
+        if (descriptor.state !== 'valid' || JSON.stringify(descriptor.value) !== JSON.stringify(value)) publish(ctx, own, value);
+        let liveParent = false;
+        for (const [key, parent] of parents) {
+          let current;
+          try { current = readLock(ctx, true); } catch { current = null; }
+          if (current?.status === 'alive' && sameLock(parent, current)) liveParent = true;
+          else parents.delete(key);
+        }
+        if (liveParent || hadLiveParent) lastActivity = Date.now();
+        hadLiveParent = liveParent;
+      });
       if (Date.now() - lastActivity >= config.idleTimeoutMs) void stop('idle');
     } catch (error) { void stop(`checkpoint ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); }
     finally { setProofPhase(null); }
@@ -608,7 +658,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     server = await startDrillServer({ storeDir: ctx.root, token: drillToken, health,
       beforeRequest() {
         setProofPhase('beforeRequest');
-        try { assertOwnLock(ctx, own); readDescriptor(ctx); }
+        try { aclTransaction(ctx, () => { assertOwnLock(ctx, own); readDescriptor(ctx); }); }
         catch (error) { void stop(`request ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); throw error; }
         finally { setProofPhase(null); }
         if (stopping) fail();
@@ -628,8 +678,14 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     health.port = server.port;
     value = { schemaVersion: 1, ...health, drillToken, controlToken };
     publish(ctx, own, value);
+    let lastCheckpointMs = 0;
     const scheduleCheckpoint = () => {
-      timer = setTimeout(() => { checkpoint(); if (!stopping) scheduleCheckpoint(); }, config.checkpointMs);
+      timer = setTimeout(() => {
+        const started = Date.now();
+        checkpoint();
+        lastCheckpointMs = Date.now() - started;
+        if (!stopping) scheduleCheckpoint();
+      }, nextCheckpointDelay(config.checkpointMs, lastCheckpointMs));
     };
     scheduleCheckpoint();
     process.once('SIGTERM', () => { void stop('SIGTERM'); });
