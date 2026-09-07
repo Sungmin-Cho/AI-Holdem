@@ -69,6 +69,44 @@ test('decision-peek is stable; view hides policySeed; redacted hand strips polic
   assert.equal(raw.includes(state.policySeed), false);
 });
 
+test('open 정책 게임의 hand --redacted에도 policyId·reasonCode가 없다', () => {
+  const dir = tmp();
+  run(['init', '--ai', '1', '--game-dir', dir, '--opponent-runtime', 'policy', '--showdown-policy', 'open']);
+  stampPlayerPolicies(dir);
+  run(['new-hand', '--game-dir', dir]);
+  let guard = 0;
+  while (guard < 40) {
+    const legal = run(['legal', '--game-dir', dir]);
+    if (legal.handOver) break;
+    if (legal.toAct === 'user') {
+      run(['apply', 'user', legal.canCheck ? 'check' : 'fold', '--game-dir', dir]);
+    } else {
+      const peek = run(['decision-peek', '--for', legal.toAct, '--game-dir', dir]);
+      const players = JSON.parse(fs.readFileSync(path.join(dir, 'players.json'), 'utf8'));
+      const seat = players.find((player) => player.playerId === legal.toAct);
+      const choice = decide({
+        snapshot: peek.snapshot,
+        legal: peek.legal,
+        policy: seat.policy,
+        policySeed: JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).policySeed,
+        gameEpoch: 'ab'.repeat(32),
+      });
+      const args = ['apply', legal.toAct, choice.action];
+      if (choice.action === 'raise') args.push(String(choice.amount));
+      args.push('--game-dir', dir, '--policy-meta', JSON.stringify({
+        policyId: choice.policyId,
+        sampledProbability: choice.sampledProbability,
+        reasonCode: choice.reasonCode,
+      }));
+      run(args);
+    }
+    guard += 1;
+  }
+  const redacted = JSON.stringify(run(['hand', '1', '--redacted', '--game-dir', dir]));
+  assert.equal(redacted.includes('policyId'), false);
+  assert.equal(redacted.includes('reasonCode'), false);
+});
+
 test('sanitized review projection stays private pre-game and resolves exact post-game identity', () => {
   const players = [{
     playerId: 'p1',

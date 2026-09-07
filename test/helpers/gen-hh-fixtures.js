@@ -53,6 +53,21 @@ export const SCENARIOS = [
     board: ['2c', '7d', '9h', '3s', '4c'],
     actions: [['user', 'raise', 100], ['p1', 'raise', 300], ['p2', 'call']],
   },
+  {
+    name: 'open-split',
+    fixture: '11-showdown-open-split.txt',
+    seed: 1009,
+    stacks: { user: 5000, p1: 5000, p2: 5000 },
+    holes: { user: ['Ah', 'Kh'], p1: ['Ad', 'Kd'], p2: ['2h', '3d'] },
+    board: ['Ts', 'Js', 'Qs', '9s', '2d'],
+    actions: [
+      ['user', 'call'], ['p1', 'call'], ['p2', 'check'],
+      ['p1', 'check'], ['p2', 'check'], ['user', 'check'],
+      ['p1', 'check'], ['p2', 'check'], ['user', 'check'],
+      ['p1', 'check'], ['p2', 'check'], ['user', 'check'],
+    ],
+    init: ['--showdown-policy', 'open'],
+  },
 ];
 
 export function buildDeck({ holes, board, seed }) {
@@ -72,7 +87,7 @@ function run(args) {
 }
 
 export function generateRecord(scenario, gameDir) {
-  run(['init', '--ai', '2', '--game-dir', gameDir, '--stack', '5000', '--blinds', '25/50']);
+  run(['init', '--ai', '2', '--game-dir', gameDir, '--stack', '5000', '--blinds', '25/50', ...(scenario.init ?? [])]);
   const statePath = path.join(gameDir, 'state.json');
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
   // init picks the button at random; startHand advances it one live seat, so

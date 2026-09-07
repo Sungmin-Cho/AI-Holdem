@@ -280,6 +280,10 @@ test('priorActions의 currentBet이 hand.actions[i].currentBet과 정확히 일�
 
 test('PRIOR_ACTION_KEYS는 engine/views.js safeAction의 키 목록과 정확히 일치한다', () => {
   assert.deepEqual([...PRIOR_ACTION_KEYS].sort(), [...SAFE_ACTION_KEYS].sort());
+  for (const key of ['reason', 'note', 'forced', 'positions']) {
+    assert.equal(SAFE_ACTION_KEYS.includes(key), false, key);
+    assert.equal(PRIOR_ACTION_KEYS.includes(key), false, key);
+  }
 });
 
 test('cli hand --redacted 에 user decisions만 있고 상대 홀카드가 없다', () => {

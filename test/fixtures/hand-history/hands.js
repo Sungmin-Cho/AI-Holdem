@@ -305,4 +305,43 @@ export const HANDS = [
       endStacks: { p1: 0, p2: 900, user: 0 },
     }),
   },
+  {
+    file: '11-showdown-open-split.txt',
+    record: base({
+      board: ['Ts', 'Js', 'Qs', '9s', '2d'],
+      actions: [
+        { playerId: 'user', action: 'call', amount: 50, street: 'preflop', currentBet: 50 },
+        { playerId: 'p1', action: 'call', amount: 25, street: 'preflop', currentBet: 50 },
+        { playerId: 'p2', action: 'check', amount: 0, street: 'preflop', currentBet: 50 },
+        { playerId: 'p1', action: 'check', amount: 0, street: 'flop', currentBet: 0 },
+        { playerId: 'p2', action: 'check', amount: 0, street: 'flop', currentBet: 0 },
+        { playerId: 'user', action: 'check', amount: 0, street: 'flop', currentBet: 0 },
+        { playerId: 'p1', action: 'check', amount: 0, street: 'turn', currentBet: 0 },
+        { playerId: 'p2', action: 'check', amount: 0, street: 'turn', currentBet: 0 },
+        { playerId: 'user', action: 'check', amount: 0, street: 'turn', currentBet: 0 },
+        { playerId: 'p1', action: 'check', amount: 0, street: 'river', currentBet: 0 },
+        { playerId: 'p2', action: 'check', amount: 0, street: 'river', currentBet: 0 },
+        { playerId: 'user', action: 'check', amount: 0, street: 'river', currentBet: 0 },
+      ],
+      pots: [{
+        potIndex: 0,
+        amount: 150,
+        eligible: ['user', 'p1', 'p2'],
+        winners: [
+          { playerId: 'p1', share: 75 },
+          { playerId: 'user', share: 75 },
+        ],
+      }],
+      showdown: {
+        reveals: [
+          { playerId: 'p1', cards: ['Ad', 'Kd'], handName: '스트레이트' },
+          { playerId: 'p2', cards: ['2h', '3d'], handName: '원페어' },
+          { playerId: 'user', cards: ['Ah', 'Kh'], handName: '스트레이트' },
+        ],
+        mucks: [],
+      },
+      holes: { user: ['Ah', 'Kh'], p1: ['Ad', 'Kd'], p2: ['2h', '3d'] },
+      endStacks: { p1: 5025, p2: 4950, user: 5025 },
+    }),
+  },
 ];

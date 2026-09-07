@@ -904,3 +904,213 @@ test('resume-check --lock-dir reports the store-level loop owner', () => {
     releaseOwnedLock(handle);
   }
 });
+
+function readState(dir) {
+  return JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+}
+
+function lastAction(dir) {
+  const state = readState(dir);
+  const record = state.hand ?? state.lastHand;
+  return record.actions.at(-1);
+}
+
+function startCliHand(extraInit = []) {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2', ...extraInit]);
+  assertOk(cli(dir, ['new-hand', '--deck', FULL_DECK]));
+  return dir;
+}
+
+function advanceToPid(dir, pid) {
+  for (let i = 0; i < 20; i += 1) {
+    const legal = assertOk(cli(dir, ['legal']));
+    if (legal.handOver) throw new Error('핸드가 이미 종료되었습니다');
+    if (legal.toAct === pid) return legal;
+    assertOk(cli(dir, ['apply', legal.toAct, legal.canCheck ? 'check' : 'call']));
+  }
+  throw new Error(`${pid} 차례에 도달하지 못했습니다`);
+}
+
+test('init --showdown-policy open을 config에 기록하고 부재는 standard', () => {
+  const openDir = tmpGame();
+  initGame(openDir, ['--ai', '2', '--showdown-policy', 'open']);
+  assert.equal(readState(openDir).config.showdownPolicy, 'open');
+
+  const defDir = tmpGame();
+  initGame(defDir, ['--ai', '2']);
+  assert.equal(readState(defDir).config.showdownPolicy, 'standard');
+});
+
+test('init --replay-reveal all|showdown과 부재 showdown', () => {
+  const allDir = tmpGame();
+  initGame(allDir, ['--ai', '2', '--replay-reveal', 'all']);
+  assert.equal(readState(allDir).config.replayReveal, 'all');
+
+  const shownDir = tmpGame();
+  initGame(shownDir, ['--ai', '2', '--replay-reveal', 'showdown']);
+  assert.equal(readState(shownDir).config.replayReveal, 'showdown');
+
+  const defDir = tmpGame();
+  initGame(defDir, ['--ai', '2']);
+  assert.equal(readState(defDir).config.replayReveal, 'showdown');
+});
+
+test('init 잘못된 showdown-policy·replay-reveal은 USAGE', () => {
+  const dir = tmpGame();
+  for (const args of [
+    ['init', '--ai', '2', '--showdown-policy', 'x'],
+    ['init', '--ai', '2', '--replay-reveal', 'hidden'],
+  ]) {
+    const result = cli(dir, args);
+    assert.equal(result.status, 2);
+    assert.equal(result.json.code, 'USAGE');
+  }
+  assert.equal(fs.existsSync(path.join(dir, 'state.json')), false);
+});
+
+function writeMeta(dir, name, body) {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body));
+  return file;
+}
+
+const META_DROPS = [
+  ['부재', 'META_MISSING', (dir) => path.join(dir, 'missing.json')],
+  ['크기', 'META_TOO_LARGE', (dir) => {
+    const file = path.join(dir, 'too-large.json');
+    fs.writeFileSync(file, 'x'.repeat(8193));
+    return file;
+  }],
+  ['JSON', 'META_PARSE', (dir) => writeMeta(dir, 'parse.json', '{not json')],
+  ['객체 아님', 'META_SHAPE', (dir) => writeMeta(dir, 'array.json', '[]')],
+  ['미지 키', 'META_SHAPE', (dir, legal) => writeMeta(dir, 'extra.json', {
+    decisionId: legal.decisionId, reason: 'x', extra: 1,
+  })],
+  ['stale', 'META_STALE', (dir) => writeMeta(dir, 'stale.json', {
+    decisionId: 'd-nope', reason: 'stale-reason',
+  })],
+  ['타입', 'META_TYPE', (dir, legal) => writeMeta(dir, 'type.json', {
+    decisionId: legal.decisionId, reason: 1,
+  })],
+  ['actor', 'META_ACTOR', (dir, legal) => writeMeta(dir, 'actor.json', legal.toAct === 'user'
+    ? { decisionId: legal.decisionId, reason: 'user-reason' }
+    : { decisionId: legal.decisionId, note: 'ai-note' })],
+  ['빈 값', 'META_EMPTY', (dir, legal) => writeMeta(dir, 'empty.json', legal.toAct === 'user'
+    ? { decisionId: legal.decisionId, note: '  \n\t  ' }
+    : { decisionId: legal.decisionId, reason: '  \n\t  ' })],
+];
+
+for (const [label, code, makePath] of META_DROPS) {
+  test(`--meta-file drop ${label}은 액션을 적용하고 envelope.meta.dropped=${code}`, () => {
+    const dir = startCliHand();
+    const legal = assertOk(cli(dir, ['legal']));
+    const metaPath = makePath(dir, legal);
+    const result = cli(dir, [
+      'apply', legal.toAct, legal.canCheck ? 'check' : 'call', '--meta-file', metaPath,
+    ]);
+    const env = assertOk(result);
+    assert.equal(env.meta.dropped, code);
+    const rec = lastAction(dir);
+    assert.equal(rec.playerId, legal.toAct);
+    assert.equal('reason' in rec, false);
+    assert.equal('note' in rec, false);
+  });
+}
+
+test('stale .decision-meta.json은 --meta-file 없이 읽히지 않는다', () => {
+  const dir = startCliHand();
+  const legal = assertOk(cli(dir, ['legal']));
+  fs.writeFileSync(path.join(dir, '.decision-meta.json'), JSON.stringify({
+    decisionId: legal.decisionId,
+    reason: 'LEFTOVER_REASON',
+    note: 'LEFTOVER_NOTE',
+  }));
+  const stepped = assertOk(cli(dir, [
+    'step', legal.toAct, legal.canCheck ? 'check' : 'call',
+  ]));
+  assert.equal(stepped.meta, undefined);
+  const rec = lastAction(dir);
+  assert.equal(rec.reason, undefined);
+  assert.equal(rec.note, undefined);
+});
+
+test('--meta-file 정상: 160자 절단, 4바이트 재절단, 제어문자, user note', () => {
+  const dir = startCliHand();
+  const aiLegal = advanceToPid(dir, 'p1');
+  const longReason = `hello\n\nworld${'R'.repeat(200)}`;
+  const aiMeta = writeMeta(dir, 'ai-meta.json', {
+    decisionId: aiLegal.decisionId,
+    reason: longReason,
+  });
+  const aiEnv = assertOk(cli(dir, [
+    'apply', aiLegal.toAct, aiLegal.canCheck ? 'check' : 'call', '--meta-file', aiMeta,
+  ]));
+  assert.deepEqual(aiEnv.meta.applied, ['reason']);
+  const aiRec = lastAction(dir);
+  assert.equal(aiRec.reason.includes('\n'), false);
+  assert.ok(aiRec.reason.startsWith('hello world'));
+  assert.ok([...aiRec.reason].length <= 160);
+
+  const emojiDir = startCliHand();
+  const emojiLegal = advanceToPid(emojiDir, 'p1');
+  const emojiMeta = writeMeta(emojiDir, 'emoji.json', {
+    decisionId: emojiLegal.decisionId,
+    reason: '😀'.repeat(160),
+  });
+  const emojiEnv = assertOk(cli(emojiDir, [
+    'apply', emojiLegal.toAct, emojiLegal.canCheck ? 'check' : 'call', '--meta-file', emojiMeta,
+  ]));
+  assert.deepEqual(emojiEnv.meta.applied, ['reason']);
+  const emojiRec = lastAction(emojiDir);
+  assert.ok(Buffer.byteLength(JSON.stringify(emojiRec.reason)) <= 512);
+  assert.ok([...emojiRec.reason].length <= 160);
+
+  const userDir = startCliHand();
+  const userLegal = advanceToPid(userDir, 'user');
+  const userMeta = writeMeta(userDir, 'user-meta.json', {
+    decisionId: userLegal.decisionId,
+    note: 'user-note-ok',
+  });
+  const userEnv = assertOk(cli(userDir, [
+    'step', userLegal.toAct, userLegal.canCheck ? 'check' : 'call', '--meta-file', userMeta,
+  ]));
+  assert.deepEqual(userEnv.meta.applied, ['note']);
+  const userRec = lastAction(userDir);
+  assert.equal(userRec.note, 'user-note-ok');
+  assert.equal('reason' in userRec, false);
+});
+
+test('--meta-file와 --force-default를 함께 쓰면 USAGE', () => {
+  const dir = startCliHand();
+  const legal = assertOk(cli(dir, ['legal']));
+  const metaPath = writeMeta(dir, 'meta.json', { decisionId: legal.decisionId, note: 'x' });
+  for (const args of [
+    ['apply', legal.toAct, '--force-default', '--meta-file', metaPath],
+    ['step', legal.toAct, '--force-default', '--meta-file', metaPath],
+  ]) {
+    const result = cli(dir, args);
+    assert.equal(result.status, 2, args[0]);
+    assert.equal(result.json.code, 'USAGE');
+  }
+  assert.equal(readState(dir).stateVersion, legal.stateVersion);
+});
+
+test('--policy-meta와 --meta-file을 동시에 쓰면 AI apply가 둘 다 남긴다', () => {
+  const dir = startCliHand();
+  const legal = advanceToPid(dir, 'p1');
+  const metaPath = writeMeta(dir, 'reason.json', {
+    decisionId: legal.decisionId,
+    reason: 'policy-reason',
+  });
+  const env = assertOk(cli(dir, [
+    'apply', legal.toAct, legal.canCheck ? 'check' : 'call',
+    '--meta-file', metaPath,
+    '--policy-meta', JSON.stringify({ policyId: 'tag-v2', reasonCode: 'OPEN' }),
+  ]));
+  assert.deepEqual(env.meta.applied, ['reason']);
+  const rec = lastAction(dir);
+  assert.equal(rec.reason, 'policy-reason');
+  assert.equal(rec.policyId, 'tag-v2');
+  assert.equal(rec.reasonCode, 'OPEN');
+});

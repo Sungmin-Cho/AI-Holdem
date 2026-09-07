@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newDeck } from '../engine/cards.js';
-import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
-import { fixedDeck, setup3 } from './helpers/fixtures.js';
+import { newDeck, shuffle } from '../engine/cards.js';
+import { applyAction, createGame, forceDefault, legalFor, startHand } from '../engine/hand.js';
+import { turnSummary } from '../engine/views.js';
+import { fixedDeck, mulberry32, setup3 } from './helpers/fixtures.js';
 
 function chipTotal(st) {
   return st.seats.reduce((a, s) => a + s.stack, 0)
@@ -23,12 +24,18 @@ function deck3(holes, board) {
   ]);
 }
 
-function start3(userStack, p1Stack, p2Stack, deck = fixedDeck()) {
-  const st = createGame({ aiCount: 2 });
+function start3(userStack, p1Stack, p2Stack, deck = fixedDeck(), config = {}) {
+  const st = createGame({ aiCount: 2, ...config });
   st.button = 2;
   st.seats[0].stack = userStack;
   st.seats[1].stack = p1Stack;
   st.seats[2].stack = p2Stack;
+  return startHand(st, { deck }).state;
+}
+
+function startN(aiCount, deck, config = {}) {
+  const st = createGame({ aiCount, ...config });
+  st.button = st.seats.length - 1;
   return startHand(st, { deck }).state;
 }
 
@@ -348,4 +355,170 @@ test('lastHand 완전성: 정산 후 lastHand로 hand-NNNN.json 내용을 재구
   assert.ok(reconstructed.board.length === 5);
   assert.ok(reconstructed.actions.length === rec.actions.length);
   assert.ok(reconstructed.pots.length === rec.pots.length);
+});
+
+const MUCK_DECK = deck3(
+  { p1: ['As', 'Ah'], p2: ['2c', '3d'], user: ['7s', '8s'] },
+  ['Ks', 'Kd', 'Kh', '9c', '6d'],
+);
+
+test('open 정책: 같은 덱에서 AI는 강제 공개, 진 사용자는 머크', () => {
+  const st0 = start3(5000, 5000, 5000, MUCK_DECK, { showdownPolicy: 'open' });
+  assert.equal(st0.seats[st0.button].playerId, 'user');
+  const r = checkDownToEnd(st0);
+  const show = r.events.find((e) => e.type === 'showdown');
+  assert.deepEqual(show.reveals.map((x) => x.playerId), ['p1', 'p2']);
+  assert.deepEqual(show.mucks, ['user']);
+  for (const reveal of show.reveals) {
+    assert.equal(typeof reveal.handName, 'string');
+    assert.ok(reveal.handName.length > 0);
+  }
+  assert.deepEqual(r.state.lastHand.showdown.reveals, show.reveals);
+  assert.deepEqual(r.state.lastHand.showdown.mucks, show.mucks);
+});
+
+test('open 정책: 사용자가 이기는 덱에서는 user도 reveals', () => {
+  const deck = deck3(
+    { p1: ['2c', '3c'], p2: ['4d', '5d'], user: ['As', 'Ah'] },
+    ['Ks', 'Kd', 'Kh', '9s', '8s'],
+  );
+  const r = checkDownToEnd(start3(5000, 5000, 5000, deck, { showdownPolicy: 'open' }));
+  const ids = r.state.lastHand.showdown.reveals.map((x) => x.playerId);
+  assert.ok(ids.includes('user'));
+  assert.ok(ids.includes('p1'));
+  assert.ok(ids.includes('p2'));
+  assert.deepEqual(r.state.lastHand.showdown.mucks, []);
+});
+
+test('open/standard 등식: user 공개 여부와 다음 turnSummary의 사용자 카드', () => {
+  function userRevealed(st) {
+    return (st.lastHand.showdown?.reveals ?? []).some((row) => row.playerId === 'user');
+  }
+
+  function observationHasCards(text, cards) {
+    const line = text.split('\n').find((row) => row.startsWith('최근 완료 핸드 공개 관측:'));
+    assert.ok(line, '관측 줄이 없다');
+    return cards.every((card) => line.includes(card));
+  }
+
+  function nextAiSummary(st, holes) {
+    const nextDeck = deckWith(newDeck().filter((card) => !holes.user.includes(card)));
+    let cur = startHand(st, { deck: nextDeck }).state;
+    for (let i = 0; i < 12; i += 1) {
+      const legal = legalFor(cur);
+      if (legal.handOver) return null;
+      if (legal.toAct !== 'user') {
+        const text = turnSummary(cur, legal.toAct);
+        return observationHasCards(text, holes.user);
+      }
+      cur = applyAction(cur, 'user', legal.canCheck ? 'check' : 'call').state;
+    }
+    return null;
+  }
+
+  function runPolicy(aiCount, deck, policy) {
+    return checkDownToEnd(startN(aiCount, deck, { showdownPolicy: policy }));
+  }
+
+  for (const aiCount of [2, 5]) {
+    for (let seed = 1; seed <= 200; seed += 1) {
+      const deck = shuffle(newDeck(), mulberry32(seed));
+      const open = runPolicy(aiCount, deck, 'open');
+      const standard = runPolicy(aiCount, deck, 'standard');
+      const openUser = userRevealed(open.state);
+      const standardUser = userRevealed(standard.state);
+      assert.equal(
+        openUser,
+        standardUser,
+        `aiCount=${aiCount} seed=${seed}: user 공개가 갈렸다`,
+      );
+      if (!openUser) continue;
+      const openNext = nextAiSummary(open.state, open.state.lastHand.holes);
+      const standardNext = nextAiSummary(standard.state, standard.state.lastHand.holes);
+      assert.equal(
+        openNext,
+        standardNext,
+        `aiCount=${aiCount} seed=${seed}: 다음 turnSummary 사용자 카드 포함이 갈렸다`,
+      );
+    }
+  }
+});
+
+test('open 고정 케이스: 라스트 어그레서 지는 AI 다음이 user여도 사용자 패가 새지 않는다', () => {
+  const deck = deck3(
+    { p1: ['As', 'Ah'], p2: ['Qc', 'Qd'], user: ['7s', '8s'] },
+    ['Ks', 'Kd', 'Kh', '9c', '6d'],
+  );
+  const script = [
+    ['user', 'call'], ['p1', 'call'], ['p2', 'check'],
+    ['p1', 'check'], ['p2', 'check'], ['user', 'check'],
+    ['p1', 'check'], ['p2', 'check'], ['user', 'check'],
+    ['p1', 'check'], ['p2', 'raise', 100], ['user', 'call'], ['p1', 'call'],
+  ];
+  function play(policy) {
+    let st = start3(5000, 5000, 5000, deck, { showdownPolicy: policy });
+    let last = { state: st, events: [] };
+    for (const [pid, action, amount] of script) {
+      last = applyAction(last.state, pid, action, amount);
+    }
+    return last;
+  }
+  const open = play('open');
+  const standard = play('standard');
+  const openIds = open.state.lastHand.showdown.reveals.map((row) => row.playerId);
+  const standardIds = standard.state.lastHand.showdown.reveals.map((row) => row.playerId);
+  assert.deepEqual(open.state.lastHand.showdown.reveals.map((row) => row.playerId).slice(0, 1), ['p2']);
+  assert.equal(openIds.includes('user'), standardIds.includes('user'));
+  assert.equal(openIds.includes('user'), false);
+  assert.ok(openIds.includes('p1'));
+  assert.ok(openIds.includes('p2'));
+});
+
+test('createGame 기본 showdownPolicy/replayReveal와 잘못된 값', () => {
+  const def = createGame({ aiCount: 2 });
+  assert.equal(def.config.showdownPolicy, 'standard');
+  assert.equal(def.config.replayReveal, 'showdown');
+  const cash = createGame({ aiCount: 2, mode: 'cash-training', levelEvery: null });
+  assert.equal(cash.config.showdownPolicy, 'standard');
+  assert.equal(cash.config.replayReveal, 'showdown');
+  const open = createGame({ aiCount: 2, showdownPolicy: 'open', replayReveal: 'all' });
+  assert.equal(open.config.showdownPolicy, 'open');
+  assert.equal(open.config.replayReveal, 'all');
+  assert.throws(() => createGame({ aiCount: 2, showdownPolicy: 'x' }), { code: 'BAD_CONFIG' });
+  assert.throws(() => createGame({ aiCount: 2, replayReveal: 'x' }), { code: 'BAD_CONFIG' });
+});
+
+test('showdowns·showdownWins는 open/standard가 같다', () => {
+  const open = checkDownToEnd(start3(5000, 5000, 5000, MUCK_DECK, { showdownPolicy: 'open' }));
+  const standard = checkDownToEnd(start3(5000, 5000, 5000, MUCK_DECK, { showdownPolicy: 'standard' }));
+  for (const pid of ['user', 'p1', 'p2']) {
+    assert.equal(open.state.stats[pid].showdowns, standard.state.stats[pid].showdowns, pid);
+    assert.equal(open.state.stats[pid].showdownWins, standard.state.stats[pid].showdownWins, pid);
+  }
+});
+
+test('lastHand.positions는 버스트 좌석을 포함해 전원 라벨을 남긴다', () => {
+  const deck = deck3(
+    { p1: ['2c', '3d'], p2: ['9s', '8s'], user: ['As', 'Ah'] },
+    ['Ks', 'Kd', 'Kh', '7c', '6d'],
+  );
+  const r = checkDownToEnd(start3(5000, 50, 5000, deck));
+  const p1 = r.state.seats.find((seat) => seat.playerId === 'p1');
+  assert.equal(p1.stack, 0);
+  assert.equal(p1.out, true);
+  assert.deepEqual(r.state.lastHand.positions, { user: 'BTN', p1: 'SB', p2: 'BB' });
+});
+
+test('forceDefault는 액션 레코드에 forced를 남긴다', () => {
+  const userForce = forceDefault(setup3(5000, 5000, 5000), 'user');
+  const userState = userForce.state.hand ?? userForce.state.lastHand;
+  assert.equal(userState.actions[0].forced, true);
+  assert.equal(userState.decisions[0].forced, true);
+
+  let opp = setup3(5000, 5000, 5000);
+  opp = applyAction(opp, 'user', 'call').state;
+  const forcedOpp = forceDefault(opp, 'p1');
+  const oppRec = forcedOpp.state.hand.actions.at(-1);
+  assert.equal(oppRec.playerId, 'p1');
+  assert.equal(oppRec.forced, true);
 });
