@@ -1,8 +1,13 @@
 // One contender: take withNamedLock once on a dead publish.lock.d and record
 // the lock directory inode and pid-file contents across the critical section.
+// `node --test` also walks test/helpers/*.mjs, so stay inert under the runner.
 import fs from 'node:fs';
 import path from 'node:path';
 import { withNamedLock } from '../../engine/state.js';
+
+if (process.execArgv.some((arg) => arg === '--test' || arg.startsWith('--test-'))) {
+  /* collected as a test file; the parent lock-race test spawns this as a child */
+} else {
 
 const [dir, out] = process.argv.slice(2);
 const lockDir = path.join(dir, 'publish.lock.d');
@@ -46,3 +51,4 @@ try {
   };
 }
 fs.writeFileSync(out, JSON.stringify(rec));
+}
