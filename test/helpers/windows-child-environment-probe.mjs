@@ -1,12 +1,10 @@
-// The study service child proves the same paths its parent just proved, with the
-// same PowerShell, and times out where the parent takes under a second. Crossing
-// the two candidate axes settled the first question: a detached child on the full
-// environment proves in 415ms, so console isolation is innocent and the
-// environment is the whole cause. Neither the client's allowlist nor that list
-// widened with the standard Windows variables can prove anything, so guessing at
-// names is what keeps failing. Shrink the working environment instead: drop one
-// variable at a time and keep every drop that still proves, until what remains is
-// exactly what PowerShell cannot start without.
+// The study service child gets an environment allowlist, so it inherits none of
+// the variables PowerShell leans on. That cost a diagnosis once: with no module
+// analysis cache location PowerShell re-analyses every module at every start and
+// overran the proof cap, while the parent — holding the runner's pre-warmed
+// PSModuleAnalysisCachePath — proved the same paths in 415ms. The cache is now
+// pinned at the spawn site, so the allowlist must once again be enough. Gate on
+// that, and shrink the working environment to name the culprit if it ever is not.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,18 +74,23 @@ async function main() {
   const target = path.join(root, 'private');
   createPrivateDirectory(target);
   try {
-    const full = Object.keys(process.env).filter((key) => process.env[key] !== undefined);
-    if (!proves(pick(full), target, { report: 'full-env control' })) {
-      console.log(JSON.stringify({ childEnvironmentMinimized: false, reason: 'the full environment cannot prove either' }));
+    // Cold then warm: a pinned cache costs its build once, and this reports it.
+    if (proves(pick(CLIENT), target, { report: 'client-allowlist cold' })
+      && proves(pick(CLIENT), target, { report: 'client-allowlist warm' })) {
+      console.log(JSON.stringify({ childEnvironmentSufficient: true }));
       return;
     }
-    proves(pick(CLIENT), target, { report: 'client-allowlist control' });
+    // The allowlist no longer suffices. Say what the environment must carry
+    // rather than leaving the next reader to guess at variable names.
+    const full = Object.keys(process.env).filter((key) => process.env[key] !== undefined);
+    if (!proves(pick(full), target, { report: 'full-env control' })) {
+      throw new Error('CHILD_ENVIRONMENT_UNPROVEN: even the full environment cannot prove');
+    }
     proves(pick(WINDOWS), target, { report: 'windows-allowlist control' });
     const required = shrink(full, target);
-    console.log(JSON.stringify({ childEnvironmentMinimized: true, requiredKeys: required.sort(),
-      missingFromClientAllowlist: required.filter((key) => !CLIENT.includes(key)).sort(),
-      missingFromWindowsAllowlist: required.filter((key) => !WINDOWS.includes(key)).sort() }));
-    proves(pick([...CLIENT, ...required]), target, { report: 'client-allowlist plus required' });
+    console.log(JSON.stringify({ childEnvironmentSufficient: false, requiredKeys: required.sort(),
+      missingFromClientAllowlist: required.filter((key) => !CLIENT.includes(key)).sort() }));
+    throw new Error(`CHILD_ENVIRONMENT_INSUFFICIENT: ${required.filter((key) => !CLIENT.includes(key)).join(',')}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 

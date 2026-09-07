@@ -25,9 +25,18 @@ import { spawnSync } from 'node:child_process';
 // pwsh 7 exports its module search path to children. Windows PowerShell 5.1
 // cannot load those Core modules. Use the system modules of the executable's
 // root, never a custom payload environment's SystemRoot or inherited PSHOME.
+const PINNED_POWERSHELL = new Set(['psmodulepath', 'psmoduleanalysiscachepath']);
 export function windowsPowerShellEnvironment(env = process.env, systemRoot = process.env.SystemRoot || 'C:\\Windows') {
-  const clean = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+  const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !PINNED_POWERSHELL.has(key.toLowerCase())));
   clean.PSModulePath = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  // With no usable cache location PowerShell re-analyses every module on that
+  // path at every start. A detached child inherits neither a caller's cache path
+  // nor LOCALAPPDATA, so it pays that cost on every proof and overruns a 15s cap.
+  // Pin the cache to the per-user temp directory PowerShell would have chosen for
+  // itself, and never inherit the location: this file decides how commands
+  // resolve, so a caller must not be able to aim it.
+  clean.PSModuleAnalysisCachePath = path.win32.join(
+    env.TEMP || env.TMP || path.win32.join(systemRoot, 'Temp'), 'ai-holdem-psmodule-analysis.cache');
   return clean;
 }
 
