@@ -567,6 +567,13 @@ test('policy benchmark asserts the published heuristic thresholds', async () => 
   assert.equal(result.thresholds.illegalOutputCount, 0);
   assert.equal(result.thresholds.determinismViolationCount, 0);
   assert.equal(result.thresholds.hiddenStateViolationCount, 0);
+  assert.equal(result.sizing.length, 8);
+  assert.ok(result.sizing.every((row) => (
+    Number.isInteger(row.amount)
+    && row.amount >= row.minRaiseTo
+    && row.amount <= row.maxRaiseTo
+  )));
+  assert.equal(result.thresholds.minRaiseOutsideClampCount, 0);
   assert.ok(Number.isFinite(result.measurements.wallClockMs.total));
   assert.ok(result.measurements.wallClockMs.total >= 0);
 });
