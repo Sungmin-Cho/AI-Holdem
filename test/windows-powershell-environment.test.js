@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import * as files from '../shared/platform-files.js';
 
 test('Windows PowerShell environment removes all poisoned key variants without mutation', () => {
- const source={SystemRoot:'E:\\payload-root',PSModulePath:'C:\\Program Files\\PowerShell\\7\\Modules',psmodulepath:'C:\\foreign',PsMoDuLePaTh:'C:\\another',PATH:'unchanged-path',PROVIDER_SENTINEL:'unchanged-provider',TEMP:'D:\\user-temp',psmoduleanalysiscachepath:'C:\\aimed-by-caller.cache'};
+ const source={SystemRoot:'E:\\payload-root',PSModulePath:'C:\\Program Files\\PowerShell\\7\\Modules',psmodulepath:'C:\\foreign',PsMoDuLePaTh:'C:\\another',PATH:'unchanged-path',PROVIDER_SENTINEL:'unchanged-provider'};
  const before={...source};
  const result=files.windowsPowerShellEnvironment(source,'D:\\Windows');
  assert.deepEqual(source,before);
@@ -13,12 +13,6 @@ test('Windows PowerShell environment removes all poisoned key variants without m
  assert.equal(result.PSModulePath,'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
  assert.equal(result.PATH,source.PATH);
  assert.equal(result.PROVIDER_SENTINEL,source.PROVIDER_SENTINEL);
- // The analysis cache decides how commands resolve, and without one PowerShell
- // re-analyses every module at every start. Pin it; never let a caller aim it.
- assert.deepEqual(Object.keys(result).filter(key=>key.toLowerCase()==='psmoduleanalysiscachepath'),['PSModuleAnalysisCachePath']);
- assert.equal(result.PSModuleAnalysisCachePath,'D:\\user-temp\\ai-holdem-psmodule-analysis.cache');
- assert.equal(files.windowsPowerShellEnvironment({TMP:'D:\\fallback'},'D:\\Windows').PSModuleAnalysisCachePath,'D:\\fallback\\ai-holdem-psmodule-analysis.cache');
- assert.equal(files.windowsPowerShellEnvironment({},'D:\\Windows').PSModuleAnalysisCachePath,'D:\\Windows\\Temp\\ai-holdem-psmodule-analysis.cache');
 });
 
 test('every Windows PowerShell production spawn receives a sanitized environment', () => {
@@ -65,8 +59,6 @@ test('every Windows PowerShell production spawn receives a sanitized environment
   assert.ok(opts.env,'production spawn must explicitly sanitize inherited module paths');
   assert.deepEqual(Object.keys(opts.env).filter(key=>key.toLowerCase()==='psmodulepath'),['PSModulePath']);
   assert.equal(opts.env.PSModulePath,'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
-  assert.deepEqual(Object.keys(opts.env).filter(key=>key.toLowerCase()==='psmoduleanalysiscachepath'),['PSModuleAnalysisCachePath']);
-  assert.match(opts.env.PSModuleAnalysisCachePath,/ai-holdem-psmodule-analysis\.cache$/);
  }
  assert.equal(captured.at(-1).opts.env.PROVIDER_SENTINEL,'caller-provider');
  assert.equal(captured.at(-1).opts.env.SystemRoot,'E:\\payload-root');

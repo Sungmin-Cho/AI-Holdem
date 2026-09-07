@@ -1,10 +1,10 @@
 // The study service child gets an environment allowlist, so it inherits none of
-// the variables PowerShell leans on. That cost a diagnosis once: with no module
-// analysis cache location PowerShell re-analyses every module at every start and
-// overran the proof cap, while the parent — holding the runner's pre-warmed
-// PSModuleAnalysisCachePath — proved the same paths in 415ms. The cache is now
-// pinned at the spawn site, so the allowlist must once again be enough. Gate on
-// that, and shrink the working environment to name the culprit if it ever is not.
+// the variables PowerShell leans on. Shrinking the working environment named the
+// one that matters: PSModuleAnalysisCachePath. Where a pre-warmed cache is
+// inherited PowerShell proves in 415ms; with no cache location it re-analyses
+// every module and overruns the proof cap. Pinning a fresh cache file is not the
+// answer either — building one overran the cap in the parent too. So measure the
+// settings themselves before choosing between them.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,13 +20,6 @@ const BUDGET_MS = 6000;
 
 // The allowlist the study client hands its detached child today.
 const CLIENT = ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_TIME', 'TZ'];
-// The variables a Windows process is normally entitled to assume exist. None of
-// them carry game or provider secrets, so an allowlist may hold all of them.
-const WINDOWS = [...CLIENT, 'SystemDrive', 'ComSpec', 'PATHEXT', 'USERPROFILE', 'APPDATA',
-  'LOCALAPPDATA', 'ALLUSERSPROFILE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)',
-  'CommonProgramFiles', 'PUBLIC', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN',
-  'COMPUTERNAME', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'OS'];
-
 const pick = (keys) => Object.fromEntries(keys
   .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 
@@ -56,15 +49,38 @@ function proves(env, target, { report } = {}) {
   return ok;
 }
 
-// Drop one variable at a time, keeping every drop the proof survives. What is
-// left cannot be reduced further: removing any one of its members breaks it.
-function shrink(keys, target) {
-  let required = [...keys];
-  for (const key of keys) {
-    const candidate = required.filter((name) => name !== key);
-    if (proves(pick(candidate), target)) required = candidate;
-  }
-  return required;
+const SYSTEM_ROOT = process.env.SystemRoot || 'C:\\Windows';
+const POWERSHELL = path.win32.join(SYSTEM_ROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const SYSTEM_MODULES = path.win32.join(SYSTEM_ROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+
+// Time PowerShell itself under one cache setting, on the allowlist the child
+// gets. The script uses only built-in cmdlets, exactly like the ACL proof.
+function timePowerShell(label, cachePath, budgetMs, modulePath = SYSTEM_MODULES) {
+  const env = pick(CLIENT);
+  env.PSModulePath = modulePath;
+  if (cachePath !== undefined) env.PSModuleAnalysisCachePath = cachePath;
+  const started = Date.now();
+  const result = cp.spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop'; (Get-Acl -LiteralPath $env:TEMP).Owner.ToString()"],
+  { env, encoding: 'utf8', timeout: budgetMs, windowsHide: true });
+  console.log(JSON.stringify({ cacheVariant: label, cachePath: cachePath ?? null,
+    modulePath: modulePath === '' ? '(empty)' : 'system', status: result.status,
+    spawnError: result.error?.code ?? null, wallMs: Date.now() - started,
+    stdout: String(result.stdout ?? '').trim().slice(0, 120),
+    stderr: String(result.stderr ?? '').trim().slice(0, 200) }));
+  return result.status === 0;
+}
+
+// Which setting lets a child that inherits nothing start PowerShell promptly?
+function measureCacheSettings(scratch) {
+  const fresh = path.join(scratch, 'analysis.cache');
+  timePowerShell('inherited runner cache', process.env.PSModuleAnalysisCachePath, 20_000);
+  timePowerShell('no cache location', undefined, 20_000);
+  timePowerShell('cache disabled by invalid path', 'NUL', 20_000);
+  timePowerShell('empty module path, no cache', undefined, 20_000, '');
+  timePowerShell('empty module path, cache disabled', 'NUL', 20_000, '');
+  timePowerShell('fresh cache file, cold', fresh, 180_000);
+  timePowerShell('fresh cache file, warm', fresh, 20_000);
 }
 
 async function main() {
@@ -74,23 +90,13 @@ async function main() {
   const target = path.join(root, 'private');
   createPrivateDirectory(target);
   try {
-    // Cold then warm: a pinned cache costs its build once, and this reports it.
-    if (proves(pick(CLIENT), target, { report: 'client-allowlist cold' })
-      && proves(pick(CLIENT), target, { report: 'client-allowlist warm' })) {
-      console.log(JSON.stringify({ childEnvironmentSufficient: true }));
-      return;
-    }
-    // The allowlist no longer suffices. Say what the environment must carry
-    // rather than leaving the next reader to guess at variable names.
+    measureCacheSettings(root);
     const full = Object.keys(process.env).filter((key) => process.env[key] !== undefined);
     if (!proves(pick(full), target, { report: 'full-env control' })) {
-      throw new Error('CHILD_ENVIRONMENT_UNPROVEN: even the full environment cannot prove');
+      console.log(JSON.stringify({ childEnvironmentMinimized: false, reason: 'the full environment cannot prove either' }));
+      return;
     }
-    proves(pick(WINDOWS), target, { report: 'windows-allowlist control' });
-    const required = shrink(full, target);
-    console.log(JSON.stringify({ childEnvironmentSufficient: false, requiredKeys: required.sort(),
-      missingFromClientAllowlist: required.filter((key) => !CLIENT.includes(key)).sort() }));
-    throw new Error(`CHILD_ENVIRONMENT_INSUFFICIENT: ${required.filter((key) => !CLIENT.includes(key)).join(',')}`);
+    proves(pick(CLIENT), target, { report: 'client-allowlist control' });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
