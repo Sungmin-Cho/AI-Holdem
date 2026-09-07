@@ -247,6 +247,16 @@ function publicHandle(value) {
 }
 // AbortSignal.timeout accepts integers only. Both the request-local deadline
 // and the caller's shared monotonic budget must still permit a whole millisecond.
+export function isStudyTransportFailure(error) {
+  const message = String(error?.message ?? '');
+  if (error?.name === 'TypeError' && message.includes('fetch failed')) return true;
+  return error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && message.includes('transport');
+}
+export function shouldRetryLiveWait(error, { afterOwner, owner, descriptorState, sameOwner }) {
+  if (afterOwner?.status !== 'alive' || sameOwner !== true) return false;
+  if (descriptorState !== 'valid') return error?.code === 'STUDY_DESCRIPTOR_CORRUPT';
+  return isStudyTransportFailure(error);
+}
 export function studyHttpTimeout(deadline, maximum = HTTP_WAIT_MS) {
   const localRemaining = deadline === undefined ? maximum : Math.floor(deadline - platformNow());
   const timeout = Math.min(localRemaining, platformTimeout(maximum));
@@ -322,11 +332,15 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
       if (!descriptorMatches(descriptor.value, ctx, currentOwner)) fail();
       try { return await verified(ctx, descriptor, currentOwner, deadline); }
       catch (error) {
-        // An owner checkpoint can overlap verification. Retry only safe missing
-        // or corrupt JSON; a valid conflicting record or failed health stays closed.
+        // A checkpoint can overlap verification. Retry missing/corrupt JSON, and
+        // also a transport reset while the same owner is still alive — a blocked
+        // spawnSync on win32 can reset the socket without unlinking the descriptor.
+        // A wrong health *answer* with a valid descriptor stays closed.
         const afterOwner = readLock(ctx);
-        if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT' || afterOwner?.status !== 'alive'
-          || !sameLock(owner, afterOwner) || readDescriptor(ctx).state === 'valid') throw error;
+        if (!shouldRetryLiveWait(error, {
+          afterOwner, owner, descriptorState: readDescriptor(ctx).state,
+          sameOwner: sameLock(owner, afterOwner),
+        })) throw error;
       }
     }
     await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
@@ -342,9 +356,23 @@ function validateParent(ctx, identity) {
 }
 async function attachParent(ctx, value, identity, deadline) {
   validateParent(ctx, identity);
-  const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
-  if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
-  validateParent(ctx, identity);
+  while (platformNow() < deadline) {
+    try {
+      const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
+      if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
+      validateParent(ctx, identity);
+      return;
+    } catch (error) {
+      if (error?.code === 'PARENT_IDENTITY_MISMATCH') throw error;
+      const after = readLock(ctx, true);
+      if (!isStudyTransportFailure(error) || after?.status !== 'alive'
+        || after.pid !== identity.pid || after.startTime !== identity.startTime) {
+        fail('STUDY_DESCRIPTOR_CORRUPT', transportDetail(error));
+      }
+    }
+    await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
+  }
+  fail();
 }
 function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
