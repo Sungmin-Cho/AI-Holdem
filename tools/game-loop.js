@@ -2523,6 +2523,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           log('publish-recovery', { code, mode: 'snapshot-rebuild' });
           continue;
         }
+        if (code === 'PUBLISH_ID_REUSED') {
+          recovered.add(code);
+          assertNotStopping();
+          appendNotice('publishId 재사용 감지: 새 id로 재게시');
+          log('publish-recovery', { code, mode: 'fresh-id-republish' });
+          continue;
+        }
         if (code === 'LOCK_TIMEOUT') {
           recovered.add(code);
           assertNotStopping();
