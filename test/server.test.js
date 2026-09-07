@@ -261,6 +261,34 @@ test('publishId 중복은 같은 revision 반환(로그 중복 없음)', async (
   }
 });
 
+test('publish: 적용 경로는 applied true, 같은 id·더 작은 id 재전송은 applied false', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const first = await publish(srv.port, token, { publishId: 3, view: { n: 1 } });
+    assert.equal(first.status, 200);
+    assert.equal(first.json.ok, true);
+    assert.equal(first.json.applied, true);
+    const firstRevision = first.json.revision;
+    const replay = await publish(srv.port, token, { publishId: 3, view: { n: 99 } });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.json.ok, true);
+    assert.equal(replay.json.applied, false);
+    assert.equal(replay.json.revision, firstRevision);
+    const older = await publish(srv.port, token, { publishId: 1, view: { n: 0 } });
+    assert.equal(older.status, 200);
+    assert.equal(older.json.applied, false);
+    assert.equal(older.json.revision, firstRevision);
+    const snap = await snapshot(srv.port, token);
+    assert.equal(snap.json.revision, firstRevision);
+    assert.equal(snap.json.view.n, 1);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
 test('action: decisionId 불일치 409, 일치 시 wait-action이 소비', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';

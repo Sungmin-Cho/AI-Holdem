@@ -3052,6 +3052,69 @@ test('LOCK_TIMEOUT retries the same publish once after the competing publisher r
   )), true);
 });
 
+function throwPublishIdReused() {
+  const error = new Error('publishId reused');
+  error.code = 'PUBLISH_ID_REUSED';
+  throw error;
+}
+
+test('PUBLISH_ID_REUSED recovers once with a fresh-id republish', { timeout: 30_000 }, async (t) => {
+  let arm = false;
+  let publishes = 0;
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter: makeAdapter(),
+    loopOpts: {
+      waitMs: 0,
+      onPublishInvoke() {
+        if (!arm) return;
+        publishes += 1;
+        if (publishes === 1) throwPublishIdReused();
+      },
+    },
+  });
+  arm = true;
+  const running = startRun(loop);
+  await waitWhileRunning(
+    running,
+    () => readLoopLog(gameDir).some((entry) => (
+      entry.event === 'publish-recovery' && entry.code === 'PUBLISH_ID_REUSED' && entry.mode === 'fresh-id-republish'
+    )),
+    'fresh-id-republish did not recover',
+    10_000,
+  );
+  await stopRun(loop, running);
+  assert.ok(publishes >= 2);
+  assert.equal(readLoopLog(gameDir).filter((entry) => (
+    entry.event === 'publish-recovery' && entry.mode === 'fresh-id-republish'
+  )).length, 1);
+  const notices = readJson(path.join(gameDir, 'loop-state.json')).notices ?? [];
+  assert.equal(notices.includes('publishId 재사용 감지: 새 id로 재게시'), true);
+});
+
+test('PUBLISH_ID_REUSED twice throws without a second recovery', { timeout: 30_000 }, async (t) => {
+  let arm = false;
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter: makeAdapter(),
+    loopOpts: {
+      waitMs: 0,
+      onPublishInvoke() {
+        if (arm) throwPublishIdReused();
+      },
+    },
+  });
+  arm = true;
+  const running = startRun(loop);
+  const outcome = await running.then(
+    () => ({ type: 'resolved' }),
+    (error) => ({ type: 'rejected', error }),
+  );
+  assert.equal(outcome.type, 'rejected');
+  assert.equal(outcome.error.code, 'PUBLISH_ID_REUSED');
+  assert.equal(readLoopLog(gameDir).filter((entry) => (
+    entry.event === 'publish-recovery' && entry.mode === 'fresh-id-republish'
+  )).length, 1);
+});
+
 test('NO_LOCK restarts on the persisted actual port and retries without rerunning the step', { timeout: 15_000 }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const lockPath = path.join(gameDir, 'lock.json');
