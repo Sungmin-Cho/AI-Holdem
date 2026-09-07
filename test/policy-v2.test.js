@@ -611,3 +611,203 @@ test('policy benchmark CLI emits asserted JSON without stronger claims', async (
   assert.equal(result.preflop.classCount, 169);
   assert.equal(result.preflop.comboCount, 1_326);
 });
+
+const DIGEST_V2_2_0_0 = Object.freeze({
+  'baseline-v2': '336abab921c7c8381aeb555e483df79931d6e83180ed5cf1f8ace17c474a4271',
+  'tag-v2': '4dd8bfeca2becb1ab610df7a3ebd8d361835ccb0e8923ef18e71432c63525f6f',
+  'lag-v2': '597de71b9b3843621a35a0ebbf2eee8bbfdfab9c35ff4d92006a6f12a84035fe',
+  'nit-v2': 'efc2bd49e4c5e2ba8fc7049d0145cfdfc087be11c6d45a22b6af661ebbfa1bfe',
+  'calling-station-v2': '4b2333d1fcef41fca2370f2006166c83571d7ff6c4b324faf3317d35355b9713',
+  'maniac-v2': 'f0ac07cc2c08ce44ad3678585a9dfd0ca769aa10aca4fb52295f7a4adf5f1d71',
+  'trickster-v2': '7dc73778b5a3dd6a309cf227c249b5b0240318f583ef147d0bd0f6cd89db03c7',
+});
+
+const V2_IDS = Object.freeze([
+  'baseline-v2', 'tag-v2', 'lag-v2', 'nit-v2',
+  'calling-station-v2', 'maniac-v2', 'trickster-v2',
+]);
+
+const SIZED_SPOTS = Object.freeze([
+  { name: 'unopened', actions: [], amount: 125, reason: 'v2-open-2.5bb' },
+  { name: '3bet', actions: [['raise', 125]], amount: 425, reason: 'v2-raise:3bet-3.4x' },
+  { name: '4bet', actions: [['raise', 125], ['raise', 425]], amount: 975, reason: 'v2-raise:4bet-2.3x' },
+  {
+    name: '5bet all-in',
+    actions: [['raise', 125], ['raise', 425], ['raise', 975]],
+    amount: 5000,
+    reason: 'v2-raise:5bet-allin',
+  },
+  { name: 'iso vs limp', actions: ['call'], amount: 175, reason: 'v2-raise:iso' },
+  {
+    name: 'BB iso',
+    actions: ['call', 'fold', 'fold', 'fold', 'fold'],
+    amount: 175,
+    reason: 'v2-bet:iso',
+  },
+  { name: 'squeeze', actions: [['raise', 125], 'call'], amount: 550, reason: 'v2-raise:squeeze' },
+  {
+    name: 'flop bet',
+    actions: [['raise', 125], 'fold', 'fold', 'fold', 'fold', 'call'],
+    amount: 175,
+    reason: 'v2-bet:bet-2/3-pot',
+  },
+  {
+    name: 'flop raise',
+    actions: [['raise', 125], 'fold', 'fold', 'fold', 'fold', 'call', ['raise', 175]],
+    amount: 650,
+    reason: 'v2-raise:raise-3/4-pot',
+  },
+  {
+    name: 'vs minbet',
+    actions: [['raise', 125], 'fold', 'fold', 'fold', 'fold', 'call', 'check', ['raise', 50]],
+    amount: 325,
+    reason: 'v2-raise:raise-3/4-pot',
+  },
+  { name: 'short all-in', stack: 300, actions: [['raise', 125]], amount: 300, reason: 'v2-raise:3bet-3.4x' },
+]);
+
+test('v2 sizes every engine spot the same for all personas and stamps the rule on reasonCode', async () => {
+  const { distributionV2 } = await import('../training/policies/strategy-v2.js');
+  const { policyById } = await import('../training/policies/catalog.js');
+  const { sizingFixture } = await import('./helpers/sizing-fixture.js');
+  for (const spot of SIZED_SPOTS) {
+    const { snapshot, legal } = sizingFixture({ stack: spot.stack, actions: spot.actions });
+    const amounts = [];
+    for (const id of PERSONA_IDS) {
+      const raises = distributionV2(snapshot, legal, policyById(id)).filter((item) => item.action === 'raise');
+      assert.ok(raises.length > 0, `${spot.name} ${id}`);
+      assert.ok(raises.every((item) => item.amount === spot.amount), `${spot.name} ${id}`);
+      assert.ok(raises.every((item) => item.reasonCode === spot.reason), `${spot.name} ${id} ${raises[0]?.reasonCode}`);
+      amounts.push(spot.amount);
+    }
+    assert.ok(amounts.every((amount) => amount === spot.amount));
+  }
+});
+
+test('v2 catalog is 2.1.0 and recompute of the frozen 2.0.0 tag-v2 digest matches history', async () => {
+  const { POLICIES, VERSION_V2 } = await import('../training/policies/catalog.js');
+  const { configDigestOf } = await import('../training/policies/contracts.js');
+  assert.equal(VERSION_V2, '2.1.0');
+  for (const id of V2_IDS) {
+    assert.equal(POLICIES[id].policyVersion, '2.1.0', id);
+  }
+  assert.equal(
+    configDigestOf({ ...POLICIES['tag-v2'], policyVersion: '2.0.0' }),
+    DIGEST_V2_2_0_0['tag-v2'],
+  );
+});
+
+test('resolveStoredPolicy accepts current 2.1.0 and exact 2.0.0 predecessors only', async () => {
+  const {
+    POLICIES, resolveStoredPolicy,
+  } = await import('../training/policies/catalog.js');
+  assert.equal(typeof resolveStoredPolicy, 'function');
+  const current = POLICIES['tag-v2'];
+  const exact = resolveStoredPolicy({
+    policyId: current.policyId,
+    policyVersion: current.policyVersion,
+    configDigest: current.configDigest,
+  });
+  assert.equal(exact.config, current);
+  assert.equal(exact.rolledForwardFrom, null);
+
+  const rolled = resolveStoredPolicy({
+    policyId: 'tag-v2',
+    policyVersion: '2.0.0',
+    configDigest: DIGEST_V2_2_0_0['tag-v2'],
+  });
+  assert.equal(rolled.config, current);
+  assert.equal(rolled.rolledForwardFrom, '2.0.0');
+
+  for (const stored of [
+    { policyId: 'tag-v2', policyVersion: '2.0.0', configDigest: '00'.repeat(32) },
+    { policyId: 'tag-v2', policyVersion: '9.0.0', configDigest: current.configDigest },
+    { policyId: 'unknown-v2', policyVersion: '2.0.0', configDigest: DIGEST_V2_2_0_0['tag-v2'] },
+    { policyId: 'tag-v2' },
+    Object.create({
+      policyId: 'tag-v2',
+      policyVersion: '2.0.0',
+      configDigest: DIGEST_V2_2_0_0['tag-v2'],
+    }),
+  ]) {
+    assert.throws(() => resolveStoredPolicy(stored), { code: 'POLICY_CONFIG_MISMATCH' });
+  }
+});
+
+test('sanitizePlayersForReview and toOpponentModel roll a 2.0.0 stamp to 2.1.0 traits', async () => {
+  const { sanitizePlayersForReview } = await import('../training/policies/catalog.js');
+  const { toOpponentModel } = await import('../training/exploit/policy-model.js');
+  const stored = {
+    policyId: 'tag-v2',
+    policyVersion: '2.0.0',
+    configDigest: DIGEST_V2_2_0_0['tag-v2'],
+  };
+  const post = sanitizePlayersForReview([{ playerId: 'p1', policy: stored }], { gameOver: true })[0];
+  assert.equal(post.policyId, 'tag-v2');
+  assert.equal(post.policyVersion, '2.1.0');
+  assert.deepEqual(post.policyTraits, {
+    tightness: 0.62, aggression: 0.62, calling: 0.38, bluff: 0.12,
+  });
+  const model = toOpponentModel(stored);
+  assert.equal(model.policyVersion, '2.1.0');
+  assert.deepEqual(model.traits, post.policyTraits);
+});
+
+test('v2 self-play raises stay in clamp and min-raise only after rounding down', async () => {
+  const { applyAction, createGame, legalFor, startHand } = await import('../engine/hand.js');
+  const { snapshotDecision } = await import('../engine/decision.js');
+  const { assignmentFor, policyById } = await import('../training/policies/catalog.js');
+  const { decide } = await import('../tools/policy-player.js');
+  const { raiseToFor, roundToUnit } = await import('../training/policies/sizing.js');
+  const started = Date.now();
+  const policies = {
+    user: policyById('baseline-v2'),
+    p1: assignmentFor('TAG'),
+    p2: assignmentFor('LAG'),
+    p3: assignmentFor('Nit'),
+    p4: assignmentFor('CallingStation'),
+    p5: assignmentFor('Maniac'),
+  };
+  const { mulberry32 } = await import('./helpers/fixtures.js');
+  const rng = mulberry32(143);
+  let state = createGame({
+    aiCount: 5, startStack: 5000, blinds0: [25, 50], mode: 'cash-training',
+    levelEvery: null, startStackBb: 100, handLimit: 100,
+  });
+  state.button = 5;
+  const policySeed = 'ab'.repeat(32);
+  const gameEpoch = 'cd'.repeat(32);
+  let raises = 0;
+  for (let hand = 0; hand < 100; hand += 1) {
+    state = startHand(state, { rng }).state;
+    let acts = 0;
+    while (!legalFor(state).handOver) {
+      acts += 1;
+      assert.ok(acts <= 10_000, `hand ${hand} did not close`);
+      const legal = legalFor(state);
+      const snapshot = snapshotDecision(state, legal.toAct, null, {
+        blinds: state.config.blinds0, legal,
+      });
+      const choice = decide({
+        snapshot, legal, policy: policies[legal.toAct], policySeed, gameEpoch,
+      });
+      if (choice.action === 'raise') {
+        raises += 1;
+        if (legal.minRaiseTo > legal.maxRaiseTo) {
+          assert.equal(choice.amount, legal.maxRaiseTo);
+        } else {
+          assert.ok(choice.amount >= legal.minRaiseTo);
+          assert.ok(choice.amount <= legal.maxRaiseTo);
+        }
+        if (choice.amount === legal.minRaiseTo) {
+          const sized = raiseToFor(snapshot, legal);
+          const unit = snapshot.blinds[0];
+          assert.ok(roundToUnit(sized.target, unit) <= legal.minRaiseTo);
+        }
+      }
+      state = applyAction(state, legal.toAct, choice.action, choice.amount).state;
+    }
+  }
+  assert.ok(raises > 0, 'self-play produced no raises');
+  assert.ok(Date.now() - started < 5000, `self-play took ${Date.now() - started}ms`);
+});
