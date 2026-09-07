@@ -48,6 +48,12 @@ function readLines(dir) {
   return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function cliEnv() {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+}
+
 test('unset diagnostics env does not create a proofs.jsonl and omits the child env key', async () => {
   const dir = diagDir();
   const target = path.join(dir, 'target');
@@ -238,11 +244,11 @@ test('proof-profile-report aggregates five fixture lines as a table and as --jso
   ];
   fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const helper = path.join(HERE, 'helpers', 'proof-profile-report.mjs');
-  const text = spawnSync(process.execPath, [helper, file], { encoding: 'utf8' });
+  const text = spawnSync(process.execPath, [helper, file], { encoding: 'utf8', env: cliEnv() });
   assert.equal(text.status, 0, text.stderr);
   assert.match(text.stdout, /calls=5/);
   assert.match(text.stdout, /timedOut=1/);
-  const json = spawnSync(process.execPath, [helper, file, '--json'], { encoding: 'utf8' });
+  const json = spawnSync(process.execPath, [helper, file, '--json'], { encoding: 'utf8', env: cliEnv() });
   assert.equal(json.status, 0, json.stderr);
   const parsed = JSON.parse(json.stdout);
   assert.equal(parsed.total.calls, 5);
@@ -252,6 +258,11 @@ test('proof-profile-report aggregates five fixture lines as a table and as --jso
   assert.equal(parsed.byPid['10'].calls, 3);
   assert.equal(parsed.byPhase.ensure.calls, 2);
   assert.equal(parsed.byKind.acl.calls, 3);
+});
+
+test('reporter CLIs stay inert when node --test loads the helper modules', async () => {
+  await import('./helpers/proof-profile-report.mjs');
+  await import('./helpers/tap-file-timing.mjs');
 });
 
 test('tap-file-timing maps a step-6 then alphabet-restart log back onto two files', () => {
@@ -271,7 +282,7 @@ test('tap-file-timing maps a step-6 then alphabet-restart log back onto two file
   ];
   fs.writeFileSync(log, lines.join('\n') + '\n');
   const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
-  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /unmatched subtests: 0/);
   assert.match(result.stdout, /alpha\.test\.js/);

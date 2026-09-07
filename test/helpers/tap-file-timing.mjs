@@ -2,7 +2,10 @@
 // then report per-file wall time from the log timestamps.
 import fs from 'node:fs';
 import path from 'node:path';
-const [logPath, testDir] = process.argv.slice(2);
+import { fileURLToPath } from 'node:url';
+
+function main(argv = process.argv.slice(2)) {
+const [logPath, testDir] = argv;
 const files = fs.readdirSync(testDir).filter((f) => f.endsWith('.test.js')).sort();
 const nameRe = /\b(?:test|it)\s*\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g;
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -62,3 +65,7 @@ const missing = files.filter((f) => !rows.some((r) => r.file === f));
 console.log(`\nnot reached: ${missing.length}`); if (missing.length) console.log(missing.join(', '));
 console.log('\nfailures by file:');
 for (const r of rows) for (const f of r.fails) console.log(`  ${r.file}: ${f}`);
+}
+
+const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (direct && !process.env.NODE_TEST_CONTEXT) main();
