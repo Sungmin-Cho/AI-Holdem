@@ -1,3 +1,5 @@
+import { referenceClaimAllowed, referenceQuality } from '../shared/reference.js';
+
 const ACTION_ALIASES = Object.freeze({
   raise: ['리레이즈', '3-bet', '3벳', '레이즈', 'raise', '오픈'],
   fold: ['fold', '폴드'],
@@ -102,10 +104,14 @@ export function validateExplanation(evaluation, explanation) {
   if (explanation.length > MAX_EXPLANATION) {
     return { ok: false, code: 'EXPLANATION_TOO_LONG' };
   }
+  if (!referenceClaimAllowed(explanation)) {
+    return { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' };
+  }
+  if (evaluation?.status === 'supported'
+    && referenceQuality(evaluation.source).quality !== 'heuristic-reference') {
+    return { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' };
+  }
   if (evaluation?.status !== 'supported') {
-    if (/(정답|GTO)/i.test(explanation) && !/지원되지/.test(explanation)) {
-      return { ok: false, code: 'UNSUPPORTED_AS_ANSWER' };
-    }
     const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;
     let match;

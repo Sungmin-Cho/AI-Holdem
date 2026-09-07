@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { skipOnWin32 } from './helpers/platform.js';
 import { createTrainingControl } from '../tools/training-control.js';
@@ -168,46 +167,45 @@ test('the drill server refuses a token passed in the query string', async () => 
   }
 });
 
-test('the shipped drill client sends its token in the header, never in the URL', async () => {
-  // Run the shipped file and inspect what `api` actually hands to `fetch`.
-  // Calling the request builder alone would stay green if `api` stopped using
-  // it, which is the regression this guards.
-  const client = fs.readFileSync(path.join(ROOT, 'server/drill-public/drill.js'), 'utf8');
-  const calls = [];
-  const context = vm.createContext({
-    URLSearchParams,
-    URL,
-    location: { search: '?token=tok' },
-    crypto: { randomUUID: () => 'k' },
-    document: { getElementById: () => null, addEventListener() {}, querySelectorAll: () => [] },
-    fetch: async (url, init) => {
+test('the shipped drill client sends its token in the header, never in the URL', () => {
+  // Load the shipped ES module and expose its real fetch adapter before DOM
+  // rendering. Only the mount boundary is instrumented; api/drillRequest run intact.
+  const clientFile = path.join(ROOT, 'server/drill-public/drill.js');
+  const original = fs.readFileSync(clientFile, 'utf8');
+  const boundary = '  const node = (tag, text, cls) =>';
+  assert.equal(original.split(boundary).length, 2, 'the mount boundary changed');
+  const client = original.replace("from './study-format.js'", `from ${JSON.stringify(new URL('../server/drill-public/study-format.js', import.meta.url).href)}`)
+    .replace(boundary, `  globalThis.__api = api; return;\n${boundary}`);
+  const script = `
+    const calls = [];
+    globalThis.document = {};
+    globalThis.location = new URL('http://127.0.0.1/?token=legacy#token=tok');
+    globalThis.history = { replaceState() {} };
+    globalThis.fetch = async (url, init) => {
       calls.push({ url: String(url), init });
-      return { status: 200, json: async () => ({ ok: true }) };
-    },
-    console,
-    setTimeout,
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    await import('data:text/javascript;base64,' + Buffer.from(${JSON.stringify(client)}).toString('base64'));
+    if (typeof globalThis.__api !== 'function') throw new Error('shipped api missing');
+    await globalThis.__api('/api/next');
+    await globalThis.__api('/api/answer', { method: 'POST', body: { action: 'fold' } });
+    process.stdout.write(JSON.stringify(calls));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024,
   });
-  // Function declarations hoist, so `api` is captured before the page setup
-  // runs — and that setup is free to fail against a stub DOM.
-  vm.runInContext(
-    `(async () => { globalThis.__api = api;\n${client}\n })().catch(() => {});`,
-    context,
-  );
-  assert.equal(typeof context.__api, 'function', 'the shipped client exposes no api()');
-
-  await context.__api('/api/next');
-  const post = await context.__api('/api/answer', { method: 'POST', body: { action: 'fold' } });
-  assert.ok(post);
-
-  // Every request the page makes, including the ones its own startup issues.
-  assert.ok(calls.length >= 2, `only ${calls.length} requests observed`);
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.signal, null);
+  const calls = JSON.parse(child.stdout);
+  assert.equal(calls.length, 2);
   for (const call of calls) {
     assert.equal(/[?&]token=/.test(call.url), false, `token leaked into ${call.url}`);
     assert.equal(call.init.headers['x-drill-token'], 'tok', `no header on ${call.url}`);
   }
   const posted = calls.find((call) => call.init.method === 'POST');
-  assert.ok(posted, 'no POST was observed');
+  assert.ok(posted);
   assert.equal(posted.init.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(posted.init.body), { action: 'fold' });
 });
 
 test('the client merge keeps a shown card and appends a new one, in hand order', async () => {

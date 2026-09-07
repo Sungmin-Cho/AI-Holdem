@@ -4,6 +4,9 @@
 // 끊는 안전망일 뿐 성능 계약이 아니다 — 계약은 각 waitFor 예산과 "다음 핸드 < 1s" 단언이며
 // 그 둘은 그대로다. 관측된 5배 변동을 덮도록 안전망만 넓힌다.
 import { test as nodeTest } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
+import { loadPreflopDataset } from '../tools/preflop-dataset.js';
+import { validateExplanation } from '../training/explain.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,10 +31,13 @@ function test(name, opts, fn) {
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const VALID_EXPLAIN = 'BTN에서 AJo는 0.96 빈도로 2.5bb 오픈이 주력입니다.';
+const REFERENCE = loadPreflopDataset();
+const REFERENCE_ACTIONS = REFERENCE.data.spots['6max-100bb-btn-rfi-unopened'].AJo;
+const OPEN_FREQUENCY = REFERENCE_ACTIONS.find((row) => row.action === 'raise').frequency;
+const VALID_EXPLAIN = `휴리스틱 기준표에서 BTN AJo는 ${OPEN_FREQUENCY} 빈도로 2.5bb 오픈이 주력입니다.`;
 
 function tmpGame() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-tasync-'));
+  return createOwnedTempDir('holdem-tasync');
 }
 
 function putUserOnTheButton(gameDir) {
@@ -124,13 +130,13 @@ function cannedEvaluation(decisionId, gameEpoch) {
     street: 'preflop',
     spotKey: '6max-100bb-btn-rfi-unopened',
     handClass: 'AJo',
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.96, evBb: null }],
-    chosen: { action: 'fold', frequency: 0.04, evBb: null },
+    recommended: REFERENCE_ACTIONS.map((row) => ({ ...row, evBb: null })),
+    chosen: { action: 'fold', frequency: REFERENCE_ACTIONS.find((row) => row.action === 'fold').frequency, evBb: null },
     bestEvBb: null,
     evLossBb: null,
     grade: 'mixed',
     forced: false,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: { id: REFERENCE.data.id, version: REFERENCE.data.version, contentSha256: REFERENCE.contentSha256 },
   };
 }
 
@@ -968,4 +974,14 @@ test('resume of a published last hand does not re-evaluate', { timeout: 120_000 
     `published last hand ${publishedHandNo} was re-evaluated (${JSON.stringify(resumeCalls)})`,
   );
   await resumed.requestStop().catch(() => {});
+});
+
+
+test('async scheduling fixture uses verified reference while unverified source remains rejected', () => {
+  const value = cannedEvaluation('d-1-preflop-0', 'ab'.repeat(32));
+  assert.equal(validateExplanation(value, VALID_EXPLAIN).ok, true);
+  const { contentSha256, ...legacySource } = value.source;
+  assert.match(contentSha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(validateExplanation({ ...value, source: legacySource }, VALID_EXPLAIN),
+    { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' });
 });

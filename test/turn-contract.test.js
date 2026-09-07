@@ -13,16 +13,28 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { startServer } from '../server/server.js';
+import { startServer as startRawServer } from '../server/server.js';
+import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 
-const execFileAsync = promisify(execFile);
+async function startServer(opts) {
+  const relay = await startRawServer(opts);
+  registerOwnedServer(relay.server, 'turn-contract');
+  return relay;
+}
+
+const execFilePromise = promisify(execFile);
+function execFileAsync(...args) {
+  const pending = execFilePromise(...args);
+  queueMicrotask(() => registerOwnedProcess(pending.child, 'node-cli'));
+  return pending;
+}
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'engine/cli.js');
 const TOOL = path.join(ROOT, 'tools/publish.js');
 const COACH = path.join(ROOT, 'tools/coach-control.js');
 
 function tmpGame() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-turn-'));
+  return createOwnedTempDir('holdem-turn');
 }
 
 // 사이드카의 runCli/runPublish와 같은 형태 — 셸을 거치지 않는 인자 배열 자식 호출.

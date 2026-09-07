@@ -2,7 +2,7 @@
 
 ## 1. 개요
 
-AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 상대로 노리밋 텍사스 홀덤을 두는 시스템이다. 시스템은 서로 아는 것이 다른 세 계층으로 갈라져 있다 — 네트워크와 LLM을 전혀 모르는 순수 규칙 엔진(`engine/`), 게임 진행 전체를 소유하고 LLM 자식 프로세스를 부리는 detached 사이드카(`tools/game-loop.js`), 상태를 갖지 않고 중계만 하는 HTTP 서버(`server/`)다. LLM 호출은 오직 `tools/player-runtime.js` 한 표면에서만 일어나며, 사용자가 여는 딜러 세션(Claude Code·Codex·Grok)은 사전 점검과 사이드카 기동, 결과 보고만 담당하고 핸드 안 진행에는 관여하지 않는다.
+AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 플레이하고 복습하는 시스템이다. 새 store 기본값은 cash-training·AI 5명·100BB·20핸드·policy v2다. 순수 규칙 엔진(`engine/`)은 네트워크·LLM을 모르고, detached 사이드카(`tools/game-loop.js`)가 게임 진행과 자식 프로세스를 소유한다. HTTP relay(`server/`)는 UI 게시와 durable 액션 접수를 소유하며 게임 규칙을 실행하지 않는다. 독립 `tools/study-service.js`가 store 학습 요약·드릴을 제공한다. LLM 호출은 `tools/player-runtime.js` 하나를 통하고, 호스트 딜러는 사전 점검·기동·보고만 맡는다.
 
 실행·운영 절차는 [`README.md`](README.md), 호스트별 딜러 절차는 [`AGENTS.md`](AGENTS.md)와 그것이 가리키는 정본 스킬이 담당한다. 이 문서는 경계와 불변식만 다룬다.
 
@@ -33,6 +33,10 @@ AI 홀덤은 브라우저 UI를 통해 사용자가 LLM 페르소나 다수를 �
 | `tools/training-control.js` | 세션 스코프 training authority·평가 멱등·reconcile. 코치 authority와 파일을 합치지 않는다. |
 | `training/profile-store.js` | 장기 skill profile. 저장은 `<store>/.training/`. fs helper를 **기본값 없이 주입**받으며, 주입자는 `tools/training-stores.js`다. |
 | `tools/drill-server.js` | 게임 서버와 분리된 스팟 드릴 HTTP(별도 프로세스, 게임 서버와 무관). 자체 토큰, 정적 파일은 `server/drill-public/`. |
+| `tools/study-service.js` | store inode·pid/startTime·instance identity와 private descriptor를 검증하는 독립 study 수명 소유자. parent attach와 제어 토큰은 UI 토큰과 분리된다. |
+| `tools/study-summary.js` | 검증된 학습 이벤트를 게임·연습·평가·재시험별 공개 요약으로 투영한다. |
+| `shared/reference.js` | 휴리스틱 기준표의 출처·허용 액션·분포 일치 계약. 학습 효과나 solver 권위로 승격하지 않는다. |
+| `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
@@ -94,3 +98,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 - **영구 세션**: 새 게임은 `.session-store/sessions/<gameId>`에서 초기화되고 그 directory는 다음 init 때문에 이동·복사·삭제되지 않는다.
 - **로그**: 로그 파일을 여는 것은 사이드카뿐이다(선택된 session의 `loop.log`, append). 사이드카가 띄우는 서버는 `stdio: 'ignore'`로 spawn되므로 자체 로그 파일을 갖지 않는다 — `server.log`는 서버를 손으로 띄울 때 쓰는 셸 리다이렉트일 뿐이다. 공용 로거는 없다.
 - **런타임 폴백**: 플레이어·상위 모델 런타임 선택은 `tools/player-runtime.js`의 probe 사다리(`claude → codex → grok`) 하나로 결정되며, 이 판정은 사이드카·서버 어느 쪽에도 복제되지 않는다.
+- **기본값과 학습 범위**: fresh store 요청만 새 기본값을 받는다. 명시 llm/tournament·스택·레벨·AI 수·핸드 수·블라인드는 보존한다. legacy API와 resume은 기록된 설정을 사용한다. 6인·약 100BB 프리플롭의 2.5BB 오픈/8.5BB 3-bet 기준표 범위 밖은 제외되며, 게임 지표와 연습 지표는 합치지 않는다.
+- **별도 study 수명**: store loop 락 소유자가 검증된 서비스에 parent로 붙는다. relay adoption은 pid·listener·세션 인증에 더해 protocol 2/actionReceipts/studyLink와 현재 study URL 일치를 요구한다. 서비스 재시작으로 URL이 바뀌면 identity를 증명한 relay만 교체하고 엔진 view를 동기화한다. 게임 종료는 study를 정지하지 않으며 인증 활동/부모 종료 후 유휴 10분에 정지한다.
+- **생성 권한**: 실제 store CLI 프로세스는 catalog·loop 락 생성 전에 umask 077을 설정한다. 호스트·API 호출자의 umask나 기존 디렉터리·foreign 락은 변경하지 않는다.
+- **버전 복구**: v1 배정은 정확한 v1 identity로 읽고 v2는 그대로 보존한다. 구버전 profile 검증은 복사본에서 실제 reader로 실행하며 raw 이벤트·평가·processed digest를 대조한다. 결과가 미확인인 accepted/delivered 액션은 rollback을 차단한다. 권위 동기화 후 matching study만 정지하고 호환 버전으로 roll-forward한다.

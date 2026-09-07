@@ -16,6 +16,14 @@ test('frequency grades map to interval increase / hold / reset+lapse', () => {
   assert.equal(off.lapses, 1);
 
   const low = nextSchedule({ ...base, grade: 'low-frequency' });
-  assert.equal(low.intervalDays, 1);
-  assert.equal(low.lapses, 1);
+  assert.equal(low.intervalDays, 4);
+  assert.equal(low.lapses, 0);
+});
+
+test('only off-policy review increments a lapse', () => {
+  const base = { intervalDays: 6, ease: 2.3, lapses: 2, now: Date.parse('2026-09-06T00:00:00Z') };
+  for (const grade of ['preferred', 'mixed', 'low-frequency']) {
+    assert.equal(nextSchedule({ ...base, grade }).lapses, 2);
+  }
+  assert.equal(nextSchedule({ ...base, grade: 'off-policy' }).lapses, 3);
 });

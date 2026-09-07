@@ -65,3 +65,6 @@ export function buildText(canonical, opts) {
     warnings: mergeWarnings(canonical.warnings, rendered.warnings),
   };
 }
+
+// Kept next to the manifest API so the real CLI and programmatic exports share one read-only loader.
+export { loadReferenceEvaluations } from './hand-normalizer.js';

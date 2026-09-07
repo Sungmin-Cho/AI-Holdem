@@ -4,6 +4,8 @@ import { applyEvent, emptyProfile, rebuildFromEvents } from '../training/profile
 import { evaluationIdOf } from '../training/contracts.js';
 
 function event(overrides = {}) {
+  const providerId = overrides.providerId ?? 'local-preflop-baseline';
+  const providerVersion = overrides.providerVersion ?? '1.0.0';
   return {
     evaluationId: evaluationIdOf({
       gameEpoch: 'ab'.repeat(32),
@@ -19,6 +21,19 @@ function event(overrides = {}) {
     evLossBb: null,
     providerId: 'local-preflop-baseline',
     providerVersion: '1.0.0',
+    street: 'preflop',
+    origin: 'game',
+    mixObservation: {
+      spotKey: '6max-100bb-btn-rfi-unopened',
+      handClass: 'AA',
+      referenceActions: [{ action: 'raise', sizeBb: 2.5, frequency: 1 }],
+      chosenAction: { action: 'raise', sizeBb: 2.5 },
+      sourceIdentity: {
+        id: providerId,
+        version: providerVersion,
+        contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+      },
+    },
     appliedAt: '2026-09-01T00:00:00.000Z',
     ...overrides,
   };
@@ -74,7 +89,7 @@ test('unsupported is coverage only; rebuild is byte-stable', () => {
   assert.equal(a.leaks.length >= 0, true);
 });
 
-test('provider version is a separate segment', () => {
+test('unverified provider version is retained only as coverage evidence', () => {
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -87,9 +102,9 @@ test('provider version is a separate segment', () => {
     providerVersion: '2.0.0',
   }));
   assert.ok(profile.segments['local-preflop-baseline@1.0.0']);
-  assert.ok(profile.segments['local-preflop-baseline@2.0.0']);
+  assert.equal(profile.segments['local-preflop-baseline@2.0.0'], undefined);
   assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
-  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.game.coverage.unverifiedDecisions, 1);
 });
 
 test('mixed provider versions are never summed at the top level', () => {
@@ -104,11 +119,11 @@ test('mixed provider versions are never summed at the top level', () => {
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   assert.equal(profile.skills['preflop.rfi.BTN'].opportunities, 1);
   assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
-  assert.equal(profile.segments['local-preflop-baseline@2.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['local-preflop-baseline@2.0.0'], undefined);
   assert.equal(profile.segments['local-preflop-baseline@1.0.0'].skills['preflop.rfi.BTN'].opportunities, 1);
 });
 
@@ -139,10 +154,13 @@ test('rebuild [game A, drill, drill] keeps activeSegmentId at A', () => {
     }),
   ]);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
-  assert.equal(profile.overall.evaluatedDecisions, 2);
+  assert.equal(profile.overall.evaluatedDecisions, 1);
+  assert.equal(profile.game.overall.evaluatedDecisions, 1);
+  assert.equal(profile.practice.overall.evaluatedDecisions, 1);
+  assert.equal(profile.practice.coverage.unverifiedDecisions, 1);
 });
 
-test('drill-only profile uses the most recent drill provider', () => {
+test('unverified drill-only profile remains unavailable', () => {
   const profile = rebuildFromEvents([
     event({
       origin: 'drill',
@@ -162,8 +180,9 @@ test('drill-only profile uses the most recent drill provider', () => {
       origin: 'drill',
     }),
   ]);
-  assert.equal(profile.activeSegmentId, 'drill-b@2.0.0');
-  assert.equal(profile.overall.evaluatedDecisions, 1);
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(profile.overall.evaluatedDecisions, 0);
+  assert.equal(profile.practice.coverage.unverifiedDecisions, 2);
 });
 
 test('other-provider drill is a separate segment and is not mixed into the game overall', () => {
@@ -184,8 +203,7 @@ test('other-provider drill is a separate segment and is not mixed into the game 
   ]);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
-  assert.ok(profile.segments['other-solver@3.0.0']);
-  assert.equal(profile.segments['other-solver@3.0.0'].overall.evaluatedDecisions, 1);
+  assert.equal(profile.segments['other-solver@3.0.0'], undefined);
   assert.equal(profile.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
 });
 
@@ -196,8 +214,8 @@ test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to 
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('duplicate apply still projects the active segment and persists schemaVersion 3', () => {
-  assert.equal(emptyProfile().schemaVersion, 3);
+test('duplicate apply still projects the active segment and persists schemaVersion 4', () => {
+  assert.equal(emptyProfile().schemaVersion, 4);
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -209,8 +227,8 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.schemaVersion, 3);
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(profile.schemaVersion, 4);
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   profile.overall.evaluatedDecisions = 2;
   profile.overall.supportedDecisions = 2;
@@ -224,7 +242,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(again.schemaVersion, 3);
+  assert.equal(again.schemaVersion, 4);
   assert.equal(again.overall.evaluatedDecisions, 1);
   assert.equal(again.overall.supportedDecisions, 1);
   assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);

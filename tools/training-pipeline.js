@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 import {
   createTrainingControl,
   hasCutoffMarker,
+  materializeLearningEvaluation,
   readAnnotationExactFile,
 } from './training-control.js';
 import { validateExplanation } from '../training/explain.js';
+import { referenceQuality } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
 import { killGroup, readPersistedSolver } from './solver-runtime.js';
@@ -164,6 +166,8 @@ export function buildExplanationPrompt(evaluation) {
     '역할: 학습 해설',
     'JSON 한 줄만 출력하라: {"evaluationId":"...","explanation":"..."}',
     'evaluator 수치를 바꾸지 마라. 새 숫자를 만들지 마라.',
+    '이 평가는 검증된 GTO 정답이나 EV 손실이 아니라 출처가 확인된 경우에도 휴리스틱 기준표 비교다.',
+    '출처가 합성·미확인이라면 추천이나 등급을 정답처럼 설명하지 마라.',
     '허용 숫자 형태만 사용하라:',
     '1) 빈도: <action> <n>% 또는 <n>% <action> 또는 소수 0.nn — n은 그 action의 frequency와 결박 (영·한 별칭: raise|레이즈|오픈|3벳|3-bet|리레이즈, fold|폴드, call|콜, check|체크)',
     '2) 사이즈: <n>bb / <n> bb / <n>BB — 어떤 sizeBb와 ±0.05. EV|손실|loss|이득이 같은 절에 있으면 금지',
@@ -180,24 +184,40 @@ export function buildExplanationPrompt(evaluation) {
       recommended: evaluation?.recommended,
       code: evaluation?.code,
       reason: evaluation?.reason,
+      source: evaluation?.source,
     }),
   ].filter(Boolean).join('\n');
+}
+
+export function aggregateProcessRows(rows, { pending = 0 } = {}) {
+  const eligible = (rows ?? []).filter((row) => {
+    const quality = referenceQuality(row?.source).quality;
+    if (quality === 'synthetic') return false;
+    return row?.status !== 'supported' || quality === 'heuristic-reference';
+  });
+  const supported = eligible.filter((row) => row.status === 'supported');
+  const offPolicy = supported.filter((row) => row.grade === 'off-policy').length;
+  return {
+    total: eligible.length,
+    supported: supported.length,
+    unsupported: eligible.length - supported.length,
+    offPolicy,
+    pending,
+    supportedRate: eligible.length ? supported.length / eligible.length : 0,
+  };
 }
 
 export function trainingAggregate(sessionDir) {
   const tc = createTrainingControl();
   const auth = tc.loadAuthority(sessionDir);
-  const rows = Object.values(auth?.items ?? {}).map((item) => item.summary).filter(Boolean);
-  const supported = rows.filter((row) => row.status === 'supported');
-  const offPolicy = supported.filter((row) => row.grade === 'off-policy').length;
-  return {
-    total: rows.length,
-    supported: supported.length,
-    unsupported: rows.length - supported.length,
-    offPolicy,
-    pending: Object.keys(auth?.pending ?? {}).length,
-    supportedRate: rows.length ? supported.length / rows.length : 0,
-  };
+  const rows = Object.values(auth?.items ?? {}).flatMap((item) => {
+    try {
+      return [materializeLearningEvaluation(sessionDir, item)];
+    } catch {
+      return [];
+    }
+  });
+  return aggregateProcessRows(rows, { pending: Object.keys(auth?.pending ?? {}).length });
 }
 
 function loadHandRecord(sessionDir, handNo) {

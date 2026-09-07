@@ -14,14 +14,18 @@ import { evaluateSolvedDecision } from '../training/postflop/solved-decision.js'
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createMistakeBank, createProfileStore } from '../tools/training-stores.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DRILL_CLI = path.join(ROOT, 'tools', 'drill-cli.js');
 const EPOCH = 'ab'.repeat(32);
-const SOURCE = { id: 'local-preflop-baseline', version: '1.0.0' };
+const SOURCE = {
+  id: 'local-preflop-baseline', version: '1.0.0',
+  contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+};
 
 function tmp(prefix = 'holdem-q4-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return createOwnedTempDir(prefix.replace(/-+$/, ''));
 }
 
 function solvedEvaluation(decisionId = 'd-3-flop-0') {
@@ -60,7 +64,10 @@ function preflopEvaluation(decisionId = 'd-1-preflop-0', overrides = {}) {
     street: 'preflop',
     spotKey: '6max-100bb-btn-rfi-unopened',
     handClass: 'AJo',
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
     chosen: { action: 'fold', frequency: 0.15, evBb: null },
     bestEvBb: null,
     evLossBb: null,
@@ -73,16 +80,21 @@ function preflopEvaluation(decisionId = 'd-1-preflop-0', overrides = {}) {
 }
 
 function bankItem({
-  mistakeId = 'm1',
+  decisionId = 'd-1-preflop-0',
   spotSignature = '6max-100bb-btn-rfi-unopened:AJo',
   skillKey = 'preflop.rfi.BTN',
 } = {}) {
+  const [spotKey, handClass] = spotSignature.split(':');
+  const evaluation = preflopEvaluation(decisionId, {
+    street: decisionId.split('-')[2], spotKey, handClass,
+  });
+  const mistakeId = evaluation.evaluationId;
   return {
     schemaVersion: 1,
     mistakeId,
     spotSignature,
     skillKey,
-    evaluation: preflopEvaluation(),
+    evaluation,
     firstSeenAt: '2026-09-01T00:00:00.000Z',
     lastReviewedAt: null,
     nextReviewAt: '2026-09-01T00:00:00.000Z',
@@ -163,11 +175,11 @@ for (const mode of ['mistake-review', 'daily']) {
   test(`S2 ④ ${mode} skips invalid signatures and preserves the queue array contract`, () => {
     const mistakes = [
       bankItem({
-        mistakeId: 'postflop',
+        decisionId: 'd-2-flop-0',
         spotSignature: 'postflop-flop:AA',
         skillKey: 'preflop.other.UNK',
       }),
-      bankItem({ mistakeId: 'preflop' }),
+      bankItem(),
     ];
     const queue = buildQueue({
       mode,
@@ -247,11 +259,24 @@ test('S2 ⑦ a solve result remains present in canonical export evaluations', ()
     seats: [{ playerId: 'user' }, { playerId: 'p1' }],
   }));
 
+  const sourceBytes = JSON.stringify(solved);
   const canonical = buildCanonical(gameDir, { evaluationsByHand: { 3: [solved] } });
-  assert.deepEqual(canonical.hands[0].evaluations, [solved]);
+  assert.equal(JSON.stringify(solved), sourceBytes, 'source solve evaluation was rewritten');
+  assert.equal(canonical.hands[0].evaluations.length, 1);
+  const qualified = canonical.hands[0].evaluations[0];
+  assert.equal(qualified.schemaVersion, 2);
+  assert.equal(qualified.referenceQuality, 'synthetic');
+  assert.equal(qualified.referenceReason, 'SYNTHETIC_SOURCE');
+  assert.equal(qualified.recommended, undefined);
+  assert.equal(qualified.grade, undefined);
+  assert.deepEqual(qualified.chosen, { action: 'check' });
+  assert.equal(qualified.chosen.frequency, undefined, 'synthetic frequency must not be exported as evidence');
+  assert.equal(qualified.chosen.evBb, undefined);
+  assert.deepEqual(qualified.source, { id: solved.source.id, version: solved.source.version });
+  assert.equal(qualified.sourcePayloadSha256, undefined, 'missing source digest was inferred');
 });
 
-test('schema 2 load rebuilds from canonical ids, preserves preflop unknown and processed ids, and drops polluted postflop skills', async () => {
+test('schema 2 legacy replay preserves processed ids as unverified evidence and drops polluted skills', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   fs.mkdirSync(path.dirname(store.profilePath), { recursive: true });
@@ -310,16 +335,17 @@ test('schema 2 load rebuilds from canonical ids, preserves preflop unknown and p
   }));
 
   const profile = await store.show();
-  assert.equal(profile.schemaVersion, 3);
+  assert.equal(profile.schemaVersion, 4);
   assert.equal(profile.activeSegmentId, `${SOURCE.id}@${SOURCE.version}`);
-  assert.equal(profile.skills['preflop.unknown'].opportunities, 1);
+  assert.equal(profile.skills['preflop.unknown'], undefined);
+  assert.equal(profile.game.coverage.unverifiedDecisions, 1);
   assert.equal(profile.skills['preflop.other.UNK'], undefined);
   assert.equal(Object.keys(profile.skills).some((key) => key.startsWith('postflop.')), false);
   assert.equal(profile.segments['fake-solver@1.0.0'], undefined);
   assert.equal(profile.processed[preflopId], preflopDigest);
   assert.equal(profile.processed[flopId], flopDigest);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.schemaVersion, 4);
   assert.deepEqual(disk.processed, profile.processed);
 });
 
@@ -350,11 +376,11 @@ test('schema 2 rebuild fails closed on a non-canonical evaluationId', async () =
   assert.equal(JSON.parse(fs.readFileSync(store.profilePath, 'utf8')).schemaVersion, 2);
 });
 
-test('new schema 3 profile events persist street additively', async () => {
+test('new schema 4 profile events persist street additively', async () => {
   const store = createProfileStore(tmp());
   const result = await store.apply(preflopEvaluation());
   const [event] = fs.readFileSync(store.eventsPath, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(result.profile.schemaVersion, 3);
+  assert.equal(result.profile.schemaVersion, 4);
   assert.equal(event.street, 'preflop');
 });
 
@@ -364,9 +390,9 @@ test('mistake load prunes invalid signatures and persists cumulative stats while
   writeBank(storeDir, {
     schemaVersion: 1,
     items: [
-      bankItem({ mistakeId: 'valid' }),
+      bankItem(),
       bankItem({
-        mistakeId: 'polluted',
+        decisionId: 'd-2-flop-0',
         spotSignature: 'postflop-flop:AA',
         skillKey: 'preflop.other.UNK',
       }),
@@ -377,7 +403,7 @@ test('mistake load prunes invalid signatures and persists cumulative stats while
 
   const items = await bank.list();
   assert.equal(Array.isArray(items), true);
-  assert.deepEqual(items.map((item) => item.mistakeId), ['valid']);
+  assert.deepEqual(items.map((item) => item.mistakeId), [preflopEvaluation().evaluationId]);
   assert.deepEqual(await bank.stats(), { prunedUnlearnable: 3, prunedAt });
   const disk = JSON.parse(fs.readFileSync(bank.file, 'utf8'));
   assert.equal(disk.meta.prunedUnlearnable, 3);
@@ -391,7 +417,7 @@ test('drill-cli start surfaces one persisted prune notice and keeps session.queu
   writeBank(storeDir, {
     schemaVersion: 1,
     items: [bankItem({
-      mistakeId: 'polluted',
+      decisionId: 'd-2-flop-0',
       spotSignature: 'postflop-flop:AA',
       skillKey: 'preflop.other.UNK',
     })],
@@ -410,6 +436,7 @@ test('drill-cli start surfaces one persisted prune notice and keeps session.queu
 });
 
 const supportedWithoutEv = {
+  source: SOURCE,
   status: 'supported',
   handNo: 17,
   chosen: { action: 'fold', frequency: 0.04, evBb: null },
@@ -419,7 +446,7 @@ const supportedWithoutEv = {
 test('M11 supported branch rejects handNo inside an EV clause but permits it outside', () => {
   assert.deepEqual(
     validateExplanation(supportedWithoutEv, 'EV loss 17'),
-    { ok: false, code: 'NUMBER_CONTRADICTION' },
+    { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
   );
   assert.deepEqual(validateExplanation(supportedWithoutEv, '핸드 17'), { ok: true });
 });
@@ -428,7 +455,7 @@ test('M11 unsupported branch rejects handNo inside an EV clause but permits it o
   const unsupported = { status: 'unsupported', handNo: 17, code: 'UNSUPPORTED_SPOT' };
   assert.deepEqual(
     validateExplanation(unsupported, 'EV loss 17'),
-    { ok: false, code: 'NUMBER_CONTRADICTION' },
+    { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
   );
   assert.deepEqual(validateExplanation(unsupported, '핸드 17'), { ok: true });
 });
@@ -487,7 +514,7 @@ test('NOT_LEARNABLE against a valid schema 2 profile is byte-for-byte read-only'
   const result = await store.apply(solvedEvaluation());
 
   assert.equal(result.reason, 'NOT_LEARNABLE');
-  assert.equal(result.profile.schemaVersion, 3);
+  assert.equal(result.profile.schemaVersion, 4);
   assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
   assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
 });
@@ -538,7 +565,7 @@ test('M11 rejects every number in supported EV clauses even when EV data exists'
   for (const explanation of ['EV loss 17', 'raise EV 96%']) {
     assert.deepEqual(
       validateExplanation(supportedWithEv, explanation),
-      { ok: false, code: 'NUMBER_CONTRADICTION' },
+      { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' },
     );
   }
 });

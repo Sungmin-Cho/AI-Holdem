@@ -1,4 +1,5 @@
 import { test as nodeTest } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,6 +13,7 @@ import { prepareSession } from '../engine/session-catalog.js';
 import { createGameLoop } from '../tools/game-loop.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 
 const WIN32_SKIP = process.platform === 'win32'
   ? 'production spawn uses POSIX PATH/ps/shebang fixtures'
@@ -27,9 +29,8 @@ function test(name, opts, fn) {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine', 'cli.js');
 const GAME_LOOP = path.join(ROOT, 'tools', 'game-loop.js');
-
 function tmp(prefix = 'holdem-q2b-resume-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return createOwnedTempDir(prefix.replace(/-+$/, ''));
 }
 
 function readJson(file) {
@@ -81,6 +82,29 @@ async function terminatePid(pid) {
   }, `pid ${pid} did not stop`, 1_000).catch(() => false);
   if (dead) return;
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  await waitFor(() => {
+    try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; }
+  }, `pid ${pid} did not die after SIGKILL`, 1_000);
+}
+
+function hostProcessStartTime(pid) {
+  try {
+    return execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function hostProcessState(pid) {
+  try {
+    return execFileSync('/bin/ps', ['-p', String(pid), '-o', 'state='], {
+      encoding: 'utf8',
+    }).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function trainingHashes(sessionDir) {
@@ -174,7 +198,8 @@ async function leaveSigkilledStoreOwner(storeDir) {
   await waitFor(() => {
     try { process.kill(child.pid, 0); return true; } catch { return false; }
   }, 'dummy owner did not start');
-  const startTime = `TEST_START_${child.pid}`;
+  const startTime = hostProcessStartTime(child.pid);
+  assert.ok(startTime, 'dummy owner host identity was unavailable');
   const lockDir = path.join(storeDir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
   fs.writeFileSync(path.join(lockDir, 'pid'), `${child.pid}\n${startTime}`);
@@ -214,19 +239,6 @@ if (args.includes('stream-json')) {
 }
 `);
   fs.chmodSync(claude, 0o755);
-  const ps = path.join(binDir, 'ps');
-  fs.writeFileSync(ps, `#!/bin/sh
-pid=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = '-p' ]; then pid="$2"; shift 2; else shift; fi
-done
-if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-  printf 'TEST_START_%s\\n' "$pid"
-  exit 0
-fi
-exit 1
-`);
-  fs.chmodSync(ps, 0o755);
   return binDir;
 }
 
@@ -236,8 +248,13 @@ function launchResume(storeDir, binDir) {
     '--store-dir', storeDir,
     '--resume',
     '--player-runtime', 'claude',
+    '--port', '0',
   ], {
-    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      TMPDIR: tmp('holdem-q2b-child-tmp-'),
+    },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -262,13 +279,78 @@ async function waitForOwnerRotation(sessionDir, previousOwner, stderr) {
   }, `resume did not rotate owner: ${stderr()}`);
 }
 
-async function cleanupSession(child, sessionDir) {
+async function waitForCompletedResume(sessionDir, previousOwner, stderr) {
+  return waitFor(() => {
+    try {
+      const current = readJson(path.join(sessionDir, 'loop-state.json'));
+      if (current.ownerSessionId === previousOwner
+        || !Number.isInteger(current.port) || current.port <= 0) return null;
+      const authority = readJson(path.join(
+        sessionDir,
+        'training',
+        '.training-authority.json',
+      ));
+      const ready = readLoopLog(sessionDir).find((entry) => (
+        entry.event === 'resume-ready' && entry.phase === 'finalizing'
+      ));
+      if (!ready || authority.ownerSessionId !== current.ownerSessionId) return null;
+      return { current, ready };
+    } catch {
+      return null;
+    }
+  }, `resume did not reach a quiescent ready boundary: ${stderr()}`);
+}
+
+async function pauseAtQuiescentTrainingBoundary(child, sessionDir, stderr) {
+  const trainingLock = path.join(sessionDir, 'training.lock.d');
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!child.kill('SIGSTOP')) throw new Error(`resume process could not be paused: ${stderr()}`);
+    await waitFor(
+      () => hostProcessState(child.pid)?.includes('T'),
+      `resume process did not stop: ${stderr()}`,
+      1_000,
+    );
+    if (!fs.existsSync(trainingLock)) return;
+    if (!child.kill('SIGCONT')) throw new Error(`resume process could not continue: ${stderr()}`);
+    await waitFor(
+      () => !hostProcessState(child.pid)?.includes('T'),
+      `resume process did not continue: ${stderr()}`,
+      1_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`resume never reached a quiescent training boundary: ${stderr()}`);
+}
+
+async function cleanupSession(child, sessionDir, storeDir) {
   if (child) await killChild(child).catch(() => {});
-  try {
-    const lock = readJson(path.join(sessionDir, 'lock.json'));
-    await terminatePid(lock.serverPid);
-  } catch {
-    // no live server lock
+  const lockFile = path.join(sessionDir, 'lock.json');
+  if (fs.existsSync(lockFile)) {
+    const lock = readJson(lockFile);
+    const start = hostProcessStartTime(lock.serverPid);
+    if (start !== null) {
+      const args = execFileSync('/bin/ps', ['-p', String(lock.serverPid), '-o', 'args='], { encoding: 'utf8' }).trim();
+      assert.ok(args.includes(path.join(ROOT, 'server/server.js')) && args.includes(sessionDir));
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        if (hostProcessStartTime(lock.serverPid) === null) break;
+        assert.equal(hostProcessStartTime(lock.serverPid), start);
+        assert.equal(execFileSync('/bin/ps', ['-p', String(lock.serverPid), '-o', 'args='], { encoding: 'utf8' }).trim(), args);
+        assert.equal(hostProcessStartTime(lock.serverPid), start);
+        process.kill(lock.serverPid, signal);
+        const ended = await waitFor(() => hostProcessStartTime(lock.serverPid) === null,
+          'owned relay did not stop', 1000).catch(() => false);
+        if (ended) break;
+      }
+    }
+    assert.throws(() => process.kill(lock.serverPid, 0), (error) => error.code === 'ESRCH');
+  }
+  if (fs.existsSync(path.join(storeDir, '.training', 'study-service.json'))) {
+    const service = await inspectStudyService(storeDir);
+    if (service.status === 'running') {
+      await stopStudyService(storeDir, { expectedInstanceId: service.instanceId });
+      assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+    }
   }
 }
 
@@ -303,7 +385,7 @@ test('Q2b two consecutive playing SIGKILL resumes transfer training ownership tw
   const binDir = fakeClaudeBin();
   const launched = [];
   t.after(async () => {
-    for (const run of launched) await cleanupSession(run.child, seeded.sessionDir);
+    for (const run of launched) await cleanupSession(run.child, seeded.sessionDir, storeDir);
   });
   await leaveSigkilledStoreOwner(storeDir);
 
@@ -359,7 +441,7 @@ test('Q2b crash chain preserves exact A-to-B-to-C-to-D owner history', { timeout
   const binDir = fakeClaudeBin();
   const launched = [];
   t.after(async () => {
-    for (const run of launched) await cleanupSession(run.child, seeded.sessionDir);
+    for (const run of launched) await cleanupSession(run.child, seeded.sessionDir, storeDir);
   });
   await leaveSigkilledStoreOwner(storeDir);
   const tc = createTrainingControl({ storeDir });
@@ -406,7 +488,7 @@ test('Q2b migration failure halts before rotating the persisted loop owner', { t
   const binDir = fakeClaudeBin();
   await leaveSigkilledStoreOwner(storeDir);
   const run = launchResume(storeDir, binDir);
-  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+  t.after(() => cleanupSession(run.child, seeded.sessionDir, storeDir));
 
   const halted = await waitFor(() => {
     const state = readJson(path.join(seeded.sessionDir, 'loop-state.json'));
@@ -424,7 +506,7 @@ test('Q2b takeover failure becomes a durable training-owner halt before producer
   const binDir = fakeClaudeBin();
   await leaveSigkilledStoreOwner(storeDir);
   const run = launchResume(storeDir, binDir);
-  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+  t.after(() => cleanupSession(run.child, seeded.sessionDir, storeDir));
 
   const halted = await waitFor(() => {
     const state = readJson(path.join(seeded.sessionDir, 'loop-state.json'));
@@ -461,7 +543,7 @@ test('Q2b playing resume logs nonfatal consumer failures and continues valid ite
   const binDir = fakeClaudeBin();
   await leaveSigkilledStoreOwner(storeDir);
   const run = launchResume(storeDir, binDir);
-  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+  t.after(() => cleanupSession(run.child, seeded.sessionDir, storeDir));
 
   const event = await waitFor(
     () => readLoopLog(seeded.sessionDir)
@@ -485,9 +567,13 @@ test('Q2b finalizing resume after SIGKILL transfers owner before reconcile', { t
   const binDir = fakeClaudeBin();
   await leaveSigkilledStoreOwner(storeDir);
   const run = launchResume(storeDir, binDir);
-  t.after(() => cleanupSession(run.child, seeded.sessionDir));
+  t.after(() => cleanupSession(run.child, seeded.sessionDir, storeDir));
 
-  const resumed = await waitForOwnerRotation(seeded.sessionDir, 'owner-0', run.stderr);
+  const completed = await waitForCompletedResume(seeded.sessionDir, 'owner-0', run.stderr);
+  const resumed = completed.current;
+  assert.equal(completed.ready.phase, 'finalizing');
+  await pauseAtQuiescentTrainingBoundary(run.child, seeded.sessionDir, run.stderr);
+  assert.equal(fs.existsSync(path.join(seeded.sessionDir, 'training.lock.d')), false);
   await killChild(run.child, 'SIGKILL');
   const auth = createTrainingControl({ storeDir }).loadAuthority(seeded.sessionDir);
 

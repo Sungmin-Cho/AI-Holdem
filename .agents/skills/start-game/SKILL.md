@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 토너먼트 기본 AI 3명(4인 테이블). cash-training 기본 AI 5명(6인 테이블). 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2다. 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -21,7 +21,7 @@ metadata:
 - **게시는 `tools/publish.js`만 한다.** 그 도구만이 `visibility==="public"` 필터와 `publishId` 증가를 책임진다. 딜러는 게시하지 않는다 — 사이드카가 한다.
 - **모델이 만든 문자열을 셸 인자에 넣지 않는다.** 사이드카는 프롬프트를 stdin으로, 본문을 파일로만 흘린다. 딜러가 남기는 모델 유래 문자열은 practiceFocus 파일 하나뿐이고, argv에는 그 **경로만** 넘긴다.
 - 사용자 노출 문자열은 한국어. 아키타입·스타일·비공개 홀카드는 종합 리뷰 전까지 공개하지 않는다 — 이 불변식도 사이드카가 지킨다.
-- 게임은 멈추지 않는다(워치독·사용자 무제한 대기·서버 자가치유는 전부 사이드카 소관). 예외는 **기동 전 실패** 하나다 — 적격 플레이어 런타임이 없으면 게임을 시작하지 않는다.
+- 워치독·사용자 무제한 대기·서버 자가치유는 사이드카 소관이다. 명시한 llm 모드에서 적격 플레이어 런타임이 없으면 기동을 중단한다. 기본 policy 모드는 플레이어 LLM을 요구하지 않는다. 상위 모델이 없으면 LLM 코치·리뷰 설명 불가를 알리고 사실 기반 기계 피드백을 제공한다. 소유권·저장·복구 오류는 halt로 보고한다.
 
 ---
 
@@ -50,7 +50,9 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 토너먼트 AI 수 `n=3`. cash-training은 `n=5`(6인). 범위 1~8. `--stack`(기본 5000), `--level-every`(기본 8), `--blinds`는 사용자 요청이 있을 때만. cash-training은 `--mode cash-training --stack-bb 100 --blinds 50/100 --hands N`처럼 `--store-dir` 기동에 붙인다. `--ai`를 생략하면 사이드카가 5로 채운다. store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 skill profile은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다.
+인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
+
+store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 휴리스틱 프리플롭 기준표는 6인·약 100BB에서 unopened 2.5BB 오픈과 단일 2.5BB 오픈에 대한 8.5BB 3-bet 스팟만 지원한다. limp·cold-call·multiway·4-bet·다른 사이즈·postflop은 제외 이유를 보여 준다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 
@@ -58,7 +60,7 @@ fi
 nohup node tools/game-loop.js --store-dir game --ai <n> \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   [--stack N] [--level-every N] [--blinds SB/BB] \
-  [--mode cash-training] [--stack-bb N] [--hands N] [--opponent-runtime llm|policy] \
+  [--mode cash-training|tournament] [--stack-bb N] [--hands N] [--opponent-runtime llm|policy] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 
@@ -151,9 +153,11 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 
 1. **정지와 lifecycle 선행 복구.** 정지 전에 `$SESSION_DIR/loop-state.json`의 `port`·`sessionToken`을 보관한다. loop lock은 session 디렉터리가 아니라 `--store-dir`의 **store root**인 `game/loop.lock.d/`가 소유한다. 그 pid+startTime identity를 직전에 재검증한 뒤에만 SIGTERM을 보내고 사망을 확인한다. 불일치면 절대 시그널하지 않는다. `phase_incomplete`는 새 `--resume`으로 finalizing/review lifecycle을 완주하고, `cleanup_error`는 원인을 해소한 뒤 새 `--resume`을 띄워 SIGTERM 정지를 다시 완주한다. 이 두 reason을 relay drain보다 먼저 해소한다.
 2. **미해소 게시 해소.** 보관한 port·sessionToken으로 `node server/server.js --game-dir "$SESSION_DIR" --port <port> --token <sessionToken>` 임시 relay를 띄우고 기동 즉시 `RELAY_PID=$!`와 `RELAY_START_TIME=$(ps -p "$RELAY_PID" -o lstart=)`를 캡처한 뒤 token-authenticated snapshot을 확인한다. `.publish-attempt.json`은 `publish.js --retry`, pending Q인 `publishQueue`는 하나의 `DEADLINE_NS`로 drain한다. `rollback-guard`의 reason은 `attempt_pending`, `active_hands`, `publish_queue`, `retired_unresolved`, `retired_reclaimable`, `retired_unreclaimed`, `coach_authority_missing`, `coach_authority_unreadable`, `cleanup_error`, `phase_incomplete`, `loop_state_unreadable`다. **`{"ok":true}`**일 때만 계속한다. relay 종료 직전 `ps -p "$RELAY_PID" -o lstart=`를 다시 읽어 `$RELAY_START_TIME`과 일치할 때만 kill한다. relay identity 불일치 시 kill 금지다.
-3. **그 다음에** `git revert`. "revert로 충분"은 정지 확인이 끝난 **quiescent** 게임에만 성립한다.
+3. **버전 호환성을 확인한다.** v2 정책 배정·profile4·bank2가 생긴 뒤에는 이를 v1로 다시 쓰지 않는다. 원본 이벤트·평가·processed digest를 보존하고 기록된 호환 버전으로 roll-forward한다. 실제 이전 버전 profile rebuild/show/apply는 복사본에서 검증한다. accepted/delivered 액션의 엔진 결과가 불명확하면 `OUTCOME_UNRESOLVED`로 중단하고 권위 상태를 동기화한다. study는 아래 helper로 검증된 instance만 정지한다. `git revert`는 v2 데이터가 없고 정지 확인이 끝난 **quiescent** 게임에서만 고려한다.
 
 종료 정리가 실패하면(`loop-state.json`에 `cleanupFailedAt`·`cleanupError`가 남고 프로세스가 비정상 종료) 그 프로세스는 이미 끝났으므로 **같은 프로세스에서 재시도되지 않는다.** 복구는 **새 `--resume` 프로세스**가 한다 — 락·서버·미해소 게시를 다시 들고 정리한다. 원인(자식 종료 미확인·디스크 오류 등)을 먼저 해소한 뒤 §5의 `--resume`을 띄운다.
+
+학습 서비스는 `tools/study-service.js`가 store별 별도 수명으로 소유한다. 게임 relay와 loop 종료는 study를 죽이지 않는다. 게임 종료 후 study URL로 요약·드릴을 계속 쓰며, 다음 게임은 현재 검증된 URL의 서비스를 재사용한다. 살아 있는 store loop 또는 인증된 학습 요청이 없으면 10분 유휴 후 정지한다. 다시 열기는 `npm run study -- /absolute/store`, 명시 정지는 `npm run study:stop -- /absolute/store`다. helper가 pid·startTime·store identity·토큰을 검증하므로 descriptor를 손으로 수정하거나 PID만 보고 kill하지 않는다. 재시작하면 URL 토큰이 바뀌므로 이전 링크 대신 새 URL을 사용한다. URL의 fragment와 private control token은 공유하지 않는다.
 
 ---
 

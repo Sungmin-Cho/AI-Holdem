@@ -7,9 +7,10 @@ import { createGameLoop } from '../tools/game-loop.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
 import { evaluationIdOf } from '../training/contracts.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-p11-'));
+  return createOwnedTempDir('holdem-p11');
 }
 
 function readJson(filePath) {
@@ -39,13 +40,19 @@ function evaluationRow(overrides = {}) {
     street: 'preflop',
     spotKey: '6max-100bb-btn-rfi-unopened',
     handClass: 'AJo',
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null }],
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
     chosen: { action: 'fold', frequency: 0.15, evBb: null },
     bestEvBb: null,
     evLossBb: null,
     grade: 'off-policy',
     forced: false,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: {
+      id: 'local-preflop-baseline', version: '1.0.0',
+      contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+    },
     ...overrides,
   };
 }
@@ -107,9 +114,62 @@ test('session A leak is auto-selected as session B practice-focus', { timeout: 1
     opponentRuntime: 'policy',
   });
   const installed = readJson(path.join(gameDir, '.practice-focus.json'));
+  assert.equal(installed.schemaVersion, 2);
+  assert.equal(installed.origin, 'game');
+  assert.equal(installed.goal.id, 'preflop.rfi.BTN');
+  assert.equal(installed.leaks, undefined);
   assert.equal(installed.focus, 'preflop.rfi.BTN');
   assert.equal(
     createTrainingControl({ storeDir }).loadAuthority(sessionA).items[evaluation.evaluationId].consumers.profiled,
     true,
   );
+});
+
+test('consumer replay and later practice preserve exactly-once game evidence', async () => {
+  const storeDir = createOwnedTempDir('profile-once-store');
+  const sessionDir = createOwnedTempDir('profile-once-session');
+  const source = {
+    id: 'local-preflop-baseline',
+    version: '1.0.0',
+    contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+  };
+  const game = evaluationRow({
+    source,
+    origin: 'game',
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
+  });
+  const tc = createTrainingControl({ storeDir });
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: 'ab'.repeat(32), owner: 'owner-1', handNo: 1, evaluations: [game],
+  });
+  assert.equal((await tc.consumeTrainingItems(sessionDir, { storeDir })).applied, 1);
+  const store = createProfileStore(storeDir);
+  const gameBefore = structuredClone((await store.show()).game);
+  const eventBytes = fs.readFileSync(store.eventsPath);
+
+  assert.equal((await tc.consumeTrainingItems(sessionDir, { storeDir })).applied, 0);
+  assert.deepEqual(fs.readFileSync(store.eventsPath), eventBytes);
+
+  await store.apply(evaluationRow({
+    decisionId: 'd-2-preflop-0',
+    evaluationId: evaluationIdOf({
+      gameEpoch: 'ab'.repeat(32),
+      decisionId: 'd-2-preflop-0',
+      providerId: source.id,
+      providerVersion: source.version,
+    }),
+    payloadSha256: 'bb'.repeat(32),
+    source,
+    origin: 'practice',
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
+      { action: 'fold', frequency: 0.15, evBb: null },
+    ],
+  }));
+  const afterPractice = await store.show();
+  assert.deepEqual(afterPractice.game, gameBefore);
+  assert.equal(afterPractice.practice.overall.evaluatedDecisions, 1);
 });

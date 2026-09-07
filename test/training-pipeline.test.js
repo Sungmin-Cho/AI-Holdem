@@ -8,6 +8,7 @@ import * as pipeline from '../tools/training-pipeline.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl, readAnnotationExactFile } from '../tools/training-control.js';
+import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-tpipe-'));
@@ -106,7 +107,7 @@ function cannedEvaluation(decisionId, gameEpoch) {
     evLossBb: null,
     grade: 'mixed',
     forced: false,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: { ...CANONICAL_REFERENCE_SOURCE },
   };
 }
 

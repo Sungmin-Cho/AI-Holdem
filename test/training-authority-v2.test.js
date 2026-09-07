@@ -20,7 +20,11 @@ import {
 import * as contract from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
-import { annotationExactSegments, createTrainingControl } from '../tools/training-control.js';
+import {
+  annotationExactSegments,
+  createTrainingControl,
+  materializeLearningEvaluation,
+} from '../tools/training-control.js';
 import { ingestHand, unpublishedEnvelope } from '../tools/training-pipeline.js';
 import * as pipeline from '../tools/training-pipeline.js';
 import { createProfileStore } from '../tools/training-stores.js';
@@ -33,6 +37,7 @@ import { createCoachControl } from '../tools/coach-control.js';
 import { writeJsonAtomic } from '../engine/state.js';
 import { readJsonl, readJsonSecure } from '../tools/training-store.js';
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const PUBLISH_TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
 const execFileAsync = promisify(execFile);
@@ -45,7 +50,7 @@ const V1_KEYS = Object.freeze([
 ]);
 
 function tmp(prefix = 'holdem-v2-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return createOwnedTempDir(prefix.replace(/-+$/, ''));
 }
 
 function sha(text) {
@@ -99,7 +104,10 @@ function evaluation(overrides = {}) {
     evLossBb: null,
     grade: 'preferred',
     forced: false,
-    source: { id: 'local-preflop-baseline', version: '1.0.0' },
+    source: {
+      id: 'local-preflop-baseline', version: '1.0.0',
+      contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+    },
   };
   return { ...base, ...overrides, evaluationId: overrides.evaluationId ?? evaluationId(overrides.decisionId ?? decisionId, overrides.gameEpoch ?? gameEpoch) };
 }
@@ -748,12 +756,13 @@ test('v1 consumers are induced from processed/mistake; consume treats apply idem
   const auth = await tc.migrateAuthority(dir);
   assert.equal(auth.items[summary.evaluationId].consumers.published, true);
   assert.equal(auth.items[summary.evaluationId].consumers.profiled, true);
-  assert.equal(auth.items[summary.evaluationId].consumers.banked, true);
+  assert.equal(auth.items[summary.evaluationId].consumers.banked, false);
 
   const consume = await tc.consumeTrainingItems(dir, { storeDir });
-  assert.equal(consume.profiled >= 0, true);
+  assert.equal(consume.skipped, true);
   const after = tc.loadAuthority(dir);
   assert.equal(after.items[summary.evaluationId].consumers.profiled, true);
+  assert.equal(after.items[summary.evaluationId].consumers.banked, false);
 });
 
 test('profile/mistake re-sign via digest map; rebuild has no PROFILE_EVENT_CONFLICT; apply returns {applied}', async () => {
@@ -772,7 +781,8 @@ test('profile/mistake re-sign via digest map; rebuild has no PROFILE_EVENT_CONFL
   assert.equal(typeof profileCli.migrateStoreV2, 'function');
   await profileCli.migrateStoreV2(storeDir, mapFile);
   const rebuilt = await createProfileStore(storeDir).rebuild();
-  assert.equal(rebuilt.overall.evaluatedDecisions, 1);
+  assert.equal(rebuilt.overall.evaluatedDecisions, 0);
+  assert.equal(rebuilt.game.coverage.unverifiedDecisions, 1);
   const map = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
   const newDigest = map.oldToNew[summary.payloadSha256];
   assert.equal(rebuilt.processed[summary.evaluationId], newDigest);
@@ -1304,18 +1314,13 @@ test('SSE payload is projected (no nested extra keys) and includes trainingAnnot
 
 // --- client formatter ---
 
-test('formatter merges annotations by evaluationId+field; unavailable is displayed; payloadSha256 no-op is machine-only', () => {
+test('formatter merges annotations by evaluationId+field; unavailable is displayed; payloadSha256 no-op is machine-only', async () => {
   assert.equal(typeof trainingFormat.applyTrainingAnnotation, 'function');
-  const item = {
-    evaluationId: evaluationId(),
-    handNo: 1,
-    handClass: 'AA',
-    chosen: { action: 'raise' },
-    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1 }],
-    status: 'supported',
-    grade: 'preferred',
-    payloadSha256: 'aa'.repeat(32),
-  };
+  const detail = evaluation();
+  const item = toPublicSummary(detail, { handNo: 1, detailSha256: sha(JSON.stringify(detail)) });
+  const before = JSON.stringify(item);
+  const verifiedDetail = await trainingFormat.verifyTrainingDetail(item, detail);
+  assert.ok(verifiedDetail, 'canonical positive rendering requires an actual detail receipt');
   const withExplain = trainingFormat.applyTrainingAnnotation(item, {
     evaluationId: item.evaluationId,
     field: 'explanation',
@@ -1323,7 +1328,9 @@ test('formatter merges annotations by evaluationId+field; unavailable is display
     value: '병합된 해설',
     payloadSha256: 'ff'.repeat(32),
   });
-  const card = formatTrainingCard(withExplain);
+  assert.equal(withExplain.payloadSha256, item.payloadSha256, 'annotation cannot replace the machine digest');
+  assert.equal(JSON.stringify(item), before, 'detail verification and annotation merge cannot mutate the compact item');
+  const card = formatTrainingCard(withExplain, { verifiedDetail });
   assert.match(card.explanation, /병합된 해설/);
   const unavailable = trainingFormat.applyTrainingAnnotation(item, {
     evaluationId: item.evaluationId,
@@ -1331,8 +1338,17 @@ test('formatter merges annotations by evaluationId+field; unavailable is display
     status: 'unavailable',
     value: null,
   });
-  const unavailableCard = formatTrainingCard(unavailable);
+  const unavailableCard = formatTrainingCard(unavailable, { verifiedDetail });
   assert.match(String(unavailableCard.explanation), /unavailable/i);
+
+  const { source, detailRef, detailSha256, ...legacy } = item;
+  const legacyWithExplain = trainingFormat.applyTrainingAnnotation(legacy, {
+    evaluationId: legacy.evaluationId, field: 'explanation', status: 'ready', value: '병합된 해설',
+  });
+  assert.equal(legacyWithExplain.explanation, '병합된 해설', 'merge still retains the annotation for identity checks');
+  assert.equal(legacyWithExplain.payloadSha256, item.payloadSha256);
+  assert.equal(formatTrainingCard(legacyWithExplain).explanation, '', 'source-less legacy strategy text must stay hidden');
+  assert.equal(formatTrainingCard(legacyWithExplain, { verifiedDetail }).explanation, '', 'a receipt for another summary binding cannot elevate legacy text');
 });
 
 // --- coach rollback ---
@@ -1366,4 +1382,207 @@ test('coach rollback requires empty pending map and empty annotationQueue (evalu
   const queued = await createCoachControl().assertRollbackAllowed(dir2);
   assert.equal(queued.ok, false);
   assert.equal(queued.reasons.some((reason) => reason.code === 'pending_annotation'), true);
+});
+
+test('training consumer hydrates sealed detail source without changing compact summary bytes or digest', async () => {
+  const sessionDir = createOwnedTempDir('authority-hydrate-session');
+  const storeDir = createOwnedTempDir('authority-hydrate-store');
+  const source = {
+    id: 'local-preflop-baseline',
+    version: '1.0.0',
+    license: 'Apache-2.0',
+    contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+  };
+  const row = evaluation({
+    handClass: 'AJo',
+    grade: 'mixed',
+    chosen: { action: 'fold', frequency: 0.2, evBb: null },
+    recommended: [
+      { action: 'raise', sizeBb: 2.5, frequency: 0.8, evBb: null },
+      { action: 'fold', frequency: 0.2, evBb: null },
+    ],
+    source,
+  });
+  const tc = createTrainingControl({ storeDir });
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: EPOCH,
+    owner: 'owner-1',
+    handNo: 1,
+    evaluations: [row],
+  });
+  const beforeItem = tc.loadAuthority(sessionDir).items[row.evaluationId];
+  const beforeSummary = JSON.stringify(beforeItem.summary);
+  const beforeJournal = fs.readFileSync(path.join(sessionDir, 'training', 'evaluations.jsonl'));
+
+  const consumed = await tc.consumeTrainingItems(sessionDir, { storeDir });
+
+  assert.deepEqual(consumed, { profiled: 1, banked: 1, applied: 1, failed: 0 });
+  const event = readJsonl(path.join(storeDir, '.training', 'profile-events.jsonl'))[0];
+  assert.equal(event.payloadSha256, beforeItem.payloadSha256);
+  assert.deepEqual(event.mixObservation.sourceIdentity, {
+    id: source.id,
+    version: source.version,
+    contentSha256: source.contentSha256,
+  });
+  assert.deepEqual(event.mixObservation.chosenAction, row.chosen);
+  assert.deepEqual(event.mixObservation.referenceActions, [row.recommended[1], row.recommended[0]]);
+  const afterItem = tc.loadAuthority(sessionDir).items[row.evaluationId];
+  assert.equal(JSON.stringify(afterItem.summary), beforeSummary);
+  assert.equal(afterItem.payloadSha256, beforeItem.payloadSha256);
+  assert.deepEqual(fs.readFileSync(path.join(sessionDir, 'training', 'evaluations.jsonl')), beforeJournal);
+});
+
+test('missing or digest-mismatched declared details fail before profile and bank writes', async () => {
+  for (const mode of ['missing', 'digest-mismatch']) {
+    const sessionDir = createOwnedTempDir(`authority-${mode}-session`);
+    const storeDir = createOwnedTempDir(`authority-${mode}-store`);
+    const row = evaluation({
+      source: {
+        id: 'local-preflop-baseline',
+        version: '1.0.0',
+        contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
+      },
+    });
+    const tc = createTrainingControl({ storeDir });
+    await tc.acceptEvaluations(sessionDir, {
+      gameEpoch: EPOCH,
+      owner: 'owner-1',
+      handNo: 1,
+      evaluations: [row],
+    });
+    const item = tc.loadAuthority(sessionDir).items[row.evaluationId];
+    const detailFile = path.join(sessionDir, 'training', 'details', `${item.detailRef}.json`);
+    if (mode === 'missing') fs.unlinkSync(detailFile);
+    else fs.writeFileSync(detailFile, JSON.stringify({ ...row, handClass: 'KQo' }));
+
+    const result = await tc.consumeTrainingItems(sessionDir, { storeDir });
+
+    assert.equal(result.failed, 1);
+    assert.equal(fs.existsSync(path.join(storeDir, '.training', 'profile.json')), false);
+    assert.equal(fs.existsSync(path.join(storeDir, '.training', 'profile-events.jsonl')), false);
+    assert.equal(fs.existsSync(path.join(storeDir, '.training', 'mistakes.json')), false);
+    const consumers = tc.loadAuthority(sessionDir).items[row.evaluationId].consumers;
+    assert.equal(consumers.profiled, false);
+    assert.equal(consumers.banked, false);
+    assert.match(consumers.lastError.code, /DETAIL|PROOF|MISMATCH|MISSING/);
+  }
+});
+
+test('consumer rejects a sealed detail whose source conflicts with evaluation identity', async () => {
+  const sessionDir = createOwnedTempDir('authority-source-spoof-session');
+  const storeDir = createOwnedTempDir('authority-source-spoof-store');
+  const row = evaluation({
+    source: { id: 'fake-solver', version: '1.0.0', contentSha256: 'aa'.repeat(32) },
+  });
+  const tc = createTrainingControl({ storeDir });
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [row],
+  });
+  const result = await tc.consumeTrainingItems(sessionDir, { storeDir });
+
+  assert.equal(result.failed, 1);
+  assert.equal(fs.existsSync(path.join(storeDir, '.training', 'profile.json')), false);
+  assert.equal(fs.existsSync(path.join(storeDir, '.training', 'mistakes.json')), false);
+});
+
+test('explanation sealing rejects false authority while allowing an explicit limitation', async () => {
+  const sessionDir = createOwnedTempDir('authority-wording-session');
+  const tc = createTrainingControl();
+  const row = evaluation();
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [row],
+  });
+  const rejected = await tc.sealAnnotation(
+    sessionDir,
+    row.evaluationId,
+    'explanation',
+    '이 선택은 검증된 GTO 정답이며 EV 손실을 막습니다.',
+  );
+  assert.deepEqual(rejected, { ok: false, code: 'REFERENCE_AUTHORITY_FORBIDDEN' });
+  assert.equal(tc.loadAuthority(sessionDir).items[row.evaluationId].annotations.explanation, undefined);
+  const accepted = await tc.sealAnnotation(
+    sessionDir,
+    row.evaluationId,
+    'explanation',
+    '이 참고 기준은 검증된 GTO 정답이 아닙니다.',
+  );
+  assert.equal(accepted.ok, true);
+});
+
+test('materializer rejects partial proof and summary identity or digest corruption', async () => {
+  const sessionDir = createOwnedTempDir('authority-materializer-corrupt');
+  const tc = createTrainingControl();
+  const row = evaluation();
+  await tc.acceptEvaluations(sessionDir, {
+    gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [row],
+  });
+  const item = tc.loadAuthority(sessionDir).items[row.evaluationId];
+  assert.throws(
+    () => materializeLearningEvaluation(sessionDir, {
+      ...item, detailRef: undefined, detailSha256: undefined,
+    }),
+    { code: 'LEARNING_DETAIL_PROOF_MISMATCH' },
+  );
+  assert.throws(
+    () => materializeLearningEvaluation(sessionDir, {
+      ...item,
+      summary: {
+        ...item.summary,
+        evaluationId: `${'cd'.repeat(32)}:d-1-preflop-0:local-preflop-baseline@1.0.0`,
+      },
+    }),
+    { code: 'LEARNING_DETAIL_IDENTITY_MISMATCH' },
+  );
+  assert.throws(
+    () => materializeLearningEvaluation(sessionDir, {
+      ...item,
+      summary: { ...item.summary, payloadSha256: 'ff'.repeat(32) },
+    }),
+    { code: 'LEARNING_DETAIL_IDENTITY_MISMATCH' },
+  );
+});
+
+test('proof-free materialization returns canonical projection and drops smuggled source identity', () => {
+  const row = evaluation();
+  const summary = contract.projectTrainingSummary({ ...row, handNo: 1 });
+  const materialized = materializeLearningEvaluation('/unused', {
+    evaluationId: summary.evaluationId,
+    decisionId: summary.decisionId,
+    payloadSha256: summary.payloadSha256,
+    summary: { ...summary, extra: 'drop', source: { ...summary.source, contentSha256: 'ff'.repeat(32) } },
+  });
+  assert.equal(materialized.extra, undefined);
+  assert.equal(materialized.source.contentSha256, undefined);
+});
+
+test('mixed caveat and positive authority claim is rejected clause-locally', async () => {
+  const sessionDir = createOwnedTempDir('authority-mixed-claim');
+  const tc = createTrainingControl();
+  const row = evaluation();
+  await tc.acceptEvaluations(sessionDir, { gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [row] });
+  const result = await tc.sealAnnotation(
+    sessionDir, row.evaluationId, 'explanation',
+    '이 기준은 GTO 정답이 아닙니다. 하지만 이 선택은 검증된 GTO 정답입니다.',
+  );
+  assert.deepEqual(result, { ok: false, code: 'REFERENCE_AUTHORITY_FORBIDDEN' });
+});
+
+test('annotation sealing rejects unrelated negation beside each positive authority claim', async () => {
+  const sessionDir = createOwnedTempDir('authority-bound-negation');
+  const tc = createTrainingControl();
+  const row = evaluation();
+  await tc.acceptEvaluations(sessionDir, { gameEpoch: EPOCH, owner: 'owner-1', handNo: 1, evaluations: [row] });
+  for (const claim of [
+    '검증된 GTO 정답이며 실수가 없습니다.',
+    '잘못된 선택은 아니며 검증된 GTO 정답입니다.',
+    '이것은 참고 기준이며 검증된 GTO 정답입니다.',
+  ]) {
+    assert.deepEqual(
+      await tc.sealAnnotation(sessionDir, row.evaluationId, 'explanation', claim),
+      { ok: false, code: 'REFERENCE_AUTHORITY_FORBIDDEN' },
+    );
+  }
+  assert.equal((await tc.sealAnnotation(
+    sessionDir, row.evaluationId, 'explanation', '이 참고 기준은 검증된 GTO 정답이 아닙니다.',
+  )).ok, true);
 });

@@ -1,3 +1,5 @@
+import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
+
 /**
  * An evaluationId's machine digest is set-once (R3/R5). A later publish carrying
  * a different digest for the same id is a conflict, not an update, so the card
@@ -29,6 +31,32 @@ const ACTION = Object.freeze({
   raise: '레이즈',
 });
 
+const GRADE = Object.freeze({
+  preferred: '기준표 주력 선택',
+  mixed: '기준표 허용 선택',
+  'low-frequency': '기준표 저빈도 허용 선택',
+  'off-policy': '기준표와 다른 선택',
+});
+
+const SOURCE_LABEL = Object.freeze({
+  'heuristic-reference': '휴리스틱 참고 자료',
+  synthetic: '테스트용 합성 자료 · 학습 근거 제외',
+  unverified: '출처 미검증 · 기준표 비교 불가',
+});
+
+// This is only a navigation shape check. Source/status authority comes from the
+// verified detail below, never from compact card fields or a second digest path.
+function practiceTargetOf(item, sourceEligible) {
+  if (!sourceEligible || item.status !== 'supported' || item.forced
+    || (item.street !== undefined && item.street !== 'preflop')
+    || !/^6max-100bb-(?:(?:utg|hj|co|btn|sb)-rfi-unopened|(?:bb|sb|btn)-vs-single-raise)$/.test(item.spotKey ?? '')) return null;
+  const hand = /^([AKQJT2-9])([AKQJT2-9])([so]?)$/.exec(item.handClass ?? '');
+  if (!hand) return null;
+  const ranks = 'AKQJT98765432';
+  if (hand[1] === hand[2] ? hand[3] !== '' : (!hand[3] || ranks.indexOf(hand[1]) >= ranks.indexOf(hand[2]))) return null;
+  return Object.freeze({ spotKey: item.spotKey, handClass: item.handClass });
+}
+
 function actionLabel(action) {
   return ACTION[action] ?? action ?? '—';
 }
@@ -47,8 +75,58 @@ export function applyTrainingAnnotation(item, annotation) {
   return next;
 }
 
-export function formatTrainingCard(item) {
-  const rec = Array.isArray(item.recommended) ? item.recommended[0] : null;
+const verifiedDetails = new WeakMap();
+const HEX64 = /^[0-9a-f]{64}$/;
+const detailBinding = (item) => JSON.stringify([
+  item.evaluationId, item.payloadSha256, item.detailRef, item.detailSha256,
+  item.decisionId, item.handNo, item.source?.id, item.source?.version,
+]);
+
+// The compact item is obtained from the authenticated snapshot/SSE channel. The
+// detail API returns parsed JSON, serialized exactly as the immutable detail writer.
+// Keep verification outside card rendering and never enrich the compact item itself.
+export async function verifyTrainingDetail(item, detail) {
+  try {
+    const binding = detailBinding(item);
+    if (!item || !detail || !HEX64.test(item.payloadSha256 ?? '')
+      || !HEX64.test(item.detailSha256 ?? '') || !HEX64.test(item.detailRef ?? '')
+      || typeof item.evaluationId !== 'string') return null;
+    const identity = /^([0-9a-f]{64}):(d-([1-9][0-9]*)-[a-z]+-[0-9]+):([a-z0-9-]+)@(\d+\.\d+\.\d+)$/.exec(item.evaluationId);
+    if (!identity || item.decisionId !== identity[2] || item.handNo !== Number(identity[3])
+      || detail.evaluationId !== item.evaluationId || detail.decisionId !== item.decisionId
+      || (detail.handNo !== undefined && detail.handNo !== item.handNo)
+      || detail.source?.id !== identity[4] || detail.source?.version !== identity[5]
+      || item.source?.id !== identity[4] || item.source?.version !== identity[5]) return null;
+    const bytes = JSON.stringify(detail);
+    if (bytes.length > 1_000_000) return null;
+    const sha256 = async (text) => Array.from(new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)),
+    ), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    if (await sha256(bytes) !== item.detailSha256 || await sha256(item.evaluationId) !== item.detailRef) return null;
+    if (binding !== detailBinding(item)) return null;
+    const receipt = Object.freeze({ evaluationId: item.evaluationId, detailSha256: item.detailSha256 });
+    verifiedDetails.set(receipt, { binding, detail: JSON.parse(bytes) });
+    return receipt;
+  } catch {
+    return null;
+  }
+}
+
+export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
+  const receipt = verifiedDetail && verifiedDetails.get(verifiedDetail);
+  const verified = receipt?.binding === detailBinding(item);
+  if (verified) {
+    const detail = receipt.detail;
+    item = { ...item };
+    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced']) {
+      item[key] = detail[key];
+    }
+  }
+  const identityQuality = referenceQuality(item.source);
+  const quality = verified || identityQuality.quality !== 'heuristic-reference' ? identityQuality
+    : { quality: 'unverified', reason: 'LEARNING_AUTHORITY_UNAVAILABLE' };
+  const sourceEligible = verified && quality.quality === 'heuristic-reference';
+  const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
   const title = [
@@ -59,14 +137,18 @@ export function formatTrainingCard(item) {
   const card = {
     title,
     choice: `내 선택: ${actionLabel(item.chosen?.action)}`,
-    recommendation: rec ? `추천: ${actionLabel(rec.action)}${recSize}${recFreq}` : '',
-    grade: item.status === 'supported' ? (item.grade ?? null) : null,
+    recommendation: rec ? `기준표 참고: ${actionLabel(rec.action)}${recSize}${recFreq}` : '',
+    grade: item.status === 'supported' && sourceEligible ? (item.grade ?? null) : null,
+    gradeLabel: item.status === 'supported' && sourceEligible ? (GRADE[item.grade] ?? '') : '',
     forced: Boolean(item.forced),
     note: '',
     explanation: item.explanationStatus === 'unavailable'
       ? 'unavailable'
-      : (item.explanation ?? ''),
+      : (sourceEligible && referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
+    sourceQuality: quality.quality,
+    sourceLabel: SOURCE_LABEL[quality.quality] ?? SOURCE_LABEL.unverified,
+    practiceTarget: practiceTargetOf(item, sourceEligible),
     status: item.status ?? null,
     exploit: '',
   };
@@ -80,7 +162,11 @@ export function formatTrainingCard(item) {
   }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {
-    card.note = item.reason ? `지원되지 않는 스팟 (${item.reason})` : '지원되지 않는 스팟';
+    card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);
+  } else if (!sourceEligible) {
+    card.note = formatReferenceReason(quality.reason);
+  } else if (!referenceClaimAllowed(item.explanation)) {
+    card.note = '근거 범위를 벗어난 표현을 제외했습니다.';
   }
   if (['flop', 'turn', 'river'].includes(item.street)
     || (typeof item.spotKey === 'string' && item.spotKey.startsWith('postflop-'))) {

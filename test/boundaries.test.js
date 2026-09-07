@@ -5,12 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { scanModule } from './helpers/module-scan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECORDER = path.join(ROOT, 'test/helpers/import-recorder.mjs');
 const FIXTURES = path.join(ROOT, 'test/fixtures/boundaries');
-const SCANNED = ['engine', 'training', 'server', 'tools', 'export'];
+const SCANNED = ['engine', 'training', 'server', 'tools', 'export', 'shared'];
 
 // R12 계층 방향. 결함 #20은 engine과 training이 tools를 불러 쓰는 역전이었고,
 // 이 가드가 없으면 다시 스며든다.
@@ -39,17 +40,21 @@ function jsFilesUnder(dir) {
 
 let staticCache = null;
 
+// The graph describes source, not the host: a module's identity is its
+// POSIX-relative path whichever separator path.relative produced it with.
+const posixRelative = (file) => path.relative(ROOT, file).split(path.sep).join('/');
+
 function staticGraph() {
   if (staticCache) return staticCache;
   const edges = [];
   const unresolved = [];
   for (const dir of SCANNED) {
     for (const file of jsFilesUnder(dir)) {
-      const relative = path.relative(ROOT, file);
+      const relative = posixRelative(file);
       const scan = scanModule(fs.readFileSync(file, 'utf8'));
       for (const entry of scan.imports) {
         const target = entry.specifier.startsWith('.')
-          ? path.relative(ROOT, path.resolve(path.dirname(file), entry.specifier))
+          ? posixRelative(path.resolve(path.dirname(file), entry.specifier))
           : entry.specifier;
         edges.push({ from: relative, to: target, ...entry });
       }
@@ -64,7 +69,7 @@ function staticGraph() {
 
 function layerOf(target) {
   if (typeof target !== 'string' || target.startsWith('..') || target.includes(':')) return null;
-  return target.split(path.sep)[0];
+  return target.split('/')[0];
 }
 
 function edgesFrom(layer) {
@@ -93,6 +98,28 @@ test('training imports no tools module', () => {
   assert.deepEqual(offenders, []);
 });
 
+test('training imports only named state locks plus the predeclared pure evaluator edge from engine', () => {
+  const allowed = new Set([
+    'training/profile-store.js -> engine/state.js',
+    'training/mistake-bank.js -> engine/state.js',
+    'training/opponent-notes.js -> engine/state.js',
+    'training/policies/hand-strength.js -> engine/evaluator.js',
+  ]);
+  const offenders = edgesFrom('training')
+    .filter((edge) => layerOf(edge.to) === 'engine')
+    .map((edge) => `${edge.from} -> ${edge.to}`)
+    .filter((edge) => !allowed.has(edge));
+  assert.deepEqual(offenders, []);
+});
+
+test('shared contracts remain pure of engine, training, server and tools imports', () => {
+  const forbidden = new Set(['engine', 'training', 'server', 'tools']);
+  const offenders = edgesFrom('shared')
+    .filter((edge) => forbidden.has(layerOf(edge.to)))
+    .map((edge) => `${edge.from} -> ${edge.to}`);
+  assert.deepEqual(offenders, []);
+});
+
 test('training does no filesystem I/O of its own', () => {
   const offenders = edgesFrom('training')
     .filter((edge) => /^(node:)?fs(\/promises)?$/.test(edge.to))
@@ -104,7 +131,8 @@ test('training does no filesystem I/O of its own', () => {
 // 예외는 담기 원시자뿐 — 서버는 별도 프로세스라 주입이 불가능하고, P0-0 helper를
 // 재구현하는 쪽이 더 나쁘다.
 const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
-const CONTAINMENT_MODULE = path.join('tools', 'training-store.js');
+const CONTAINMENT_MODULE = 'tools/training-store.js';
+const SERVER_ALLOWED_REFERENCE = 'shared/reference.js';
 
 test('server imports only the publish contract and named containment primitives', () => {
   const offenders = [];
@@ -112,6 +140,7 @@ test('server imports only the publish contract and named containment primitives'
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
+    if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
       offenders.push(`${edge.from} -> ${edge.to}`);
       continue;
@@ -132,16 +161,30 @@ test('server imports only the publish contract and named containment primitives'
 
 // S1: 서버는 `state.json`·`players.json`·`hands/`를 **읽기 전용 보안 술어**로만 본다.
 // 그 파일들이 쓰기 원시자 옆에 나타나는 순간 "중계만 하는 서버"가 깨진다.
-const SERVER_WRITE_TARGETS = new Set(['ui-snapshot.json', 'lock.json']);
-const WRITE_PRIMITIVE_RE = /\b(?:fs\.(?:write|append|rename|unlink|rm|truncate|copyFile|mkdir)\w*|writeJsonAtomic|writeContained)\(/;
+const SERVER_WRITE_TARGETS = new Set(['ui-snapshot.json', 'ui-action-receipt.json', 'lock.json']);
+const WRITE_PRIMITIVE_RE = /\b(?:fs\.(?:write|append|rename|unlink|rm|truncate|copyFile|mkdir)\w*|writeJsonAtomic|writeContained|writeRelayJsonAtomic)\(/;
 const SECURITY_INPUT_RE = /'(?:state|players)\.json'|'hands'|'\.coach-authority\.json'/;
 
-test('the server writes only the two files it owns, never the ones it reads as security predicates', () => {
+test('the server writes only its UI, receipt and lock files, never its security predicates', () => {
   const offenders = [];
   for (const file of jsFilesUnder('server')) {
-    const relative = path.relative(ROOT, file);
+    const relative = posixRelative(file);
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
+    const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
+      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json']) : new Set();
+    for (const call of source.matchAll(/\bwriteRelayJsonAtomic\(([^\n]*)/g)) {
+      if (source.slice(Math.max(0, call.index - 16), call.index).endsWith('function ')) {
+        if (relative !== 'server/action-receipts.js') offenders.push(`${relative} -> unowned writer declaration`);
+        continue;
+      }
+      const target = /^owner, '([^']+)',/.exec(call[1])?.[1];
+      if (!relayTargets.has(target)) offenders.push(`${relative} -> unapproved relay destination`);
+    }
+    if (relative === 'server/action-receipts.js') {
+      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes('!owners.has(owner) || !RELAY_FILES.has(name)'));
+    }
     for (const call of source.matchAll(/writeJsonAtomic\(\s*path\.join\(([^)]*)\)/g)) {
       const literals = [...call[1].matchAll(/'([^']+)'/g)].map((row) => row[1]);
       const target = literals[literals.length - 1];
@@ -236,7 +279,12 @@ let recordedCache = null;
  */
 function recordedGraph() {
   if (recordedCache) return recordedCache;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-graph-'));
+  const dir = createOwnedTempDir('holdem-graph');
+  const sourceDir = path.join(dir, 'source');
+  fs.mkdirSync(sourceDir);
+  const sourceRoot = fs.realpathSync(sourceDir);
+  for (const name of SCANNED) fs.cpSync(path.join(ROOT, name), path.join(sourceRoot, name), { recursive: true });
+  for (const name of ['package.json', 'publish-contract.js']) fs.copyFileSync(path.join(ROOT, name), path.join(sourceRoot, name));
   const out = path.join(dir, 'edges.jsonl');
   const probe = path.join(dir, 'probe.mjs');
   fs.writeFileSync(probe, [
@@ -255,15 +303,11 @@ function recordedGraph() {
   for (const file of files) {
     try {
       execFileSync(process.execPath, [probe], {
-        cwd: ROOT,
+        cwd: sourceRoot,
         timeout: 20_000,
         stdio: 'ignore',
         env: {
-          ...process.env,
-          RECORDER: pathToFileURL(RECORDER).href,
-          ROOT,
-          RECORD_OUT: out,
-          RECORD_FILE: file,
+          ...process.env, RECORDER: pathToFileURL(RECORDER).href, ROOT: sourceRoot, RECORD_OUT: out, RECORD_FILE: path.join(sourceRoot, path.relative(ROOT, file)),
         },
       });
     } catch { /* a script that exits non-zero still recorded what it resolved */ }
@@ -273,10 +317,10 @@ function recordedGraph() {
     if (!line) continue;
     const row = JSON.parse(line);
     if (!row.parent?.startsWith('file:')) continue;
-    const from = path.relative(ROOT, fileURLToPath(row.parent));
+    const from = path.relative(sourceRoot, fs.realpathSync(fileURLToPath(row.parent)));
     // The probe's own import of the target is not an edge of the tree.
     if (from.startsWith('..')) continue;
-    const to = row.url?.startsWith('file:') ? path.relative(ROOT, fileURLToPath(row.url)) : row.url;
+    const to = row.url?.startsWith('file:') ? path.relative(sourceRoot, fs.realpathSync(fileURLToPath(row.url))) : row.url;
     edges.push({ from, to, specifier: row.specifier });
   }
   fs.rmSync(dir, { recursive: true, force: true });
@@ -311,6 +355,7 @@ test('the process entry points that spawn or touch the filesystem live in tools'
   for (const entry of [
     'tools/evaluate-cli.js',
     'tools/drill-server.js',
+    'tools/study-service.js',
     'tools/fake-solver-adapter.js',
     'tools/solver-adapter.js',
     'tools/build-preflop-baseline.js',
@@ -331,8 +376,14 @@ test('the process entry points that spawn or touch the filesystem live in tools'
 });
 
 test('the moved dataset builder rewrites the canonical dataset and its pin, byte for byte', () => {
-  const dataset = path.join(ROOT, 'training/data/preflop-baseline-v1.json');
-  const digestFile = path.join(ROOT, 'training/data/preflop-baseline-v1.sha256');
+  const builderRoot = createOwnedTempDir('holdem-builder-copy');
+  for (const name of ['tools', 'training/data']) fs.mkdirSync(path.join(builderRoot, name), { recursive: true });
+  for (const name of ['package.json', 'tools/build-preflop-baseline.js', 'training/cards.js',
+    'training/data/preflop-baseline-v1.json', 'training/data/preflop-baseline-v1.sha256']) {
+    fs.copyFileSync(path.join(ROOT, name), path.join(builderRoot, name));
+  }
+  const dataset = path.join(builderRoot, 'training/data/preflop-baseline-v1.json');
+  const digestFile = path.join(builderRoot, 'training/data/preflop-baseline-v1.sha256');
   const before = fs.readFileSync(dataset);
   const digestBefore = fs.readFileSync(digestFile);
   // Comparing bytes alone cannot tell "rebuilt identically" from "wrote
@@ -344,7 +395,7 @@ test('the moved dataset builder rewrites the canonical dataset and its pin, byte
   const staleDataset = fs.statSync(dataset).mtimeMs;
   const staleDigest = fs.statSync(digestFile).mtimeMs;
 
-  execFileSync(process.execPath, [path.join(ROOT, 'tools/build-preflop-baseline.js')], {
+  execFileSync(process.execPath, [path.join(builderRoot, 'tools/build-preflop-baseline.js')], {
     encoding: 'utf8',
     timeout: 60_000,
   });
@@ -427,4 +478,24 @@ test('the tools injector supplies every helper the training stores require', asy
   const store = path.join(ROOT, 'test');
   assert.doesNotThrow(() => createProfileStore(store, { io: trainingStoreIo }));
   assert.doesNotThrow(() => createMistakeBank(store, { io: trainingStoreIo }));
+});
+
+test('study service reaches engine only through named ownership primitives', () => {
+  const edges = staticGraph().edges.filter(edge => edge.from === 'tools/study-service.js' && layerOf(edge.to) === 'engine');
+  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'parseOwnedLockIdentity']);
+  assert.ok(edges.length > 0);
+  for (const edge of edges) {
+    assert.equal(edge.to, 'engine/state.js');
+    assert.equal(edge.dynamic, false);
+    assert.ok(edge.bindings.length > 0);
+    assert.deepEqual(edge.bindings.filter(binding => !allowed.has(binding)), []);
+  }
+  assert.deepEqual(edgesFrom('server').filter(edge => edge.to === 'tools/study-service.js'), []);
+});
+
+test('store game loop attaches study through its verified lifetime helper', () => {
+  const edges = staticGraph().edges.filter(edge => edge.from === 'tools/game-loop.js' && edge.to === 'tools/study-service.js');
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].dynamic, false);
+  assert.deepEqual(edges[0].bindings, ['ensureStudyService']);
 });

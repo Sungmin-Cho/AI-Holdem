@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   collectPrivateLiterals,
+  gameEpochOf,
+  validateActionAck,
   legacyExplanationAnnotation,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
@@ -18,6 +20,7 @@ import {
   validatePrivateEngineState,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
+import { createActionReceiptStore, createRelayRootOwner, writeRelayJsonAtomic } from './action-receipts.js';
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 // 서버가 읽기 전용 보안 술어로만 여는 세션 파일들. 엔진은 원자적 rename으로 쓰므로
@@ -29,6 +32,7 @@ const KEEP_ALIVE_MS = 120_000;
 const HEADERS_MS = 125_000;
 const DEFAULT_WAIT_MS = 25_000;
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const SHARED_REFERENCE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'shared', 'reference.js');
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -39,26 +43,6 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-function writeJsonAtomic(filePath, obj) {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  try {
-    fs.writeFileSync(tmpPath, JSON.stringify(obj), 'utf8');
-    try {
-      fs.renameSync(tmpPath, filePath);
-    } catch (error) {
-      if (process.platform !== 'win32' || !['EPERM', 'EEXIST', 'EACCES'].includes(error.code)) {
-        throw error;
-      }
-      fs.copyFileSync(tmpPath, filePath);
-      try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
-    }
-  } catch (error) {
-    try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
-    throw error;
-  }
-}
 
 function sendJson(res, status, obj) {
   if (res.writableEnded || res.headersSent) return;
@@ -66,6 +50,8 @@ function sendJson(res, status, obj) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
   });
   res.end(body);
 }
@@ -437,9 +423,10 @@ function legacyTrainingProvenance(gameDir) {
   }
 }
 
-export function loadUiState(gameDir, expectedSessionToken) {
+export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {}) {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(gameDir, 'ui-snapshot.json'), 'utf8'));
+    assertRaw(raw);
     const legacyProvenance = legacyTrainingProvenance(gameDir);
     const migrated = migrateLoadedTraining(raw.training, { legacyProvenance });
     const machineById = new Map(migrated.training.map((row) => [row.evaluationId, row]));
@@ -504,6 +491,7 @@ export function loadUiState(gameDir, expectedSessionToken) {
       review: raw.review,
       publishId: raw.publishId,
       history: replay.history,
+      lastActionAck: raw.lastActionAck,
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -692,7 +680,17 @@ function publicSnapshot(state) {
   return snap;
 }
 
-function persistUiState(gameDir, state) {
+function validatedStudyUrl(value) {
+  if (value === undefined) return undefined;
+  const match = typeof value === 'string'
+    && /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/#token=([0-9a-f]{64})$/.exec(value);
+  if (!match || match[0] !== value || Number(match[1]) > 65535) {
+    throw coded('STUDY_URL_INVALID', 'Invalid study service URL');
+  }
+  return value;
+}
+
+function persistUiStateAtomic(owner, state) {
   const file = {
     revision: state.revision,
     view: state.view,
@@ -702,9 +700,10 @@ function persistUiState(gameDir, state) {
     trainingAnnotations: state.trainingAnnotations ?? {},
     publishId: state.publishId,
     history: state.history,
+    lastActionAck: state.lastActionAck,
   };
   if (state.review !== undefined) file.review = state.review;
-  writeJsonAtomic(path.join(gameDir, 'ui-snapshot.json'), file);
+  writeRelayJsonAtomic(owner, 'ui-snapshot.json', file);
 }
 
 function writeSse(res, revision, payload) {
@@ -719,6 +718,7 @@ function parseArgs(argv) {
     if (arg === '--game-dir' && next != null) { out.gameDir = next; i += 1; }
     else if (arg === '--port' && next != null) { out.port = Number(next); i += 1; }
     else if (arg === '--token' && next != null) { out.token = next; i += 1; }
+    else if (arg === '--study-url' && next != null) { out.studyUrl = next; i += 1; }
   }
   return out;
 }
@@ -785,6 +785,18 @@ function readTrainingDetail(root, ref, expectedSha) {
 }
 
 function serveStatic(pathname, res) {
+  if (pathname === '/shared/reference.js') {
+    fs.readFile(SHARED_REFERENCE_FILE, (error, data) => {
+      if (error) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      res.writeHead(200, { 'Content-Type': MIME['.js'] });
+      res.end(data);
+    });
+    return;
+  }
+  if (pathname.startsWith('/shared/')) {
+    sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    return;
+  }
   const rel = pathname === '/' ? '/index.html' : pathname;
   const abs = path.normalize(path.join(PUBLIC_DIR, rel));
   const root = path.normalize(`${PUBLIC_DIR}${path.sep}`);
@@ -808,17 +820,29 @@ function serveStatic(pathname, res) {
   });
 }
 
-export function startServer({ gameDir, port = 8877, token }) {
+export function startServer({ gameDir, port = 8877, token, studyUrl, receiptCheckpoint, publishCheckpoint = () => {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
+  const trustedStudyUrl = validatedStudyUrl(studyUrl);
+  const studyCapability = trustedStudyUrl?.split('#token=')[1];
+  const assertNoStudyCapability = (value) => {
+    if (studyCapability && JSON.stringify(value).includes(studyCapability)) {
+      throw coded('FORBIDDEN_LITERAL', 'Study capability is not public game content');
+    }
+  };
   const root = path.resolve(gameDir);
   fs.mkdirSync(root, { recursive: true });
 
-  const state = loadUiState(root, token);
+  const owner = createRelayRootOwner(root);
+  const state = loadUiState(root, token, assertNoStudyCapability);
+  assertNoStudyCapability(state);
+  owner.assert();
   const sseClients = new Set();
   const waiters = new Set();
-  let slot = null;
-  let delivered = null;
+  const gameEpoch = gameEpochOf(token);
+  const receiptStore = createActionReceiptStore(root, gameEpoch, { checkpoint: receiptCheckpoint, owner });
+  receiptStore.reconcile(state.view, state.lastActionAck, state.publishId);
+  let recoveryRequired = false;
 
   const checkToken = (provided, res) => {
     if (tokensEqual(provided, token)) return true;
@@ -829,15 +853,9 @@ export function startServer({ gameDir, port = 8877, token }) {
   const currentDecisionId = () => state.view?.legal?.decisionId ?? null;
 
   const deliverSlot = () => {
-    if (!slot) return;
     for (const waiter of waiters) {
-      if (waiter.expectDecisionId && waiter.expectDecisionId !== slot.decisionId) continue;
-      const taken = slot;
-      slot = null;
-      // Delivery is not proof of receipt: an HTTP response can be lost, and the user's
-      // action bar is already disabled, so a consumed-and-forgotten action stalls the
-      // hand with nobody able to resend it. Kept until the next decision is published.
-      delivered = taken;
+      const taken = receiptStore.deliver(currentDecisionId(), waiter.expectDecisionId);
+      if (!taken) continue;
       waiters.delete(waiter);
       clearTimeout(waiter.timer);
       waiter.finish(taken);
@@ -845,7 +863,41 @@ export function startServer({ gameDir, port = 8877, token }) {
     }
   };
 
+  const checkRecovery = (res) => {
+    if (!recoveryRequired) return true;
+    sendJson(res, 503, { ok: false, code: 'ACTION_RECOVERY_REQUIRED' });
+    return false;
+  };
+
+  const sendCommitted = (client) => {
+    for (const entry of state.history) {
+      if (entry.revision <= client.lastRevision) continue;
+      writeSse(client.res, entry.revision, entry.payload);
+      client.lastRevision = entry.revision;
+    }
+  };
+  const fanoutCommitted = () => {
+    for (const client of sseClients) {
+      try { sendCommitted(client); } catch { /* disconnected clients replay on reconnect */ }
+    }
+  };
+
   const handlePublish = (body, res) => {
+    try { assertNoStudyCapability(body); }
+    catch { sendJson(res, 400, { ok: false, code: 'FORBIDDEN_LITERAL' }); return; }
+    if (recoveryRequired) {
+      try {
+        owner.assert();
+        const restored = loadUiState(root, token, assertNoStudyCapability);
+        owner.assert();
+        const durable = (restored.publishId ?? 0) >= (state.publishId ?? 0) ? restored : state;
+        assertNoStudyCapability(durable);
+        receiptStore.reconcile(durable.view, durable.lastActionAck, durable.publishId);
+        Object.assign(state, durable);
+        fanoutCommitted();
+        recoveryRequired = false;
+      } catch { checkRecovery(res); return; }
+    }
     if (!Number.isInteger(body.publishId) || body.publishId < 1 || body.publishId > MAX_PUBLISH_ID) {
       sendJson(res, 400, { ok: false, code: 'BAD_PUBLISH_ID' });
       return;
@@ -856,6 +908,26 @@ export function startServer({ gameDir, port = 8877, token }) {
     const alreadyApplied = Number.isInteger(state.publishId)
       ? body.publishId <= state.publishId
       : false;
+    let boundAck;
+    let boundAckPublishId;
+    try {
+      if (body.actionAck !== undefined) {
+        // A duplicate publish ID alone is not evidence that this acknowledgement
+        // was committed: the exact terminal tuple must have a durable UI anchor.
+        if (alreadyApplied && (!state.lastActionAck || state.lastActionAck.publishId > body.publishId)) {
+          throw new Error('Uncommitted action acknowledgement');
+        }
+        const receipt = alreadyApplied ? state.lastActionAck : receiptStore.read();
+        boundAck = validateActionAck(body.actionAck, {
+          receipt, gameEpoch, view: body.view, viewOnly: body.viewOnly === true,
+        });
+        boundAckPublishId = receipt?.publishId ?? body.publishId;
+        if (!alreadyApplied) receiptStore.preflightAcknowledge(boundAck, boundAckPublishId);
+      }
+    } catch {
+      sendJson(res, 400, { ok: false, code: 'BAD_ACTION_ACK' });
+      return;
+    }
     if (alreadyApplied) {
       sendJson(res, 200, { ok: true, revision: state.revision });
       return;
@@ -875,6 +947,7 @@ export function startServer({ gameDir, port = 8877, token }) {
       trainingAnnotations: state.trainingAnnotations ?? {},
       review: state.review,
       history: state.history,
+      lastActionAck: boundAck ? { ...boundAck, publishId: boundAckPublishId } : state.lastActionAck,
     };
 
     const payload = {};
@@ -932,36 +1005,42 @@ export function startServer({ gameDir, port = 8877, token }) {
     next.history = [...next.history, { revision: next.revision, at: new Date().toISOString(), payload }];
 
     try {
-      persistUiState(root, next);
+      // This is the single commit owner: UI anchor -> terminal receipt -> memory.
+      if (!boundAck && body.view !== undefined
+        && receiptStore.shouldClearHistoricalAck(body.view, state.lastActionAck, state.publishId)) {
+        // Exact ledger validation precedes removal. A current receipt's own anchor
+        // is retained; obsolete correction history leaves with its old decision.
+        next.lastActionAck = undefined;
+      }
+      publishCheckpoint('before-ui-commit');
+      persistUiStateAtomic(owner, next);
+      publishCheckpoint('after-ui-commit');
+      if (boundAck) receiptStore.acknowledgeDurable(boundAck, boundAckPublishId);
+      receiptStore.reconcile(next.view, next.lastActionAck, next.publishId);
+      publishCheckpoint('after-receipt-commit');
     } catch {
+      recoveryRequired = true;
       sendJson(res, 500, { ok: false, code: 'PERSIST_FAILED' });
       return;
     }
 
     Object.assign(state, next);
-    // Any published view means the dealer got the action and moved on — either it was
-    // applied, or it was refused and re-asked. Re-delivering past this point would feed
-    // a refused action straight back into the wait it just re-entered, forever.
-    // A view-only republish is the exception: it re-shows a state rather than
-    // acknowledging anything, so a resuming dealer must still be able to collect an
-    // action whose response was lost.
-    if (body.view !== undefined && body.viewOnly !== true) delivered = null;
-    for (const client of sseClients) {
-      try { writeSse(client.res, state.revision, payload); } catch { /* disconnected */ }
-    }
+    fanoutCommitted();
     sendJson(res, 200, { ok: true, revision: state.revision });
   };
 
   const handleAction = (body, res) => {
     const current = currentDecisionId();
-    if (current == null || body.decisionId !== current) {
-      sendJson(res, 409, { ok: false, code: 'STALE_DECISION' });
+    if (!checkRecovery(res)) return;
+    try {
+      receiptStore.accept(body, current);
+      deliverSlot();
+    } catch (error) {
+      const status = error.code === 'BAD_ACTION' ? 400
+        : ['STALE_DECISION', 'ACTION_ALREADY_RECEIVED', 'ACTION_REJECTED', 'ACTION_RECEIPT_CAPACITY'].includes(error.code) ? 409 : 500;
+      sendJson(res, status, { ok: false, code: error.code ?? 'PERSIST_FAILED' });
       return;
     }
-    const next = { decisionId: body.decisionId, action: body.action };
-    if (body.amount !== undefined) next.amount = body.amount;
-    slot = next;
-    deliverSlot();
     sendJson(res, 200, { ok: true });
   };
 
@@ -978,14 +1057,13 @@ export function startServer({ gameDir, port = 8877, token }) {
 
     const client = {
       res,
+      lastRevision: Math.min(Math.max(after, 0), state.revision),
       heartbeat: setInterval(() => {
         try { res.write(':heartbeat\n\n'); } catch { /* gone */ }
       }, HEARTBEAT_MS),
     };
     sseClients.add(client);
-    for (const entry of state.history) {
-      if (entry.revision > after) writeSse(res, entry.revision, entry.payload);
-    }
+    sendCommitted(client);
 
     const cleanup = () => {
       clearInterval(client.heartbeat);
@@ -1004,17 +1082,9 @@ export function startServer({ gameDir, port = 8877, token }) {
       sendJson(res, 200, payload);
     };
 
-    if (slot && (!expectDecisionId || slot.decisionId === expectDecisionId)) {
-      const taken = slot;
-      slot = null;
-      delivered = taken;
+    const taken = receiptStore.deliver(currentDecisionId(), expectDecisionId);
+    if (taken) {
       finish(taken);
-      return;
-    }
-
-    // The same decision asked twice means the first answer never arrived.
-    if (delivered && expectDecisionId && delivered.decisionId === expectDecisionId) {
-      finish(delivered);
       return;
     }
 
@@ -1037,7 +1107,20 @@ export function startServer({ gameDir, port = 8877, token }) {
     const pathname = url.pathname;
 
     if (req.method === 'GET' && pathname === '/api/health') {
-      sendJson(res, 200, { ok: true });
+      const supplied = req.headers['x-session-token'] ?? url.searchParams.get('token');
+      // Keep the legacy liveness probe. Capability discovery requires credentials.
+      if (supplied !== null && supplied !== undefined) {
+        if (!checkToken(supplied, res)) return;
+        sendJson(res, 200, { ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true } });
+      } else sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/action-status') {
+      if (!checkToken(req.headers['x-session-token'] ?? url.searchParams.get('token'), res)) return;
+      if (!checkRecovery(res)) return;
+      try { sendJson(res, 200, receiptStore.status(currentDecisionId())); }
+      catch { sendJson(res, 503, { ok: false, code: 'ACTION_RECEIPT_CORRUPT' }); }
       return;
     }
 
@@ -1049,7 +1132,7 @@ export function startServer({ gameDir, port = 8877, token }) {
 
     if (req.method === 'GET' && pathname === '/api/snapshot') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
-      sendJson(res, 200, publicSnapshot(state));
+      sendJson(res, 200, { ...publicSnapshot(state), ...(trustedStudyUrl ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
 
@@ -1076,22 +1159,29 @@ export function startServer({ gameDir, port = 8877, token }) {
 
     if (req.method === 'GET' && pathname === '/api/wait-action') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
+      if (!checkRecovery(res)) return;
       attachWait(req, res, url);
       return;
     }
 
     if (req.method === 'POST' && pathname === '/api/publish') {
+      const supplied = req.headers['x-session-token'] ?? url.searchParams.get('token');
+      if (supplied !== null && supplied !== undefined && !checkToken(supplied, res)) return;
+      // The explicit legacy body-token path must read bounded JSON to authenticate.
       const body = await readJsonBody(req, res);
       if (body == null) return;
-      if (!checkToken(url.searchParams.get('token') ?? body.token, res)) return;
+      if (!checkToken(supplied ?? body.token, res)) return;
       handlePublish(body, res);
       return;
     }
 
     if (req.method === 'POST' && pathname === '/api/action') {
+      const supplied = req.headers['x-session-token'] ?? url.searchParams.get('token');
+      if (supplied !== null && supplied !== undefined && !checkToken(supplied, res)) return;
+      // The explicit legacy body-token path must read bounded JSON to authenticate.
       const body = await readJsonBody(req, res);
       if (body == null) return;
-      if (!checkToken(url.searchParams.get('token') ?? body.token, res)) return;
+      if (!checkToken(supplied ?? body.token, res)) return;
       handleAction(body, res);
       return;
     }
@@ -1140,7 +1230,7 @@ export function startServer({ gameDir, port = 8877, token }) {
     server.listen(port, '127.0.0.1', () => {
       server.removeListener('error', onError);
       const actualPort = server.address().port;
-      writeJsonAtomic(path.join(root, 'lock.json'), {
+      writeRelayJsonAtomic(owner, 'lock.json', {
         serverPid: process.pid,
         port: actualPort,
         sessionToken: token,

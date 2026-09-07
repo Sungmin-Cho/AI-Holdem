@@ -1,6 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { processStartTime } from './process-identity.js';
+import { processStartTime, win32ProcessStartTime, validWin32StartTime } from './process-identity.js';
 
 export { processStartTime } from './process-identity.js';
 
@@ -23,19 +24,21 @@ function readJson(filePath) {
   }
 }
 
+// Windows refuses a rename while any reader holds the destination open, and a
+// relay reading state.json holds it for a moment on every request. That is a
+// collision to wait out, not a verdict: retry the same rename a bounded number
+// of times, and if it still fails, fail.
+const RENAME_RETRY_MS = 25;
+const RENAME_RETRIES = process.platform === 'win32' ? 20 : 0;
 function commitTmp(tmpPath, filePath) {
-  try {
-    fs.renameSync(tmpPath, filePath);
-    return;
-  } catch (error) {
-    // Windows cannot rename-replace a path that already exists, or that still
-    // has a reader handle. copyFile overwrites; POSIX rename already replaced.
-    if (process.platform !== 'win32' || !['EPERM', 'EEXIST', 'EACCES'].includes(error.code)) {
-      throw error;
+  // Rename is the commit boundary on every platform. Sharing violations are
+  // failures, never permission to expose a partially copied destination.
+  for (let attempt = 0; ; attempt += 1) {
+    try { fs.renameSync(tmpPath, filePath); return; } catch (error) {
+      if (attempt >= RENAME_RETRIES || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+      sleepSync(RENAME_RETRY_MS);
     }
   }
-  fs.copyFileSync(tmpPath, filePath);
-  try { fs.unlinkSync(tmpPath); } catch { /* leftover tmp is harmless */ }
 }
 
 export function writeJsonAtomic(filePath, obj) {
@@ -90,7 +93,7 @@ function isProcessAlive(pid) {
 
 // pid 파일을 fd로 읽어 내용과 inode를 함께 얻는다. 이후 unlink는 이 inode가
 // 그대로일 때만 하므로, 경로가 다른 락의 pid 파일로 바뀐 경우를 걸러낼 수 있다.
-// 형식은 1줄(기존 단명 락: pid만) 또는 2줄(owned 락: pid\nstartTime) 둘 다 허용한다.
+// 단명 락은 PID 1줄, legacy owned는 2줄, canonical owned는 정확히 3줄이다.
 function readPidFile(dir) {
   let fd;
   try {
@@ -107,11 +110,15 @@ function readPidFile(dir) {
       const parsed = Number(lines[0].trim());
       return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: null };
     }
-    if (lines.length === 2 && lines[0].trim() !== '' && lines[1].trim() !== '') {
+    // Three lines deliberately fail closed in pre-versioned owned-lock readers.
+    const owned = parseOwnedLockIdentity(lines.join('\n'));
+    if (owned) return { ...base, ...owned };
+    if (lines.length === 2 && lines[0].trim() !== '' && lines[1].trim() !== ''
+      && !/^(?:utc|win32)-/.test(lines[1].trim())) {
       const parsed = Number(lines[0].trim());
       return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: lines[1].trim() };
     }
-    // 3줄 이상이거나 2줄이지만 빈 줄이 섞인 기록은 legacy도 owned도 아닌 malformed —
+    // 인식하지 못한 버전·형식·추가 줄은 malformed —
     // pid-less 취급(mtime staleness 경로)으로 fail-closed, 절대 owned·alive로 해석하지 않는다.
     return { ...base, pid: null, startTime: null };
   } finally {
@@ -158,10 +165,14 @@ function mutexIdentity(dir) {
 // 같이 취급하면(예: null !== recordedStartTime) 살아 있는 소유자가 회수되는
 // fail-open이 생긴다. isIdentityStale·readOwnedLock 양쪽 모두 'unknown'을
 // 'dead'가 아닌 별도 상태로 다뤄야 한다.
-function ownedIdentityStatus(pid, recordedStartTime, startTimeOf = processStartTime) {
+export function ownedIdentityStatus(pid, recordedStartTime, startTimeOf = ownedProcessStartTime) {
+  // Parsed two-line legacy records retain the accepted positively-dead PID
+  // reclamation boundary; live legacy can never authorize identity or signals.
   if (!isProcessAlive(pid)) return 'dead';
-  const current = startTimeOf(pid);
-  if (current === null) return 'unknown';
+  // Unqualified legacy stamps cannot prove identity across caller timezones.
+  if (!validOwnedIdentity(recordedStartTime)) return 'unknown';
+  const current = resolveOwnedStartTime(pid, startTimeOf);
+  if (!validOwnedIdentity(current) || current.split(':', 1)[0] !== recordedStartTime.split(':', 1)[0]) return 'unknown';
   return current === recordedStartTime ? 'alive' : 'dead';
 }
 
@@ -413,11 +424,69 @@ export async function withNamedLock(gameDir, name, fn, options) {
   }
 }
 
+// 로컬 ps 호출 — 서버·네트워크와 무관하므로 sync 허용. pid는 재사용되지만
+// (pid, 기동시각) 쌍은 사실상 유일하므로 owned 락의 identity로 쓴다.
+const OWNED_TIMESTAMP = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( [1-9]|[12]\d|3[01]) ([0-2]\d):([0-5]\d):([0-5]\d) (\d{4})$/;
+function validOwnedTimestamp(value) {
+  const match = typeof value === 'string' && OWNED_TIMESTAMP.exec(value);
+  if (!match) return false;
+  const [, weekday, month, day, hour, minute, second, year] = match;
+  const monthIndex = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'].indexOf(month);
+  if (+year < 1970 || +hour > 23 || +day < 1) return false;
+  const date = new Date(Date.UTC(+year, monthIndex, +day, +hour, +minute, +second));
+  return date.getUTCFullYear() === +year && date.getUTCMonth() === monthIndex
+    && date.getUTCDate() === +day && ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][date.getUTCDay()] === weekday;
+}
+
+function resolveOwnedStartTime(pid, probe) {
+  if (probe === processStartTime || probe === ownedProcessStartTime) return ownedProcessStartTime(pid);
+  const value = probe(pid);
+  if (value == null || validOwnedIdentity(value)) return value;
+  // Preserve the public raw-probe injection seam, but qualify it only after a
+  // real matching platform read. Arbitrary/unavailable probe values fail closed.
+  return value === processStartTime(pid) ? ownedProcessStartTime(pid) : null;
+}
+
+function validOwnedIdentity(value) {
+  if (typeof value !== 'string') return false;
+  if (value.startsWith('utc-v1:')) return validOwnedTimestamp(value.slice(7));
+  // The owned wire is exactly the Windows round-trip 'o' format. Shorter
+  // fractions can denote the same instant but must never become a different PID
+  // identity through string comparison; keep raw adapter flexibility separate.
+  if (value.startsWith('win32-v1:')) return /\.\d{7}Z$/.test(value) && validWin32StartTime(value.slice(9));
+  return false;
+}
+
+/** Parse only the exact canonical lifetime wire after a caller's bounded safe read.
+ * Legacy and unknown formats return null; they cannot authorize a current owner. */
+export function parseOwnedLockIdentity(text) {
+  if (typeof text !== 'string') return null;
+  const lines = text.split('\n');
+  if (lines.length !== 3 || !/^[1-9]\d*$/.test(lines[0]) || !validOwnedIdentity(`${lines[1]}:${lines[2]}`)) return null;
+  const pid = Number(lines[0]);
+  return Number.isSafeInteger(pid) ? { pid, startTime: `${lines[1]}:${lines[2]}` } : null;
+}
+
+/** Versioned identity for lifetime locks only; legacy processStartTime is unchanged. */
+export function ownedProcessStartTime(pid) {
+  if (process.platform === 'win32') {
+    const stamp = win32ProcessStartTime(pid);
+    return stamp === null ? null : `win32-v1:${stamp}`;
+  }
+  if (!['darwin', 'linux'].includes(process.platform)) return null;
+  try {
+    const value = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8', timeout: 3000, env: { ...process.env, TZ: 'UTC', LANG: 'C', LC_ALL: 'C' },
+    }).trim();
+    return validOwnedTimestamp(value) ? `utc-v1:${value}` : null;
+  } catch { return null; }
+}
+
 /**
  * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락 경로가
  * 없을 때만 null이다. 기록이 partial/legacy/malformed/unreadable이면 존재는 하지만
  * identity를 증명할 수 없으므로 `{ alive:false, status:'unknown' }`을 돌려준다.
- * 유효한 2줄 기록은 `status: 'alive'|'dead'|'unknown'`으로 3상태를 보존한다.
+ * canonical 3줄 기록만 alive를 증명한다. 살아 있는 2줄 legacy는 unknown으로 보호한다.
  * 기존 호출자를 위해 pid/startTime/alive 필드는 그대로 유지하며, `alive`는
  * `ownedIdentityStatus`가 'alive'로 **긍정 증명**했을 때만 true다.
  */
@@ -459,7 +528,7 @@ function tryCreateOwnedLock(dir, startTime) {
   }
   const mine = inodeKey(dir);
   try {
-    fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime}`);
+    fs.writeFileSync(path.join(dir, 'pid'), `${process.pid}\n${startTime.slice(0, startTime.indexOf(':'))}\n${startTime.slice(startTime.indexOf(':') + 1)}`);
   } catch (error) {
     undoOwnMutex(dir, mine);
     if (error.code === 'ENOENT') return null;
@@ -470,7 +539,7 @@ function tryCreateOwnedLock(dir, startTime) {
 
 /**
  * 기존 mkdir+pid 원시를 수명 보유(lifetime-owned) 락으로 확장한다: 기록은
- * pid 파일 한 개에 `pid\nstartTime` 2줄뿐(비재귀 rmdir 계약을 지키기 위해
+ * pid 파일 한 개에 `pid\nutc-v1\nUTC timestamp` 3줄뿐(비재귀 rmdir 계약을 지키기 위해
  * 그 외 파일은 절대 만들지 않는다), staleness는 mtime이 아니라 `readOwnedLock`의
  * `alive` 판정 하나로만 결정된다 — 살아 있는 소유자는 시간이 얼마나 지나도
  * 회수되지 않는다. 죽은 것으로 판정되면 기존 reclaim 경로(inode 검증
@@ -483,8 +552,8 @@ function tryCreateOwnedLock(dir, startTime) {
  */
 export function acquireOwnedLock(gameDir, name, { processStartTime: startTimeOf = processStartTime } = {}) {
   const dir = path.join(gameDir, name);
-  const startTime = startTimeOf(process.pid);
-  if (startTime === null) {
+  const startTime = resolveOwnedStartTime(process.pid, startTimeOf);
+  if (!validOwnedIdentity(startTime)) {
     const error = new Error('IDENTITY_UNAVAILABLE');
     error.code = 'IDENTITY_UNAVAILABLE';
     throw error;

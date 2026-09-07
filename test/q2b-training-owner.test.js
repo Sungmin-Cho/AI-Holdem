@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -20,7 +21,7 @@ const PROFILE_CLI = path.join(ROOT, 'tools', 'profile-cli.js');
 const EPOCH = 'ab'.repeat(32);
 
 function tmp(prefix = 'holdem-q2b-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return createOwnedTempDir(prefix.replace(/-+$/, ''));
 }
 
 function sessionDirOf(storeDir, id) {
@@ -471,7 +472,7 @@ test('Q2b consumeTrainingItems persists each item outcome and continues after a 
   assert.deepEqual(first, { profiled: 1, banked: 1, applied: 1, failed: 1 });
   assert.equal(afterFirst.items[bad.evaluationId].consumers.profiled, false);
   assert.equal(afterFirst.items[bad.evaluationId].consumers.banked, false);
-  assert.equal(afterFirst.items[bad.evaluationId].consumers.lastError.code, 'PROFILE_EVENT_INVALID');
+  assert.equal(afterFirst.items[bad.evaluationId].consumers.lastError.code, 'LEARNING_DETAIL_IDENTITY_MISMATCH');
   assert.equal(Number.isNaN(Date.parse(afterFirst.items[bad.evaluationId].consumers.lastError.at)), false);
   assert.equal(afterFirst.items[good.evaluationId].consumers.profiled, true);
   assert.equal(afterFirst.items[good.evaluationId].consumers.banked, true);

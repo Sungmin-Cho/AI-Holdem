@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   processStartTime,
+  ownedProcessStartTime,
   readOwnedLock,
   withNamedLock,
 } from '../engine/state.js';
@@ -26,6 +27,8 @@ import { prepareSession } from '../engine/session-catalog.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,7 +50,7 @@ const VALID_REVIEW = [
 ].join('\n\n');
 
 function tmpGame() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-loop-'));
+  return createOwnedTempDir('holdem-loop');
 }
 
 function readJson(filePath) {
@@ -336,7 +339,11 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
   assert.fail(`pid ${pid} did not exit`);
 }
 
-async function waitFor(predicate, message, timeoutMs = 3_000) {
+// A wait bounded for in-process proofs; on win32 each proof behind the loop is
+// a PowerShell child, so the same wait needs an order of magnitude more.
+const WIN32_SCALE = process.platform === 'win32' ? 10 : 1;
+
+async function waitFor(predicate, message, timeoutMs = 3_000 * WIN32_SCALE) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
@@ -352,7 +359,7 @@ async function waitFor(predicate, message, timeoutMs = 3_000) {
   assert.fail(message);
 }
 
-async function waitForUserSnapshot(gameDir, timeoutMs = 3_000) {
+async function waitForUserSnapshot(gameDir, timeoutMs = 3_000 * WIN32_SCALE) {
   return waitFor(async () => {
     const lock = readJson(path.join(gameDir, 'lock.json'));
     const response = await fetch(
@@ -748,7 +755,13 @@ async function terminateIfAlive(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exit = new Promise((resolve) => child.once('exit', resolve));
   child.kill('SIGKILL');
-  await exit;
+  // A cleanup hook has no test timeout of its own; a child whose exit never
+  // arrives would hold the file until the per-file cap. Bound it and say so.
+  let timer;
+  const bound = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`external child ${child.pid} did not exit after SIGKILL`)), 15_000 * WIN32_SCALE);
+  });
+  try { await Promise.race([exit, bound]); } finally { clearTimeout(timer); }
 }
 
 async function withServerLockSwapAtRetirement(lockPath, replacementPath, fn) {
@@ -941,6 +954,10 @@ async function setupCoachHand(t, {
   t.after(() => loop.requestStop().catch(() => {}));
   await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile });
   putAiFirst(gameDir);
+  await cliJson(gameDir, ['step', '--new-hand']);
+  await cliJson(gameDir, ['apply', 'p1', 'call']);
+  await cliJson(gameDir, ['apply', 'user', 'check']);
+  await cliJson(gameDir, ['apply', 'user', 'raise', '50']);
   return { gameDir, loop, player, upper };
 }
 
@@ -1011,12 +1028,12 @@ function putUserOnTheButton(gameDir) {
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
-// Both blinds are all-in at the post, so startHand runs the rigged board out with no
-// actions at all: exactly one completed hand and a deterministic user bust.
+// A real user call against the all-in big blind supplies decision evidence before the deterministic bust.
 async function seedFinishedGame(gameDir) {
-  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '25']);
+  const init = await cliJson(gameDir, ['init', '--ai', '1', '--stack', '50']);
   putUserOnTheButton(gameDir);
-  const over = await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  await cliJson(gameDir, ['step', '--new-hand', '--deck', HU_BUST_DECK]);
+  const over = await cliJson(gameDir, ['apply', 'user', 'call']);
   assert.equal(over.handOver, true);
   assert.equal(over.gameOver, true);
   return init;
@@ -1027,8 +1044,14 @@ function expandFinishedGameToTwoHands(gameDir) {
   const state = readJson(statePath);
   const second = structuredClone(state.lastHand);
   second.handNo = 2;
+  second.decisions = structuredClone(state.lastHand.decisions);
+  for (const decision of second.decisions) {
+    decision.handNo = 2;
+    decision.decisionId = decision.decisionId.replace('d-1-', 'd-2-');
+    decision.legal.decisionId = decision.decisionId;
+  }
   second.actions = [...(second.actions ?? []), {
-    decisionId: 'TRACE_ONLY_SENTINEL',
+    decisionId: 'FUTURE_ACTION_SENTINEL',
     playerId: 'user',
     action: 'fold',
     street: 'river',
@@ -1785,6 +1808,10 @@ test('playing resume recreates only missing, corrupt, runtime-mismatched, or arg
 });
 
 test('a remotely rejected restored session recreates only that player once, persists it, and retries without overlap', { timeout: 15_000 }, async (t) => {
+  // This asserts a 25ms decide budget against a 10ms adapter. On win32 the
+  // loop's own identity and lock checks are synchronous PowerShell children of
+  // about a second, which blocks the timer and fires that budget spuriously.
+  if (skipOnWin32(t, 'a 25ms decide budget cannot be kept while in-process proofs block the loop for seconds on win32')) return;
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
@@ -2147,7 +2174,7 @@ test('missing or timed-out listener verifier fails closed without adopting or si
   }
 });
 
-test('present invalid or falsy lock.json fails closed without spawn, adoption, or signal', { timeout: 20_000 }, async (t) => {
+test('present invalid or falsy lock.json fails closed without spawn, adoption, or signal', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const cases = [
     ['malformed-json', '{'],
     ['null', 'null'],
@@ -3167,7 +3194,7 @@ test('wait-only child supervision exceeds waitMs plus network margin (the defaul
   assert.equal(Date.now() - started >= 1_800, true, 'child supervisor killed wait before waitMs');
 });
 
-test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않고 같은 결정을 다시 기다린다', { timeout: 15_000 }, async (t) => {
+test('user action·amount의 잘못된 shape는 HTTP에서 거부되고 engine argv로 넘어가지 않는다', { timeout: 15_000 }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
   const running = startRun(loop);
   let current = await waitForUserSnapshot(gameDir);
@@ -3181,12 +3208,7 @@ test('user action·amount의 의미 플래그는 engine argv로 넘어가지 않
   ];
 
   for (const payload of invalids) {
-    const rejectedBefore = readLoopLog(gameDir)
-      .filter((entry) => entry.event === 'user-action-rejected').length;
-    assert.deepEqual(await postUserAction(current.lock, payload), { status: 200, body: { ok: true } });
-    await waitWhileRunning(running, () => (
-      readLoopLog(gameDir).filter((entry) => entry.event === 'user-action-rejected').length > rejectedBefore
-    ), `invalid user payload was not rejected: ${JSON.stringify(payload)}`);
+    assert.deepEqual(await postUserAction(current.lock, payload), { status: 400, body: { ok: false, code: 'BAD_ACTION' } });
     assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0,
       `invalid payload reached engine mutation: ${JSON.stringify(payload)}`);
     current = await waitForUserSnapshot(gameDir);
@@ -3274,13 +3296,120 @@ test('user VERSION_MISMATCH republishes the authoritative decision with narratio
   assert.equal(readJson(path.join(gameDir, 'state.json')).stateVersion, staleVersion + 1);
   assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
   const refreshed = await waitForUserSnapshot(gameDir);
-  await postUserAction(refreshed.lock, preferredUserAction(refreshed.snapshot.view.legal));
+  await postUserAction(refreshed.lock, { ...preferredUserAction(refreshed.snapshot.view.legal), requestId: 'version-correction' });
   await waitWhileRunning(
     running,
     () => waitForUserAction(gameDir),
     'user action was not accepted after VERSION_MISMATCH resync',
   );
   await stopRun(loop, running);
+});
+
+test('REQ-007: a moved engine decision consumes a VERSION_MISMATCH receipt without another effect', { timeout: 20_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t);
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const action = preferredUserAction(snapshot.view.legal);
+  const before = readJson(path.join(gameDir, 'state.json'));
+  const args = ['step', 'user', action.action];
+  if (action.amount !== undefined) args.push(String(action.amount));
+  args.push('--expect-version', String(before.stateVersion));
+  await cliJson(gameDir, args);
+  assert.equal((await postUserAction(lock, { ...action, requestId: 'moved-decision' })).status, 200);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'consumed',
+    'moved decision did not consume the stale receipt');
+  assert.equal(readJson(receiptFile).reason, 'VERSION_MISMATCH');
+  await stopRun(loop, running);
+  const after = readJson(path.join(gameDir, 'state.json'));
+  const original = after.handNo === before.handNo && after.hand ? after.hand : after.lastHand;
+  assert.equal(original.actions.filter((row) => row.decisionId === action.decisionId).length, 1);
+});
+
+test('REQ-007: sidecar synchronizes an engine-applied action after lost publish and applies it once', { timeout: 20_000 }, async (t) => {
+  let interrupted = false;
+  let fixtureDir;
+  const { gameDir, loop } = await setupUserFirst(t, { loopOpts: {
+    onPublishInvoke() {
+      const envelope = readJson(path.join(fixtureDir, '.turn.json'));
+      if (!interrupted && envelope.actionAck?.reason === 'ACTION_APPLIED') {
+        interrupted = true;
+        throw Object.assign(new Error('engine applied before publisher ran'), { code: 'INJECTED_PUBLISH_LOSS' });
+      }
+    },
+  } });
+  fixtureDir = gameDir;
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  const illegal = { decisionId: snapshot.view.legal.decisionId, requestId: 'rejected-before-loss',
+    action: 'raise', amount: snapshot.view.legal.maxRaiseTo + 1 };
+  assert.equal((await postUserAction(lock, illegal)).status, 200);
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'rejected',
+    'first rejection was not published before the corrected action');
+  const historicalAck = readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck;
+  assert.equal(historicalAck.requestId, illegal.requestId);
+  const submitted = { ...preferredUserAction(snapshot.view.legal), requestId: 'lost-publish-request' };
+  assert.equal((await postUserAction(lock, submitted)).status, 200);
+  await assert.rejects(running, (error) => error.code === 'INJECTED_PUBLISH_LOSS');
+  assert.equal(readJson(receiptFile).phase, 'delivered');
+  assert.equal(readJson(receiptFile).rejections[0].publishId, historicalAck.publishId);
+  assert.deepEqual(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck, historicalAck);
+  const before = readJson(path.join(gameDir, 'state.json'));
+  assert.equal(before.hand.actions.filter((row) => row.decisionId === submitted.decisionId).length, 1);
+  const oldServerPid = loop.serverPid;
+  await loop.requestStop();
+  await waitUntilDead(oldServerPid);
+
+  const resumedAdapter = makeAdapter();
+  const resumed = createGameLoop({ gameDir, resolver: resolverFor(resumedAdapter), opts: { port: 0, waitMs: 30 } });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  const rerun = startRun(resumed);
+  await waitWhileRunning(rerun, () => readJson(receiptFile).phase === 'consumed', 'old receipt did not retire after engine synchronization', 5_000);
+  const recoveredReceipt = readJson(receiptFile);
+  assert.equal(recoveredReceipt.requestId, submitted.requestId);
+  assert.equal(recoveredReceipt.reason, 'DECISION_ADVANCED');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck, undefined);
+  // The durable server commit precedes the publisher's response. Let resume finish
+  // that response and enter the loop before requesting a graceful fixture stop.
+  await waitWhileRunning(rerun, () => resumedAdapter.decideCalls.length > 0, 'synchronized view did not reach the AI turn');
+  await stopRun(resumed, rerun);
+  const engine = readJson(path.join(gameDir, 'state.json'));
+  const original = engine.handNo === before.handNo && engine.hand ? engine.hand : engine.lastHand;
+  assert.equal(original.actions.filter((row) => row.decisionId === submitted.decisionId).length, 1,
+    'restart applied the same request a second time');
+  const restored = await startExternalServer(gameDir, before.sessionToken);
+  t.after(() => terminateIfAlive(restored.child));
+  const status = await fetch(`http://127.0.0.1:${restored.lock.port}/api/action-status?token=${before.sessionToken}`);
+  assert.equal(status.status, 200, 'the retired receipt must restore after its historical anchor was cleared');
+  await status.text();
+  await terminateIfAlive(restored.child);
+});
+
+test('REQ-007: sidecar rejection survives restart and a corrected new request resumes controls', { timeout: 20_000 }, async (t) => {
+  const { gameDir, loop } = await setupUserFirst(t);
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const decisionId = snapshot.view.legal.decisionId;
+  const submitted = { decisionId, requestId: 'illegal-request', action: 'raise', amount: snapshot.view.legal.maxRaiseTo + 1 };
+  await postUserAction(lock, submitted);
+  const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
+  await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'rejected', 'sidecar did not persist a rejection');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).lastActionAck.reason, 'ILLEGAL_ACTION');
+  await stopRun(loop, running);
+
+  const resumed = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 30 } });
+  t.after(() => resumed.requestStop());
+  await resumed.resume();
+  const rerun = startRun(resumed);
+  const refreshed = await waitForUserSnapshot(gameDir);
+  assert.equal((await postUserAction(refreshed.lock, submitted)).body.code, 'ACTION_REJECTED');
+  assert.equal((await postUserAction(refreshed.lock, {
+    ...preferredUserAction(refreshed.snapshot.view.legal), requestId: 'corrected-request',
+  })).status, 200);
+  await waitWhileRunning(rerun, () => waitForUserAction(gameDir, (row) => row.decisionId === decisionId), 'corrected request was not applied');
+  await stopRun(resumed, rerun);
 });
 
 test('user waitError restarts a dead server, republishes view-only, and re-waits for the action', { timeout: 15_000 }, async (t) => {
@@ -3416,7 +3545,7 @@ test('AI 3 plus user runs the finalization cutoff through the real loop with chi
   assert.equal(sent.size > 0, true);
 });
 
-test('코치는 redacted hand·stats를 reserve 전에 캡처하고 동일 stats·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
+test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only hand·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
   const events = [];
   const coachCalls = [];
   const engineCalls = [];
@@ -3472,7 +3601,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 동일 stats
   const snapshotPath = reserve[reserve.indexOf('--snapshot-file') + 1];
   assert.equal(path.resolve(snapshotPath), path.join(gameDir, 'ui-snapshot.json'));
   const capturedStats = fs.readFileSync(statsPath, 'utf8');
-  assert.equal(upper.prompts[0].includes(capturedStats), true, 'prompt did not reuse the exact stats capture');
+  assert.equal(upper.prompts[0].includes(capturedStats), false, 'outcome-bearing stats leaked into coach prompt');
+  assert.match(upper.prompts[0], /"processStatus":"available"/);
   assert.equal(upper.starts[0].timeoutMs, 120_000);
   for (const args of coachCalls.filter((args) => ['heartbeat', 'reserve', 'bind-handle', 'accept'].includes(args[0]))) {
     assert.equal(args[args.indexOf('--owner') + 1], owner, `${args[0]} minted a per-hand owner`);
@@ -3518,8 +3648,13 @@ test('코치 프롬프트는 상대 비공개 홀카드와 아키타입 literal�
   const record = readJson(path.join(gameDir, 'state.json')).lastHand;
   const privateCards = record.holes.p1;
   const prompt = upper.prompts[0];
+  // Cards are JSON string values in the inline process input. A raw substring
+  // check mistakes "Ac" inside "chosenAction"/"priorActions" for a leaked card.
+  assert.equal(JSON.stringify({ chosenAction: 'fold' }).includes('Ac'), true);
+  for (const card of privateCards) {
+    assert.equal(prompt.includes(JSON.stringify(card)), false, `private card leaked into prompt: ${card}`);
+  }
   for (const literal of [
-    ...privateCards,
     villain.archetype,
     villain.personality,
     String(villain.bluffFreq),
@@ -3590,8 +3725,10 @@ test('코치 1차 빈 text는 종료 확인 후 동일 입력 attempt 2로 교�
   assert.equal(upper.starts.length, 2);
   assert.equal(upper.terminations.length, 2);
   const statsRaw = fs.readFileSync(path.join(gameDir, '.coach-stats-1.json'), 'utf8');
-  assert.equal(upper.prompts[0].includes(statsRaw), true);
-  assert.equal(upper.prompts[1].includes(statsRaw), true);
+  assert.equal(upper.prompts[0].includes(statsRaw), false);
+  assert.equal(upper.prompts[1].includes(statsRaw), false);
+  assert.equal(upper.prompts[0].includes('confidence'), false);
+  assert.equal(upper.prompts[1].includes('confidence'), false);
   const reserves = coachCalls.filter((args) => args[0] === 'reserve');
   assert.deepEqual(reserves.map((args) => args[args.indexOf('--attempt') + 1]), ['1', '2']);
   const unavailable = coachCalls.find((args) => args[0] === 'complete-unavailable');
@@ -5317,7 +5454,10 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
   const holder = await startOwnedLoopHolder(gameDir, { signalLog });
   fs.writeFileSync(
     path.join(gameDir, 'loop.lock.d', 'pid'),
-    `${holder.pid}\nMon Jan  1 00:00:00 2001`,
+    // Wrong in this host's own identity format; a foreign format is 'unknown'.
+    process.platform === 'win32'
+      ? `${holder.pid}\nwin32-v1\n2001-01-01T00:00:00.0000000Z`
+      : `${holder.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
   );
   const signals = [];
   const loop = createGameLoop({
@@ -5355,7 +5495,7 @@ test('--force treats loop pid reuse after TERM as an identity error, not death, 
   const marker = path.join(os.tmpdir(), `holdem-loop-reused-${process.pid}-${Date.now()}`);
   const before = snapshotTree(gameDir);
   const signals = [];
-  const startTimeOf = createStartTimeProbe();
+  const startTimeOf = createStartTimeProbe(ownedProcessStartTime);
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(makeAdapter()),
@@ -5363,7 +5503,7 @@ test('--force treats loop pid reuse after TERM as an identity error, not death, 
       port: 0,
       forceStopMs: 100,
       pollMs: 10,
-      processStartTime: startTimeOf,
+      ownedProcessStartTime: startTimeOf,
       signalProcess: (pid, signal) => {
         signals.push([pid, signal]);
         if (pid === holder.pid && signal === 'SIGTERM') {
@@ -5780,8 +5920,8 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 1_500,
-      finalizeCutoffLeadMs: 1_000,
+      // This tests PID identity and durable cleanup, with the normal finalization
+      // budget. Five real recovery/capture children need not finish within 500 ms.
       signalProcess: (pid, signal) => {
         signalled.push({ pid, signal });
         process.kill(pid, signal);
@@ -5896,8 +6036,6 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 1_200,
-      finalizeCutoffLeadMs: 800,
       coachCaptureCheckpoint: async () => {
         captureEntered();
         await captureGate;
@@ -5906,19 +6044,17 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   });
 
   await loop.resume();
-  // The checkpoint is a deterministic scheduler only. Against the old implementation it
-  // is absent, so continue after one short turn and let the behavior assertions prove the
-  // worker crossed cutoff instead of hanging on the missing hook.
-  await Promise.race([
-    entered,
-    new Promise((resolve) => setTimeout(resolve, 100)),
-  ]);
+  await entered;
   const running = startRun(loop);
-  await waitFor(
-    () => Boolean(readJson(path.join(gameDir, 'loop-state.json')).finalization),
-    'finalization checkpoint did not appear',
+  // The deadline starts during resume, before capture. Observe the real cutoff
+  // under the normal budget rather than sleeping relative to the end of resume.
+  const cutoff = await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
+    'capture stayed blocked without reaching the result-wait cutoff',
+    15_000,
   );
-  await new Promise((resolve) => setTimeout(resolve, 550));
+  assert.equal(cutoff.settled, false, 'the blocked capture did not cross the cutoff');
+  assert.equal(cutoff.pending, 1);
   releaseCapture();
   assert.equal((await running).phase, 'done');
 
@@ -5940,8 +6076,6 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 1_200,
-      finalizeCutoffLeadMs: 800,
       coachSpawnCheckpoint: async () => {
         spawnEntered();
         await spawnGate;
@@ -5952,7 +6086,13 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
   await loop.resume();
   await entered;
   const running = startRun(loop);
-  await new Promise((resolve) => setTimeout(resolve, 550));
+  const cutoff = await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
+    'spawn stayed blocked without reaching the result-wait cutoff',
+    15_000,
+  );
+  assert.equal(cutoff.settled, false, 'the blocked spawn did not cross the cutoff');
+  assert.equal(cutoff.pending, 1);
   releaseSpawn();
   assert.equal((await running).phase, 'done');
 
@@ -5974,24 +6114,24 @@ test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시
     },
   });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
+  const heldOwner = readOwnedLock(gameDir, 'publish.lock.d');
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
     held.release();
   };
-  const timer = setTimeout(release, 700);
   t.after(async () => {
-    clearTimeout(timer);
     release();
     await held.done;
   });
 
-  const startedAt = Date.now();
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
-  const elapsed = Date.now() - startedAt;
 
-  assert.equal(elapsed < 650, true, `deadline abort가 lock release까지 ${elapsed}ms 기다렸다`);
+  // Keep the lock held until rejection. A stopwatch around resume also counts
+  // server/identity setup before the cutoff clock and cleanup after the abort.
+  assert.equal(released, false, 'deadline abort waited for the lock release');
+  assert.deepEqual(readOwnedLock(gameDir, 'publish.lock.d'), heldOwner);
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
   assert.equal(state.finalization.cutoff.reason, 'result_wait_cutoff_exceeded');
@@ -6358,13 +6498,13 @@ test('Task 7A r2: persisted authority fence/cleanup은 shared deadline 아래 ha
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     stateOverrides: { port: external.lock.port },
-    loopOpts: { finalizeBudgetMs: 3_000, finalizeCutoffLeadMs: 2_000 },
   });
 
   const resuming = loop.resume();
   resuming.catch(() => {});
-  await waitFor(() => coachInvocations(calls, 'fence').length >= 1, 'first persisted fence did not start');
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  // Both real children must start while the same lock is still held. Releasing
+  // after an arbitrary delay can hide serialization on a slow scheduler.
+  await waitFor(() => coachInvocations(calls, 'fence').length === 2, 'persisted fence children did not start concurrently');
   const concurrentFences = coachInvocations(calls, 'fence').length;
   release();
   await resuming;
@@ -6768,7 +6908,7 @@ test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시�
   assert.deepEqual(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.sealed, []);
 });
 
-test('Task 7B: evaluator는 전 redacted hand와 stats만 받고 종합자는 결과와 players로 review를 원자 게시한 뒤 done 정리한다', { timeout: 40_000 }, async (t) => {
+test('Task 7B: evaluator는 decision-time process만 받고 종합자는 별도 결과와 players로 review를 원자 게시한 뒤 done 정리한다', { timeout: 40_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   expandFinishedGameToTwoHands(gameDir);
@@ -6802,15 +6942,20 @@ test('Task 7B: evaluator는 전 redacted hand와 stats만 받고 종합자는 �
     assert.equal(start.timeoutMs, 300_000);
   }
   const evaluatorPrompt = upper.evaluatorStarts[0].prompt;
-  assert.match(evaluatorPrompt, /hand 1 \(redacted\):/);
-  assert.match(evaluatorPrompt, /hand 2 \(redacted\):/);
-  assert.match(evaluatorPrompt, /TRACE_ONLY_SENTINEL/);
-  assert.match(evaluatorPrompt, /"sample":2/);
+  assert.match(evaluatorPrompt, /decision-time process input:/);
+  assert.match(evaluatorPrompt, /d-2-preflop-0/);
+  assert.equal(evaluatorPrompt.includes('FUTURE_ACTION_SENTINEL'), false);
+  assert.equal(evaluatorPrompt.includes('endStacks'), false);
+  assert.equal(evaluatorPrompt.includes('showdown'), false);
+  assert.equal(evaluatorPrompt.includes('"sample":2'), false);
   assert.equal(evaluatorPrompt.includes('PRIVATE_ARCHETYPE_SENTINEL'), false);
   assert.equal(evaluatorPrompt.includes('"result":"lose"'), false);
   const synthesizerPrompt = upper.synthesizerStarts[0].prompt;
   assert.match(synthesizerPrompt, new RegExp(evaluatorText));
   assert.match(synthesizerPrompt, /"result":"lose"/);
+  assert.match(synthesizerPrompt, /redacted outcome records/);
+  assert.match(synthesizerPrompt, /endStacks/);
+  assert.equal(synthesizerPrompt.includes('FUTURE_ACTION_SENTINEL'), false);
   assert.match(synthesizerPrompt, /PRIVATE_ARCHETYPE_SENTINEL/);
   assert.equal(synthesizerPrompt.includes('TRACE_ONLY_SENTINEL'), true, 'evaluator output was not preserved verbatim');
 
@@ -7356,7 +7501,7 @@ test('Task 7B: gameOver resume phase 유도는 loop-state 유무와 무관하게
 test('production --store-dir creates permanent sessions and resume reuses current', { timeout: 60_000, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'production spawn uses POSIX PATH/shebang fixtures')) return;
   const storeDir = tmpGame();
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-store-main-bin-'));
+  const binDir = createOwnedTempDir('holdem-store-main-bin');
   const claudePath = path.join(binDir, 'claude');
   fs.writeFileSync(claudePath, `#!/usr/bin/env node
     const fs = require('node:fs');
@@ -7371,12 +7516,39 @@ test('production --store-dir creates permanent sessions and resume reuses curren
   `);
   fs.chmodSync(claudePath, 0o755);
   const children = new Set();
+  const sessions = new Set();
+  const stopSessionRelay = async (sessionDir) => {
+    const file = path.join(sessionDir, 'lock.json');
+    if (!fs.existsSync(file)) return;
+    const lock = readJson(file);
+    const start = processStartTime(lock.serverPid);
+    if (start === null) { await waitUntilDead(lock.serverPid); return; }
+    const { stdout } = await execFileAsync(REAL_PS, ['-p', String(lock.serverPid), '-o', 'args=']);
+    const args = stdout.trim();
+    assert.ok(args.includes(SERVER) && args.includes(sessionDir));
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      if (processStartTime(lock.serverPid) === null) { await waitUntilDead(lock.serverPid); return; }
+      assert.equal(processStartTime(lock.serverPid), start);
+      assert.equal((await execFileAsync(REAL_PS, ['-p', String(lock.serverPid), '-o', 'args='])).stdout.trim(), args);
+      assert.equal(processStartTime(lock.serverPid), start);
+      process.kill(lock.serverPid, signal);
+      try { await waitUntilDead(lock.serverPid); return; } catch (error) { if (signal === 'SIGKILL') throw error; }
+    }
+  };
   t.after(async () => {
     await Promise.all([...children].map((child) => terminateIfAlive(child)));
+    for (const sessionDir of sessions) await stopSessionRelay(sessionDir);
+    if (fs.existsSync(path.join(storeDir, '.training', 'study-service.json'))) {
+      const service = await inspectStudyService(storeDir);
+      if (service.status === 'running') {
+        await stopStudyService(storeDir, { expectedInstanceId: service.instanceId });
+        assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+      }
+    }
   });
 
   const launch = async (mode, expectedPreviousGameId = null) => {
-    const argv = [GAME_LOOP, '--store-dir', storeDir, '--player-runtime', 'claude'];
+    const argv = [GAME_LOOP, '--store-dir', storeDir, '--player-runtime', 'claude', '--port', '0'];
     if (mode === 'resume') argv.push('--resume');
     else argv.push('--ai', '1', '--stack', '100');
     const child = spawn(process.execPath, argv, {
@@ -7390,6 +7562,7 @@ test('production --store-dir creates permanent sessions and resume reuses curren
         if (mode === 'new' && expectedPreviousGameId !== null && current.gameId === expectedPreviousGameId) return null;
         if (mode === 'resume' && expectedPreviousGameId !== null && current.gameId !== expectedPreviousGameId) return null;
         const sessionDir = path.join(storeDir, '.session-store', current.sessionRel);
+        sessions.add(sessionDir);
         const loopState = readJson(path.join(sessionDir, 'loop-state.json'));
         if (loopState.phase !== 'playing') return null;
         return { current, sessionDir, loopState };
@@ -7413,13 +7586,7 @@ test('production --store-dir creates permanent sessions and resume reuses curren
       true,
       JSON.stringify(outcome),
     );
-    try {
-      const lock = readJson(path.join(selected.sessionDir, 'lock.json'));
-      if (Number.isInteger(lock.serverPid)) {
-        try { process.kill(lock.serverPid, 'SIGTERM'); } catch { /* already dead */ }
-        await waitUntilDead(lock.serverPid).catch(() => {});
-      }
-    } catch { /* graceful requestStop already removed the lock */ }
+    await stopSessionRelay(selected.sessionDir);
     children.delete(child);
     return selected;
   };
@@ -7483,4 +7650,132 @@ test('CLI parser covers the full surface and halt errors map to stable process e
   assert.equal(exitCodeFor({ code: 'REVIEW_FAILED' }), 3);
   assert.equal(exitCodeFor({ code: 'NO_PLAYER_RUNTIME' }), 4);
   assert.equal(exitCodeFor({ code: 'STOPPING' }), 5);
+});
+
+// S2 accepted-review regressions use the real capture/reserve/seal/publish lifecycle.
+function removeProcessDecisions(gameDir) {
+  const file = path.join(gameDir, 'state.json');
+  const state = readJson(file);
+  if (state.lastHand) state.lastHand.decisions = [];
+  if (state.hand) state.hand.decisions = [];
+  fs.writeFileSync(file, JSON.stringify(state));
+  for (const name of fs.existsSync(path.join(gameDir, 'hands')) ? fs.readdirSync(path.join(gameDir, 'hands')) : []) {
+    const target = path.join(gameDir, 'hands', name);
+    const record = readJson(target);
+    record.decisions = [];
+    fs.writeFileSync(target, JSON.stringify(record));
+  }
+}
+
+test('S2 unavailable-only coaching seals and publishes without any model call', { timeout: 20_000 }, async (t) => {
+  const calls = [];
+  const upper = makeCoachAdapter();
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper, loopOpts: { onCoachInvoke: (args) => calls.push({ kind: 'coach', args }) },
+  });
+  removeProcessDecisions(gameDir);
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 0, 'missing decisions must never receive ordinary coaching');
+  assert.equal(note.unavailable, true);
+  assert.equal(coachInvocations(calls, 'reserve').length, 1);
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 0);
+  const completed = coachInvocations(calls, 'complete-unavailable');
+  assert.equal(completed.length, 1);
+  assert.notEqual(flagValue(completed[0], '--generation'), null);
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.ok(auth.publishedSeals['1']);
+  assert.deepEqual(auth.publishQueue, {});
+});
+
+test('S2 unavailable-only final review closes the existing lifecycle without evaluator or synthesizer', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  removeProcessDecisions(gameDir);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length + upper.starts.length, 0);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.match(snapshot.review, /판정 불가/);
+  assert.match(snapshot.review, /결정 시점/);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reviewGate, 'open');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+test('S2 coach rejects unsupported authority through both existing attempts and publishes unavailable', { timeout: 20_000 }, async (t) => {
+  const upper = makeCoachAdapter({ rounds: [
+    { raw: JSON.stringify({ handNo: 1, text: '이것이 GTO 전략입니다.' }) },
+    { raw: JSON.stringify({ handNo: 1, text: 'EV 3bb를 벌었으므로 확정 누수는 없습니다.' }) },
+  ] });
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 2);
+  assert.equal(note.unavailable, true);
+  assert.doesNotMatch(note.text, /GTO 전략|EV 3bb/);
+});
+
+test('S2 evaluator and synthesizer authority claims cannot cross retries or publication', { timeout: 30_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: 'This is the optimal choice.' }, { raw: '참고용 과정 평가입니다.' }],
+    synthesizerRounds: [{ raw: `${VALID_REVIEW}\nThis move is solver certified.` }, { raw: VALID_REVIEW }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length, 2);
+  assert.equal(upper.synthesizerStarts.length, 2);
+  assert.equal(upper.synthesizerStarts.some((row) => row.prompt.includes('the optimal choice')), false);
+  assert.doesNotMatch(readJson(path.join(gameDir, 'ui-snapshot.json')).review, /the optimal choice|solver certified/);
+});
+
+test('S2 mixed coaching sends eligible decisions only and appends a separate unavailable notice', { timeout: 20_000 }, async (t) => {
+  const upper = makeCoachAdapter();
+  const { gameDir, loop } = await setupCoachHand(t, { upper });
+  const stateFile = path.join(gameDir, 'state.json');
+  const state = readJson(stateFile);
+  const decision = structuredClone(state.hand.decisions.find((row) => row.actorId === 'user'));
+  decision.decisionId = 'd-1-turn-999';
+  decision.legal = null;
+  decision.chosenAction.outcome = 'UNAVAILABLE_PRIVATE_SENTINEL';
+  state.hand.decisions.push(decision);
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 1);
+  assert.doesNotMatch(upper.prompts[0], /d-1-turn-999|UNAVAILABLE_PRIVATE_SENTINEL|"processStatus":"unavailable"/);
+  assert.match(upper.prompts[0], /"processStatus":"available"/);
+  assert.match(note.text, /과정 판정 불가/);
+  assert.match(note.text, /기본 코치 응답/);
+});
+
+test('S2 mixed review sends eligible hands only and retains deterministic excluded-hand notices', { timeout: 25_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const archiveFile = path.join(gameDir, 'hands', 'hand-0001.json');
+  const archive = readJson(archiveFile);
+  archive.decisions[0].legal = null;
+  archive.endStacks = { user: 'UNAVAILABLE_OUTCOME_SENTINEL' };
+  fs.writeFileSync(archiveFile, JSON.stringify(archive));
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(upper.evaluatorStarts.length, 1);
+  assert.equal(upper.synthesizerStarts.length, 1);
+  assert.doesNotMatch(upper.evaluatorStarts[0].prompt, /d-1-preflop-0|UNAVAILABLE_OUTCOME_SENTINEL|"processStatus":"unavailable"/);
+  assert.match(upper.evaluatorStarts[0].prompt, /d-2-preflop-0/);
+  assert.doesNotMatch(upper.synthesizerStarts[0].prompt, /UNAVAILABLE_OUTCOME_SENTINEL|과정 판정 불가/);
+  const review = readJson(path.join(gameDir, 'ui-snapshot.json')).review;
+  assert.match(review, /과정 판정 불가: 핸드 1/);
+  assert.match(review, /팟 오즈 확인/);
 });

@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -7,13 +8,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gameEpochOf } from '../publish-contract.js';
 import { createGameLoop } from '../tools/game-loop.js';
+import { resolveRuntimes } from '../tools/player-runtime.js';
 import { decide, stampPlayerPolicies } from '../tools/policy-player.js';
-import { assignmentFor } from '../training/policies/catalog.js';
+import { assignmentFor, policyById } from '../training/policies/catalog.js';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-policy-loop-'));
+  return createOwnedTempDir('holdem-policy-loop');
 }
 
 function readJson(file) {
@@ -154,11 +156,53 @@ test('policy resume re-stamps seats missing after init crash and reproduces init
   assert.deepEqual(readJson(path.join(gameDir, 'players.json')), stamped);
 });
 
+test('early learning defaults preserve a legacy v1 policy session on resume', { timeout: 15000 }, async (t) => {
+  const gameDir = tmp();
+  execFileSync(process.execPath, [ENGINE, 'init', '--ai', '2', '--stack', '900', '--opponent-runtime', 'policy', '--game-dir', gameDir], {
+    encoding: 'utf8', timeout: 10000,
+  });
+  const playersPath = path.join(gameDir, 'players.json');
+  const players = readJson(playersPath);
+  const policy = policyById('baseline-v1');
+  for (const player of players) {
+    if (player.playerId !== 'user') player.policy = {
+      policyId: policy.policyId, policyVersion: policy.policyVersion, configDigest: policy.configDigest,
+    };
+  }
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+  const beforePlayers = fs.readFileSync(playersPath);
+  const before = readJson(path.join(gameDir, 'state.json'));
+  let need;
+  const loop = createGameLoop({ gameDir, opts: { port: 0 }, resolver: async (input) => {
+    need = input.need;
+    return { player: null, upper: null, notices: [] };
+  } });
+  t.after(() => loop.requestStop());
+  const resumed = await loop.resume();
+  assert.equal(need, 'upper-only');
+  assert.equal(resumed.opponentRuntime, 'policy');
+  assert.deepEqual(fs.readFileSync(playersPath), beforePlayers);
+  const after = readJson(path.join(gameDir, 'state.json'));
+  assert.deepEqual(after.config, before.config);
+  assert.equal(after.policySeed, before.policySeed);
+  assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
+  const pid = loop.serverPid;
+  await loop.requestStop();
+  assert.throws(() => process.kill(pid, 0), (error) => error.code === 'ESRCH');
+});
+
 test('policy mode reaches done without an LLM player runtime', { timeout: 40_000 }, async (t) => {
   const gameDir = tmp();
   const loop = createGameLoop({
     gameDir,
-    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    resolver: ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
+      need, canaryAbsPath, onAdapterCreated: registerAdapter,
+      createRuntime: (kind) => ({
+        kind,
+        async probe() { return { ok: false, upper: false, containment: false }; },
+        async dispose() {},
+      }),
+    }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy' },
   });
   t.after(() => loop.requestStop().catch(() => {}));
@@ -195,8 +239,14 @@ test('policy mode reaches done without an LLM player runtime', { timeout: 40_000
   const finished = await running;
   await driver;
   assert.equal(finished.phase, 'done');
+  assert.ok(finished.notices.some((notice) => /LLM.*코치.*리뷰/.test(notice)));
+  assert.equal(finished.notices.some((notice) => notice.includes('리뷰는 생성되지 않습니다')), false);
   const review = fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8');
-  assert.match(review, /machine-only/);
+  assert.match(review, /LLM.*설명.*제공할 수 없/);
+  assert.match(review, /플레이한 핸드/);
+  assert.match(review, /설정된 성향/);
+  assert.match(review, /관찰/);
+  assert.doesNotMatch(review, /agentHandle|policyModelKind|policyTraitsEvidence|"playerId"|"vpip"|machine-only|"kind"/);
   assert.match(review, /## 각 AI의 실제 아키타입 공개/);
   assert.equal(review.includes(readJson(path.join(gameDir, 'state.json')).policySeed), false);
 });

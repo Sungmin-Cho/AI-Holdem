@@ -37,12 +37,32 @@ test('스킬 frontmatter는 그대로다 — 슬래시 명령 인식의 계약',
   assert.match(fm, /^\s+user-invocable:\s*true\s*$/m);
 });
 
-test('스킬 §2: 토너먼트 기본 n=3, cash-training 기본 n=5', () => {
+test('스킬 §2: 새 store는 policy 학습 n=5이고 명시 토너먼트는 n=3이다', () => {
   const start = section(read(SKILL), '## 2. 시작');
   assert.match(start, /n=3/);
   assert.match(start, /n=5/);
   assert.match(start, /cash-training/);
   assert.match(start, /6인/);
+  assert.match(start, /기본.*cash-training|cash-training.*기본/);
+  assert.match(start, /20핸드/);
+  assert.match(start, /--opponent-runtime llm/);
+});
+
+test('S8 문서: 기본 학습, 독립 study 소유권과 버전 보존 복구를 안내한다', () => {
+  for (const file of ['README.md', 'AGENTS.md', 'ARCHITECTURE.md', SKILL]) {
+    const doc = read(file);
+    assert.match(doc, /policy/);
+    assert.match(doc, /100BB/);
+    assert.match(doc, /20핸드/);
+    assert.match(doc, /study-service/);
+    assert.match(doc, /휴리스틱/);
+    assert.match(doc, /v2/);
+  }
+  const readme = read('README.md');
+  assert.match(readme, /npm run study -- \/absolute\/store/);
+  assert.match(readme, /--mode tournament/);
+  assert.match(readme, /roll-forward/);
+  assert.doesNotMatch(readme, /nohup node tools\/game-loop\.js --store-dir game --ai 3/);
 });
 
 test('스킬: 사이드카 기동 문면과 폴링 종료 조건 3가지가 있다', () => {

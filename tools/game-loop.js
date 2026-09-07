@@ -7,11 +7,13 @@ import { fileURLToPath } from 'node:url';
 import {
   acquireOwnedLock,
   processStartTime,
+  ownedProcessStartTime,
   readOwnedLock,
   releaseOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
+import { createRelayRootOwner, writeRelayJsonAtomic } from '../server/action-receipts.js';
 import {
   buildPlayerPrompt,
   extractJsonLine,
@@ -19,12 +21,14 @@ import {
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
-import { collectPrivateLiterals, gameEpochOf } from '../publish-contract.js';
+import { collectPrivateLiterals, gameEpochOf, validateActionAck } from '../publish-contract.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
+import { buildProcessInput } from '../training/process-review.js';
+import { referenceClaimAllowed } from '../shared/reference.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   buildExplanationPrompt,
@@ -49,6 +53,7 @@ import {
   writePracticeFocus,
 } from './profile-cli.js';
 import { createProfileStore } from './training-stores.js';
+import { ensureStudyService } from './study-service.js';
 import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
 import {
   commitSession,
@@ -168,10 +173,11 @@ function readStrictServerLock(gameDir) {
   }
 }
 
-function integerValue(value, flag) {
-  if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 양의 정수여야 합니다.`);
+function integerValue(value, flag, minimum = 1) {
+  const label = minimum === 0 ? '0 이상의 정수' : '양의 정수';
+  if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) throw codedError('USAGE', `${flag}는 양의 정수여야 합니다.`);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
   return parsed;
 }
 
@@ -189,8 +195,17 @@ export function engineInitFlags(args = {}) {
 
 export function applyModeDefaults(args) {
   const next = { ...args };
+  const freshStore = next.storeDir !== undefined && !next.resume;
+  if (freshStore && next.mode === undefined && next.stack === undefined && next.levelEvery === undefined) {
+    next.mode = 'cash-training';
+  }
   if (!next.resume && next.mode === 'cash-training' && next.ai === undefined) {
     next.ai = 5;
+  }
+  if (freshStore && next.mode === 'cash-training') {
+    if (next.stack === undefined && next.stackBb === undefined) next.stackBb = 100;
+    if (next.hands === undefined) next.hands = 20;
+    if (next.opponentRuntime === undefined) next.opponentRuntime = 'policy';
   }
   return next;
 }
@@ -203,9 +218,9 @@ export function gtoEvalNotice(config = {}) {
   const badStack = !Number.isFinite(stackBb) || Math.abs(stackBb - 100) > 1;
   if (!badSeats && !badStack) return null;
   const parts = [];
-  if (badSeats) parts.push(`${Number.isFinite(seats) ? seats : '?'}인`);
-  if (badStack) parts.push(`startStackBb=${stackBb ?? '없음'}`);
-  return `GTO 프리플랍 평가는 6-max 100BB만 지원합니다 (현재 ${parts.join(', ')}).`;
+  if (badSeats) parts.push(Number.isFinite(seats) ? `${seats}인` : '좌석 수 확인 불가');
+  if (badStack) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
+  return `휴리스틱 프리플롭 기준표 비교는 6인·100BB 조건의 지원 스팟에서만 제공됩니다 (현재 ${parts.join(', ')}).`;
 }
 
 export function parseGameLoopArgs(argv) {
@@ -243,6 +258,7 @@ export function parseGameLoopArgs(argv) {
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
     ['--solver', 'solverAdapterId'],
+    ['--port', 'port'],
   ]);
   let sawGameDir = false;
 
@@ -260,8 +276,8 @@ export function parseGameLoopArgs(argv) {
     index += 1;
     if (valueName === 'gameDir') sawGameDir = true;
     if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery'
-      || valueName === 'stackBb' || valueName === 'hands') {
-      parsed[valueName] = integerValue(value, arg);
+      || valueName === 'stackBb' || valueName === 'hands' || valueName === 'port') {
+      parsed[valueName] = integerValue(value, arg, valueName === 'port' ? 0 : 1);
     } else if (valueName === 'gameDir' || valueName === 'storeDir' || valueName === 'practiceFocusFile') {
       parsed[valueName] = path.resolve(value);
     } else {
@@ -270,6 +286,9 @@ export function parseGameLoopArgs(argv) {
   }
   if (parsed.storeDir !== undefined && sawGameDir) {
     throw codedError('USAGE', '--store-dir와 --game-dir는 함께 사용할 수 없습니다.');
+  }
+  if (parsed.port !== undefined && (parsed.port < 0 || parsed.port > 65535)) {
+    throw codedError('USAGE', '--port는 0..65535 정수여야 합니다.');
   }
   if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
     throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
@@ -402,15 +421,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
+  const ownedStartTimeOf = opts.ownedProcessStartTime ?? ownedProcessStartTime;
   const listenerOwnedByFn = opts.listenerOwnedBy ?? createListenerOwnedBy({
     lsofPath,
     timeoutMs: osVerifyMs,
+    onChild: (event, child) => {
+      if (event === 'open') activeChildren.add(child);
+      else activeChildren.delete(child);
+    },
   });
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
   const storeDir = opts.storeDir ?? null;
+  // The store launcher owns the store loop lock. Legacy API callers may use a
+  // separate profile store while keeping their game-dir ownership unchanged.
+  const ownsStore = storeDir !== null && path.resolve(storeDir) === lockRoot;
   // 플래그는 새 solve pending 생성만 게이트한다. 이미 pending에 적힌 adapterId는
   // 플래그 없이도 resume에서 재개된다.
   const solverAdapterId = typeof opts.solverAdapterId === 'string' && opts.solverAdapterId
@@ -456,6 +483,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
+  let studyPromise = null;
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
   let finalizeResultWaitCutoffNs = null;
@@ -888,6 +916,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const runCliBeforeResultCutoff = (args) => runCli(args, resultWaitSupervisor());
   const runCoachBeforeResultCutoff = (args) => runCoach(args, resultWaitSupervisor());
   const runPublish = (args) => {
+    // Replayed bodies and queued/fallback envelopes cross the same output boundary.
+    const from = args.indexOf('--from');
+    let envelope;
+    try {
+      envelope = args.includes('--retry')
+        ? readJsonOptional(path.join(root, '.publish-attempt.json'), 'PUBLISH_ATTEMPT')?.body
+        : (from >= 0 ? readJsonOptional(args[from + 1], 'PUBLISH_ENVELOPE') : null);
+    } catch (error) {
+      // The publisher owns malformed-attempt rejection and its BAD_ATTEMPT code
+      // drives the existing bounded recovery matrix. A syntax-invalid JSON file
+      // has no publishable feedback; let that parser reject it, without bypassing
+      // claim validation for a readable replay or swallowing I/O failures.
+      if (!args.includes('--retry') || error.code !== 'BAD_PUBLISH_ATTEMPT'
+        || !(error.cause instanceof SyntaxError)) throw error;
+    }
+    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
+    if (feedback.some((text) => !referenceClaimAllowed(text))) {
+      throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
+    }
     // After the cutoff every publication must carry the single finalization deadline:
     // publish.js refuses new play-time bodies once `noNewPlayTimePublishers` is set, and
     // the deadline is what bounds the residual drain to the remaining budget.
@@ -918,7 +965,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const listenerOwnedBy = async (pid, port) => {
     try {
-      return await listenerOwnedByFn(pid, port);
+      return await listenerOwnedByFn(pid, port, { timeoutMs: assertAndBoundFinalizationMs(osVerifyMs) });
     } catch (error) {
       if (error?.code === 'SERVER_LISTENER_UNAVAILABLE') {
         throw codedError('SERVER_LISTENER_UNAVAILABLE', error.message, { cause: error });
@@ -963,6 +1010,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ) {
         throw codedError('SERVER_AUTH_FAILED', '서버 token 인증 응답이 relay snapshot 계약과 다릅니다.');
       }
+      return snapshot;
     } catch (error) {
       if (error.code === 'STOPPING') throw error;
       if (error.code === 'SERVER_AUTH_FAILED') throw error;
@@ -981,13 +1029,46 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!ownsListener) {
       throw codedError('SERVER_LISTENER_MISMATCH', 'lock.serverPid가 lock.port listener를 소유하지 않습니다.');
     }
-    await assertAuthenticatedServer(port, sessionToken, { stopAware });
+    const snapshot = await assertAuthenticatedServer(port, sessionToken, { stopAware });
     if (stopAware) assertNotStopping();
+    return snapshot;
   };
 
-  const identityStillAlive = (pid, startTime) => {
+  const ensureStudyForOwner = async () => {
+    if (!ownsStore) return null;
+    assertNotStopping();
+    if (!lockHandle) throw codedError('PARENT_IDENTITY_MISMATCH', 'store loop ownership가 없습니다.');
+    const pending = ensureStudyService(storeDir, {
+      parentIdentity: { pid: lockHandle.pid, startTime: lockHandle.startTime },
+    });
+    studyPromise = pending;
+    try {
+      const service = await pending;
+      assertNotStopping();
+      return service;
+    } finally {
+      if (studyPromise === pending) studyPromise = null;
+    }
+  };
+
+  const matchesStoreRelay = async ({ port, sessionToken }, snapshot, study, { stopAware }) => {
+    if (!study) return true;
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { 'x-session-token': sessionToken },
+      signal: AbortSignal.timeout(assertAndBoundFinalizationMs(500)),
+    });
+    if (stopAware) assertNotStopping();
+    let health = null;
+    try { health = await response.json(); } catch { /* incompatible owned relay */ }
+    if (stopAware) assertNotStopping();
+    return response.ok && health?.ok === true && health.protocolVersion === 2
+      && health.capabilities?.actionReceipts === true && health.capabilities?.studyLink === true
+      && snapshot.studyUrl === study.studyUrl;
+  };
+
+  const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
     if (!processAlive(pid)) return false;
-    const current = startTimeOf(pid);
+    const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
     if (current === null) {
       throw codedError('IDENTITY_UNAVAILABLE', `pid ${pid} startTime을 재검증할 수 없습니다.`);
     }
@@ -1008,11 +1089,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     unavailableCode,
     mismatchCode,
     label,
+    owned = false,
   }) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!processAlive(pid)) return true;
-      const current = startTimeOf(pid);
+      const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
       if (current === null) {
         // 종료 직후 kill(0)은 아직 성공하지만 ps identity가 먼저 사라지는
         // 짧은 전이 창이 있다. unknown을 사망으로 승격하지 않고 deadline까지 재확인한다.
@@ -1027,7 +1109,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await sleep(pollMs);
     }
     if (!processAlive(pid)) return true;
-    const current = startTimeOf(pid);
+    const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
     if (current === null) {
       throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
     }
@@ -1054,7 +1136,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const signalLoopOwner = (signal) => {
       assertSameLoopOwner(expected);
       // lock 동일성 검사 직후 startTime을 한 번 더 맞춘 뒤 동기적으로 시그널한다.
-      if (!identityStillAlive(expected.pid, expected.startTime)) {
+      if (!identityStillAlive(expected.pid, expected.startTime, { owned: true })) {
         throw codedError('LOOP_IDENTITY_MISMATCH', '정지 대상 loop pid identity가 바뀌었습니다.');
       }
       return sendSignal(expected.pid, signal, 'LOOP_SIGNAL_FAILED');
@@ -1064,6 +1146,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
       mismatchCode: 'LOOP_IDENTITY_MISMATCH',
       label: 'loop',
+      owned: true,
     })) return;
     // KILL 직전에도 lock pid+startTime이 같은 소유자를 가리킬 때만 신호한다.
     signalLoopOwner('SIGKILL');
@@ -1071,6 +1154,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       unavailableCode: 'LOOP_IDENTITY_UNAVAILABLE',
       mismatchCode: 'LOOP_IDENTITY_MISMATCH',
       label: 'loop',
+      owned: true,
     })) {
       throw codedError('LOOP_ALIVE', '기존 게임 루프 종료를 확인하지 못해 아카이브하지 않습니다.');
     }
@@ -1184,6 +1268,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!Number.isSafeInteger(desiredPort) || desiredPort < 0 || desiredPort > 65_535) {
       throw codedError('BAD_SERVER_PORT', `서버 재기동 port가 올바르지 않습니다: ${desiredPort}`);
     }
+    const study = ownsStore ? await ensureStudyForOwner() : null;
+    if (recovery) d9Checkpoint('after-study-ensure');
     const ownsPin = providedPin === null;
     let pin = providedPin ?? openServerLockPin();
     try {
@@ -1208,17 +1294,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
           }
-          await assertServerBinding(confirmed, { stopAware });
+          const snapshot = await assertServerBinding(confirmed, { stopAware });
           if (stopAware) assertNotStopping();
           if (startTimeOf(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
+          }
+          const compatible = study ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
+          if (study) {
+            assertPinnedServerLock(pin);
+            if (startTimeOf(existing.serverPid) !== startTime) {
+              throw codedError('SERVER_IDENTITY_CHANGED', 'store relay identity가 capability 검증 중 바뀌었습니다.');
+            }
           }
           serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
           serverPid = existing.serverPid;
           serverIdentity = { pid: existing.serverPid, startTime };
           serverAdopted = serverChild === null;
           serverStartupIdentityMissing = false;
-          return existing.port;
+          if (compatible) return existing.port;
+          // Ownership/authentication is already proved. Retire only this pinned
+          // relay when it lacks receipts or the current service capability URL.
+          await stopServer({ boundToFinalizationDeadline: recovery });
+          if (recovery) d9Checkpoint('after-incompatible-relay-stop');
+          else if (stopAware) assertNotStopping();
+          log('server-capability-replaced', { pid: existing.serverPid });
         }
 
         const confirmed = assertPinnedServerLock(pin);
@@ -1237,6 +1336,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--game-dir', root,
         '--port', String(desiredPort),
         '--token', sessionToken,
+        ...(study ? ['--study-url', study.studyUrl] : []),
       ];
       const child = spawn(process.execPath, argv, {
         cwd: ROOT,
@@ -1287,34 +1387,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 startup 중 바뀌었습니다.');
           }
+          // Keep a fresh inode/bytes pin across listener, token and study URL
+          // checks, then revalidate both the child and the pinned lock.
           if (pin) closeServerLockPin(pin);
+          const startupRootOwner = createRelayRootOwner(root);
           pin = openServerLockPin();
-          if (!pin) {
-            throw codedError('SERVER_LOCK_REPLACED', '새 server lock을 고정할 수 없습니다.');
+          if (!pin) throw codedError('SERVER_LOCK_REPLACED', '새 server lock을 고정할 수 없습니다.');
+          const pinned = assertPinnedServerLock(pin);
+          if (pinned.serverPid !== child.pid || pinned.port !== lock.port || pinned.sessionToken !== sessionToken) {
+            throw codedError('SERVER_LOCK_REPLACED', '새 server lock identity가 바뀌었습니다.');
           }
-          await assertServerBinding(
-            { serverPid: lock.serverPid, port: lock.port, sessionToken },
-            { stopAware },
-          );
+          const snapshot = await assertServerBinding(pinned, { stopAware });
+          if (study && !await matchesStoreRelay(pinned, snapshot, study, { stopAware })) {
+            throw codedError('SERVER_CAPABILITY_MISMATCH', '새 store relay의 학습 capability 연결이 올바르지 않습니다.');
+          }
           if (stopAware) assertNotStopping();
           const confirmed = assertPinnedServerLock(pin);
-          if (
-            confirmed.serverPid !== lock.serverPid
-            || confirmed.port !== lock.port
-            || confirmed.sessionToken !== sessionToken
-            || child.exitCode !== null
-            || child.signalCode !== null
-            || startTimeOf(lock.serverPid) !== spawnedStartTime
-          ) {
+          if (child.exitCode !== null || child.signalCode !== null || startTimeOf(child.pid) !== spawnedStartTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 binding 뒤 바뀌었습니다.');
           }
-          // Windows cannot rename-replace a path that still has an open handle.
-          // The pin already proved binding; drop it before merging serverStartTime.
           closeServerLockPin(pin);
           pin = null;
-          writeJsonAtomic(lockPath, { ...confirmed, serverStartTime: spawnedStartTime });
-          const merged = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-          if (merged.serverStartTime !== spawnedStartTime || merged.serverPid !== lock.serverPid) {
+          writeRelayJsonAtomic(startupRootOwner, 'lock.json', { ...confirmed, serverStartTime: spawnedStartTime });
+          const merged = readServerLock();
+          if (merged?.serverStartTime !== spawnedStartTime || merged.serverPid !== child.pid
+            || merged.port !== confirmed.port || merged.sessionToken !== sessionToken) {
             throw codedError('SERVER_IDENTITY_CHANGED', 'serverStartTime 병합이 서버 lock을 바꾸었습니다.');
           }
           return merged.port;
@@ -2449,12 +2546,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return out;
   };
 
-  const runAtomicStepPublish = async (stepArgs, publishFlags = []) => {
+  const runAtomicStepPublish = async (stepArgs, publishFlags = [], actionAck) => {
     const atomicUnit = beginAtomicTransition();
     try {
       const envelope = await runCli(stepArgs);
       const flags = typeof publishFlags === 'function' ? publishFlags(envelope) : publishFlags;
-      return await publishEnvelope(envelope, flags);
+      return await publishEnvelope(actionAck ? { ...envelope, actionAck } : envelope, flags);
     } finally {
       atomicUnit.finish();
     }
@@ -2536,17 +2633,60 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return { path: filePath, literals };
   };
 
+  const parseCapturedHand = (raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const processPracticeFocus = (raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      const goal = parsed?.goal && typeof parsed.goal === 'object' && !Array.isArray(parsed.goal)
+        ? {
+          id: parsed.goal.id ?? null,
+          recommendedDrill: parsed.goal.recommendedDrill ?? null,
+          severity: parsed.goal.severity ?? null,
+          sampleWeight: parsed.goal.sampleWeight ?? parsed.goal.confidence ?? null,
+          reason: parsed.goal.reason ?? null,
+        }
+        : null;
+      return JSON.stringify({
+        origin: parsed?.origin ?? null,
+        focus: parsed?.focus ?? null,
+        goal,
+      });
+    } catch {
+      return '없음';
+    }
+  };
+
+  const eligibleProcessInput = (input) => ({
+    schemaVersion: input.schemaVersion,
+    hands: input.hands.map((hand) => ({
+      schemaVersion: hand.schemaVersion, handNo: hand.handNo,
+      decisions: hand.decisions.filter((decision) => decision.processStatus === 'available'),
+    })).filter((hand) => hand.decisions.length > 0),
+  });
+
+  const unavailableProcessNotice = (input) => {
+    if (input.unavailableReasons.length === 0) return '';
+    const hands = [...new Set(input.unavailableReasons.map((row) => row.handNo).filter(Number.isSafeInteger))];
+    return `과정 판정 불가: ${hands.length ? `핸드 ${hands.join(', ')}` : '일부 결정'}의 결정 시점 증거가 없거나 올바르지 않아 해당 결정은 평가에서 제외했습니다.`;
+  };
+
   const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
-    const practiceFocus = readInstalledPracticeFocus(root) ?? '없음';
+    const practiceFocus = processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null');
+    const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     const prompt = [
       '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
       '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
       '',
       `hand ${handNo} (redacted):`,
-      inputs.hand.raw,
-      '',
-      'stats (reserve가 읽은 동일 캡처):',
-      inputs.stats.raw,
+      JSON.stringify(eligibleProcessInput(processInput)),
       '',
       'practiceFocus:',
       practiceFocus,
@@ -2557,6 +2697,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 공개 근거로 무난한 폴드라고 평가한다.',
       '특별한 누수가 없다면 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.',
       '팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.',
+      '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
       overfoldReserved
         ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
         : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
@@ -2584,6 +2725,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || Object.keys(note).some((field) => !allowed.has(field))
     ) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력 필드 계약이 올바르지 않습니다.');
+    }
+    if (!referenceClaimAllowed(note.text)) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 근거 범위를 벗어납니다.');
     }
     if (forbiddenLiterals.some((literal) => literal && note.text.includes(literal))) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력에 private literal이 포함됐습니다.');
@@ -3125,6 +3269,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     }
     if (coachWorkSuspended()) return;
+    const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
+    if (eligibleProcessInput(processInput).hands.length === 0) {
+      await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
+        reason: 'process-evidence-unavailable', fallbackEnvelopePath: descriptor.exactEnvelopePath });
+      return;
+    }
     for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
       const currentDescriptor = descriptor;
       if (attempt > 1 && !coachReplacementAllowed()) {
@@ -3182,6 +3332,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
         const note = validateCoachNote(completed?.raw, handNo, deny.literals);
+        const unavailableNotice = unavailableProcessNotice(processInput);
+        if (unavailableNotice) note.text += `\n${unavailableNotice}`;
         writeJsonAtomic(currentDescriptor.exactResultPath, note);
         await runCoachBeforeResultCutoff([
           'accept',
@@ -3466,6 +3618,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let accepted = false;
     try {
       const deny = writeCoachDeny(action.handNo);
+      validateCoachNote(fs.readFileSync(action.exactResultPath, 'utf8'), action.handNo, deny.literals);
       await runCoachBeforeResultCutoff([
         'accept',
         '--owner', owner,
@@ -3726,6 +3879,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
     }
     const text = raw.trim();
+    if (!referenceClaimAllowed(text)) {
+      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 출력이 근거 범위를 벗어납니다.');
+    }
     if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
       throw codedError('INVALID_REVIEW_OUTPUT', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
     }
@@ -3792,7 +3948,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('REVIEW_ATTEMPTS_EXHAUSTED', `${stage} 시도를 완료하지 못했습니다.`);
   };
 
-  const buildEvaluatorPrompt = ({ completed, hands, statsRaw }) => [
+  const buildEvaluatorPrompt = ({ completed, processInput }) => [
     '역할: 격리 evaluator',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     '각 결정 시점에 사용자가 볼 수 있었던 공개 정보만으로 과정 품질을 한국어로 평가하라.',
@@ -3800,20 +3956,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '표본이 30핸드 미만이면 반드시 참고용이라고 명시하라.',
     ...(trainingOn ? [
       '',
-      'training aggregate (frequency grades, independent of chip result):',
+      'training aggregate (qualified reference grades, independent of chip result):',
       JSON.stringify(trainingAggregate(root)),
     ] : []),
     '',
     `completed hands: ${completed}`,
-    ...hands.flatMap(({ handNo, raw }) => [
-      '',
-      `hand ${handNo} (redacted):`,
-      raw,
-    ]),
+    'decision-time process input:',
+    JSON.stringify(eligibleProcessInput(processInput)),
     '',
-    'stats:',
-    statsRaw,
-    '',
+    '정성적 과정 평가만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
 
@@ -3828,17 +3979,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     })),
   }));
 
-  const buildSynthesizerPrompt = ({ evaluator, result, playersRaw, exploitRaw }) => [
+  const outcomeRecord = (record) => {
+    const out = {};
+    for (const key of [
+      'handNo', 'board', 'endStacks', 'pots', 'showdown', 'folded', 'allIn', 'uncalledReturns',
+    ]) {
+      if (Object.hasOwn(record ?? {}, key)) out[key] = structuredClone(record[key]);
+    }
+    return out;
+  };
+
+  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw }) => [
     '역할: 종합자',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
     '결과가 좋았다고 나쁜 과정을 칭찬하거나 결과가 나쁘다고 좋은 과정을 비난하지 마라.',
+    '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
     '',
     'evaluator output:',
     evaluator,
     '',
     'game result:',
     JSON.stringify({ result }),
+    '',
+    'redacted outcome records (provided only after evaluator completion):',
+    JSON.stringify(outcomeRecords),
     '',
     'players.json:',
     playersRaw,
@@ -3854,23 +4019,48 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
   ].join('\n');
 
-  const machineReview = ({ statsRaw, players, result }) => [
-    '## 내 성향 통계',
-    statsRaw || 'unavailable',
-    '## 결정적 핸드 2~3개 리플레이',
-    'machine-only: LLM review unavailable',
-    '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
-    JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
-    JSON.stringify(exploitReveal(players)),
-    `result: ${result}`,
-    '## 다음 게임에서 연습할 것',
-    'machine-only fallback',
-  ].join('\n');
+  const machineReview = ({ statsRaw, players, result }) => {
+    const stats = JSON.parse(statsRaw).perPlayer;
+    const user = stats?.user;
+    const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(value) : '확인 불가';
+    const percent = (value, sample) => Number.isFinite(value) && value >= 0 && value <= 1 && sample > 0
+      ? `${(100 * value).toFixed(1)}%` : '표본 없음';
+    const chips = Number.isSafeInteger(user?.net)
+      ? `${user.net > 0 ? '+' : ''}${user.net}칩` : '확인 불가';
+    const labels = { TAG: '신중한 공격형 (TAG)', LAG: '폭넓은 공격형 (LAG)', Nit: '매우 신중한 유형 (Nit)',
+      CallingStation: '콜을 선호하는 유형 (CallingStation)', Maniac: '매우 공격적인 유형 (Maniac)',
+      Trickster: '변화를 섞는 유형 (Trickster)' };
+    const names = sanitizePlayersForReview(players, { gameOver: true })
+      .filter((player) => player.playerId !== 'user').map((player) => {
+        const observed = stats?.[player.playerId];
+        const name = String(player.name ?? '이름 미확인').replace(/[\\`*_[\]<>|\r\n]/g, ' ');
+        return `- ${name} — 설정된 성향: ${labels[player.archetype] ?? '확인 불가'}. `
+          + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, observed?.sample)}, `
+          + `프리플롭 레이즈 ${percent(observed?.pfr, observed?.sample)}.`;
+      });
+    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배', loss: '패배' }[result] ?? '종료';
+    return [
+      '## 내 성향 통계', '',
+      `- 플레이한 핸드: ${count(user?.sample)}핸드`,
+      `- 자발적 프리플롭 참여: ${percent(user?.vpip, user?.sample)}`,
+      `- 프리플롭 레이즈: ${percent(user?.pfr, user?.sample)}`,
+      `- 칩 증감: ${chips}`,
+      `- 게임 결과: ${resultText}`, '',
+      '이 값은 이번 세션의 관찰 기록입니다. 실력이나 전략의 우열을 판정하지 않습니다.', '',
+      '## 결정적 핸드 2~3개 리플레이', '',
+      'LLM 설명을 제공할 수 없습니다. 결정적 핸드 선정과 과정 해설은 생성하지 않았습니다. 핸드별 기록과 지원 범위 내 휴리스틱 기준표 비교를 확인하세요.', '',
+      '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '',
+      '설정된 성향은 게임 시작 시의 정책 설정입니다. 아래 관찰 기록만으로 그 성향이 입증되거나 상대 읽기가 정확했다고 판단할 수는 없습니다.',
+      ...(names.length ? names : ['AI 성향 기록을 확인할 수 없습니다.']), '',
+      '## 다음 게임에서 연습할 것', '',
+      '이 자동 요약만으로는 개별 연습 목표를 확정할 근거가 부족합니다. 학습 페이지에서 지원되는 결정과 제외 이유를 먼저 확인하세요.',
+    ].join('\n');
+  };
 
   const appendTrainingPendingToReview = (text) => {
     if (!trainingOn) return text;
     const pending = trainingAggregate(root).pending ?? 0;
-    return `${text}\n\n학습 평가 pending: ${pending}`;
+    return `${text}\n\n미완료 학습 평가: ${pending}건`;
   };
 
   const generateReview = async ({ completed, statsRaw }) => {
@@ -3889,7 +4079,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--redacted']));
         hands.push({ handNo, raw: JSON.stringify(captured) });
       }
-      const evaluatorPrompt = buildEvaluatorPrompt({ completed, hands, statsRaw });
+      const processInput = buildProcessInput(hands.map(({ raw }) => parseCapturedHand(raw)));
+      const eligibleHands = new Set(eligibleProcessInput(processInput).hands.map((hand) => hand.handNo));
+      const unavailableNotice = unavailableProcessNotice(processInput);
+      if (eligibleHands.size === 0) {
+        return appendTrainingPendingToReview([
+          '## 내 성향 통계', '과정 평가는 판정 불가입니다.',
+          '## 결정적 핸드 2~3개 리플레이', unavailableNotice,
+          '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '결정 시점 증거가 없어 읽기 평가는 제공할 수 없습니다.',
+          '## 다음 게임에서 연습할 것', '다음 게임에서 결정 시점의 공개 정보와 합법 액션을 확인하세요.',
+        ].join('\n'));
+      }
+      const evaluatorPrompt = buildEvaluatorPrompt({ completed: eligibleHands.size, processInput });
       const evaluator = await runReviewStage({
         stage: 'evaluator',
         prompt: evaluatorPrompt,
@@ -3906,6 +4107,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const synthesizerPrompt = buildSynthesizerPrompt({
         evaluator,
         result: engine.result,
+        outcomeRecords: hands.filter((hand) => eligibleHands.has(hand.handNo)).map(({ raw }) => outcomeRecord(parseCapturedHand(raw))),
         playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
       });
@@ -3914,7 +4116,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         prompt: synthesizerPrompt,
         requireHeadings: true,
       });
-      return appendTrainingPendingToReview(synthesized);
+      return appendTrainingPendingToReview([synthesized, unavailableNotice].filter(Boolean).join('\n\n'));
     } catch (error) {
       throw haltFinalization(
         'REVIEW_FAILED',
@@ -3924,6 +4126,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const checkpointGeneratedReview = (review) => {
+    validateReviewOutput(review, { requireHeadings: true });
     writeTextAtomic(reviewPath, review);
     const persisted = fs.readFileSync(reviewPath, 'utf8');
     const reviewSha256 = sha256Text(persisted);
@@ -4399,18 +4602,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--wait-only', '--wait-ms', String(waitMs),
   ]);
 
-  const republishAfterRejectedUserAction = async (code) => {
+  const userActionAck = (submitted, phase, reason) => {
+    const { gameEpoch, decisionId, requestId, digest } = submitted;
+    try {
+      return validateActionAck({ gameEpoch, decisionId, requestId, digest, phase, reason }, {
+        gameEpoch: readLoopState()?.gameEpoch,
+        view: { legal: { decisionId: phase === 'rejected' ? decisionId : null } },
+      });
+    } catch {
+      throw codedError('BAD_ACTION_RECEIPT', '접수 identity가 없는 사용자 액션은 적용하지 않습니다.');
+    }
+  };
+
+  const republishAfterRejectedUserAction = async (code, submitted) => {
     const synchronized = await runCli(['step']);
     const narration = code === 'VERSION_MISMATCH'
       ? '게임 상태가 변경되어 최신 결정으로 다시 기다립니다.'
       : '입력한 액션이 허용되지 않아 같은 결정을 다시 기다립니다.';
-    // First emit the contract's view-only+narration republish. The relay retains a
-    // possibly response-lost action for view-only publishes, so an authoritative
-    // empty-event publish follows to acknowledge this positively rejected action
-    // before entering the next wait; otherwise the rejected action is replayed forever.
-    await publishEnvelope(synchronized, ['--view-only', '--narration', narration]);
+    const phase = synchronized.next?.decisionId === submitted.decisionId ? 'rejected' : 'consumed';
+    const actionAck = userActionAck(submitted, phase, code);
     log('user-action-rejected', { code, decisionId: synchronized.next?.decisionId ?? null });
-    return publishEnvelope(synchronized, waitFlags());
+    return publishEnvelope({ ...synchronized, actionAck }, ['--narration', narration, ...waitFlags()]);
   };
 
   const handleUserTurn = async (out) => {
@@ -4440,7 +4652,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         expectedDecisionId: next.decisionId,
         receivedDecisionId: submitted.decisionId ?? null,
       });
-      return waitOnlyForUser();
+      return republishAfterRejectedUserAction('STALE_DECISION', submitted);
     }
 
     // Relay payload는 외부 입력이다. action/amount를 semantic argv로 검증한 뒤에만
@@ -4448,18 +4660,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const action = validatedUserAction(submitted);
     if (!action) {
       if (stopRequested) return null;
-      return republishAfterRejectedUserAction('ILLEGAL_ACTION');
+      return republishAfterRejectedUserAction('ILLEGAL_ACTION', submitted);
     }
 
     const stepArgs = ['step', 'user', action.action];
     if (action.amount !== undefined) stepArgs.push(String(action.amount));
     stepArgs.push('--expect-version', String(out.stateVersion));
+    const actionAck = userActionAck(submitted, 'consumed', 'ACTION_APPLIED');
     try {
-      return await runAtomicStepPublish(stepArgs, waitFlags());
+      return await runAtomicStepPublish(stepArgs, waitFlags(), actionAck);
     } catch (error) {
       if (error.code !== 'ILLEGAL_ACTION' && error.code !== 'VERSION_MISMATCH') throw error;
       if (stopRequested) return null;
-      return republishAfterRejectedUserAction(error.code);
+      return republishAfterRejectedUserAction(error.code, submitted);
     }
   };
 
@@ -4527,6 +4740,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       for (const adapter of adapters) startAdapterDisposal(adapter);
       if (resolving) {
         try { await resolving; } catch { /* bootstrap/resume 호출자가 원래 오류를 관찰한다 */ }
+      }
+      if (studyPromise) {
+        // Study has an independent lifetime, but parent attachment must settle
+        // before this process releases the store-loop ownership it attests.
+        try { await studyPromise; } catch { /* caller observes the startup error */ }
       }
       // resolver settlement 뒤에는 더 이상 새 adapter가 생기지 않는다. 전부 settle한
       // 뒤에만 loop lock을 풀어 probe child가 ownership 밖으로 탈출하지 못하게 한다.
@@ -4750,6 +4968,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return writeLoopState({ port });
     }
     if (phase === 'done') {
+      await ensureStudyForOwner();
       const liveLock = readServerLock();
       if (liveLock && processAlive(liveLock.serverPid)) {
         const port = await ensureServer(engineState.sessionToken, { port: liveLock.port });
@@ -5197,6 +5416,9 @@ async function main() {
     });
     if (args.storeDir !== undefined) {
       if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
+      // main runs only in the store CLI child. Restrict newly created paths
+      // before the catalog/loop lock; never chmod existing caller directories.
+      process.umask(0o077);
       ensureSessionStore(args.storeDir);
       let storeLockHandle;
       try {
@@ -5215,6 +5437,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              port: args.port,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5237,6 +5460,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              port: args.port,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5253,7 +5477,7 @@ async function main() {
       loop = createGameLoop({
         gameDir: args.gameDir,
         resolver,
-        opts: { opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
+        opts: { port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
     process.once('SIGTERM', () => {

@@ -8,9 +8,10 @@ import { startServer } from '../server/server.js';
 import { skipOnWin32 } from './helpers/platform.js';
 import { detailRefOf, projectTrainingSummary } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
+import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-srv-'));
+  return createOwnedTempDir('holdem-srv');
 }
 
 // M1: machine item의 identity는 D9 문법이고 detailRef는 그 identity에서 파생된다.
@@ -46,6 +47,13 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
     assert.equal(js.status, 200);
     assert.match(js.text, /formatTrainingCard/);
+    const shared = await req(srv.port, '/shared/reference.js', { token: 'tok-mod' });
+    assert.equal(shared.status, 200);
+    assert.match(shared.headers['content-type'], /javascript/);
+    assert.match(shared.text, /export function referenceQuality/);
+    for (const denied of ['/shared/study-contract.js', '/shared/%2e%2e%2fpublish-contract.js', '/shared/reference.js/extra']) {
+      assert.notEqual((await req(srv.port, denied, { token: 'tok-mod' })).status, 200);
+    }
   } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });
@@ -53,7 +61,9 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
 });
 
 async function start(gameDir, token = 'tok-test') {
-  return startServer({ gameDir, port: 0, token });
+  const relay = await startServer({ gameDir, port: 0, token });
+  registerOwnedServer(relay.server, 'server-regression');
+  return relay;
 }
 
 async function closeOf(started) {
@@ -77,7 +87,7 @@ async function req(port, pathname, { method = 'GET', token, queryToken, body, ra
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* non-JSON */ }
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: Object.fromEntries(res.headers.entries()) };
 }
 
 function publish(port, token, body) {
@@ -393,7 +403,7 @@ test('review 게시 → snapshot 보존 → 서버 재시작 후 복원', async 
   }
 });
 
-test('깊이 1 덮어쓰기: 같은 decisionId로 두 번 POST → 마지막 값만 소비', async () => {
+test('같은 decision의 다른 액션은 충돌로 거부하고 먼저 접수한 액션을 전달한다', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';
   const srv = await start(gameDir, token);
@@ -401,13 +411,13 @@ test('깊이 1 덮어쓰기: 같은 decisionId로 두 번 POST → 마지막 값
     const decisionId = 'd-2-flop-3';
     await publish(srv.port, token, { publishId: 1, view: viewWith(decisionId) });
     const first = await action(srv.port, token, { decisionId, action: 'fold' });
-    const second = await action(srv.port, token, { decisionId, action: 'call', amount: 50 });
+    const second = await action(srv.port, token, { decisionId, action: 'call' });
     assert.equal(first.status, 200);
-    assert.equal(second.status, 200);
+    assert.equal(second.status, 409);
+    assert.equal(second.json.code, 'ACTION_ALREADY_RECEIVED');
     const got = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 500 });
-    assert.equal(got.json.action, 'call');
-    assert.equal(got.json.amount, 50);
-    assert.notEqual(got.json.action, 'fold');
+    assert.equal(got.json.action, 'fold');
+    assert.equal(got.json.amount, undefined);
   } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });
@@ -583,7 +593,7 @@ test('publish: 이미 지나간 publishId는 다시 적용하지 않는다', asy
   }
 });
 
-test('wait-action: 뷰가 다시 게시되면 소비된 액션은 재전달되지 않는다', async () => {
+test('wait-action: bound rejection ack가 게시되면 거부된 액션은 재전달되지 않는다', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';
   const srv = await start(gameDir, token);
@@ -598,6 +608,7 @@ test('wait-action: 뷰가 다시 게시되면 소비된 액션은 재전달되�
     // 여기서 그 액션이 또 오면 딜러는 거부·재게시를 무한 반복한다.
     await publish(srv.port, token, {
       publishId: 2, view: viewWith(decisionId),
+      actionAck: { gameEpoch: first.json.gameEpoch, decisionId, requestId: first.json.requestId, digest: first.json.digest, phase: 'rejected', reason: 'ILLEGAL_ACTION' },
       messages: [{ type: 'narration', text: '그 액션은 지금 둘 수 없습니다.' }],
     });
     const again = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 150 });
@@ -782,7 +793,7 @@ test('training-detail GET parent-swap is rejected', async () => {
   const detailsDir = path.join(gameDir, 'training', 'details');
   fs.mkdirSync(detailsDir, { recursive: true });
   fs.writeFileSync(path.join(detailsDir, `${ref}.json`), raw);
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-detail-outside-'));
+  const outside = createOwnedTempDir('holdem-detail-outside');
   fs.writeFileSync(path.join(outside, `${ref}.json`), raw);
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
     revision: 1,

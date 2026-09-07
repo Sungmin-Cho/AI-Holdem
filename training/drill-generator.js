@@ -1,14 +1,35 @@
 import { createHash } from 'node:crypto';
 import { isPreflopSpotKey } from './opportunities.js';
+import { assertEvaluationId } from './contracts.js';
 
-const DEFAULT_SPOTS = [
+const SUPPORTED_SPOTS = [
   '6max-100bb-utg-rfi-unopened',
   '6max-100bb-hj-rfi-unopened',
   '6max-100bb-co-rfi-unopened',
   '6max-100bb-btn-rfi-unopened',
   '6max-100bb-sb-rfi-unopened',
   '6max-100bb-bb-vs-single-raise',
+  '6max-100bb-sb-vs-single-raise',
+  '6max-100bb-btn-vs-single-raise',
 ];
+const SUPPORTED_SPOT_SET = new Set(SUPPORTED_SPOTS);
+const RANKS = 'AKQJT98765432'.split('');
+const HAND_CLASSES = [
+  ...RANKS.map((rank) => `${rank}${rank}`),
+  ...RANKS.flatMap((high, highIndex) => RANKS.slice(highIndex + 1)
+    .flatMap((low) => [`${high}${low}s`, `${high}${low}o`])),
+];
+const HAND_SET = new Set(HAND_CLASSES);
+const MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest']);
+const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
+const PROVIDER_VERSION_RE = /^\d+\.\d+\.\d+$/;
+const HEX64_RE = /^[0-9a-f]{64}$/;
+
+function coded(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 
 function rng(seed) {
   const hex = createHash('sha256').update(String(seed)).digest('hex').slice(0, 8);
@@ -31,28 +52,41 @@ function shuffle(items, seed) {
   return copy;
 }
 
-const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
-const PROVIDER_VERSION_RE = /^\d+\.\d+\.\d+$/;
+function sourceIdentity(source) {
+  if (!PROVIDER_ID_RE.test(source?.id ?? '') || !PROVIDER_VERSION_RE.test(source?.version ?? '')
+    || (source?.contentSha256 !== undefined && !HEX64_RE.test(source.contentSha256))) {
+    throw coded('PROVIDER_VERSION_REQUIRED', 'drill queue needs a validated dataset source');
+  }
+  return {
+    id: source.id,
+    version: source.version,
+    ...(source.contentSha256 !== undefined ? { contentSha256: source.contentSha256 } : {}),
+  };
+}
 
-function questionFrom({
-  mode, spotKey, handClass = 'AJo', skillKey, nonce,
-  providerId = 'local-preflop-baseline', providerVersion,
-}) {
-  if (!PROVIDER_VERSION_RE.test(providerVersion ?? '')) {
-    const error = new Error('drill question needs the dataset provider version');
-    error.code = 'PROVIDER_VERSION_REQUIRED';
-    throw error;
+function exactSource(left, right) {
+  return left?.id === right?.id && left?.version === right?.version
+    && (left?.contentSha256 ?? null) === (right?.contentSha256 ?? null);
+}
+
+function validateSelection(spotKey, handClass) {
+  if (spotKey !== undefined && (!isPreflopSpotKey(spotKey) || !SUPPORTED_SPOT_SET.has(spotKey))) {
+    throw coded('UNSUPPORTED_SPOT', 'selected spot is unavailable in the reference dataset');
   }
-  if (!isPreflopSpotKey(spotKey)) {
-    const error = new Error('drill question spotKey가 지원 문법을 벗어났습니다.');
-    error.code = 'UNSUPPORTED_SPOT';
-    throw error;
+  if (handClass !== undefined && !HAND_SET.has(handClass)) {
+    throw coded('UNSUPPORTED_HAND', 'selected hand is unavailable in the reference dataset');
   }
+}
+
+function questionFrom({ mode, spotKey, handClass, skillKey, nonce, source, candidateMistakeId }) {
+  validateSelection(spotKey, handClass);
   const pos = spotKey.split('-')[2].toUpperCase();
   return {
-    questionId: `drill:${providerVersion}:${spotKey}:${handClass}:${nonce}`,
+    questionId: `drill:${source.version}:${spotKey}:${handClass}:${nonce}`,
     mode,
     skillKey,
+    ...(candidateMistakeId ? { candidateMistakeId } : {}),
+    sourceIdentity: { ...source },
     prompt: {
       position: pos,
       handClass,
@@ -64,15 +98,13 @@ function questionFrom({
         : ['fold', 'raise:2.5'],
     },
     answerPolicy: {
-      providerId,
-      providerVersion,
+      providerId: source.id,
+      providerVersion: source.version,
+      ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
     },
   };
 }
 
-// The spot grammar, not the dataset — `training/` stays pure. A leak names a
-// seat and a situation, and the drill should follow it rather than collapse
-// every leak onto one of two spots with one hand.
 const RFI_SEATS = ['utg', 'hj', 'co', 'btn', 'sb'];
 const DEFENSE_SEATS = ['bb', 'sb', 'btn'];
 const SEAT_ALIASES = new Map([['mp', 'hj'], ['lj', 'hj'], ['bu', 'btn'], ['button', 'btn']]);
@@ -83,21 +115,14 @@ function seatIn(key, seats) {
     if (new RegExp(`(^|[^a-z])${seat}([^a-z]|$)`).test(key)) return seat;
   }
   for (const [alias, seat] of SEAT_ALIASES) {
-    if (!seats.includes(seat)) continue;
-    if (new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`).test(key)) return seat;
+    if (seats.includes(seat) && new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`).test(key)) return seat;
   }
   return null;
 }
 
 export function spotForSkillKey(skillKey) {
   const key = String(skillKey ?? '').toLowerCase();
-  // `skillKeyOf` emits `preflop.rfi.<POS>`, `preflop.bbDefense.vsRaise` and
-  // `preflop.vsRaise.<POS>`. The last two have no hyphen, so testing for `vs-`
-  // alone sent every non-BB defence leak to an RFI spot.
   if (/defense|defence|vs-?raise|vs-/.test(key)) {
-    // Named by the seat that defends: `preflop.vsRaise.CO` carries it after the
-    // marker, `preflop.bbDefense.vsRaise` before it. Seats the grammar has no
-    // defence spot for fall back to BB rather than to an unrelated RFI spot.
     const parts = key.split(/defense|defence|vs-?raise|vs-/);
     const defender = seatIn(parts[0] ?? '', DEFENSE_SEATS)
       ?? seatIn(parts.slice(1).join(' '), DEFENSE_SEATS)
@@ -115,10 +140,42 @@ export function handClassForSkillKey(skillKey) {
   return HAND_ROTATION[sum % HAND_ROTATION.length];
 }
 
-function mistakeQuestionInput(item) {
-  const [spot, handClass] = String(item?.spotSignature ?? '').split(':');
-  if (!isPreflopSpotKey(spot)) return null;
-  return { item, spot, handClass: handClass || 'AJo' };
+function pool({ spots = SUPPORTED_SPOTS, hands = HAND_CLASSES, seed, seen = new Set() }) {
+  const pairs = [];
+  for (const spot of spots) {
+    for (const hand of hands) {
+      if (!seen.has(`${spot}:${hand}`)) pairs.push({ spot, handClass: hand });
+    }
+  }
+  return shuffle(pairs, seed);
+}
+
+function itemInput(item, selectedSource) {
+  const spot = item?.spotKey ?? String(item?.spotSignature ?? '').split(':')[0];
+  const handClass = item?.handClass ?? String(item?.spotSignature ?? '').split(':')[1];
+  const legacy = item?.schemaVersion === 1 ? item.evaluation : null;
+  if (item?.schemaVersion === 1) {
+    try { assertEvaluationId(item.mistakeId); } catch { return null; }
+    if (!legacy || legacy.evaluationId !== item.mistakeId
+      || legacy.spotKey !== spot || legacy.handClass !== handClass
+      || item.spotSignature !== `${spot}:${handClass}`
+      || !HEX64_RE.test(legacy.payloadSha256 ?? '')
+      || (item.payloadSha256 !== undefined && item.payloadSha256 !== legacy.payloadSha256)
+      || legacy.status !== 'supported' || legacy.forced !== false || legacy.grade !== 'off-policy'
+      || (item.sourceIdentity !== undefined && !exactSource(item.sourceIdentity, legacy.source))) return null;
+  }
+  // Schema1 already persisted full evaluation evidence in some stores. Use
+  // that explicit source only after binding the duplicated fields; never fill
+  // in an absent content hash from the selected dataset.
+  const itemSource = item?.sourceIdentity ?? legacy?.source;
+  if (!SUPPORTED_SPOT_SET.has(spot) || !HAND_SET.has(handClass) || !exactSource(itemSource, selectedSource)) return null;
+  return { item, spot, handClass, source: itemSource };
+}
+
+function questionsFromPairs(pairs, { mode, source, skillKey, limit }) {
+  return pairs.slice(0, limit).map(({ spot, handClass }, index) => questionFrom({
+    mode, source, spotKey: spot, handClass, skillKey, nonce: index + 1,
+  }));
 }
 
 export function generateQueue({
@@ -128,64 +185,66 @@ export function generateQueue({
   seed = '0',
   now = new Date().toISOString(),
   spotKey,
+  handClass,
+  history,
+  questionSet,
   limit = 10,
-  // 데이터셋이 밝히는 provider. 기본값을 두면 데이터셋을 갈아도 질문 id와
-  // answerPolicy가 옛 버전을 주장하므로, 없으면 fail-closed다.
   source,
 } = {}) {
-  // 타입만 보면 빈 문자열이 통과해 `drill::…` 같은 provenance가 생기고, 빈
-  // 버전은 평가기의 truthy 검사까지 비껴간다. evaluationId와 같은 문법으로 건다.
-  if (!PROVIDER_ID_RE.test(source?.id ?? '') || !PROVIDER_VERSION_RE.test(source?.version ?? '')) {
-    const error = new Error('drill queue needs a dataset source with a provider id and semver');
-    error.code = 'PROVIDER_VERSION_REQUIRED';
-    throw error;
+  if (!MODES.has(mode)) throw coded('INVALID_DRILL_MODE', `unsupported drill mode: ${mode}`);
+  if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100) throw coded('INVALID_DRILL_LIMIT', 'invalid drill limit');
+  const selectedSource = sourceIdentity(source);
+  validateSelection(spotKey, handClass);
+
+  if (mode === 'daily' || mode === 'mistake-review') {
+    const candidates = mistakes
+      .filter((item) => mode !== 'daily' || !item.nextReviewAt || item.nextReviewAt <= now)
+      .map((item) => itemInput(item, selectedSource))
+      .filter(Boolean);
+    const seen = new Set();
+    return candidates.filter(({ spot, handClass: hand }) => {
+      const key = `${spot}:${hand}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, limit).map(({ item, spot, handClass: hand, source: itemSource }, index) => questionFrom({
+      mode, source: itemSource, spotKey: spot, handClass: hand,
+      skillKey: item.skillKey, candidateMistakeId: item.mistakeId, nonce: index + 1,
+    }));
   }
-  const nonce = 1;
-  const provider = { providerId: source.id, providerVersion: source.version };
+
+  if (mode === 'retest') {
+    if (!Array.isArray(questionSet)) throw coded('INCOMPLETE_ASSESSMENT', 'retest needs the original question set');
+    const pairs = questionSet.map((question) => ({ spot: question.spotKey, handClass: question.handClass }));
+    for (const pair of pairs) validateSelection(pair.spot, pair.handClass);
+    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.retest', limit });
+  }
+
+  if (mode === 'assessment') {
+    const seen = new Set((history?.seenPairs ?? [])
+      .filter((row) => exactSource(row.sourceIdentity, selectedSource))
+      .map((row) => `${row.spotKey}:${row.handClass}`));
+    const pairs = pool({ seed, seen });
+    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.assessment', limit });
+  }
+
   if (mode === 'leak') {
-    const leak = profile?.leaks?.[0];
-    if (!leak) return [];
-    const key = leak.recommendedDrill ?? leak.id;
-    const spot = spotForSkillKey(key);
-    if (!isPreflopSpotKey(spot)) return [];
-    return [questionFrom({
-      ...provider,
-      mode, spotKey: spot, skillKey: key, nonce, handClass: handClassForSkillKey(key),
-    })];
-  }
-  if (mode === 'mistake-review') {
-    return mistakes.map(mistakeQuestionInput).filter(Boolean).slice(0, limit)
-      .map(({ item, spot, handClass }, index) => {
-      return questionFrom({
-        ...provider,
-        mode,
-        spotKey: spot,
-        handClass,
-        skillKey: item.skillKey,
-        nonce: index + 1,
-      });
+    const leaks = profile?.game?.leaks ?? profile?.leaks ?? profile?.practice?.leaks ?? [];
+    const leakKey = leaks[0]?.recommendedDrill ?? leaks[0]?.id;
+    const spots = [...new Set(leaks.map((leak) => spotForSkillKey(leak.recommendedDrill ?? leak.id))
+      .filter((spot) => SUPPORTED_SPOT_SET.has(spot)))];
+    if (!spots.length) return [];
+    const primary = { spot: spots[0], handClass: handClassForSkillKey(leakKey) };
+    const pairs = [primary, ...pool({ spots, seed: `${seed}:${leakKey}` })
+      .filter((pair) => pair.spot !== primary.spot || pair.handClass !== primary.handClass)];
+    return questionsFromPairs(pairs, {
+      mode, source: selectedSource,
+      skillKey: leakKey ?? 'preflop.leak', limit,
     });
   }
-  if (mode === 'daily') {
-    const due = mistakes.filter((item) => !item.nextReviewAt || item.nextReviewAt <= now)
-      .map(mistakeQuestionInput).filter(Boolean);
-    return due.slice(0, limit).map(({ item, spot, handClass }, index) => {
-      return questionFrom({
-        ...provider,
-        mode,
-        spotKey: spot,
-        handClass,
-        skillKey: item.skillKey,
-        nonce: index + 1,
-      });
-    });
-  }
-  const spots = spotKey ? [spotKey] : shuffle(DEFAULT_SPOTS, seed);
-  return spots.slice(0, limit).map((spot, index) => questionFrom({
-    ...provider,
-    mode: 'free',
-    spotKey: spot,
-    skillKey: 'preflop.free',
-    nonce: index + 1,
-  }));
+
+  const spots = spotKey ? [spotKey] : SUPPORTED_SPOTS;
+  const hands = handClass ? [handClass] : HAND_CLASSES;
+  const pairs = pool({ spots, hands, seed });
+  return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.free', limit });
 }

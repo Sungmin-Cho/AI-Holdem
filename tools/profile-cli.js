@@ -12,8 +12,9 @@ import { openContained, readJsonSecure, writeContained, writeJsonSecure } from '
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
 export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
 const PRACTICE_FOCUS_DEST = ['.practice-focus.json'];
-const PRACTICE_FOCUS_KEYS = new Set(['schemaVersion', 'leaks', 'focus']);
+const PRACTICE_FOCUS_KEYS = new Set(['schemaVersion', 'leaks', 'focus', 'origin', 'goal']);
 const PRACTICE_FOCUS_LEAK_KEYS = new Set(['id', 'recommendedDrill', 'severity', 'confidence']);
+const PRACTICE_FOCUS_GOAL_KEYS = new Set(['id', 'recommendedDrill', 'severity', 'confidence', 'reason']);
 const MIGRATION_MARKER_SEGMENTS = ['training', '.migration-v2.json'];
 const DIGEST_MAP_SEGMENTS = ['training', '.digest-map-v2.json'];
 const MIGRATION_MARKER_MAX_BYTES = 64 * 1024;
@@ -347,14 +348,25 @@ export async function completeSessionStoreMigration(storeDir, sessionDir, {
 }
 
 export function writePracticeFocus(storeDir, profile) {
-  const leaks = (profile.leaks ?? []).slice(0, 3).map((leak) => ({
-    id: leak.id,
-    recommendedDrill: leak.recommendedDrill,
-    severity: leak.severity,
-    confidence: leak.confidence,
-  }));
+  const gameCandidates = profile.game?.candidates ?? [];
+  const practiceCandidates = profile.practice?.candidates ?? [];
+  const origin = gameCandidates.length > 0 ? 'game'
+    : (practiceCandidates.length > 0 ? 'practice' : 'default');
+  const candidate = (origin === 'game' ? gameCandidates : practiceCandidates)[0] ?? null;
+  const goal = candidate ? {
+    id: candidate.id,
+    recommendedDrill: candidate.recommendedDrill,
+    severity: candidate.severity,
+    confidence: candidate.confidence,
+    reason: candidate.reason ?? 'reference-deviation',
+  } : null;
   const file = path.join(storeDir, '.training', 'practice-focus.json');
-  writeJsonSecure(file, { schemaVersion: 1, leaks, focus: leaks[0]?.recommendedDrill ?? null });
+  writeJsonSecure(file, {
+    schemaVersion: 2,
+    origin,
+    goal,
+    focus: goal?.recommendedDrill ?? null,
+  });
   return file;
 }
 
@@ -375,6 +387,23 @@ function assertPracticeFocusLeak(leak) {
   }
 }
 
+function assertPracticeFocusGoal(goal) {
+  if (goal === null) return;
+  if (typeof goal !== 'object' || Array.isArray(goal)) {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus goal 항목이 올바르지 않습니다.');
+  }
+  for (const key of Object.keys(goal)) {
+    if (!PRACTICE_FOCUS_GOAL_KEYS.has(key)) {
+      throw coded('BAD_PRACTICE_FOCUS', `practice-focus goal 여분 키: ${key}`);
+    }
+  }
+  if (typeof goal.id !== 'string' || typeof goal.recommendedDrill !== 'string'
+    || !Number.isFinite(goal.severity) || !Number.isFinite(goal.confidence)
+    || typeof goal.reason !== 'string') {
+    throw coded('BAD_PRACTICE_FOCUS', 'practice-focus goal 값이 올바르지 않습니다.');
+  }
+}
+
 function assertPracticeFocusSchema(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw coded('BAD_PRACTICE_FOCUS', 'practice-focus JSON 스키마가 올바르지 않습니다.');
@@ -390,7 +419,7 @@ function assertPracticeFocusSchema(value) {
   if (value.focus !== null && typeof value.focus !== 'string') {
     throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.focus 타입이 올바르지 않습니다.');
   }
-  if (Object.prototype.hasOwnProperty.call(value, 'schemaVersion') && value.schemaVersion !== 1) {
+  if (Object.prototype.hasOwnProperty.call(value, 'schemaVersion') && ![1, 2].includes(value.schemaVersion)) {
     throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.schemaVersion이 올바르지 않습니다.');
   }
   if (Object.prototype.hasOwnProperty.call(value, 'leaks')) {
@@ -398,6 +427,17 @@ function assertPracticeFocusSchema(value) {
       throw coded('BAD_PRACTICE_FOCUS', 'practice-focus.leaks가 올바르지 않습니다.');
     }
     for (const leak of value.leaks) assertPracticeFocusLeak(leak);
+  }
+  if (value.schemaVersion === 2) {
+    if (!['game', 'practice', 'default'].includes(value.origin)
+      || !Object.prototype.hasOwnProperty.call(value, 'goal')
+      || Object.prototype.hasOwnProperty.call(value, 'leaks')) {
+      throw coded('BAD_PRACTICE_FOCUS', 'practice-focus schema 2 origin/goal이 올바르지 않습니다.');
+    }
+    assertPracticeFocusGoal(value.goal);
+    if ((value.goal?.recommendedDrill ?? null) !== value.focus) {
+      throw coded('BAD_PRACTICE_FOCUS', 'practice-focus goal과 focus가 일치하지 않습니다.');
+    }
   }
 }
 
