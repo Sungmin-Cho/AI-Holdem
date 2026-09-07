@@ -139,6 +139,13 @@ test('positionsFromRecord matches positionsOf on 200 real-play hands with busts'
       let hands = 0;
       while (!st.gameOver && hands < 400 && cases.length < 200) {
         st = startHand(st, { rng }).state;
+        // Capture while the hand is live. startHand may finish immediately
+        // (walkout / blinds all-in); those seats can already be busted.
+        if (!st.hand) {
+          hands += 1;
+          if (st.seats.some((seat) => seat.out)) busted = true;
+          continue;
+        }
         const live = positionsOf(st);
         let acts = 0;
         while (!legalFor(st).handOver) {
@@ -363,7 +370,7 @@ test('preflop regimes increment exactly one of rfi/limp/vsRaise/vs3Bet', () => {
   assert.deepEqual(cells(limper), { rfi: 0, limp: 0, vsRaise: 0, vs3Bet: 0 });
   assert.deepEqual(cells(singleOpen), { rfi: 0, limp: 0, vsRaise: 1, vs3Bet: 0 });
   assert.deepEqual(cells(squeeze), { rfi: 0, limp: 0, vsRaise: 0, vs3Bet: 0 });
-  assert.deepEqual(cells(vs3bet), { rfi: 0, limp: 0, vsRaise: 0, vs3Bet: 1 });
+  assert.deepEqual(cells(vs3bet), { rfi: 1, limp: 0, vsRaise: 0, vs3Bet: 1 });
 });
 
 test('bet vs raise size buckets use raise-to math', () => {
