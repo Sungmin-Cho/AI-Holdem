@@ -308,13 +308,17 @@ function reclaimAsideLeftovers(dir) {
  * stale로 판정한 pid 파일을 떼어 낸다 — 경로에 대한 파괴 연산은 그 경로가 산 락으로
  * 재바인딩될 수 없음이 증명될 때만 한다.
  * (1) link(dir/pid, aside): 이름을 하나 더할 뿐 아무것도 옮기거나 교체하지 않는다.
- * (2) aside를 열어 inode를 판정 당시와 대조한다. 불일치면 산 락의 pid에 이름을 붙인 것이다 —
- *     aside(고유 이름)만 지우고 물러난다. 산 락에서는 아무것도 제거되지 않았다.
- * (3) 일치하면 aside가 그 디렉터리를 비어 있지 않게 고정하므로 rmdir도 mkdir도 불가능하고,
+ * (2) 디렉터리 inode가 판정 당시와 같은지 본다. 다르면 경로가 새 락으로 재바인딩된 것이다 —
+ *     aside(고유 이름)만 지우고 물러난다. ext4는 unlink 직후 pid 파일 inode를 재사용할 수
+ *     있어, 파일 inode만 보면 교체본을 원본으로 오인한다.
+ * (3) aside를 열어 파일 inode와 pid/startTime 내용이 판정 당시와 같은지 본다. 불일치면
+ *     산 락의 pid에 이름을 붙인 것이다 — aside만 지우고 물러난다.
+ * (4) 일치하면 aside가 그 디렉터리를 비어 있지 않게 고정하므로 rmdir도 mkdir도 불가능하고,
  *     dir/pid는 판정한 그 파일이거나 이미 부재다. 그때만 dir/pid를 지우고 aside를 지운다.
  * rename은 쓰지 않는다: rename은 이동·교체 원시라 잘못 잡으면 산 락이 경로에서 사라진다.
  */
-function detachStalePidFile(dir, expectedPidFile, hooks) {
+function detachStalePidFile(dir, expected, hooks) {
+  const expectedPidFile = expected?.pidFile;
   if (!expectedPidFile) return true; // pid-less stale dir: nothing to unlink
   const pidPath = path.join(dir, 'pid');
   const link = hooks?.link ?? fs.linkSync;
@@ -348,6 +352,10 @@ function detachStalePidFile(dir, expectedPidFile, hooks) {
     hooks?.afterLink?.(dir, aside);
     let matches = false;
     let fd;
+    if (!sameInode(inodeKey(dir), expected)) {
+      dropAside();
+      return false; // path now names a different directory — do not rmdir a live peer lock
+    }
     try {
       fd = fs.openSync(aside, 'r');
     } catch (error) {
@@ -359,6 +367,12 @@ function detachStalePidFile(dir, expectedPidFile, hooks) {
       matches = st.dev === expectedPidFile.dev && st.ino === expectedPidFile.ino;
     } finally {
       fs.closeSync(fd);
+    }
+    if (matches) {
+      const now = readPidFile(dir);
+      if (!now || now.pid !== expectedPidFile.pid || now.startTime !== expectedPidFile.startTime) {
+        matches = false;
+      }
     }
     if (!matches) {
       dropAside();
@@ -390,7 +404,7 @@ function reclaimMutex(dir, hooks) {
   const confirmed = mutexIdentity(dir);
   if (!isReclaimable(decided, confirmed)) return false;
   hooks?.afterJudge?.(dir);
-  if (!detachStalePidFile(dir, confirmed.pidFile, hooks)) return false;
+  if (!detachStalePidFile(dir, confirmed, hooks)) return false;
   hooks?.beforeRmdir?.(dir);
   return rmdirReclaimed(dir);
 }
@@ -432,7 +446,7 @@ function reclaimOwnedMutex(dir, startTimeOf = processStartTime, hooks) {
   const confirmed = mutexIdentity(dir);
   if (!sameOwnedIdentity(decided, confirmed) || !ownedIdentityIsDead(confirmed, startTimeOf)) return false;
   hooks?.afterJudge?.(dir);
-  if (!detachStalePidFile(dir, confirmed.pidFile, hooks)) return false;
+  if (!detachStalePidFile(dir, confirmed, hooks)) return false;
   hooks?.beforeRmdir?.(dir);
   return rmdirReclaimed(dir);
 }
