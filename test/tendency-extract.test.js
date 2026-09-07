@@ -130,45 +130,103 @@ function replayScenario(scenario) {
 }
 
 test('positionsFromRecord matches positionsOf on 200 real-play hands with busts', () => {
+  const TARGET = 200;
+  const PER_SIZE = 12;
   const cases = [];
-  for (let aiCount = 1; aiCount <= 8 && cases.length < 200; aiCount += 1) {
-    for (let seed = 1; seed <= 12 && cases.length < 200; seed += 1) {
-      const rng = mulberry32(seed * 1000 + aiCount);
-      let st = createGame({ aiCount, levelEvery: 2 });
-      let busted = false;
-      let hands = 0;
-      while (!st.gameOver && hands < 400 && cases.length < 200) {
-        st = startHand(st, { rng }).state;
-        // Capture while the hand is live. startHand may finish immediately
-        // (walkout / blinds all-in); those seats can already be busted.
-        if (!st.hand) {
-          hands += 1;
-          if (st.seats.some((seat) => seat.out)) busted = true;
-          continue;
-        }
-        const live = positionsOf(st);
-        let acts = 0;
-        while (!legalFor(st).handOver) {
-          acts += 1;
-          assert.ok(acts <= 10_000, `hand ${hands} did not close`);
-          const la = legalFor(st);
-          st = applyAction(st, la.toAct, ...randomLegal(la, rng)).state;
-        }
-        hands += 1;
-        if (st.seats.some((seat) => seat.out)) busted = true;
-        if (!busted && aiCount > 1) continue;
-        const fromRecord = positionsFromRecord(st.lastHand);
-        const seated = fromRecord.seated;
-        const labels = { ...fromRecord };
-        delete labels.seated;
-        cases.push({ live, labels, seated, seats: st.seats.length });
-      }
-    }
+
+  function snapshot(st, live) {
+    const fromRecord = positionsFromRecord(st.lastHand);
+    const labels = { ...fromRecord };
+    delete labels.seated;
+    return {
+      live,
+      labels,
+      seated: fromRecord.seated,
+      seats: st.seats.length,
+      startStackCount: Object.keys(st.lastHand.startStacks).length,
+    };
   }
-  assert.ok(cases.length >= 200, `only ${cases.length} parity cases`);
-  for (const row of cases.slice(0, 200)) {
+
+  function collectFromGame(aiCount, seed, { waitForBust, take }) {
+    const rng = mulberry32(seed * 92821 + aiCount * 17);
+    let st = createGame({ aiCount, levelEvery: 2 });
+    let hands = 0;
+    const out = [];
+    while (!st.gameOver && hands < 500 && out.length < take) {
+      const bustedAtDeal = st.seats.some((seat) => seat.out);
+      st = startHand(st, { rng }).state;
+      // Capture while the hand is live. startHand may finish immediately
+      // (walkout / blinds all-in); those seats can already be busted.
+      if (!st.hand) {
+        hands += 1;
+        continue;
+      }
+      const live = positionsOf(st);
+      let acts = 0;
+      while (!legalFor(st).handOver) {
+        acts += 1;
+        assert.ok(acts <= 10_000, `hand ${hands} did not close`);
+        const la = legalFor(st);
+        st = applyAction(st, la.toAct, ...randomLegal(la, rng)).state;
+      }
+      hands += 1;
+      if (waitForBust && !bustedAtDeal) continue;
+      out.push(snapshot(st, live));
+    }
+    return out;
+  }
+
+  for (let aiCount = 1; aiCount <= 8; aiCount += 1) {
+    const seats = aiCount + 1;
+    const full = collectFromGame(aiCount, 1, { waitForBust: false, take: 1 });
+    assert.ok(full.length >= 1, `no live ${seats}-max hand`);
+    assert.equal(full[0].seated, seats);
+    const waitForBust = aiCount > 1;
+    const bucket = [];
+    for (let seed = 1; seed <= 40 && bucket.length < PER_SIZE; seed += 1) {
+      bucket.push(...collectFromGame(aiCount, seed + 10, {
+        waitForBust,
+        take: PER_SIZE - bucket.length,
+      }));
+    }
+    assert.ok(bucket.length >= PER_SIZE, `${seats}-max quota ${bucket.length}`);
+    if (waitForBust) {
+      assert.ok(
+        bucket.some((row) => row.startStackCount < row.seats),
+        `${seats}-max produced no busted startStacks`,
+      );
+    }
+    cases.push(full[0], ...bucket.slice(0, PER_SIZE));
+  }
+
+  let fillSeed = 200;
+  while (cases.length < TARGET && fillSeed < 500) {
+    const aiCount = (fillSeed % 8) + 1;
+    const extra = collectFromGame(aiCount, fillSeed, {
+      waitForBust: aiCount > 1,
+      take: 1,
+    });
+    fillSeed += 1;
+    if (extra.length) cases.push(extra[0]);
+  }
+
+  assert.ok(cases.length >= TARGET, `only ${cases.length} parity cases`);
+  const sample = cases.slice(0, TARGET);
+  const original = new Set(sample.map((row) => row.seats));
+  const liveSeated = new Set(sample.map((row) => row.seated));
+  for (let n = 2; n <= 9; n += 1) {
+    assert.ok(original.has(n), `missing original ${n}-max`);
+    assert.ok(liveSeated.has(n), `missing live seated ${n}`);
+  }
+  assert.ok(
+    sample.some((row) => row.startStackCount < row.seats),
+    'no busted-table cases (startStacks smaller than original seats)',
+  );
+
+  for (const row of sample) {
     assert.deepEqual(row.labels, row.live);
     assert.equal(row.seated, Object.keys(row.live).length);
+    assert.equal(row.seated, row.startStackCount);
   }
 });
 
