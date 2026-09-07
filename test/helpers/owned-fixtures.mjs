@@ -117,6 +117,14 @@ export function ownedCleanupReceiptPath() {
   return receiptPath;
 }
 
+export function cleanupFailureLine(entry, error) {
+  const kind = entry?.kind ?? '';
+  const label = entry?.label ?? '';
+  const pid = entry?.pid ?? '';
+  const message = error?.message ?? error;
+  return `OWNED_FIXTURE_CLEANUP_FAILED kind=${kind} label=${label} pid=${pid} error=${message}`;
+}
+
 after(async () => {
   const evidence = [];
   const failures = [];
@@ -128,6 +136,7 @@ after(async () => {
     } catch (error) {
       failures.push(error);
       evidence.push({ kind: 'server', label: entry.label, closed: false, error: error.message });
+      console.log(cleanupFailureLine({ kind: 'server', label: entry.label }, error));
     }
   }
   for (const entry of ownedProcesses.reverse()) {
@@ -157,6 +166,7 @@ after(async () => {
     } catch (error) {
       failures.push(error);
       evidence.push({ kind: 'process', label: entry.label, pid: entry.pid, dead: false, error: error.message });
+      console.log(cleanupFailureLine({ kind: 'process', label: entry.label, pid: entry.pid }, error));
     }
   }
   for (const entry of ownedDirs.reverse()) {
@@ -183,6 +193,7 @@ after(async () => {
         removed: false,
         error: error.message,
       });
+      console.log(cleanupFailureLine({ kind: 'directory', label: entry.real }, error));
     }
   }
   const body = {

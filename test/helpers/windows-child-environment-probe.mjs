@@ -21,7 +21,7 @@ const STATE = pathToFileURL(path.join(REPO, 'engine', 'state.js')).href;
 const BUDGET_MS = 6000;
 
 // The allowlist the study client hands its detached child today.
-const CLIENT = ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_TIME', 'TZ'];
+const CLIENT = ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_TIME', 'TZ', 'AI_HOLDEM_PLATFORM_DIAGNOSTICS'];
 const pick = (keys) => Object.fromEntries(keys
   .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 
