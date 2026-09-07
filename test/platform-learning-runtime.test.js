@@ -98,8 +98,12 @@ test('actual platform fresh private store owns, reuses and stops study service',
     // A child that died moments before this throw has not had its exit or its
     // last stderr delivered yet. Give the loop a turn so the account is complete.
     await new Promise((resolve) => { setTimeout(resolve, 500); });
-    error.message = `${error.message}\nstudy child output: ${childOutput || '(the child produced no output)'}`;
-    throw error;
+    // An AssertionError computes its message through a getter, so assigning to
+    // it throws and hides the very failure this is here to explain. Carry the
+    // account on a new error and keep the original as its cause.
+    const account = childOutput || '(the child produced no output)';
+    throw Object.assign(new Error(`${error?.message ?? error}\nstudy child output: ${account}`, { cause: error }),
+      error?.code === undefined ? {} : { code: error.code });
   } finally {
     cp.spawn = originalSpawn;
     syncBuiltinESMExports();
