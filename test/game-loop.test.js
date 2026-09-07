@@ -755,7 +755,13 @@ async function terminateIfAlive(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exit = new Promise((resolve) => child.once('exit', resolve));
   child.kill('SIGKILL');
-  await exit;
+  // A cleanup hook has no test timeout of its own; a child whose exit never
+  // arrives would hold the file until the per-file cap. Bound it and say so.
+  let timer;
+  const bound = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`external child ${child.pid} did not exit after SIGKILL`)), 15_000 * WIN32_SCALE);
+  });
+  try { await Promise.race([exit, bound]); } finally { clearTimeout(timer); }
 }
 
 async function withServerLockSwapAtRetirement(lockPath, replacementPath, fn) {

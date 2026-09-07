@@ -365,7 +365,7 @@ test('default integration evidence requires controlled20 completion, four exclus
   }), { code: 'RELEASE_GATE_EVIDENCE_INVALID' });
 });
 
-test('actual archived readers reject new identities without writes and compatible code resumes', { timeout: 60_000 }, async () => {
+test('actual archived readers reject new identities without writes and compatible code resumes', { timeout: process.platform === 'win32' ? 600_000 : 60_000 }, async () => {
   const dir = createOwnedTempDir('holdem-compatibility-proof');
   const outDir = path.join(dir, 'evidence');
   const result = await runCompatibilityVerification({ baseline: SHA, outDir });

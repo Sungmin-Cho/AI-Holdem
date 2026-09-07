@@ -194,5 +194,16 @@ after(async () => {
   body.receiptSha256 = sha256(JSON.stringify(body));
   fs.writeFileSync(receiptPath, `${JSON.stringify(body)}\n`, { mode: 0o600, flag: 'wx' });
   console.log(`OWNED_FIXTURE_CLEANUP receipt=${receiptPath} sha256=${body.receiptSha256}`);
+  // Cleanup is done and the receipt is written; the file should end within
+  // milliseconds. On one Windows run it stayed alive for 46 minutes instead,
+  // silently, until the per-file cap killed it: some handle the fixtures do not
+  // own kept the loop turning. This timer is unref'd, so it never holds the loop
+  // itself; it fires only if something else still does, and then names it.
+  const watchdog = setTimeout(() => {
+    const held = process.getActiveResourcesInfo?.() ?? ['(getActiveResourcesInfo unavailable)'];
+    fs.writeSync(2, `OWNED_FIXTURE_LOOP_HELD pid=${process.pid} resources=${JSON.stringify(held)}\n`);
+    process.exit(70);
+  }, 60_000);
+  watchdog.unref();
   if (failures.length > 0) throw new AggregateError(failures, 'owned fixture cleanup failed');
 });

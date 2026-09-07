@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
 import { isPrivatePath, windowsPowerShellEnvironment } from '../shared/platform-files.js';
+import { skipOnWin32 } from './helpers/platform.js';
 
 // Every wait in this file is sized for a host whose proofs are in-process. On
 // win32 each proof is a PowerShell child and a cold study start alone may take
@@ -450,6 +451,9 @@ for (const variant of ['missing study URL', 'rotated study URL', 'actual legacy 
 }
 
 test('S8 full: a current-URL relay is reused and the attached store owner keeps study alive', { timeout: scaled(15000) }, async (t) => {
+  // A 1s idle window against 25ms checkpoints models in-process proofs; on
+  // win32 one checkpoint is seconds of PowerShell and the window cannot be kept.
+  if (skipOnWin32(t, 'sub-second idle and checkpoint cadence is below the per-checkpoint proof cost on win32')) return;
   const storeDir = createOwnedTempDir('holdem-s8-study-parent');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -474,7 +478,7 @@ test('S8 full: a current-URL relay is reused and the attached store owner keeps 
     'without parent attachment the idle service would have stopped');
 });
 
-async function waitValue(probe, timeoutMs = 5000) {
+async function waitValue(probe, timeoutMs = scaled(5000)) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await probe();

@@ -621,7 +621,9 @@ async function studyRotationRehearsal() {
   const services = [];
   const options = {
     parentIdentity: { pid: parent.pid, startTime: parent.startTime },
-    testOptions: { idleTimeoutMs: 5_000, checkpointMs: 50 },
+    // On win32 a checkpoint is seconds of PowerShell, and a rotation step can
+    // take a minute; a 5s idle window would end the service between steps.
+    testOptions: { idleTimeoutMs: process.platform === 'win32' ? 120_000 : 5_000, checkpointMs: 50 },
     onChild(child) {
       child.ref();
       services.push(registerOwnedProcess(child, 'compatibility study service'));
