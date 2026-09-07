@@ -29,6 +29,26 @@ function processAlive(pid) {
   }
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function removeOwnedDirectory(dir) {
+  const attempts = process.platform === 'win32' ? 10 : 1;
+  let last;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: false });
+      return;
+    } catch (error) {
+      last = error;
+      if (process.platform !== 'win32' || !['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(error.code)) throw error;
+      sleepSync(50 * (i + 1));
+    }
+  }
+  throw last;
+}
+
 function waitForExit(child, timeoutMs = 2_000) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -176,7 +196,7 @@ after(async () => {
         throw new Error('owned fixture inode changed before cleanup');
       }
       if (current.state === 'owned') {
-        fs.rmSync(entry.dir, { recursive: true, force: false });
+        removeOwnedDirectory(entry.dir);
       }
       if (fs.existsSync(entry.dir)) throw new Error('owned fixture directory remained after cleanup');
       evidence.push({

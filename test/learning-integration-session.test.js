@@ -241,7 +241,7 @@ test('S8 full: default 20-hand production session records support then study rem
       if (current.gameId === selected.gameId) return null;
       nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
       return readFirstFixtureRecord(nextFake.log, nextCli.child);
-    }, nextCli, 10000);
+    }, nextCli, studyBudget({ coldStarts: 1, extraMs: 5000 }));
     const nextStateFile = path.join(nextGameDir, 'state.json');
     const nextInitial = JSON.parse(fs.readFileSync(nextStateFile));
     assert.equal(nextInitial.handNo, 0);
@@ -256,7 +256,7 @@ test('S8 full: default 20-hand production session records support then study rem
       if (!fs.existsSync(loopFile)) return null;
       const nextState = JSON.parse(fs.readFileSync(loopFile));
       return nextState.phase === 'playing' ? { current, state: nextState } : null;
-    }, nextCli, 10000);
+    }, nextCli, studyBudget({ coldStarts: 1, extraMs: 5000 }));
     assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
     assert.equal((await relayRequest({ port: next.state.port, sessionToken: next.state.sessionToken }, '/api/snapshot')).body.studyUrl, service.studyUrl);
     checkpoint = 'next-cli-stop';

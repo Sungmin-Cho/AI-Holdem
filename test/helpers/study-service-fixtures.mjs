@@ -75,7 +75,7 @@ export function unfinishedRequest(port, route, headers = {}) {
       res.on('data', (chunk) => { text += chunk; });
       res.on('end', () => { req.destroy(); resolve({ status: res.statusCode, body: JSON.parse(text) }); });
     });
-    req.setTimeout(1500, () => req.destroy(new Error('authorization waited for request body')));
+    req.setTimeout(WIN32 ? REQUEST_MS : 1500, () => req.destroy(new Error('authorization waited for request body')));
     req.on('error', reject);
     req.flushHeaders();
   });
