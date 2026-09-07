@@ -428,7 +428,7 @@ async function httpJson(port, route, { token, control = false, body } = {}) {
     method: body === undefined ? 'GET' : 'POST',
     headers: token ? { [control ? 'x-study-control' : 'x-drill-token']: token } : {},
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(3_000),
+    signal: AbortSignal.timeout(process.platform === 'win32' ? 30_000 : 3_000),
   });
   return { status: response.status, body: await response.json() };
 }
@@ -438,7 +438,7 @@ async function relayRequest(lock, route, { method = 'GET', body } = {}) {
     method,
     headers: { 'x-session-token': lock.sessionToken },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(3_000),
+    signal: AbortSignal.timeout(process.platform === 'win32' ? 30_000 : 3_000),
   });
   return { status: response.status, body: await response.json() };
 }

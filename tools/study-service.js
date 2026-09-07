@@ -17,6 +17,9 @@ const MAX_DESCRIPTOR = 4096;
 // work: a cold ensure on a CI runner spent over 13s before its budget expired
 // mid-proof. This is a ceiling on waiting, never a delay that is spent.
 const WAIT_MS = process.platform === 'win32' ? 60_000 : 5000;
+// The budget a client spends before it gives up on an unrepaired owner. Tests
+// assert repair and refusal against this, not against a POSIX literal.
+export const CLIENT_WAIT_MS = WAIT_MS;
 // Only positively absent/dead ownership may enter the cold-start allowance.
 const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
 // A request is not answered until the service has re-proved its own boundaries,
@@ -61,12 +64,16 @@ function privatePath(file, privateMode) {
 // candidates: a listing can only change that many times before it is empty.
 function proveEntries(candidates, phase) {
   const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
-  let entries = candidates.filter(({ file }) => statOrNull(file));
+  // A symlink is never a private path, and every read of one is refused on
+  // its own. Listing it here would veto the whole transaction instead — an
+  // owner could not release its own lock beside a symlinked descriptor.
+  const present = (file) => { const stat = statOrNull(file); return stat && !stat.isSymbolicLink(); };
+  let entries = candidates.filter(({ file }) => present(file));
   let reasons = [];
   for (let attempt = 0; attempt <= candidates.length; attempt += 1) {
     reasons = [];
     if (arePrivatePaths(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
-    const relisted = candidates.filter(({ file }) => statOrNull(file));
+    const relisted = candidates.filter(({ file }) => present(file));
     if (listing(relisted) === listing(entries)) break;
     entries = relisted;
   }

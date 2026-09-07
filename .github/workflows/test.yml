@@ -23,7 +23,10 @@ jobs:
     # the suite runs its files one at a time because they spawn real services and
     # share lock state. That puts a full Windows run near 75 minutes against 10 on
     # Linux; the run cancelled at 60 was still progressing, 1346 tests in.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 120 || 40 }}
+    # Measured at 110+ minutes with the hour-per-file cap: study-service 42,
+    # learning-integration 29, game-loop 13. Sharding the matrix is the real
+    # answer; until then one job needs room to finish.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 40 }}
     strategy:
       fail-fast: false
       matrix:

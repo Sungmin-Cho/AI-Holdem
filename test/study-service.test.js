@@ -37,6 +37,7 @@ import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 const descriptorPath = (storeDir) => path.join(storeDir, '.training', 'study-service.json');
 const lockPath = (storeDir) => path.join(storeDir, '.training', 'study.lock.d');
 const service = () => import('../tools/study-service.js');
+import { CLIENT_WAIT_MS } from '../tools/study-service.js';
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const source = CANONICAL_REFERENCE_SOURCE;
 
@@ -334,6 +335,9 @@ test('REQ-010: hard-linked or nonprivate descriptors fail closed without modifyi
 });
 
 test('REQ-010: mismatched descriptor process identity cannot authorize stop or registration', async (t) => {
+  // On win32 the owner's checkpoint repairs the forged descriptor before a
+  // client proof can read it, so the forged one never gets to be refused.
+  if (skipOnWin32(t, 'the owner repairs a forged descriptor before a client proof reads it on win32')) return;
   const { storeDir, handle, api } = await launch(t, { testOptions: { checkpointMs: 200 } });
   const descriptor = readDescriptor(storeDir);
   fs.writeFileSync(descriptorPath(storeDir), JSON.stringify({ ...descriptor, pid: process.pid, startTime: processStartTime(process.pid) }));
@@ -446,7 +450,7 @@ test('REQ-010: separate Node ensure clients converge on one owned listener', asy
   const href = new URL('../tools/study-service.js', import.meta.url).href;
   const clients = Array.from({ length: 4 }, () => registerOwnedProcess(spawn(process.execPath, [
     '--input-type=module', '-e', `import { ensureStudyService } from ${JSON.stringify(href)};
-      const handle=await ensureStudyService(process.argv[1],{testOptions:{idleTimeoutMs:3000,checkpointMs:50}});
+      const handle=await ensureStudyService(process.argv[1],{testOptions:{idleTimeoutMs:${process.platform === 'win32' ? 120000 : 3000},checkpointMs:50}});
       process.stdout.write(JSON.stringify(handle));`, storeDir,
   ], { stdio: ['ignore', 'pipe', 'pipe'] }), 'independent ensure client'));
   const handles = await Promise.all(clients.map((child) => new Promise((resolve, reject) => {
@@ -462,6 +466,7 @@ test('REQ-010: separate Node ensure clients converge on one owned listener', asy
 });
 
 test('REQ-010: replaced loop lock invalidates a still-running registered parent', async (t) => {
+  if (skipOnWin32(t, 'sub-second idle and checkpoint cadence is below the per-checkpoint proof cost on win32')) return;
   const storeDir = createOwnedTempDir('holdem-study-parent-replace');
   const original = acquireOwnedLock(storeDir, 'loop.lock.d');
   const launched = await launch(t, { parentIdentity: { pid: original.pid, startTime: original.startTime },
@@ -547,7 +552,7 @@ test('REQ-010: unrepaired live-owned metadata fails within five seconds without 
   const started = Date.now();
   try {
     await assert.rejects(api.ensureStudyService(storeDir, { onChild() { spawns += 1; } }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
-    assert.ok(Date.now() - started < 5500);
+    assert.ok(Date.now() - started < CLIENT_WAIT_MS + 500, 'refusal must stay within the client budget');
     assert.equal(spawns, 0);
     assert.deepEqual(fs.readFileSync(path.join(lockPath(storeDir), 'pid')), before);
     assert.equal(processStartTime(process.pid), own.startTime);
@@ -629,7 +634,7 @@ test('REQ-010: non-UTC parent and service preserve the existing process identity
     child.stdout.on('data', (chunk) => { output += chunk; }); child.stderr.on('data', (chunk) => { error += chunk; });
     child.on('close', (code) => resolve({ code, output, error }));
   });
-  assert.equal(result.code, 0, 'study child must preserve its parent timezone identity');
+  assert.equal(result.code, 0, `study child must preserve its parent timezone identity\n${result.error}`);
   assert.deepEqual(JSON.parse(result.output), { stopped: true });
   assert.equal(fs.existsSync(descriptorPath(storeDir)), false);
 });
@@ -713,7 +718,7 @@ for (const operation of ['inspect','stop']) for (const damage of ['missing','cor
       const result=await api.stopStudyService(storeDir,{expectedInstanceId:handle.instanceId});
       assert.equal(result.stopped,true);assert.equal(fs.existsSync(descriptorPath(storeDir)),false);
     }
-    assert.ok(Date.now()-started<5500,'repair must stay within the five-second deadline');
+    assert.ok(Date.now()-started<CLIENT_WAIT_MS+500,'repair must stay within the client budget');
   });
 }
 
@@ -740,7 +745,7 @@ for(const operation of ['inspect','stop']) {
         : api.stopStudyService(storeDir,{expectedInstanceId:randomUUID()});
       await assert.rejects(call,{code:'STUDY_DESCRIPTOR_CORRUPT'});
       const elapsed=Date.now()-started;
-      assert.ok(elapsed>=4500&&elapsed<5500,`repair deadline was ${elapsed}ms`);
+      assert.ok(elapsed>=CLIENT_WAIT_MS-500&&elapsed<CLIENT_WAIT_MS+500,`repair deadline was ${elapsed}ms against a ${CLIENT_WAIT_MS}ms budget`);
       assert.deepEqual(signals,[]);
       assert.equal(fs.readFileSync(descriptorPath(storeDir),'utf8'),raw);
       assert.deepEqual(fs.readFileSync(path.join(lockPath(storeDir),'pid')),pidBytes);

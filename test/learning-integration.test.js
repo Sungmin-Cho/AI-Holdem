@@ -492,7 +492,7 @@ async function relayRequest(lock, route, body) {
   const response = await fetch(`http://127.0.0.1:${lock.port}${route}?token=${encodeURIComponent(lock.sessionToken)}`, {
     method: body === undefined ? 'GET' : 'POST',
     ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(1500),
+    signal: AbortSignal.timeout(scaled(1500)),
   });
   return { status: response.status, body: await response.json() };
 }
@@ -501,7 +501,7 @@ async function studyRequest(service, route, body) {
   const response = await fetch(`http://127.0.0.1:${service.port}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'x-drill-token': new URL(service.studyUrl).hash.slice(7), 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(2000),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(scaled(2000)),
   });
   const result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
