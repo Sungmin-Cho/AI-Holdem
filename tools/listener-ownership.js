@@ -70,6 +70,9 @@ function rowOwnedBy(row, pid, port) {
 }
 
 export function parseNetstatListening(stdout, pid, port) {
+  // netstat always prints its headers. An empty table was not read at all, and
+  // an absent listener can only be concluded from a table that was.
+  if (String(stdout).trim() === '') throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
   const needle = `127.0.0.1:${port}`;
   const lines = String(stdout).split(/\r?\n/);
   let sawFormat = false;
@@ -129,6 +132,28 @@ export async function posixListenerOwnedBy(pid, port, {
   });
 }
 
+// Windows reads the native table first. netstat needs no PowerShell, no module
+// and no analysis cache, and answers in well under the probe budget, whereas
+// Get-NetTCPConnection must import NetTCPIP: one to three seconds with a warm
+// module cache, over twenty without one, which a child holding an environment
+// allowlist never has. Sharing one deadline, that import starved the native
+// fallback of the time it needed — 131 game-loop failures on one runner. The
+// PowerShell view now decides only where netstat cannot answer at all.
+function netstatVerdict(pid, port, { spawn, timeoutMs }) {
+  let result;
+  try {
+    result = spawn(netstatExe(), ['-ano', '-p', 'tcp'], {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    });
+  } catch { return null; }
+  if (!result || result.error || result.status !== 0) return null;
+  try { return { owned: parseNetstatListening(result.stdout, pid, port) }; }
+  catch { return null; }
+}
+
 export function win32ListenerOwnedBy(pid, port, {
   spawn = spawnSync,
   timeoutMs = 1_000,
@@ -136,13 +161,16 @@ export function win32ListenerOwnedBy(pid, port, {
   const id = asPid(pid);
   const listenPort = asPort(port);
   if (id === null || listenPort === null) throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
+  const native = netstatVerdict(id, listenPort, { spawn, timeoutMs });
+  if (native) return native.owned;
   const script = [
     '$ErrorActionPreference = "Stop"',
     `Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${listenPort} -State Listen -ErrorAction SilentlyContinue |`,
     'Select-Object OwningProcess,LocalAddress,LocalPort,State | ConvertTo-Json -Compress',
   ].join(' ');
+  let result;
   try {
-    const result = spawn(powershellExe(), [
+    result = spawn(powershellExe(), [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-Command', script,
     ], {
@@ -152,61 +180,46 @@ export function win32ListenerOwnedBy(pid, port, {
       env: windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }),
       windowsHide: true,
     });
-    if (result.status === 0) {
-      const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
-      if (rows.some((row) => rowOwnedBy(row, id, listenPort))) return true;
-      if (rows.length === 0) {
-        return netstatFallback(id, listenPort, { spawn, timeoutMs });
-      }
-      return false;
-    }
-  } catch {
-    /* fall through to netstat */
-  }
-  return netstatFallback(id, listenPort, { spawn, timeoutMs });
-}
-
-function netstatFallback(pid, port, { spawn, timeoutMs }) {
-  let result;
-  try {
-    result = spawn(netstatExe(), ['-ano', '-p', 'tcp'], {
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      maxBuffer: 256 * 1024,
-      windowsHide: true,
-    });
   } catch (error) {
     throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.', error);
   }
   if (result.status !== 0) throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
-  return parseNetstatListening(result.stdout, pid, port);
+  const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
+  // With the native table already unable to answer, an empty PowerShell view
+  // cannot tell "no listener" from "no cmdlet"; only a populated view decides.
+  if (rows.length === 0) throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
+  return rows.some((row) => rowOwnedBy(row, id, listenPort));
 }
 
 // Production probes are asynchronous so the supervisor can account for and
-// cancel every child. Both Windows commands share one monotonic deadline.
+// cancel every child. Both Windows commands share one monotonic deadline; the
+// native table goes first so the deadline is spent on the command that answers.
 async function win32ListenerOwnedByAsync(pid, port, { execFileFn = execFile, onChild, timeoutMs }) {
   const id = asPid(pid); const listenPort = asPort(port);
   if (id === null || listenPort === null) throw unavailable('Invalid listener identity');
   const deadline = performance.now() + timeoutMs;
-  const run = (exe, args) => new Promise((resolve, reject) => {
+  const run = (exe, args, env) => new Promise((resolve, reject) => {
     const remaining = Math.floor(deadline - performance.now());
     if (remaining <= 0) { reject(unavailable('Listener probe deadline exhausted')); return; }
-    const child = execFileFn(exe, args, { env: windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }), encoding: 'utf8', timeout: remaining,
+    const child = execFileFn(exe, args, { ...(env ? { env } : {}), encoding: 'utf8', timeout: remaining,
       killSignal: 'SIGKILL', maxBuffer: 256 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       onChild?.('close', child);
       resolve({ error, stdout, stderr });
     });
     onChild?.('open', child);
   });
-  const script = `$ErrorActionPreference = "Stop"; Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${listenPort} -State Listen -ErrorAction SilentlyContinue | Select-Object OwningProcess,LocalAddress,LocalPort,State | ConvertTo-Json -Compress`;
-  const result = await run(powershellExe(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
-  if (!result.error && !String(result.stderr ?? '').trim()) {
-    const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
-    if (rows.length) return rows.some((row) => rowOwnedBy(row, id, listenPort));
+  const native = await run(netstatExe(), ['-ano', '-p', 'tcp']);
+  if (!native.error && !String(native.stderr ?? '').trim()) {
+    try { return parseNetstatListening(native.stdout, id, listenPort); }
+    catch { /* The table could not be read as one; the PowerShell view decides. */ }
   }
-  const fallback = await run(netstatExe(), ['-ano', '-p', 'tcp']);
-  if (fallback.error || String(fallback.stderr ?? '').trim()) throw unavailable('Listener verification failed', fallback.error);
-  return parseNetstatListening(fallback.stdout, id, listenPort);
+  const script = `$ErrorActionPreference = "Stop"; Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${listenPort} -State Listen -ErrorAction SilentlyContinue | Select-Object OwningProcess,LocalAddress,LocalPort,State | ConvertTo-Json -Compress`;
+  const result = await run(powershellExe(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }));
+  if (result.error || String(result.stderr ?? '').trim()) throw unavailable('Listener verification failed', result.error);
+  const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
+  if (!rows.length) throw unavailable('Listener verification failed');
+  return rows.some((row) => rowOwnedBy(row, id, listenPort));
 }
 
 export function createListenerOwnedBy(opts = {}) {

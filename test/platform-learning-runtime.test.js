@@ -11,18 +11,67 @@ test('Windows owned lock preserves submillisecond start precision and rejects le
   }
 });
 
+// The native table answers first on Windows; PowerShell decides only where
+// netstat cannot answer at all. These fixtures stand in for each command.
+const isNetstat = (exe) => /netstat\.exe$/i.test(String(exe));
+const netstatTable = (owner, port = 12345) => `\n  Proto  Local Address          Foreign Address        State           PID\n`
+  + `  TCP    127.0.0.1:${port}        0.0.0.0:0              LISTENING       ${owner}\n`;
+const netstatUnavailable = { status: 1, stdout: '', stderr: '' };
+const cannotAnswer = Object.assign(new Error('netstat unavailable'), { code: 'ENOENT' });
+
 test('Windows listener factory tracks asynchronous probe children', async () => {
   const events = [];
   const child = { pid: 123 };
   const adapter = createListenerOwnedBy({ platform: 'win32', onChild: (event, proc) => events.push([event, proc]),
     execFileFn: (exe, args, options, callback) => {
-      queueMicrotask(() => callback(null, JSON.stringify({ OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 'Listen' }), ''));
+      queueMicrotask(() => callback(null, isNetstat(exe) ? netstatTable(42)
+        : JSON.stringify({ OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 'Listen' }), ''));
       return child;
     },
-    spawn: () => ({ status: 0, stdout: JSON.stringify({ OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 'Listen' }) }),
   });
   assert.equal(await adapter(42, 12345), true);
-  assert.deepEqual(events, [['open', child], ['close', child]]);
+  assert.deepEqual(events, [['open', child], ['close', child]], 'the native table decided; no PowerShell child ran');
+});
+
+test('Windows listener proves ownership from the native table before any PowerShell runs', async () => {
+  const { win32ListenerOwnedBy } = await import('../tools/listener-ownership.js');
+  const spawned = [];
+  const spawn = (exe) => { spawned.push(exe); return { status: 0, stdout: netstatTable(42), stderr: '' }; };
+  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn }), true);
+  assert.equal(win32ListenerOwnedBy(43, 12345, { spawn }), false, 'another owner in the table is a final answer');
+  assert.equal(win32ListenerOwnedBy(42, 12346, { spawn }), false, 'an absent listener in an ASCII table is a final answer');
+  assert.equal(spawned.length, 3);
+  assert.ok(spawned.every(isNetstat), 'a populated native table never reaches PowerShell');
+  const execs = [];
+  const adapter = createListenerOwnedBy({ platform: 'win32', execFileFn: (exe, args, options, callback) => {
+    execs.push(exe); queueMicrotask(() => callback(null, netstatTable(42), '')); return { pid: 123 };
+  } });
+  assert.equal(await adapter(42, 12345), true);
+  assert.equal(await adapter(43, 12345), false);
+  assert.equal(execs.length, 2); assert.ok(execs.every(isNetstat));
+});
+
+test('Windows listener falls back to PowerShell only when the native table cannot be read', async () => {
+  const { win32ListenerOwnedBy } = await import('../tools/listener-ownership.js');
+  const row = { OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 2 };
+  // A localized table without the listener carries non-ASCII headers and no
+  // matching line: not a verdict, so PowerShell decides.
+  const localized = '\n  \uD65C\uC131 \uC5F0\uACB0\n  TCP  127.0.0.1:1  0.0.0.0:0  LISTENING  7\n';
+  const spawned = [];
+  const spawn = (exe) => { spawned.push(exe); return isNetstat(exe)
+    ? { status: 0, stdout: localized, stderr: '' } : { status: 0, stdout: JSON.stringify(row), stderr: '' }; };
+  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn }), true);
+  assert.equal(spawned.length, 2); assert.ok(isNetstat(spawned[0])); assert.ok(!isNetstat(spawned[1]));
+  // netstat always prints its headers, so an empty table was never read: not a
+  // verdict either, even with a clean exit.
+  const empties = [];
+  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: (exe) => { empties.push(exe); return isNetstat(exe)
+    ? { status: 0, stdout: '', stderr: '' } : { status: 0, stdout: JSON.stringify(row), stderr: '' }; } }), true);
+  assert.equal(empties.length, 2);
+  // An empty PowerShell view after an unreadable table cannot tell "no listener"
+  // from "no cmdlet", so it is never a verdict.
+  assert.throws(() => win32ListenerOwnedBy(42, 12345, { spawn: (exe) => isNetstat(exe) ? netstatUnavailable : { status: 0, stdout: '', stderr: '' } }),
+    { code: 'SERVER_LISTENER_UNAVAILABLE' });
 });
 
 test('private path helper refuses permissive Windows ACL and never treats mode bits as privacy', async () => {
@@ -207,17 +256,19 @@ test('Windows listener accepts the PowerShell numeric Listen enum in both query 
   const { win32ListenerOwnedBy } = await import('../tools/listener-ownership.js');
   const row = { OwningProcess: 42, LocalAddress: '127.0.0.1', LocalPort: 12345, State: 2 };
   const events = []; let syncCalls = 0; let asyncCalls = 0;
-  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: () => {
-    syncCalls += 1; return { status: 0, stdout: JSON.stringify(row), stderr: '' };
+  assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: (exe) => {
+    syncCalls += 1; return isNetstat(exe) ? netstatUnavailable : { status: 0, stdout: JSON.stringify(row), stderr: '' };
   } }), true);
   const adapter = createListenerOwnedBy({ platform: 'win32', onChild: (event) => events.push(event),
     execFileFn: (exe, args, options, callback) => {
-      asyncCalls += 1; queueMicrotask(() => callback(null, JSON.stringify(row), '')); return { pid: 123 };
+      asyncCalls += 1;
+      queueMicrotask(() => (isNetstat(exe) ? callback(cannotAnswer, '', '') : callback(null, JSON.stringify(row), '')));
+      return { pid: 123 };
     },
   });
   assert.equal(await adapter(42, 12345), true);
-  assert.equal(syncCalls, 1); assert.equal(asyncCalls, 1);
-  assert.deepEqual(events, ['open', 'close']);
+  assert.equal(syncCalls, 2); assert.equal(asyncCalls, 2);
+  assert.deepEqual(events, ['open', 'close', 'open', 'close'], 'the native attempt and the PowerShell rescue are both tracked');
 });
 
 test('Windows numeric listener proof rejects non-listen, unknown and mismatched owners in both query paths', async () => {
@@ -227,9 +278,9 @@ test('Windows numeric listener proof rejects non-listen, unknown and mismatched 
     { State: true }, { State: 'Established' }, { State: {} }, { OwningProcess: 43 },
     { LocalPort: 12346 }, { LocalAddress: '0.0.0.0' }]) {
     const stdout = JSON.stringify({ ...base, ...patch });
-    assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: () => ({ status: 0, stdout, stderr: '' }) }), false);
+    assert.equal(win32ListenerOwnedBy(42, 12345, { spawn: (exe) => (isNetstat(exe) ? netstatUnavailable : { status: 0, stdout, stderr: '' }) }), false);
     const adapter = createListenerOwnedBy({ platform: 'win32', execFileFn: (exe, args, options, callback) => {
-      queueMicrotask(() => callback(null, stdout, '')); return { pid: 123 };
+      queueMicrotask(() => (isNetstat(exe) ? callback(cannotAnswer, '', '') : callback(null, stdout, ''))); return { pid: 123 };
     } });
     assert.equal(await adapter(42, 12345), false);
   }

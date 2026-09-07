@@ -37,7 +37,11 @@ test('every Windows PowerShell production spawn receives a sanitized environment
  import {syncBuiltinESMExports} from 'node:module';
  const captured=[]; const originalEnv={...process.env};
  const proof={user:'S-1-5-21-1',owner:'S-1-5-21-1',reparse:false,rules:[{sid:'S-1-5-21-1',type:'Allow',rights:2032127}]};
+ // netstat is native and carries no PowerShell environment. Leave it unable to
+ // answer so the listener's PowerShell rescue path is the one exercised here.
+ const netstat=(exe)=>/netstat\.exe$/i.test(String(exe));
  cp.spawnSync=(exe,args,opts)=>{
+  if(netstat(exe)) return {status:1,stdout:'',stderr:''};
   captured.push({exe,args,opts});
   const script=args.at(-1);
   if(script.includes('Get-Acl')) return {status:0,stdout:JSON.stringify([proof]),stderr:''};
@@ -47,6 +51,7 @@ test('every Windows PowerShell production spawn receives a sanitized environment
  };
  cp.spawn=(exe,args,opts)=>{captured.push({exe,args,opts});return {pid:123,exitCode:null,signalCode:null};};
  cp.execFile=(exe,args,opts,callback)=>{
+  if(netstat(exe)){queueMicrotask(()=>callback(Object.assign(new Error('unavailable'),{code:'ENOENT'}),'',''));return {pid:123};}
   captured.push({exe,args,opts});
   queueMicrotask(()=>callback(null,JSON.stringify({OwningProcess:123,LocalAddress:'127.0.0.1',LocalPort:3210,State:2}),''));
   return {pid:123};
