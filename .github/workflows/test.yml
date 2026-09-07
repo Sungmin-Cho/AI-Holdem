@@ -51,6 +51,9 @@ jobs:
       - name: Verify the Windows child environment can prove privacy
         if: runner.os == 'Windows'
         run: node test/helpers/windows-child-environment-probe.mjs
+      - name: Measure in-box csc.exe native proof cost
+        if: runner.os == 'Windows'
+        run: node test/helpers/windows-native-proof-probe.mjs
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Run tests
