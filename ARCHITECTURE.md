@@ -14,7 +14,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `engine/evaluator.js` | 7장 중 최고 5장 핸드 평가(`evaluate7`)와 점수 비교(`compareScore`). |
 | `engine/sidepots.js` | 컨트리뷰션·폴드 집합으로부터 사이드팟을 구성(`buildPots`)하고 승자에게 분배(`awardPots`). |
 | `engine/personas.js` | AI 좌석의 표현 필드(이름·말투·성격·아키타입)만 생성. 빈도 파라미터는 `training/policies/`가 소유한다. |
-| `training/policies/` | deterministic strategy policy와 RNG. 엔진은 정책 모듈을 import하지 않는다. |
+| `training/policies/` | deterministic strategy policy와 RNG. 레이즈 사이징 규칙은 `sizing.js` 한 곳. 엔진은 정책 모듈을 import하지 않는다. |
 | `tools/policy-player.js` | `--opponent-runtime policy`일 때 인프로세스 결정. LLM 워밍업을 생략한다. |
 | `training/exploit/` | 종료 후 heuristic exploit 비교. EV 숫자는 만들지 않는다. |
 | `tools/solver-runtime.js` | Postflop solver 자식. detached process group, RSS/stdout cap, fake adapter. |

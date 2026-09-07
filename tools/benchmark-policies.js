@@ -6,6 +6,7 @@ import { snapshotDecision } from '../engine/decision.js';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { allHandClasses } from '../training/cards.js';
 import { policyById } from '../training/policies/catalog.js';
+import { raiseToFor, roundToUnit } from '../training/policies/sizing.js';
 import { distributionV2 } from '../training/policies/strategy-v2.js';
 import { decide } from './policy-player.js';
 
@@ -70,6 +71,75 @@ export function buildPreflopScenarios() {
 }
 
 const PREFLOP_SCENARIOS = buildPreflopScenarios();
+
+function sizingSpot(actions = []) {
+  let state = createGame({
+    aiCount: 5,
+    startStack: 5000,
+    blinds0: [25, 50],
+    mode: 'cash-training',
+    levelEvery: null,
+    startStackBb: 100,
+    handLimit: 20,
+  });
+  state.button = 5;
+  state = startHand(state, { deck: newDeck() }).state;
+  for (const step of actions) {
+    const legal = legalFor(state);
+    const [action, amount] = Array.isArray(step) ? step : [step];
+    state = applyAction(state, legal.toAct, action, amount).state;
+  }
+  const legal = legalFor(state);
+  const snapshot = snapshotDecision(state, legal.toAct, null, {
+    blinds: state.config.blinds0, legal,
+  });
+  return { snapshot, legal };
+}
+
+function buildSizingScenarios() {
+  const flop = [['raise', 125], 'fold', 'fold', 'fold', 'fold', 'call'];
+  return Object.freeze([
+    Object.freeze({ spot: 'P1', ...sizingSpot([]) }),
+    Object.freeze({ spot: 'P2', ...sizingSpot(['call']) }),
+    Object.freeze({ spot: 'P3', ...sizingSpot([['raise', 125]]) }),
+    Object.freeze({ spot: 'P4', ...sizingSpot([['raise', 125], 'call']) }),
+    Object.freeze({ spot: 'P5', ...sizingSpot([['raise', 125], ['raise', 425]]) }),
+    Object.freeze({ spot: 'P6', ...sizingSpot([['raise', 125], ['raise', 425], ['raise', 975]]) }),
+    Object.freeze({ spot: 'F1', ...sizingSpot(flop) }),
+    Object.freeze({ spot: 'F2', ...sizingSpot([...flop, ['raise', 175]]) }),
+  ]);
+}
+
+const SIZING_SCENARIOS = buildSizingScenarios();
+
+function benchmarkSizing() {
+  const sizing = SIZING_SCENARIOS.map(({ spot, snapshot, legal }) => {
+    const sized = raiseToFor(snapshot, legal);
+    const raises = distributionV2(snapshot, legal, policyById('tag-v2'))
+      .filter((item) => item.action === 'raise');
+    return {
+      spot,
+      rule: sized.rule,
+      minRaiseTo: legal.minRaiseTo,
+      maxRaiseTo: legal.maxRaiseTo,
+      amount: raises[0]?.amount ?? null,
+    };
+  });
+  let minRaiseOutsideClampCount = 0;
+  for (const { snapshot, legal } of SIZING_SCENARIOS) {
+    const sized = raiseToFor(snapshot, legal);
+    const unit = snapshot.blinds[0];
+    for (const id of PERSONA_IDS) {
+      for (const item of distributionV2(snapshot, legal, policyById(id))) {
+        if (item.action !== 'raise') continue;
+        if (item.amount === legal.minRaiseTo && roundToUnit(sized.target, unit) > legal.minRaiseTo) {
+          minRaiseOutsideClampCount += 1;
+        }
+      }
+    }
+  }
+  return { sizing, minRaiseOutsideClampCount };
+}
 
 const EXPECTED_PREFLOP_FACTS = Object.freeze({
   unopened: Object.freeze({
@@ -261,6 +331,7 @@ export function benchmarkPolicies() {
   const safetyStarted = performance.now();
   const safety = benchmarkSafety();
   const safetyMs = performance.now() - safetyStarted;
+  const sizingReport = benchmarkSizing();
   const nutsFolds = PERSONA_IDS.map((id) => personaResponses[id].strong.fold);
   const nutsAirDifferences = PERSONA_IDS.map(
     (id) => personaResponses[id].air.fold - personaResponses[id].strong.fold,
@@ -287,6 +358,7 @@ export function benchmarkPolicies() {
       stationCallMinusTagMinExclusive: 0,
       tricksterBaselineMeanTvMin: 0.05,
       safetyViolationCountMax: 0,
+      minRaiseOutsideClampCountMax: 0,
     },
     thresholds: {
       nutsFoldMax: Math.max(...nutsFolds),
@@ -295,8 +367,10 @@ export function benchmarkPolicies() {
       comboParticipationOrder: ordered ? openOrder : [],
       stationCallMinusTag: preflop.defenseCalls['calling-station-v2'] - preflop.defenseCalls['tag-v2'],
       tricksterBaselineMeanTv: preflop.tricksterBaselineMeanTv,
+      minRaiseOutsideClampCount: sizingReport.minRaiseOutsideClampCount,
       ...safety,
     },
+    sizing: sizingReport.sizing,
     personaResponses,
     priceResponses: price.responses,
     preflop,
@@ -328,9 +402,10 @@ export function assertBenchmark(result) {
   if (JSON.stringify(t.comboParticipationOrder) !== JSON.stringify(['nit-v2', 'tag-v2', 'lag-v2', 'maniac-v2'])) failures.push('comboParticipationOrder');
   if (!(t.stationCallMinusTag > 0)) failures.push('stationCallMinusTag');
   if (!(t.tricksterBaselineMeanTv >= 0.05)) failures.push('tricksterBaselineMeanTv');
-  for (const key of ['illegalOutputCount', 'determinismViolationCount', 'hiddenStateViolationCount']) {
+  for (const key of ['illegalOutputCount', 'determinismViolationCount', 'hiddenStateViolationCount', 'minRaiseOutsideClampCount']) {
     if (t[key] !== 0) failures.push(key);
   }
+  if (!Array.isArray(result?.sizing) || result.sizing.length !== 8) failures.push('sizing');
   for (const key of ['unopened', 'facingOpen']) {
     if (JSON.stringify(result?.scenarios?.preflop?.[key]) !== JSON.stringify(EXPECTED_PREFLOP_FACTS[key])) {
       failures.push(`preflopScenario.${key}`);
