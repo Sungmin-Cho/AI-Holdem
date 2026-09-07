@@ -131,8 +131,8 @@ test('training does no filesystem I/O of its own', () => {
 // 예외는 담기 원시자뿐 — 서버는 별도 프로세스라 주입이 불가능하고, P0-0 helper를
 // 재구현하는 쪽이 더 나쁘다.
 const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
-const CONTAINMENT_MODULE = path.join('tools', 'training-store.js');
-const SERVER_ALLOWED_REFERENCE = path.join('shared', 'reference.js');
+const CONTAINMENT_MODULE = 'tools/training-store.js';
+const SERVER_ALLOWED_REFERENCE = 'shared/reference.js';
 
 test('server imports only the publish contract and named containment primitives', () => {
   const offenders = [];

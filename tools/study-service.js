@@ -252,10 +252,16 @@ async function verified(ctx, descriptor, owner, deadline) {
   try {
     denied = await httpJson(value, '/api/health', { badToken: true, deadline });
     health = await httpJson(value, '/api/health', { deadline });
-  } catch { fail(); }
-  if (denied.status !== 401 || health.status !== 200 || health.body.ok !== true
-    || health.body.protocolVersion !== 1 || health.body.capabilities?.study !== true
-    || !['pid','startTime','instanceId','storeIdentity','port'].every((key) => health.body[key] === value[key])) fail();
+  } catch (error) {
+    // A transport failure and a wrong answer are different losses; name which.
+    fail('STUDY_DESCRIPTOR_CORRUPT', `health transport ${error?.name ?? ''} ${error?.code ?? ''} ${String(error?.message ?? '').slice(0, 120)}`);
+  }
+  if (denied.status !== 401 || health.status !== 200 || health.body?.ok !== true
+    || health.body?.protocolVersion !== 1 || health.body?.capabilities?.study !== true
+    || !['pid','startTime','instanceId','storeIdentity','port'].every((key) => health.body?.[key] === value[key])) {
+    fail('STUDY_DESCRIPTOR_CORRUPT', `health answer denied=${denied.status} status=${health.status} ok=${health.body?.ok}`
+      + ` identity=${['pid','startTime','instanceId','storeIdentity','port'].filter((key) => health.body?.[key] !== value[key]).join(',') || 'match'}`);
+  }
   const after = readDescriptor(ctx), lock = readLock(ctx);
   if (after.state !== 'valid' || JSON.stringify(after.value) !== JSON.stringify(value)
     || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();

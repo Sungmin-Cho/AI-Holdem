@@ -16,6 +16,11 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { newDeck } from '../engine/cards.js';
 import { isPrivatePath, windowsPowerShellEnvironment } from '../shared/platform-files.js';
+
+// Every wait in this file is sized for a host whose proofs are in-process. On
+// win32 each proof is a PowerShell child and a cold study start alone may take
+// two minutes, so the same waits need an order of magnitude more.
+const scaled = (ms) => (process.platform === 'win32' ? ms * 10 : ms);
 import { ownedProcessStartTime } from '../engine/state.js';
 import { resolveRuntimes, RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { ensureStudyService, inspectStudyService, stopStudyService } from '../tools/study-service.js';
@@ -113,7 +118,7 @@ test('S8 early: off-target configuration uses readable heuristic reference compa
 
 function engine(args) {
   return new Promise((resolve) => {
-    const child = execFile(process.execPath, [ENGINE, ...args], { encoding: 'utf8', timeout: 10000 }, (error, stdout, stderr) => {
+    const child = execFile(process.execPath, [ENGINE, ...args], { encoding: 'utf8', timeout: scaled(10000) }, (error, stdout, stderr) => {
       let json;
       try { json = JSON.parse(stdout.trim()); } catch { /* reported with terminal output */ }
       resolve({ code: error?.code ?? 0, signal: error?.signal ?? null, json, stderr });
@@ -214,7 +219,7 @@ async function within(promise, milliseconds, label = 'owned CLI') {
   } finally { clearTimeout(timer); }
 }
 
-async function until(predicate, cli, milliseconds = 6000) {
+async function until(predicate, cli, milliseconds = scaled(6000)) {
   const deadline = Date.now() + milliseconds;
   while (Date.now() < deadline) {
     const value = predicate();
@@ -227,7 +232,7 @@ async function until(predicate, cli, milliseconds = 6000) {
   assert.fail('owned CLI bootstrap checkpoint was not reached');
 }
 
-test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: 15000 }, async (t) => {
+test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: scaled(15000) }, async (t) => {
   const store = createOwnedTempDir('holdem-s8-cli-store');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env);
@@ -265,7 +270,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
   assert.equal(result.signal, null);
 });
 
-test('S8 early: explicit LLM store launch still requires an eligible player runtime', { timeout: 15000 }, async () => {
+test('S8 early: explicit LLM store launch still requires an eligible player runtime', { timeout: scaled(15000) }, async () => {
   const store = createOwnedTempDir('holdem-s8-cli-llm');
   const fake = failedCliFixtures();
   const cli = startCli(['--store-dir', store, '--opponent-runtime', 'llm', '--player-runtime', 'claude'], fake.env);
@@ -287,7 +292,7 @@ test('S8 early: explicit LLM store launch still requires an eligible player runt
   assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false);
 });
 
-test('S8 early: policy bootstrap survives failed upper selection and reports LLM feedback unavailable', { timeout: 10000 }, async (t) => {
+test('S8 early: policy bootstrap survives failed upper selection and reports LLM feedback unavailable', { timeout: scaled(10000) }, async (t) => {
   const gameDir = createOwnedTempDir('holdem-s8-upper-none');
   const parsed = resolve(...STORE_ARGS);
   const probes = [];
@@ -331,7 +336,7 @@ async function stopOwnedStudy(storeDir) {
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 }
 
-test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: 15000 }, async (t) => {
+test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: scaled(15000) }, async (t) => {
   const parent = createOwnedTempDir('holdem-s8-private-store');
   fs.chmodSync(parent, 0o755);
   const store = path.join(parent, 'new-store');
@@ -350,7 +355,7 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   assert.equal(process.umask(), hostMask, 'the host process umask is unchanged');
 });
 
-test('S8 full: store bootstrap attaches its owner and publishes the verified study URL', { timeout: 15000 }, async (t) => {
+test('S8 full: store bootstrap attaches its owner and publishes the verified study URL', { timeout: scaled(15000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-link');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -371,7 +376,7 @@ test('S8 full: store bootstrap attaches its owner and publishes the verified stu
 
 async function command(file, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile(file, args, { encoding: 'utf8', timeout: 10000, ...options }, (error, stdout, stderr) => {
+    const child = execFile(file, args, { encoding: 'utf8', timeout: scaled(10000), ...options }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(error, { stdout, stderr }));
       else resolve(stdout);
     });
@@ -406,7 +411,7 @@ async function launchRelay(t, gameDir, sessionToken, { studyUrl, sourceRoot = RO
 }
 
 for (const variant of ['missing study URL', 'rotated study URL', 'actual legacy capabilities']) {
-  test(`S8 full: store bootstrap replaces an authenticated owned relay with ${variant}`, { timeout: 20000 }, async (t) => {
+  test(`S8 full: store bootstrap replaces an authenticated owned relay with ${variant}`, { timeout: scaled(20000) }, async (t) => {
     const storeDir = createOwnedTempDir('holdem-s8-relay-adoption');
     const gameDir = path.join(storeDir, 'session');
     fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -444,7 +449,7 @@ for (const variant of ['missing study URL', 'rotated study URL', 'actual legacy 
   });
 }
 
-test('S8 full: a current-URL relay is reused and the attached store owner keeps study alive', { timeout: 15000 }, async (t) => {
+test('S8 full: a current-URL relay is reused and the attached store owner keeps study alive', { timeout: scaled(15000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-parent');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -501,12 +506,12 @@ async function studyRequest(service, route, body) {
 
 function processCommandLine(pid) {
   assert.ok(Number.isSafeInteger(pid) && pid > 1);
-  if (process.platform !== 'win32') return execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 5000 }).trim();
+  if (process.platform !== 'win32') return execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: scaled(5000) }).trim();
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
     `$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`],
   // Get-CimInstance lives in a module, so this call needs the system module path.
-  { env: windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }), encoding: 'utf8', timeout: 15000 }).replace(/^\uFEFF/, '').trim();
+  { env: windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }), encoding: 'utf8', timeout: scaled(15000) }).replace(/^\uFEFF/, '').trim();
 }
 
 test('S8 fixture: runner process command line is observable with inherited shell environment', () => {
@@ -618,7 +623,7 @@ test('S8 driver preserves premature relay loss and unreadable engine state as fa
   await assert.rejects(snapshotForActiveGame(file, async () => ({ status: 200 })), SyntaxError);
 });
 
-test('S8 full: default 20-hand production session records support then study remains usable and reusable', { timeout: 240000 }, async (t) => {
+test('S8 full: default 20-hand production session records support then study remains usable and reusable', { timeout: scaled(240000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-default20');
   const fake = failedCliFixtures({ hold: true });
   const initialCli = startCli(['--store-dir', storeDir], fake.env);
@@ -904,7 +909,7 @@ for (const scenario of ['limp', 'off-size', 'multiway', 'four-bet']) {
   });
 }
 
-test('S8 full: private CLI creation never relabels an existing live foreign loop lock', { timeout: 15000 }, async () => {
+test('S8 full: private CLI creation never relabels an existing live foreign loop lock', { timeout: scaled(15000) }, async () => {
   const storeDir = createOwnedTempDir('holdem-s8-foreign-loop');
   fs.chmodSync(storeDir, 0o755);
   const lock = path.join(storeDir, 'loop.lock.d');
@@ -925,7 +930,7 @@ test('S8 full: private CLI creation never relabels an existing live foreign loop
   assert.equal(fs.readFileSync(pidFile, 'utf8'), bytes);
 });
 
-test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: 15000 }, async (t) => {
+test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: scaled(15000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-command');
   t.after(() => stopOwnedStudy(storeDir));
   const npm = process.platform === 'win32' ? process.execPath : path.join(path.dirname(process.execPath), 'npm');
@@ -939,7 +944,7 @@ test('S8 full: package study commands require an explicit store and own service 
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 });
 
-test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: 15000 }, async (t) => {
+test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: scaled(15000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-rotation-heal');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -973,7 +978,7 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
   assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
 });
 
-test('S8 full: corrupt study ownership blocks relay replacement without rewriting either file', { timeout: 10000 }, async (t) => {
+test('S8 full: corrupt study ownership blocks relay replacement without rewriting either file', { timeout: scaled(10000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-corrupt-study');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -997,7 +1002,7 @@ test('S8 full: corrupt study ownership blocks relay replacement without rewritin
   assert.doesNotThrow(() => process.kill(relay.child.pid, 0));
 });
 
-test('S8 full: capability verification rechecks the pinned relay lock before adoption', { timeout: 10000, concurrency: false }, async (t) => {
+test('S8 full: capability verification rechecks the pinned relay lock before adoption', { timeout: scaled(10000), concurrency: false }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-capability-race');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -1041,7 +1046,7 @@ test('S8 full: optional relay port is validated and never becomes an engine opti
   assert.equal(engineInitFlags(resolve(...STORE_ARGS, '--port', '0')).includes('--port'), false);
 });
 
-test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: 15000 }, async (t) => {
+test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: scaled(15000) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-cli-port');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', storeDir, '--port', '0'], fake.env);

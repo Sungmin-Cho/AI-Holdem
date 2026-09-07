@@ -318,6 +318,9 @@ test('REQ-010: unsafe descriptor symlink is preserved and owner self-stops witho
 
 test('REQ-010: hard-linked or nonprivate descriptors fail closed without modifying foreign bytes', async (t) => {
   for (const kind of ['hardlink', 'mode']) await t.test(kind, async (t) => {
+    // chmod changes nothing about privacy on Windows, where the ACL is the
+    // boundary and the Windows ACL tests hold that contract instead.
+    if (kind === 'mode' && skipOnWin32(t, 'mode bits carry no privacy on win32; the ACL proof does')) return;
     const { storeDir, api } = await launch(t, { testOptions: { checkpointMs: 100 } });
     const foreign = path.join(storeDir, 'foreign-descriptor');
     const before = fs.readFileSync(descriptorPath(storeDir));

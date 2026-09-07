@@ -339,7 +339,11 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
   assert.fail(`pid ${pid} did not exit`);
 }
 
-async function waitFor(predicate, message, timeoutMs = 3_000) {
+// A wait bounded for in-process proofs; on win32 each proof behind the loop is
+// a PowerShell child, so the same wait needs an order of magnitude more.
+const WIN32_SCALE = process.platform === 'win32' ? 10 : 1;
+
+async function waitFor(predicate, message, timeoutMs = 3_000 * WIN32_SCALE) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
@@ -355,7 +359,7 @@ async function waitFor(predicate, message, timeoutMs = 3_000) {
   assert.fail(message);
 }
 
-async function waitForUserSnapshot(gameDir, timeoutMs = 3_000) {
+async function waitForUserSnapshot(gameDir, timeoutMs = 3_000 * WIN32_SCALE) {
   return waitFor(async () => {
     const lock = readJson(path.join(gameDir, 'lock.json'));
     const response = await fetch(
@@ -1798,6 +1802,10 @@ test('playing resume recreates only missing, corrupt, runtime-mismatched, or arg
 });
 
 test('a remotely rejected restored session recreates only that player once, persists it, and retries without overlap', { timeout: 15_000 }, async (t) => {
+  // This asserts a 25ms decide budget against a 10ms adapter. On win32 the
+  // loop's own identity and lock checks are synchronous PowerShell children of
+  // about a second, which blocks the timer and fires that budget spuriously.
+  if (skipOnWin32(t, 'a 25ms decide budget cannot be kept while in-process proofs block the loop for seconds on win32')) return;
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
@@ -2160,7 +2168,7 @@ test('missing or timed-out listener verifier fails closed without adopting or si
   }
 });
 
-test('present invalid or falsy lock.json fails closed without spawn, adoption, or signal', { timeout: 20_000 }, async (t) => {
+test('present invalid or falsy lock.json fails closed without spawn, adoption, or signal', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const cases = [
     ['malformed-json', '{'],
     ['null', 'null'],
@@ -5440,7 +5448,10 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
   const holder = await startOwnedLoopHolder(gameDir, { signalLog });
   fs.writeFileSync(
     path.join(gameDir, 'loop.lock.d', 'pid'),
-    `${holder.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
+    // Wrong in this host's own identity format; a foreign format is 'unknown'.
+    process.platform === 'win32'
+      ? `${holder.pid}\nwin32-v1\n2001-01-01T00:00:00.0000000Z`
+      : `${holder.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
   );
   const signals = [];
   const loop = createGameLoop({
