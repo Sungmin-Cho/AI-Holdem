@@ -90,7 +90,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 
 ## 5. 횡단 관심사
 
-- **락**: pid(+startTime) identity 기반 owned-lock 프리미티브 하나(`engine/state.js`의 `acquireOwnedLock`/`readOwnedLock`/`withMutation`/`withNamedLock`)가 엔진 mutex, 사이드카 수명 락(`loop.lock.d/`), 게시 락(`publish.lock.d/`) 전부에 재사용된다. 새 락 구현을 따로 만들지 않는다.
+- **락**: pid(+startTime) identity 기반 owned-lock 프리미티브 하나(`engine/state.js`의 `acquireOwnedLock`/`readOwnedLock`/`withMutation`/`withNamedLock`)가 엔진 mutex, 사이드카 수명 락(`loop.lock.d/`), 게시 락(`publish.lock.d/`) 전부에 재사용된다. 새 락 구현을 따로 만들지 않는다. 회수는 stale pid 파일에 하드링크 aside를 붙여 inode를 검증하고 그 aside가 디렉터리를 비어 있지 않게 고정하는 동안만 지운다(경로 재바인딩 방지); 획득은 고유 이름 임시 디렉터리에 pid를 먼저 기록하고 rename으로 설치해 산 락이 한순간도 비어 있지 않게 한다. 회수에는 rename을 쓰지 않는다.
 - **게시 계약**: `publish-contract.js`가 body-byte 상한·`publishId` 상한·`gameEpoch` 파생을 `server/`와 `tools/` 양쪽에 단일 소스로 공급해, 두 프로세스가 같은 상수를 따로 정의하지 않게 한다.
 - **원자적 쓰기**: JSON 상태 파일은 `engine/state.js`의 `writeJsonAtomic`이, 리뷰 같은 텍스트 산출물은 `tools/game-loop.js`의 `writeTextAtomic`이 각각 tmp-write-then-rename으로 쓴다 — 프로세스가 도중에 죽어도 부분 쓰기로 상태가 깨지지 않는다.
 - **contained I/O**: `tools/training-store.js`의 `openContained`/`writeContained`는 세그먼트 문법(`BAD_SEGMENT`)·조상 `lstat`(symlink 거부)·`O_NOFOLLOW`·열기 후 조상 재-`lstat`(dev/ino)로 경계를 좁힌다. Node 공개 API에 `openat`이 없어 이 검사-열기-재검사는 **완전 봉쇄가 아니다** — TOCTOU 창은 줄어들 뿐이고, 호출자는 root를 신뢰 경계로 둬야 한다. `writeContained({mode:'create'})`는 `link(tmp, dest)`만 허용하며(EEXIST → `EXISTS`) 존재 검사 후 rename으로 덮어쓰지 않는다.
