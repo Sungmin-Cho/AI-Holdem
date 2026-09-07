@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, parseOwnedLockIdentity } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -264,10 +264,10 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   while (platformNow() < deadline) {
     const currentOwner = readLock(ctx);
     if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
-      // Name both identities: a recorded stamp that never matches is a format
-      // disagreement, while one that stops matching is the process going away.
+        // The status word already separates the two losses: 'unknown' is a probe
+      // that could not run, 'dead' is one that ran and disagreed.
       const observed = currentOwner
-        ? `${currentOwner.status} pid=${currentOwner.pid} recorded=${currentOwner.startTime} probed=${ownedProcessStartTime(currentOwner.pid)}`
+        ? `${currentOwner.status} pid=${currentOwner.pid} recorded=${currentOwner.startTime}`
         : 'absent';
       fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${observed}, expected alive pid=${owner.pid} recorded=${owner.startTime}`);
     }
@@ -463,14 +463,13 @@ function assertOwnLock(ctx, own) {
   if (current?.status !== 'alive' || current.pid !== own.pid || current.startTime !== own.startTime
     || current.exact?.dev !== own.dev || current.exact?.ino !== own.ino) {
     // Four different losses reach this guard and the caller cannot tell them
-    // apart. Name the one that happened, and for an identity that no longer
-    // reads alive, what the probe answers now: null is a probe that cannot run,
-    // a different stamp is two processes disagreeing about the same instant.
+    // apart. Name the one that happened; the status word carries the rest,
+    // since 'unknown' is a probe that could not run and 'dead' is one that ran
+    // and disagreed.
     fail('STUDY_DESCRIPTOR_CORRUPT', current
       ? `own lock status=${current.status} pid=${current.pid}/${own.pid}`
         + ` start=${current.startTime}/${own.startTime}`
         + ` dev=${current.exact?.dev}/${own.dev} ino=${current.exact?.ino}/${own.ino}`
-        + (current.status === 'alive' ? '' : ` probed=${ownedProcessStartTime(current.pid)}`)
       : 'own lock absent');
   }
   return current;
