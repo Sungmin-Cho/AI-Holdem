@@ -106,9 +106,11 @@ export function aclTransaction(ctx, fn, { platform = process.platform } = {}) {
     { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
   ];
   identityMemo = new Map();
-  aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
-  try { return settleTransaction(fn); }
-  finally { identityMemo = null; aclScope = null; proveEntries(candidates, 'after'); }
+  try {
+    aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
+    try { return settleTransaction(fn); }
+    finally { aclScope = null; proveEntries(candidates, 'after'); }
+  } finally { identityMemo = null; }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
 function directory(file, { privateMode = false } = {}) {
