@@ -1,4 +1,4 @@
-import { fallbackLegal, legalizeEntries, VERSION_V2 } from './contracts.js';
+import { fallbackLegal, isStrategyV2, legalizeEntries } from './contracts.js';
 import { estimatePublicStrength } from './hand-strength.js';
 import { raiseToFor } from './sizing.js';
 
@@ -9,8 +9,7 @@ function clamp(value, low = 0, high = 1) {
 function traitsOf(config) {
   const traits = config?.traits;
   if (
-    config?.policyVersion !== VERSION_V2
-    || config?.base !== 'strategy-v2'
+    !isStrategyV2(config)
     || !traits
     || ['tightness', 'aggression', 'calling', 'bluff'].some(
       (key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1,

@@ -26,7 +26,7 @@ import { collectPrivateLiterals, gameEpochOf, validateActionAck } from '../publi
 import { normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS } from '../shared/free-text.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
-import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
+import { decide as decidePolicy, readDerivedPolicyConfigs, stampPlayerPolicies } from './policy-player.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
@@ -1827,6 +1827,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       policy: seat.policy,
       policySeed: engine.policySeed,
       gameEpoch: gameEpochOf(engine.sessionToken),
+      derived: readDerivedPolicyConfigs(root),
     });
     const stepArgs = ['step', next.toAct, choice.action];
     if (choice.action === 'raise') stepArgs.push(String(choice.amount));
@@ -4099,7 +4100,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
 
-  const exploitReveal = (players) => Object.entries(modelsFromPlayers(players)).map(([playerId, model]) => ({
+  const exploitReveal = (players) => Object.entries(modelsFromPlayers(players, {
+    derived: readDerivedPolicyConfigs(root),
+  })).map(([playerId, model]) => ({
     playerId,
     opponentModelId: model.opponentModelId,
     policyVersion: model.policyVersion,
@@ -4162,7 +4165,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const labels = { TAG: '신중한 공격형 (TAG)', LAG: '폭넓은 공격형 (LAG)', Nit: '매우 신중한 유형 (Nit)',
       CallingStation: '콜을 선호하는 유형 (CallingStation)', Maniac: '매우 공격적인 유형 (Maniac)',
       Trickster: '변화를 섞는 유형 (Trickster)' };
-    const names = sanitizePlayersForReview(players, { gameOver: true })
+    const names = sanitizePlayersForReview(players, {
+      gameOver: true, derived: readDerivedPolicyConfigs(root),
+    })
       .filter((player) => player.playerId !== 'user').map((player) => {
         const observed = stats?.[player.playerId];
         const name = String(player.name ?? '이름 미확인').replace(/[\\`*_[\]<>|\r\n]/g, ' ');
@@ -4249,7 +4254,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         evaluator,
         result: engine.result,
         outcomeRecords: trimmed.records,
-        playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
+        playersRaw: JSON.stringify(sanitizePlayersForReview(players, {
+          gameOver: true, derived: readDerivedPolicyConfigs(root),
+        })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
       });
       const synthesized = await runReviewStage({
