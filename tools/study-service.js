@@ -19,7 +19,12 @@ const MAX_DESCRIPTOR = 4096;
 const WAIT_MS = process.platform === 'win32' ? 60_000 : 5000;
 // Only positively absent/dead ownership may enter the cold-start allowance.
 const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
-const HTTP_WAIT_MS = process.platform === 'win32' ? 8000 : 500;
+// A request is not answered until the service has re-proved its own boundaries,
+// and on Windows each of those proofs is a PowerShell child. Serving
+// /internal/parent-attach costs an ownership check, a descriptor read and a
+// parent lock read — six or so proofs at about a second each — which overran the
+// previous 8s ceiling on a CI runner. This is a ceiling on waiting, not a spend.
+const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 500;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
