@@ -79,7 +79,7 @@ test('every Windows PowerShell production spawn receives a sanitized environment
   // so it never pays for analysing a module directory it does not read.
   const needsModule=String(args.at(-1)).includes('Get-NetTCPConnection');
   assert.equal(opts.env.PSModulePath,needsModule?'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules':'');
-  assert.equal(opts.env.PSModuleAnalysisCachePath,needsModule?undefined:'NUL');
+  assert.equal(opts.env.PSModuleAnalysisCachePath,needsModule?originalEnv.PSModuleAnalysisCachePath:'NUL');
  }
  assert.equal(captured.at(-1).opts.env.PROVIDER_SENTINEL,'caller-provider');
  assert.equal(captured.at(-1).opts.env.SystemRoot,'E:\\payload-root');

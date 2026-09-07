@@ -115,7 +115,7 @@ test('real study ensure inspect stop accept fractional remaining below HTTP cap'
   assert.equal((await bounded(()=>inspectStudyService(dir))).status,'running');
   assert.equal((await bounded(()=>stopStudyService(dir,{expectedInstanceId:handle.instanceId}))).stopped,true);
   assert.ok(timers.length>=7);
-  assert.ok(timers.every(ms=>Number.isInteger(ms)&&ms>0&&ms<(process.platform==='win32'?8000:500)));
+  assert.ok(timers.every(ms=>Number.isInteger(ms)&&ms>0&&ms<(process.platform==='win32'?30_000:500)));
  } finally {
   t.mock.restoreAll();
   if(handle) await stopStudyService(dir,{expectedInstanceId:handle.instanceId});

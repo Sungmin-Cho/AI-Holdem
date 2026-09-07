@@ -366,7 +366,7 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     assertContext(ctx);
     owner = readLock(ctx);
     if (owner?.status === 'alive') {
-      deadline = Math.min(deadline, platformNow() + WAIT_MS);
+      deadline = Math.min(deadline, platformNow() + platformTimeout(WAIT_MS));
       extendPlatformDeadline(deadline);
       return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
     }
@@ -376,7 +376,9 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
 }
 
 async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
-  let deadline = platformNow() + WAIT_MS;
+  // Every WAIT_MS deadline is capped by the budget in force, so a caller's
+  // monotonic budget is consumed, never extended past by a fresh window.
+  let deadline = platformNow() + platformTimeout(WAIT_MS);
   let ctx = context(storeDir);
   let coldDeadline;
   optionsForChild(options);
@@ -389,7 +391,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
     const created = context(storeDir, { create: true });
     if (created.root !== ctx.root || !sameInode(created.rootStat, ctx.rootStat)) fail();
     ctx = created;
-    deadline = Math.min(coldDeadline, platformNow() + WAIT_MS);
+    deadline = Math.min(coldDeadline, platformNow() + platformTimeout(WAIT_MS));
     extendPlatformDeadline(deadline);
   }
   if (options.parentIdentity !== undefined) validateParent(ctx, options.parentIdentity);
@@ -413,7 +415,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   return publicHandle(value);
 }
 async function inspectStudyServiceWithinBudget(storeDir) {
-  const deadline = platformNow() + WAIT_MS;
+  const deadline = platformNow() + platformTimeout(WAIT_MS);
   const ctx = context(storeDir);
   const descriptor = readDescriptor(ctx), owner = readLock(ctx);
   if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
@@ -424,7 +426,7 @@ async function inspectStudyServiceWithinBudget(storeDir) {
   return { status: 'running', ...publicHandle(value) };
 }
 async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {}) {
-  const deadline = platformNow() + WAIT_MS;
+  const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
   const ctx = context(storeDir);
   const descriptor = readDescriptor(ctx), owner = readLock(ctx);
@@ -453,13 +455,17 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
 }
 
 export function ensureStudyService(storeDir, options = {}) {
-  return withPlatformDeadline(platformNow() + WAIT_MS, () => ensureStudyServiceWithinBudget(storeDir, options));
+  // platformTimeout caps the client's own budget by whatever a caller's budget
+  // has left, so an outer monotonic deadline is honoured rather than replaced.
+  // POSIX hid this: its WAIT_MS happened to equal the budget the contract test
+  // hands in, and the 60s Windows budget overran that test by 55s.
+  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => ensureStudyServiceWithinBudget(storeDir, options));
 }
 export function inspectStudyService(storeDir) {
-  return withPlatformDeadline(platformNow() + WAIT_MS, () => inspectStudyServiceWithinBudget(storeDir));
+  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => inspectStudyServiceWithinBudget(storeDir));
 }
 export function stopStudyService(storeDir, options = {}) {
-  return withPlatformDeadline(platformNow() + WAIT_MS, () => stopStudyServiceWithinBudget(storeDir, options));
+  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => stopStudyServiceWithinBudget(storeDir, options));
 }
 
 function assertOwnLock(ctx, own) {
