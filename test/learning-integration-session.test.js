@@ -9,6 +9,7 @@ import { newDeck } from '../engine/cards.js';
 import { ownedProcessStartTime } from '../engine/state.js';
 import { engineInitFlags, createGameLoop } from '../tools/game-loop.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { studyBudget } from './helpers/platform.js';
 import {
   scaled,
   ROOT,
@@ -365,21 +366,21 @@ test('S8 full: private CLI creation never relabels an existing live foreign loop
   assert.equal(fs.readFileSync(pidFile, 'utf8'), bytes);
 });
 
-test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: studyBudget({ coldStarts: 1, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-command');
   t.after(() => stopOwnedStudy(storeDir));
   const npm = process.platform === 'win32' ? process.execPath : path.join(path.dirname(process.execPath), 'npm');
   const npmArgs = process.platform === 'win32' ? [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')] : [];
   await assert.rejects(command(npm, [...npmArgs, 'run', '--silent', 'study'], { cwd: ROOT }), /usage:/);
   assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
-  const output = await command(npm, [...npmArgs, 'run', '--silent', 'study', '--', storeDir], { cwd: ROOT });
+  const output = await command(npm, [...npmArgs, 'run', '--silent', 'study', '--', storeDir], { cwd: ROOT, timeout: studyBudget({ coldStarts: 1 }) });
   const service = await inspectStudyService(storeDir);
   assert.equal(output.trim(), service.studyUrl);
   await command(npm, [...npmArgs, 'run', '--silent', 'study:stop', '--', storeDir], { cwd: ROOT });
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 });
 
-test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-rotation-heal');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -402,7 +403,7 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
     if (lock.serverPid === oldPid) return null;
     const snapshot = await relayRequest(lock, '/api/snapshot');
     return snapshot.body.view?.legal?.decisionId ? { lock, snapshot } : null;
-  });
+  }, studyBudget({ coldStarts: 1 }));
   const service = await inspectStudyService(storeDir);
   assert.notEqual(service.instanceId, firstService.instanceId);
   assert.notEqual(service.studyUrl, firstService.studyUrl);
@@ -413,13 +414,13 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
   assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
 });
 
-test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: studyBudget({ coldStarts: 1, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-cli-port');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', storeDir, '--port', '0'], fake.env);
   let gameDir;
   t.after(async () => { await cleanupCli(cli, gameDir); await stopOwnedStudy(storeDir); });
-  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);
+  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli, studyBudget({ coldStarts: 1 }));
   const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
   gameDir = path.join(storeDir, '.session-store', current.sessionRel);
   const file = path.join(gameDir, 'state.json');
@@ -431,7 +432,7 @@ test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated
   const lock = await until(() => {
     const file = path.join(gameDir, 'lock.json');
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : null;
-  }, cli);
+  }, cli, studyBudget({ coldStarts: 1 }));
   assert.ok(lock.port > 0 && lock.port <= 65535);
   assert.match(captureCliRelay(gameDir).args, /--port 0(?: |$)/);
   assert.equal((await relayRequest(lock, '/api/snapshot')).status, 200);
