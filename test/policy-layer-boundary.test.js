@@ -38,7 +38,7 @@ test('v2 strategy depends only on policy-layer modules', () => {
   assert.deepEqual(scan.unresolved, []);
   assert.deepEqual(
     scan.imports.map((entry) => entry.specifier).sort(),
-    ['./contracts.js', './hand-strength.js'],
+    ['./contracts.js', './hand-strength.js', './sizing.js'],
   );
 });
 

@@ -17,8 +17,8 @@ export function roundToUnit(value, unit) {
 }
 
 export function raiseTargetFor(snapshot, legal) {
-  const street = actionsOnStreet(snapshot);
   if (snapshot?.street === 'preflop') {
+    const street = actionsOnStreet(snapshot);
     const raises = street.filter((action) => action?.action === 'raise');
     const lastRaiseIndex = street.reduce(
       (found, action, index) => (action?.action === 'raise' ? index : found),

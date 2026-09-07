@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 export const POLICY_ACTIONS = new Set(['fold', 'check', 'call', 'raise']);
+export const VERSION_V2 = '2.1.0';
+export const PREDECESSOR_VERSIONS_V2 = Object.freeze(['2.0.0']);
 
 export function coded(code, message) {
   const error = new Error(message);

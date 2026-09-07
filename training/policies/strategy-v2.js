@@ -1,5 +1,4 @@
-import { VERSION_V2 } from './catalog.js';
-import { fallbackLegal, legalizeEntries } from './contracts.js';
+import { fallbackLegal, legalizeEntries, VERSION_V2 } from './contracts.js';
 import { estimatePublicStrength } from './hand-strength.js';
 import { raiseToFor } from './sizing.js';
 

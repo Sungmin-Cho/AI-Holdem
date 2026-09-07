@@ -175,6 +175,17 @@ test('legalizeOne keeps the v1 sizeBb out-of-range fallback to minRaiseTo', () =
   assert.equal(legalizeOne({ action: 'raise' }, facing, { bb: 50 }).amount, 100);
 });
 
+test('F1 handmade snapshot without priorActions does not throw', () => {
+  const sized = raiseToFor({
+    street: 'flop',
+    blinds: [25, 50],
+    currentBet: 0,
+    potBefore: 275,
+  }, { canRaise: true, minRaiseTo: 50, maxRaiseTo: 5000 });
+  assert.equal(sized.rule, 'bet-2/3-pot');
+  assert.equal(sized.raiseTo, 175);
+});
+
 test('P1 handmade snapshot without potBefore does not throw and opens 2.5bb', () => {
   const sized = raiseToFor({
     street: 'preflop',

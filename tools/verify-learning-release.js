@@ -478,6 +478,7 @@ export function validatePolicyBenchmark(result) {
     nutsFoldMax: 0.05, nutsAirDifferenceMin: 0.5, marginalPriceViolationCountMax: 0,
     comboParticipationStrictOrder: ['nit-v2', 'tag-v2', 'lag-v2', 'maniac-v2'],
     stationCallMinusTagMinExclusive: 0, tricksterBaselineMeanTvMin: 0.05, safetyViolationCountMax: 0,
+    minRaiseOutsideClampCountMax: 0,
   };
   const metrics = ['nutsFoldMax', 'nutsAirDifferenceMin', 'tricksterBaselineMeanTv', 'stationCallMinusTag'];
   if (result?.schemaVersion !== 1 || result.claims?.humanSkill !== false || result.claims?.gto !== false

@@ -1,8 +1,8 @@
-import { configDigestOf } from './contracts.js';
+import { configDigestOf, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
+
+export { PREDECESSOR_VERSIONS_V2, VERSION_V2 };
 
 const VERSION = '1.0.0';
-export const VERSION_V2 = '2.1.0';
-export const PREDECESSOR_VERSIONS_V2 = Object.freeze(['2.0.0']);
 
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
