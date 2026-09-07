@@ -104,8 +104,12 @@ test('isReservedName: archive, .mutex, publish.lock.d, .training', () => {
   assert.equal(isReservedName('.mutex'), true);
   assert.equal(isReservedName('publish.lock.d'), true);
   assert.equal(isReservedName('.training'), true);
+  assert.equal(isReservedName('.mutex.123.0123abcd.tmp'), true);
+  assert.equal(isReservedName('publish.lock.d.123.0123abcd.tmp'), true);
   assert.equal(isReservedName('state.json'), false);
   assert.equal(isReservedName('hands'), false);
+  assert.equal(isReservedName('foo.tmp'), false);
+  assert.equal(isReservedName('.mutex.tmp'), false);
 });
 
 test('vacateLive: .training 은 보관·삭제하지 않고 라이브에 남긴다', () => {

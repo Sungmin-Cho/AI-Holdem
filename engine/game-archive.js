@@ -82,7 +82,9 @@ export function throwArchiveFailed() {
 
 export function isReservedName(name) {
   return name === 'archive' || name === '.mutex' || name === '.session-store'
-    || name === '.training' || name.endsWith('.lock.d');
+    || name === '.training' || name.endsWith('.lock.d')
+    || /^\.mutex\.\d+\.[0-9a-f]{8}\.tmp$/.test(name)
+    || /\.lock\.d\.\d+\.[0-9a-f]{8}\.tmp$/.test(name);
 }
 
 export function archiveTag(state) {
