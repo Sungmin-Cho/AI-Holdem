@@ -5225,17 +5225,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         canaries.delete(canary);
       }
 
-      if (stopError) {
-        persistCleanupFailure(stopError);
-        throw stopError;
-      }
-
       if (logFd !== null) {
         try {
           fs.closeSync(logFd);
           logFd = null;
         } catch (error) {
-          stopError = error;
+          stopError ??= error;
         }
       }
       if (stopError) {
