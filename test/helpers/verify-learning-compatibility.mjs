@@ -424,13 +424,19 @@ function redactedDescriptor(proof) {
 }
 
 async function httpJson(port, route, { token, control = false, body } = {}) {
-  const response = await fetch(`http://127.0.0.1:${port}${route}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: token ? { [control ? 'x-study-control' : 'x-drill-token']: token } : {},
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(process.platform === 'win32' ? 30_000 : 3_000),
-  });
-  return { status: response.status, body: await response.json() };
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: token ? { [control ? 'x-study-control' : 'x-drill-token']: token } : {},
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(process.platform === 'win32' ? 30_000 : 3_000),
+    });
+    return { status: response.status, body: await response.json() };
+  } catch (error) {
+    const cause = error?.cause?.code ?? error?.cause?.name ?? 'none';
+    error.message = `${error.message} cause=${cause}`;
+    throw error;
+  }
 }
 
 async function relayRequest(lock, route, { method = 'GET', body } = {}) {

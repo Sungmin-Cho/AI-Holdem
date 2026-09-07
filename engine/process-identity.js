@@ -1,5 +1,6 @@
-import { platformTimeout, windowsPowerShellEnvironment } from '../shared/platform-files.js';
+import { platformTimeout, windowsPowerShellEnvironment, recordProofEvent } from '../shared/platform-files.js';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import path from 'node:path';
 
 const IDENTITY_TIMEOUT_MS = process.platform === 'win32' ? 15_000 : 3_000;
@@ -63,6 +64,7 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
     "$p.StartTime.ToUniversalTime().ToString('o')",
   ].join('; ');
   try {
+    const started = performance.now();
     const result = spawn(powershellExe(), [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-Command', script,
@@ -72,6 +74,13 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
       env: windowsPowerShellEnvironment(),
       maxBuffer: IDENTITY_MAX_BUFFER,
       windowsHide: true,
+    });
+    recordProofEvent({
+      kind: 'identity',
+      paths: 1,
+      ms: Math.round(performance.now() - started),
+      status: result.status ?? null,
+      timedOut: result.error?.code === 'ETIMEDOUT',
     });
     if (result.status !== 0) return null;
     return canonicalizeWin32StartTime(result.stdout, result.stderr);

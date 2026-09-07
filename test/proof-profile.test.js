@@ -262,8 +262,8 @@ test('tap-file-timing maps a step-6 then alphabet-restart log back onto two file
   fs.writeFileSync(path.join(tests, 'zeta.test.js'), "test('zeta one', () => {});\n");
   const log = path.join(dir, 'job.log');
   const lines = [
-    'gate\t2026-09-07T10:00:00.0000000Z # Subtest: alpha one',
-    'gate\t2026-09-07T10:00:05.0000000Z ok 1 - alpha one',
+    'gate\t2026-09-07T10:00:00.0000000Z # Subtest: zeta one',
+    'gate\t2026-09-07T10:00:05.0000000Z ok 1 - zeta one',
     'run\t2026-09-07T10:03:00.0000000Z # Subtest: alpha one',
     'run\t2026-09-07T10:03:10.0000000Z ok 1 - alpha one',
     'run\t2026-09-07T10:03:10.0000000Z # Subtest: zeta one',

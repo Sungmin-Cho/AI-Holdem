@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { isPrivatePath, arePrivatePaths, createPrivateDirectory, withPlatformDeadline, platformNow, platformTimeout, extendPlatformDeadline } from '../shared/platform-files.js';
+import { isPrivatePath, arePrivatePaths, createPrivateDirectory, withPlatformDeadline, platformNow, platformTimeout, extendPlatformDeadline, setProofPhase } from '../shared/platform-files.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -261,7 +261,7 @@ async function verified(ctx, descriptor, owner, deadline) {
     health = await httpJson(value, '/api/health', { deadline });
   } catch (error) {
     // A transport failure and a wrong answer are different losses; name which.
-    fail('STUDY_DESCRIPTOR_CORRUPT', `health transport ${error?.name ?? ''} ${error?.code ?? ''} ${String(error?.message ?? '').slice(0, 120)}`);
+    fail('STUDY_DESCRIPTOR_CORRUPT', transportDetail(error));
   }
   if (denied.status !== 401 || health.status !== 200 || health.body?.ok !== true
     || health.body?.protocolVersion !== 1 || health.body?.capabilities?.study !== true
@@ -360,14 +360,16 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     // never remove a lock or send process signals, including failed startup paths.
     deadline = coldDeadline ?? platformNow() + COLD_START_MS;
     extendPlatformDeadline(deadline);
+    const childLog = openChildLog();
     const child = spawn(process.execPath, [SELF, '--serve', ctx.root, JSON.stringify(config),
       ctx.storeIdentity, trainingIdentity(ctx)], {
-      cwd: path.dirname(SELF), detached: true, stdio: 'ignore',
+      cwd: path.dirname(SELF), detached: true,
+      stdio: childLog === undefined ? 'ignore' : ['ignore', 'ignore', childLog],
       // Existing owned locks use ps lstart in the caller's locale/timezone.
       // Preserve that identity format without inheriting game/provider secrets.
-      env: Object.fromEntries(['PATH','SystemRoot','WINDIR','TEMP','TMP','LANG','LC_ALL','LC_TIME','TZ']
-        .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
+      env: childEnvironment(),
     });
+    if (childLog !== undefined) fs.closeSync(childLog);
     let spawnError = null;
     child.on('error', (error) => { spawnError = error; });
     child.unref();
@@ -467,18 +469,41 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   fail();
 }
 
+const CHILD_ENV_KEYS = ['PATH','SystemRoot','WINDIR','TEMP','TMP','LANG','LC_ALL','LC_TIME','TZ'];
+export function childEnvironment(env = process.env) {
+  const keys = env.AI_HOLDEM_PLATFORM_DIAGNOSTICS !== undefined
+    ? [...CHILD_ENV_KEYS, 'AI_HOLDEM_PLATFORM_DIAGNOSTICS']
+    : CHILD_ENV_KEYS;
+  return Object.fromEntries(keys.filter((key) => env[key] !== undefined).map((key) => [key, env[key]]));
+}
+function openChildLog() {
+  const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
+  if (!dir) return undefined;
+  try { return fs.openSync(path.join(dir, 'study-children.log'), 'a'); }
+  catch { return undefined; }
+}
+export function transportDetail(error) {
+  const cause = error?.cause?.code ?? error?.cause?.name ?? 'none';
+  return `health transport ${error?.name ?? ''} ${error?.code ?? ''} ${String(error?.message ?? '').slice(0, 120)} cause=${cause}`;
+}
+function withClientPhase(label, fn) {
+  setProofPhase(label);
+  try { return fn(); }
+  finally { setProofPhase(null); }
+}
+
 export function ensureStudyService(storeDir, options = {}) {
   // platformTimeout caps the client's own budget by whatever a caller's budget
   // has left, so an outer monotonic deadline is honoured rather than replaced.
   // POSIX hid this: its WAIT_MS happened to equal the budget the contract test
   // hands in, and the 60s Windows budget overran that test by 55s.
-  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => ensureStudyServiceWithinBudget(storeDir, options));
+  return withClientPhase('ensure', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => ensureStudyServiceWithinBudget(storeDir, options)));
 }
 export function inspectStudyService(storeDir) {
-  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => inspectStudyServiceWithinBudget(storeDir));
+  return withClientPhase('inspect', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => inspectStudyServiceWithinBudget(storeDir)));
 }
 export function stopStudyService(storeDir, options = {}) {
-  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => stopStudyServiceWithinBudget(storeDir, options));
+  return withClientPhase('stop', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => stopStudyServiceWithinBudget(storeDir, options)));
 }
 
 function assertOwnLock(ctx, own) {
@@ -519,13 +544,17 @@ function publish(ctx, own, value) {
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 async function runService(storeDir, config, expectedStore, expectedTraining) {
-  const ctx = context(storeDir);
-  if (!ctx.trainingStat || ctx.storeIdentity !== expectedStore || trainingIdentity(ctx) !== expectedTraining) fail();
-  readDescriptor(ctx); readLock(ctx); // Validate private boundaries before owned-lock primitives.
+  setProofPhase('runService');
+  let ctx;
+  try {
+    ctx = context(storeDir);
+    if (!ctx.trainingStat || ctx.storeIdentity !== expectedStore || trainingIdentity(ctx) !== expectedTraining) fail();
+    readDescriptor(ctx); readLock(ctx); // Validate private boundaries before owned-lock primitives.
+  } finally { setProofPhase(null); }
   // runService is child-only; do not change the caller umask or existing modes.
   process.umask(0o077);
   const own = acquireOwnedLock(ctx.training, LOCK);
-  let server, timer, value, stopping = false;
+  let server, timer, value, stopping = false, instanceId;
   const parents = new Map();
   let lastActivity = Date.now();
   let hadLiveParent = false;
@@ -534,8 +563,9 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   // startup failure uses: discarded in production, read by a piped caller.
   const stop = async (reason = 'requested') => {
     if (stopping) return; stopping = true; clearTimeout(timer);
-    try { process.stderr.write(`STUDY_CHILD_STOPPED ${reason}\n`); } catch { /* closed stdio */ }
+    try { process.stderr.write(`STUDY_CHILD_STOPPED ${reason} pid=${own.pid} instance=${instanceId ?? 'none'}\n`); } catch { /* closed stdio */ }
     await server?.close();
+    setProofPhase('stop');
     try {
       assertOwnLock(ctx, own);
       const descriptor = readDescriptor(ctx);
@@ -546,10 +576,14 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
         fs.unlinkSync(file);
       }
     } catch { /* Unsafe/foreign descriptor stays untouched; HTTP still closes. */ }
+    finally { setProofPhase(null); }
+    setProofPhase('stop');
     try { assertOwnLock(ctx, own); releaseOwnedLock(own); } catch { /* Never traverse a replaced owner boundary. */ }
+    finally { setProofPhase(null); }
   };
   const checkpoint = () => {
     if (stopping) return;
+    setProofPhase('checkpoint');
     try {
       assertOwnLock(ctx, own);
       const descriptor = readDescriptor(ctx);
@@ -565,15 +599,18 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
       hadLiveParent = liveParent;
       if (Date.now() - lastActivity >= config.idleTimeoutMs) void stop('idle');
     } catch (error) { void stop(`checkpoint ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); }
+    finally { setProofPhase(null); }
   };
   try {
     const drillToken = randomBytes(32).toString('hex'), controlToken = randomBytes(32).toString('hex');
-    const instanceId = randomUUID();
+    instanceId = randomUUID();
     const health = { pid: own.pid, startTime: own.startTime, instanceId, storeIdentity: ctx.storeIdentity };
     server = await startDrillServer({ storeDir: ctx.root, token: drillToken, health,
       beforeRequest() {
+        setProofPhase('beforeRequest');
         try { assertOwnLock(ctx, own); readDescriptor(ctx); }
         catch (error) { void stop(`request ${error?.code ?? error?.name ?? 'unknown'} ${String(error?.stack ?? '').split('\n').slice(0, 3).join(' / ')}`); throw error; }
+        finally { setProofPhase(null); }
         if (stopping) fail();
       },
       onActivity() { lastActivity = Date.now(); },
@@ -610,7 +647,7 @@ if (direct) {
     // Production stdio is 'ignore', so this write lands on the null device and
     // costs nothing. A caller that pipes this child is otherwise unable to tell
     // a failed cold start from a slow one: it only ever sees its own timeout.
-    try { process.stderr.write(`STUDY_CHILD_FAILED ${error?.code ?? error?.name ?? 'unknown'}\n${error?.stack ?? ''}\n`); }
+    try { process.stderr.write(`STUDY_CHILD_FAILED ${error?.code ?? error?.name ?? 'unknown'} pid=${process.pid} instance=none\n${error?.stack ?? ''}\n`); }
     catch { /* A closed or full stdio never changes the exit status. */ }
     process.exitCode = 1;
   }

@@ -47,10 +47,46 @@ export function windowsPowerShellEnvironment(env = process.env, systemRoot = pro
 
 const denied = () => Object.assign(new Error('PRIVATE_PATH_UNVERIFIED'), { code: 'PRIVATE_PATH_UNVERIFIED' });
 const quote = (text) => `'${String(text).replaceAll("'", "''")}'`;
-function powershell(script, spawn = spawnSync) {
-  return spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoProfile', '-NonInteractive', '-Command', script],
-    { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: platformTimeout(15_000), maxBuffer: 64 * 1024, windowsHide: true });
+
+let currentPhase = null;
+export function setProofPhase(label) {
+  currentPhase = label == null || label === '' ? null : String(label);
+}
+
+export function recordProofEvent({ kind, paths = 0, ms, status, timedOut }) {
+  const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
+  if (!dir) return;
+  try {
+    fs.appendFileSync(path.join(dir, 'proofs.jsonl'), `${JSON.stringify({
+      t: Date.now(),
+      pid: process.pid,
+      kind,
+      paths,
+      ms,
+      status: status ?? null,
+      timedOut: Boolean(timedOut),
+      phase: currentPhase,
+    })}\n`);
+  } catch { /* Diagnostics must never change a privacy verdict. */ }
+}
+
+function powershell(script, spawn = spawnSync, { kind = 'acl', paths = 0 } = {}) {
+  const started = performance.now();
+  let result;
+  try {
+    result = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { env: windowsPowerShellEnvironment(), encoding: 'utf8', timeout: platformTimeout(15_000), maxBuffer: 64 * 1024, windowsHide: true });
+    return result;
+  } finally {
+    recordProofEvent({
+      kind,
+      paths,
+      ms: Math.round(performance.now() - started),
+      status: result?.status ?? null,
+      timedOut: result?.error?.code === 'ETIMEDOUT',
+    });
+  }
 }
 
 // Windows mode bits do not describe a DACL. Read the actual ACL without changing
@@ -79,7 +115,7 @@ export function arePrivatePaths(entries, { platform = process.platform, spawn = 
     if (shape) return unproven(`shape:${shape.file}`);
     const paths = entries.map(({ file }) => quote(file)).join(',');
     const script = `$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); $me=$id.User.Value; $tokenOwner=$id.Owner.Value; $proofs=@(); foreach($p in @(${paths})) { $a=Get-Acl -LiteralPath $p; $rules=@(); foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { $rules+=@{sid=$r.IdentityReference.Value;type=$r.AccessControlType.ToString();rights=[long]$r.FileSystemRights} }; $proofs+=@{user=$me;tokenOwner=$tokenOwner;owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;reparse=(([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0);rules=$rules} }; ConvertTo-Json -InputObject @($proofs) -Depth 5 -Compress`;
-    const result = powershell(script, spawn);
+    const result = powershell(script, spawn, { kind: 'acl', paths: entries.length });
     if (result.status !== 0 || String(result.stderr ?? '').trim()) {
       return unproven(`powershell:status=${result.status} error=${result.error?.code ?? 'none'} stderr=${String(result.stderr ?? '').trim().slice(0, 300)}`);
     }
@@ -144,7 +180,7 @@ $acl.SetOwner($me); $acl.SetAccessRuleProtection($true,$false);
 $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($me,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule);
 $bytes=$acl.GetSecurityDescriptorBinaryForm(); $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length);
 try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=New-Object PrivateDirectoryNative+SA; $sa.length=[Runtime.InteropServices.Marshal]::SizeOf($sa); $sa.descriptor=$ptr; if (![PrivateDirectoryNative]::CreateDirectory(${quote(file)},[ref]$sa)) { $e=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); if($e -eq 183){exit 2}; exit 1 } } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }`;
-  const result = powershell(script);
+  const result = powershell(script, spawnSync, { kind: 'create', paths: 1 });
   if (result.status === 2) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
   if (result.status !== 0 || !isPrivatePath(file)) throw denied();
 }

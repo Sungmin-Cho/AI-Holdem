@@ -1,5 +1,6 @@
-import { windowsPowerShellEnvironment } from '../shared/platform-files.js';
+import { windowsPowerShellEnvironment, recordProofEvent } from '../shared/platform-files.js';
 import { execFile, spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -169,6 +170,7 @@ export function win32ListenerOwnedBy(pid, port, {
     'Select-Object OwningProcess,LocalAddress,LocalPort,State | ConvertTo-Json -Compress',
   ].join(' ');
   let result;
+  const started = performance.now();
   try {
     result = spawn(powershellExe(), [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -181,8 +183,22 @@ export function win32ListenerOwnedBy(pid, port, {
       windowsHide: true,
     });
   } catch (error) {
+    recordProofEvent({
+      kind: 'listener',
+      paths: 1,
+      ms: Math.round(performance.now() - started),
+      status: null,
+      timedOut: error?.code === 'ETIMEDOUT',
+    });
     throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.', error);
   }
+  recordProofEvent({
+    kind: 'listener',
+    paths: 1,
+    ms: Math.round(performance.now() - started),
+    status: result.status ?? null,
+    timedOut: result.error?.code === 'ETIMEDOUT',
+  });
   if (result.status !== 0) throw unavailable('pid↔port OS 검증을 완료할 수 없습니다.');
   const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
   // With the native table already unable to answer, an empty PowerShell view
@@ -214,8 +230,16 @@ async function win32ListenerOwnedByAsync(pid, port, { execFileFn = execFile, onC
     catch { /* The table could not be read as one; the PowerShell view decides. */ }
   }
   const script = `$ErrorActionPreference = "Stop"; Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${listenPort} -State Listen -ErrorAction SilentlyContinue | Select-Object OwningProcess,LocalAddress,LocalPort,State | ConvertTo-Json -Compress`;
+  const started = performance.now();
   const result = await run(powershellExe(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
     windowsPowerShellEnvironment(process.env, undefined, { modules: 'system' }));
+  recordProofEvent({
+    kind: 'listener',
+    paths: 1,
+    ms: Math.round(performance.now() - started),
+    status: result.error ? (result.error.code === 'ETIMEDOUT' ? null : 1) : 0,
+    timedOut: result.error?.code === 'ETIMEDOUT',
+  });
   if (result.error || String(result.stderr ?? '').trim()) throw unavailable('Listener verification failed', result.error);
   const rows = parseListenRows(String(result.stdout ?? '').replace(/^\uFEFF/, '').trim());
   if (!rows.length) throw unavailable('Listener verification failed');

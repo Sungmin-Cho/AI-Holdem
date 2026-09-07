@@ -45,6 +45,12 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Prepare Windows diagnostics directory
+        if: runner.os == 'Windows'
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'holdem-diag'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          echo "AI_HOLDEM_PLATFORM_DIAGNOSTICS=$dir" >> $env:GITHUB_ENV
       - name: Verify Windows private directory creation
         if: runner.os == 'Windows'
         run: node test/helpers/windows-privacy-probe.mjs
@@ -60,3 +66,10 @@ jobs:
         # which pass for real; the full suite returns with that issue.
         if: runner.os != 'Windows'
         run: npm run ${{ runner.os == 'Windows' && 'test:ci:windows' || 'test:ci' }}
+      - name: Report Windows proof profile
+        if: runner.os == 'Windows' && always()
+        run: |
+          $file = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'proofs.jsonl'
+          if (Test-Path $file) { node test/helpers/proof-profile-report.mjs $file } else { echo 'no proofs.jsonl' }
+          $log = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'study-children.log'
+          if (Test-Path $log) { Get-Content $log }
