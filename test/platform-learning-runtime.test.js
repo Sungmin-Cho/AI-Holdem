@@ -78,7 +78,7 @@ test('actual platform fresh private store owns, reuses and stops study service',
     return child;
   };
   syncBuiltinESMExports();
-  let owner, service;
+  let owner, service, failed = false;
   try {
     assert.equal(isPrivatePath(root), true);
     owner = acquireOwnedLock(root, 'loop.lock.d');
@@ -95,6 +95,7 @@ test('actual platform fresh private store owns, reuses and stops study service',
     assert.equal(ownedIdentityStatus(service.pid, service.startTime), 'dead');
     service = null;
   } catch (error) {
+    failed = true;
     // A child that died moments before this throw has not had its exit or its
     // last stderr delivered yet. Give the loop a turn so the account is complete.
     await new Promise((resolve) => { setTimeout(resolve, 500); });
@@ -107,7 +108,11 @@ test('actual platform fresh private store owns, reuses and stops study service',
   } finally {
     cp.spawn = originalSpawn;
     syncBuiltinESMExports();
-    if (service) await stopStudyService(root, { expectedInstanceId: service.instanceId });
+    // Cleanup runs after a failure and can fail on its own — stopping a service
+    // that is already gone, say. It must never replace the failure it is
+    // cleaning up after, and must still be heard when there was none.
+    try { if (service) await stopStudyService(root, { expectedInstanceId: service.instanceId }); }
+    catch (error) { if (!failed) throw error; }
     if (owner) releaseOwnedLock(owner);
     fs.rmSync(root, { recursive: true, force: true });
   }

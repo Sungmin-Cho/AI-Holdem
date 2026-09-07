@@ -50,26 +50,37 @@ let aclScope = null;
 function privatePath(file, privateMode) {
   return aclScope?.has(file) || isPrivatePath(file, { privateMode });
 }
+// A path can be removed between the moment it is listed and the moment the proof
+// reads it, and on Windows that proof is a PowerShell child, so the window is
+// wide: releasing a lock while a client polls does exactly this. A path that is
+// gone is absent, not unproven, so a listing that changed under the proof earns
+// one fresh attempt. A listing that did not change closes the transaction.
+function proveEntries(candidates, phase) {
+  const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
+  let entries = candidates.filter(({ file }) => statOrNull(file));
+  for (let attempt = 0; ; attempt += 1) {
+    const reasons = [];
+    if (arePrivatePaths(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
+    const relisted = candidates.filter(({ file }) => statOrNull(file));
+    if (attempt > 0 || listing(relisted) === listing(entries)) {
+      fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
+    }
+    entries = relisted;
+  }
+}
 function aclTransaction(ctx, fn) {
   if (process.platform !== 'win32' || aclScope) return fn();
-  const entries = [
+  const candidates = [
     { file: ctx.root, privateMode: false }, { file: ctx.training, privateMode: true },
     { file: path.join(ctx.training, DESCRIPTOR), privateMode: true },
     { file: path.join(ctx.training, LOCK), privateMode: false },
     { file: path.join(ctx.training, LOCK, 'pid'), privateMode: false },
     { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
     { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
-  ].filter(({ file }) => statOrNull(file));
-  const reasons = [];
-  const onUnproven = (reason) => { if (reasons.length < 4) reasons.push(reason); };
-  if (!arePrivatePaths(entries, { onUnproven })) fail('STUDY_DESCRIPTOR_CORRUPT', `before ${reasons.join(' | ')}`);
-  aclScope = new Set(entries.map(({ file }) => file));
+  ];
+  aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
   try { return fn(); }
-  finally {
-    aclScope = null;
-    reasons.length = 0;
-    if (!arePrivatePaths(entries.filter(({ file }) => statOrNull(file)), { onUnproven })) fail('STUDY_DESCRIPTOR_CORRUPT', `after ${reasons.join(' | ')}`);
-  }
+  finally { aclScope = null; proveEntries(candidates, 'after'); }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
 function directory(file, { privateMode = false } = {}) {
