@@ -4,7 +4,7 @@ import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os'
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
-import { loadState, saveState, withMutation, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
+import { loadState, saveState, withMutation, withNamedLock, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
 import { spawnSleeper } from './helpers/platform.js';
 
 function tmpDir() { return createOwnedTempDir('holdem-state'); }
@@ -458,5 +458,74 @@ test('noncanonical zero-padded day cannot make a live owned identity reclaimable
     assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown', 'equivalent noncanonical spelling must not prove owner death');
     assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), /LOCKED/);
     assert.equal(fs.readFileSync(path.join(lock, 'pid'), 'utf8'), raw);
+  }
+});
+
+// #148: 회수자가 죽은 락을 판정·검증한 뒤 pid를 지우기 직전, 동료가 그 락을 완전히 회수하고
+// 자기 락을 세운다. 회수자는 동료의 산 락을 파괴해서는 안 된다.
+function reclaimTheftHooks() {
+  let peerAcquired = false;
+  let peerIno = null;
+  let calls = 0;
+  const hooks = {
+    beforeUnlinkPid(dir) {
+      calls += 1;
+      if (calls > 1) return;
+      try { fs.unlinkSync(path.join(dir, 'pid')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      try { fs.rmdirSync(dir); } catch (e) { if (e.code === 'ENOTEMPTY') return; throw e; }
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      peerIno = fs.statSync(dir, { bigint: true }).ino;
+      peerAcquired = true;
+    },
+  };
+  return { hooks, get calls() { return calls; }, get peerAcquired() { return peerAcquired; }, get peerIno() { return peerIno; } };
+}
+
+test('T1: 회수자는 검증과 unlink 사이에 동료가 세운 산 락을 파괴하지 않는다', () => {
+  const d = tmpDir();
+  const mutex = path.join(d, '.mutex');
+  fs.mkdirSync(mutex);
+  fs.writeFileSync(path.join(mutex, 'pid'), '2147480000');
+  saveState(d, { stateVersion: 0 });
+  const sim = reclaimTheftHooks();
+  let error = null;
+  try {
+    withMutation(d, (s) => ({ state: { ...s, ran: true }, response: null }), { ...fastLock, hooks: sim.hooks });
+  } catch (e) { error = e; }
+  assert.ok(sim.calls >= 1, 'hook never reached');
+  if (sim.peerAcquired) {
+    assert.equal(error?.code, 'LOCKED', `stole the peer lock: ${error ? error.code : 'acquired'}`);
+    assert.equal(fs.readFileSync(path.join(mutex, 'pid'), 'utf8'), String(process.pid), 'peer pid destroyed');
+    assert.equal(fs.statSync(mutex, { bigint: true }).ino, sim.peerIno, 'peer lock directory replaced');
+    assert.equal(loadState(d).ran, undefined);
+  } else {
+    assert.equal(error, null, `peer was pinned out but we did not acquire: ${error?.code}`);
+    assert.equal(loadState(d).ran, true);
+    assert.equal(fs.existsSync(mutex), false);
+  }
+});
+
+test('T1 named: withNamedLock도 같은 창에서 동료의 산 락을 파괴하지 않는다', async () => {
+  const d = tmpDir();
+  const lockDir = path.join(d, 'publish.lock.d');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), '2147480000');
+  const sim = reclaimTheftHooks();
+  let error = null;
+  let ran = false;
+  try {
+    await withNamedLock(d, 'publish.lock.d', async () => { ran = true; }, { ...fastLock, hooks: sim.hooks });
+  } catch (e) { error = e; }
+  assert.ok(sim.calls >= 1, 'hook never reached');
+  if (sim.peerAcquired) {
+    assert.equal(error?.code, 'LOCKED', `stole the peer lock: ${error ? error.code : 'acquired'}`);
+    assert.equal(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'), String(process.pid), 'peer pid destroyed');
+    assert.equal(fs.statSync(lockDir, { bigint: true }).ino, sim.peerIno, 'peer lock directory replaced');
+    assert.equal(ran, false);
+  } else {
+    assert.equal(error, null, `peer was pinned out but we did not acquire: ${error?.code}`);
+    assert.equal(ran, true);
+    assert.equal(fs.existsSync(lockDir), false);
   }
 });

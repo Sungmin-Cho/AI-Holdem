@@ -211,7 +211,7 @@ function throwLocked() {
 
 // stale로 판정해 둔 pid 파일만 지운다: 다시 열어 fstat의 inode가 판정 당시와
 // 일치할 때만 unlink한다. 불일치(교체된 락의 pid 파일)나 소실이면 회수를 중단한다.
-function unlinkStalePidFile(dir, expectedPidFile) {
+function unlinkStalePidFile(dir, expectedPidFile, hooks) {
   if (!expectedPidFile) return true; // pid-less stale dir: nothing to unlink
   const pidPath = path.join(dir, 'pid');
   let fd;
@@ -227,6 +227,7 @@ function unlinkStalePidFile(dir, expectedPidFile) {
   } finally {
     fs.closeSync(fd);
   }
+  hooks?.beforeUnlinkPid?.(dir);
   try {
     fs.unlinkSync(pidPath);
   } catch (error) {
@@ -253,12 +254,12 @@ function unlinkStalePidFile(dir, expectedPidFile) {
  * microsecond window) our rmdir removes it. Its owner then fails its pid write with
  * ENOENT and throws — it never silently proceeds as if it held the lock.
  */
-function reclaimMutex(dir) {
+function reclaimMutex(dir, hooks) {
   const decided = mutexIdentity(dir);
   if (!decided || !isIdentityStale(decided)) return false;
   const confirmed = mutexIdentity(dir);
   if (!isReclaimable(decided, confirmed)) return false;
-  if (!unlinkStalePidFile(dir, confirmed.pidFile)) return false;
+  if (!unlinkStalePidFile(dir, confirmed.pidFile, hooks)) return false;
   try {
     fs.rmdirSync(dir);
   } catch (error) {
@@ -348,7 +349,7 @@ function acquireMutex(dir, ctx) {
   for (;;) {
     let mine = tryCreateMutex(dir);
     if (mine) return mine;
-    if (reclaimMutex(dir)) {
+    if (reclaimMutex(dir, ctx.hooks)) {
       mine = tryCreateMutex(dir);
       if (mine) return mine;
     }
@@ -380,7 +381,7 @@ export function withMutation(gameDir, fn, options) {
   const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
   const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
   const dir = mutexPath(gameDir);
-  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs, hooks: options?.hooks });
   try {
     const result = fn(loadState(gameDir));
     saveState(gameDir, result.state);
@@ -395,7 +396,7 @@ export function runExclusive(gameDir, fn, options) {
   const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
   fs.mkdirSync(gameDir, { recursive: true });
   const dir = mutexPath(gameDir);
-  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs, hooks: options?.hooks });
   try {
     return fn();
   } finally {
@@ -416,7 +417,7 @@ export async function withNamedLock(gameDir, name, fn, options) {
   const retryMs = options?.retryMs ?? MUTEX_RETRY_MS;
   const timeoutMs = options?.timeoutMs ?? MUTEX_TIMEOUT_MS;
   const dir = path.join(gameDir, name);
-  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs });
+  const mine = acquireMutex(dir, { deadline: Date.now() + timeoutMs, retryMs, hooks: options?.hooks });
   try {
     return await fn();
   } finally {
