@@ -8,6 +8,7 @@ import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from '.
 import { startDrill, answerQuestion } from '../../tools/drill-cli.js';
 import { createProfileStore } from '../../tools/training-stores.js';
 import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../../shared/reference.js';
+import { isStudyTransportFailure } from '../../tools/study-service.js';
 
 // On Windows the service re-proves its boundaries before answering, and each
 // proof is a PowerShell child, so a request costs seconds and the owned state
@@ -23,11 +24,20 @@ export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const source = CANONICAL_REFERENCE_SOURCE;
 
 export async function request(port, token, route, { body, headers = {}, method = body === undefined ? 'GET' : 'POST' } = {}) {
-  const response = await fetch(`http://127.0.0.1:${port}${route}`, {
-    method, headers: { ...(token ? { 'x-drill-token': token } : {}), ...headers },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(REQUEST_MS),
-  });
-  return { status: response.status, body: await response.json() };
+  const deadline = Date.now() + REQUEST_MS;
+  for (;;) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+        method, headers: { ...(token ? { 'x-drill-token': token } : {}), ...headers },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      });
+      return { status: response.status, body: await response.json() };
+    } catch (error) {
+      if (!isStudyTransportFailure(error) || Date.now() >= deadline) throw error;
+      await wait(25);
+    }
+  }
 }
 
 export async function standalone(t) {
