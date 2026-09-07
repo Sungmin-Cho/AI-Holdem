@@ -21,10 +21,25 @@ async function main() {
   syncBuiltinESMExports();
   try {
     const { createPrivateDirectory, isPrivatePath } = await import('../../shared/platform-files.js');
-    const target = path.join(root, 'private');
-    createPrivateDirectory(target);
-    if (!isPrivatePath(target)) throw new Error('PRIVATE_PROBE_FAILED');
-    console.log(JSON.stringify({ privateDirectoryVerified: true }));
+    // A hosted runner's PowerShell occasionally stalls past the 15s per-call
+    // cap once, in a job that otherwise proves in under a second per call. One
+    // stall is not a verdict on the platform, and it must not cost the 75
+    // minutes behind this gate. Try once more on a fresh directory; both
+    // attempts stay in the log, and a second stall fails the step.
+    let target = path.join(root, 'private');
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        createPrivateDirectory(target);
+        if (!isPrivatePath(target)) throw Object.assign(new Error('PRIVATE_PROBE_FAILED'), { code: 'PRIVATE_PROBE_FAILED' });
+        break;
+      } catch (error) {
+        console.log(JSON.stringify({ privateDirectoryAttempt: attempt, failed: error?.code ?? error?.message }));
+        if (attempt >= 2 || !['PRIVATE_PATH_UNVERIFIED', 'PRIVATE_PROBE_FAILED'].includes(error?.code)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        target = path.join(root, `private-${attempt + 1}`);
+      }
+    }
+    console.log(JSON.stringify({ privateDirectoryVerified: true, target: path.basename(target) }));
     const { acquireOwnedLock, releaseOwnedLock } = await import('../../engine/state.js');
     const owner = acquireOwnedLock(target, 'loop.lock.d');
     try {
