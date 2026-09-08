@@ -9,6 +9,7 @@ import { skipOnWin32 } from './helpers/platform.js';
 import { detailRefOf, projectTrainingSummary } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { handRecordFixture, writeSecurityFixtures } from './helpers/security-fixtures.js';
 
 function tmpDir() {
   return createOwnedTempDir('holdem-srv');
@@ -892,6 +893,68 @@ test('training-detail GET without a token performs 0 fs accesses', async () => {
     for (const name of names) {
       if (orig[name] !== undefined) fs[name] = orig[name];
     }
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('publicSnapshot.handReplays is ascending and SSE deltas are incremental', async () => {
+  const gameDir = tmpDir();
+  writeSecurityFixtures(gameDir, {
+    hands: [handRecordFixture(1), handRecordFixture(2), handRecordFixture(3)],
+    config: { replayReveal: 'all' },
+  });
+  const token = 'tok';
+  const srv = await start(gameDir, token);
+  try {
+    const pending = collectSse(
+      `http://127.0.0.1:${srv.port}/api/events?token=${token}&after=0`,
+      { until: (events) => events.some((event) => Number(event.id) === 2) },
+    );
+    assert.equal((await publish(srv.port, token, {
+      publishId: 1, view: { n: 1 }, handReplay: { handNos: [3] },
+    })).status, 200);
+    assert.equal((await publish(srv.port, token, {
+      publishId: 2, view: { n: 2 }, handReplay: { handNos: [1] },
+    })).status, 200);
+    const sse = await pending;
+    const snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.handReplays.map((row) => row.handNo), [1, 3]);
+    const second = sse.events.find((event) => Number(event.id) === 2);
+    assert.deepEqual(second.data.handReplays.map((row) => row.handNo), [1]);
+  } finally {
+    await closeOf(srv);
+  }
+});
+
+test('POST /api/action note is delivered; same requestId keeps the first; non-string is 400', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  const decisionId = 'd-1-preflop-0';
+  try {
+    await publish(srv.port, token, { publishId: 1, view: viewWith(decisionId) });
+    const waiting = waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 2000 });
+    const posted = await action(srv.port, token, {
+      decisionId, requestId: 'note-req', action: 'call', note: '  my plan  ',
+    });
+    assert.equal(posted.status, 200);
+    const got = await waiting;
+    assert.equal(got.json.note, 'my plan');
+
+    const again = await action(srv.port, token, {
+      decisionId, requestId: 'note-req', action: 'call', note: 'other plan',
+    });
+    assert.equal(again.status, 200);
+    const replayed = await waitAction(srv.port, token, { expectDecisionId: decisionId, timeoutMs: 200 });
+    assert.equal(replayed.json.note, 'my plan');
+
+    const bad = await action(srv.port, token, {
+      decisionId, requestId: 'bad-note', action: 'fold', note: 12,
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.code, 'BAD_ACTION');
+  } finally {
     await closeOf(srv);
     fs.rmSync(gameDir, { recursive: true, force: true });
   }

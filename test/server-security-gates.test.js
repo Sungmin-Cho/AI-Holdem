@@ -6,16 +6,19 @@ import http from 'node:http';
 import path from 'node:path';
 import {
   annotationValueSha256,
+  canonicalHandReplayJson,
   detailRefOf,
   projectTrainingAnnotation,
   projectTrainingSummary,
   publicProofId,
+  replayRecord,
   trainingPayloadSha256,
 } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
 import { startServer } from '../server/server.js';
 import {
+  FIXTURE_ARCHETYPE,
   FIXTURE_CONFIG_DIGEST,
   FIXTURE_POLICY_ID,
   FIXTURE_POLICY_SEED,
@@ -957,6 +960,489 @@ test('M4: unsigned legacy text and every duplicate final authority key are dropp
   fs.writeFileSync(path.join(malformedOuterDir, 'ui-snapshot.json'), JSON.stringify(raw));
   await withServer(malformedOuterDir, async ({ port }) => {
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
+  });
+});
+
+function replaySha(replay) {
+  return createHash('sha256').update(canonicalHandReplayJson(replay)).digest('hex');
+}
+
+function foldAction(playerId, reason) {
+  return {
+    decisionId: `d-1-preflop-${playerId}`,
+    playerId,
+    action: 'fold',
+    amount: null,
+    street: 'preflop',
+    potTotal: 150,
+    callAmount: 100,
+    minRaiseTo: 200,
+    maxRaiseTo: 10_000,
+    board: [],
+    currentBet: 100,
+    reason,
+  };
+}
+
+function findReplay(snap, handNo) {
+  return (snap.handReplays ?? []).find((row) => row.handNo === handNo);
+}
+
+test('server recomputes a completed-hand trigger from the archive', async () => {
+  const dir = tmpDir();
+  const record = handRecordFixture(1, {
+    positions: { user: 'BTN', p1: 'SB' },
+    actions: [foldAction('p1', 'secret-fold')],
+    folded: ['p1'],
+  });
+  writeSecurityFixtures(dir, { hands: [record], config: { replayReveal: 'all' } });
+  await withServer(dir, async ({ port }) => {
+    const posted = await post(port, {
+      publishId: 1,
+      view: { handNo: 1 },
+      handReplay: { handNos: [1] },
+    });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.stored, [1]);
+    const snap = await snapshotOf(port);
+    const stored = findReplay(snap, 1);
+    const expected = replayRecord(record, { reveal: 'all' });
+    assert.equal(replaySha(stored), replaySha(expected));
+  });
+});
+
+test('in-progress, abort and future handNos mark NOT_COMPLETED and still commit the body', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, {
+    hands: [handRecordFixture(1)],
+    handInProgress: { handNo: 2, holes: { user: ['2h', '3h'], p1: ['4c', '5d'] } },
+  });
+  await withServer(dir, async ({ port }) => {
+    await post(port, {
+      publishId: 1,
+      view: { handNo: 2, toAct: 'user', legal: { decisionId: 'd-2-preflop-0' } },
+    });
+    const actionRes = await fetch(`http://127.0.0.1:${port}/api/action?token=${TOKEN}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisionId: 'd-2-preflop-0', requestId: 'ack-1', action: 'call' }),
+    });
+    assert.equal(actionRes.status, 200);
+    await actionRes.text();
+    const receipt = JSON.parse(fs.readFileSync(path.join(dir, 'ui-action-receipt.json'), 'utf8'));
+    const posted = await post(port, {
+      publishId: 2,
+      view: { handNo: 2, toAct: 'p1', legal: { decisionId: 'd-2-preflop-0' } },
+      events: [{ seq: 9, visibility: 'public', type: 'street', street: 'flop' }],
+      actionAck: {
+        gameEpoch: receipt.gameEpoch,
+        decisionId: receipt.decisionId,
+        requestId: receipt.requestId,
+        digest: receipt.digest,
+        phase: 'rejected',
+        reason: 'ILLEGAL_ACTION',
+      },
+      handReplay: { handNos: [2] },
+    });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.markers, [{ handNo: 2, reason: 'REPLAY_NOT_COMPLETED' }]);
+    const snap = await snapshotOf(port);
+    assert.equal(snap.view.toAct, 'p1');
+    assert.equal(snap.log.some((entry) => entry.type === 'street'), true);
+    assert.equal(findReplay(snap, 2).unavailable, true);
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
+    assert.equal(persisted.lastActionAck.requestId, 'ack-1');
+  });
+
+  const aborted = tmpDir();
+  writeSecurityFixtures(aborted, {
+    gameOver: true,
+    hands: [handRecordFixture(1)],
+    state: { result: 'abort', handNo: 2, hand: null, phase: 'idle' },
+  });
+  await withServer(aborted, async ({ port }) => {
+    const posted = await post(port, {
+      publishId: 1,
+      view: { aborted: true },
+      events: [{ seq: 1, visibility: 'public', type: 'hand_start', handNo: 1 }],
+      handReplay: { handNos: [2, 99] },
+    });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(
+      posted.json.handReplay.markers.map((row) => row.handNo).sort((a, b) => a - b),
+      [2, 99],
+    );
+    assert.ok(posted.json.handReplay.markers.every((row) => row.reason === 'REPLAY_NOT_COMPLETED'));
+    const snap = await snapshotOf(port);
+    assert.equal(snap.view.aborted, true);
+    assert.equal(snap.log[0].type, 'hand_start');
+  });
+});
+
+test('{handNos:[]} is a 200 no-op', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, { hands: [handRecordFixture(1)] });
+  await withServer(dir, async ({ port }) => {
+    const posted = await post(port, {
+      publishId: 1,
+      view: { idle: true },
+      handReplay: { handNos: [] },
+    });
+    assert.equal(posted.status, 200);
+    const snap = await snapshotOf(port);
+    assert.equal(snap.view.idle, true);
+    assert.equal((snap.handReplays ?? []).length, 0);
+  });
+});
+
+test('corrupt state.json marks every trigger UNAVAILABLE without rejecting the body', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, { hands: [handRecordFixture(1)] });
+  fs.writeFileSync(path.join(dir, 'state.json'), '{broken');
+  await withServer(dir, async ({ port }) => {
+    const posted = await post(port, {
+      publishId: 1,
+      view: { kept: true },
+      handReplay: { handNos: [1, 2] },
+    });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.markers.map((row) => row.reason), [
+      'REPLAY_UNAVAILABLE',
+      'REPLAY_UNAVAILABLE',
+    ]);
+    assert.equal((await snapshotOf(port)).view.kept, true);
+  });
+});
+
+test('archive parse failure and handNo mismatch are UNAVAILABLE', async () => {
+  const parseFail = tmpDir();
+  writeSecurityFixtures(parseFail, { hands: [handRecordFixture(1), handRecordFixture(2)] });
+  fs.mkdirSync(path.join(parseFail, 'hands'), { recursive: true });
+  fs.writeFileSync(handFilePath(parseFail, 3), 'not json');
+  await withServer(parseFail, async ({ port }) => {
+    const posted = await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [3] } });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.markers, [{ handNo: 3, reason: 'REPLAY_UNAVAILABLE' }]);
+  });
+
+  const mismatch = tmpDir();
+  writeSecurityFixtures(mismatch, { hands: [handRecordFixture(1), handRecordFixture(2)] });
+  fs.writeFileSync(handFilePath(mismatch, 3), JSON.stringify(handRecordFixture(4)));
+  await withServer(mismatch, async ({ port }) => {
+    const posted = await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [3] } });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.markers, [{ handNo: 3, reason: 'REPLAY_UNAVAILABLE' }]);
+  });
+});
+
+test('archivePending lastHand-only hands are stored', async () => {
+  const dir = tmpDir();
+  const record = handRecordFixture(1);
+  writeSecurityFixtures(dir, { hands: [record], config: { replayReveal: 'all' } });
+  fs.rmSync(handFilePath(dir, 1));
+  await withServer(dir, async ({ port }) => {
+    const posted = await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(posted.json.handReplay.stored, [1]);
+    assert.equal(replaySha(findReplay(await snapshotOf(port), 1)), replaySha(replayRecord(record, { reveal: 'all' })));
+  });
+});
+
+test('legacy store without replayReveal projects showdown', async () => {
+  const dir = tmpDir();
+  const record = handRecordFixture(1, { folded: ['p1'], actions: [foldAction('p1', 'hidden-reason')] });
+  writeSecurityFixtures(dir, { hands: [record] });
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
+    const stored = findReplay(await snapshotOf(port), 1);
+    assert.equal(stored.reveal, 'showdown');
+    assert.equal(replaySha(stored), replaySha(replayRecord(record, { reveal: 'showdown' })));
+  });
+});
+
+test('17 handNos are BAD_HAND_REPLAY 400', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, { hands: [handRecordFixture(1)] });
+  await withServer(dir, async ({ port }) => {
+    const posted = await post(port, {
+      publishId: 1,
+      view: { shouldNotCommit: true },
+      handReplay: { handNos: Array.from({ length: 17 }, (_, i) => i + 1) },
+    });
+    assert.equal(posted.status, 400);
+    assert.equal(posted.json.code, 'BAD_HAND_REPLAY');
+    const snap = await snapshotOf(port);
+    assert.equal(snap.view, null);
+  });
+});
+
+test('set-once: no-op, marker replacement, archive conflict', async () => {
+  const dir = tmpDir();
+  const first = handRecordFixture(1, { folded: ['p1'] });
+  const second = handRecordFixture(2);
+  writeSecurityFixtures(dir, { hands: [first, second], config: { replayReveal: 'all' } });
+  await withServer(dir, async ({ port }) => {
+    const stored = await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
+    assert.deepEqual(stored.json.handReplay.stored, [1]);
+    const again = await post(port, { publishId: 2, view: { n: 2 }, handReplay: { handNos: [1] } });
+    assert.deepEqual(again.json.handReplay.stored, []);
+    assert.deepEqual(again.json.handReplay.conflicts, []);
+    const firstSha = replaySha(findReplay(await snapshotOf(port), 1));
+
+    const marked = await post(port, { publishId: 3, view: { n: 3 }, handReplay: { handNos: [3] } });
+    assert.deepEqual(marked.json.handReplay.markers, [{ handNo: 3, reason: 'REPLAY_NOT_COMPLETED' }]);
+    const third = handRecordFixture(3);
+    fs.writeFileSync(handFilePath(dir, 3), JSON.stringify(third));
+    const engine = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+    engine.lastHand = third;
+    engine.handNo = 3;
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(engine));
+    const replaced = await post(port, { publishId: 4, view: { n: 4 }, handReplay: { handNos: [3] } });
+    assert.deepEqual(replaced.json.handReplay.stored, [3]);
+    assert.equal(findReplay(await snapshotOf(port), 3).unavailable, undefined);
+
+    const mutated = JSON.parse(fs.readFileSync(handFilePath(dir, 1), 'utf8'));
+    mutated.board = ['2c', '3d', '4h'];
+    fs.writeFileSync(handFilePath(dir, 1), JSON.stringify(mutated));
+    const conflicted = await post(port, { publishId: 5, view: { n: 5 }, handReplay: { handNos: [1] } });
+    assert.deepEqual(conflicted.json.handReplay.conflicts, [1]);
+    assert.equal(replaySha(findReplay(await snapshotOf(port), 1)), firstSha);
+  });
+});
+
+test('showdown projection hides folded opponent holes and reasons; posted holes are ignored', async () => {
+  const dir = tmpDir();
+  const record = handRecordFixture(1, {
+    folded: ['p1'],
+    actions: [foldAction('p1', 'secret-reason')],
+  });
+  writeSecurityFixtures(dir, { hands: [record], config: { replayReveal: 'showdown' } });
+  await withServer(dir, async ({ port }) => {
+    await post(port, {
+      publishId: 1,
+      view: { n: 1 },
+      handReplay: { handNos: [1], holes: { p1: ['As', 'Ah'] } },
+    });
+    const stored = findReplay(await snapshotOf(port), 1);
+    assert.equal(stored.holes.p1, undefined);
+    assert.deepEqual(stored.holes.user, ['Ah', 'Kh']);
+    const hidden = stored.actions.find((row) => row.playerId === 'p1');
+    assert.equal(hidden.reasonKind, 'hidden');
+    assert.equal('reason' in hidden, false);
+    assert.equal(JSON.stringify(stored).includes('As'), false);
+  });
+});
+
+test('loadUiState and history reproject: tamper replaced, lastHand-only kept, missing dropped, markers kept', async () => {
+  const dir = tmpDir();
+  const first = handRecordFixture(1);
+  const second = handRecordFixture(2);
+  writeSecurityFixtures(dir, { hands: [first, second], config: { replayReveal: 'all' } });
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1, 2, 99] } });
+  });
+
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
+  const list = Array.isArray(raw.handReplays)
+    ? raw.handReplays
+    : Object.values(raw.handReplays ?? {});
+  const one = list.find((row) => row.handNo === 1);
+  one.holes = { ...one.holes, p1: ['As', 'Ah'] };
+  fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify(raw));
+  fs.rmSync(handFilePath(dir, 2));
+
+  await withServer(dir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    const restoredOne = findReplay(snap, 1);
+    assert.equal(replaySha(restoredOne), replaySha(replayRecord(first, { reveal: 'all' })));
+    assert.equal(JSON.stringify(restoredOne.holes).includes('As'), false);
+    assert.equal(findReplay(snap, 2)?.handNo, 2);
+    assert.equal(findReplay(snap, 99)?.unavailable, true);
+    const sse = await collectSse(port, TOKEN, 400);
+    assert.equal(sse.includes('As'), false);
+  });
+
+  fs.rmSync(handFilePath(dir, 1));
+  const engine = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+  engine.lastHand = second;
+  engine.handNo = 2;
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(engine));
+  await withServer(dir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(findReplay(snap, 1), undefined);
+    assert.equal(findReplay(snap, 2)?.handNo, 2);
+    assert.equal(findReplay(snap, 99)?.unavailable, true);
+  });
+});
+
+test('deny list is policy-aware: all completed fold cards 200, in-progress 400, no subject-hand exemption', async () => {
+  const completed = tmpDir();
+  writeSecurityFixtures(completed, {
+    hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] } })],
+    config: { replayReveal: 'all' },
+  });
+  const summary = summaryOf();
+  await withServer(completed, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const allowed = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 7c를 들고 있었다')],
+    });
+    assert.equal(allowed.status, 200);
+  });
+
+  const inProgress = tmpDir();
+  writeSecurityFixtures(inProgress, {
+    hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['9s', '9h'] } })],
+    handInProgress: { handNo: 2, holes: { user: ['2h', '3h'], p1: ['7c', '2d'] } },
+    config: { replayReveal: 'all' },
+  });
+  await withServer(inProgress, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 7c를 들고 있었다')],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+  });
+
+  const overlap = tmpDir();
+  writeSecurityFixtures(overlap, {
+    players: [
+      { playerId: 'user' },
+      {
+        playerId: 'p1',
+        archetype: FIXTURE_ARCHETYPE,
+        policy: { policyId: FIXTURE_POLICY_ID, configDigest: FIXTURE_CONFIG_DIGEST },
+      },
+      { playerId: 'p2', archetype: 'P2_ARCHETYPE', personality: 'p2-person' },
+    ],
+    hands: [
+      handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'], p2: ['Qs', 'Qd'] } }),
+      handRecordFixture(2, { holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'], p2: ['Qs', 'Qd'] } }),
+      handRecordFixture(3, {
+        holes: { user: ['Ah', 'Ac'], p1: ['7c', '2d'], p2: ['Kh', '7s'] },
+        folded: ['p2'],
+      }),
+      handRecordFixture(4, { holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'], p2: ['Qs', 'Qd'] } }),
+    ],
+    handInProgress: {
+      handNo: 5,
+      holes: { user: ['2h', '3h'], p1: ['4c', '5d'], p2: ['Kh', '9c'] },
+    },
+    config: { replayReveal: 'all' },
+  });
+  await withServer(overlap, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '핸드 3에서 p2는 Kh')],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('deny list is never empty under all for policy and llm runtimes', async () => {
+  const summary = summaryOf();
+  const policyDir = tmpDir();
+  writeSecurityFixtures(policyDir, {
+    hands: [handRecordFixture(1)],
+    config: { replayReveal: 'all' },
+  });
+  await withServer(policyDir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', `정책 ${FIXTURE_POLICY_ID}`)],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+  });
+
+  const llmDir = tmpDir();
+  writeSecurityFixtures(llmDir, {
+    players: [
+      { playerId: 'user' },
+      { playerId: 'p1', archetype: FIXTURE_ARCHETYPE, personality: 'FIXTURE_PERSONALITY_SENTINEL' },
+    ],
+    hands: [handRecordFixture(1)],
+    config: { replayReveal: 'all' },
+    state: { policySeed: null },
+  });
+  await withServer(llmDir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', `아키타입 ${FIXTURE_ARCHETYPE}`)],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+    const personality = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '성격 FIXTURE_PERSONALITY_SENTINEL')],
+    });
+    assert.equal(personality.status, 400);
+  });
+});
+
+test('open showdown archive may quote a former muck-target AI card', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, {
+    hands: [handRecordFixture(1, {
+      holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] },
+      reveals: [{ playerId: 'p1', cards: ['7c', '2d'] }],
+    })],
+    config: { showdownPolicy: 'open', replayReveal: 'showdown' },
+  });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const allowed = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '오픈 쇼다운의 7c')],
+    });
+    assert.equal(allowed.status, 200);
+  });
+});
+
+test('handReplays keep the latest 200 hands', async () => {
+  const dir = tmpDir();
+  const hands = Array.from({ length: 201 }, (_, i) => handRecordFixture(i + 1));
+  writeSecurityFixtures(dir, { hands, config: { replayReveal: 'showdown' } });
+  await withServer(dir, async ({ port }) => {
+    let publishId = 1;
+    for (let start = 1; start <= 201; start += 16) {
+      const handNos = [];
+      for (let n = start; n < start + 16 && n <= 201; n += 1) handNos.push(n);
+      const posted = await post(port, { publishId, view: { handNo: 201 }, handReplay: { handNos } });
+      assert.equal(posted.status, 200, `batch ${start}`);
+      publishId += 1;
+    }
+    const snap = await snapshotOf(port);
+    assert.equal(snap.handReplays.length, 200);
+    assert.equal(snap.handReplays[0].handNo, 2);
+    assert.equal(snap.handReplays.at(-1).handNo, 201);
+    assert.equal(snap.handReplays.some((row) => row.handNo === 1), false);
+  });
+});
+
+test('SSE deltas include only this publish\'s stored or replaced replays', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, {
+    hands: [handRecordFixture(1), handRecordFixture(2)],
+    config: { replayReveal: 'all' },
+  });
+  await withServer(dir, async ({ port }) => {
+    const pending = collectSse(port, TOKEN, 800);
+    await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
+    await post(port, { publishId: 2, view: { n: 2 }, handReplay: { handNos: [2] } });
+    const body = await pending;
+    const blocks = body.split('\n\n').filter((block) => block.includes('data:'));
+    const payloads = blocks.map((block) => JSON.parse(block.split('data: ').pop()));
+    const lastWithReplay = [...payloads].reverse().find((row) => Array.isArray(row.handReplays));
+    assert.deepEqual(lastWithReplay.handReplays.map((row) => row.handNo), [2]);
   });
 });
 

@@ -16,6 +16,7 @@ import {
   projectTrainingSummary,
   utf8ByteLength,
   validateActionAck,
+  validateHandReplayTrigger,
 } from '../publish-contract.js';
 import { createCoachControl } from './coach-control.js';
 
@@ -174,6 +175,10 @@ function buildBody(envelope, opts) {
   if (Array.isArray(envelope.training) && envelope.training.length) body.training = envelope.training;
   if (Array.isArray(envelope.trainingAnnotations) && envelope.trainingAnnotations.length) {
     body.trainingAnnotations = envelope.trainingAnnotations;
+  }
+  if (envelope.handReplay !== undefined) {
+    const handNos = validateHandReplayTrigger(envelope.handReplay);
+    if (handNos.length) body.handReplay = { handNos };
   }
   return body;
 }
@@ -423,7 +428,12 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         if (!Number.isInteger(nextId) || nextId < 1 || nextId > MAX_PUBLISH_ID) {
           bail('PUBLISH_ID_OVERFLOW', '다음 publishId가 허용 범위를 넘습니다.');
         }
-        body = { publishId: nextId, ...buildBody(envelope, opts) };
+        try {
+          body = { publishId: nextId, ...buildBody(envelope, opts) };
+        } catch (error) {
+          if (error?.code === 'BAD_HAND_REPLAY') bail('BAD_HAND_REPLAY', 'handReplay 트리거가 올바르지 않습니다.');
+          throw error;
+        }
       }
       if (body.actionAck !== undefined) {
         try {
@@ -537,6 +547,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         revision: json.revision,
         hadCoach: Array.isArray(body.coach),
         applied: json.applied !== false,
+        handReplay: json.handReplay,
       };
     }, { timeoutMs: lockWaitMs });
     if (published.hadCoach) {
@@ -622,6 +633,7 @@ async function main() {
     out.hadCoach = published.hadCoach === true;
     out.reconcilePending = published.reconcilePending === true;
     out.applied = published.applied;
+    if (published.handReplay) out.handReplay = published.handReplay;
   }
   // The dealer never reopens the envelope file, so its next command's inputs ship here.
   if (envelope.stateVersion !== undefined) out.stateVersion = envelope.stateVersion;
