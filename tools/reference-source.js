@@ -38,10 +38,15 @@ function assertHistory(root,source){
  }
 }
 /** Validation-only lookup: never creates or repairs lifecycle state. */
-export function readSessionReference(root,{allowLegacyMissing=false}={}) {
+export function readSessionReference(root,{allowLegacyMissing=false,expectedDescriptor}={}) {
  const descriptor=read(root,['reference-source.json'],4096);
  if(!descriptor&&!allowLegacyMissing)fail('REFERENCE_CONTEXT_UNAVAILABLE','Session reference descriptor missing');
- const source=descriptor?validateDescriptor(descriptor):LEGACY_REFERENCE_SOURCE;
+  const source=descriptor?validateDescriptor(descriptor):LEGACY_REFERENCE_SOURCE;
+  if(expectedDescriptor!==undefined){
+    let expected;try{expected=validateDescriptor(JSON.parse(expectedDescriptor));}
+    catch{fail('REFERENCE_SOURCE_INVALID','Invalid captured descriptor');}
+    if(!sameReferenceSource(source,expected))fail('REFERENCE_SOURCE_CONFLICT','Captured descriptor source conflict');
+  }
  assertHistory(root,source);loadReferenceDataset(source);
  return source;
 }

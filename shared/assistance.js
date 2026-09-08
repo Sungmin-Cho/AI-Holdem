@@ -34,7 +34,7 @@ export function independentAssessmentEligibility(event) {
 
 export function assistanceAllowsIndependent(event) {
   try {
-    if (event.assistance === undefined) return event.schemaVersion !== 6 && event.hintContractVersion == null;
+    if (event.assistance === undefined) return !(event.schemaVersion >= 6) && event.hintContractVersion == null;
     return !projectAssistance(event.assistance).hintShown;
   } catch { return false; }
 }

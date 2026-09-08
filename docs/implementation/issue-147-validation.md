@@ -152,3 +152,40 @@ Sol 최초 시도는 nested macOS sandbox의 파일 읽기 실패로 `INVALID_OU
 - 전체 `npm run test:ci` 진행 중. 초기 실패 중 새 diagnostic 필드 기대값과 schema3 pending fixture 5개를 고쳤고 집중 재실행 5/5 통과. 초기 병렬 실행의 재개 timeout 6개는 단독 실행에서 통과. 최종 전체 결과는 아래 완료 기록으로 확정한다.
 
 Model-router 구현 R1은 고정 diff/new-file pack SHA256 `0882871eb86264b6dede199ec7a455b19bd56b6814ac16b778bd7f6461e86fe6`, CRITICAL, MAX, Opus 5/Sol/Fable 5.1 세 좌석에 제출했다. 실행 종료·receipt·판정 및 수용 여부는 아직 미확정이다. 리뷰 도중 root가 추가 검증과 수정한 부분은 다음 고정 대상에 포함한다. 현재 기록은 merge 승인 근거가 아니다.
+
+### 구현 리뷰 수용 판단과 재검증
+
+R1은 Opus/Fable의 첫 출력이 schema-invalid였고, 같은 세션에서 정해진 형식으로 다시 받은 판정은 FAIL이었다. Sol 첫 실행은 1,200초 timeout 뒤 종료 확인됐다. 이를 승인으로 세지 않았다. R2 고정 pack `559dba8d1f6e2b8a8690c41f82ea0d72fa6edcadc2701a8393aba90d5629294a`에 대한 Opus/Fable은 PASS_WITH_CHANGES, Sol은 두 concrete blocker로 FAIL이었다.
+
+| 지적 | root 판단과 조치 |
+|---|---|
+| hints 검증이 숫자 파서 안에 있어 실행되지 않음 | 수용. 옵션 파서로 이동, invalid/legacy on 거부 테스트. |
+| omitted resume의 resolved hints가 relay gate에 전달되지 않음 | 수용. durable config의 반환값을 runtime opts에 반영. |
+| off 게시가 추가 state 읽기에 의존함 | 수용. production enabled gate에서 기존 envelope를 그대로 반환. |
+| source parse와 descriptor capture 사이 파일 교체 | 수용. 초기화 전후 bounded bytes/dev/inode 일치를 검사한 뒤 context를 확정. relay/sidecar 양쪽의 실제 rename fault 주입 테스트, source 오류는 restart까지 latch. |
+| schema5 practice 원본 재시도가 새 assistance guard에 막힘 | 수용. 기존 id를 먼저 찾고 검증된 prior의 과거 형식으로만 비교. 새 undeclared practice는 거부하고 과거 저널은 무변경. |
+| schema>=6 helper 일치, recovery view guard, non-string error.code | 방어 보강으로 수용. |
+| SSE await 때문에 lastRevision 중복/역전 | 기각. lastRevision 검사는 await 이후 동기 루프 안에 있어 stale 사전 읽기가 아니다. 실제 overlapping SSE 1,2,3 고유 순서 테스트 통과. |
+| potTotal과 potBefore의 의미가 다를 수 있음 | 기각. 두 엔진 함수 모두 현재 hand.contribs 합계이며 호출 전 팟이다. |
+| 특정 새 테스트 파일명이 없으므로 기능 검증 없음 | 파일명 요구는 기각하고 실제 경로 검증 요구는 수용. 기존 suite 확장과 새 authority/relay/sidecar 테스트 및 실제 브라우저 증거로 검증. |
+| 모든 새 store의 one-way profile 경계 | 의도된 계약. schema1~5 profile을 읽어 schema6 derived profile로 재구축하는 시점도 roll-forward 경계다. 저널의 과거 바이트를 강제 변환하거나 구 binary로 내려가는 복구는 지원하지 않는다. |
+
+Claude R3 후속 요청은 실제 API 429 session limit으로 종료되어 판정 없음으로 기록했다. 유효한 R2 보고서를 보존하고, Sol의 두 blocker 수정은 해당 Sol 세션의 bounded R3 후속 검증에 제출했다. 그 고정 pack은 `c26ac6ee602c2e95df9d1fdd94e1e7667071980c9efdf0d95c299974128a43c4`이다. root는 각 지적을 코드·재현으로 판단했으며, 모든 좌석이 최종 동일 tree에 PASS했다고 주장하지 않는다.
+
+### 실제 검증 범위
+
+로컬 Node 26 전체 2차 실행: **2,166건 중 2,165 pass, 0 fail, 1 cancelled**. 취소된 `cutoff-marker write failure still fail-closed when terminate throws`는 120초 timeout이며, 같은 코드 단독 재실행에서 8.2초로 통과했다. 초기 전체 실행의 기본값/schema/pending fixture 오류와 legacy reader 오류는 수정했다. `training-async-pipeline` 전체 단독 12/12, reader 91/91, migration/release 61/61, practice/legacy 54/54가 통과했다. 이 기록을 로컬 전체 green으로 바꾸지 않는다.
+
+C1 10,000파일 보안 검증은 기준 main과 현재 소스의 단독 실행이 각각 약 1.2초와 1.3초로 통과했다. 앞선 전체/병렬 실행의 timeout은 단독 결과와 구분한다. 마지막 제품 변경 이후의 지원 Node 20/22 Linux 전체 suite와 Windows 플랫폼 게이트가 모두 성공해야 PR을 ready/merge한다. 원격 결과의 정본은 [PR #166 checks](https://github.com/Sungmin-Cho/AI-Holdem/pull/166/checks)다. Windows 전체 suite는 저장소 #149에 따라 이번 증거 범위 밖이다. ESLint/Stryker는 미설치이며 실행했다고 기록하지 않는다.
+
+실제 브라우저 흐름은 힌트 → 폴드 클릭/즉시 숨김 → 실제 engine hand 완료 → accept/materialize → 학습 카드 detail 검증/도움 라벨 → profile 독립 0·보조 1을 확인했다. 이 수동 fixture는 액션 소비 ack까지 sidecar가 처리하는 전체 게임 종료를 주장하지 않는다. 별도 실제 policy sidecar bootstrap/resume/run 테스트가 그 게시 통합 경로를 다룬다. 390×844 screenshot 검토에서 발견한 테이블 축소·로그 패널의 버튼 가림은 min-content 높이와 세로 스크롤로 수정했고, 테이블 높이 231px·버튼 hit-test·가로폭 390px을 재확인했다.
+
+합성 source history 10,000행(6,798,890 bytes)의 로컬 timing: source 검증 restart 9.8ms, 마커 포함 준비 209.1ms, 게시 14.8ms, snapshot 50회 p95 1.16ms, 순수 warm query 100회 p95 0.12ms. 한 머신의 측정이며 배포 환경 지연 보장은 아니다. 실제 사용자 store·토큰을 복사하지 않았다.
+
+### 마지막 root 수정 판정
+
+Sol R3는 과거 practice blocker 해소를 확인했고 source의 A→B→A 교체를 추가 지적했다. 수용하여 `readSessionReference`가 초기 bounded descriptor의 **검증된 full triple**과 자신이 실제 읽은 descriptor의 source를 직접 비교하도록 했다. 앞뒤 bytes/inode가 같아져도 중간 parser가 B를 읽으면 `REFERENCE_SOURCE_CONFLICT`다. 캡처 raw는 기존 closed descriptor validator로 검증한다. 실제 원래 inode를 보관→B로 교체→parser read→원래 inode 복원하는 양쪽 fault test가 통과했다. 출처 오류 후 bytes 복원만으로 sidecar latch가 풀리지 않는 것도 검증했다.
+
+model-router의 `max_review_rounds: 3`에 따라 추가 모델 리뷰를 종료했다. R3 뒤의 이 제한된 source fix는 root가 코드와 실패 주입으로 판정했으며 모델 PASS라고 기록하지 않는다. R2의 세 영수증은 `verify-evidence --require-receipt-guard --expect-count 3` 및 모델 multiset·decision fingerprint 검증 exit 0이었다. 이는 FAIL 판정을 PASS로 바꾸는 검사가 아니라 실행 증거의 무결성 검사다.
+
+마지막 focused authority/publication 검증은 14/14 통과(ABA 하위 2개 포함), 앞선 주요 boundary/profile/drill/hint 묶음은 89/89 통과했다. 원격 Node22에서 SSE 테스트가 concurrent HTTP 3-before-2의 정상 중복 처리로 id 2를 기다리던 결함을 확인했다. publish commit 순서를 보장하면서 proof I/O를 지연시켜 fanout 자체를 중첩시키는 테스트로 고쳤다. 같은 원격 실행의 기존 exploit action-driver timeout은 별도로 남겨 두고, 최신 커밋 CI에서 재검증한다.

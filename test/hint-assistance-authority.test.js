@@ -30,3 +30,18 @@ test('canonical hinted archive survives accept/materialize and rejects omitted o
  const state=f.state();delete state.lastHand.hintExposures;fs.writeFileSync(path.join(f.dir,'state.json'),JSON.stringify(state));
  assert.throws(()=>materializeLearningEvaluation(f.dir,item),{code:'ASSISTANCE_INVALID'});
 });
+
+test('default off contract archives explicit false and remains independently learnable',async t=>{
+ const f=await hintFixture(t,{hints:'off'});const e=await f.prepare();assert.equal(e.hint,undefined);
+ f.cli('apply','user','fold');while(f.state().hand){const next=f.cli('step').next;f.cli('apply',next.toAct,'fold');}
+ const record=f.state().lastHand;assert.deepEqual(record.hintExposures,{});
+ const s=record.decisions.find(row=>row.actorId==='user'),tc=createTrainingControl();
+ const ev=evaluatePreflopReference(s,loadReferenceDataset(V2_REFERENCE_SOURCE),{gameEpoch:f.epoch});
+ await tc.acceptEvaluations(f.dir,{gameEpoch:f.epoch,owner:'off-test',handNo:1,evaluations:[ev]});
+ const m=materializeLearningEvaluation(f.dir,tc.loadAuthority(f.dir).items[ev.evaluationId]);
+ assert.deepEqual(m.assistance,{schemaVersion:1,hintShown:false,exposureId:null});
+ const {independentAssessmentEligibility}=await import('../shared/assistance.js');
+ assert.equal(independentAssessmentEligibility(m).metricEligible,true);
+ const {assistance,...undeclared}=m;
+ assert.throws(()=>eventFromEvaluation({...undeclared,origin:'practice'},'2026-09-08T00:00:00.000Z'),{code:'ASSISTANCE_INVALID'});
+});

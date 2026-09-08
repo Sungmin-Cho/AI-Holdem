@@ -47,10 +47,12 @@ export async function verifyHintPublication({ sessionDir, token, context, initia
       context.root = await fs.promises.realpath(sessionDir);
       const state = JSON.parse((await readBounded(context.root,'state.json',2*1024*1024)).raw);
       if (state.sessionToken !== token || state.config?.hintContractVersion !== 1 || state.config.hints !== 'on') return {ready:false};
-      context.source = readSessionReference(context.root);
+      const before = await readBounded(context.root,'reference-source.json',4096);
+      context.source = readSessionReference(context.root,{expectedDescriptor:before.raw});
       if (context.source.version !== '2.0.0') return {ready:false};
       context.dataset = loadReferenceDataset(context.source);
       context.descriptor = await readBounded(context.root,'reference-source.json',4096);
+      if (before.raw !== context.descriptor.raw || before.dev !== context.descriptor.dev || before.ino !== context.descriptor.ino) throw new Error('source changed during initialization');
       context.ready = true;
     } catch { context.ready = false; }
     return {ready:context.ready};

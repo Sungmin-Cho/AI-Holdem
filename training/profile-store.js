@@ -88,7 +88,11 @@ export function eventFromEvaluation(evaluation, appliedAt, classified = classify
 /** Reproduce a verified journal row's original version without rewriting it. */
 export function eventForPrior(evaluation, prior) {
   assertProfileEvent(prior);
-  const event = eventFromEvaluation(evaluation, prior.appliedAt);
+  // Historical practice/import rows may be compared, but this exception never
+  // issues a new journal row: apply resolves the existing id before projection.
+  const historicalPractice = prior.schemaVersion !== 6 && !Object.hasOwn(prior,'assistance')
+    && evaluation.assistance === undefined && ['practice','import'].includes(evaluation.origin);
+  const event = eventFromEvaluation(historicalPractice ? {...evaluation,assistance:NO_HINT_ASSISTANCE} : evaluation, prior.appliedAt);
   if (prior.schemaVersion === 6) return event;
   if (evaluation.assistance?.hintShown || (evaluation.assistance !== undefined
     && !['drill','retest'].includes(evaluation.origin))) {
@@ -224,12 +228,12 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
         return { applied: false, reason: 'NOT_LEARNABLE', profile };
       }
       const appliedAt = now();
-      const event = eventFromEvaluation(evaluation, appliedAt, classified);
+      const prior = validateLearningEvents(readJsonl(eventsPath)).find((row) => row.evaluationId === evaluation.evaluationId);
+      const event = prior ? eventForPrior(evaluation,prior) : eventFromEvaluation(evaluation, appliedAt, classified);
       if (typeof event.payloadSha256 !== 'string' || event.payloadSha256.length === 0) {
         throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
       }
-      const prior = validateLearningEvents(readJsonl(eventsPath)).find((row) => row.evaluationId === event.evaluationId);
-      if (prior && learningEventKey(prior, { includeTime: false }) !== learningEventKey(eventForPrior(evaluation, prior), { includeTime: false })) {
+      if (prior && learningEventKey(prior, { includeTime: false }) !== learningEventKey(event, { includeTime: false })) {
         throw coded('PROFILE_EVENT_CONFLICT', 'same evaluationId has different learning metadata');
       }
       let profile = loadProfile();

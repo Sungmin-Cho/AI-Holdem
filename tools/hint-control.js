@@ -18,31 +18,39 @@ export function checkHintResume(config, requested) {
   return config.hints;
 }
 export function createHintControl({sessionDir,runCli,ready,enabled=()=>true,assertActive=()=>{},isFatal=()=>false,log=()=>{}}) {
-  let source, dataset, descriptor, blockedDecision;
+  let source, dataset, descriptor, blockedDecision, sourceInvalid=false;
   return { async prepare(envelope) {
     if (!enabled()) return envelope;
     let state;
     try { state=JSON.parse(openContained(sessionDir,['state.json'],{maxBytes:2*1024*1024})); }
-    catch(error) { log('hint-unavailable',{code:'HINT_STATE_UNAVAILABLE'});return {...envelope,hint:null}; }
+    catch(error) { log('hint-unavailable',{code:'HINT_STATE_UNAVAILABLE',causeCode:error.code??'INVALID_JSON'});return {...envelope,hint:null}; }
     if (state.config?.hints!=='on' || state.config.hintContractVersion!==1) return envelope;
     if (!envelope.view || envelope.next?.toAct!=='user') return {...envelope,hint:null};
     const identity={schemaVersion:1,gameEpoch:gameEpochOf(state.sessionToken),decisionId:envelope.next.decisionId,
       handNo:envelope.view.handNo,stateVersion:envelope.stateVersion};
     const unavailable=code=>({...envelope,hint:{...identity,status:'unavailable',source:source??null,code}});
+    if (sourceInvalid) return unavailable('HINT_SOURCE_UNAVAILABLE');
     if (blockedDecision===identity.decisionId) return unavailable('HINT_EXPOSURE_CONFLICT');
     const started=performance.now();
+    let checkingSource=false;
     try {
       assertActive();
       if (!await ready()) return unavailable('HINT_RELAY_UNAVAILABLE');
       assertActive();
+      checkingSource=true;
       if (!source) {
-        source=readSessionReference(sessionDir);dataset=loadReferenceDataset(source);
-        const stat=fs.lstatSync(path.join(sessionDir,'reference-source.json'));
-        descriptor={raw:openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8'),ino:stat.ino,dev:stat.dev};
+        const capture=()=>{const stat=fs.lstatSync(path.join(sessionDir,'reference-source.json'));
+          return {raw:openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8'),ino:stat.ino,dev:stat.dev};};
+        const before=capture(),resolved=readSessionReference(sessionDir,{expectedDescriptor:before.raw}),loaded=loadReferenceDataset(resolved),after=capture();
+        if (before.raw!==after.raw || before.ino!==after.ino || before.dev!==after.dev) throw hintError('HINT_SOURCE_UNAVAILABLE');
+        source=resolved;dataset=loaded;descriptor=after;
       } else {
         const stat=fs.lstatSync(path.join(sessionDir,'reference-source.json'));
-        if (stat.ino!==descriptor.ino || stat.dev!==descriptor.dev || openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8')!==descriptor.raw) return unavailable('HINT_SOURCE_UNAVAILABLE');
+        if (stat.ino!==descriptor.ino || stat.dev!==descriptor.dev || openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8')!==descriptor.raw) {
+          sourceInvalid=true;return unavailable('HINT_SOURCE_UNAVAILABLE');
+        }
       }
+      checkingSource=false;
       const peek=await runCli(['decision-peek','--for','user','--expect-version',String(envelope.stateVersion)]);
       assertActive();
       if (Buffer.byteLength(JSON.stringify(peek.snapshot))>16384) throw hintError('HINT_SNAPSHOT_INVALID');
@@ -61,17 +69,19 @@ export function createHintControl({sessionDir,runCli,ready,enabled=()=>true,asse
       return {...envelope,...marked,events:envelope.events,actionAck:envelope.actionAck,handReplay:envelope.handReplay,
         hint:{...hint,stateVersion:marked.stateVersion}};
     } catch(error) {
-      if (isFatal(error) || error.code === 'STOPPING' || error.code === 'FINALIZATION_RESULT_WAIT_CUTOFF') throw error;
-      log('hint-unavailable',{code:error.code??'HINT_QUERY_UNAVAILABLE'});
-      if (['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH'].includes(error.code)) blockedDecision=identity.decisionId;
+      const errorCode=typeof error?.code==='string'?error.code:'';
+      if (isFatal(error) || errorCode === 'STOPPING' || errorCode === 'FINALIZATION_RESULT_WAIT_CUTOFF') throw error;
+      log('hint-unavailable',{code:errorCode||'HINT_QUERY_UNAVAILABLE'});
+      if (checkingSource) sourceInvalid=true;
+      if (['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH'].includes(errorCode)) blockedDecision=identity.decisionId;
       // A commit may have succeeded before stdout loss: always re-sync identity.
       assertActive();
       const synchronized=await runCli(['step']);
-      const code=['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH','HINT_SNAPSHOT_INVALID'].includes(error.code)?error.code
-        :error.code==='SNAPSHOT_INVALID'?'HINT_SNAPSHOT_INVALID':error.code==='VERSION_MISMATCH'?'HINT_STALE_DECISION'
-        :error.code?.includes('TIMEOUT')?'HINT_PREPARE_TIMEOUT':error.code?.includes('SOURCE')?'HINT_SOURCE_UNAVAILABLE':'HINT_QUERY_UNAVAILABLE';
+      const code=checkingSource?'HINT_SOURCE_UNAVAILABLE':['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH','HINT_SNAPSHOT_INVALID'].includes(errorCode)?errorCode
+        :errorCode==='SNAPSHOT_INVALID'?'HINT_SNAPSHOT_INVALID':errorCode==='VERSION_MISMATCH'?'HINT_STALE_DECISION'
+        :errorCode.includes('TIMEOUT')?'HINT_PREPARE_TIMEOUT':errorCode.includes('SOURCE')?'HINT_SOURCE_UNAVAILABLE':'HINT_QUERY_UNAVAILABLE';
       return {...envelope,...synchronized,events:envelope.events,actionAck:envelope.actionAck,handReplay:envelope.handReplay,
-        hint:synchronized.next?.toAct==='user'?{...identity,decisionId:synchronized.next.decisionId,
+        hint:synchronized.view && synchronized.next?.toAct==='user'?{...identity,decisionId:synchronized.next.decisionId,
           handNo:synchronized.view.handNo,stateVersion:synchronized.stateVersion,status:'unavailable',source:source??null,code}:null};
     } finally { log('hint-timing',{prepareMs:performance.now()-started}); }
   }};

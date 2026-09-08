@@ -601,3 +601,17 @@ test('schema 4 derived profile without journal fails without rewriting evidence'
  await assert.rejects(store.show(),{code:'UNSUPPORTED_PROFILE'});
  assert.equal(fs.readFileSync(store.profilePath,'utf8'),bytes);
 });
+
+test('legacy practice duplicates remain byte-preserving but undeclared new practice cannot append',async()=>{
+ const dir=tmp(),store=createProfileStore(dir);
+ const {eventFromEvaluation}=await import('../training/profile-store.js');
+ const legacyEvaluation=evaluation({origin:'practice'});delete legacyEvaluation.assistance;
+ const prior=eventFromEvaluation({...legacyEvaluation,assistance:{schemaVersion:1,hintShown:false,exposureId:null}},'2026-09-08T00:00:00.000Z');
+ prior.schemaVersion=5;delete prior.assistance;
+ fs.mkdirSync(path.dirname(store.eventsPath),{recursive:true});
+ const bytes=JSON.stringify(prior)+'\n';fs.writeFileSync(store.eventsPath,bytes);
+ const result=await store.apply(legacyEvaluation);assert.equal(result.applied,false);
+ assert.equal(fs.readFileSync(store.eventsPath,'utf8'),bytes);
+ await assert.rejects(()=>store.apply({...legacyEvaluation,evaluationId:legacyEvaluation.evaluationId.replace('d-1-','d-2-')}),{code:'ASSISTANCE_INVALID'});
+ assert.equal(fs.readFileSync(store.eventsPath,'utf8'),bytes);
+});
