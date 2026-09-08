@@ -236,7 +236,9 @@ test('generated fixture VPIP/PFR matches statsReport and ignores AF', () => {
   let vpip = 0;
   let pfr = 0;
   let hands = 0;
-  for (const scenario of SCENARIOS) {
+  for (const name of names) {
+    const scenario = SCENARIOS.find((row) => row.name === name);
+    assert.ok(scenario, `missing scenario ${name}`);
     const st = replayScenario(scenario);
     const raw = st.stats.user;
     vpip += raw.vpip;
