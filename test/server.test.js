@@ -991,3 +991,27 @@ test('P3 F4: alreadyApplied 200 still carries handReplay stored/markers/conflict
     await closeOf(srv);
   }
 });
+
+test('P3 F4: alreadyApplied missing handReplay is a marker, not stored', async () => {
+  const gameDir = tmpDir();
+  writeSecurityFixtures(gameDir, {
+    hands: [handRecordFixture(1)],
+    config: { replayReveal: 'all' },
+  });
+  const token = 'tok';
+  const srv = await start(gameDir, token);
+  try {
+    const first = await publish(srv.port, token, { publishId: 1, view: { n: 1 } });
+    assert.equal(first.status, 200);
+    assert.equal(first.json.applied, true);
+    const again = await publish(srv.port, token, {
+      publishId: 1, view: { n: 1 }, handReplay: { handNos: [9] },
+    });
+    assert.equal(again.status, 200);
+    assert.equal(again.json.applied, false);
+    assert.deepEqual(again.json.handReplay.stored, []);
+    assert.deepEqual(again.json.handReplay.markers, [{ handNo: 9, reason: 'REPLAY_UNAVAILABLE' }]);
+  } finally {
+    await closeOf(srv);
+  }
+});

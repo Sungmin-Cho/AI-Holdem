@@ -8112,6 +8112,19 @@ test('P3: last-hand gameOver crash still carries the trigger on the game-over vi
   assert.equal(snapshotReplayRows(gameDir).some((row) => row.handNo === 1 && !row.unavailable), true);
 });
 
+test('P3: corrupt .replay-pending.json does not halt run', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  fs.writeFileSync(replayPendingPath(gameDir), '{not-json');
+  const running = startRun(loop);
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'corrupt pending halted run with BAD_REPLAY_PENDING');
+  await stopRun(loop, running);
+  const notices = readJson(path.join(gameDir, 'loop-state.json')).notices
+    .filter((row) => /replay-pending/i.test(row));
+  assert.ok(notices.length >= 1, 'corrupt pending was not noticed');
+  assert.equal(readLoopLog(gameDir).some((row) => row.event === 'replay-pending-unreadable'), true);
+  assert.notEqual(readJson(path.join(gameDir, 'loop-state.json')).halt?.code, 'BAD_REPLAY_PENDING');
+});
+
 test('P3: view-only BAD_ATTEMPT recovery still posts pending handNos and records marker notices', { timeout: 15_000 }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   fs.writeFileSync(replayPendingPath(gameDir), JSON.stringify({ handNos: [99] }));

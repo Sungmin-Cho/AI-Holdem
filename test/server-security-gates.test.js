@@ -1185,7 +1185,7 @@ test('set-once: no-op, marker replacement, archive conflict', async () => {
     const stored = await post(port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
     assert.deepEqual(stored.json.handReplay.stored, [1]);
     const again = await post(port, { publishId: 2, view: { n: 2 }, handReplay: { handNos: [1] } });
-    assert.deepEqual(again.json.handReplay.stored, []);
+    assert.deepEqual(again.json.handReplay.stored, [1]);
     assert.deepEqual(again.json.handReplay.conflicts, []);
     const firstSha = replaySha(findReplay(await snapshotOf(port), 1));
 

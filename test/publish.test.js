@@ -25,7 +25,7 @@ import {
   NOTE_MAX_CHARS,
   sameActionIdentity,
 } from '../publish-contract.js';
-import { handRecordFixture } from './helpers/security-fixtures.js';
+import { handRecordFixture, writeSecurityFixtures } from './helpers/security-fixtures.js';
 import { skipOnWin32 } from './helpers/platform.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
@@ -1341,6 +1341,51 @@ test('P3: --retry does not merge .replay-pending.json into the recorded body', a
   assert.deepEqual(captured.posted.handReplay, { handNos: [1] });
   assert.equal(captured.posted.handReplay.handNos.includes(9), false);
   assert.deepEqual(readReplayPending(dir), { handNos: [9, 10] });
+});
+
+test('P3: identical already-stored handNos ack as stored so mixed pending drains', async () => {
+  const dir = tmpDir();
+  const hands = Array.from({ length: 17 }, (_, i) => handRecordFixture(i + 1));
+  writeSecurityFixtures(dir, { hands, config: { replayReveal: 'all' } });
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const prior = Array.from({ length: 15 }, (_, i) => i + 1);
+    const seeded = await run(dir, ['--from', turnFile(dir, sampleTurn({
+      handReplay: { handNos: prior },
+    }))]);
+    assert.deepEqual(seeded.handReplay.stored, prior);
+    writeReplayPending(dir, Array.from({ length: 17 }, (_, i) => i + 1));
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn({ stateVersion: 4 }))]);
+    const posted = out.handReplay.stored;
+    assert.deepEqual(posted, Array.from({ length: 16 }, (_, i) => i + 1));
+    assert.deepEqual(readReplayPending(dir), { handNos: [17] });
+  } finally {
+    await started.close();
+  }
+});
+
+test('P3: non-retry applied:false does not drain not-yet-stored pending handNos', async () => {
+  const dir = tmpDir();
+  writeReplayPending(dir, [7, 8]);
+  const server = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      revision: 7,
+      applied: false,
+      handReplay: { stored: [7, 8], markers: [], conflicts: [] },
+    }));
+  });
+  writeLockJson(dir, server.address().port, 'tok');
+  try {
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn({
+      handReplay: { handNos: [7, 8] },
+    }))]);
+    assert.equal(failed.json.code, 'PUBLISH_ID_REUSED');
+    assert.deepEqual(readReplayPending(dir), { handNos: [7, 8] });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('P3 F4: --retry applied:false still drains pending using response handReplay or recorded handNos', async () => {
