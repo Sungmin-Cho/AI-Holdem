@@ -1,0 +1,110 @@
+import {createMistakeBank,createProfileStore} from '../tools/training-stores.js';
+import {execFileSync} from 'node:child_process';
+import {createStudyController} from '../server/drill-public/drill.js';
+import {createGame,startHand,applyAction,legalFor} from '../engine/hand.js';
+import {snapshotDecision} from '../engine/decision.js';
+import {newDeck} from '../engine/cards.js';
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {loadReferenceDataset} from '../tools/preflop-dataset.js';
+import {V2_REFERENCE_SOURCE,LEGACY_REFERENCE_SOURCE} from '../shared/reference.js';
+import {preflopKeys} from '../shared/preflop-key.js';
+import {nativePreflopSnapshot} from '../training/native-preflop-snapshot.js';
+import {evaluatePreflopReference} from '../training/preflop-reference.js';
+import {referenceAssessmentEligibility,projectReferenceCoverage} from '../shared/reference-coverage.js';
+import {generateQueue} from '../training/drill-generator.js';
+import {startDrill,answerQuestion,nextQuestion} from '../tools/drill-cli.js';
+import {readStudySummary} from '../tools/study-summary.js';
+const data=loadReferenceDataset(V2_REFERENCE_SOURCE);
+test('all 99 native contexts yield eligible evaluations and accurate practice prompts',()=>{
+ for(const key of preflopKeys()) {
+  const s=nativePreflopSnapshot(key,'AA',{action:'raise',sizeBb:key.includes('-vs-')?8.5:2.5});
+  const e=evaluatePreflopReference(s,data);
+  assert.equal(e.status,'supported',key);assert.equal(referenceAssessmentEligibility(e).metricEligible,true,key);
+  assert.deepEqual(projectReferenceCoverage(e.coverage),e.coverage);
+  const [q]=generateQueue({source:V2_REFERENCE_SOURCE,spotKey:key,handClass:'AA',limit:1});
+  assert.equal(q.prompt.seated,Number(key[0]));assert.equal(q.prompt.openerPosition,e.coverage.input.openerPosition);
+ }
+});
+test('v2 native drill answer persists eligible practice and v1 remains resumable',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'reference-drill-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ let session=await startDrill(d,{source:LEGACY_REFERENCE_SOURCE,seed:'old'});
+ const resumed=await nextQuestion(d);assert.ok(resumed);
+ session=await startDrill(d,{source:V2_REFERENCE_SOURCE,spotKey:'8max-100bb-lj-vs-utg1-open25-v2',handClass:'AA'});
+ const q=session.queue[0];
+ const result=await answerQuestion(d,{sessionId:session.sessionId,questionId:q.questionId,attemptNo:0,action:'raise',sizeBb:8.5});
+ assert.ok(result);
+ const summary=await readStudySummary(d);
+ assert.equal(summary.source.version,'2.0.0');assert.equal(summary.practice.overall.supportedDecisions,1);
+ assert.equal(summary.practice.coverage.exactComparableDecisions,1);
+});
+
+test('real engine 6/8/9 seat first-orbit snapshots resolve table-specific positions',()=>{
+ for(const seated of [6,8,9]){
+  let state=startHand(createGame({aiCount:seated-1,startStack:5000,blinds0:[25,50],mode:'cash-training',levelEvery:null}),{deck:newDeck()}).state;
+  let count=0;
+  while(!legalFor(state).handOver){
+   const legal=legalFor(state);if(legal.canCheck)break;
+   const snapshot=snapshotDecision(state,legal.toAct,{action:'fold',amount:0},{blinds:[25,50],legal});
+   const result=evaluatePreflopReference(snapshot,data);
+   assert.equal(result.status,'supported',`${seated} ${snapshot.position}`);
+   assert.equal(result.coverage.input.seated,seated);count++;
+   state=applyAction(state,legal.toAct,'fold').state;
+  }
+  assert.equal(count,seated-1);
+ }
+});
+
+test('all 79 opener pairs resolve from real engine raise/fold transitions',()=>{
+ let pairs=0;
+ for(const seated of [6,8,9])for(let openerIndex=0;openerIndex<seated-1;openerIndex++){
+  let state=startHand(createGame({aiCount:seated-1,startStack:5000,blinds0:[25,50],mode:'cash-training',levelEvery:null}),{deck:newDeck()}).state;
+  for(let before=0;before<openerIndex;before++)state=applyAction(state,legalFor(state).toAct,'fold').state;
+  state=applyAction(state,legalFor(state).toAct,'raise',125).state;
+  while(!legalFor(state).handOver){
+   const legal=legalFor(state);if(state.hand.street!=='preflop')break;
+   const snapshot=snapshotDecision(state,legal.toAct,{action:'fold',amount:0},{blinds:[25,50],legal});
+   const result=evaluatePreflopReference(snapshot,data);
+   assert.equal(result.status,'supported',`${seated} ${openerIndex} ${snapshot.position}`);
+   assert.ok(result.spotKey.includes('-vs-'));pairs++;
+   state=applyAction(state,legal.toAct,'fold').state;
+  }
+ }
+ assert.equal(pairs,79);
+});
+
+test('CLI exposes bundled v1 selection after a v2 practice run',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'reference-select-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ const session=await startDrill(d,{source:V2_REFERENCE_SOURCE,spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'});
+ await answerQuestion(d,{sessionId:session.sessionId,questionId:session.queue[0].questionId,attemptNo:0,action:'fold'});
+ const result=JSON.parse(execFileSync(process.execPath,['tools/drill-cli.js','start','--store-dir',d,'--source-version','1.0.0'],{encoding:'utf8'}));
+ assert.equal(result.session.sourceIdentity.version,'1.0.0');assert.ok(result.count>0);
+});
+test('study controller captures source selection and drops incompatible card target',async()=>{
+ const calls=[];const storage={getItem:()=>null,setItem(){},removeItem(){}};
+ const controller=createStudyController({storage,storageKey:'test',initialTarget:{spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'},api:async(route,options)=>{calls.push({route,options});return {ok:true};}});
+ await controller.restore();await controller.start({mode:'free',source:LEGACY_REFERENCE_SOURCE});
+ const request=calls.find(c=>c.route==='/api/start').options.body;
+ assert.deepEqual(request.source,LEGACY_REFERENCE_SOURCE);assert.equal(request.spotKey,undefined);
+});
+
+test('choosing another source for daily review preserves an unrelated free-practice card target',async()=>{
+ const target={spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'};
+ const controller=createStudyController({storage:{getItem:()=>null,setItem(){},removeItem(){}},storageKey:'test',initialTarget:target,api:async()=>({ok:true})});
+ await controller.restore();await controller.start({mode:'daily',source:LEGACY_REFERENCE_SOURCE});
+ assert.deepEqual(controller.state.target,target);
+});
+
+test('v1 mistake review remains reachable from CLI in a v2-active game store',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'reference-mistake-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ const e=evaluatePreflopReference(nativePreflopSnapshot('6max-100bb-btn-rfi-v2','AA',{action:'fold'}),data,{gameEpoch:'aa'.repeat(32)});e.payloadSha256='bb'.repeat(32);
+ await createProfileStore(d).apply(e);
+ const legacy={evaluationId:`${'cc'.repeat(32)}:d-9-preflop-0:local-preflop-baseline@1.0.0`,payloadSha256:'dd'.repeat(32),status:'supported',street:'preflop',spotKey:'6max-100bb-btn-rfi-unopened',handClass:'AA',grade:'off-policy',forced:false,evLossBb:null,source:LEGACY_REFERENCE_SOURCE,origin:'game'};
+ assert.equal((await createMistakeBank(d).collect(legacy)).added,true);
+ assert.equal((await readStudySummary(d)).source.version,'2.0.0');
+ const result=JSON.parse(execFileSync(process.execPath,['tools/drill-cli.js','start','--store-dir',d,'--mode','mistake-review','--source-version','1.0.0'],{encoding:'utf8'}));
+ assert.equal(result.count,1);assert.equal(result.session.sourceIdentity.version,'1.0.0');assert.equal(result.session.queue[0].prompt.spotKey,legacy.spotKey);
+});

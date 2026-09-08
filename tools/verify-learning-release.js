@@ -376,7 +376,7 @@ export function validateCompatibilityResult(result) {
     || result.priorReaders?.lockProtection?.code !== 'LOCKED'
     || result.priorReaders.lockProtection.wrote !== false
     || result.priorReaders.lockProtection.process?.expectedFailure !== true
-    || result.currentResume?.profileSchemaVersion !== 4 || result.currentResume?.policyId !== 'tag-v2'
+    || result.currentResume?.profileSchemaVersion !== 5 || result.currentResume?.policyId !== 'tag-v2'
     || !Number.isSafeInteger(result.currentResume?.bankEvidenceCount) || result.currentResume.bankEvidenceCount < 1
     || result.rollback?.actionRecovery?.unresolvedAccepted?.phase !== 'accepted'
     || result.rollback.actionRecovery.unresolvedAccepted.code !== 'OUTCOME_UNRESOLVED'
@@ -849,8 +849,8 @@ function mutationSpecs() {
     },
     {
       name: 'source-qualification', file: 'shared/reference.js',
-      search: '&& source.contentSha256 === CANONICAL_REFERENCE_SOURCE.contentSha256',
-      replace: '&& typeof source.contentSha256 === \'string\'',
+      search: 'KNOWN_REFERENCE_SOURCES.some(known => sameReferenceSource(source, known))',
+      replace: 'KNOWN_REFERENCE_SOURCES.some(known => source.id === known.id && source.version === known.version)',
       test: 'test/learning-metrics.test.js',
       expected: /not ok .*unverified source identities cannot complete a canonical calibration group/m,
     },

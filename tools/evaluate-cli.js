@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readSessionReference } from './reference-source.js';
+import { loadReferenceDataset } from './preflop-dataset.js';
+import { evaluatePreflopReference } from '../training/preflop-reference.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,9 +89,9 @@ function runEvaluate() {
   let data;
   let contentSha256;
   try {
-    ({ data, contentSha256 } = loadPreflopDataset(datasetPath));
+    ({ data, contentSha256 } = flags.dataset ? loadPreflopDataset(datasetPath) : loadReferenceDataset(readSessionReference(gameDir,{allowLegacyMissing:true})));
   } catch (error) {
-    fail('DATASET_INVALID', error.message);
+    fail(error.code?.startsWith('REFERENCE_') ? error.code : 'DATASET_INVALID', error.message);
   }
   const source = {
     id: data.id,
@@ -107,6 +110,10 @@ function runEvaluate() {
     // decisionId에 다른 digest를 붙여 EVALUATION_CONFLICT가 된다.
     if (solverAdapterId && snapshot.street !== 'preflop') {
       pendingSolve.push(snapshot.decisionId);
+      continue;
+    }
+    if (data.schemaVersion === 2) {
+      evaluations.push(evaluatePreflopReference(snapshot, {data, contentSha256}, {gameEpoch}));
       continue;
     }
     const handClass = handClassOf(snapshot.holeCards);

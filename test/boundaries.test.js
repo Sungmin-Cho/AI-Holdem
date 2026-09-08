@@ -141,6 +141,9 @@ test('server imports only the publish contract and named containment primitives'
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'] };
+    if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
+      && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
       offenders.push(`${edge.from} -> ${edge.to}`);
       continue;
@@ -377,8 +380,9 @@ test('the process entry points that spawn or touch the filesystem live in tools'
 
 test('the moved dataset builder rewrites the canonical dataset and its pin, byte for byte', () => {
   const builderRoot = createOwnedTempDir('holdem-builder-copy');
-  for (const name of ['tools', 'training/data']) fs.mkdirSync(path.join(builderRoot, name), { recursive: true });
+  for (const name of ['tools', 'training/data', 'shared']) fs.mkdirSync(path.join(builderRoot, name), { recursive: true });
   for (const name of ['package.json', 'tools/build-preflop-baseline.js', 'training/cards.js',
+    'training/data/legacy-preflop-recipe.js', 'shared/preflop-key.js',
     'training/data/preflop-baseline-v1.json', 'training/data/preflop-baseline-v1.sha256']) {
     fs.copyFileSync(path.join(ROOT, name), path.join(builderRoot, name));
   }
@@ -395,7 +399,7 @@ test('the moved dataset builder rewrites the canonical dataset and its pin, byte
   const staleDataset = fs.statSync(dataset).mtimeMs;
   const staleDigest = fs.statSync(digestFile).mtimeMs;
 
-  execFileSync(process.execPath, [path.join(builderRoot, 'tools/build-preflop-baseline.js')], {
+  execFileSync(process.execPath, [path.join(builderRoot, 'tools/build-preflop-baseline.js'), '--version', '1'], {
     encoding: 'utf8',
     timeout: 60_000,
   });

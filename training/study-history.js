@@ -1,3 +1,4 @@
+import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { assertProfileEvent } from './profile-aggregator.js';
@@ -36,6 +37,8 @@ export function learningEventKey(event, { includeTime = true } = {}) {
     origin: event.origin ?? 'game',
     ...(includeTime ? { appliedAt: event.appliedAt ?? null } : {}),
     mixObservation: event.mixObservation === undefined ? null : validateMixObservation(event.mixObservation),
+    ...(Object.hasOwn(event,'coverage') ? {coverage:event.coverage} : {}),
+    ...(event.sourceIdentity ? {sourceIdentity:event.sourceIdentity} : {}),
     studyRun: event.studyRun === undefined ? null : validateStudyRun(event.studyRun),
   });
 }
@@ -107,8 +110,8 @@ function summarizeRun(entries, now) {
       || observation.sourceIdentity.version !== entry.event.providerVersion) inconsistent = true;
     if (sourceIdentity == null) sourceIdentity = observation.sourceIdentity;
     else if (sourceKey(sourceIdentity) !== sourceKey(observation.sourceIdentity)) inconsistent = true;
-    if (referenceQuality(observation.sourceIdentity).quality !== 'heuristic-reference') verified = false;
-    if (entry.event.schemaVersion !== 4) legacy = true;
+    if (!referenceAssessmentEligibility(entry.event).metricEligible) verified = false;
+    if (![4,5].includes(entry.event.schemaVersion)) legacy = true;
     if (byIndex.has(candidate.index)) {
       inconsistent = true;
       continue;
@@ -179,7 +182,9 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
       || (event.studyRun && Date.parse(event.studyRun.startedAt) > Date.parse(now));
     const relevantOrigin = ['game', 'practice', 'drill', 'retest'].includes(event.origin)
       || event.origin === undefined;
-    if (event.status === 'supported' && event.forced !== true && relevantOrigin && !future) {
+    if (event.status === 'supported' && !event.forced && relevantOrigin && !future
+      && !referenceAssessmentEligibility(event).verified) unknownPreTrackingExposure = true;
+    if (referenceAssessmentEligibility(event).metricEligible && relevantOrigin && !future) {
       if (event.mixObservation) {
         try {
           const observation = validateMixObservation(event.mixObservation);
@@ -259,7 +264,7 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
     goal: gameGoal ?? practiceGoal ?? {
       origin: 'default',
       sourceIdentity: null,
-      spotKey: '6max-100bb-btn-rfi-unopened',
+      spotKey: '6max-100bb-btn-rfi-v2',
       handClass: 'AJo',
       reason: 'default-supported-spot',
     },

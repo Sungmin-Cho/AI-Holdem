@@ -21,7 +21,7 @@ import { evaluationIdOf } from '../training/contracts.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { loadReferenceEvaluations } from '../export/manifest.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
-import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE = path.join(ROOT, 'engine/cli.js');

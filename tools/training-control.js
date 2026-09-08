@@ -1,3 +1,7 @@
+import { readSessionReference } from './reference-source.js';
+import { loadReferenceDataset } from './preflop-dataset.js';
+import { evaluatePreflopReference } from '../training/preflop-reference.js';
+import { sameReferenceSource } from '../shared/reference.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -1184,12 +1188,46 @@ export function materializeLearningEvaluation(sessionDir, item) {
     || item.summary?.source?.version !== identity.providerVersion) {
     throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning detail identity does not match authority');
   }
+  if (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0') {
+    const projected = toPublicSummary(detail, {handNo:item.handNo, detailSha256:item.detailSha256, detailRef:item.detailRef});
+    if (JSON.stringify(projected) !== JSON.stringify(canonicalSummary)) {
+      throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'Versioned detail and summary differ');
+    }
+  }
   return {
     ...detail,
     payloadSha256: item.payloadSha256,
     detailSha256: item.detailSha256,
     detailRef: item.detailRef,
   };
+}
+
+function verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, source) {
+  if (evaluation.source?.id !== 'local-preflop-baseline') return;
+  if (evaluation.source?.version !== '2.0.0') {
+    // Legacy test/import artifacts without a lifecycle descriptor retain their contract.
+    // A bound session cannot accept another baseline version or digest.
+    try {
+      const descriptor = JSON.parse(openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8'));
+      if (descriptor.source?.id !== evaluation.source.id || descriptor.source?.version !== evaluation.source.version
+        || (evaluation.source.contentSha256 !== undefined && descriptor.source.contentSha256 !== evaluation.source.contentSha256)) throw coded('REFERENCE_SOURCE_CONFLICT','Bound session source differs from evaluation');
+    } catch(e) { if(e.code !== 'ENOENT') throw e; }
+    return;
+  }
+  if (!sameReferenceSource(source, evaluation.source)) throw coded('REFERENCE_SOURCE_CONFLICT', 'Evaluation source differs from session');
+  let record;
+  try { record = JSON.parse(openContained(sessionDir, ['hands', `hand-${String(handNo).padStart(4,'0')}.json`], { maxBytes: SECURITY_READ_MAX_BYTES }).toString('utf8')); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const state = JSON.parse(openContained(sessionDir, ['state.json'], { maxBytes: SECURITY_READ_MAX_BYTES }).toString('utf8'));
+    if (state.lastHand?.handNo === handNo) record = state.lastHand;
+  }
+  const snapshots = (record?.decisions ?? []).filter(s => s.actorId === 'user' && s.decisionId === evaluation.decisionId);
+  if (snapshots.length !== 1) throw coded('REFERENCE_CONTEXT_UNAVAILABLE', 'Canonical completed decision missing');
+  const expected = evaluatePreflopReference(snapshots[0], loadReferenceDataset(source), {gameEpoch});
+  for (const key of ['evaluationId','decisionId','status','street','spotKey','handClass','recommended','chosen','bestEvBb','evLossBb','grade','forced','code','reason','source','coverage']) {
+    if (JSON.stringify(evaluation[key]) !== JSON.stringify(expected[key])) throw coded('REFERENCE_EVALUATION_MISMATCH', `Reference evaluation mismatch: ${key}`);
+  }
 }
 
 export function createTrainingControl({ storeDir, io } = {}) {
@@ -1263,8 +1301,11 @@ export function createTrainingControl({ storeDir, io } = {}) {
       auth.ownerSessionId = owner;
       auth.pending = auth.pending ?? {};
       auth.annotationQueue = auth.annotationQueue ?? {};
+      const source = (evaluations ?? []).some(e => e.source?.id === 'local-preflop-baseline' && e.source?.version === '2.0.0')
+        ? readSessionReference(sessionDir) : null;
       const accepted = [];
       for (const evaluation of evaluations ?? []) {
+        verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, source);
         const evaluationId = assertEvaluationId(evaluation.evaluationId);
         const detailRef = detailRefOf(evaluationId);
         ensureDir(detailsDir(sessionDir));

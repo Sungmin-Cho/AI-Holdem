@@ -1,3 +1,4 @@
+import { referenceAssessmentEligibility } from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from './contracts.js';
@@ -52,7 +53,12 @@ export function eventFromEvaluation(evaluation, appliedAt, classified = classify
       ? { origin: evaluation.origin }
       : { origin: 'game' }),
   };
-  if (evaluation.status === 'supported'
+  if (evaluation.source?.version === '2.0.0' && evaluation.source?.id === 'local-preflop-baseline') {
+    event.sourceIdentity = { id:evaluation.source.id, version:evaluation.source.version, contentSha256:evaluation.source.contentSha256 };
+    if (Object.hasOwn(evaluation, 'coverage')) event.coverage = structuredClone(evaluation.coverage);
+  }
+  if ((evaluation.source?.version !== '2.0.0' || referenceAssessmentEligibility(evaluation).metricEligible)
+    && evaluation.status === 'supported'
     && evaluation.source?.contentSha256
     && Array.isArray(evaluation.recommended)
     && evaluation.recommended.length > 0
@@ -147,8 +153,8 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
   function migrateLegacyProfile(profile, { persist = true } = {}) {
     const events = readJsonl(eventsPath);
     const processedIds = Object.keys(profile.processed ?? {});
-    if (processedIds.length > 0 && events.length === 0) {
-      throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema 4`);
+    if (events.length === 0 && (processedIds.length > 0 || (profile.game?.overall?.evaluatedDecisions ?? 0) > 0 || (profile.practice?.overall?.evaluatedDecisions ?? 0) > 0 || Object.keys(profile.segments ?? {}).length > 0)) {
+      throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion} events cannot support schema ${PROFILE_SCHEMA_VERSION}`);
     }
     const rebuilt = rebuildLearnableFromEvents(events);
     assertProcessedBacked(profile, rebuilt);
@@ -166,7 +172,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
             || (profile.practice?.overall?.evaluatedDecisions ?? 0) !== 0
             || Object.keys(profile.segments ?? {}).length !== 0;
           if (hasDerivedEvidence) {
-            throw coded('UNSUPPORTED_PROFILE', 'schema 4 derived evidence has no journal');
+            throw coded('UNSUPPORTED_PROFILE', `schema ${PROFILE_SCHEMA_VERSION} derived evidence has no journal`);
           }
           return projectActive(profile);
         }
@@ -176,7 +182,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
           && persistLegacy) writeJsonSecure(profilePath, rebuilt);
         return rebuilt;
       }
-      if ([1, 2, 3].includes(profile.schemaVersion)) {
+      if ([1, 2, 3, 4].includes(profile.schemaVersion)) {
         return migrateLegacyProfile(profile, { persist: persistLegacy });
       }
       throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion}`);
@@ -227,7 +233,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       let current = null;
       try {
         current = readJsonSecure(profilePath);
-        if (![1, 2, 3, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+        if (![1, 2, 3, 4, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
           throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
         }
       } catch (error) {
@@ -255,7 +261,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       const profile = rebuildLearnableFromEvents(events);
       try {
         const current = readJsonSecure(profilePath);
-        if (![1, 2, 3, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+        if (![1, 2, 3, 4, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
           throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
         }
         assertProcessedBacked(current, profile);

@@ -1,16 +1,17 @@
+import {parsePreflopKey} from '../shared/preflop-key.js';
 import { assertEvaluationId } from './contracts.js';
 
 export const PREFLOP_SPOT_RE = /^6max-100bb-(utg|hj|co|btn|sb|bb)-(rfi-unopened|vs-single-raise)$/;
 
 export function isPreflopSpotKey(spotKey) {
-  return typeof spotKey === 'string' && PREFLOP_SPOT_RE.test(spotKey);
+  return Boolean(parsePreflopKey(spotKey));
 }
 
 export function skillKeyOf({ spotKey } = {}) {
-  const match = typeof spotKey === 'string' ? PREFLOP_SPOT_RE.exec(spotKey) : null;
-  if (!match) return 'unknown';
-  const [, seat, context] = match;
-  const pos = seat.toUpperCase();
+  const parsed = parsePreflopKey(spotKey);
+  if (!parsed) return 'unknown';
+  const {position:pos,context} = parsed;
+  if (parsed.version === 2) return `preflop.v2.${spotKey}`;
   if (context === 'rfi-unopened') return `preflop.rfi.${pos}`;
   if (context === 'vs-single-raise') {
     return pos === 'BB' ? 'preflop.bbDefense.vsRaise' : `preflop.vsRaise.${pos}`;

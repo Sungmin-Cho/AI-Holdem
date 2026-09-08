@@ -1,3 +1,4 @@
+import {LEGACY_REFERENCE_SOURCE} from '../shared/reference.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -91,7 +92,7 @@ for (const name of ['missing', 'chosen', 'grade', 'noncanonical', 'ambiguous', '
 
 test('corrupt prior feedback blocks an otherwise valid pending recovery before any consumer write', async () => {
   const store = createOwnedTempDir('drill-committed-pending');
-  await startDrill(store, { seed: 'pending-integrity' });
+  await startDrill(store, { seed: 'pending-integrity', source: LEGACY_REFERENCE_SOURCE });
   let session = read(store);
   for (let index = 0; index < 2; index += 1) {
     await answerQuestion(store, { sessionId: session.sessionId,

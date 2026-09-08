@@ -1,3 +1,4 @@
+import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -175,7 +176,11 @@ export function buildExplanationPrompt(evaluation) {
     evaluation?.status !== 'supported'
       ? 'unsupported를 정답처럼 설명하지 마라. 핸드 번호 외 숫자를 쓰지 마라.'
       : '',
+    evaluation?.source?.version === '2.0.0' && !referenceAssessmentEligibility(evaluation).metricEligible
+      ? '투영 참고 또는 비교 불가다. 등급을 주장하지 말고 핸드 번호 외 모든 숫자를 생략하라. 직접 비교라고 쓰지 마라.' : '',
     JSON.stringify({
+      coverage: evaluation?.coverage,
+      metricEligible: referenceAssessmentEligibility(evaluation).metricEligible,
       evaluationId: evaluation?.evaluationId,
       status: evaluation?.status,
       grade: evaluation?.grade,
@@ -195,12 +200,19 @@ export function aggregateProcessRows(rows, { pending = 0 } = {}) {
     if (quality === 'synthetic') return false;
     return row?.status !== 'supported' || quality === 'heuristic-reference';
   });
-  const supported = eligible.filter((row) => row.status === 'supported');
+  const supported = eligible.filter((row) => referenceAssessmentEligibility(row).metricEligible);
+  const available = eligible.filter(row=>referenceAssessmentEligibility(row).referenceAvailable);
   const offPolicy = supported.filter((row) => row.grade === 'off-policy').length;
   return {
     total: eligible.length,
     supported: supported.length,
-    unsupported: eligible.length - supported.length,
+    unsupported: eligible.filter(row=>row.status!=='supported').length,
+    nonComparableSupported: eligible.filter(row=>row.status==='supported'&&!referenceAssessmentEligibility(row).metricEligible).length,
+    forced: eligible.filter(row=>row.forced===true).length,
+    referenceAvailable: available.length,
+    exactComparable: supported.length,
+    projected: available.filter(row=>row.coverage?.referenceMatch==='projected'||row.coverage?.choiceMatch==='projected').length,
+    comparisonUnavailable: available.filter(row=>row.coverage?.choiceMatch==='unavailable').length,
     offPolicy,
     pending,
     supportedRate: eligible.length ? supported.length / eligible.length : 0,

@@ -6,7 +6,7 @@ import { createProfileStore } from '../tools/training-stores.js';
 import { eventFromEvaluation } from '../training/profile-store.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { formatSummary } from '../server/drill-public/study-format.js';
-import { CANONICAL_REFERENCE_SOURCE as source } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as source } from '../shared/reference.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
 const now = () => '2026-09-06T00:00:00.000Z';
@@ -35,11 +35,12 @@ test('production coverage includes unsupported and unverified without granting s
   assert.deepEqual(pair.game.coverage, {
     evaluatedDecisions: 2, supportedDecisions: 1, unsupportedDecisions: 1,
     supportedRate: 0.5, unverifiedDecisions: 1,
+    referenceAvailableDecisions: 1, exactComparableDecisions: 1, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0,
   });
   assert.deepEqual(score(pair.game), score(baseline.game));
   assert.equal(eventFromEvaluation(unsupported, now()).mixObservation, undefined);
   const pairUi = formatSummary({ source, game: pair.game });
-  assert.match(pairUi.game.coverage, /1 \/ 2/);
+  assert.match(pairUi.game.coverage, /2개 결정.*참고 가능 1개.*직접 비교 1개/);
   assert.match(pairUi.game.coverage, /지원 제외 1/);
   assert.match(pairUi.game.coverage, /출처 미검증 1/);
 

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
+import { allHandClasses } from '../cards.js';
+import { preflopKeys, parsePreflopKey } from '../../shared/preflop-key.js';
 
 // Keyed by object identity, so the association cannot be reflected, copied or
 // spoofed: `Object.getOwnPropertySymbols` finds nothing, and a Proxy cannot
@@ -50,13 +52,14 @@ export function parsePreflopJson(raw, { expectedSha256 } = {}) {
 }
 
 export function validateDataset(data) {
-  if (!data || data.schemaVersion !== 1) throw coded(ERRORS.DATASET_INVALID, 'schemaVersion');
+  if (!data || ![1, 2].includes(data.schemaVersion)) throw coded(ERRORS.DATASET_INVALID, 'schemaVersion');
   if (!PROVIDER_ID_RE.test(data.id ?? '')) throw coded(ERRORS.DATASET_INVALID, 'id');
   if (!SEMVER_RE.test(data.version ?? '')) throw coded(ERRORS.DATASET_INVALID, 'version');
   if (typeof data.license !== 'string' || data.license.length < 1) {
     throw coded(ERRORS.DATASET_INVALID, 'license');
   }
   if (!data.spots || typeof data.spots !== 'object') throw coded(ERRORS.DATASET_INVALID, 'spots');
+  if (data.schemaVersion === 2) validateV2(data);
   for (const [spotKey, hands] of Object.entries(data.spots)) {
     if (typeof spotKey !== 'string' || !hands || typeof hands !== 'object') {
       throw coded(ERRORS.DATASET_INVALID, `spot ${spotKey}`);
@@ -67,7 +70,7 @@ export function validateDataset(data) {
       }
       for (const action of actions) {
         if (typeof action.action !== 'string') throw coded(ERRORS.DATASET_INVALID, 'action');
-        if (typeof action.frequency !== 'number' || action.frequency < 0 || action.frequency > 1) {
+        if (!Number.isFinite(action.frequency) || action.frequency < 0 || action.frequency > 1) {
           throw coded(ERRORS.DATASET_INVALID, 'frequency');
         }
         if (action.evBb != null) throw coded(ERRORS.DATASET_INVALID, 'MVP EV must be absent or null');
@@ -75,6 +78,40 @@ export function validateDataset(data) {
       if (!frequenciesSumToOne(actions)) {
         throw coded(ERRORS.DATASET_INVALID, `frequency sum ${spotKey} ${handClass}`);
       }
+    }
+  }
+}
+
+function validateV2(data) {
+  const fail = (field) => { throw coded(ERRORS.DATASET_INVALID, `v2 ${field}`); };
+  const keys = preflopKeys();
+  const hands = allHandClasses();
+  if (data.id !== 'local-preflop-baseline' || data.version !== '2.0.0'
+      || data.recipeVersion !== 'original-v2.0.0') fail('identity');
+  if (JSON.stringify(data.tree) !== JSON.stringify({rfiBb:2.5,threeBetBb:8.5})) fail('tree');
+  if (JSON.stringify(data.capabilities) !== JSON.stringify({mode:'cash-training',seated:[6,8,9],stackBb:100,
+    projectedStackBb:[80,120],projectedOpenBb:[2,3],projectedThreeBetBb:[6.5,10.5]})) fail('capabilities');
+  if (Object.keys(data.spots).length !== keys.length || keys.some(k=>!Object.hasOwn(data.spots,k))) fail('keys');
+  for (const key of keys) {
+    const rows = data.spots[key];
+    if (!rows || Object.keys(rows).length !== hands.length || hands.some(h=>!Object.hasOwn(rows,h))) fail('hands');
+    const size = parsePreflopKey(key).context === 'rfi-unopened' ? 2.5 : 8.5;
+    for (const hand of hands) {
+      const actions = rows[hand];
+      if (!Array.isArray(actions) || !actions.length || actions.length > 3) fail('actions');
+      const seen = new Set(); let units = 0;
+      for (const a of actions) {
+        if (!a || !['raise','call','fold'].includes(a.action) || seen.has(a.action)) fail('action');
+        seen.add(a.action);
+        if (Object.keys(a).some(k=>!['action','sizeBb','frequency','evBb'].includes(k))) fail('action fields');
+        if (a.action === 'raise' ? a.sizeBb !== size : Object.hasOwn(a,'sizeBb')) fail('size');
+        if (size === 2.5 && a.action === 'call') fail('RFI call');
+        if (!Number.isFinite(a.frequency) || a.frequency <= 0 || a.frequency > 1
+            || Math.abs(a.frequency*10000-Math.round(a.frequency*10000)) > 1e-9) fail('frequency');
+        if (a.evBb !== null) fail('EV');
+        units += Math.round(a.frequency*10000);
+      }
+      if (units !== 10000) fail('frequency sum');
     }
   }
 }

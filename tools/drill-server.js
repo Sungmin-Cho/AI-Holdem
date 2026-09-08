@@ -15,6 +15,7 @@ const STATIC = new Map([
   ['/drill.js', ['server/drill-public/drill.js', 'text/javascript; charset=utf-8']],
   ['/drill.css', ['server/drill-public/drill.css', 'text/css; charset=utf-8']],
   ['/study-format.js', ['server/drill-public/study-format.js', 'text/javascript; charset=utf-8']],
+  ['/shared/preflop-key.js', ['shared/preflop-key.js', 'text/javascript; charset=utf-8']],
   ['/shared/reference.js', ['shared/reference.js', 'text/javascript; charset=utf-8']],
 ]);
 const CLIENT_ERRORS = new Map([
@@ -22,7 +23,7 @@ const CLIENT_ERRORS = new Map([
   ['INVALID_DRILL_ANSWER', 400], ['INVALID_DRILL_MODE', 400], ['INVALID_DRILL_LIMIT', 400], ['INVALID_DRILL_SELECTION', 400],
   ['UNSUPPORTED_SPOT', 400], ['UNSUPPORTED_HAND', 400],
   ['NO_SESSION', 409], ['STALE_QUESTION', 409], ['PENDING_UNRESOLVED', 409],
-  ['RETEST_NOT_DUE', 409], ['INCOMPLETE_ASSESSMENT', 409], ['SOURCE_CHANGED', 409], ['SOURCE_UNVERIFIED', 409],
+  ['RETEST_NOT_DUE', 409], ['INCOMPLETE_ASSESSMENT', 409], ['SOURCE_UNAVAILABLE', 409], ['SOURCE_CHANGED', 409], ['SOURCE_UNVERIFIED', 409],
   ['PARENT_IDENTITY_MISMATCH', 409], ['STUDY_IDENTITY_MISMATCH', 409], ['LOCKED', 409],
   ['UNAUTHORIZED', 401], ['FORBIDDEN', 403], ['NOT_FOUND', 404],
   ['UNSUPPORTED_PROFILE', 500], ['UNSUPPORTED_MISTAKES', 500], ['PROFILE_EVENT_INVALID', 500],
@@ -89,6 +90,9 @@ const string = (max) => (value) => typeof value === 'string' && value.length > 0
 const START_FIELDS = {
   mode: string(40), seed: string(256), idempotencyKey: string(256), spotKey: string(128),
   handClass: string(8), assessmentId: string(128),
+  source: value => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'contentSha256,id,version'
+    && string(64)(value.id) && string(32)(value.version) && /^[0-9a-f]{64}$/.test(value.contentSha256),
 };
 const ANSWER_FIELDS = {
   action: string(16), sizeBb: (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1e9,

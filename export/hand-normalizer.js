@@ -1,3 +1,4 @@
+import {referenceAssessmentEligibility,projectReferenceCoverage} from '../shared/reference-coverage.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
@@ -178,7 +179,9 @@ export function projectReferenceEvaluation(evaluation) {
   const sourceQuality = referenceQuality(evaluation.source);
   const quality = verified || sourceQuality.quality === 'synthetic' ? sourceQuality
     : { quality: 'unverified', reason: 'LEARNING_AUTHORITY_UNAVAILABLE' };
-  const eligible = verified && quality.quality === 'heuristic-reference' && evaluation.status === 'supported';
+  const eligibility = referenceAssessmentEligibility(evaluation);
+  const eligible = verified && quality.quality === 'heuristic-reference' && eligibility.referenceAvailable;
+  const metricEligible = eligible && eligibility.metricEligible;
   const projected = {
     schemaVersion: 2,
     status: ['supported', 'unsupported', 'unavailable'].includes(evaluation.status) ? evaluation.status : 'unavailable',
@@ -192,7 +195,7 @@ export function projectReferenceEvaluation(evaluation) {
   }
   if (Number.isSafeInteger(evaluation.handNo) && evaluation.handNo > 0) projected.handNo = evaluation.handNo;
   if (typeof evaluation.forced === 'boolean') projected.forced = evaluation.forced;
-  const chosen = exportAction(evaluation.chosen, { reference: eligible });
+  const chosen = exportAction(evaluation.chosen, { reference: metricEligible });
   if (chosen) projected.chosen = chosen;
   if (isPlainObject(evaluation.source)
     && typeof evaluation.source.id === 'string' && /^[a-z0-9-]{1,64}$/.test(evaluation.source.id)
@@ -204,7 +207,8 @@ export function projectReferenceEvaluation(evaluation) {
     };
   }
   if (eligible) {
-    if (['preferred', 'mixed', 'low-frequency', 'off-policy'].includes(evaluation.grade)) projected.grade = evaluation.grade;
+    if (evaluation.source?.version === '2.0.0' && Object.hasOwn(evaluation,'coverage')) projected.coverage = projectReferenceCoverage(evaluation.coverage);
+    if (metricEligible && ['preferred', 'mixed', 'low-frequency', 'off-policy'].includes(evaluation.grade)) projected.grade = evaluation.grade;
     if (Array.isArray(evaluation.recommended)) {
       projected.recommended = evaluation.recommended.slice(0, 10).map((action) => exportAction(action, { reference: true })).filter(Boolean);
     }

@@ -231,7 +231,7 @@ function paintTop(view) {
   const net = view?.sessionNet?.user;
   $('session-net').textContent = Number.isFinite(net) ? `${net > 0 ? '+' : ''}${formatChip(net)}` : '—';
   $('learning-scope').textContent = cash
-    ? '6인 · 약 100BB 프리플롭의 휴리스틱 기준표를 참고합니다. 다른 상황은 정성 복기이며 집계에서 제외됩니다.'
+    ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
     : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
   $('level').textContent = view == null ? '—' : String((view.level ?? 0) + 1);
   $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])}/${formatChip(view.blinds[1])}` : '—';

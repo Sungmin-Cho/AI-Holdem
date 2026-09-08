@@ -14,13 +14,16 @@ import { eventFromEvaluation } from '../training/profile-store.js';
 import { learningEventKey } from '../training/study-history.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { lookup } from '../training/providers/preflop-json.js';
-import { loadPreflopDataset } from './preflop-dataset.js';
+import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES } from '../shared/reference.js';
+import { rebuildFromEvents } from '../training/profile-aggregator.js';
+import { nativePreflopSnapshot } from '../training/native-preflop-snapshot.js';
+import { evaluatePreflopReference } from '../training/preflop-reference.js';
+import { loadReferenceDataset } from './preflop-dataset.js';
 import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
 import { withNamedLock } from '../engine/state.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
 
-const DATASET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/data/preflop-baseline-v1.json');
 const DRILL_LOCK = 'drill.lock.d';
 const SESSION_SEGMENTS = ['drill-session.json'];
 const SESSION_MAX_BYTES = 1_048_576;
@@ -121,7 +124,7 @@ function assertSession(session, now = new Date().toISOString()) {
     throw coded('PENDING_UNRESOLVED', 'stored drill session is invalid');
   }
   const legacy = session.schemaVersion === 1;
-  const source = sourceIdentityOfDataset(loadPreflopDataset(DATASET));
+  const source = sourceIdentityOfDataset(loadStoredDataset(legacy ? LEGACY_REFERENCE_SOURCE : session.sourceIdentity));
   if (legacy) {
     if (session.sourceIdentity !== undefined || session.studyRun !== undefined
       || ['assessment', 'retest'].includes(session.mode)) throw coded('PENDING_UNRESOLVED', 'legacy session contains unsupported learning authority');
@@ -228,6 +231,13 @@ async function committedProof(storeDir, session, now = new Date().toISOString())
   }
 }
 
+function loadStoredDataset(source) {
+  try { return loadReferenceDataset(source); } catch (e) {
+    if (e.code === 'SOURCE_UNAVAILABLE') throw coded('SOURCE_CHANGED', 'Stored reference source is unavailable');
+    throw e;
+  }
+}
+
 function sourceIdentityOfDataset(loaded) {
   return {
     id: loaded.data.id,
@@ -242,7 +252,7 @@ function sameSource(left, right) {
 }
 
 function lookupStrategy(question) {
-  const { data, contentSha256 } = loadPreflopDataset(DATASET);
+  const { data, contentSha256 } = loadReferenceDataset(question.sourceIdentity ?? LEGACY_REFERENCE_SOURCE);
   return lookup({ data, contentSha256 }, {
     spotKey: question.prompt.spotKey,
     handClass: question.prompt.handClass,
@@ -289,6 +299,7 @@ function profileEventOf(session, question, attemptNo, result, source, answer) {
       version: source.version,
       contentSha256: source.contentSha256,
     },
+    ...(source.version === '2.0.0' ? {coverage:evaluatePreflopReference(nativePreflopSnapshot(question.prompt.spotKey,question.prompt.handClass,answer),loadReferenceDataset(source)).coverage} : {}),
     recommended: result.recommended,
     chosen: {
       action: answer.action,
@@ -563,8 +574,19 @@ export async function startDrill(storeDir, {
   return withDrillLock(storeDir, async () => {
     const existing = loadSession(storeDir);
     const serverNow = new Date().toISOString();
-    const loadedDataset = loadPreflopDataset(DATASET);
-    const sourceIdentity = sourceIdentityOfDataset(loadedDataset);
+    let defaultSource = CANONICAL_REFERENCE_SOURCE;
+    if (!requestedSource && !spotKey) {
+      let events;
+      try { events = (await loadProfileEvents(storeDir)).filter(e=>Date.parse(e.appliedAt)<=Date.parse(serverNow)); }
+      catch(error) {
+        if(existing) throw coded('PENDING_UNRESOLVED','Existing drill history is unavailable');
+        throw error;
+      }
+      const activeId = rebuildFromEvents(events).activeSegmentId;
+      defaultSource = KNOWN_REFERENCE_SOURCES.find(s=>`${s.id}@${s.version}`===activeId) ?? defaultSource;
+    }
+    const loadedDataset = loadReferenceDataset(requestedSource ?? (spotKey && !spotKey.endsWith('-v2') ? LEGACY_REFERENCE_SOURCE : defaultSource));
+    let sourceIdentity = sourceIdentityOfDataset(loadedDataset);
     if (requestedSource !== undefined && !sameSource(requestedSource, sourceIdentity)) {
       throw coded('SOURCE_CHANGED', 'requested reference source is not available');
     }
@@ -597,8 +619,9 @@ export async function startDrill(storeDir, {
       assessment = assessmentId !== undefined
         ? history.assessments.find((run) => run.id === assessmentId)
         : [...history.assessments].reverse().find((run) => run.complete);
-      if (assessment?.sourceIdentity && !sameSource(assessment.sourceIdentity, sourceIdentity)) {
-        throw coded('SOURCE_CHANGED', 'the assessment reference source is unavailable');
+      if (assessment?.sourceIdentity) {
+        if (requestedSource && !sameSource(requestedSource,assessment.sourceIdentity)) throw coded('SOURCE_CHANGED','Requested source differs from assessment');
+        sourceIdentity = sourceIdentityOfDataset(loadReferenceDataset(assessment.sourceIdentity));
       }
       if (!assessment?.complete) throw coded('INCOMPLETE_ASSESSMENT', 'completed assessment is required');
       const eligibility = retestEligibility(assessment, serverNow);
@@ -750,6 +773,8 @@ async function main() {
   const storeDir = flags['store-dir'];
   if (!storeDir) fail('USAGE', '--store-dir가 필요합니다.');
   if (cmd === 'start') {
+    const source = flags['source-version'] === undefined ? undefined : KNOWN_REFERENCE_SOURCES.find(s=>s.version===flags['source-version']);
+    if(flags['source-version'] !== undefined && !source) fail('SOURCE_CHANGED','Unknown reference source version');
     const session = await startDrill(storeDir, {
       mode: flags.mode ?? 'free',
       seed: flags.seed ?? '0',
@@ -757,6 +782,7 @@ async function main() {
       spotKey: flags['spot-key'],
       handClass: flags['hand-class'],
       assessmentId: flags['assessment-id'],
+      ...(source ? {source} : {}),
     });
     fs.writeSync(1, `${JSON.stringify({
       ok: true,

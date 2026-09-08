@@ -22,7 +22,7 @@ import { buildProcessInput, toProcessReview } from '../training/process-review.j
 import { personaGuidance } from '../tools/persona-guidance.js';
 import { buildPlayerPrompt } from '../tools/player-runtime.js';
 import { validateExplanation } from '../training/explain.js';
-import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 import { projectReferenceEvaluation } from '../export/hand-normalizer.js';
 import { aggregateProcessRows } from '../tools/training-pipeline.js';
 import { fixedDeck, setup3 } from './helpers/fixtures.js';
@@ -258,6 +258,7 @@ test('process aggregate excludes synthetic grades while preserving pending lifec
   ], { pending: 7 });
   assert.deepEqual(aggregate, {
     total: 1, supported: 1, unsupported: 0, offPolicy: 0, pending: 7, supportedRate: 1,
+    nonComparableSupported: 0, forced: 0, referenceAvailable: 1, exactComparable: 1, projected: 0, comparisonUnavailable: 0,
   });
   assert.equal('confidence' in aggregate, false);
 });
@@ -304,4 +305,10 @@ test('process projection rejects future actions hidden inside priorActions', () 
   assert.equal(decision.processStatus, 'unavailable');
   assert.equal(decision.priorActions, undefined);
   assert.equal(JSON.stringify(decision).includes('Ac'), false);
+});
+
+test('forced v1 process rows remain visible in the non-comparable denominator',()=>{
+ const a=aggregateProcessRows([{status:'supported',forced:true,source:CANONICAL_REFERENCE_SOURCE}]);
+ assert.equal(a.total,a.supported+a.unsupported+a.nonComparableSupported);
+ assert.equal(a.forced,1);assert.equal(a.supported,0);
 });

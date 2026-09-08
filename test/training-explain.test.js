@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateExplanation } from '../training/explain.js';
 import * as pipeline from '../tools/training-pipeline.js';
-import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
 
 const supported = {
   source: CANONICAL_REFERENCE_SOURCE,

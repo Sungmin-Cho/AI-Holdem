@@ -234,7 +234,7 @@ test('gtoEvalNotice: cash-training만, 6-max 100BB가 아니면 문면', () => {
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 100 }), null);
   assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 100 }), null);
   const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 });
-  assert.match(four, /휴리스틱.*기준표.*6인·100BB/);
+  assert.match(four, /휴리스틱.*기준표.*6·8·9인.*100BB/);
   assert.match(four, /4인/);
   const stack = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 50 });
   assert.match(stack, /시작 스택 50BB/);
@@ -250,4 +250,13 @@ test('parseGameLoopArgs는 --mode/--stack-bb/--hands를 읽는다', () => {
   assert.equal(parsed.stackBb, 100);
   assert.equal(parsed.hands, 100);
   assert.equal(parsed.blinds, '50/100');
+});
+
+test('reference notice distinguishes projected stacks from unsupported configurations',()=>{
+ for(const seats of [6,8,9]){
+  assert.equal(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:100}),null);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:112}),/투영 참고/);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:40}),/지원 범위 밖/);
+ }
+ assert.match(gtoEvalNotice({mode:'cash-training',aiCount:6,startStackBb:100}),/지원 범위 밖/);
 });

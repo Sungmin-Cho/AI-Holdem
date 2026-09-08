@@ -52,7 +52,7 @@ fi
 
 인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
 
-store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 휴리스틱 프리플롭 기준표는 6인·약 100BB에서 unopened 2.5BB 오픈과 단일 2.5BB 오픈에 대한 8.5BB 3-bet 스팟만 지원한다. limp·cold-call·multiway·4-bet·다른 사이즈·postflop은 제외 이유를 보여 준다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
+store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 새 세션의 v2 휴리스틱 기준표는 cash-training 6·8·9인, 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원한다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 

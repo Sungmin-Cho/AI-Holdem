@@ -1,3 +1,8 @@
+import {loadReferenceDataset} from '../tools/preflop-dataset.js';
+import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
+import {nativePreflopSnapshot} from '../training/native-preflop-snapshot.js';
+import {evaluatePreflopReference} from '../training/preflop-reference.js';
+import {eventFromEvaluation} from '../training/profile-store.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyEvent, emptyProfile, rebuildFromEvents } from '../training/profile-aggregator.js';
@@ -180,7 +185,7 @@ test('unverified drill-only profile remains unavailable', () => {
       origin: 'drill',
     }),
   ]);
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 0);
   assert.equal(profile.practice.coverage.unverifiedDecisions, 2);
 });
@@ -208,14 +213,14 @@ test('other-provider drill is a separate segment and is not mixed into the game 
 });
 
 test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to the dataset provider', () => {
-  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@2.0.0');
   const bad = event();
   delete bad.payloadSha256;
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('duplicate apply still projects the active segment and persists schemaVersion 4', () => {
-  assert.equal(emptyProfile().schemaVersion, 4);
+test('duplicate apply still projects the active segment and persists schemaVersion 5', () => {
+  assert.equal(emptyProfile().schemaVersion, 5);
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -227,7 +232,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.schemaVersion, 4);
+  assert.equal(profile.schemaVersion, 5);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   profile.overall.evaluatedDecisions = 2;
@@ -242,8 +247,26 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(again.schemaVersion, 4);
+  assert.equal(again.schemaVersion, 5);
   assert.equal(again.overall.evaluatedDecisions, 1);
   assert.equal(again.overall.supportedDecisions, 1);
   assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);
+});
+
+test('v1 and v2 scores and calibration remain separate while raw coverage combines',()=>{
+ const events=Array.from({length:20},(_,n)=>event({evaluationId:evaluationIdOf({gameEpoch:'ab'.repeat(32),decisionId:`d-1-preflop-${n}`,providerId:'local-preflop-baseline',providerVersion:'1.0.0'})}));
+ const data=loadReferenceDataset(V2_REFERENCE_SOURCE);
+ const s=nativePreflopSnapshot('6max-100bb-btn-rfi-v2','AA',{action:'raise',sizeBb:2.5});
+ const e=evaluatePreflopReference(s,data,{gameEpoch:'cc'.repeat(32)});e.payloadSha256='dd'.repeat(32);
+ events.push(eventFromEvaluation(e,'2026-09-08T00:00:00.000Z'));
+ let p=rebuildFromEvents(events);
+ assert.equal(p.activeSegmentId,'local-preflop-baseline@2.0.0');
+ assert.equal(p.overall.evaluatedDecisions,1);assert.equal(p.coverage.evaluatedDecisions,21);
+ assert.equal(p.segments['local-preflop-baseline@1.0.0'].game.calibration.totalObservations,20);
+ assert.equal(p.game.calibration.totalObservations,1);
+ for(const seat of s.publicSeats)seat.stack+=600;s.maxRaiseTo+=600;s.legal.maxRaiseTo+=600;s.effectiveStack+=600;
+ const projected=evaluatePreflopReference(s,data,{gameEpoch:'ee'.repeat(32)});projected.payloadSha256='ff'.repeat(32);
+ p=rebuildFromEvents([...events.slice(0,20),eventFromEvaluation(projected,'2026-09-08T00:00:00.000Z')]);
+ assert.equal(p.activeSegmentId,'local-preflop-baseline@2.0.0');assert.equal(p.overall.evaluatedDecisions,0);
+ assert.equal(p.coverage.projectedReferenceDecisions,1);assert.equal(p.coverage.evaluatedDecisions,21);
 });

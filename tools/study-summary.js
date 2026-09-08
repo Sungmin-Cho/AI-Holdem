@@ -1,12 +1,9 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createMistakeBank, createProfileStore } from './training-stores.js';
-import { loadPreflopDataset } from './preflop-dataset.js';
+import { loadReferenceDataset } from './preflop-dataset.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
-import { referenceQuality } from '../shared/reference.js';
+import { CANONICAL_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, referenceQuality } from '../shared/reference.js';
 
-const DATASET = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../training/data/preflop-baseline-v1.json');
 const sameSource = (a, b) => a?.id === b?.id && a?.version === b?.version && a?.contentSha256 === b?.contentSha256;
 const safeSource = (value) => value && typeof value.id === 'string' && value.id.length <= 128
   && typeof value.version === 'string' && value.version.length <= 64 && /^[0-9a-f]{64}$/.test(value.contentSha256)
@@ -51,7 +48,7 @@ function projection(value, origin, events, source) {
       unsupportedDecisions: overall.unsupportedDecisions, forfeits: overall.forfeits, allowed: overall.allowed,
       offPolicy: overall.offPolicy, allowedActionRate: overall.supportedDecisions ? overall.allowedActionRate : null,
       modalActionRate: overall.supportedDecisions ? overall.modalActionRate : null, sampleWeight: overall.sampleWeight },
-    coverage: { evaluatedDecisions: coverage.evaluatedDecisions, supportedDecisions: coverage.supportedDecisions,
+    coverage: { ...coverage, evaluatedDecisions: coverage.evaluatedDecisions, supportedDecisions: coverage.supportedDecisions,
       unsupportedDecisions: coverage.unsupportedDecisions, unverifiedDecisions: coverage.unverifiedDecisions,
       supportedRate: coverage.evaluatedDecisions ? coverage.supportedRate : null },
     calibration: { distributionAgreement: value.calibration.distributionAgreement,
@@ -68,7 +65,9 @@ export async function readStudySummary(storeDir) {
     const error = new Error('STUDY_HISTORY_TOO_LARGE'); error.code = 'STUDY_HISTORY_TOO_LARGE'; throw error;
   }
   const now = new Date().toISOString();
-  const { data, contentSha256 } = loadPreflopDataset(DATASET);
+  const activeId = rebuildFromEvents(events.filter(event=>!future(event,Date.parse(now)))).activeSegmentId;
+  const selected = KNOWN_REFERENCE_SOURCES.find(s=>`${s.id}@${s.version}`===activeId) ?? CANONICAL_REFERENCE_SOURCE;
+  const { data, contentSha256 } = loadReferenceDataset(selected);
   const source = safeSource({ id: data.id, version: data.version, contentSha256 });
   for (const event of events) {
     const pair = event.mixObservation;

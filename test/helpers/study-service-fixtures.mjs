@@ -7,7 +7,7 @@ import { startDrillServer } from '../../tools/drill-server.js';
 import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './owned-fixtures.mjs';
 import { startDrill, answerQuestion } from '../../tools/drill-cli.js';
 import { createProfileStore } from '../../tools/training-stores.js';
-import { CANONICAL_REFERENCE_SOURCE } from '../../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../../shared/reference.js';
 
 // On Windows the service re-proves its boundaries before answering, and each
 // proof is a PowerShell child, so a request costs seconds and the owned state

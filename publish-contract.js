@@ -1,3 +1,4 @@
+import { projectReferenceCoverage } from './shared/reference-coverage.js';
 import { createHash } from 'node:crypto';
 import {
   NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
@@ -469,6 +470,7 @@ const TRAINING_SUMMARY_KEYS = Object.freeze([
   'detailSha256',
   'code',
   'reason',
+  'coverage',
 ]);
 const LEGACY_TRAINING_SUMMARY_KEYS = Object.freeze([
   'evaluationId', 'handNo', 'decisionId', 'status', 'street', 'spotKey', 'handClass',
@@ -643,6 +645,9 @@ export function projectTrainingSummary(item) {
   if (item.code) out.code = item.code;
   if (item.reason) out.reason = item.reason;
   out.recommendedTruncated = item.recommendedTruncated === true;
+  if (Object.hasOwn(item, 'coverage')) out.coverage = projectReferenceCoverage(item.coverage);
+  if (item.source?.id === 'local-preflop-baseline' && item.source?.version === '2.0.0'
+    && !Object.hasOwn(item, 'coverage')) throw coded('TRAINING_PROOF_MISMATCH', 'v2 coverage missing');
   out.payloadSha256 = trainingPayloadSha256(out);
   return out;
 }
