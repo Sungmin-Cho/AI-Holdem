@@ -2243,7 +2243,7 @@ test('present invalid or falsy lock.json fails closed without spawn, adoption, o
   }
 });
 
-test('bootstrap validates present invalid lock.json before init, archive, spawn, or signal', { timeout: 20_000 }, async (t) => {
+test('bootstrap validates present invalid lock.json before init, archive, spawn, or signal', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const cases = [
     ['malformed-json', '{'],
     ['null', 'null'],

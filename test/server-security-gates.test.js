@@ -1583,7 +1583,10 @@ test('REQ-010: persisted studyUrl cannot restore capability and an unlinked lega
 test('REQ-010: study outlives relay completion and another relay reuses the same private service', async (t) => {
   const storeDir = createOwnedTempDir('holdem-study-after-relay');
   const handle = await ensureStudyService(storeDir, { onChild(child) { child.ref(); registerOwnedProcess(child, 'independent study lifetime'); } });
-  t.after(() => stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }));
+  t.after(async () => {
+    try { await stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }); }
+    catch (error) { if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error; }
+  });
   const descriptor = JSON.parse(fs.readFileSync(path.join(storeDir, '.training', 'study-service.json'), 'utf8'));
   let relay = await linkedRelay(t, handle.studyUrl);
   const gameDir = relay.gameDir;
