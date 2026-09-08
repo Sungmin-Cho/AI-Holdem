@@ -149,9 +149,10 @@ test('S8 full: default 20-hand production session records support then study rem
     const running = loop.run().finally(() => { settled = true; });
     running.catch(() => {});
     const driver = (async () => {
-      // Isolated default20 took 68s; a full-suite run reached 117s. Preserve
-      // all 20 random production hands and leave 40s for finalization/cleanup.
-      const deadline = Date.now() + 200000;
+      // Isolated default20 took 68s; a full-suite POSIX run reached 117s.
+      // Win32 n20 under #166 load spent 188s on 19 hands and missed the 200s
+      // cutoff. Preserve all 20 hands; finalization still has scaled(15000).
+      const deadline = Date.now() + (process.platform === 'win32' ? 400_000 : 200_000);
       while (!settled && Date.now() < deadline) {
         const state = JSON.parse(fs.readFileSync(stateFile));
         if (state.hand && !observedHands.has(state.handNo)) {
