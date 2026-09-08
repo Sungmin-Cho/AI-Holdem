@@ -463,13 +463,11 @@ export function collectPrivateLiteralsDetailed({ players, engineState, records }
     others.add(privateScalar(engineState.policySeed, 'state.policySeed'));
   }
   const replayAll = engineState.config?.replayReveal === 'all';
-  if (replayAll) {
-    const holes = engineState.hand?.holes;
-    if (holes) {
-      for (const [playerId, holeCards] of Object.entries(holes)) {
-        if (playerId === 'user') continue;
-        for (const card of holeCards) cards.add(String(card));
-      }
+  const holes = engineState.hand?.holes;
+  if (holes) {
+    for (const [playerId, holeCards] of Object.entries(holes)) {
+      if (playerId === 'user') continue;
+      for (const card of holeCards) cards.add(String(card));
     }
   }
   const allowedPlayerIds = new Set(engineState.seats.map((seat) => seat.playerId));
