@@ -17,6 +17,7 @@ import {
   materializeHandReplay,
   payloadSha256,
   publicProofId,
+  validateCoachDecisions,
   projectTrainingAnnotation,
   projectTrainingSummary,
   textLeaksPrivate,
@@ -629,12 +630,12 @@ function validateIncomingCoach(existing, incoming, gameDir) {
     }
     if (note.overfold !== undefined && note.overfold !== true) return 'COACH_PROOF_MISMATCH';
     if (note.unavailable !== undefined && note.unavailable !== true) return 'COACH_PROOF_MISMATCH';
-    const digest = payloadSha256({
-      handNo: note.handNo,
-      text: note.text,
-      overfold: note.overfold === true,
-      unavailable: note.unavailable === true,
-    });
+    const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable', 'decisions', 'coachProof']);
+    if (Object.keys(note).some((field) => !allowed.has(field))) return 'COACH_PROOF_MISMATCH';
+    if (note.decisions !== undefined && validateCoachDecisions(note.decisions, note.handNo) != null) {
+      return 'COACH_PROOF_MISMATCH';
+    }
+    const digest = payloadSha256(note);
     if (digest !== note.coachProof.payloadSha256) return 'COACH_PROOF_MISMATCH';
     const prev = existing.find((entry) => entry.handNo === note.handNo);
     if (prev) {

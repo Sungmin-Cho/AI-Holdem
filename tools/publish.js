@@ -515,12 +515,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         if (!note || notes.length !== 1) {
           bail('STALE_COACH_AUTHORITY', 'coach body shape이 올바르지 않습니다.');
         }
-        const digest = payloadSha256({
-          handNo: note.handNo,
-          text: note.text,
-          overfold: note.overfold === true,
-          unavailable: note.unavailable === true,
-        });
+        const digest = payloadSha256(note);
         const queued = auth.publishQueue[String(coachAuthority.handNo)];
         if (digest !== coachAuthority.payloadSha256
           || digest !== queued?.payloadSha256

@@ -14,6 +14,8 @@ import {
   proofBearingCoachNote,
   publicProofId,
   publishBodyByteLength,
+  coachNoteStrings,
+  validateCoachDecisions,
 } from '../publish-contract.js';
 
 export const UNAVAILABLE_TEXT = '이 핸드의 코치 응답을 생성하지 못했습니다. 종합 리뷰에서 해당 핸드를 다시 확인합니다.';
@@ -154,6 +156,7 @@ function freshAuthority(epoch, owner) {
     retiredAttempts: [],
     publishQueue: {},
     publishedSeals: {},
+    deferred: {},
     noNewPlayTimePublishers: false,
     finalization: null,
   };
@@ -240,12 +243,7 @@ function readSnapshot(snapshotFile) {
 }
 
 function tupleOf(note) {
-  return {
-    handNo: note.handNo,
-    text: note.text,
-    overfold: note.overfold === true,
-    unavailable: note.unavailable === true,
-  };
+  return note;
 }
 
 function overfoldUsed(auth, snapshot) {
@@ -536,11 +534,15 @@ function validateCoachOutput(raw, handNo) {
   if (note.unavailable !== undefined && note.unavailable !== true) {
     return { ok: false, code: 'INVALID_COACH_OUTPUT', reason: 'unavailable' };
   }
-  const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable']);
+  const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable', 'decisions']);
   for (const field of Object.keys(note)) {
     if (!allowed.has(field)) {
       return { ok: false, code: 'INVALID_COACH_OUTPUT', reason: 'extra-field' };
     }
+  }
+  if (note.decisions !== undefined) {
+    const reason = validateCoachDecisions(note.decisions, handNo);
+    if (reason) return { ok: false, code: 'INVALID_COACH_OUTPUT', reason };
   }
   return { ok: true, note };
 }
@@ -567,9 +569,13 @@ function appendTrace(gameDir, row) {
 }
 
 function sealUnavailable(auth, {
-  gameDir, epoch, owner, handNo, generation, reason, snapshotFile,
+  gameDir, epoch, owner, handNo, generation, reason, snapshotFile, replaceDeferred = false,
 }) {
   const key = keyOf(handNo);
+  if (auth.deferred?.[key]) {
+    if (!replaceDeferred) return { ok: false, code: 'HAND_DEFERRED' };
+    delete auth.deferred[key];
+  }
   if (auth.publishQueue[key]) return occupiedReject(auth, handNo, owner, generation, 'QUEUE_ALREADY_SEALED');
   if (auth.publishedSeals[key]) return occupiedReject(auth, handNo, owner, generation, 'HAND_ALREADY_PUBLISHED');
   if (generation == null && snapshotOccupies(snapshotFile, handNo)) {
@@ -600,7 +606,6 @@ function sealUnavailable(auth, {
   const tuple = {
     handNo,
     text: UNAVAILABLE_TEXT,
-    overfold: false,
     unavailable: true,
   };
   const digest = payloadSha256(tuple);
@@ -685,7 +690,7 @@ export function createCoachControl(deps = {}) {
       const leaseHand = auth.overfoldLease?.state === 'active' ? auth.overfoldLease.handNo : null;
       for (let handNo = 1; handNo <= completed; handNo += 1) {
         const key = keyOf(handNo);
-        if (auth.publishedSeals[key] || auth.publishQueue[key]) {
+        if (auth.publishedSeals[key] || auth.publishQueue[key] || auth.deferred?.[key]) {
           sealedSkipped.push(handNo);
           continue;
         }
@@ -866,8 +871,9 @@ export function createCoachControl(deps = {}) {
         fail('MISSING_PATH', `${hand.exactResultPath}를 읽을 수 없습니다.`);
       }
       const parsed = peeked;
+      const noteStrings = coachNoteStrings(parsed.note);
       for (const lit of forbiddenLiterals) {
-        if (lit && parsed.note.text.includes(lit)) {
+        if (lit && noteStrings.some((value) => value.includes(lit))) {
           return { ok: false, code: 'INVALID_COACH_OUTPUT', reason: 'forbidden-literal' };
         }
       }
@@ -913,6 +919,7 @@ export function createCoachControl(deps = {}) {
         auth.overfoldLease = null;
       }
       retireActive(auth, handNo, { resultState: 'consumed', cleanupEligible: false });
+      if (auth.deferred) delete auth.deferred[key];
       persist(gameDir, auth);
       return { ok: true, queueId };
     });
@@ -959,14 +966,16 @@ export function createCoachControl(deps = {}) {
     }
   }
 
-  async function completeUnavailable({ gameDir, owner, handNo, generation, reason, snapshotFile }) {
+  async function completeUnavailable({
+    gameDir, owner, handNo, generation, reason, snapshotFile, replaceDeferred = false,
+  }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
       if (auth.activeOwnerSessionId && auth.activeOwnerSessionId !== owner) fail('STALE_OWNER');
       if (snapshotFile) migrateLocked(gameDir, auth, snapshotFile);
       if (reason === 'gate0') auth.adapterState = 'unavailable';
       const result = sealUnavailable(auth, {
-        gameDir, epoch, owner, handNo, generation, reason, snapshotFile,
+        gameDir, epoch, owner, handNo, generation, reason, snapshotFile, replaceDeferred,
       });
       persist(gameDir, auth);
       return result;
@@ -991,7 +1000,7 @@ export function createCoachControl(deps = {}) {
       const actions = [];
       for (const [key, hand] of Object.entries(auth.hands)) {
         if (hand.ownerSessionId !== owner) continue;
-        if (auth.publishQueue[key] || auth.publishedSeals[key]) continue;
+        if (auth.publishQueue[key] || auth.publishedSeals[key] || auth.deferred?.[key]) continue;
         if (!['reserved', 'running'].includes(hand.status)) continue;
         if (hand.resultState !== 'unread') continue;
         if (now < hand.deadlineMono) continue;
@@ -1032,6 +1041,25 @@ export function createCoachControl(deps = {}) {
       });
       persist(gameDir, auth);
       return { ok: true, reason };
+    });
+  }
+
+  async function defer({ gameDir, owner, handNo, generation, note }) {
+    return withLock(gameDir, () => {
+      const { auth } = requireAuth(gameDir, { owner });
+      const key = keyOf(handNo);
+      const hand = auth.hands[key];
+      if (!matchingCaller(hand, owner, generation)) fail('STALE_GENERATION');
+      if (!note || typeof note !== 'object' || Array.isArray(note)) fail('INVALID_COACH_OUTPUT');
+      auth.deferred = auth.deferred ?? {};
+      auth.deferred[key] = {
+        note,
+        generation,
+        exactResultPath: hand.exactResultPath,
+        exactEnvelopePath: hand.exactEnvelopePath,
+      };
+      persist(gameDir, auth);
+      return { ok: true, deferred: true, handNo };
     });
   }
 
@@ -1214,7 +1242,9 @@ export function createCoachControl(deps = {}) {
       const out = [];
       for (let handNo = 1; handNo <= sample; handNo += 1) {
         const key = keyOf(handNo);
-        if (!auth?.publishedSeals?.[key] && !auth?.publishQueue?.[key]) out.push(handNo);
+        if (!auth?.publishedSeals?.[key] && !auth?.publishQueue?.[key] && !auth?.deferred?.[key]) {
+          out.push(handNo);
+        }
       }
       return { ok: true, missing: out };
     });
@@ -1270,7 +1300,9 @@ export function createCoachControl(deps = {}) {
         const missingHands = [];
         for (let handNo = 1; handNo <= n; handNo += 1) {
           const key = keyOf(handNo);
-          if (!auth.publishedSeals[key] && !auth.publishQueue[key]) missingHands.push(handNo);
+          if (!auth.publishedSeals[key] && !auth.publishQueue[key] && !auth.deferred?.[key]) {
+            missingHands.push(handNo);
+          }
         }
         for (const handNo of missingHands) {
           const hand = auth.hands[keyOf(handNo)];
@@ -1317,6 +1349,7 @@ export function createCoachControl(deps = {}) {
     reconcile,
     heartbeat,
     fence,
+    defer,
     adapterDisable,
     missing,
     finalizeCutoff,
@@ -1416,6 +1449,7 @@ async function cliMain() {
       generation: opts.generation == null ? undefined : Number(opts.generation),
       reason: opts.reason,
       snapshotFile: opts['snapshot-file'],
+      replaceDeferred: Boolean(opts['replace-deferred']),
     });
   } else if (command === 'finalize-cutoff') {
     result = await cc.finalizeCutoff({
@@ -1446,6 +1480,17 @@ async function cliMain() {
       handNo: Number(opts.hand),
       generation: Number(opts.generation),
       reason: opts.reason,
+    });
+  } else if (command === 'defer') {
+    const notePath = opts['note-file'];
+    if (!notePath) fail('USAGE', 'defer는 --note-file이 필요합니다.');
+    assertExactFile(gameDir, notePath);
+    result = await cc.defer({
+      gameDir,
+      owner: opts.owner,
+      handNo: Number(opts.hand),
+      generation: Number(opts.generation),
+      note: JSON.parse(fs.readFileSync(path.resolve(notePath), 'utf8')),
     });
   } else if (command === 'adapter-disable') {
     result = await cc.adapterDisable({ gameDir, owner: opts.owner, reason: opts.reason });
@@ -1480,4 +1525,4 @@ if (isDirect) {
   });
 }
 
-export { canonicalPayloadJson };
+export { canonicalPayloadJson, validateCoachOutput };

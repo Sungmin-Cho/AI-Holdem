@@ -705,6 +705,107 @@ test('coach: proof digest mismatch는 전체를 거부한다', async () => {
   }
 });
 
+test('coach: decisions 포함 노트는 증명 sha가 맞으면 200이고 스냅샷에 decisions가 남는다', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const { createHash } = await import('node:crypto');
+    const { payloadSha256 } = await import('../publish-contract.js');
+    const note = {
+      handNo: 1,
+      text: '결정 단위 피드백입니다.',
+      decisions: [{
+        decisionId: 'd-1-preflop-0',
+        why: '왜 그 액션을 했는지 설명합니다.',
+        outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+        alternative: '다른 라인을 검토할 수 있었습니다.',
+      }],
+    };
+    const digest = createHash('sha256').update(JSON.stringify({
+      handNo: note.handNo,
+      text: note.text,
+      overfold: false,
+      unavailable: false,
+      decisions: note.decisions,
+    })).digest('hex');
+    assert.equal(payloadSha256(note), digest);
+    const r = await publish(srv.port, token, {
+      publishId: 1,
+      coach: [{
+        ...note,
+        coachProof: { id: 'a'.repeat(64), payloadSha256: digest },
+      }],
+    });
+    assert.equal(r.status, 200);
+    const snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.coach[0].decisions, note.decisions);
+    assert.equal(snap.json.coach[0].coachProof.payloadSha256, digest);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: decisions를 변조하고 옛 4키 sha를 쓰면 COACH_PROOF_MISMATCH', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const { payloadSha256 } = await import('../publish-contract.js');
+    const note = {
+      handNo: 1,
+      text: '결정 단위 피드백입니다.',
+      decisions: [{
+        decisionId: 'd-1-preflop-0',
+        why: '왜 그 액션을 했는지 설명합니다.',
+        outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+        alternative: '다른 라인을 검토할 수 있었습니다.',
+      }],
+    };
+    const oldSha = payloadSha256({
+      handNo: note.handNo, text: note.text, overfold: false, unavailable: false,
+    });
+    const r = await publish(srv.port, token, {
+      publishId: 1,
+      coach: [{
+        ...note,
+        decisions: [{ ...note.decisions[0], why: '변조된 이유입니다.' }],
+        coachProof: { id: 'b'.repeat(64), payloadSha256: oldSha },
+      }],
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.code, 'COACH_PROOF_MISMATCH');
+    const snap = await snapshot(srv.port, token);
+    assert.deepEqual(snap.json.coach, []);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
+test('coach: 옛 4키 형태는 decisions 없이 그대로 200', async () => {
+  const gameDir = tmpDir();
+  const token = 'tok-test';
+  const srv = await start(gameDir, token);
+  try {
+    const { payloadSha256 } = await import('../publish-contract.js');
+    const note = { handNo: 2, text: '옛 형태 노트입니다.' };
+    const digest = payloadSha256({ ...note, overfold: false, unavailable: false });
+    const r = await publish(srv.port, token, {
+      publishId: 1,
+      coach: [{ ...note, coachProof: { id: 'c'.repeat(64), payloadSha256: digest } }],
+    });
+    assert.equal(r.status, 200);
+    const snap = await snapshot(srv.port, token);
+    assert.equal(snap.json.coach[0].text, note.text);
+    assert.equal(snap.json.coach[0].decisions, undefined);
+  } finally {
+    await closeOf(srv);
+    fs.rmSync(gameDir, { recursive: true, force: true });
+  }
+});
+
 test('coach: sticky-overfold가 incoming tuple을 바꾸면 COACH_SEMANTIC_CONFLICT', async () => {
   const gameDir = tmpDir();
   const token = 'tok-test';
