@@ -54,3 +54,21 @@ test('real engine 6/8/9 seat first-orbit snapshots resolve table-specific positi
   assert.equal(count,seated-1);
  }
 });
+
+test('all 79 opener pairs resolve from real engine raise/fold transitions',()=>{
+ let pairs=0;
+ for(const seated of [6,8,9])for(let openerIndex=0;openerIndex<seated-1;openerIndex++){
+  let state=startHand(createGame({aiCount:seated-1,startStack:5000,blinds0:[25,50],mode:'cash-training',levelEvery:null}),{deck:newDeck()}).state;
+  for(let before=0;before<openerIndex;before++)state=applyAction(state,legalFor(state).toAct,'fold').state;
+  state=applyAction(state,legalFor(state).toAct,'raise',125).state;
+  while(!legalFor(state).handOver){
+   const legal=legalFor(state);if(state.hand.street!=='preflop')break;
+   const snapshot=snapshotDecision(state,legal.toAct,{action:'fold',amount:0},{blinds:[25,50],legal});
+   const result=evaluatePreflopReference(snapshot,data);
+   assert.equal(result.status,'supported',`${seated} ${openerIndex} ${snapshot.position}`);
+   assert.ok(result.spotKey.includes('-vs-'));pairs++;
+   state=applyAction(state,legal.toAct,'fold').state;
+  }
+ }
+ assert.equal(pairs,79);
+});
