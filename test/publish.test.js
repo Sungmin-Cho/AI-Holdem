@@ -1286,3 +1286,107 @@ test('normalizeActionRequest: note 정규화, 비문자열 거부, digest·ident
   ), true);
   assert.equal('note' in without, false);
 });
+
+const REPLAY_PENDING = '.replay-pending.json';
+
+function writeReplayPending(dir, handNos) {
+  fs.writeFileSync(path.join(dir, REPLAY_PENDING), JSON.stringify({ handNos }));
+}
+
+function readReplayPending(dir) {
+  const file = path.join(dir, REPLAY_PENDING);
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+test('P3: publish unions .replay-pending.json with envelope, caps at 16, and drains acked numbers', async () => {
+  const dir = tmpDir();
+  writeReplayPending(dir, [1, 2, 3, 20]);
+  const captured = await capturePublishPost(dir, sampleTurn({
+    handReplay: { handNos: [3, 4] },
+  }), [], {
+    handReplay: { stored: [1, 3], markers: [{ handNo: 2, reason: 'REPLAY_NOT_COMPLETED' }], conflicts: [4] },
+  });
+  assert.deepEqual(captured.posted.handReplay.handNos, [1, 2, 3, 20, 4]);
+  assert.deepEqual(readReplayPending(dir), { handNos: [20] });
+});
+
+test('P3: publish caps pending∪envelope at 16 and carries the rest to the next run', async () => {
+  const dir = tmpDir();
+  const first = Array.from({ length: 17 }, (_, i) => i + 1);
+  writeReplayPending(dir, first);
+  const captured = await capturePublishPost(dir, sampleTurn(), [], {
+    handReplay: { stored: first.slice(0, 16), markers: [], conflicts: [] },
+  });
+  assert.deepEqual(captured.posted.handReplay.handNos, first.slice(0, 16));
+  assert.deepEqual(readReplayPending(dir), { handNos: [17] });
+
+  const second = await capturePublishPost(dir, sampleTurn({ stateVersion: 4 }), [], {
+    handReplay: { stored: [17], markers: [], conflicts: [] },
+  });
+  assert.deepEqual(second.posted.handReplay.handNos, [17]);
+  assert.deepEqual(readReplayPending(dir), { handNos: [] });
+});
+
+test('P3: --retry does not merge .replay-pending.json into the recorded body', async () => {
+  const dir = tmpDir();
+  writeReplayPending(dir, [1, 9, 10]);
+  fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: gameEpochOf('tok'),
+    body: { publishId: 1, view: { handNo: 1 }, handReplay: { handNos: [1] } },
+  }));
+  const captured = await capturePublishPost(dir, sampleTurn(), ['--retry'], {
+    handReplay: { stored: [1], markers: [], conflicts: [] },
+  });
+  assert.deepEqual(captured.posted.handReplay, { handNos: [1] });
+  assert.equal(captured.posted.handReplay.handNos.includes(9), false);
+  assert.deepEqual(readReplayPending(dir), { handNos: [9, 10] });
+});
+
+test('P3 F4: --retry applied:false still drains pending using response handReplay or recorded handNos', async () => {
+  const dir = tmpDir();
+  writeReplayPending(dir, [5, 6]);
+  fs.writeFileSync(path.join(dir, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: gameEpochOf('tok'),
+    body: { publishId: 1, view: { handNo: 1 }, handReplay: { handNos: [5] } },
+  }));
+  const server = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      revision: 7,
+      applied: false,
+      handReplay: { stored: [5], markers: [], conflicts: [] },
+    }));
+  });
+  writeLockJson(dir, server.address().port, 'tok');
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, sampleTurn()), '--retry']);
+    assert.equal(out.ok, true);
+    assert.equal(out.applied, false);
+    assert.deepEqual(out.handReplay, { stored: [5], markers: [], conflicts: [] });
+    assert.deepEqual(readReplayPending(dir), { handNos: [6] });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  const missing = tmpDir();
+  writeReplayPending(missing, [8]);
+  fs.writeFileSync(path.join(missing, '.publish-attempt.json'), JSON.stringify({
+    expectedGameEpoch: gameEpochOf('tok'),
+    body: { publishId: 1, view: { handNo: 1 }, handReplay: { handNos: [8] } },
+  }));
+  const silent = await listenFakePublish((res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, revision: 7, applied: false }));
+  });
+  writeLockJson(missing, silent.address().port, 'tok');
+  try {
+    const out = await run(missing, ['--from', turnFile(missing, sampleTurn()), '--retry']);
+    assert.equal(out.ok, true);
+    assert.equal(out.applied, false);
+    assert.deepEqual(readReplayPending(missing), { handNos: [] });
+  } finally {
+    await new Promise((resolve) => silent.close(resolve));
+  }
+});

@@ -1470,6 +1470,43 @@ function persistedFiles(dir) {
   return result;
 }
 
+test('P3 F1: study-capability literal in a replay note becomes a marker, not a FORBIDDEN_LITERAL boot-loop', async (t) => {
+  const dir = tmpDir();
+  const record = handRecordFixture(1, {
+    actions: [{
+      decisionId: 'd-1-preflop-0',
+      playerId: 'user',
+      action: 'call',
+      street: 'preflop',
+      potTotal: 150,
+      note: `study ${STUDY_TOKEN}`,
+    }],
+  });
+  writeSecurityFixtures(dir, { hands: [record], config: { replayReveal: 'all' } });
+  const first = await startServer({ gameDir: dir, port: 0, token: TOKEN, studyUrl: STUDY_URL });
+  registerOwnedServer(first.server, 'p3-f1-first');
+  t.after(async () => { if (first.server.listening) await first.close(); });
+  const posted = await post(first.port, { publishId: 1, view: { n: 1 }, handReplay: { handNos: [1] } });
+  assert.equal(posted.status, 200);
+  assert.equal(posted.json.code, undefined);
+  assert.notEqual(posted.json.code, 'FORBIDDEN_LITERAL');
+  const snap = await snapshotOf(first.port);
+  const row = snap.handReplays.find((entry) => entry.handNo === 1);
+  assert.ok(row);
+  assert.equal(row.unavailable, true);
+  assert.equal(JSON.stringify(snap).includes(STUDY_TOKEN), false);
+  await first.close();
+
+  const restarted = await startServer({ gameDir: dir, port: 0, token: TOKEN, studyUrl: STUDY_URL });
+  registerOwnedServer(restarted.server, 'p3-f1-restart');
+  t.after(async () => { if (restarted.server.listening) await restarted.close(); });
+  const again = await snapshotOf(restarted.port);
+  const restored = again.handReplays.find((entry) => entry.handNo === 1);
+  assert.ok(restored);
+  assert.equal(restored.unavailable, true);
+  assert.equal(JSON.stringify(again).includes(STUDY_TOKEN), false);
+});
+
 test('REQ-010: only authenticated snapshots synthesize the trusted startup study link', async (t) => {
   const relay = await linkedRelay(t, STUDY_URL);
   assert.equal((await snapshotOf(relay.port)).studyUrl, STUDY_URL);

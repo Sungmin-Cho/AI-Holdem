@@ -166,6 +166,19 @@ test('positionsOf: 6인은 BTN·SB·BB·UTG·UTG+1·CO, 탈락 좌석은 건너�
   assert.equal(afterBust.p2, 'SB');
 });
 
+test('turnSummary: JSON 템플릿에 선택 reason이 있고 폴드 카드·note는 없다', () => {
+  const st = setup3(5000, 5000, 5000);
+  const legal = legalFor(st);
+  const text = turnSummary(st, legal.toAct);
+  assert.match(text, /"reason":"한 줄 사유\(선택\)"/);
+  assert.equal(/\bnote\b/.test(text), false);
+  for (const other of ['user', 'p1', 'p2'].filter((pid) => pid !== legal.toAct)) {
+    for (const card of holeOf(st, other)) {
+      assert.equal(text.includes(card), false, `${other} 홀카드 ${card} 유출`);
+    }
+  }
+});
+
 test('turnSummary: 자기 홀카드만 담고 legal 수치를 전부 문면에 쓴다', () => {
   const st = setup3(5000, 5000, 5000);
   const legal = legalFor(st);

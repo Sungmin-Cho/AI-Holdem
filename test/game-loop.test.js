@@ -19,6 +19,7 @@ import {
   exitCodeFor,
   parseGameLoopArgs,
   engineInitFlags,
+  applyModeDefaults,
 } from '../tools/game-loop.js';
 import { RUNTIME_TABLE } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -7843,4 +7844,393 @@ test('S2 mixed review sends eligible hands only and retains deterministic exclud
   const review = readJson(path.join(gameDir, 'ui-snapshot.json')).review;
   assert.match(review, /과정 판정 불가: 핸드 1/);
   assert.match(review, /팟 오즈 확인/);
+});
+
+const REASON_TOKEN = 'ZXQ_P3_REASON_TOKEN';
+const NOTE_TOKEN = 'ZXQ_P3_NOTE_TOKEN';
+const FOLD_CARD_TOKEN = 'Qc';
+
+function replayPendingPath(gameDir) {
+  return path.join(gameDir, '.replay-pending.json');
+}
+
+function readReplayPending(gameDir) {
+  const file = replayPendingPath(gameDir);
+  if (!fs.existsSync(file)) return null;
+  return readJson(file);
+}
+
+function snapshotReplayRows(gameDir) {
+  const snap = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  const raw = snap.handReplays ?? [];
+  return Array.isArray(raw) ? raw : Object.values(raw);
+}
+
+test('P3: validatedDecision keeps a normalized reason and omits empty/non-string values', async () => {
+  const { validatedDecision } = await import('../tools/game-loop.js');
+  const next = {
+    decisionId: 'd-1-preflop-0',
+    message: 'legal 수치: canCheck=false callAmount=50 canRaise=true minRaiseTo=100 maxRaiseTo=500',
+  };
+  const kept = validatedDecision(JSON.stringify({
+    decisionId: 'd-1-preflop-0', action: 'fold', reason: `  ${REASON_TOKEN}  \n`,
+  }), next);
+  assert.equal(kept.action, 'fold');
+  assert.equal(kept.reason, REASON_TOKEN);
+
+  const long = '한'.repeat(200);
+  const cut = validatedDecision(JSON.stringify({
+    decisionId: 'd-1-preflop-0', action: 'fold', reason: long,
+  }), next);
+  assert.equal([...cut.reason].length, 160);
+
+  for (const reason of [12, '', '   ', '\n\t']) {
+    const action = validatedDecision(JSON.stringify({
+      decisionId: 'd-1-preflop-0', action: 'fold', reason,
+    }), next);
+    assert.equal(action.action, 'fold');
+    assert.equal('reason' in action, false, `reason=${JSON.stringify(reason)}`);
+  }
+});
+
+test('P3: validatedUserAction keeps string notes, ignores unknown keys, and drops non-string notes', async () => {
+  const { validatedUserAction } = await import('../tools/game-loop.js');
+  const kept = validatedUserAction({
+    action: 'call', note: NOTE_TOKEN, surprise: true, extra: 'x',
+  });
+  assert.deepEqual(kept, { action: 'call', note: NOTE_TOKEN });
+  assert.equal('surprise' in kept, false);
+
+  const ignored = validatedUserAction({ action: 'fold', note: 12, surprise: true });
+  assert.deepEqual(ignored, { action: 'fold' });
+});
+
+test('P3: LLM reason is written to .decision-meta.json and --meta-file, never argv', { timeout: 15_000 }, async (t) => {
+  const engineCalls = [];
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => ({
+      raw: JSON.stringify({
+        decisionId: decisionIdOfMessage(message),
+        action: 'fold',
+        reason: REASON_TOKEN,
+      }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter,
+    loopOpts: { onEngineInvoke: (args) => engineCalls.push(args) },
+  });
+  await runUntilUserBoundary(loop, gameDir);
+
+  const step = engineCalls.find((args) => args[0] === 'step' && args.includes('p1') && args.includes('fold'));
+  assert.ok(step, 'p1 fold step was not invoked');
+  assert.equal(step.includes('--meta-file'), true);
+  assert.equal(step.some((arg) => String(arg).includes(REASON_TOKEN)), false);
+  const metaFile = step[step.indexOf('--meta-file') + 1];
+  assert.equal(path.resolve(metaFile), path.join(gameDir, '.decision-meta.json'));
+  const meta = readJson(path.join(gameDir, '.decision-meta.json'));
+  assert.equal(meta.reason, REASON_TOKEN);
+  assert.equal(typeof meta.decisionId, 'string');
+  const record = readJson(path.join(gameDir, 'state.json')).lastHand;
+  assert.equal(record.actions.find((row) => row.playerId === 'p1')?.reason, REASON_TOKEN);
+});
+
+test('P3: watchdog force-default records forced and does not attach a reason', { timeout: 15_000 }, async (t) => {
+  const engineCalls = [];
+  const adapter = makeAdapter({
+    onDecide: async ({ timeoutMs }) => new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(Object.assign(new Error('adapter timeout'), { code: 'TIMEOUT' }));
+      }, timeoutMs);
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter,
+    loopOpts: {
+      watchdog: { t1Ms: 20, t2Ms: 15 },
+      onEngineInvoke: (args) => engineCalls.push(args),
+    },
+  });
+  await runUntilUserBoundary(loop, gameDir);
+  const forced = engineCalls.find((args) => args.includes('--force-default'));
+  assert.ok(forced);
+  assert.equal(forced.includes('--meta-file'), false);
+  const action = readJson(path.join(gameDir, 'state.json')).lastHand.actions[0];
+  assert.equal(action.forced, true);
+  assert.equal('reason' in action, false);
+});
+
+test('P3: stale --meta-file is dropped, action still applies, log and notice fire once', { timeout: 15_000 }, async (t) => {
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => ({
+      raw: JSON.stringify({
+        decisionId: decisionIdOfMessage(message),
+        action: 'fold',
+        reason: REASON_TOKEN,
+      }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter,
+    loopOpts: {
+      onEngineInvoke: (args) => {
+        const index = args.indexOf('--meta-file');
+        if (index === -1) return;
+        fs.writeFileSync(args[index + 1], JSON.stringify({
+          decisionId: 'stale-decision',
+          reason: REASON_TOKEN,
+        }));
+      },
+    },
+  });
+  await runUntilUserBoundary(loop, gameDir);
+  const action = readJson(path.join(gameDir, 'state.json')).lastHand.actions.find((row) => row.playerId === 'p1');
+  assert.equal(action.action, 'fold');
+  assert.equal('reason' in action, false);
+  const dropped = readLoopLog(gameDir).filter((row) => row.event === 'decision-meta-dropped');
+  assert.equal(dropped.length, 1);
+  assert.equal(dropped[0].code, 'META_STALE');
+  assert.equal(dropped[0].playerId, 'p1');
+  const notices = readJson(path.join(gameDir, 'loop-state.json')).notices
+    .filter((row) => /decision-meta|META_STALE/.test(row));
+  assert.equal(notices.length, 1);
+});
+
+test('P3: wait-action note is written to --meta-file; unknown keys still apply', { timeout: 15_000 }, async (t) => {
+  const engineCalls = [];
+  const { gameDir, loop } = await setupUserFirst(t, {
+    loopOpts: { onEngineInvoke: (args) => engineCalls.push(args) },
+  });
+  const running = startRun(loop);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  const action = preferredUserAction(snapshot.view.legal);
+  await postUserAction(lock, { ...action, note: NOTE_TOKEN, surprise: 'ignore-me' });
+  await waitWhileRunning(
+    running,
+    () => waitForUserAction(gameDir, (entry) => entry.decisionId === action.decisionId),
+    'user action with note was not applied',
+  );
+  await stopRun(loop, running);
+
+  const step = engineCalls.find((args) => args[0] === 'step' && args.includes('user'));
+  assert.ok(step);
+  assert.equal(step.includes('--meta-file'), true);
+  assert.equal(step.some((arg) => String(arg).includes(NOTE_TOKEN)), false);
+  const meta = readJson(path.join(gameDir, '.decision-meta.json'));
+  assert.equal(meta.note, NOTE_TOKEN);
+  const applied = [
+    ...(readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []),
+    ...(readJson(path.join(gameDir, 'state.json')).lastHand?.actions ?? []),
+  ].find((row) => row.playerId === 'user');
+  assert.equal(applied.note, NOTE_TOKEN);
+});
+
+test('P3: fresh bootstrap init argv includes showdown-policy and replay-reveal', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const engineCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, onEngineInvoke: (args) => engineCalls.push(args) },
+  });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({
+    ai: 1,
+    stack: 100,
+    showdownPolicy: 'open',
+    replayReveal: 'all',
+  });
+  const init = engineCalls.find((args) => args[0] === 'init');
+  assert.ok(init);
+  assert.equal(init[init.indexOf('--showdown-policy') + 1], 'open');
+  assert.equal(init[init.indexOf('--replay-reveal') + 1], 'all');
+  const flags = engineInitFlags(applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/p3-fresh'])));
+  assert.equal(flags.includes('--showdown-policy'), true);
+  assert.equal(flags[flags.indexOf('--showdown-policy') + 1], 'open');
+  assert.equal(flags[flags.indexOf('--replay-reveal') + 1], 'all');
+  assert.equal(
+    engineInitFlags(applyModeDefaults(parseGameLoopArgs(['--resume', '--store-dir', '/tmp/p3-fresh']))).includes('--showdown-policy'),
+    false,
+  );
+  assert.equal(
+    engineInitFlags(applyModeDefaults(parseGameLoopArgs(['--game-dir', '/tmp/p3-legacy', '--ai', '2']))).includes('--showdown-policy'),
+    false,
+  );
+});
+
+test('P3: closing-step crash resume publishes the lost handReplay trigger', { timeout: 20_000 }, async (t) => {
+  const { gameDir, loop: first } = await setupAiFirst(t, { adapter: makeAdapter() });
+  await cliJson(gameDir, ['step', '--new-hand']);
+  const closed = await cliJson(gameDir, ['apply', 'p1', 'fold']);
+  assert.equal(closed.handOver, true);
+  assert.equal(readJson(path.join(gameDir, 'state.json')).hand, null);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  await seedEmptyCoachAuthority(gameDir, readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId);
+  await first.requestStop();
+
+  const pendingAtPublish = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onPublishInvoke: () => {
+        pendingAtPublish.push(readReplayPending(gameDir));
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.resume();
+  await runUntilUserBoundary(loop, gameDir);
+
+  assert.ok(pendingAtPublish[0]?.handNos?.includes(1), 'resume did not load the lost hand into pending before the first publish');
+  assert.equal(snapshotReplayRows(gameDir).some((row) => row.handNo === 1 && !row.unavailable), true);
+});
+
+test('P3: last-hand gameOver crash still carries the trigger on the game-over view publish', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  assert.equal(readJson(path.join(gameDir, 'state.json')).gameOver, true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
+  const pendingAtPublish = [];
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: '표본 1핸드는 참고용입니다.' }],
+    synthesizerRounds: [{ raw: VALID_REVIEW }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { phase: 'playing', handNo: 1 },
+    loopOpts: {
+      onPublishInvoke: () => pendingAtPublish.push(readReplayPending(gameDir)),
+    },
+  });
+  await loop.resume();
+  const done = await loop.run();
+  assert.ok(['done', 'review_published', 'finalizing', 'review_generated'].includes(done.phase));
+  assert.ok(pendingAtPublish[0]?.handNos?.includes(1), 'gameOver resume did not fill pending before finalization publish');
+  assert.equal(snapshotReplayRows(gameDir).some((row) => row.handNo === 1 && !row.unavailable), true);
+});
+
+test('P3: view-only BAD_ATTEMPT recovery still posts pending handNos and records marker notices', { timeout: 15_000 }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  fs.writeFileSync(replayPendingPath(gameDir), JSON.stringify({ handNos: [99] }));
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), '{broken-json');
+  const running = startRun(loop);
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'BAD_ATTEMPT recovery did not resume play');
+  await stopRun(loop, running);
+
+  const marker = snapshotReplayRows(gameDir).find((row) => row.handNo === 99);
+  assert.ok(marker);
+  assert.equal(marker.unavailable, true);
+  const notices = readJson(path.join(gameDir, 'loop-state.json')).notices
+    .filter((row) => /99|REPLAY_NOT_COMPLETED|handReplay/.test(row));
+  assert.ok(notices.length >= 1, 'marker response was not noticed');
+  const pending = readReplayPending(gameDir);
+  assert.equal(pending?.handNos?.includes(99), false);
+});
+
+test('P3: stacked handReplays do not change the next opponent turnSummary bytes', { timeout: 20_000 }, async (t) => {
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => ({
+      raw: JSON.stringify({
+        decisionId: decisionIdOfMessage(message),
+        action: 'fold',
+        reason: REASON_TOKEN,
+      }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  await runUntilUserBoundary(loop, gameDir);
+  const firstSummary = adapter.decideCalls[0].message;
+  assert.ok(snapshotReplayRows(gameDir).length >= 1);
+  assert.equal(firstSummary.includes(REASON_TOKEN), false);
+  const later = adapter.decideCalls.at(-1).message;
+  assert.equal(later.includes(REASON_TOKEN), false);
+  assert.equal(later.includes('"reason"') === firstSummary.includes('"reason"'), true);
+});
+
+test('P3: synthesizer uses --replay captures; evaluator stays on --redacted', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const statePath = path.join(gameDir, 'state.json');
+  const state = readJson(statePath);
+  state.config = { ...(state.config ?? {}), replayReveal: 'all' };
+  const folded = '2c';
+  state.lastHand.holes.p2 = [folded, FOLD_CARD_TOKEN];
+  state.lastHand.folded = [...new Set([...(state.lastHand.folded ?? []), 'p2'])];
+  state.lastHand.actions = [
+    ...(state.lastHand.actions ?? []),
+    {
+      decisionId: 'd-1-preflop-reason',
+      playerId: 'p1',
+      action: 'call',
+      street: 'preflop',
+      potTotal: 100,
+      reason: REASON_TOKEN,
+    },
+  ];
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  fs.mkdirSync(path.join(gameDir, 'hands'), { recursive: true });
+  fs.writeFileSync(path.join(gameDir, 'hands', 'hand-0001.json'), JSON.stringify(state.lastHand));
+
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: '표본 1핸드는 참고용입니다. TRACE_EVAL' }],
+    synthesizerRounds: [{ raw: VALID_REVIEW }],
+  });
+  const engineCalls = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { onEngineInvoke: (args) => engineCalls.push(args) },
+  });
+  await loop.resume();
+  await loop.run();
+
+  const replayCaptures = engineCalls.filter((args) => args[0] === 'hand' && args.includes('--replay'));
+  const redactedCaptures = engineCalls.filter((args) => args[0] === 'hand' && args.includes('--redacted'));
+  assert.ok(replayCaptures.length >= 1);
+  assert.ok(redactedCaptures.length >= 1);
+  const evaluatorPrompt = upper.evaluatorStarts[0].prompt;
+  assert.equal(evaluatorPrompt.includes(REASON_TOKEN), false);
+  assert.equal(evaluatorPrompt.includes(FOLD_CARD_TOKEN), false);
+  const synthesizerPrompt = upper.synthesizerStarts[0].prompt;
+  assert.match(synthesizerPrompt, /replay/);
+  assert.equal(synthesizerPrompt.includes(REASON_TOKEN), true);
+  assert.equal(synthesizerPrompt.includes(FOLD_CARD_TOKEN), true);
+  assert.equal(fs.existsSync(path.join(gameDir, '.review-hand-1-replay.json')), true);
+});
+
+test('P3: synthesizer replay budget strips reason then actions; evaluator prompt is unchanged', async () => {
+  const mod = await import('../tools/game-loop.js');
+  assert.equal(mod.REVIEW_REPLAY_BUDGET_BYTES, 200_000);
+  assert.equal(typeof mod.trimReviewReplays, 'function');
+  const huge = (handNo) => ({
+    handNo,
+    holes: { user: ['Ah', 'Kh'], p1: ['7c', '2d'] },
+    positions: { user: 'BTN', p1: 'SB' },
+    board: ['2s', '3d', '4c', '5h', '6s'],
+    showdown: { reveals: [{ playerId: 'p1', cards: ['7c', '2d'] }], mucks: [] },
+    folded: [],
+    actions: Array.from({ length: 40 }, (_, index) => ({
+      playerId: 'p1',
+      action: 'raise',
+      amount: 100 + index,
+      reason: 'r'.repeat(160),
+    })),
+  });
+  const records = Array.from({ length: 20 }, (_, index) => huge(index + 1));
+  const rawBytes = Buffer.byteLength(JSON.stringify(records));
+  assert.ok(rawBytes > 200_000);
+  const { records: trimmed, stage } = mod.trimReviewReplays(records);
+  assert.ok(stage === 'reason' || stage === 'actions', `stage=${stage}`);
+  assert.ok(Buffer.byteLength(JSON.stringify(trimmed)) <= 200_000);
+  if (stage === 'reason') {
+    assert.equal(trimmed.some((row) => (row.actions ?? []).some((action) => action.reason)), false);
+    assert.ok(trimmed[0].actions.length > 0);
+  }
+  if (stage === 'actions') {
+    assert.equal(trimmed.every((row) => !row.actions || row.actions.length === 0), true);
+    assert.ok(trimmed[0].holes);
+    assert.ok(trimmed[0].positions);
+  }
 });
