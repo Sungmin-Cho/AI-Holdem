@@ -50,7 +50,7 @@ function wonContested(record, playerId) {
   return false;
 }
 
-export function extractHandTendency(record, playerId, { forcedDecisionIds, strengthSamples } = {}) {
+export function extractHandTendency(record, playerId, { forcedDecisionIds, strengthSamples = 32 } = {}) {
   const t = emptyTendency(playerId);
   if (!record?.holes?.[playerId]) return t;
   t.hands = 1;
@@ -171,7 +171,7 @@ export function extractHandTendency(record, playerId, { forcedDecisionIds, stren
           holeCards,
           board: row.board ?? record.board ?? [],
           position: engineLabel,
-        }, strengthSamples != null ? { samples: strengthSamples } : undefined);
+        }, { samples: strengthSamples });
         if (strength < 0.30) {
           t.postflop.bluff.n += 1;
           if (row.action === 'raise') t.postflop.bluff.k += 1;
@@ -220,13 +220,13 @@ export function extractHandTendency(record, playerId, { forcedDecisionIds, stren
   return t;
 }
 
-export function tendencyFromRecords(records, playerId, { sources } = {}) {
+export function tendencyFromRecords(records, playerId, { sources, strengthSamples } = {}) {
   let t = emptyTendency(playerId);
   for (const record of records ?? []) {
     const forcedDecisionIds = (record?.decisions ?? [])
       .filter((row) => row?.forced === true)
       .map((row) => row.decisionId);
-    t = mergeTendency(t, extractHandTendency(record, playerId, { forcedDecisionIds }));
+    t = mergeTendency(t, extractHandTendency(record, playerId, { forcedDecisionIds, strengthSamples }));
   }
   if (Array.isArray(sources) && sources.length) {
     t = { ...t, sources: [...t.sources, ...sources] };
