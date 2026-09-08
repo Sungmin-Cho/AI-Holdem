@@ -67,9 +67,18 @@ function writeResult(exactResultPath, note) {
   fs.writeFileSync(exactResultPath, `${JSON.stringify(note)}\n`);
 }
 
+const BOUNDARY_DECISIONS = [{
+  decisionId: 'd-1-preflop-0',
+  why: '왜 그 액션을 했는지 설명합니다.',
+  outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+  alternative: '다른 라인을 검토할 수 있었습니다.',
+}];
+
 function bodyTextForBytes(target, handNo = 1) {
   const measure = (text) => {
-    const tuple = { handNo, text, overfold: false, unavailable: false };
+    const tuple = {
+      handNo, text, overfold: false, unavailable: false, decisions: BOUNDARY_DECISIONS,
+    };
     const digest = payloadSha256(tuple);
     return publishBodyByteLength(tuple, { id: publicProofId('dummy'), payloadSha256: digest });
   };
@@ -378,6 +387,43 @@ test('Gate D: Published ∪ Pending = 1..sample 이고 교집합은 공집합', 
   assert.ok(completeness.reviewDisclosure.every((row) => row.handNo && row.noteKind));
 });
 
+test('validateCoachOutput는 decisions를 수락하고 잘못된 항목은 거부한다', async () => {
+  const { validateCoachOutput } = await import('../tools/coach-control.js');
+  assert.equal(typeof validateCoachOutput, 'function');
+  const ok = validateCoachOutput(JSON.stringify({
+    handNo: 1,
+    text: '결정 단위 피드백입니다.',
+    decisions: [BOUNDARY_DECISIONS[0]],
+  }), 1);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.note.decisions, BOUNDARY_DECISIONS);
+
+  const rejected = [
+    JSON.stringify({
+      handNo: 1,
+      text: '결정 단위 피드백입니다.',
+      decisions: [{ ...BOUNDARY_DECISIONS[0], why: '' }],
+    }),
+    JSON.stringify({
+      handNo: 1,
+      text: '결정 단위 피드백입니다.',
+      mystery: true,
+    }),
+    JSON.stringify({
+      handNo: 1,
+      text: '결정 단위 피드백입니다.',
+      decisions: Array.from({ length: 13 }, (_, i) => ({
+        ...BOUNDARY_DECISIONS[0], decisionId: `d-1-preflop-${i}`,
+      })),
+    }),
+  ];
+  for (const raw of rejected) {
+    const out = validateCoachOutput(raw, 1);
+    assert.equal(out.ok, false);
+    assert.equal(out.code, 'INVALID_COACH_OUTPUT');
+  }
+});
+
 test('proof-bearing coach body 65535·65536은 seal, 65537은 queue 전 INVALID_COACH_OUTPUT', async () => {
   for (const [target, expectOk] of [[65_535, true], [65_536, true], [65_537, false]]) {
     const { dir, owner, cc, snapshotFile, statsFile } = setup();
@@ -388,16 +434,18 @@ test('proof-bearing coach body 65535·65536은 seal, 65537은 queue 전 INVALID_
     const d1 = started.descriptors[0];
     const text = bodyTextForBytes(target);
     assert.ok(text.includes('한'), '한글을 포함한 최악 본문이 아니다');
-    writeResult(d1.exactResultPath, { handNo: 1, text });
+    writeResult(d1.exactResultPath, { handNo: 1, text, decisions: BOUNDARY_DECISIONS });
     const out = await cc.accept({ gameDir: dir, owner, handNo: 1, generation: d1.generation });
     const auth = cc.loadAuthority(dir);
     if (expectOk) {
       assert.equal(out.ok, true, `bytes=${target} ${out.code}`);
       assert.ok(auth.publishQueue['1']);
       assert.equal(publishBodyByteLength(
-        { handNo: 1, text, overfold: false, unavailable: false },
+        { handNo: 1, text, overfold: false, unavailable: false, decisions: BOUNDARY_DECISIONS },
         { id: auth.publishQueue['1'].publicProofId, payloadSha256: auth.publishQueue['1'].payloadSha256 },
       ), target);
+      const envelope = JSON.parse(fs.readFileSync(d1.exactEnvelopePath, 'utf8'));
+      assert.deepEqual(envelope.coach[0].decisions, BOUNDARY_DECISIONS);
     } else {
       assert.equal(out.ok, false);
       assert.equal(out.code, 'INVALID_COACH_OUTPUT');
@@ -619,6 +667,72 @@ test('accept CLI --forbidden-file이 배열이 아니면 BAD_FORBIDDEN_FILE', as
     assert.equal(json.ok, false);
     assert.equal(json.code, 'BAD_FORBIDDEN_FILE');
   }
+});
+
+test('accept --forbidden-file은 text가 깨끗해도 decisions.outcome literal을 거부한다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const started = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  writeResult(started.descriptors[0].exactResultPath, {
+    handNo: 1,
+    text: '공개 액션만 보면 무난한 폴드입니다.',
+    decisions: [{
+      decisionId: 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '상대는 Ah를 가지고 있었다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  });
+  const out = await cc.accept({
+    gameDir: dir,
+    owner,
+    handNo: 1,
+    generation: started.descriptors[0].generation,
+    forbiddenLiterals: ['Ah'],
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'INVALID_COACH_OUTPUT');
+  assert.equal(cc.loadAuthority(dir).publishQueue['1'], undefined);
+});
+
+test('defer 뒤 result 파일이 없어도 deadline heartbeat는 unavailable을 봉인하지 않는다', async () => {
+  const clock = new FakeClock();
+  const { dir, owner, cc, snapshotFile, statsFile } = setup({ clock });
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const started = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  const d1 = started.descriptors[0];
+  const note = {
+    handNo: 1,
+    text: '지연된 노트입니다.',
+    decisions: [{
+      decisionId: 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  };
+  writeResult(d1.exactResultPath, note);
+  const deferred = await cc.defer({
+    gameDir: dir, owner, handNo: 1, generation: d1.generation, note,
+  });
+  assert.equal(deferred.ok, true);
+  fs.unlinkSync(d1.exactResultPath);
+  clock.advanceMs(DEFAULT_ATTEMPT_MS + 1);
+  const heartbeat = await cc.heartbeat({ gameDir: dir, owner });
+  assert.deepEqual(heartbeat.actions, []);
+  const sealed = await cc.completeUnavailable({
+    gameDir: dir, owner, handNo: 1, generation: d1.generation, reason: 'game-over-cutoff', snapshotFile,
+  });
+  assert.equal(sealed.ok, false);
+  assert.equal(sealed.code, 'HAND_DEFERRED');
+  const auth = cc.loadAuthority(dir);
+  assert.equal(auth.publishQueue['1'], undefined);
+  assert.equal(auth.publishedSeals['1'], undefined);
+  assert.equal(auth.deferred['1'].note.text, note.text);
 });
 
 test('forbidden literal은 INVALID_COACH_OUTPUT이고 본문은 trace에 없다', async () => {
