@@ -39,9 +39,14 @@ test('live wait retries transport resets while the same owner is alive', () => {
   const transport = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
   const wrapped = Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT health transport TypeError fetch failed cause=ECONNRESET'), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   const answer = Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT health answer denied=401'), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  const powershellTimeout = Object.assign(
+    new Error('STUDY_DESCRIPTOR_CORRUPT before powershell:status=null error=ETIMEDOUT stderr='),
+    { code: 'STUDY_DESCRIPTOR_CORRUPT' },
+  );
   assert.equal(isStudyTransportFailure(transport), true);
   assert.equal(isStudyTransportFailure(wrapped), true);
   assert.equal(isStudyTransportFailure(answer), false);
+  assert.equal(isStudyTransportFailure(powershellTimeout), true);
   const alive = { afterOwner: owner, owner, sameOwner: true, descriptorState: 'valid' };
   assert.equal(shouldRetryLiveWait(wrapped, alive), true);
   assert.equal(shouldRetryLiveWait(transport, alive), true);
