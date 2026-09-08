@@ -175,6 +175,7 @@ test('the shipped drill client sends its token in the header, never in the URL',
   const boundary = '  const node = (tag, text, cls) =>';
   assert.equal(original.split(boundary).length, 2, 'the mount boundary changed');
   const client = original.replace("from './study-format.js'", `from ${JSON.stringify(new URL('../server/drill-public/study-format.js', import.meta.url).href)}`)
+    .replace("from '../../shared/reference.js'", `from ${JSON.stringify(new URL('../shared/reference.js', import.meta.url).href)}`)
     .replace(boundary, `  globalThis.__api = api; return;\n${boundary}`);
   const script = `
     const calls = [];
