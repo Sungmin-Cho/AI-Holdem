@@ -2758,6 +2758,7 @@ test('adapter runtime watchdog is used when opts.watchdog is absent', { timeout:
 });
 
 test('zero-delay AI metrics include every timing field and keep non-model overhead under one second', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'non-model overhead 1s bound is POSIX; win32 proofs exceed it')) return;
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
 
