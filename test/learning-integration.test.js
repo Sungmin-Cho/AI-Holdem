@@ -15,7 +15,7 @@ import path from 'node:path';
 import { isPrivatePath } from '../shared/platform-files.js';
 import { skipOnWin32, studyBudget } from './helpers/platform.js';
 import { resolveRuntimes, RUNTIME_TABLE } from '../tools/player-runtime.js';
-import { ensureStudyService, inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { ensureStudyService, inspectStudyService, stopStudyService, HTTP_WAIT_MS } from '../tools/study-service.js';
 import {
   scaled,
   ROOT,
@@ -292,7 +292,7 @@ test('S8 full: store bootstrap attaches its owner and publishes the verified stu
   const service = await inspectStudyService(storeDir);
   assert.equal(service.status, 'running', 'store bootstrap must attach a verified independent study service');
   const response = await fetch(`http://127.0.0.1:${initialized.port}/api/snapshot?token=${encodeURIComponent(initialized.sessionToken)}`, {
-    signal: AbortSignal.timeout(2000),
+    signal: AbortSignal.timeout(Math.max(2_000, HTTP_WAIT_MS)),
   });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).studyUrl, service.studyUrl);
