@@ -5067,6 +5067,7 @@ test('heartbeat result-ready remediation은 다음 핸드를 막지 않지만 sh
 });
 
 test('heartbeat result-ready accept 실패는 handle 종료 확인·fence 후 generation-bearing unavailable로 봉인한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  if (skipOnWin32(t, 'heartbeat accept-failure seal races Windows publish.lock.d EPERM')) return;
   const never = new Promise(() => {});
   const upper = makeCoachAdapter({
     rounds: [{

@@ -98,7 +98,7 @@ async function replaceDescriptorAfterRead(f,nth,run) {
  const file=path.join(f.dir,'reference-source.json'),original=JSON.parse(fs.readFileSync(file));
  const {LEGACY_REFERENCE_SOURCE}=await import('../shared/reference.js');
  const open=fs.openSync,read=fs.readSync;const descriptors=new Set();let count=0,swapped=false;
- fs.openSync=function(name,...args){const fd=open.call(this,name,...args);descriptors.delete(fd);if(String(name).endsWith('/reference-source.json'))descriptors.add(fd);return fd;};
+ fs.openSync=function(name,...args){const fd=open.call(this,name,...args);descriptors.delete(fd);if(path.basename(String(name))==='reference-source.json')descriptors.add(fd);return fd;};
  fs.readSync=function(fd,...args){const n=read.call(this,fd,...args);if(descriptors.has(fd)&&++count===nth){const temp=file+'.swap';fs.writeFileSync(temp,JSON.stringify({...original,source:LEGACY_REFERENCE_SOURCE}));fs.renameSync(temp,file);swapped=true;}return n;};
  try{await run();assert.equal(swapped,true,'fault must occur in the source parse window');}finally{fs.openSync=open;fs.readSync=read;}
 }
@@ -128,7 +128,7 @@ async function abaDescriptorAtParse(f,nth,run) {
  const original=fs.readFileSync(file),open=fs.openSync,read=fs.readSync;
  let count=0,targetFd=null,swapped=false,restored=false;
  fs.openSync=function(name,...args){
-  const target=String(name).endsWith('/reference-source.json')&&++count===nth;
+  const target=path.basename(String(name))==='reference-source.json'&&++count===nth;
   if(target){fs.renameSync(file,held);fs.writeFileSync(file,JSON.stringify({schemaVersion:1,source:LEGACY_REFERENCE_SOURCE}));swapped=true;}
   const fd=open.call(this,name,...args);if(target)targetFd=fd;return fd;
  };
