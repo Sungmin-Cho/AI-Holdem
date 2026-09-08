@@ -22,7 +22,12 @@ import {
   RUNTIME_TABLE,
   resolveRuntimes,
 } from './player-runtime.js';
-import { collectPrivateLiterals, gameEpochOf, validateActionAck } from '../publish-contract.js';
+import {
+  collectPrivateLiteralsDetailed,
+  gameEpochOf,
+  validateActionAck,
+  validateCoachDecisions,
+} from '../publish-contract.js';
 import { normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS } from '../shared/free-text.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
@@ -2670,6 +2675,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const coachSnapshotPath = path.join(root, 'ui-snapshot.json');
   const coachStatsPath = (handNo) => path.join(root, `.coach-stats-${handNo}.json`);
   const coachHandPath = (handNo) => path.join(root, `.coach-hand-${handNo}-redacted.json`);
+  const coachReplayPath = (handNo) => path.join(root, `.coach-hand-${handNo}-replay.json`);
   const coachDenyPath = (handNo) => path.join(root, `.coach-deny-${handNo}.json`);
   const coachAuthorityPath = path.join(root, '.coach-authority.json');
   const coachAttemptKey = (handNo, generation) => `${handNo}:${generation}`;
@@ -2773,13 +2779,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return { path: filePath, raw: fs.readFileSync(filePath, 'utf8') };
   };
 
+  const captureCoachReplay = async (handNo, { beforeResultCutoff = false } = {}) => {
+    const runner = beforeResultCutoff ? runCliBeforeResultCutoff : runCli;
+    const captured = semanticChildPayload(await runner(['hand', String(handNo), '--replay']));
+    const filePath = coachReplayPath(handNo);
+    writeJsonAtomic(filePath, captured);
+    return { path: filePath, raw: fs.readFileSync(filePath, 'utf8') };
+  };
+
   const captureCoachInputs = async (handNo, prepared = null) => {
     if (prepared) return prepared;
-    // reserve consumes the stats file synchronously. Both captures therefore finish before
+    // reserve consumes the stats file synchronously. Captures therefore finish before
     // the first reservation, and the exact bytes written here are reused in the prompt.
     const hand = await captureCoachHand(handNo, { beforeResultCutoff: true });
+    const replay = await captureCoachReplay(handNo, { beforeResultCutoff: true });
     const stats = await captureCoachStats(handNo, { beforeResultCutoff: true });
-    return { hand, stats };
+    return { hand, replay, stats };
   };
 
   const fullHandRecord = (handNo) => {
@@ -2790,11 +2805,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   // 규칙 자체는 게시 계약이 갖는다 — 서버의 deny 수집기와 같은 코드여야 한다.
-  const coachForbiddenLiterals = (handNo) => collectPrivateLiterals({
+  const coachForbiddenDetailed = (handNo) => collectPrivateLiteralsDetailed({
     players: readJsonOptional(playersPath, 'PLAYERS'),
     engineState: readJsonOptional(engineStatePath, 'ENGINE_STATE'),
     records: [fullHandRecord(handNo)],
   });
+
+  const coachForbiddenLiterals = (handNo) => {
+    const { cards, others } = coachForbiddenDetailed(handNo);
+    return [...new Set([...cards, ...others])];
+  };
+
+  const replayPublicCards = (replay) => {
+    const cards = new Set();
+    for (const row of Object.values(replay?.holes ?? {})) {
+      for (const card of row ?? []) cards.add(String(card));
+    }
+    for (const card of replay?.board ?? []) cards.add(String(card));
+    return cards;
+  };
+
+  const coachNoteStrings = (note) => {
+    const strings = [note.text];
+    for (const row of note.decisions ?? []) {
+      strings.push(row.decisionId, row.why, row.outcome, row.alternative);
+    }
+    return strings.filter((value) => typeof value === 'string' && value);
+  };
 
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);
@@ -2853,13 +2890,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
     const practiceFocus = processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null');
-    const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     const prompt = [
       '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
       '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
       '',
       `hand ${handNo} (redacted):`,
-      JSON.stringify(eligibleProcessInput(processInput)),
+      inputs.hand.raw,
+      '',
+      `hand ${handNo} (replay):`,
+      inputs.replay.raw,
       '',
       'practiceFocus:',
       practiceFocus,
@@ -2867,6 +2906,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       `과폴드 코멘트: ${overfoldReserved ? '허용' : '금지'}`,
       '',
       '할 일: 사용자의 주요 결정 1~2개를 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.',
+      '(a) 왜 그 액션을 했다고 보는가. note가 있으면 인용하고 자기 해석과 구분한다.',
+      '(b) 결과적으로 왜 잃었는가/접게 됐는가. 공개된 카드·보드·액션만 근거로 삼는다.',
+      '(c) 대안 라인 한 줄과 근거. heuristic 방향만 제시한다.',
+      'reasonKind가 model인 상대 사유는 "모델이 밝힌 사유"로 인용한다.',
       '폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 공개 근거로 무난한 폴드라고 평가한다.',
       '특별한 누수가 없다면 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.',
       '팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.',
@@ -2875,7 +2918,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
         : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
       '',
-      `출력은 JSON 한 줄만: {"handNo":${handNo},"text":"..."}`,
+      `출력은 JSON 한 줄만: {"handNo":${handNo},"text":"...","decisions":[{"decisionId":"d-${handNo}-<street>-<k>","why":"...","outcome":"...","alternative":"..."}]}`,
+      'decisions는 선택이며 최대 12개다. 각 필드는 비어 있지 않은 문자열이다.',
       'text.trim()은 비어 있으면 안 되고, 설명·마크다운·코드펜스·추가 필드는 금지한다.',
     ].join('\n');
     return retry
@@ -2883,12 +2927,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : prompt;
   };
 
-  const validateCoachNote = (raw, handNo, forbiddenLiterals) => {
-    const note = extractJsonLine(raw);
+  const validateCoachNote = (raw, handNo, { forbiddenDetailed, replay } = {}) => {
+    const note = typeof raw === 'string' ? extractJsonLine(raw) : raw;
     if (!note || typeof note !== 'object' || Array.isArray(note)) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 JSON 객체가 아닙니다.');
     }
-    const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable']);
+    const allowed = new Set(['handNo', 'text', 'overfold', 'unavailable', 'decisions']);
     if (
       note.handNo !== handNo
       || typeof note.text !== 'string'
@@ -2899,11 +2943,36 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력 필드 계약이 올바르지 않습니다.');
     }
+    if (note.decisions !== undefined) {
+      const reason = validateCoachDecisions(note.decisions, handNo);
+      if (reason) {
+        throw codedError('INVALID_COACH_OUTPUT', `코치 decisions 계약이 올바르지 않습니다 (${reason}).`);
+      }
+      const allowedIds = new Set((replay?.decisions ?? []).map((row) => row.decisionId));
+      for (const row of note.decisions) {
+        if (!allowedIds.has(row.decisionId)) {
+          throw codedError('INVALID_COACH_OUTPUT', 'decisionId가 replay user 결정 집합에 없습니다.');
+        }
+      }
+    }
     if (!referenceClaimAllowed(note.text)) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 근거 범위를 벗어납니다.');
     }
-    if (forbiddenLiterals.some((literal) => literal && note.text.includes(literal))) {
+    const strings = coachNoteStrings(note);
+    const others = forbiddenDetailed?.others ?? new Set();
+    if ([...others].some((literal) => literal && strings.some((value) => value.includes(literal)))) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력에 private literal이 포함됐습니다.');
+    }
+    const cards = forbiddenDetailed?.cards ?? new Set();
+    const cardsHit = [...cards].filter((literal) => (
+      literal && strings.some((value) => value.includes(literal))
+    ));
+    if (cardsHit.length) {
+      const publicCards = replayPublicCards(replay);
+      if (cardsHit.every((card) => publicCards.has(card))) {
+        throw codedError('DEFER_COACH_OUTPUT', '카드 인용이 진행 중 핸드와 겹칩니다.', { note });
+      }
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 replay 공개 범위 밖 카드를 인용합니다.');
     }
     return note;
   };
@@ -3420,6 +3489,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await opts.coachCaptureCheckpoint({ handNo });
     }
     if (coachWorkSuspended()) return;
+    const denyDetailed = coachForbiddenDetailed(handNo);
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
@@ -3504,7 +3574,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ]);
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
-        const note = validateCoachNote(completed?.raw, handNo, deny.literals);
+        const note = validateCoachNote(completed?.raw, handNo, {
+          forbiddenDetailed: denyDetailed,
+          replay: parseCapturedHand(inputs.replay.raw),
+        });
         const unavailableNotice = unavailableProcessNotice(processInput);
         if (unavailableNotice) note.text += `\n${unavailableNotice}`;
         writeJsonAtomic(currentDescriptor.exactResultPath, note);
@@ -3521,6 +3594,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (!coachPublicationDeferred()) await executeCoachPublish(handNo, currentDescriptor.exactEnvelopePath);
         return;
       } catch (error) {
+        if (error.code === 'DEFER_COACH_OUTPUT') {
+          writeJsonAtomic(currentDescriptor.exactResultPath, error.note);
+          await runCoachBeforeResultCutoff([
+            'defer',
+            '--owner', owner,
+            '--hand', String(handNo),
+            '--generation', String(currentDescriptor.generation),
+            '--note-file', currentDescriptor.exactResultPath,
+          ]);
+          if (handle && typeof handle.terminate === 'function') {
+            await handle.terminate();
+          }
+          return;
+        }
         if (error.code === 'COACH_RESULT_ACCEPTED') return;
         heartbeatTimedOut = error.code === 'COACH_HEARTBEAT_TIMEOUT';
         if (accepted) throw error;
@@ -3744,9 +3831,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopRequested) break;
       const hand = await captureCoachHand(descriptor.handNo, { beforeResultCutoff: true });
       if (stopRequested) break;
+      const replay = await captureCoachReplay(descriptor.handNo, { beforeResultCutoff: true });
+      if (stopRequested) break;
       launchCoachPipeline(descriptor.handNo, {
         descriptor,
-        prepared: { hand, stats },
+        prepared: { hand, replay, stats },
       });
     }
     for (const handNo of begun.unavailableSealed ?? []) {
@@ -3791,7 +3880,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let accepted = false;
     try {
       const deny = writeCoachDeny(action.handNo);
-      validateCoachNote(fs.readFileSync(action.exactResultPath, 'utf8'), action.handNo, deny.literals);
+      const replayRaw = fs.existsSync(coachReplayPath(action.handNo))
+        ? fs.readFileSync(coachReplayPath(action.handNo), 'utf8')
+        : (await captureCoachReplay(action.handNo, { beforeResultCutoff: true })).raw;
+      validateCoachNote(fs.readFileSync(action.exactResultPath, 'utf8'), action.handNo, {
+        forbiddenDetailed: coachForbiddenDetailed(action.handNo),
+        replay: parseCapturedHand(replayRaw),
+      });
       await runCoachBeforeResultCutoff([
         'accept',
         '--owner', owner,
@@ -3802,6 +3897,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       accepted = true;
       await publishQueuedCoachHand(action.handNo);
     } catch (error) {
+      if (error.code === 'DEFER_COACH_OUTPUT') {
+        writeJsonAtomic(action.exactResultPath, error.note);
+        await runCoachBeforeResultCutoff([
+          'defer',
+          '--owner', owner,
+          '--hand', String(action.handNo),
+          '--generation', String(action.generation),
+          '--note-file', action.exactResultPath,
+        ]);
+        return;
+      }
       if (!record) throw error;
       const termination = await record.handle.terminate();
       if (accepted) {
@@ -3849,6 +3955,55 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const flushDeferredCoachNotes = async () => {
+    const owner = readLoopState()?.ownerSessionId;
+    if (typeof owner !== 'string' || owner === '') return;
+    const auth = readCoachAuthority();
+    for (const [key, entry] of Object.entries(auth?.deferred ?? {})) {
+      if (stopRequested) return;
+      const handNo = Number(key);
+      const note = entry?.note ?? entry;
+      let replayRaw;
+      try {
+        replayRaw = fs.existsSync(coachReplayPath(handNo))
+          ? fs.readFileSync(coachReplayPath(handNo), 'utf8')
+          : (await captureCoachReplay(handNo, { beforeResultCutoff: true })).raw;
+      } catch {
+        continue;
+      }
+      try {
+        validateCoachNote(JSON.stringify(note), handNo, {
+          forbiddenDetailed: coachForbiddenDetailed(handNo),
+          replay: parseCapturedHand(replayRaw),
+        });
+      } catch (error) {
+        if (error.code === 'DEFER_COACH_OUTPUT' || error.code === 'INVALID_COACH_OUTPUT') continue;
+        throw error;
+      }
+      const live = readCoachAuthority()?.hands?.[key];
+      let generation = entry.generation ?? live?.generation;
+      let resultPath = entry.exactResultPath ?? live?.exactResultPath;
+      let envelopePath = entry.exactEnvelopePath ?? live?.exactEnvelopePath;
+      if (!live || live.generation !== generation) {
+        const stats = await captureCoachStats(handNo, { beforeResultCutoff: true });
+        const reserved = await reserveCoach(owner, handNo, 1, stats.path);
+        generation = reserved.generation;
+        resultPath = reserved.exactResultPath;
+        envelopePath = reserved.exactEnvelopePath;
+      }
+      writeJsonAtomic(resultPath, note);
+      const deny = writeCoachDeny(handNo);
+      await runCoachBeforeResultCutoff([
+        'accept',
+        '--owner', owner,
+        '--hand', String(handNo),
+        '--generation', String(generation),
+        '--forbidden-file', deny.path,
+      ]);
+      if (!coachPublicationDeferred()) await executeCoachPublish(handNo, envelopePath);
+    }
+  };
+
   const heartbeatCoach = async () => {
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') return;
@@ -3858,8 +4013,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!fs.existsSync(coachAuthorityPath)) return;
     const heartbeat = await runCoachBeforeResultCutoff(['heartbeat', '--owner', owner]);
     if (stopRequested) return;
+    await flushDeferredCoachNotes();
+    const latest = readCoachAuthority();
     for (const action of heartbeat.actions ?? []) {
       if (stopRequested) break;
+      const key = String(action.handNo);
+      if (action.action === 'result-ready' && (
+        latest?.deferred?.[key] || latest?.publishQueue?.[key] || latest?.publishedSeals?.[key]
+      )) {
+        continue;
+      }
       log('coach-heartbeat', {
         handNo: action.handNo,
         action: action.action,
@@ -4644,6 +4807,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ]);
     log('finalize-coach-settled', { settled, pending: coachTasks.size });
     log('finalize-training-settled', { settled: trainingSettled, pending: trainingTasks.size });
+    if (stopRequested) return readLoopState();
+    try {
+      await flushDeferredCoachNotes();
+    } catch (error) {
+      appendNotice(`코치 deferred flush 오류: ${error.code ?? 'ERROR'}`);
+      log('coach-deferred-flush-error', { phase: 'finalizing', code: error.code ?? 'ERROR' });
+    }
     if (stopRequested) return readLoopState();
 
     // (3) cutoff: 새 play-time publisher 금지 + live worker 종료 확인.

@@ -4,6 +4,7 @@ import {
   NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
+import { referenceClaimAllowed } from './shared/reference.js';
 
 export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS, NOTE_MAX_BYTES } from './shared/free-text.js';
 export {
@@ -15,6 +16,9 @@ export const HAND_REPLAY_TRIGGER_MAX = 16;
 export const MAX_PUBLISH_BODY_BYTES = 65_536;
 export const MAX_PUBLISH_ID = Number.MAX_SAFE_INTEGER;
 export const SUPPORTED_COACH_AUTHORITY_SCHEMAS = Object.freeze([2]);
+export const COACH_DECISION_LIMITS = Object.freeze({ entries: 12, chars: 300 });
+const COACH_DECISION_KEYS = Object.freeze(['decisionId', 'why', 'outcome', 'alternative']);
+const COACH_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
 
 export function utf8ByteLength(value) {
   return Buffer.byteLength(typeof value === 'string' ? value : String(value), 'utf8');
@@ -24,13 +28,45 @@ export function sha256Hex(input) {
   return createHash('sha256').update(input).digest('hex');
 }
 
-export function canonicalPayloadJson({ handNo, text, overfold = false, unavailable = false }) {
-  return JSON.stringify({
-    handNo,
-    text,
-    overfold: Boolean(overfold),
-    unavailable: Boolean(unavailable),
-  });
+export function canonicalPayloadJson(note) {
+  const payload = {
+    handNo: note.handNo,
+    text: note.text,
+    overfold: Boolean(note.overfold),
+    unavailable: Boolean(note.unavailable),
+  };
+  if (Array.isArray(note.decisions) && note.decisions.length > 0) {
+    payload.decisions = note.decisions.map((row) => ({
+      decisionId: row.decisionId,
+      why: row.why,
+      outcome: row.outcome,
+      alternative: row.alternative,
+    }));
+  }
+  return JSON.stringify(payload);
+}
+
+export function validateCoachDecisions(decisions, handNo) {
+  if (decisions === undefined) return null;
+  if (!Array.isArray(decisions)) return 'not-array';
+  if (decisions.length === 0) return null;
+  if (decisions.length > COACH_DECISION_LIMITS.entries) return 'too-many';
+  const seen = new Set();
+  for (const row of decisions) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return 'not-object';
+    if (Object.keys(row).some((key) => !COACH_DECISION_KEYS.includes(key))) return 'extra-key';
+    for (const field of COACH_DECISION_KEYS) {
+      const value = row[field];
+      if (typeof value !== 'string' || value.trim() === '') return `empty-${field}`;
+      if ([...value].length > COACH_DECISION_LIMITS.chars) return 'too-long';
+      if (COACH_CONTROL_CHARS.test(value)) return 'control';
+      if (!referenceClaimAllowed(value)) return 'reference';
+    }
+    if (typeof handNo === 'number' && !row.decisionId.startsWith(`d-${handNo}-`)) return 'hand-mismatch';
+    if (seen.has(row.decisionId)) return 'duplicate';
+    seen.add(row.decisionId);
+  }
+  return null;
 }
 
 export function payloadSha256(tuple) {
@@ -45,6 +81,14 @@ export function proofBearingCoachNote(tuple, proof) {
   const note = { handNo: tuple.handNo, text: tuple.text };
   if (tuple.overfold) note.overfold = true;
   if (tuple.unavailable) note.unavailable = true;
+  if (Array.isArray(tuple.decisions) && tuple.decisions.length > 0) {
+    note.decisions = tuple.decisions.map((row) => ({
+      decisionId: row.decisionId,
+      why: row.why,
+      outcome: row.outcome,
+      alternative: row.alternative,
+    }));
+  }
   note.coachProof = { id: proof.id, payloadSha256: proof.payloadSha256 };
   return note;
 }

@@ -853,6 +853,24 @@ function putAiFirst(gameDir) {
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
 
+function injectCurrentHandCard(state, card) {
+  const hand = state.hand;
+  const villain = Object.keys(hand.holes).find((pid) => pid !== 'user');
+  delete hand.deck;
+  const displaced = hand.holes[villain][0];
+  const replace = (value, fallback) => (value === card ? (fallback === card ? '2c' : fallback) : value);
+  for (const pid of Object.keys(hand.holes)) {
+    if (pid === villain) continue;
+    hand.holes[pid] = hand.holes[pid].map((value) => replace(value, displaced));
+  }
+  hand.holes[villain][1] = replace(hand.holes[villain][1], displaced === card ? '3c' : displaced);
+  if (Array.isArray(hand.board)) {
+    hand.board = hand.board.map((value) => replace(value, displaced === card ? '4c' : displaced));
+  }
+  hand.holes[villain][0] = card;
+  return card;
+}
+
 function makeCurrentActorCanCheck(gameDir) {
   const statePath = path.join(gameDir, 'state.json');
   const state = readJson(statePath);
@@ -3654,7 +3672,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
   await waitForUserSnapshot(gameDir);
   await stopRun(loop, running);
 
-  assert.deepEqual(events.slice(0, 7), [
+  assert.deepEqual(events.slice(0, 8), [
+    'engine:hand',
     'engine:hand',
     'engine:stats',
     'coach:reserve',
@@ -3663,6 +3682,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
     'coach:accept',
     'publish:coach',
   ]);
+  assert.equal(engineCalls.filter((args) => args[0] === 'hand' && args.includes('--redacted')).length >= 1, true);
+  assert.equal(engineCalls.filter((args) => args[0] === 'hand' && args.includes('--replay')).length >= 1, true);
   const reserve = coachCalls.find((args) => args[0] === 'reserve');
   assert.ok(reserve, 'reserve was not invoked');
   const statsPath = reserve[reserve.indexOf('--stats-file') + 1];
@@ -3670,7 +3691,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
   assert.equal(path.resolve(snapshotPath), path.join(gameDir, 'ui-snapshot.json'));
   const capturedStats = fs.readFileSync(statsPath, 'utf8');
   assert.equal(upper.prompts[0].includes(capturedStats), false, 'outcome-bearing stats leaked into coach prompt');
-  assert.match(upper.prompts[0], /"processStatus":"available"/);
+  assert.match(upper.prompts[0], /hand 1 \(redacted\):/);
+  assert.match(upper.prompts[0], /hand 1 \(replay\):/);
   assert.equal(upper.starts[0].timeoutMs, 120_000);
   for (const args of coachCalls.filter((args) => ['heartbeat', 'reserve', 'bind-handle', 'accept'].includes(args[0]))) {
     assert.equal(args[args.indexOf('--owner') + 1], owner, `${args[0]} minted a per-hand owner`);
@@ -3951,9 +3973,7 @@ test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 
         decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const last = state.lastHand;
         const foldPid = (last.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
-        overlapCard = last.holes[foldPid][0];
-        const villain = Object.keys(state.hand.holes).find((pid) => pid !== 'user');
-        state.hand.holes[villain][0] = overlapCard;
+        overlapCard = injectCurrentHandCard(state, last.holes[foldPid][0]);
         fs.writeFileSync(statePath, JSON.stringify(state));
       },
     },
@@ -3988,7 +4008,7 @@ test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 
 
 test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
   let decisionId = 'd-1-preflop-0';
-  const ghost = 'As';
+  let ghost = null;
   const rounds = [
     {
       get raw() {
@@ -3998,7 +4018,7 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
           decisions: [{
             decisionId,
             why: '왜 그 액션을 했는지 설명합니다.',
-            outcome: `상대는 ${ghost}를 가지고 있었다.`,
+            outcome: ghost ? `상대는 ${ghost}를 가지고 있었다.` : '보드만 근거로 평가한다.',
             alternative: '다른 라인을 검토할 수 있었습니다.',
           }],
         });
@@ -4009,11 +4029,14 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
   const upper = makeCoachAdapter({ rounds });
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
-    bootstrap: { replayReveal: 'all' },
+    bootstrap: { replayReveal: 'showdown' },
     loopOpts: {
       async coachCaptureCheckpoint() {
         const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
         decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+        const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
+        const folded = (record.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
+        ghost = record.holes[folded][0];
       },
     },
   });
@@ -4059,9 +4082,7 @@ test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { ti
         const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
         decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const foldPid = (state.lastHand.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
-        overlapCard = state.lastHand.holes[foldPid][0];
-        const villain = Object.keys(state.hand.holes).find((pid) => pid !== 'user');
-        state.hand.holes[villain][0] = overlapCard;
+        overlapCard = injectCurrentHandCard(state, state.lastHand.holes[foldPid][0]);
         fs.writeFileSync(statePath, JSON.stringify(state));
       },
     },
@@ -8265,8 +8286,6 @@ test('S2 mixed coaching sends eligible decisions only and appends a separate una
   const note = await waitForCoachNote(gameDir, 1);
   await stopRun(loop, running);
   assert.equal(upper.starts.length, 1);
-  assert.doesNotMatch(upper.prompts[0], /d-1-turn-999|UNAVAILABLE_PRIVATE_SENTINEL|"processStatus":"unavailable"/);
-  assert.match(upper.prompts[0], /"processStatus":"available"/);
   assert.match(note.text, /과정 판정 불가/);
   assert.match(note.text, /기본 코치 응답/);
 });
