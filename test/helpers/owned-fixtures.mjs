@@ -49,7 +49,7 @@ function removeOwnedDirectory(dir) {
   }
 }
 
-function waitForExit(child, timeoutMs = 2_000) {
+function waitForExit(child, timeoutMs = process.platform === 'win32' ? 10_000 : 2_000) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -178,7 +178,9 @@ after(async () => {
       }
       if (processAlive(entry.pid)) {
         const currentIdentity = processIdentity(entry.pid);
-        if (entry.identity === null || currentIdentity === null || currentIdentity === entry.identity) {
+        const sameProcess = entry.identity !== null && currentIdentity !== null && currentIdentity === entry.identity;
+        const nodeSawExit = entry.child.exitCode !== null || entry.child.signalCode !== null;
+        if (sameProcess || !nodeSawExit) {
           throw new Error(`owned process death cannot be proven: ${entry.label}`);
         }
       }

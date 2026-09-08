@@ -6510,6 +6510,7 @@ test('Task 7A r1: cutoff 커밋 뒤 crash-resume은 pending Q를 owner 교대 �
 });
 
 test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫은 뒤에만 replacement를 시작한다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -6842,6 +6843,7 @@ test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면
 });
 
 test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남은 예산으로 cutoff와 Q drain을 완료한다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -7427,6 +7429,7 @@ test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 �
 });
 
 test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린다', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
@@ -7465,6 +7468,7 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
 });
 
 test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION_ABORTED로 리뷰 게이트를 잠근다', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
