@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { handRecordFixture, writeSecurityFixtures } from './security-fixtures.js';
 
 const DELAY_MS = 1500;
 
@@ -253,13 +254,38 @@ function sequence() {
       },
     },
     {
-      label: '코치 노트',
+      // Requires a matching hands/hand-0001.json in the server game-dir
+      // (writeReplayDemoArchive). Without it the overlay shows a marker.
+      label: '복기 트리거',
       body: {
         publishId: 8,
+        view: view({
+          street: 'river',
+          board: boardRiver,
+          toAct: null,
+          pots: [{ potIndex: 0, amount: 200, eligible }],
+          seats: seats({
+            stacks: { user: 5150, p1: 4950, p2: 4950, p3: 4950 },
+            bets: { user: 0, p1: 0, p2: 0, p3: 0 },
+          }),
+        }),
+        handReplay: { handNos: [1] },
+      },
+    },
+    {
+      label: '코치 노트',
+      body: {
+        publishId: 9,
         coach: [
           {
             handNo: 1,
             text: '프리플랍 콜은 블라인드 대비 가격이 쌌습니다. 다음엔 버튼 뒤에서 레이즈로 주도권을 가져 보세요.',
+            decisions: [{
+              decisionId: 'd-1-preflop-0',
+              why: '블라인드 대비 가격이 쌌습니다.',
+              outcome: '보드의 에이스와 맞아들며 원페어로 이겼습니다.',
+              alternative: '버튼 뒤에서 레이즈로 주도권을 가져 보세요.',
+            }],
           },
           {
             handNo: 2,
@@ -272,7 +298,7 @@ function sequence() {
     {
       label: 'game_over',
       body: {
-        publishId: 9,
+        publishId: 10,
         view: view({
           street: 'river',
           board: boardRiver,
@@ -292,7 +318,7 @@ function sequence() {
     {
       label: 'review',
       body: {
-        publishId: 10,
+        publishId: 11,
         view: view({
           street: 'river',
           board: boardRiver,
@@ -341,6 +367,48 @@ async function main() {
     if (i < steps.length - 1) await sleep(DELAY_MS);
   }
 }
+
+export function writeReplayDemoArchive(gameDir, { token = 'dev' } = {}) {
+  const record = handRecordFixture(1, {
+    holes: { user: ['As', 'Td'], p1: ['Kh', 'Qc'], p2: ['2h', '3d'], p3: ['Jd', '8s'] },
+    positions: { user: 'SB', p1: 'BTN', p2: 'CO', p3: 'BB' },
+    folded: ['p2'],
+    board: ['Ah', '7c', '2d', '9s', '3c'],
+    reveals: [
+      { playerId: 'user', cards: ['As', 'Td'], handName: '원페어' },
+      { playerId: 'p1', cards: ['Kh', 'Qc'], handName: '하이 카드' },
+      { playerId: 'p3', cards: ['Jd', '8s'], handName: '하이 카드' },
+    ],
+    actions: [
+      {
+        decisionId: 'd-1-preflop-0', playerId: 'user', action: 'call', street: 'preflop',
+        potTotal: 75, note: '가격이 싸다',
+      },
+      { playerId: 'p1', action: 'call', street: 'preflop', potTotal: 125, reason: '큰 건 아닌 듯하네요.' },
+      { playerId: 'p2', action: 'call', street: 'preflop', potTotal: 175 },
+      { playerId: 'p3', action: 'check', street: 'preflop', potTotal: 200 },
+    ],
+  });
+  record.pots = [{
+    potIndex: 0,
+    amount: 200,
+    eligible: ['user', 'p1', 'p2', 'p3'],
+    winners: [{ playerId: 'user', share: 200 }],
+  }];
+  return writeSecurityFixtures(gameDir, {
+    hands: [record],
+    config: { replayReveal: 'all', showdownPolicy: 'open' },
+    players: [
+      { playerId: 'user' },
+      { playerId: 'p1', name: '이서연', archetype: 'TAG' },
+      { playerId: 'p2', name: '김민준', archetype: 'Nit' },
+      { playerId: 'p3', name: '박지훈', archetype: 'LAG' },
+    ],
+    state: { sessionToken: token },
+  });
+}
+
+export { sequence };
 
 const isDirectRun = process.argv[1] != null
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
