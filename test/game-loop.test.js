@@ -4200,20 +4200,24 @@ test('finalizing flush에서 replay 캡처가 없으면 deferred 핸드를 unava
     noNewPlayTimePublishers: false,
     finalization: null,
   });
+  let replayCaptures = 0;
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper: makeCoachAdapter(),
     stateOverrides: { ownerSessionId: owner, handNo: 1 },
     loopOpts: {
       onEngineInvoke(args) {
-        if (args[0] === 'hand' && args.includes('--replay')) {
-          throw new Error('replay capture should not run for a missing flush file');
+        if (args[0] !== 'hand' || !args.includes('--replay')) return;
+        replayCaptures += 1;
+        if (replayCaptures === 1) {
+          const err = new Error('flush recapture failed');
+          err.code = 'HAND_RECORD';
+          throw err;
         }
       },
     },
   });
   await loop.resume();
   await loop.run();
-  assert.equal(fs.existsSync(path.join(gameDir, '.coach-hand-1-replay.json')), false);
   const snap = readJson(path.join(gameDir, 'ui-snapshot.json'));
   const note = (snap.coach ?? []).find((row) => row.handNo === 1);
   assert.ok(note);

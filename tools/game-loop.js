@@ -23,6 +23,7 @@ import {
   resolveRuntimes,
 } from './player-runtime.js';
 import {
+  coachNoteStrings,
   collectPrivateLiteralsDetailed,
   gameEpochOf,
   validateActionAck,
@@ -2825,14 +2826,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return cards;
   };
 
-  const coachNoteStrings = (note) => {
-    const strings = [note.text];
-    for (const row of note.decisions ?? []) {
-      strings.push(row.decisionId, row.why, row.outcome, row.alternative);
-    }
-    return strings.filter((value) => typeof value === 'string' && value);
-  };
-
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);
     if (literals.length === 0) {
@@ -3423,7 +3416,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const completeCoachUnavailable = async ({ owner, handNo, generation, reason, fallbackEnvelopePath = null }) => {
+  const completeCoachUnavailable = async ({
+    owner, handNo, generation, reason, fallbackEnvelopePath = null, replaceDeferred = false,
+  }) => {
     // Past the cutoff the single finalize-cutoff transaction owns every remaining seal;
     // a racing per-hand seal would fight it for the same handNo.
     if (finalizationCutoff) return;
@@ -3434,6 +3429,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ...(generation == null ? [] : ['--generation', String(generation)]),
       '--reason', reason,
       '--snapshot-file', coachSnapshotPath,
+      ...(replaceDeferred ? ['--replace-deferred'] : []),
     ];
     await runCoachBeforeResultCutoff(args);
     const exactEnvelopePath = coachEnvelopePathFor(handNo, fallbackEnvelopePath);
@@ -3955,10 +3951,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const flushDeferredCoachNotes = async () => {
+  const flushDeferredCoachNotes = async ({ finalizing = false } = {}) => {
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') return;
     const auth = readCoachAuthority();
+    const sealFlushFailure = async (handNo, entry, reason) => {
+      await completeCoachUnavailable({
+        owner,
+        handNo,
+        generation: entry?.generation,
+        reason,
+        fallbackEnvelopePath: entry?.exactEnvelopePath ?? null,
+        replaceDeferred: true,
+      });
+    };
     for (const [key, entry] of Object.entries(auth?.deferred ?? {})) {
       if (stopRequested) return;
       const handNo = Number(key);
@@ -3968,7 +3974,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         replayRaw = fs.existsSync(coachReplayPath(handNo))
           ? fs.readFileSync(coachReplayPath(handNo), 'utf8')
           : (await captureCoachReplay(handNo, { beforeResultCutoff: true })).raw;
-      } catch {
+      } catch (error) {
+        if (finalizing) await sealFlushFailure(handNo, entry, error.code ?? 'deferred-replay-missing');
         continue;
       }
       try {
@@ -3977,7 +3984,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           replay: parseCapturedHand(replayRaw),
         });
       } catch (error) {
-        if (error.code === 'DEFER_COACH_OUTPUT' || error.code === 'INVALID_COACH_OUTPUT') continue;
+        if (error.code === 'DEFER_COACH_OUTPUT' && !finalizing) continue;
+        if (finalizing) {
+          await sealFlushFailure(handNo, entry, error.code ?? 'deferred-flush-failed');
+          continue;
+        }
+        if (error.code === 'INVALID_COACH_OUTPUT' || error.code === 'DEFER_COACH_OUTPUT') continue;
         throw error;
       }
       const live = readCoachAuthority()?.hands?.[key];
@@ -4013,7 +4025,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!fs.existsSync(coachAuthorityPath)) return;
     const heartbeat = await runCoachBeforeResultCutoff(['heartbeat', '--owner', owner]);
     if (stopRequested) return;
-    await flushDeferredCoachNotes();
+    await flushDeferredCoachNotes({
+      finalizing: readLoopState()?.phase === 'finalizing',
+    });
     const latest = readCoachAuthority();
     for (const action of heartbeat.actions ?? []) {
       if (stopRequested) break;
@@ -4809,7 +4823,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     log('finalize-training-settled', { settled: trainingSettled, pending: trainingTasks.size });
     if (stopRequested) return readLoopState();
     try {
-      await flushDeferredCoachNotes();
+      await flushDeferredCoachNotes({ finalizing: true });
     } catch (error) {
       appendNotice(`코치 deferred flush 오류: ${error.code ?? 'ERROR'}`);
       log('coach-deferred-flush-error', { phase: 'finalizing', code: error.code ?? 'ERROR' });

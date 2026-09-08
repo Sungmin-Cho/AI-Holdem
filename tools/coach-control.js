@@ -14,6 +14,7 @@ import {
   proofBearingCoachNote,
   publicProofId,
   publishBodyByteLength,
+  coachNoteStrings,
   validateCoachDecisions,
 } from '../publish-contract.js';
 
@@ -568,9 +569,13 @@ function appendTrace(gameDir, row) {
 }
 
 function sealUnavailable(auth, {
-  gameDir, epoch, owner, handNo, generation, reason, snapshotFile,
+  gameDir, epoch, owner, handNo, generation, reason, snapshotFile, replaceDeferred = false,
 }) {
   const key = keyOf(handNo);
+  if (auth.deferred?.[key]) {
+    if (!replaceDeferred) return { ok: false, code: 'HAND_DEFERRED' };
+    delete auth.deferred[key];
+  }
   if (auth.publishQueue[key]) return occupiedReject(auth, handNo, owner, generation, 'QUEUE_ALREADY_SEALED');
   if (auth.publishedSeals[key]) return occupiedReject(auth, handNo, owner, generation, 'HAND_ALREADY_PUBLISHED');
   if (generation == null && snapshotOccupies(snapshotFile, handNo)) {
@@ -866,8 +871,9 @@ export function createCoachControl(deps = {}) {
         fail('MISSING_PATH', `${hand.exactResultPath}를 읽을 수 없습니다.`);
       }
       const parsed = peeked;
+      const noteStrings = coachNoteStrings(parsed.note);
       for (const lit of forbiddenLiterals) {
-        if (lit && parsed.note.text.includes(lit)) {
+        if (lit && noteStrings.some((value) => value.includes(lit))) {
           return { ok: false, code: 'INVALID_COACH_OUTPUT', reason: 'forbidden-literal' };
         }
       }
@@ -960,14 +966,16 @@ export function createCoachControl(deps = {}) {
     }
   }
 
-  async function completeUnavailable({ gameDir, owner, handNo, generation, reason, snapshotFile }) {
+  async function completeUnavailable({
+    gameDir, owner, handNo, generation, reason, snapshotFile, replaceDeferred = false,
+  }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
       if (auth.activeOwnerSessionId && auth.activeOwnerSessionId !== owner) fail('STALE_OWNER');
       if (snapshotFile) migrateLocked(gameDir, auth, snapshotFile);
       if (reason === 'gate0') auth.adapterState = 'unavailable';
       const result = sealUnavailable(auth, {
-        gameDir, epoch, owner, handNo, generation, reason, snapshotFile,
+        gameDir, epoch, owner, handNo, generation, reason, snapshotFile, replaceDeferred,
       });
       persist(gameDir, auth);
       return result;
@@ -992,7 +1000,7 @@ export function createCoachControl(deps = {}) {
       const actions = [];
       for (const [key, hand] of Object.entries(auth.hands)) {
         if (hand.ownerSessionId !== owner) continue;
-        if (auth.publishQueue[key] || auth.publishedSeals[key]) continue;
+        if (auth.publishQueue[key] || auth.publishedSeals[key] || auth.deferred?.[key]) continue;
         if (!['reserved', 'running'].includes(hand.status)) continue;
         if (hand.resultState !== 'unread') continue;
         if (now < hand.deadlineMono) continue;
@@ -1441,6 +1449,7 @@ async function cliMain() {
       generation: opts.generation == null ? undefined : Number(opts.generation),
       reason: opts.reason,
       snapshotFile: opts['snapshot-file'],
+      replaceDeferred: Boolean(opts['replace-deferred']),
     });
   } else if (command === 'finalize-cutoff') {
     result = await cc.finalizeCutoff({

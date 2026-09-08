@@ -46,6 +46,15 @@ export function canonicalPayloadJson(note) {
   return JSON.stringify(payload);
 }
 
+export function coachNoteStrings(note) {
+  if (!note || typeof note !== 'object' || Array.isArray(note)) return [];
+  const strings = [note.text];
+  for (const row of note.decisions ?? []) {
+    strings.push(row.decisionId, row.why, row.outcome, row.alternative);
+  }
+  return strings.filter((value) => typeof value === 'string' && value);
+}
+
 export function validateCoachDecisions(decisions, handNo) {
   if (decisions === undefined) return null;
   if (!Array.isArray(decisions)) return 'not-array';
