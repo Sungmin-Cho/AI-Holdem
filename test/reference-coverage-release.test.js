@@ -1,3 +1,4 @@
+import {createMistakeBank,createProfileStore} from '../tools/training-stores.js';
 import {execFileSync} from 'node:child_process';
 import {createStudyController} from '../server/drill-public/drill.js';
 import {createGame,startHand,applyAction,legalFor} from '../engine/hand.js';
@@ -88,4 +89,22 @@ test('study controller captures source selection and drops incompatible card tar
  await controller.restore();await controller.start({mode:'free',source:LEGACY_REFERENCE_SOURCE});
  const request=calls.find(c=>c.route==='/api/start').options.body;
  assert.deepEqual(request.source,LEGACY_REFERENCE_SOURCE);assert.equal(request.spotKey,undefined);
+});
+
+test('choosing another source for daily review preserves an unrelated free-practice card target',async()=>{
+ const target={spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'};
+ const controller=createStudyController({storage:{getItem:()=>null,setItem(){},removeItem(){}},storageKey:'test',initialTarget:target,api:async()=>({ok:true})});
+ await controller.restore();await controller.start({mode:'daily',source:LEGACY_REFERENCE_SOURCE});
+ assert.deepEqual(controller.state.target,target);
+});
+
+test('v1 mistake review remains reachable from CLI in a v2-active game store',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'reference-mistake-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ const e=evaluatePreflopReference(nativePreflopSnapshot('6max-100bb-btn-rfi-v2','AA',{action:'fold'}),data,{gameEpoch:'aa'.repeat(32)});e.payloadSha256='bb'.repeat(32);
+ await createProfileStore(d).apply(e);
+ const legacy={evaluationId:`${'cc'.repeat(32)}:d-9-preflop-0:local-preflop-baseline@1.0.0`,payloadSha256:'dd'.repeat(32),status:'supported',street:'preflop',spotKey:'6max-100bb-btn-rfi-unopened',handClass:'AA',grade:'off-policy',forced:false,evLossBb:null,source:LEGACY_REFERENCE_SOURCE,origin:'game'};
+ assert.equal((await createMistakeBank(d).collect(legacy)).added,true);
+ assert.equal((await readStudySummary(d)).source.version,'2.0.0');
+ const result=JSON.parse(execFileSync(process.execPath,['tools/drill-cli.js','start','--store-dir',d,'--mode','mistake-review','--source-version','1.0.0'],{encoding:'utf8'}));
+ assert.equal(result.count,1);assert.equal(result.session.sourceIdentity.version,'1.0.0');assert.equal(result.session.queue[0].prompt.spotKey,legacy.spotKey);
 });

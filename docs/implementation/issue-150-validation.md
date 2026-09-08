@@ -39,3 +39,7 @@ node --test test/preflop-baseline-v2.test.js test/preflop-reference.test.js test
 두 번째 리뷰 후 112BB + limp/4bet 지원 제외 카드의 null reference 접근을 수정했다. unsupported coverage에서는 투영 사유를 제거하고 validator에서도 모순된 투영 사유를 거절한다. 공개 결정 전체를 112BB로 바꾼 detail 검증·카드 렌더링 회귀를 추가했다. 혼합 v1/v2 프로필, 합성 postflop 측정, UI/CLI의 명시적 이전 출처 복습도 검증한다. 긴 세션의 출처 history 전체 검증 비용과 기존 4MB authority 한도는 유지한다. 부분 tail만 검증해 출처 충돌을 놓치는 최적화는 하지 않는다.
 
 main의 PR #160을 통합한 뒤 게시·리플레이·학습 authority 집중 테스트 122건이 통과했다. Node 20 CI의 bootstrap race 실패는 테스트 자식이 SIGTERM 처리기를 등록하기 전에 준비 완료를 출력하는 순서 문제로 확인하여 처리기 등록을 먼저 하도록 수정했다. 서비스의 소유권 규칙은 바꾸지 않았다.
+
+최종 독립 리뷰는 Opus 5 `PASS_WITH_CHANGES`(0.78), Fable 5.1 `PASS`(0.80)이며, 두 실행 모두 보호된 receipt·모델 identity·종료·verdict 검증을 통과했다. 수용한 낮은 심각도 지적은 자유 연습에서만 다른 버전 선택 시 기존 카드 target을 해제하고, 연구 보고서의 synthetic 수를 분리하는 것이다. 관련 focused 계약을 재검증했다. 최종 리뷰가 함께 읽은 main #160의 큰 handNo replay marker에 의한 보관 슬롯 잠식·marker 사유 갱신 지적은 이번 기준표 변경 이전의 코드이며 토큰 보유 게시자 범위의 후속 항목으로 남긴다. 기준표 PR에 리플레이 정책 변경을 추가하지 않았다.
+
+마지막 로컬 전체 실행은 2,013건 중 2,012건 통과, 1건은 브라우저 data-URL 하네스가 새 상대 import를 변환하지 못한 실패였다. 하네스 수정 후 해당 파일 21건이 통과했다. 최종 전체 플랫폼 검증은 PR의 최신 커밋 CI로 확인한다. 실제 모바일 브라우저에서도 v2 게임 기록을 보존한 채 v1 연습을 시작하고, 답안 후 새로고침에서 1/10 진행과 v1 출처가 유지됨을 확인했다.

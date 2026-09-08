@@ -93,5 +93,5 @@ test('synthetic postflop evaluations are measured without granting reference aut
  const e={schemaVersion:1,evaluationId:`${epoch}:${snapshot.decisionId}:fake-solver@1.0.0`,decisionId:snapshot.decisionId,status:'supported',street:'flop',spotKey:'postflop-test',handClass:'AA',grade:null,forced:false,recommended:[],chosen:{action:'fold',frequency:null,evBb:null},bestEvBb:null,evLossBb:null,source:{id:'fake-solver',version:'1.0.0',contentSha256:'c'.repeat(64)}};
  const {accepted:[item]}=await createTrainingControl().acceptEvaluations(d,{gameEpoch:epoch,owner:'test',handNo:snapshot.handNo,evaluations:[e]});
  fs.writeFileSync(path.join(d,'training','evaluations.jsonl'),JSON.stringify({...e,payloadSha256:item.payloadSha256})+'\n');
- const report=measureTrainingCoverage(d);assert.equal(report.complete,true);assert.equal(report.postflop,1);assert.equal(report.exactComparable,0);assert.equal(report.referenceAvailable,0);
+ const report=measureTrainingCoverage(d);assert.equal(report.complete,true);assert.equal(report.postflop,1);assert.equal(report.synthetic,1);assert.equal(report.exactComparable,0);assert.equal(report.referenceAvailable,0);
 });

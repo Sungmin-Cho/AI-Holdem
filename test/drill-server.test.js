@@ -1,3 +1,4 @@
+import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -617,4 +618,14 @@ test('study start selection errors are authoritative 400 responses and preserve 
     }
     assert.equal((await api(drill.port, drill.token, '/api/current')).json.sessionId, original.sessionId);
   } finally { await drill.close(); }
+});
+
+test('HTTP forged source hash is 409 and preserves the current drill session',async()=>{
+ const storeDir=tmp();await startDrill(storeDir,{source:V2_REFERENCE_SOURCE});
+ const file=path.join(storeDir,'.training','drill-session.json'),before=fs.readFileSync(file);
+ const server=await startDrillServer({storeDir,port:0,token:'reference-test'});
+ try{
+  const response=await api(server.port,'reference-test','/api/start',{method:'POST',body:{mode:'free',idempotencyKey:'forged-source',source:{...V2_REFERENCE_SOURCE,contentSha256:'0'.repeat(64)}}});
+  assert.equal(response.status,409);assert.equal(response.json.code,'SOURCE_UNAVAILABLE');assert.deepEqual(fs.readFileSync(file),before);
+ }finally{await server.close();}
 });

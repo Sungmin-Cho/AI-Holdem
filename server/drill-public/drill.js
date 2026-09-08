@@ -152,7 +152,7 @@ export function createStudyController({ api, storage, storageKey, initialTarget 
     async start(selectors) {
       if (busy || recovery || pending) return state();
       if (!Object.hasOwn(STUDY_MODES, selectors?.mode)) { error = { code: 'INVALID_DRILL_MODE' }; return emit(); }
-      if (selectors.source && target?.spotKey && selectors.source.version !== (target.spotKey.endsWith('-v2') ? '2.0.0' : '1.0.0')) target = null;
+      if (selectors.mode === 'free' && selectors.source && target?.spotKey && selectors.source.version !== (target.spotKey.endsWith('-v2') ? '2.0.0' : '1.0.0')) target = null;
       return submit({ kind: 'start', body: { ...(selectors.mode === 'free' ? target : null), ...selectors, seed: uuid(), idempotencyKey: uuid() } });
     },
     async answer(action, sizeBb) {
