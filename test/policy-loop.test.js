@@ -259,3 +259,123 @@ test('policy mode reaches done without an LLM player runtime', { timeout: 40_000
   assert.match(review, /## 각 AI의 실제 아키타입 공개/);
   assert.equal(review.includes(readJson(path.join(gameDir, 'state.json')).policySeed), false);
 });
+
+test('self-opponent policy game assigns seats, reviews them, and keeps identity private until done', { timeout: 60_000 }, async (t) => {
+  const { collectStoreTendency } = await import('../tools/self-opponents.js');
+  const { readGeneratedRecord } = await import('./helpers/gen-hh-fixtures.js');
+  const storeDir = tmp();
+  const sessionDir = path.join(storeDir, '.session-store', 'sessions', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+  fs.mkdirSync(path.join(sessionDir, 'hands'), { recursive: true });
+  const record = readGeneratedRecord('uncalled');
+  for (let i = 0; i < 60; i += 1) {
+    fs.writeFileSync(
+      path.join(sessionDir, 'hands', `hand-${String(i + 1).padStart(4, '0')}.json`),
+      `${JSON.stringify(record)}\n`,
+    );
+  }
+  fs.writeFileSync(path.join(sessionDir, 'state.json'), JSON.stringify({
+    gameOver: true,
+    seats: [{ playerId: 'user' }, { playerId: 'p1' }, { playerId: 'p2' }, { playerId: 'p3' }, { playerId: 'p4' }, { playerId: 'p5' }],
+    config: { mode: 'cash-training', aiCount: 5 },
+    policySeed: 'ab'.repeat(32),
+  }));
+  const collected = collectStoreTendency(storeDir);
+  assert.equal(collected.tendency.hands, 60);
+
+  const gameDir = tmp();
+  const privacy = /SelfMirror|SelfExploiter|self-mirror-v1|self-exploiter-v1|strategy-mirror-v1|mirror-[a-z0-9]|observed-tendency/;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
+      need, canaryAbsPath, onAdapterCreated: registerAdapter,
+      createRuntime: (kind) => ({
+        kind,
+        async probe() { return { ok: false, upper: false, containment: false }; },
+        async dispose() {},
+      }),
+    }),
+    opts: {
+      port: 0,
+      waitMs: 40,
+      opponentRuntime: 'policy',
+      selfOpponents: {
+        requested: { mirror: true, exploiter: true },
+        tendency: collected.tendency,
+        sources: collected.sources,
+        chooseSeat: () => 0,
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({
+    ai: 3,
+    mode: 'cash-training',
+    stackBb: 100,
+    blinds: '50/100',
+    hands: 1,
+    opponentRuntime: 'policy',
+  });
+  const assigned = readJson(path.join(gameDir, 'players.json'));
+  const mirror = assigned.find((row) => row.archetype === 'SelfMirror');
+  const exploiter = assigned.find((row) => row.archetype === 'SelfExploiter');
+  assert.ok(mirror);
+  assert.ok(exploiter);
+  const digest = mirror.policy.configDigest;
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.doesNotMatch(JSON.stringify(loopState), privacy);
+  assert.equal(JSON.stringify(loopState).includes(mirror.playerId), false);
+
+  const running = loop.run();
+  running.catch(() => {});
+  const sent = new Set();
+  const driver = (async () => {
+    for (let i = 0; i < 80; i += 1) {
+      const state = readJson(path.join(gameDir, 'loop-state.json'));
+      if (state.phase === 'done' || state.halt) return;
+      try {
+        const { lock, snapshot } = await waitForUserSnapshot(gameDir, 400);
+        const decisionId = snapshot.view.legal.decisionId;
+        if (!sent.has(decisionId)) {
+          sent.add(decisionId);
+          const legal = snapshot.view.legal;
+          await postUserAction(lock, {
+            decisionId,
+            action: legal.canCheck ? 'check' : 'fold',
+          });
+        }
+      } catch { /* AI turn or terminal */ }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  })();
+  const finished = await running;
+  await driver;
+  assert.equal(finished.phase, 'done');
+  const review = fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8');
+  assert.match(review, /## 나를 닮은 상대와의 비교/);
+  assert.match(review, /## 나를 공략한 상대/);
+  assert.match(review, new RegExp(mirror.name));
+  assert.doesNotMatch(review, /agentHandle|policyModelKind|policyTraitsEvidence|"playerId"|"vpip"|machine-only|"kind"/);
+  const snapshotPath = path.join(gameDir, 'ui-snapshot.json');
+  if (fs.existsSync(snapshotPath)) {
+    const published = fs.readFileSync(snapshotPath, 'utf8');
+    assert.doesNotMatch(published, privacy);
+    assert.equal(published.includes(digest), false);
+  }
+  assert.doesNotMatch(JSON.stringify(readJson(path.join(gameDir, 'loop-state.json'))), privacy);
+  const handsDir = path.join(gameDir, 'hands');
+  const handFiles = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter((name) => name.startsWith('hand-')) : [];
+  assert.ok(handFiles.length > 0);
+  let sawMirrorAction = false;
+  for (const name of handFiles) {
+    const hand = readJson(path.join(handsDir, name));
+    for (const action of hand.actions ?? []) {
+      if (action.playerId === mirror.playerId && action.policyId) {
+        assert.equal(action.policyId, 'self-mirror-v1');
+        sawMirrorAction = true;
+      }
+    }
+  }
+  assert.equal(sawMirrorAction, true);
+  assert.ok(finished.notices.some((notice) => /exploit 평가를 남기지 못한 결정/.test(notice)));
+});
+
