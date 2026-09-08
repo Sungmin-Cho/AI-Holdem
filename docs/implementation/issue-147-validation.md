@@ -199,3 +199,9 @@ CI run `34207017686`의 Node 20 Ubuntu 전체 suite와 Windows 20/22 플랫폼 �
 두 학습 테스트 드라이버가 `canRaise`이면 무조건 `minRaiseTo`를 전송하고 접수 결과 전부터 해당 decision을 전송 완료로 기록하는 결함을 확인했다. 엔진의 합법적인 숏 올인(`minRaiseTo > maxRaiseTo`)에서는 액션이 거부되고 드라이버가 사용자 차례에서 멈출 수 있었다. 실제 UI처럼 `min(minRaiseTo,maxRaiseTo)`를 사용하고, `ok:true` 이후에만 전송 완료로 기록하는 공유 테스트 helper로 보정했다. 실제 short-stack 엔진 fixture에서 기존 액션의 거부와 수정 액션의 다음 결정 진행을 검증하고, 거부된 POST의 재시도 및 성공 후 중복 방지까지 2/2 통과했다. training 드라이버도 deadline 이후 조용히 반환해 `running`을 무한 대기하지 않고 명시적으로 실패한다.
 
 코치 카드 공개 범위 테스트는 단일 cash-training 핸드로 고정하고 정상 종료까지 기다린다. 무작위 다음 핸드의 카드 충돌로 합법적인 deferred 경로에 들어가는 변수를 제거하며, deferred 자체의 별도 검증은 유지한다. 위 네 CI 실패 테스트는 Node 22 집중 실행에서 4/4 통과했다. 제품 코드, timeout 예산과 계약 단언은 이 보정으로 변경하지 않았다. 최종 원격 CI는 이 테스트 보정 커밋에 대해 다시 확인한다.
+
+### PR #167 UI 통합
+
+`395d32f`의 CI run `34211025376` 네 축은 모두 성공했다(Node 22 전체 2,198/2,198, 취소 0). 병합 시점에 main의 PR #167 (`92b10f6`, 복기 overlay·의도 메모)이 들어와 UI 충돌 두 곳을 통합했다. `ui`는 hint와 handReplays를 함께 보존하고, `sendAction`은 힌트를 숨긴 뒤 intent note를 action controller에 넘긴다.
+
+리플레이·액션 controller·힌트 관련 27/27 테스트가 통과했다. 모바일 Chromium 390×844에서 힌트·메모 입력·액션 바 배치를 확인했고, 실제 클릭 후 힌트 숨김 및 접수 기록의 메모 보존을 검증했다. 같은 fixture에서 실제 엔진 완료·assistance materialize 후 독립 0/도움받은 1을 유지하고, 서버가 재산출한 handReplay를 모바일 overlay로 열어 메모가 보존된 것을 확인했다. 이 수동 fixture는 전체 사이드카의 actionAck 소비까지 재현했다는 증거는 아니다. 통합 커밋의 전체 CI를 다시 확인한 뒤 병합한다.

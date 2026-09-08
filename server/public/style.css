@@ -931,6 +931,113 @@ main {
 
 .boot-error-text { margin: 0; font-size: 14px; line-height: 1.6; color: var(--ink-2); }
 
+/* ── 복기 오버레이·의도 메모 ──────────────────────────────── */
+
+.intent-note-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 0 100%;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.intent-note {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+}
+.action-bar { flex-wrap: wrap; }
+
+.log-divider-text .replay-open {
+  margin-left: 8px;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.replay-card {
+  --tw: min(640px, 100%);
+  --ch: calc(var(--tw) * 0.042);
+  --cw: calc(var(--tw) * 0.030);
+  --card-gap: calc(var(--tw) * 0.0115);
+  display: flex;
+  flex-direction: column;
+  width: var(--tw);
+  min-width: 0;
+  max-height: min(86dvh, 700px);
+  padding: 24px 30px 28px;
+  background: linear-gradient(180deg, #151B16 0%, #101510 100%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  box-shadow: 0 40px 90px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.replay-card h1 { margin: 0; font-size: 21px; font-weight: 700; letter-spacing: 0.01em; }
+.replay-head { display: flex; align-items: center; gap: 12px; }
+.replay-mark { width: 17px; height: 17px; fill: #D9BE7E; flex: none; }
+.replay-head h1 { flex: none; }
+#replay-close { margin-left: auto; }
+.replay-disclaimer {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--gold-2);
+}
+.replay-rule {
+  height: 1px;
+  margin: 16px 0 2px;
+  background: linear-gradient(90deg, rgba(201, 168, 96, 0.5) 0%, rgba(201, 168, 96, 0.06) 100%);
+}
+.replay-body { flex: 1; min-width: 0; min-height: 0; overflow: auto; overflow-wrap: anywhere; }
+.replay-marker { margin: 12px 0; font-size: 14px; line-height: 1.6; color: var(--ink-2); }
+.replay-meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; font-size: 13px; color: var(--ink-2); }
+.replay-board { display: flex; gap: var(--card-gap); margin: 6px 0 12px; }
+.replay-street { margin: 12px 0; }
+.replay-street-name {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #D9BE7E;
+}
+.replay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.replay-name { font-weight: 600; color: var(--ink); }
+.replay-cards { display: inline-flex; gap: var(--card-gap); }
+.replay-card .mini-card { font-size: var(--ch); }
+.replay-card .mini-suit { width: var(--cw); height: var(--cw); }
+.replay-reason, .replay-note, .replay-coach, .replay-summary {
+  flex: 1 0 100%;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.replay-note { color: var(--gold-2); }
+.replay-coach { color: var(--pos-ink); }
+.replay-coach.is-pending { color: var(--muted); font-style: italic; }
+.replay-study {
+  height: 24px;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--gold-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
 /* ── 좁은 화면 ───────────────────────────────────────── */
 
 @media (max-width: 900px) {

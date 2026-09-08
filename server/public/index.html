@@ -81,6 +81,10 @@
         </div>
         <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
         <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
+        <label class="intent-note-wrap" for="intent-note">의도
+          <input id="intent-note" class="intent-note" type="text" maxlength="160"
+                 autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
+        </label>
       </div>
     </section>
 
@@ -102,6 +106,19 @@
       </div>
     </aside>
   </main>
+
+  <div id="replay-overlay" class="overlay" hidden>
+    <div class="replay-card" role="dialog" aria-modal="true" aria-labelledby="replay-title">
+      <div class="replay-head">
+        <svg class="replay-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#suit-s"></use></svg>
+        <h1 id="replay-title">핸드 복기</h1>
+        <button type="button" id="replay-close" class="btn btn-ghost">닫기</button>
+      </div>
+      <p id="replay-disclaimer" class="replay-disclaimer"></p>
+      <div class="replay-rule" aria-hidden="true"></div>
+      <div id="replay-body" class="replay-body"></div>
+    </div>
+  </div>
 
   <div id="review-overlay" class="overlay" hidden>
     <div class="review-card" role="dialog" aria-modal="true" aria-labelledby="review-title">
