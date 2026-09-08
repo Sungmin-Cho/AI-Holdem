@@ -7219,6 +7219,7 @@ test('Task 7A r3: Q로 이미 봉인되고 pid가 죽은 retired attempt는 clea
 });
 
 test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설치해 5초 미만 attempt-2를 막는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter({
