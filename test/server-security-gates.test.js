@@ -1494,7 +1494,7 @@ test('P3 F1: study-capability literal in a replay note becomes a marker, not a F
   const row = snap.handReplays.find((entry) => entry.handNo === 1);
   assert.ok(row);
   assert.equal(row.unavailable, true);
-  assert.equal(JSON.stringify(snap).includes(STUDY_TOKEN), false);
+  assert.equal(JSON.stringify(row).includes(STUDY_TOKEN), false);
   await first.close();
 
   const restarted = await startServer({ gameDir: dir, port: 0, token: TOKEN, studyUrl: STUDY_URL });
@@ -1504,7 +1504,9 @@ test('P3 F1: study-capability literal in a replay note becomes a marker, not a F
   const restored = again.handReplays.find((entry) => entry.handNo === 1);
   assert.ok(restored);
   assert.equal(restored.unavailable, true);
-  assert.equal(JSON.stringify(again).includes(STUDY_TOKEN), false);
+  assert.equal(JSON.stringify(restored).includes(STUDY_TOKEN), false);
+  const persisted = fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8');
+  assert.equal(persisted.includes(STUDY_TOKEN), false);
 });
 
 test('REQ-010: only authenticated snapshots synthesize the trusted startup study link', async (t) => {

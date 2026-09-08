@@ -7019,9 +7019,9 @@ test('Task 7B: evaluator는 decision-time process만 받고 종합자는 별도 
   const synthesizerPrompt = upper.synthesizerStarts[0].prompt;
   assert.match(synthesizerPrompt, new RegExp(evaluatorText));
   assert.match(synthesizerPrompt, /"result":"lose"/);
-  assert.match(synthesizerPrompt, /redacted outcome records/);
+  assert.match(synthesizerPrompt, /replay outcome records/);
   assert.match(synthesizerPrompt, /endStacks/);
-  assert.equal(synthesizerPrompt.includes('FUTURE_ACTION_SENTINEL'), false);
+  assert.equal(synthesizerPrompt.includes('FUTURE_ACTION_SENTINEL'), true);
   assert.match(synthesizerPrompt, /PRIVATE_ARCHETYPE_SENTINEL/);
   assert.equal(synthesizerPrompt.includes('TRACE_ONLY_SENTINEL'), true, 'evaluator output was not preserved verbatim');
 
@@ -8211,7 +8211,7 @@ test('P3: synthesizer replay budget strips reason then actions; evaluator prompt
     board: ['2s', '3d', '4c', '5h', '6s'],
     showdown: { reveals: [{ playerId: 'p1', cards: ['7c', '2d'] }], mucks: [] },
     folded: [],
-    actions: Array.from({ length: 40 }, (_, index) => ({
+    actions: Array.from({ length: 80 }, (_, index) => ({
       playerId: 'p1',
       action: 'raise',
       amount: 100 + index,

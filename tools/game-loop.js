@@ -23,6 +23,7 @@ import {
   resolveRuntimes,
 } from './player-runtime.js';
 import { collectPrivateLiterals, gameEpochOf, validateActionAck } from '../publish-contract.js';
+import { normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS } from '../shared/free-text.js';
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, stampPlayerPolicies } from './policy-player.js';
@@ -182,6 +183,20 @@ function integerValue(value, flag, minimum = 1) {
   return parsed;
 }
 
+export const REVIEW_REPLAY_BUDGET_BYTES = 200_000;
+
+export function trimReviewReplays(records, budget = REVIEW_REPLAY_BUDGET_BYTES) {
+  const clone = structuredClone(records ?? []);
+  const sizeOf = (rows) => Buffer.byteLength(JSON.stringify(rows));
+  if (sizeOf(clone) <= budget) return { records: clone, stage: null };
+  for (const row of clone) {
+    for (const action of row.actions ?? []) delete action.reason;
+  }
+  if (sizeOf(clone) <= budget) return { records: clone, stage: 'reason' };
+  for (const row of clone) delete row.actions;
+  return { records: clone, stage: 'actions' };
+}
+
 export function engineInitFlags(args = {}) {
   const extra = [];
   if (args.stack !== undefined) extra.push('--stack', String(args.stack));
@@ -191,6 +206,8 @@ export function engineInitFlags(args = {}) {
   if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
   if (args.hands !== undefined) extra.push('--hands', String(args.hands));
   if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
+  if (args.showdownPolicy !== undefined) extra.push('--showdown-policy', String(args.showdownPolicy));
+  if (args.replayReveal !== undefined) extra.push('--replay-reveal', String(args.replayReveal));
   return extra;
 }
 
@@ -207,6 +224,10 @@ export function applyModeDefaults(args) {
     if (next.stack === undefined && next.stackBb === undefined) next.stackBb = 100;
     if (next.hands === undefined) next.hands = 20;
     if (next.opponentRuntime === undefined) next.opponentRuntime = 'policy';
+  }
+  if (freshStore) {
+    next.showdownPolicy ??= 'open';
+    next.replayReveal ??= 'all';
   }
   return next;
 }
@@ -262,6 +283,8 @@ export function parseGameLoopArgs(argv) {
     ['--opponent-runtime', 'opponentRuntime'],
     ['--solver', 'solverAdapterId'],
     ['--port', 'port'],
+    ['--showdown-policy', 'showdownPolicy'],
+    ['--replay-reveal', 'replayReveal'],
   ]);
   let sawGameDir = false;
 
@@ -298,6 +321,12 @@ export function parseGameLoopArgs(argv) {
   }
   if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
     throw codedError('USAGE', '--solver는 [a-z0-9-] 64자 이내 adapterId입니다.');
+  }
+  if (parsed.showdownPolicy != null && parsed.showdownPolicy !== 'open' && parsed.showdownPolicy !== 'standard') {
+    throw codedError('USAGE', '--showdown-policy는 open 또는 standard입니다.');
+  }
+  if (parsed.replayReveal != null && parsed.replayReveal !== 'all' && parsed.replayReveal !== 'showdown') {
+    throw codedError('USAGE', '--replay-reveal는 all 또는 showdown입니다.');
   }
   return parsed;
 }
@@ -362,36 +391,50 @@ function legalFromMessage(message) {
   };
 }
 
-function validatedDecision(raw, next) {
+export function validatedDecision(raw, next) {
   const parsed = extractJsonLine(raw);
   const legal = legalFromMessage(next.message);
   if (!parsed || !legal || parsed.decisionId !== next.decisionId) return null;
-  if (parsed.action === 'fold') return { action: 'fold' };
-  if (parsed.action === 'check') return legal.canCheck ? { action: 'check' } : null;
-  if (parsed.action === 'call') {
-    return !legal.canCheck && legal.callAmount > 0 ? { action: 'call' } : null;
+  let action = null;
+  if (parsed.action === 'fold') action = { action: 'fold' };
+  else if (parsed.action === 'check') action = legal.canCheck ? { action: 'check' } : null;
+  else if (parsed.action === 'call') {
+    action = !legal.canCheck && legal.callAmount > 0 ? { action: 'call' } : null;
+  } else if (parsed.action === 'raise' && legal.canRaise && Number.isInteger(parsed.amount)) {
+    if (legal.minRaiseTo > legal.maxRaiseTo) {
+      action = parsed.amount === legal.maxRaiseTo ? { action: 'raise', amount: parsed.amount } : null;
+    } else {
+      action = parsed.amount >= legal.minRaiseTo && parsed.amount <= legal.maxRaiseTo
+        ? { action: 'raise', amount: parsed.amount }
+        : null;
+    }
   }
-  if (parsed.action !== 'raise' || !legal.canRaise || !Number.isInteger(parsed.amount)) return null;
-  if (legal.minRaiseTo > legal.maxRaiseTo) {
-    return parsed.amount === legal.maxRaiseTo ? { action: 'raise', amount: parsed.amount } : null;
-  }
-  return parsed.amount >= legal.minRaiseTo && parsed.amount <= legal.maxRaiseTo
-    ? { action: 'raise', amount: parsed.amount }
-    : null;
+  if (!action) return null;
+  const reason = normalizeFreeText(parsed.reason, {
+    maxChars: REASON_MAX_CHARS,
+    maxBytes: REASON_MAX_BYTES,
+  });
+  if (reason) action.reason = reason;
+  return action;
 }
 
 const USER_ACTIONS = new Set(['fold', 'check', 'call', 'raise']);
 
-function validatedUserAction(raw) {
+export function validatedUserAction(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !USER_ACTIONS.has(raw.action)) return null;
+  let action;
   if (raw.action === 'raise') {
     if (!Number.isSafeInteger(raw.amount) || raw.amount < 1) return null;
-    return { action: 'raise', amount: raw.amount };
+    action = { action: 'raise', amount: raw.amount };
+  } else if (raw.amount !== undefined) {
+    // 숫자라도 raise 외 action의 amount는 engine argv에 싣을 의미가 없다.
+    // 예상 못 한 필드를 버리지 말고 요청 전체를 거부해 경계를 명확히 한다.
+    return null;
+  } else {
+    action = { action: raw.action };
   }
-  // 숫자라도 raise 외 action의 amount는 engine argv에 싣을 의미가 없다.
-  // 예상 못 한 필드를 버리지 말고 요청 전체를 거부해 경계를 명확히 한다.
-  if (raw.amount !== undefined) return null;
-  return { action: raw.action };
+  if (typeof raw.note === 'string') action.note = raw.note;
+  return action;
 }
 
 export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = resolveRuntimes, opts = {} }) {
@@ -1840,12 +1883,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else {
         stepArgs.push(action.action);
         if (action.action === 'raise') stepArgs.push(String(action.amount));
+        if (action.reason) {
+          const metaPath = path.join(root, '.decision-meta.json');
+          writeJsonAtomic(metaPath, { decisionId: next.decisionId, reason: action.reason });
+          stepArgs.push('--meta-file', metaPath);
+        }
       }
       stepArgs.push('--expect-version', String(stateVersion));
       const stepStarted = monotonicNow();
       const atomicUnit = beginAtomicTransition();
       try {
         const envelope = await runCli(stepArgs);
+        reportDecisionMetaDropped(envelope, next.toAct);
         return { envelope, atomicUnit };
       } catch (error) {
         atomicUnit.finish();
@@ -2397,7 +2446,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const executePublishUnlocked = async (args) => {
     try {
-      return await runPublish(args);
+      const out = await runPublish(args);
+      reportHandReplay(out);
+      return out;
     } catch (error) {
       if (error.code !== 'PUBLISH_FAILED' && error.code !== 'PUBLISH_REJECTED') throw error;
       if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
@@ -2421,7 +2472,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       d9Checkpoint('before-retry');
       const retryArgs = args.includes('--retry') ? args : [...args, '--retry'];
-      return runPublish(retryArgs);
+      const retried = await runPublish(retryArgs);
+      reportHandReplay(retried);
+      return retried;
     }
   };
 
@@ -2507,6 +2560,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const synchronized = await runCli(['step']);
           assertNotStopping();
           writeJsonAtomic(turnPath, synchronized);
+          const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
+          if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
           const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
           currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
           args = currentArgs;
@@ -2560,6 +2615,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const atomicUnit = beginAtomicTransition();
     try {
       const envelope = await runCli(stepArgs);
+      reportDecisionMetaDropped(envelope, stepArgs[1]);
       const flags = typeof publishFlags === 'function' ? publishFlags(envelope) : publishFlags;
       return await publishEnvelope(actionAck ? { ...envelope, actionAck } : envelope, flags);
     } finally {
@@ -2590,6 +2646,64 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const notices = Array.isArray(state.notices) ? [...state.notices] : [];
     if (!notices.includes(message)) notices.push(message);
     writeLoopState({ notices });
+  };
+
+  const replayPendingPath = path.join(root, '.replay-pending.json');
+
+  const readReplayPendingNos = () => {
+    const raw = readJsonOptional(replayPendingPath, 'REPLAY_PENDING');
+    if (!Array.isArray(raw?.handNos)) return [];
+    return raw.handNos.filter((value) => Number.isInteger(value) && value >= 1);
+  };
+
+  const unionReplayPending = (handNos) => {
+    const seen = new Set();
+    const next = [];
+    for (const value of [...readReplayPendingNos(), ...(handNos ?? [])]) {
+      if (!Number.isInteger(value) || value < 1 || seen.has(value)) continue;
+      seen.add(value);
+      next.push(value);
+    }
+    writeJsonAtomic(replayPendingPath, { handNos: next });
+    return next;
+  };
+
+  const completedReplayHandNos = (engine) => {
+    const nos = [];
+    const handsDir = path.join(root, 'hands');
+    try {
+      for (const name of fs.readdirSync(handsDir)) {
+        const match = /^hand-(\d+)\.json$/.exec(name);
+        if (match) nos.push(Number(match[1]));
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const lastNo = engine?.lastHand?.handNo;
+    if (Number.isInteger(lastNo) && lastNo >= 1) nos.push(lastNo);
+    return nos;
+  };
+
+  const reportDecisionMetaDropped = (envelope, playerId) => {
+    const code = envelope?.meta?.dropped;
+    if (typeof code !== 'string' || code === '') return;
+    log('decision-meta-dropped', { code, playerId });
+    appendNotice(`decision-meta dropped: ${code}`);
+  };
+
+  const reportHandReplay = (out) => {
+    const report = out?.handReplay;
+    if (!report || typeof report !== 'object') return;
+    for (const entry of report.markers ?? []) {
+      const handNo = entry?.handNo ?? entry;
+      const reason = entry?.reason ?? 'REPLAY_UNAVAILABLE';
+      log('hand-replay-marker', { handNo, reason });
+      appendNotice(`handReplay marker hand ${handNo}: ${reason}`);
+    }
+    for (const handNo of report.conflicts ?? []) {
+      log('hand-replay-conflict', { handNo });
+      appendNotice(`handReplay conflict hand ${handNo}`);
+    }
   };
 
   const captureCoachStats = async (label, { beforeResultCutoff = false } = {}) => {
@@ -3993,6 +4107,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const out = {};
     for (const key of [
       'handNo', 'board', 'endStacks', 'pots', 'showdown', 'folded', 'allIn', 'uncalledReturns',
+      'holes', 'positions', 'actions',
     ]) {
       if (Object.hasOwn(record ?? {}, key)) out[key] = structuredClone(record[key]);
     }
@@ -4012,7 +4127,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'game result:',
     JSON.stringify({ result }),
     '',
-    'redacted outcome records (provided only after evaluator completion):',
+    'replay outcome records (핸드 종료 후 공개 범위, provided only after evaluator completion):',
     JSON.stringify(outcomeRecords),
     '',
     'players.json:',
@@ -4114,10 +4229,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!Array.isArray(players)) {
         throw codedError('BAD_PLAYERS', '종합 리뷰에 필요한 players.json이 배열이 아닙니다.');
       }
+      const replayRecords = [];
+      for (const handNo of [...eligibleHands].sort((a, b) => a - b)) {
+        const captured = semanticChildPayload(await runCli(['hand', String(handNo), '--replay']));
+        const filePath = path.join(root, `.review-hand-${handNo}-replay.json`);
+        writeJsonAtomic(filePath, captured);
+        replayRecords.push(outcomeRecord(parseCapturedHand(fs.readFileSync(filePath, 'utf8'))));
+      }
+      const trimmed = trimReviewReplays(replayRecords);
+      if (trimmed.stage) log('review-replay-budget', { stage: trimmed.stage, bytes: Buffer.byteLength(JSON.stringify(trimmed.records)) });
       const synthesizerPrompt = buildSynthesizerPrompt({
         evaluator,
         result: engine.result,
-        outcomeRecords: hands.filter((hand) => eligibleHands.has(hand.handNo)).map(({ raw }) => outcomeRecord(parseCapturedHand(raw))),
+        outcomeRecords: trimmed.records,
         playersRaw: JSON.stringify(sanitizePlayersForReview(players, { gameOver: true })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
       });
@@ -4672,10 +4796,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopRequested) return null;
       return republishAfterRejectedUserAction('ILLEGAL_ACTION', submitted);
     }
+    if (submitted.note !== undefined && typeof submitted.note !== 'string') {
+      log('user-note-ignored', { type: typeof submitted.note });
+    }
 
     const stepArgs = ['step', 'user', action.action];
     if (action.amount !== undefined) stepArgs.push(String(action.amount));
     stepArgs.push('--expect-version', String(out.stateVersion));
+    if (action.note) {
+      const metaPath = path.join(root, '.decision-meta.json');
+      writeJsonAtomic(metaPath, { decisionId: next.decisionId, note: action.note });
+      stepArgs.push('--meta-file', metaPath);
+    }
     const actionAck = userActionAck(submitted, 'consumed', 'ACTION_APPLIED');
     try {
       return await runAtomicStepPublish(stepArgs, waitFlags(), actionAck);
@@ -4850,6 +4982,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     preinitialized,
     skipLock = false,
     opponentRuntime,
+    showdownPolicy,
+    replayReveal,
   } = {}) => {
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
@@ -4886,6 +5020,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
+        showdownPolicy,
+        replayReveal,
       })];
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
@@ -5235,6 +5371,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const run = async () => {
     let state = readLoopState();
     if (!state) throw codedError('NOT_BOOTSTRAPPED', 'bootstrap 또는 resume이 필요합니다.');
+    const engineForPending = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    if (engineForPending) unionReplayPending(completedReplayHandNos(engineForPending));
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
     if (FINAL_PHASES.has(state.phase)) return runFinalization();
@@ -5516,6 +5654,8 @@ async function main() {
       preinitialized: preparedInitialization,
       skipLock: args.storeDir !== undefined,
       opponentRuntime: args.opponentRuntime,
+      showdownPolicy: args.showdownPolicy,
+      replayReveal: args.replayReveal,
     });
     await loop.run();
   } catch (error) {

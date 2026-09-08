@@ -183,12 +183,20 @@ function selectHandRecord(root, engineState, handNo) {
   }
 }
 
-function recomputeHandReplay(root, engineState, handNo) {
+function recomputeHandReplay(root, engineState, handNo, assertNoStudyCapability = () => {}) {
   if (!engineState) return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
-  return materializeHandReplay({ handNo, engineState, ...selectHandRecord(root, engineState, handNo) });
+  const materialized = materializeHandReplay({
+    handNo, engineState, ...selectHandRecord(root, engineState, handNo),
+  });
+  try {
+    assertNoStudyCapability(materialized);
+    return materialized;
+  } catch {
+    return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+  }
 }
 
-function restoreHandReplays(raw, root, engineState) {
+function restoreHandReplays(raw, root, engineState, assertNoStudyCapability = () => {}) {
   const out = Object.create(null);
   for (const [key, entry] of Object.entries(handReplayMap(raw))) {
     const handNo = entry?.handNo ?? Number(key);
@@ -197,7 +205,7 @@ function restoreHandReplays(raw, root, engineState) {
       out[handNo] = { handNo, unavailable: true, reason: entry.reason };
       continue;
     }
-    const recomputed = recomputeHandReplay(root, engineState, handNo);
+    const recomputed = recomputeHandReplay(root, engineState, handNo, assertNoStudyCapability);
     if (isReplayMarker(recomputed)) {
       process.stderr.write(`ui-snapshot restore dropped hand replay ${handNo}\n`);
       continue;
@@ -460,7 +468,9 @@ function restoreHistory(rawHistory, context) {
       else delete payload.trainingAnnotations;
     }
     if ('handReplays' in payload) {
-      const rows = handReplayList(restoreHandReplays(payload.handReplays, context.root, context.engineState));
+      const rows = handReplayList(restoreHandReplays(
+        payload.handReplays, context.root, context.engineState, context.assertNoStudyCapability,
+      ));
       if (rows.length) payload.handReplays = rows;
       else delete payload.handReplays;
     }
@@ -563,7 +573,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
     }
     const replay = restoreHistory(raw.history, {
       machineById, literals, gate, annotations: restoredAnnotations, legacyProvenance,
-      root: gameDir, engineState,
+      root: gameDir, engineState, assertNoStudyCapability: assertRaw,
     });
     if (droppedAnnotations || replay.dropped) {
       process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
@@ -579,7 +589,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       publishId: raw.publishId,
       history: replay.history,
       lastActionAck: raw.lastActionAck,
-      handReplays: restoreHandReplays(raw.handReplays, gameDir, engineState),
+      handReplays: restoreHandReplays(raw.handReplays, gameDir, engineState, assertRaw),
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -1023,7 +1033,25 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       return;
     }
     if (alreadyApplied) {
-      sendJson(res, 200, { ok: true, revision: state.revision, applied: false });
+      let replayReport = null;
+      if (body.handReplay !== undefined) {
+        const handNos = validateHandReplayTrigger(body.handReplay);
+        replayReport = { stored: [], markers: [], conflicts: [] };
+        for (const handNo of handNos) {
+          const existing = state.handReplays?.[handNo];
+          if (isReplayMarker(existing)) {
+            replayReport.markers.push({ handNo, reason: existing.reason });
+          } else {
+            replayReport.stored.push(handNo);
+          }
+        }
+      }
+      sendJson(res, 200, {
+        ok: true,
+        revision: state.revision,
+        applied: false,
+        ...(replayReport ? { handReplay: replayReport } : {}),
+      });
       return;
     }
 
@@ -1115,7 +1143,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       }
       for (const handNo of handNos) {
         const materialized = stateOk
-          ? recomputeHandReplay(root, engineState, handNo)
+          ? recomputeHandReplay(root, engineState, handNo, assertNoStudyCapability)
           : replayMarker(handNo, 'REPLAY_UNAVAILABLE');
         const existing = next.handReplays[handNo];
         if (!existing) {

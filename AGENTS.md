@@ -4,7 +4,7 @@
 
 **게임 루프는 사이드카(`tools/game-loop.js`)가 소유한다.** 부트스트랩(loop 락 → `init` → 서버)부터 핸드 안 액션, 코치, 종합 리뷰, 종료까지 그 detached 노드 프로세스가 전부 한다. 딜러 세션이 하는 일은 사전 점검 → 사이드카 기동 → 보고 셋뿐이고, 핸드 안 딜러 LLM 라운드는 0회다.
 
-새 `--store-dir` 게임은 cash-training·AI 5명·100BB·20핸드·policy v2가 기본이다. 명시한 `--opponent-runtime llm`, `--mode tournament`, AI 수·스택·블라인드·핸드 수를 보존한다. mode 없는 `--stack`/`--level-every`는 기존 토너먼트 설정이며, resume과 legacy `--game-dir`에는 새 기본값을 적용하지 않는다. policy 게임은 플레이어 LLM 없이 실행하고 상위 모델만 코치·리뷰 용도로 검사한다. 적격 상위 모델이 없으면 LLM 설명 불가를 알리고 사실 기반 기계 피드백을 남긴다.
+새 `--store-dir` 게임은 cash-training·AI 5명·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이 기본이다. 옵션 `--showdown-policy open|standard`, `--replay-reveal all|showdown`. 명시한 `--opponent-runtime llm`, `--mode tournament`, AI 수·스택·블라인드·핸드 수를 보존한다. mode 없는 `--stack`/`--level-every`는 기존 토너먼트 설정이며, resume과 legacy `--game-dir`에는 새 기본값을 적용하지 않는다. policy 게임은 플레이어 LLM 없이 실행하고 상위 모델만 코치·리뷰 용도로 검사한다. 적격 상위 모델이 없으면 LLM 설명 불가를 알리고 사실 기반 기계 피드백을 남긴다.
 
 학습 서비스(`tools/study-service.js`)는 store마다 별도 수명·토큰을 가진다. 게임 relay가 종료되어도 study가 유지되며, 다음 게임은 검증된 같은 서비스를 재사용한다. 열기는 `npm run study -- /absolute/store`, 정지는 `npm run study:stop -- /absolute/store`다. URL과 descriptor의 토큰은 공유하지 않는다. 학습 수치는 휴리스틱 기준표 비교이며 실제 포커 실력·수익·GTO 정답의 증명이 아니다. v2 정책과 원본 이벤트를 보존하고, 구버전으로 강제 변환하지 말고 호환 버전으로 roll-forward한다. 미해소 액션의 엔진 결과부터 확인한 뒤 복구한다.
 
