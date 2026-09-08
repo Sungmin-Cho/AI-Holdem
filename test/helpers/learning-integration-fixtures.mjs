@@ -108,10 +108,14 @@ export async function until(predicate, cli, milliseconds = scaled(6000)) {
 
 export async function stopOwnedStudy(storeDir) {
   if (!fs.existsSync(path.join(storeDir, '.training', 'study-service.json'))) return;
-  const service = await inspectStudyService(storeDir);
-  if (service.status !== 'running') return;
-  assert.equal((await stopStudyService(storeDir, { expectedInstanceId: service.instanceId })).stopped, true);
-  assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+  try {
+    const service = await inspectStudyService(storeDir);
+    if (service.status !== 'running') return;
+    assert.equal((await stopStudyService(storeDir, { expectedInstanceId: service.instanceId })).stopped, true);
+    assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+  } catch (error) {
+    if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+  }
 }
 
 export async function command(file, args, options = {}) {
