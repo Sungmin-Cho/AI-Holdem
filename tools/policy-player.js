@@ -4,6 +4,7 @@ import { writeJsonAtomic } from '../engine/state.js';
 import {
   assignmentFor,
   DERIVED_POLICY_FAMILIES,
+  isStrategyMirror,
   isStrategyV2,
   policyById,
   resolveStoredPolicy,
@@ -23,6 +24,7 @@ function baselineDataset() {
 }
 import { deriveUnit, sampleWeighted } from '../training/policies/rng.js';
 import { ruleBasedDistribution } from '../training/policies/rule-based.js';
+import { distributionMirror } from '../training/policies/strategy-mirror.js';
 import { distributionV2 } from '../training/policies/strategy-v2.js';
 
 export const DERIVED_CONFIGS_FILE = '.policy-configs.json';
@@ -79,6 +81,7 @@ function resolvePolicyInput(policy, { derived } = {}) {
 
 export function distributionFor(snapshot, legal, policy, { derived } = {}) {
   const config = resolvePolicyInput(policy, { derived });
+  if (isStrategyMirror(config)) return distributionMirror(snapshot, legal, config);
   if (isStrategyV2(config)) return distributionV2(snapshot, legal, config);
   const bb = snapshot?.blinds?.[1];
   const base = config.base === 'baseline-v1' || config.policyId === 'baseline-v1' || config.base == null

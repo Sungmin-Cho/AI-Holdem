@@ -1,4 +1,6 @@
 import { configDigestOf, isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
+import { TENDENCY_MIN_HANDS, assertTendency } from '../tendency/contracts.js';
+import { traitsFromTendency } from '../tendency/traits.js';
 
 export { isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 };
 
@@ -21,11 +23,36 @@ function validateExploiterParams(config) {
   return typeof version === 'string' && STRATEGY_VERSION_RE.test(version);
 }
 
+function validateMirrorParams(config) {
+  try {
+    assertTendency(config?.params?.tendency);
+  } catch (error) {
+    if (error.code === 'TENDENCY_INVALID') return false;
+    throw error;
+  }
+  if (!Number.isInteger(config.params.tendency.hands) || config.params.tendency.hands < TENDENCY_MIN_HANDS) {
+    return false;
+  }
+  const traits = config?.traits;
+  if (!traits || typeof traits !== 'object') return false;
+  if (TRAIT_KEYS.some((key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1)) {
+    return false;
+  }
+  if (config.params?.evidence !== 'derived-from-user-observed-action-frequencies-heuristic') return false;
+  const version = config?.params?.strategyVersion;
+  return typeof version === 'string' && STRATEGY_VERSION_RE.test(version);
+}
+
 export const DERIVED_POLICY_FAMILIES = Object.freeze({
   'self-exploiter-v1': Object.freeze({
     policyVersion: '1.0.0',
     base: 'strategy-v2',
     validateParams: validateExploiterParams,
+  }),
+  'self-mirror-v1': Object.freeze({
+    policyVersion: '1.0.0',
+    base: 'strategy-mirror-v1',
+    validateParams: validateMirrorParams,
   }),
 });
 
@@ -33,6 +60,22 @@ export const SELF_ARCHETYPES = Object.freeze(['SelfMirror', 'SelfExploiter']);
 
 export function isStrategyMirror(config) {
   return config?.base === 'strategy-mirror-v1';
+}
+
+export function buildMirrorConfig(tendency, { source, strategyVersion = VERSION_V2 } = {}) {
+  const config = {
+    policyId: 'self-mirror-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-mirror-v1',
+    traits: traitsFromTendency(tendency),
+    params: {
+      strategyVersion,
+      source,
+      tendency,
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  return completePolicy(config);
 }
 
 const VERSION = '1.0.0';
@@ -253,11 +296,12 @@ export function sanitizePlayersForReview(players, { gameOver = false, derived } 
       out.policyId = config.policyId;
       out.policyVersion = config.policyVersion;
       if (Object.hasOwn(DERIVED_POLICY_FAMILIES, config.policyId)) {
-        out.policyModelKind = 'observed-tendency-exploiter-v1';
+        const mirror = config.policyId === 'self-mirror-v1';
+        out.policyModelKind = mirror ? 'observed-tendency-mirror-v1' : 'observed-tendency-exploiter-v1';
         out.policyTraitsEvidence = 'derived-from-user-observed-action-frequencies-heuristic';
         out.policyTraits = { ...config.traits };
         const selfOpponent = {
-          role: 'exploiter',
+          role: mirror ? 'mirror' : 'exploiter',
           source: config.params?.source,
         };
         if (config.params && Object.hasOwn(config.params, 'targets')) {

@@ -7,6 +7,7 @@ import {
   medianOf,
   rateOf,
 } from '../training/tendency/contracts.js';
+import { traitsFromTendency } from '../training/tendency/traits.js';
 import { referenceClaimAllowed } from '../shared/reference.js';
 import { collectStoreTendency } from './self-opponents.js';
 
@@ -80,9 +81,13 @@ function indicatorsOf(t) {
 
 function formatShow(result) {
   const t = result.tendency;
+  const traits = traitsFromTendency(t);
+  const eligible = t.hands >= TENDENCY_MIN_HANDS;
   const lines = [
     `누적 ${t.hands}핸드 · ${result.sources.length}세션`,
     `최소 표본(${TENDENCY_MIN_HANDS}핸드): ${t.hands >= TENDENCY_MIN_HANDS ? '충족' : '미달'}`,
+    `복제 가능 여부: ${eligible ? '가능' : '불가'} (${t.hands}핸드 / 필요 ${TENDENCY_MIN_HANDS}핸드)`,
+    `트레이트 투영  tightness ${traits.tightness.toFixed(2)} · aggression ${traits.aggression.toFixed(2)} · calling ${traits.calling.toFixed(2)} · bluff ${traits.bluff.toFixed(2)}`,
     '지표 (비율, n) — 관측 빈도이며 실력·수익의 증명이 아닙니다.',
     counterLine('자발적 참여(VPIP)', t.preflop.vpip),
     counterLine('프리플롭 레이즈(PFR)', t.preflop.pfr),
@@ -128,6 +133,8 @@ function main() {
       skippedSessions: result.skippedSessions,
       skippedHands: result.skippedHands,
       indicators: indicatorsOf(result.tendency),
+      traitProjection: traitsFromTendency(result.tendency),
+      mirrorEligible: result.tendency.hands >= TENDENCY_MIN_HANDS,
       seatMix: result.tendency.seatMix,
       sources: result.sources,
     };

@@ -26,13 +26,13 @@ function priorRaises(snapshot) {
   return (snapshot?.priorActions ?? []).filter((action) => action?.action === 'raise');
 }
 
-function unopenedPreflop(snapshot) {
+export function unopenedPreflop(snapshot) {
   return snapshot?.street === 'preflop'
     && priorRaises(snapshot).length === 0
     && !(snapshot?.priorActions ?? []).some((action) => action?.action === 'call');
 }
 
-function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule } = {}) {
+export function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule } = {}) {
   const pot = Math.max(0, Number(snapshot?.potBefore) || 0);
   const callAmount = Math.max(0, Number(legal?.callAmount) || 0);
   const price = callAmount / Math.max(1, pot + callAmount);
@@ -61,7 +61,7 @@ function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule }
   ];
 }
 
-function unopenedDistribution(traits, strength, { raiseTo } = {}) {
+export function unopenedDistribution(traits, strength, { raiseTo } = {}) {
   const threshold = 0.20 + 0.52 * traits.tightness;
   const participation = clamp(
     0.50 + 1.60 * (strength - threshold) + 0.25 * (0.50 - traits.tightness),
@@ -74,7 +74,7 @@ function unopenedDistribution(traits, strength, { raiseTo } = {}) {
   ];
 }
 
-function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) {
+export function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) {
   const bet = clamp(
     0.03
       + traits.aggression * (0.12 + 0.58 * strength)

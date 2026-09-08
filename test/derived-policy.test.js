@@ -191,7 +191,7 @@ function annotationFiles(dir) {
 }
 
 test('U1 registers only the exploiter family at literal 1.0.0', () => {
-  assert.deepEqual(Object.keys(DERIVED_POLICY_FAMILIES), ['self-exploiter-v1']);
+  assert.deepEqual(Object.keys(DERIVED_POLICY_FAMILIES).sort(), ['self-exploiter-v1', 'self-mirror-v1']);
   assert.equal(DERIVED_POLICY_FAMILIES['self-exploiter-v1'].policyVersion, '1.0.0');
   assert.notEqual(DERIVED_POLICY_FAMILIES['self-exploiter-v1'].policyVersion, VERSION_V2);
   assert.equal(DERIVED_POLICY_FAMILIES['self-exploiter-v1'].base, 'strategy-v2');
