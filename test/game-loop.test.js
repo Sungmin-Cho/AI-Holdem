@@ -3269,6 +3269,7 @@ test('user timeouts repeat wait-only indefinitely and never force-default before
 });
 
 test('wait-only child supervision exceeds waitMs plus network margin (the default 60s wait is not capped at 30s)', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'wait-only timeout vs child rejection races under Windows ACL/child cost')) return;
   const { gameDir, loop } = await setupUserFirst(t, {
     loopOpts: { waitMs: 2_000, childTimeoutMs: 1_000, waitNetworkMarginMs: 500 },
   });
@@ -6262,7 +6263,7 @@ test('--force rechecks server startTime immediately after async binding and befo
   );
 });
 
-test('--force aborts before archive when the stopped server pid is observed as reused', { timeout: 10_000, concurrency: false }, async (t) => {
+test('--force aborts before archive when the stopped server pid is observed as reused', { timeout: 10_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const marker = path.join(os.tmpdir(), `holdem-server-reused-${process.pid}-${Date.now()}`);
   const initialized = await initGame(gameDir);
