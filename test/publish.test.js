@@ -1328,6 +1328,26 @@ test('P3: publish caps pending∪envelope at 16 and carries the rest to the next
   assert.deepEqual(readReplayPending(dir), { handNos: [] });
 });
 
+test('P3: envelope overflow past the 16-cap is written to pending, not dropped', async () => {
+  const dir = tmpDir();
+  const pending = Array.from({ length: 16 }, (_, i) => i + 1);
+  writeReplayPending(dir, pending);
+  const captured = await capturePublishPost(dir, sampleTurn({
+    handReplay: { handNos: [17] },
+  }), [], {
+    handReplay: { stored: pending, markers: [], conflicts: [] },
+  });
+  assert.deepEqual(captured.posted.handReplay.handNos, pending);
+  assert.equal(captured.posted.handReplay.handNos.includes(17), false);
+  assert.deepEqual(readReplayPending(dir), { handNos: [17] });
+
+  const second = await capturePublishPost(dir, sampleTurn({ stateVersion: 4 }), [], {
+    handReplay: { stored: [17], markers: [], conflicts: [] },
+  });
+  assert.deepEqual(second.posted.handReplay.handNos, [17]);
+  assert.deepEqual(readReplayPending(dir), { handNos: [] });
+});
+
 test('P3: --retry does not merge .replay-pending.json into the recorded body', async () => {
   const dir = tmpDir();
   writeReplayPending(dir, [1, 9, 10]);
