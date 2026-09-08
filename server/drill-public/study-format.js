@@ -8,7 +8,7 @@ const number = (value) => typeof value === 'number' && Number.isFinite(value) &&
 const percent = (value) => number(value) !== null && value <= 1 ? `${Math.round(value * 100)}%` : '측정 자료 없음';
 const verified = (source) => referenceQuality(source).quality === 'heuristic-reference';
 const hand = (value) => /^[2-9TJQKA]{2}[so]?$/.test(value ?? '') ? value : '손패 정보 없음';
-const position = (value) => ['utg', 'hj', 'co', 'btn', 'sb', 'bb'].includes(String(value).toLowerCase()) ? value.toUpperCase() : '위치 정보 없음';
+const position = (value) => ['utg', 'utg1', 'utg2', 'lj', 'hj', 'co', 'btn', 'sb', 'bb'].includes(String(value).toLowerCase()) ? value.toUpperCase() : '위치 정보 없음';
 
 export function formatSource(source) {
   return verified(source)
@@ -57,7 +57,7 @@ export function formatQuestion(question) {
     actions.push({ action, ...(sizeBb !== undefined ? { sizeBb } : {}), label: `${ACTIONS[action]}${sizeBb !== undefined ? ` · 총액 ${sizeBb}BB` : ''}` });
   }
   return { title: `${position(prompt.position)} · ${hand(prompt.handClass)}`,
-    context: `${number(prompt.stackBb) ?? '—'}BB · ${history}`, actions };
+    context: `${prompt.seated ? `${prompt.seated}인 · ` : ''}${prompt.openerPosition ? `${position(prompt.openerPosition)} 오픈 대응 · ` : ''}${number(prompt.stackBb) ?? '—'}BB · ${history}`, actions };
 }
 export function formatFeedback(result, source) {
   if (!result) return null;
@@ -90,7 +90,9 @@ function originSummary(origin, allowed) {
   return {
     rate: allowed && supported > 0 ? percent(overall.allowedActionRate) : '측정 자료 없음',
     samples: `${supported}개 지원 표본 · 표본 가중치 ${number(overall.sampleWeight) ?? 0}`,
-    coverage: `${count(coverage.supportedDecisions)} / ${count(coverage.evaluatedDecisions)}개 결정이 기준표 범위에 포함 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개(지원 제외와 중복 가능)`,
+    coverage: Object.hasOwn(coverage,'exactComparableDecisions')
+      ? `${count(coverage.evaluatedDecisions)}개 결정 · 참고 가능 ${count(coverage.referenceAvailableDecisions)}개 · 직접 비교 ${count(coverage.exactComparableDecisions)}개 · 투영 ${count(coverage.projectedReferenceDecisions)}개 · 선택 비교 불가 ${count(coverage.comparisonUnavailableDecisions)}개 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개`
+      : `${count(coverage.supportedDecisions)} / ${count(coverage.evaluatedDecisions)}개 결정이 기준표 범위에 포함 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개(지원 제외와 중복 가능)`,
     calibration: allowed && eligible > 0 && !calibration.reason
       ? `${percent(calibration.distributionAgreement)} · ${eligible}개 관측`
       : (calibration.reason === 'insufficient-observations' ? '표본 부족 · 같은 상황에서 20회 이상 필요' : '빈도 관측 자료 없음'),

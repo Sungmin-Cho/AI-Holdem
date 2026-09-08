@@ -180,7 +180,7 @@ test('unverified drill-only profile remains unavailable', () => {
       origin: 'drill',
     }),
   ]);
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 0);
   assert.equal(profile.practice.coverage.unverifiedDecisions, 2);
 });
@@ -208,14 +208,14 @@ test('other-provider drill is a separate segment and is not mixed into the game 
 });
 
 test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to the dataset provider', () => {
-  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@1.0.0');
+  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@2.0.0');
   const bad = event();
   delete bad.payloadSha256;
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('duplicate apply still projects the active segment and persists schemaVersion 4', () => {
-  assert.equal(emptyProfile().schemaVersion, 4);
+test('duplicate apply still projects the active segment and persists schemaVersion 5', () => {
+  assert.equal(emptyProfile().schemaVersion, 5);
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -227,7 +227,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.schemaVersion, 4);
+  assert.equal(profile.schemaVersion, 5);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   profile.overall.evaluatedDecisions = 2;
@@ -242,7 +242,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(again.schemaVersion, 4);
+  assert.equal(again.schemaVersion, 5);
   assert.equal(again.overall.evaluatedDecisions, 1);
   assert.equal(again.overall.supportedDecisions, 1);
   assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);

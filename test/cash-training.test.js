@@ -234,7 +234,7 @@ test('gtoEvalNotice: cash-training만, 6-max 100BB가 아니면 문면', () => {
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 100 }), null);
   assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 100 }), null);
   const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 });
-  assert.match(four, /휴리스틱.*기준표.*6인·100BB/);
+  assert.match(four, /휴리스틱.*기준표.*6·8·9인.*100BB/);
   assert.match(four, /4인/);
   const stack = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 50 });
   assert.match(stack, /시작 스택 50BB/);

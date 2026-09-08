@@ -18,7 +18,7 @@ import {
   nextQuestion,
   readDrillSession,
   readStudyHistory,
-  startDrill,
+  startDrill as startDrillCurrent,
 } from '../tools/drill-cli.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
 import { createMistakeBank, createProfileStore } from '../tools/training-stores.js';
@@ -33,6 +33,8 @@ const SOURCE = {
   version: '1.0.0',
   contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
 };
+// These recovery fixtures describe the prior v1 producer. V2 is covered in reference-coverage-release.
+const startDrill = (dir, options = {}) => startDrillCurrent(dir, {source:SOURCE,...options});
 const OTHER_SOURCE = { ...SOURCE, version: '2.0.0' };
 
 function pair(question) {
@@ -629,7 +631,7 @@ test('a stored question with changed source bytes cannot be graded or journaled'
     retests: [],
     goal: {
       origin: 'default', sourceIdentity: null,
-      spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo',
+      spotKey: '6max-100bb-btn-rfi-v2', handClass: 'AJo',
       reason: 'default-supported-spot',
     },
   });

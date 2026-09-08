@@ -1,3 +1,4 @@
+import {CANONICAL_REFERENCE_SOURCE} from '../shared/reference.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isPrivatePath } from '../shared/platform-files.js';
@@ -126,7 +127,7 @@ test('REQ-010: internal errors expose stable codes without paths or messages', a
 test('REQ-002: summary is origin-explicit and practice cannot alter game evidence', async (t) => {
   const { storeDir, port, token } = await standalone(t);
   const before = (await request(port, token, '/api/summary')).body.summary;
-  const run = await startDrill(storeDir, { mode: 'free', idempotencyKey: 'practice-summary' });
+  const run = await startDrill(storeDir, { mode: 'free', idempotencyKey: 'practice-summary', source });
   const question = await nextQuestion(storeDir);
   await answerQuestion(storeDir, { action: 'fold', sessionId: run.sessionId,
     questionId: question.question.questionId, attemptNo: 0 });
@@ -144,7 +145,7 @@ test('REQ-002: summary is origin-explicit and practice cannot alter game evidenc
 
 test('REQ-011: assessment summary omits question records and reports retest wait', async (t) => {
   const { storeDir, port, token } = await standalone(t);
-  const run = await startDrill(storeDir, { mode: 'assessment', idempotencyKey: 'assessment-summary' });
+  const run = await startDrill(storeDir, { mode: 'assessment', idempotencyKey: 'assessment-summary', source });
   for (let index = 0; index < run.queue.length; index += 1) {
     await answerQuestion(storeDir, { action: 'fold', sessionId: run.sessionId,
       questionId: run.queue[index].questionId, attemptNo: index });
@@ -340,7 +341,7 @@ test('REQ-002: unknown reference tuples are preserved as unverified and cannot b
   event.mixObservation.sourceIdentity.contentSha256 = 'f'.repeat(64);
   replaceEvents(storeDir, [event]);
   const summary = (await request(port, token, '/api/summary')).body.summary;
-  assert.deepEqual(summary.source, source);
+  assert.deepEqual(summary.source, CANONICAL_REFERENCE_SOURCE);
   assert.equal(summary.practice.overall.allowedActionRate, null);
   assert.equal(summary.practice.coverage.unverifiedDecisions, 1);
   assert.deepEqual(summary.practice.candidates, []);

@@ -1,8 +1,19 @@
-export const CANONICAL_REFERENCE_SOURCE = Object.freeze({
+export const LEGACY_REFERENCE_SOURCE = Object.freeze({
   id: 'local-preflop-baseline',
   version: '1.0.0',
   contentSha256: '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf',
 });
+export const V2_REFERENCE_SOURCE = Object.freeze({
+  id: 'local-preflop-baseline', version: '2.0.0',
+  contentSha256: '1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7',
+});
+export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE]);
+// New sessions use v2; legacy sessions and policy retain their explicit v1 pin.
+export const CANONICAL_REFERENCE_SOURCE = V2_REFERENCE_SOURCE;
+export function sameReferenceSource(a, b) {
+  return Boolean(a && b && ['id','version','contentSha256'].every(k=>a[k]===b[k]));
+}
+
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const ACTIONS = new Set(['fold', 'check', 'call', 'bet', 'raise']);
@@ -21,9 +32,7 @@ function plainObject(value) {
 export function referenceQuality(source) {
   if (!plainObject(source)) return { quality: 'unverified', reason: 'SOURCE_MISSING' };
   if (source.id === 'fake-solver') return { quality: 'synthetic', reason: 'SYNTHETIC_SOURCE' };
-  if (source.id === CANONICAL_REFERENCE_SOURCE.id
-    && source.version === CANONICAL_REFERENCE_SOURCE.version
-    && source.contentSha256 === CANONICAL_REFERENCE_SOURCE.contentSha256) {
+  if (KNOWN_REFERENCE_SOURCES.some(known => sameReferenceSource(source, known))) {
     return { quality: 'heuristic-reference', reason: null };
   }
   return { quality: 'unverified', reason: 'SOURCE_IDENTITY_UNVERIFIED' };

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
+import { resolveSessionReference } from './reference-source.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -214,13 +215,13 @@ export function gtoEvalNotice(config = {}) {
   if (config.mode !== 'cash-training') return null;
   const seats = Number(config.aiCount) + 1;
   const stackBb = config.startStackBb;
-  const badSeats = !Number.isFinite(seats) || seats !== 6;
-  const badStack = !Number.isFinite(stackBb) || Math.abs(stackBb - 100) > 1;
+  const badSeats = !Number.isFinite(seats) || ![6, 8, 9].includes(seats);
+  const badStack = !Number.isFinite(stackBb) || stackBb !== 100;
   if (!badSeats && !badStack) return null;
   const parts = [];
   if (badSeats) parts.push(Number.isFinite(seats) ? `${seats}인` : '좌석 수 확인 불가');
   if (badStack) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
-  return `휴리스틱 프리플롭 기준표 비교는 6인·100BB 조건의 지원 스팟에서만 제공됩니다 (현재 ${parts.join(', ')}).`;
+  return `휴리스틱 프리플롭 기준표는 6·8·9인 100BB의 미오픈·단일 오픈 상황을 지원합니다. 80~120BB는 투영 참고이며 점수에서 제외됩니다 (현재 ${parts.join(', ')}).`;
 }
 
 export function parseGameLoopArgs(argv) {
@@ -3963,7 +3964,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '표본이 30핸드 미만이면 반드시 참고용이라고 명시하라.',
     ...(trainingOn ? [
       '',
-      'training aggregate (qualified reference grades, independent of chip result):',
+      'training aggregate (qualified reference grades = exactComparable only, independent of chip result; projected references are ungraded):',
       JSON.stringify(trainingAggregate(root)),
     ] : []),
     '',
@@ -4887,6 +4888,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
       const initialized = preinitialized ?? await runCli(initArgs);
+      if (storeDir) resolveSessionReference(root, { createNew: true });
       openLog();
       const startedAt = isoNow(now);
       writeLoopState({
@@ -5440,6 +5442,7 @@ async function main() {
         if (args.resume) {
           const current = resolveCurrentSession(args.storeDir);
           if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
+          resolveSessionReference(current.sessionDir);
           loop = createGameLoop({
             gameDir: current.sessionDir,
             lockDir: args.storeDir,
@@ -5462,6 +5465,7 @@ async function main() {
           const prepared = prepareSession(args.storeDir);
           const initialized = await initializePreparedSession(prepared.stagingDir, args);
           preparedInitialization = initialized;
+          resolveSessionReference(prepared.stagingDir, { createNew: true });
           const committed = commitSession(args.storeDir, prepared);
           loop = createGameLoop({
             gameDir: committed.sessionDir,

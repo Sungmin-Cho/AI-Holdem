@@ -222,7 +222,7 @@ test('S8 full: default 20-hand production session records support then study rem
     const before = (await studyRequest(service, '/api/summary')).summary;
     assert.ok(before.game.overall.supportedDecisions >= 1);
     for (const [index, handClass] of ['AJo', '72o', 'KK'].entries()) {
-      await studyRequest(service, '/api/start', { mode: 'free', spotKey: '6max-100bb-btn-rfi-unopened',
+      await studyRequest(service, '/api/start', { mode: 'free', spotKey: '6max-100bb-btn-rfi-v2',
         handClass, idempotencyKey: `postgame-practice-${index}` });
       const current = await studyRequest(service, '/api/current');
       await studyRequest(service, '/api/answer', { sessionId: current.sessionId,

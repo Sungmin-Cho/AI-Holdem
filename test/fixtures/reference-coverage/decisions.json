@@ -1,0 +1,8269 @@
+[
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-1-preflop-0",
+    "gameMode": "cash-training",
+    "handNo": 1,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG",
+    "holeCards": [
+      "5d",
+      "2d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 75,
+    "currentBet": 50,
+    "actorBet": 0,
+    "toCall": 50,
+    "minRaiseTo": 100,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [],
+    "legal": {
+      "decisionId": "d-1-preflop-0",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-2-preflop-5",
+    "gameMode": "cash-training",
+    "handNo": 2,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BB",
+    "holeCards": [
+      "8s",
+      "Th"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 50,
+    "toCall": 75,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-2-preflop-0",
+        "playerId": "p1",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-2-preflop-1",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-2-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-2-preflop-3",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-2-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-2-preflop-5",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 75,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-3-preflop-4",
+    "gameMode": "cash-training",
+    "handNo": 3,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "SB",
+    "holeCards": [
+      "4c",
+      "Ks"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 625,
+    "currentBet": 425,
+    "actorBet": 25,
+    "toCall": 400,
+    "minRaiseTo": 725,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4575,
+        "bet": 425,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-3-preflop-0",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-3-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-3-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      }
+    ],
+    "legal": {
+      "decisionId": "d-3-preflop-4",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 400,
+      "minRaiseTo": 725,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 400
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-3-flop-7",
+    "gameMode": "cash-training",
+    "handNo": 3,
+    "actorId": "user",
+    "street": "flop",
+    "position": "SB",
+    "holeCards": [
+      "4c",
+      "Ks"
+    ],
+    "board": [
+      "6c",
+      "7h",
+      "6d"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 1400,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4575,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4575,
+        "bet": 0,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4575,
+        "bet": 0,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4575,
+        "bet": 0,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-3-preflop-0",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-3-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-3-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-4",
+        "playerId": "user",
+        "action": "call",
+        "amount": 400,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 400,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-5",
+        "playerId": "p1",
+        "action": "call",
+        "amount": 375,
+        "street": "preflop",
+        "potTotal": 1025,
+        "callAmount": 375,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4575,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-6",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1400,
+        "callAmount": 300,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4575,
+          "p1": 4575,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      }
+    ],
+    "legal": {
+      "decisionId": "d-3-flop-7",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4575
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-3-flop-10",
+    "gameMode": "cash-training",
+    "handNo": 3,
+    "actorId": "user",
+    "street": "flop",
+    "position": "SB",
+    "holeCards": [
+      "4c",
+      "Ks"
+    ],
+    "board": [
+      "6c",
+      "7h",
+      "6d"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 2325,
+    "currentBet": 925,
+    "actorBet": 0,
+    "toCall": 925,
+    "minRaiseTo": 1850,
+    "maxRaiseTo": 4575,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4575,
+        "bet": 0,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4575,
+        "bet": 0,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 3650,
+        "bet": 925,
+        "contribution": 1350,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-3-preflop-0",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-3-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-3-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-4",
+        "playerId": "user",
+        "action": "call",
+        "amount": 400,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 400,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-5",
+        "playerId": "p1",
+        "action": "call",
+        "amount": 375,
+        "street": "preflop",
+        "potTotal": 1025,
+        "callAmount": 375,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4575,
+          "p1": 4950,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-preflop-6",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1400,
+        "callAmount": 300,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4575,
+          "p1": 4575,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-3-flop-7",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 1400,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4575,
+        "board": [
+          "6c",
+          "7h",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4575,
+          "p1": 4575,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-3-flop-8",
+        "playerId": "p1",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 1400,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4575,
+        "board": [
+          "6c",
+          "7h",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4575,
+          "p1": 4575,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-3-flop-9",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 925,
+        "street": "flop",
+        "potTotal": 1400,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4575,
+        "board": [
+          "6c",
+          "7h",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4575,
+          "p1": 4575,
+          "p2": 4875,
+          "p3": 4575,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-3-flop-10",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 925,
+      "minRaiseTo": 1850,
+      "maxRaiseTo": 4575
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-4-preflop-3",
+    "gameMode": "cash-training",
+    "handNo": 4,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BTN",
+    "holeCards": [
+      "Th",
+      "3s"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-4-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-4-preflop-1",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-4-preflop-3",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-4-flop-7",
+    "gameMode": "cash-training",
+    "handNo": 4,
+    "actorId": "user",
+    "street": "flop",
+    "position": "BTN",
+    "holeCards": [
+      "Th",
+      "3s"
+    ],
+    "board": [
+      "Qs",
+      "Qc",
+      "8s"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 0,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-4-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-4-preflop-1",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-3",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-4",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-5",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-flop-6",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-4-flop-7",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-4-turn-9",
+    "gameMode": "cash-training",
+    "handNo": 4,
+    "actorId": "user",
+    "street": "turn",
+    "position": "BTN",
+    "holeCards": [
+      "Th",
+      "3s"
+    ],
+    "board": [
+      "Qs",
+      "Qc",
+      "8s",
+      "Ac"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 0,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-4-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-4-preflop-1",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-3",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-4",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-5",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-flop-6",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-flop-7",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-turn-8",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s",
+          "Ac"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-4-turn-9",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-4-river-11",
+    "gameMode": "cash-training",
+    "handNo": 4,
+    "actorId": "user",
+    "street": "river",
+    "position": "BTN",
+    "holeCards": [
+      "Th",
+      "3s"
+    ],
+    "board": [
+      "Qs",
+      "Qc",
+      "8s",
+      "Ac",
+      "Qd"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 550,
+    "currentBet": 225,
+    "actorBet": 0,
+    "toCall": 225,
+    "minRaiseTo": 450,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 0,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4650,
+        "bet": 225,
+        "contribution": 350,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-4-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-4-preflop-1",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-3",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-4",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-preflop-5",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-4-flop-6",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-flop-7",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-turn-8",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s",
+          "Ac"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-turn-9",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s",
+          "Ac"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-4-river-10",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 225,
+        "street": "river",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Qs",
+          "Qc",
+          "8s",
+          "Ac",
+          "Qd"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-4-river-11",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 225,
+      "minRaiseTo": 450,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 225
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-5-preflop-2",
+    "gameMode": "cash-training",
+    "handNo": 5,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "CO",
+    "holeCards": [
+      "8s",
+      "7d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 75,
+    "currentBet": 50,
+    "actorBet": 0,
+    "toCall": 50,
+    "minRaiseTo": 100,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-5-preflop-0",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-5-preflop-1",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      }
+    ],
+    "legal": {
+      "decisionId": "d-5-preflop-2",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-6-preflop-1",
+    "gameMode": "cash-training",
+    "handNo": 6,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG+1",
+    "holeCards": [
+      "4d",
+      "8s"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-6-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      }
+    ],
+    "legal": {
+      "decisionId": "d-6-preflop-1",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-7-preflop-0",
+    "gameMode": "cash-training",
+    "handNo": 7,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG",
+    "holeCards": [
+      "Qd",
+      "9d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 75,
+    "currentBet": 50,
+    "actorBet": 0,
+    "toCall": 50,
+    "minRaiseTo": 100,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [],
+    "legal": {
+      "decisionId": "d-7-preflop-0",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-7-preflop-6",
+    "gameMode": "cash-training",
+    "handNo": 7,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG",
+    "holeCards": [
+      "Qd",
+      "9d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 625,
+    "currentBet": 425,
+    "actorBet": 125,
+    "toCall": 300,
+    "minRaiseTo": 725,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 4575,
+        "bet": 425,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-7-preflop-0",
+        "playerId": "user",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-7-preflop-1",
+        "playerId": "p1",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-7-preflop-2",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4575,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-7-preflop-3",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4575,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-7-preflop-4",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 400,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4575,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-7-preflop-5",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 375,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4575,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 425
+      }
+    ],
+    "legal": {
+      "decisionId": "d-7-preflop-6",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 300,
+      "minRaiseTo": 725,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-8-preflop-5",
+    "gameMode": "cash-training",
+    "handNo": 8,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BB",
+    "holeCards": [
+      "3c",
+      "2h"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 600,
+    "currentBet": 425,
+    "actorBet": 50,
+    "toCall": 375,
+    "minRaiseTo": 725,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4575,
+        "bet": 425,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-8-preflop-0",
+        "playerId": "p1",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-8-preflop-1",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-8-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-8-preflop-3",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-8-preflop-4",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-8-preflop-5",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 375,
+      "minRaiseTo": 725,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-9-preflop-4",
+    "gameMode": "cash-training",
+    "handNo": 9,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "SB",
+    "holeCards": [
+      "Qs",
+      "2h"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 450,
+    "currentBet": 125,
+    "actorBet": 25,
+    "toCall": 100,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-9-preflop-0",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-9-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-9-preflop-2",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-9-preflop-3",
+        "playerId": "p5",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 4875,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-9-preflop-4",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 100,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-10-preflop-3",
+    "gameMode": "cash-training",
+    "handNo": 10,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BTN",
+    "holeCards": [
+      "7d",
+      "Jh"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-10-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-10-preflop-1",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-10-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4875,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-10-preflop-3",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-11-preflop-2",
+    "gameMode": "cash-training",
+    "handNo": 11,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "CO",
+    "holeCards": [
+      "Ts",
+      "2h"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-11-preflop-0",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-11-preflop-1",
+        "playerId": "p5",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 4875,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-11-preflop-2",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-12-preflop-1",
+    "gameMode": "cash-training",
+    "handNo": 12,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG+1",
+    "holeCards": [
+      "4h",
+      "Kh"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-12-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      }
+    ],
+    "legal": {
+      "decisionId": "d-12-preflop-1",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-12-preflop-7",
+    "gameMode": "cash-training",
+    "handNo": 12,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG+1",
+    "holeCards": [
+      "4h",
+      "Kh"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 1100,
+    "currentBet": 675,
+    "actorBet": 125,
+    "toCall": 550,
+    "minRaiseTo": 1225,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4325,
+        "bet": 675,
+        "contribution": 675,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-12-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-12-preflop-1",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-12-preflop-2",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-12-preflop-3",
+        "playerId": "p2",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-12-preflop-4",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 675,
+        "street": "preflop",
+        "potTotal": 450,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-12-preflop-5",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1100,
+        "callAmount": 625,
+        "minRaiseTo": 1225,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 4325,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 675
+      },
+      {
+        "decisionId": "d-12-preflop-6",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1100,
+        "callAmount": 550,
+        "minRaiseTo": 1225,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 4325,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 675
+      }
+    ],
+    "legal": {
+      "decisionId": "d-12-preflop-7",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 550,
+      "minRaiseTo": 1225,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-13-preflop-0",
+    "gameMode": "cash-training",
+    "handNo": 13,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG",
+    "holeCards": [
+      "Jh",
+      "2h"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 75,
+    "currentBet": 50,
+    "actorBet": 0,
+    "toCall": 50,
+    "minRaiseTo": 100,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [],
+    "legal": {
+      "decisionId": "d-13-preflop-0",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-14-preflop-5",
+    "gameMode": "cash-training",
+    "handNo": 14,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BB",
+    "holeCards": [
+      "Qc",
+      "2d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 125,
+    "actorBet": 50,
+    "toCall": 75,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-14-preflop-0",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-1",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-3",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-14-preflop-5",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 75,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 75
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-14-flop-6",
+    "gameMode": "cash-training",
+    "handNo": 14,
+    "actorId": "user",
+    "street": "flop",
+    "position": "BB",
+    "holeCards": [
+      "Qc",
+      "2d"
+    ],
+    "board": [
+      "5h",
+      "8c",
+      "9h"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 400,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-14-preflop-0",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-1",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-3",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-5",
+        "playerId": "user",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-14-flop-6",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 275
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-14-turn-9",
+    "gameMode": "cash-training",
+    "handNo": 14,
+    "actorId": "user",
+    "street": "turn",
+    "position": "BB",
+    "holeCards": [
+      "Qc",
+      "2d"
+    ],
+    "board": [
+      "5h",
+      "8c",
+      "9h",
+      "Ad"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 950,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4600,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4600,
+        "bet": 0,
+        "contribution": 400,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 4600,
+        "bet": 0,
+        "contribution": 400,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-14-preflop-0",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-1",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-3",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-5",
+        "playerId": "user",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-flop-6",
+        "playerId": "user",
+        "action": "raise",
+        "amount": 275,
+        "street": "flop",
+        "potTotal": 400,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-14-flop-7",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 675,
+        "callAmount": 275,
+        "minRaiseTo": 550,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 275
+      },
+      {
+        "decisionId": "d-14-flop-8",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 275,
+        "street": "flop",
+        "potTotal": 675,
+        "callAmount": 275,
+        "minRaiseTo": 550,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 275
+      }
+    ],
+    "legal": {
+      "decisionId": "d-14-turn-9",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4600
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-14-turn-11",
+    "gameMode": "cash-training",
+    "handNo": 14,
+    "actorId": "user",
+    "street": "turn",
+    "position": "BB",
+    "holeCards": [
+      "Qc",
+      "2d"
+    ],
+    "board": [
+      "5h",
+      "8c",
+      "9h",
+      "Ad"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 1575,
+    "currentBet": 625,
+    "actorBet": 0,
+    "toCall": 625,
+    "minRaiseTo": 1250,
+    "maxRaiseTo": 4600,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4600,
+        "bet": 0,
+        "contribution": 400,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 3975,
+        "bet": 625,
+        "contribution": 1025,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-14-preflop-0",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-1",
+        "playerId": "p2",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-14-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-3",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-preflop-5",
+        "playerId": "user",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-14-flop-6",
+        "playerId": "user",
+        "action": "raise",
+        "amount": 275,
+        "street": "flop",
+        "potTotal": 400,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-14-flop-7",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 675,
+        "callAmount": 275,
+        "minRaiseTo": 550,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 275
+      },
+      {
+        "decisionId": "d-14-flop-8",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 275,
+        "street": "flop",
+        "potTotal": 675,
+        "callAmount": 275,
+        "minRaiseTo": 550,
+        "maxRaiseTo": 4875,
+        "board": [
+          "5h",
+          "8c",
+          "9h"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4875,
+          "p5": 4975
+        },
+        "currentBet": 275
+      },
+      {
+        "decisionId": "d-14-turn-9",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 950,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4600,
+        "board": [
+          "5h",
+          "8c",
+          "9h",
+          "Ad"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4600,
+          "p5": 4975
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-14-turn-10",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 625,
+        "street": "turn",
+        "potTotal": 950,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4600,
+        "board": [
+          "5h",
+          "8c",
+          "9h",
+          "Ad"
+        ],
+        "stacks": {
+          "user": 4600,
+          "p1": 5000,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4600,
+          "p5": 4975
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-14-turn-11",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 625,
+      "minRaiseTo": 1250,
+      "maxRaiseTo": 4600
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-15-preflop-4",
+    "gameMode": "cash-training",
+    "handNo": 15,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "SB",
+    "holeCards": [
+      "Tc",
+      "3s"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 25,
+    "toCall": 100,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-15-preflop-0",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-15-preflop-4",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 100,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 100
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-15-flop-6",
+    "gameMode": "cash-training",
+    "handNo": 15,
+    "actorId": "user",
+    "street": "flop",
+    "position": "SB",
+    "holeCards": [
+      "Tc",
+      "3s"
+    ],
+    "board": [
+      "Jc",
+      "9s",
+      "7d"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 375,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-15-preflop-0",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-4",
+        "playerId": "user",
+        "action": "call",
+        "amount": 100,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-5",
+        "playerId": "p1",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 300,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      }
+    ],
+    "legal": {
+      "decisionId": "d-15-flop-6",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-15-turn-9",
+    "gameMode": "cash-training",
+    "handNo": 15,
+    "actorId": "user",
+    "street": "turn",
+    "position": "SB",
+    "holeCards": [
+      "Tc",
+      "3s"
+    ],
+    "board": [
+      "Jc",
+      "9s",
+      "7d",
+      "9d"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 375,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-15-preflop-0",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-4",
+        "playerId": "user",
+        "action": "call",
+        "amount": 100,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-5",
+        "playerId": "p1",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 300,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-flop-6",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-flop-7",
+        "playerId": "p1",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-flop-8",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-15-turn-9",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-15-river-12",
+    "gameMode": "cash-training",
+    "handNo": 15,
+    "actorId": "user",
+    "street": "river",
+    "position": "SB",
+    "holeCards": [
+      "Tc",
+      "3s"
+    ],
+    "board": [
+      "Jc",
+      "9s",
+      "7d",
+      "9d",
+      "Jh"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 375,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "SB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BB",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-15-preflop-0",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-1",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-15-preflop-2",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-3",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-4",
+        "playerId": "user",
+        "action": "call",
+        "amount": 100,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4975,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-preflop-5",
+        "playerId": "p1",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 300,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4950,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-15-flop-6",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-flop-7",
+        "playerId": "p1",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-flop-8",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-turn-9",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d",
+          "9d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-turn-10",
+        "playerId": "p1",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d",
+          "9d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-15-turn-11",
+        "playerId": "p3",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 375,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jc",
+          "9s",
+          "7d",
+          "9d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-15-river-12",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 250
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-16-preflop-3",
+    "gameMode": "cash-training",
+    "handNo": 16,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BTN",
+    "holeCards": [
+      "9d",
+      "8s"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 625,
+    "currentBet": 425,
+    "actorBet": 0,
+    "toCall": 425,
+    "minRaiseTo": 725,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 4575,
+        "bet": 425,
+        "contribution": 425,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-16-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-16-preflop-1",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-16-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 425
+      }
+    ],
+    "legal": {
+      "decisionId": "d-16-preflop-3",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 425,
+      "minRaiseTo": 725,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 975
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-16-preflop-8",
+    "gameMode": "cash-training",
+    "handNo": 16,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BTN",
+    "holeCards": [
+      "9d",
+      "8s"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 6475,
+    "currentBet": 5000,
+    "actorBet": 975,
+    "toCall": 4025,
+    "minRaiseTo": 9025,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BTN",
+        "stack": 4025,
+        "bet": 975,
+        "contribution": 975,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "UTG",
+        "stack": 0,
+        "bet": 5000,
+        "contribution": 5000,
+        "folded": false,
+        "allIn": true,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG+1",
+        "stack": 4575,
+        "bet": 425,
+        "contribution": 425,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-16-preflop-0",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-16-preflop-1",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-16-preflop-2",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-16-preflop-3",
+        "playerId": "user",
+        "action": "raise",
+        "amount": 975,
+        "street": "preflop",
+        "potTotal": 625,
+        "callAmount": 425,
+        "minRaiseTo": 725,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 425
+      },
+      {
+        "decisionId": "d-16-preflop-4",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1600,
+        "callAmount": 950,
+        "minRaiseTo": 1525,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4025,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 975
+      },
+      {
+        "decisionId": "d-16-preflop-5",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 1600,
+        "callAmount": 925,
+        "minRaiseTo": 1525,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4025,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 975
+      },
+      {
+        "decisionId": "d-16-preflop-6",
+        "playerId": "p3",
+        "action": "raise",
+        "amount": 5000,
+        "street": "preflop",
+        "potTotal": 1600,
+        "callAmount": 850,
+        "minRaiseTo": 1525,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4025,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 4875,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 975
+      },
+      {
+        "decisionId": "d-16-preflop-7",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 6475,
+        "callAmount": 4575,
+        "minRaiseTo": 9025,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4025,
+          "p1": 4975,
+          "p2": 4950,
+          "p3": 0,
+          "p4": 4575,
+          "p5": 5000
+        },
+        "currentBet": 5000
+      }
+    ],
+    "legal": {
+      "decisionId": "d-16-preflop-8",
+      "canCheck": false,
+      "canRaise": false,
+      "callAmount": 4025,
+      "minRaiseTo": 9025,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-17-preflop-2",
+    "gameMode": "cash-training",
+    "handNo": 17,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "CO",
+    "holeCards": [
+      "Qd",
+      "5c"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-17-preflop-0",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-17-preflop-1",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      }
+    ],
+    "legal": {
+      "decisionId": "d-17-preflop-2",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-17-preflop-7",
+    "gameMode": "cash-training",
+    "handNo": 17,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "CO",
+    "holeCards": [
+      "Qd",
+      "5c"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 2325,
+    "currentBet": 550,
+    "actorBet": 125,
+    "toCall": 425,
+    "minRaiseTo": 975,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "CO",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "BTN",
+        "stack": 4450,
+        "bet": 550,
+        "contribution": 550,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "SB",
+        "stack": 4450,
+        "bet": 550,
+        "contribution": 550,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BB",
+        "stack": 4450,
+        "bet": 550,
+        "contribution": 550,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG+1",
+        "stack": 4450,
+        "bet": 550,
+        "contribution": 550,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-17-preflop-0",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-17-preflop-1",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-17-preflop-2",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-17-preflop-3",
+        "playerId": "p1",
+        "action": "raise",
+        "amount": 550,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-17-preflop-4",
+        "playerId": "p2",
+        "action": "call",
+        "amount": 525,
+        "street": "preflop",
+        "potTotal": 875,
+        "callAmount": 525,
+        "minRaiseTo": 975,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4450,
+          "p2": 4975,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 4875
+        },
+        "currentBet": 550
+      },
+      {
+        "decisionId": "d-17-preflop-5",
+        "playerId": "p3",
+        "action": "call",
+        "amount": 500,
+        "street": "preflop",
+        "potTotal": 1400,
+        "callAmount": 500,
+        "minRaiseTo": 975,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4450,
+          "p2": 4450,
+          "p3": 4950,
+          "p4": 5000,
+          "p5": 4875
+        },
+        "currentBet": 550
+      },
+      {
+        "decisionId": "d-17-preflop-6",
+        "playerId": "p5",
+        "action": "call",
+        "amount": 425,
+        "street": "preflop",
+        "potTotal": 1900,
+        "callAmount": 425,
+        "minRaiseTo": 975,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 4450,
+          "p2": 4450,
+          "p3": 4450,
+          "p4": 5000,
+          "p5": 4875
+        },
+        "currentBet": 550
+      }
+    ],
+    "legal": {
+      "decisionId": "d-17-preflop-7",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 425,
+      "minRaiseTo": 975,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-18-preflop-1",
+    "gameMode": "cash-training",
+    "handNo": 18,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG+1",
+    "holeCards": [
+      "As",
+      "Ad"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 200,
+    "currentBet": 125,
+    "actorBet": 0,
+    "toCall": 125,
+    "minRaiseTo": 200,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-18-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      }
+    ],
+    "legal": {
+      "decisionId": "d-18-preflop-1",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 125,
+      "minRaiseTo": 200,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "call",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-18-flop-7",
+    "gameMode": "cash-training",
+    "handNo": 18,
+    "actorId": "user",
+    "street": "flop",
+    "position": "UTG+1",
+    "holeCards": [
+      "As",
+      "Ad"
+    ],
+    "board": [
+      "Ah",
+      "Ac",
+      "6d"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 0,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-18-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-18-preflop-1",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-2",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-3",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-4",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-5",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-flop-6",
+        "playerId": "p5",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Ah",
+          "Ac",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-18-flop-7",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "check",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-18-turn-9",
+    "gameMode": "cash-training",
+    "handNo": 18,
+    "actorId": "user",
+    "street": "turn",
+    "position": "UTG+1",
+    "holeCards": [
+      "As",
+      "Ad"
+    ],
+    "board": [
+      "Ah",
+      "Ac",
+      "6d",
+      "6s"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 325,
+    "currentBet": 0,
+    "actorBet": 0,
+    "toCall": 0,
+    "minRaiseTo": 50,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 0,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 0,
+        "contribution": 50,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-18-preflop-0",
+        "playerId": "p5",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 5000
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-18-preflop-1",
+        "playerId": "user",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-2",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-3",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-4",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-preflop-5",
+        "playerId": "p4",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-18-flop-6",
+        "playerId": "p5",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Ah",
+          "Ac",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-18-flop-7",
+        "playerId": "user",
+        "action": "check",
+        "amount": 0,
+        "street": "flop",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Ah",
+          "Ac",
+          "6d"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-18-turn-8",
+        "playerId": "p5",
+        "action": "check",
+        "amount": 0,
+        "street": "turn",
+        "potTotal": 325,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Ah",
+          "Ac",
+          "6d",
+          "6s"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4975,
+          "p4": 4950,
+          "p5": 4875
+        },
+        "currentBet": 0
+      }
+    ],
+    "legal": {
+      "decisionId": "d-18-turn-9",
+      "canCheck": true,
+      "canRaise": true,
+      "callAmount": 0,
+      "minRaiseTo": 50,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 225
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-19-preflop-0",
+    "gameMode": "cash-training",
+    "handNo": 19,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "UTG",
+    "holeCards": [
+      "2d",
+      "Th"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 75,
+    "currentBet": 50,
+    "actorBet": 0,
+    "toCall": 50,
+    "minRaiseTo": 100,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [],
+    "legal": {
+      "decisionId": "d-19-preflop-0",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 50,
+      "minRaiseTo": 100,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "raise",
+      "amount": 125
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-19-flop-8",
+    "gameMode": "cash-training",
+    "handNo": 19,
+    "actorId": "user",
+    "street": "flop",
+    "position": "UTG",
+    "holeCards": [
+      "2d",
+      "Th"
+    ],
+    "board": [
+      "Jd",
+      "3d",
+      "8c"
+    ],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 1150,
+    "currentBet": 325,
+    "actorBet": 0,
+    "toCall": 325,
+    "minRaiseTo": 650,
+    "maxRaiseTo": 4875,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG+1",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "BTN",
+        "stack": 4875,
+        "bet": 0,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "SB",
+        "stack": 4550,
+        "bet": 325,
+        "contribution": 450,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "BB",
+        "stack": 4550,
+        "bet": 325,
+        "contribution": 450,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-19-preflop-0",
+        "playerId": "user",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 5000,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-19-preflop-1",
+        "playerId": "p1",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-19-preflop-2",
+        "playerId": "p2",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-19-preflop-3",
+        "playerId": "p3",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-19-preflop-4",
+        "playerId": "p4",
+        "action": "call",
+        "amount": 100,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 100,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 4975,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-19-preflop-5",
+        "playerId": "p5",
+        "action": "call",
+        "amount": 75,
+        "street": "preflop",
+        "potTotal": 425,
+        "callAmount": 75,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 4875,
+          "p5": 4950
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-19-flop-6",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 325,
+        "street": "flop",
+        "potTotal": 500,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jd",
+          "3d",
+          "8c"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 4875,
+          "p5": 4875
+        },
+        "currentBet": 0
+      },
+      {
+        "decisionId": "d-19-flop-7",
+        "playerId": "p5",
+        "action": "call",
+        "amount": 325,
+        "street": "flop",
+        "potTotal": 825,
+        "callAmount": 325,
+        "minRaiseTo": 650,
+        "maxRaiseTo": 4875,
+        "board": [
+          "Jd",
+          "3d",
+          "8c"
+        ],
+        "stacks": {
+          "user": 4875,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 4875,
+          "p4": 4550,
+          "p5": 4875
+        },
+        "currentBet": 325
+      }
+    ],
+    "legal": {
+      "decisionId": "d-19-flop-8",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 325,
+      "minRaiseTo": 650,
+      "maxRaiseTo": 4875
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "decisionId": "d-20-preflop-5",
+    "gameMode": "cash-training",
+    "handNo": 20,
+    "actorId": "user",
+    "street": "preflop",
+    "position": "BB",
+    "holeCards": [
+      "2h",
+      "7d"
+    ],
+    "board": [],
+    "blinds": [
+      25,
+      50
+    ],
+    "potBefore": 875,
+    "currentBet": 550,
+    "actorBet": 50,
+    "toCall": 500,
+    "minRaiseTo": 975,
+    "maxRaiseTo": 5000,
+    "effectiveStack": 5000,
+    "forced": false,
+    "publicSeats": [
+      {
+        "playerId": "user",
+        "position": "BB",
+        "stack": 4950,
+        "bet": 50,
+        "contribution": 50,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p1",
+        "position": "UTG",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p2",
+        "position": "UTG+1",
+        "stack": 4875,
+        "bet": 125,
+        "contribution": 125,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p3",
+        "position": "CO",
+        "stack": 5000,
+        "bet": 0,
+        "contribution": 0,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p4",
+        "position": "BTN",
+        "stack": 4450,
+        "bet": 550,
+        "contribution": 550,
+        "folded": false,
+        "allIn": false,
+        "out": false
+      },
+      {
+        "playerId": "p5",
+        "position": "SB",
+        "stack": 4975,
+        "bet": 25,
+        "contribution": 25,
+        "folded": true,
+        "allIn": false,
+        "out": false
+      }
+    ],
+    "priorActions": [
+      {
+        "decisionId": "d-20-preflop-0",
+        "playerId": "p1",
+        "action": "raise",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 75,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 5000,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 50
+      },
+      {
+        "decisionId": "d-20-preflop-1",
+        "playerId": "p2",
+        "action": "call",
+        "amount": 125,
+        "street": "preflop",
+        "potTotal": 200,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 5000,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-20-preflop-2",
+        "playerId": "p3",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-20-preflop-3",
+        "playerId": "p4",
+        "action": "raise",
+        "amount": 550,
+        "street": "preflop",
+        "potTotal": 325,
+        "callAmount": 125,
+        "minRaiseTo": 200,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 5000,
+          "p5": 4975
+        },
+        "currentBet": 125
+      },
+      {
+        "decisionId": "d-20-preflop-4",
+        "playerId": "p5",
+        "action": "fold",
+        "amount": 0,
+        "street": "preflop",
+        "potTotal": 875,
+        "callAmount": 525,
+        "minRaiseTo": 975,
+        "maxRaiseTo": 5000,
+        "board": [],
+        "stacks": {
+          "user": 4950,
+          "p1": 4875,
+          "p2": 4875,
+          "p3": 5000,
+          "p4": 4450,
+          "p5": 4975
+        },
+        "currentBet": 550
+      }
+    ],
+    "legal": {
+      "decisionId": "d-20-preflop-5",
+      "canCheck": false,
+      "canRaise": true,
+      "callAmount": 500,
+      "minRaiseTo": 975,
+      "maxRaiseTo": 5000
+    },
+    "chosenAction": {
+      "action": "fold",
+      "amount": 0
+    }
+  }
+]

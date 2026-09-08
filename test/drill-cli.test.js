@@ -1,3 +1,4 @@
+import {LEGACY_REFERENCE_SOURCE} from '../shared/reference.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -5,7 +6,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { answerQuestion, nextQuestion, startDrill } from '../tools/drill-cli.js';
+import { answerQuestion, nextQuestion, startDrill as startDrillCurrent } from '../tools/drill-cli.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { createMistakeBank } from '../tools/training-stores.js';
 import { readJsonl } from '../tools/training-store.js';
@@ -14,6 +15,8 @@ import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { loadPreflopDataset } from '../tools/preflop-dataset.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
+
+const startDrill = (dir, options = {}) => startDrillCurrent(dir, {source: LEGACY_REFERENCE_SOURCE, ...options});
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/drill-cli.js');
 const CLI_HREF = pathToFileURL(CLI).href;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parsePreflopJson } from '../training/providers/preflop-json.js';
 import { ERRORS, coded } from '../training/contracts.js';
+import { KNOWN_REFERENCE_SOURCES, sameReferenceSource } from '../shared/reference.js';
 
 export const DEFAULT_DATASET = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -41,4 +42,20 @@ export function loadPreflopDataset(datasetPath = DEFAULT_DATASET, { expectedSha2
     throw withCause(coded(ERRORS.DATASET_INVALID, `dataset 파일을 읽을 수 없습니다: ${error.message}`), error);
   }
   return parsePreflopJson(raw, { expectedSha256: pinned });
+}
+
+const bundled = new Map();
+export function loadReferenceDataset(source) {
+  const known = KNOWN_REFERENCE_SOURCES.find(s => sameReferenceSource(s, source));
+  if (!known) throw coded('SOURCE_UNAVAILABLE', 'Unknown reference source');
+  const key = `${known.id}@${known.version}:${known.contentSha256}`;
+  if (!bundled.has(key)) {
+    const file = new URL(`../training/data/preflop-baseline-v${known.version[0]}.json`, import.meta.url);
+    const parsed = loadPreflopDataset(fileURLToPath(file), { expectedSha256: known.contentSha256 });
+    if (!sameReferenceSource({...parsed.data, contentSha256:parsed.contentSha256}, known)) {
+      throw coded('SOURCE_UNAVAILABLE', 'Reference identity mismatch');
+    }
+    bundled.set(key, Object.freeze(parsed));
+  }
+  return bundled.get(key);
 }

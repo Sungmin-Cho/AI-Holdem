@@ -90,9 +90,9 @@ test('REQ-003: positive-frequency choices stay allowed', async (t) => {
     assert.ok(value.calibration && typeof value.calibration === 'object');
   }
 
-  await t.test('schema 4 exposes independent game and practice projections', () => {
+  await t.test('schema 5 exposes independent game and practice projections', () => {
     const value = replay({ raises: 1, folds: 0 });
-    assert.equal(value.schemaVersion, 4);
+    assert.equal(value.schemaVersion, 5);
     assertProjectionShape(value.game);
     assertProjectionShape(value.practice);
     assert.equal(value.overall.evaluatedDecisions, value.game.overall.evaluatedDecisions);

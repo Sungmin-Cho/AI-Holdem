@@ -1,3 +1,5 @@
+import {referenceAssessmentEligibility} from '../../shared/reference-coverage.js';
+import {parsePreflopKey} from '../../shared/preflop-key.js';
 import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
 
 /**
@@ -49,7 +51,7 @@ const SOURCE_LABEL = Object.freeze({
 function practiceTargetOf(item, sourceEligible) {
   if (!sourceEligible || item.status !== 'supported' || item.forced
     || (item.street !== undefined && item.street !== 'preflop')
-    || !/^6max-100bb-(?:(?:utg|hj|co|btn|sb)-rfi-unopened|(?:bb|sb|btn)-vs-single-raise)$/.test(item.spotKey ?? '')) return null;
+    || !parsePreflopKey(item.spotKey)) return null;
   const hand = /^([AKQJT2-9])([AKQJT2-9])([so]?)$/.exec(item.handClass ?? '');
   if (!hand) return null;
   const ranks = 'AKQJT98765432';
@@ -118,28 +120,32 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   if (verified) {
     const detail = receipt.detail;
     item = { ...item };
-    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced']) {
+    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage']) {
       item[key] = detail[key];
     }
   }
   const identityQuality = referenceQuality(item.source);
   const quality = verified || identityQuality.quality !== 'heuristic-reference' ? identityQuality
     : { quality: 'unverified', reason: 'LEARNING_AUTHORITY_UNAVAILABLE' };
-  const sourceEligible = verified && quality.quality === 'heuristic-reference';
+  const eligibility = referenceAssessmentEligibility(item);
+  const sourceEligible = verified && quality.quality === 'heuristic-reference' && eligibility.verified;
+  const metricEligible = sourceEligible && eligibility.metricEligible;
   const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
+  const spot = parsePreflopKey(item.spotKey);
   const title = [
     `핸드 ${item.handNo ?? '?'}`,
-    item.spotKey ? String(item.spotKey).split('-')[2]?.toUpperCase() : null,
+    spot?.version === 2 ? `${spot.seated}인 ${spot.position}` : item.spotKey ? String(item.spotKey).split('-')[2]?.toUpperCase() : null,
+    spot?.version === 2 && spot.openerPosition ? `${spot.openerPosition} 오픈 대응` : null,
     item.handClass,
   ].filter(Boolean).join(' · ');
   const card = {
     title,
     choice: `내 선택: ${actionLabel(item.chosen?.action)}`,
     recommendation: rec ? `기준표 참고: ${actionLabel(rec.action)}${recSize}${recFreq}` : '',
-    grade: item.status === 'supported' && sourceEligible ? (item.grade ?? null) : null,
-    gradeLabel: item.status === 'supported' && sourceEligible ? (GRADE[item.grade] ?? '') : '',
+    grade: item.status === 'supported' && metricEligible ? (item.grade ?? null) : null,
+    gradeLabel: item.status === 'supported' && metricEligible ? (GRADE[item.grade] ?? '') : '',
     forced: Boolean(item.forced),
     note: '',
     explanation: item.explanationStatus === 'unavailable'
@@ -148,7 +154,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     sourceQuality: quality.quality,
     sourceLabel: SOURCE_LABEL[quality.quality] ?? SOURCE_LABEL.unverified,
-    practiceTarget: practiceTargetOf(item, sourceEligible),
+    practiceTarget: practiceTargetOf(item, metricEligible),
     status: item.status ?? null,
     exploit: '',
   };
@@ -159,6 +165,16 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
       const adj = primary.adjustment;
       card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue}`;
     }
+  }
+  if (sourceEligible && item.coverage) {
+    const c=item.coverage,i=c.input,r=c.reference;
+    const projections=[];
+    if(c.reasonCodes.includes('STACK_PROJECTED'))projections.push(`스택 ${i.effectiveStackBb}bb → ${r.stackBb}bb`);
+    if(c.reasonCodes.includes('FACING_SIZE_PROJECTED'))projections.push(`오픈 ${i.facingRaiseToBb}bb → ${r.openRaiseToBb}bb`);
+    if(c.reasonCodes.includes('CHOICE_SIZE_PROJECTED'))projections.push(`선택 ${i.chosenRaiseToBb}bb → ${i.openerPosition ? r.threeBetRaiseToBb : r.openRaiseToBb}bb`);
+    if(projections.length)card.note=`투영 참고: ${projections.join(' · ')} · 점수 제외`;
+    if(c.choiceMatch==='unavailable')card.note=[card.note,'선택 사이즈 비교 불가 · 점수 제외'].filter(Boolean).join(' · ');
+    else if(c.metricEligible)card.note='직접 기준표 비교';
   }
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, drillRequest, readStudyEntry, formatSource } from '../server/drill-public/study-format.js';
-import { CANONICAL_REFERENCE_SOURCE as source } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as source } from '../shared/reference.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { startDrillServer } from '../tools/drill-server.js';
 import * as drillUi from '../server/drill-public/drill.js';
@@ -263,7 +263,7 @@ test('actual drill backend source mismatch survives refresh and allows only an e
     return result;
   };
   assert.equal((await api('/api/start', { method: 'POST', body: {
-    mode: 'free', seed: 'initial-seed', idempotencyKey: 'initial-key',
+    mode: 'free', seed: 'initial-seed', idempotencyKey: 'initial-key', source,
   } })).ok, true);
   const memory = new Map();
   const storage = { getItem: (key) => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value), removeItem: (key) => memory.delete(key) };
@@ -318,7 +318,7 @@ test('actual drill backend legacy source rejection survives refresh and allows o
     return result;
   };
   assert.equal((await api('/api/start', { method: 'POST', body: {
-    mode: 'free', seed: 'initial-seed', idempotencyKey: 'initial-key',
+    mode: 'free', seed: 'initial-seed', idempotencyKey: 'initial-key', source,
   } })).ok, true);
   const memory = new Map();
   const storage = { getItem: (key) => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value), removeItem: (key) => memory.delete(key) };

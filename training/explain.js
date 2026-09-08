@@ -1,3 +1,4 @@
+import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { referenceClaimAllowed, referenceQuality } from '../shared/reference.js';
 
 const ACTION_ALIASES = Object.freeze({
@@ -111,7 +112,10 @@ export function validateExplanation(evaluation, explanation) {
     && referenceQuality(evaluation.source).quality !== 'heuristic-reference') {
     return { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' };
   }
-  if (evaluation?.status !== 'supported') {
+  const eligibility = referenceAssessmentEligibility(evaluation);
+  if (evaluation?.source?.version === '2.0.0' && !eligibility.verified) return {ok:false,code:'REFERENCE_SOURCE_UNVERIFIED'};
+  if (evaluation?.status !== 'supported' || (evaluation?.source?.version === '2.0.0' && !eligibility.metricEligible)) {
+    if (/직접\s*비교|주력\s*선택|허용\s*선택|저빈도|off.policy|preferred|mixed/i.test(explanation)) return {ok:false,code:'REFERENCE_AUTHORITY_CLAIM'};
     const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;
     let match;

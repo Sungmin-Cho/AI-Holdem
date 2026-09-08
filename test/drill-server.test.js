@@ -471,7 +471,7 @@ test('start preserves pending with 409 until explicit recovery applies bank, pro
   try {
     const first = await api(drill.port, 'tok', '/api/start', {
       method: 'POST',
-      body: { mode: 'mistake-review', seed: '1', idempotencyKey: 'pend-a' },
+      body: { mode: 'mistake-review', seed: '1', idempotencyKey: 'pend-a', source },
     });
     const captured = writePending(storeDir);
     const before = bytes();

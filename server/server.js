@@ -785,8 +785,8 @@ function readTrainingDetail(root, ref, expectedSha) {
 }
 
 function serveStatic(pathname, res) {
-  if (pathname === '/shared/reference.js') {
-    fs.readFile(SHARED_REFERENCE_FILE, (error, data) => {
+  if (['/shared/reference.js','/shared/reference-coverage.js','/shared/preflop-key.js'].includes(pathname)) {
+    fs.readFile(path.join(path.dirname(SHARED_REFERENCE_FILE), pathname.split('/').at(-1)), (error, data) => {
       if (error) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
       res.writeHead(200, { 'Content-Type': MIME['.js'] });
       res.end(data);

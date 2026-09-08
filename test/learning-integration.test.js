@@ -108,12 +108,12 @@ test('S8 early: resume never adds learning defaults or overrides parsed values',
 test('S8 early: off-target configuration uses readable heuristic reference comparison wording', () => {
   const notice = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 50 });
   assert.match(notice, /휴리스틱.*기준표/);
-  assert.match(notice, /6인.*100BB/);
+  assert.match(notice, /6·8·9인.*100BB/);
   assert.match(notice, /4인/);
   assert.match(notice, /50BB/);
   assert.doesNotMatch(notice, /GTO|startStackBb/);
-  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 99 }), null);
-  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 101 }), null);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 99 }), /투영 참고/);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 101 }), /투영 참고/);
   assert.notEqual(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 101.1 }), null);
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 20 }), null);
 });

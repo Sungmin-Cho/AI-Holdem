@@ -1,10 +1,11 @@
+import { referenceAssessmentEligibility, projectReferenceCoverage } from '../shared/reference-coverage.js';
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
 import { actionKey, matchReferenceAction, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 
-export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@1.0.0';
-export const PROFILE_SCHEMA_VERSION = 4;
+export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@2.0.0';
+export const PROFILE_SCHEMA_VERSION = 5;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -31,7 +32,7 @@ function emptyCalibration() {
 function emptyProjection() {
   return {
     overall: emptyOverall(), skills: {}, leaks: [], candidates: [], coverageGaps: [],
-    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0, unverifiedDecisions: 0 },
+    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0, unverifiedDecisions: 0, referenceAvailableDecisions: 0, exactComparableDecisions: 0, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0 },
     calibration: emptyCalibration(), mixGroups: {}, studyRuns: {}, unverifiedEvidence: [],
   };
 }
@@ -60,7 +61,7 @@ function isSafeMapKey(key) {
 
 export function assertProfileEvent(event) {
   if (!event || (event.schemaVersion !== undefined
-      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 4))) {
+      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 5))) {
     throw coded('PROFILE_EVENT_INVALID', 'profile event schema is invalid');
   }
   if (typeof event.evaluationId !== 'string' || event.evaluationId.length === 0) {
@@ -88,6 +89,8 @@ export function assertProfileEvent(event) {
       || event.mixObservation.sourceIdentity.version !== event.providerVersion)) {
     throw coded('PROFILE_EVENT_INVALID', 'mix source identity does not match the event provider');
   }
+  if (event.coverage !== undefined) projectReferenceCoverage(event.coverage);
+  if (event.sourceIdentity && (event.sourceIdentity.id !== event.providerId || event.sourceIdentity.version !== event.providerVersion)) throw coded('PROFILE_EVENT_INVALID', 'source identity conflict');
   if (event.studyRun !== undefined) validateStudyRun(event.studyRun);
   return event;
 }
@@ -98,7 +101,7 @@ function originOf(event) {
 
 function shouldAggregate(event) {
   return Boolean(event.mixObservation
-    && referenceQuality(event.mixObservation.sourceIdentity).quality === 'heuristic-reference');
+    && (event.providerVersion === '1.0.0' ? referenceQuality(event.mixObservation.sourceIdentity).quality === 'heuristic-reference' : referenceAssessmentEligibility(event).metricEligible));
 }
 
 function bumpEv(current, add) {
@@ -246,11 +249,15 @@ function finishProjection(projection) {
 // unsupported status and absent source proof are independent, overlapping facts.
 function applyCoverage(projection, event) {
   const coverage = projection.coverage;
+  const eligibility = referenceAssessmentEligibility(event);
   coverage.evaluatedDecisions += 1;
+  if (event.forced) coverage.forcedDecisions += 1;
   if (!event.forced && event.status === 'unsupported') coverage.unsupportedDecisions += 1;
-  if (shouldAggregate(event)) {
-    if (!event.forced && event.status === 'supported') coverage.supportedDecisions += 1;
-  } else coverage.unverifiedDecisions += 1;
+  if (eligibility.referenceAvailable) coverage.referenceAvailableDecisions += 1;
+  if (shouldAggregate(event) && !event.forced && event.status === 'supported') { coverage.supportedDecisions += 1; coverage.exactComparableDecisions += 1; }
+  if (!eligibility.verified) coverage.unverifiedDecisions += 1;
+  if (eligibility.referenceAvailable && (event.coverage?.referenceMatch === 'projected' || event.coverage?.choiceMatch === 'projected')) coverage.projectedReferenceDecisions += 1;
+  if (eligibility.referenceAvailable && event.coverage?.choiceMatch === 'unavailable') coverage.comparisonUnavailableDecisions += 1;
 }
 
 function segmentKey(event) {
@@ -291,6 +298,9 @@ export function projectActive(profile) {
   profile.coverageGaps = clone(active.coverageGaps);
   profile.coverage = clone((profile.game.coverage.evaluatedDecisions ? profile.game : profile.practice).coverage);
   profile.calibration = clone(active.calibration);
+  if (segment) for (const origin of ['game','practice']) {
+    for (const field of ['overall','skills','leaks','candidates','coverageGaps','calibration']) profile[origin][field] = clone(segment[origin][field]);
+  }
   return profile;
 }
 
@@ -309,21 +319,16 @@ function applyEventMutable(next, event, finalize = true) {
   next.processed[event.evaluationId] = event.payloadSha256;
   const origin = originOf(event);
   applyCoverage(next[origin], event);
+  const eligibility = referenceAssessmentEligibility(event);
+  if (eligibility.verified) applyToSegment(next, event, origin, finalize);
   if (shouldAggregate(event)) {
-    applyToSegment(next, event, origin, finalize);
-    applyToOverall(next[origin].overall, event);
-    applyToSkill(next[origin].skills, event);
-    if (event.mixObservation && event.status === 'supported' && !event.forced) {
-      applyMixObservation(next[origin], event.mixObservation);
-    }
+
+
     if (event.studyRun && event.status === 'supported' && !event.forced) {
       next[origin].studyRuns[event.studyRun.id] = validateStudyRun(event.studyRun);
     }
-    if (origin === 'game') {
-      next.hasGameEvents = true;
-      next.activeSegmentId = segmentKey(event);
-    } else if (!next.hasGameEvents) next.activeSegmentId = segmentKey(event);
-  } else {
+
+  } else if (!eligibility.verified) {
     next[origin].unverifiedEvidence = next[origin].unverifiedEvidence ?? [];
     next[origin].unverifiedEvidence.push({
       evaluationId: event.evaluationId,
@@ -332,6 +337,12 @@ function applyEventMutable(next, event, finalize = true) {
       providerVersion: event.providerVersion,
       reason: event.providerId === 'fake-solver' ? 'SYNTHETIC_SOURCE' : 'SOURCE_IDENTITY_UNVERIFIED',
     });
+  }
+  if (eligibility.referenceAvailable) {
+    if (origin === 'game') {
+      next.hasGameEvents = true;
+      next.activeSegmentId = segmentKey(event);
+    } else if (!next.hasGameEvents) next.activeSegmentId = segmentKey(event);
   }
   next.updatedAt = event.appliedAt ?? next.updatedAt;
   return finalize ? projectActive(next) : next;

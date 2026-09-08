@@ -13,7 +13,7 @@ test('REQ-002: export qualifies canonical reference without rewriting source byt
   assert.equal(projected.payloadSha256, undefined);
 });
 
-import { CANONICAL_REFERENCE_SOURCE, referenceClaimAllowed } from '../shared/reference.js';
+import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE, referenceClaimAllowed } from '../shared/reference.js';
 import { formatTrainingCard } from '../server/public/training-format.js';
 import './helpers/owned-fixtures.mjs';
 

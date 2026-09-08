@@ -1,3 +1,4 @@
+import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { classifyOpportunity, isPreflopSpotKey } from './opportunities.js';
@@ -83,7 +84,7 @@ function collectable(evaluation) {
   if (!classifyOpportunity(evaluation).learnable || evaluation.forced !== false
     || evaluation.status !== 'supported' || evaluation.grade !== 'off-policy') return false;
   const quality = referenceQuality(evaluation.source);
-  return quality.quality === 'heuristic-reference';
+  return quality.quality === 'heuristic-reference' && referenceAssessmentEligibility(evaluation).metricEligible;
 }
 
 function signatureOf(evaluation) {
@@ -297,6 +298,8 @@ function validateGraph(data, now) {
       if (!itemIds.has(id)) invalid('bank evidence digest has no matching identity');
       assertDigest(digest);
     }
+    if (source.id === 'local-preflop-baseline' && source.version === '2.0.0'
+      && !referenceAssessmentEligibility(item.evaluation).metricEligible) invalid('v2 bank evidence is not an exact comparison');
     const quality = referenceQuality(source).quality;
     const derived = { referenceQuality: quality, availability: quality === 'heuristic-reference' ? 'available' : 'unverified' };
     for (const [key, value] of Object.entries(derived)) {
