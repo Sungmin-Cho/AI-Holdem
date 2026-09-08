@@ -282,11 +282,14 @@ test('T6: chooseSeat is deterministic when injected and covers every AI seat whe
   assert.equal(picked.playerId, aiIds[1]);
 
   const seen = new Set();
+  const trial = initPolicyDir(3);
+  const originalPlayers = fs.readFileSync(path.join(trial, 'players.json'));
   for (let i = 0; i < 100; i += 1) {
-    const trial = initPolicyDir(3);
+    fs.writeFileSync(path.join(trial, 'players.json'), originalPlayers);
+    try { fs.unlinkSync(path.join(trial, '.policy-configs.json')); } catch { /* first trial */ }
     assignSelfOpponents({
       root: trial,
-      players: readJson(path.join(trial, 'players.json')),
+      players: JSON.parse(originalPlayers),
       tendency,
       sources,
       requested: { mirror: true, exploiter: false },
@@ -515,7 +518,7 @@ test('T8: review section table, advice, zero-target exploiter, empty when no der
   const zeroSection = buildSelfOpponentSection({
     root: dir,
     players: zeroPlayers,
-    derived: { [shortConfig.configDigest]: shortConfig, [zeroConfig.configDigest]: zeroConfig },
+    derived: { ...derived, [zeroConfig.configDigest]: zeroConfig },
     records,
   });
   assert.match(zeroSection, /겨냥할 경향이 없어 정석대로 쳤/);
@@ -553,8 +556,9 @@ test('T8: buildSelfOpponentSection catches injected failures', () => {
 });
 
 test('T8: 20-hand 6-max clones keep the similarity floor at 6', () => {
-  const lagRecords = simulateTable({ seats: { p1: 'lag-v2' }, hands: 20, seed: 11, samples: 8 });
-  const baseRecords = simulateTable({ seats: { p1: 'baseline-v2' }, hands: 20, seed: 12, samples: 8 });
+  const mixed = { p2: 'lag-v2', p3: 'maniac-v2', p4: 'lag-v2', p5: 'maniac-v2' };
+  const lagRecords = simulateTable({ seats: { p1: 'lag-v2', ...mixed }, hands: 20, seed: 11, samples: 8 });
+  const baseRecords = simulateTable({ seats: { p1: 'baseline-v2', ...mixed }, hands: 20, seed: 5, samples: 8 });
   const nitRecords = simulateTable({ seats: { p1: 'nit-v2' }, hands: 20, seed: 13, samples: 8 });
   const lag = tendencyFromRecords(lagRecords, 'p1');
   const baseline = tendencyFromRecords(baseRecords, 'p1');

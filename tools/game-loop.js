@@ -27,6 +27,15 @@ import { normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS } from '../shared
 import { canStartReplacement } from './coach-control.js';
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, readDerivedPolicyConfigs, stampPlayerPolicies } from './policy-player.js';
+import {
+  assertSelfOpponentsConsistent,
+  assignSelfOpponents,
+  buildSelfOpponentSection,
+  buildSelfOpponentsRaw,
+  requireStoreTendency,
+  selfOpponentNotices,
+  writeSelfOpponentsMarker,
+} from './self-opponents.js';
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
@@ -256,6 +265,8 @@ export function parseGameLoopArgs(argv) {
     blinds: undefined,
     force: false,
     resume: false,
+    mirrorSelf: false,
+    exploitSelf: false,
     playerRuntime: undefined,
     practiceFocusFile: undefined,
     mode: undefined,
@@ -267,6 +278,8 @@ export function parseGameLoopArgs(argv) {
   const bools = new Map([
     ['--force', 'force'],
     ['--resume', 'resume'],
+    ['--mirror-self', 'mirrorSelf'],
+    ['--exploit-self', 'exploitSelf'],
   ]);
   const values = new Map([
     ['--game-dir', 'gameDir'],
@@ -331,9 +344,36 @@ export function parseGameLoopArgs(argv) {
   return parsed;
 }
 
+export function validateSelfOpponentArgs(args) {
+  if (!args?.mirrorSelf && !args?.exploitSelf) return args;
+  if (args.resume) {
+    throw codedError('USAGE', '--mirror-self/--exploit-self는 새 게임에서만 사용할 수 있습니다.');
+  }
+  if (args.opponentRuntime !== 'policy') {
+    throw codedError(
+      'USAGE',
+      '--mirror-self/--exploit-self는 policy 상대 런타임이 필요합니다 — tournament·legacy 설정에서는 --opponent-runtime policy를 명시하세요.',
+    );
+  }
+  if (args.storeDir === undefined) {
+    throw codedError('USAGE', '--mirror-self/--exploit-self는 --store-dir가 필요합니다.');
+  }
+  const needed = (args.mirrorSelf ? 1 : 0) + (args.exploitSelf ? 1 : 0);
+  if (!Number.isInteger(args.ai) || args.ai < needed) {
+    throw codedError('USAGE', '--ai는 요청한 자기 상대 좌석 수 이상이어야 합니다.');
+  }
+  return args;
+}
+
 export function exitCodeFor(error) {
   if (!error) return 0;
-  if (error.code === 'USAGE' || error.code === 'repair_failed' || error.code === 'REPAIR_FAILED') return 2;
+  if (
+    error.code === 'USAGE'
+    || error.code === 'repair_failed'
+    || error.code === 'REPAIR_FAILED'
+    || error.code === 'TENDENCY_INSUFFICIENT'
+    || error.code === 'TENDENCY_SOURCE_UNREADABLE'
+  ) return 2;
   if (error.code === 'REVIEW_FAILED') return 3;
   if (error.code === 'NO_PLAYER_RUNTIME') return 4;
   return 5;
@@ -481,6 +521,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
   const storeDir = opts.storeDir ?? null;
+  const selfOpponentRequest = opts.selfOpponents ?? null;
   // The store launcher owns the store loop lock. Legacy API callers may use a
   // separate profile store while keeping their game-dir ownership unchanged.
   const ownsStore = storeDir !== null && path.resolve(storeDir) === lockRoot;
@@ -4124,7 +4165,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return out;
   };
 
-  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw }) => [
+  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw, selfOpponentsRaw }) => [
     '역할: 종합자',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
@@ -4146,6 +4187,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'exploit policies (post-game only, heuristic, no EV):',
     exploitRaw ?? '[]',
     '',
+    'selfOpponents:',
+    selfOpponentsRaw ?? 'null',
+    '',
+    "self-mirror 좌석이 있으면 '각 AI의 실제 아키타입 공개' 절에서 어느 좌석이 사용자 복제였는지와 사용자가 그것을 알아챘을 만한 단서를 평가하라. 수치는 selfOpponents의 것만 인용하고 유사도를 실력으로 해석하지 마라.",
+    '',
     '마크다운 본문에 다음 네 heading을 모두 그대로 포함하라:',
     '## 내 성향 통계',
     '## 결정적 핸드 2~3개 리플레이',
@@ -4164,7 +4210,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ? `${user.net > 0 ? '+' : ''}${user.net}칩` : '확인 불가';
     const labels = { TAG: '신중한 공격형 (TAG)', LAG: '폭넓은 공격형 (LAG)', Nit: '매우 신중한 유형 (Nit)',
       CallingStation: '콜을 선호하는 유형 (CallingStation)', Maniac: '매우 공격적인 유형 (Maniac)',
-      Trickster: '변화를 섞는 유형 (Trickster)' };
+      Trickster: '변화를 섞는 유형 (Trickster)',
+      SelfMirror: '나를 닮은 복제 상대 (self-mirror)',
+      SelfExploiter: '나를 공략하는 상대 (self-exploiter)' };
     const names = sanitizePlayersForReview(players, {
       gameOver: true, derived: readDerivedPolicyConfigs(root),
     })
@@ -4195,9 +4243,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const appendTrainingPendingToReview = (text) => {
-    if (!trainingOn) return text;
+    let section = '';
+    try {
+      const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
+      section = buildSelfOpponentSection({
+        root,
+        players,
+        derived: readDerivedPolicyConfigs(root),
+      });
+    } catch (error) {
+      section = `자기 상대 비교를 만들지 못했습니다 (${error.code ?? 'ERROR'})`;
+    }
+    const withSection = section ? `${text}\n\n${section}` : text;
+    if (!trainingOn) return withSection;
     const pending = trainingAggregate(root).pending ?? 0;
-    return `${text}\n\n미완료 학습 평가: ${pending}건`;
+    return `${withSection}\n\n미완료 학습 평가: ${pending}건`;
   };
 
   const generateReview = async ({ completed, statsRaw }) => {
@@ -4258,6 +4318,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           gameOver: true, derived: readDerivedPolicyConfigs(root),
         })),
         exploitRaw: JSON.stringify(exploitReveal(players)),
+        selfOpponentsRaw: (() => {
+          try {
+            return JSON.stringify(buildSelfOpponentsRaw({
+              root,
+              players,
+              derived: readDerivedPolicyConfigs(root),
+            }));
+          } catch {
+            return 'null';
+          }
+        })(),
       });
       const synthesized = await runReviewStage({
         stage: 'synthesizer',
@@ -5063,7 +5134,54 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (sweepFailed > 0) log('profile-sweep-consume-failed', { failed: sweepFailed });
 
       const policyMode = opponentRuntimeOf() === 'policy';
+      const requestedSelf = selfOpponentRequest?.requested;
+      let assignedSelf = null;
+      if (requestedSelf?.mirror || requestedSelf?.exploiter) {
+        const sourceHands = selfOpponentRequest.tendency?.hands ?? 0;
+        const sourceSessions = Array.isArray(selfOpponentRequest.sources)
+          ? selfOpponentRequest.sources.length
+          : 0;
+        writeLoopState({
+          selfOpponents: {
+            requested: { mirror: !!requestedSelf.mirror, exploiter: !!requestedSelf.exploiter },
+            sourceHands,
+            sourceSessions,
+          },
+        });
+        assignedSelf = assignSelfOpponents({
+          root,
+          players: readJsonOptional(playersPath, 'PLAYERS') ?? [],
+          tendency: selfOpponentRequest.tendency,
+          sources: selfOpponentRequest.sources ?? [],
+          requested: requestedSelf,
+          chooseSeat: selfOpponentRequest.chooseSeat,
+        });
+      }
       if (policyMode) stampPlayerPolicies(root, { onNotice: appendNotice });
+      if (assignedSelf) {
+        const sourceHands = selfOpponentRequest.tendency?.hands ?? 0;
+        const sourceSessions = Array.isArray(selfOpponentRequest.sources)
+          ? selfOpponentRequest.sources.length
+          : 0;
+        writeLoopState({
+          selfOpponents: {
+            requested: { mirror: !!requestedSelf.mirror, exploiter: !!requestedSelf.exploiter },
+            assigned: {
+              mirror: !!assignedSelf.assigned.mirror,
+              exploiter: !!assignedSelf.assigned.exploiter,
+            },
+            sourceHands,
+            sourceSessions,
+          },
+        });
+        for (const notice of selfOpponentNotices({
+          assigned: assignedSelf.assigned,
+          sources: selfOpponentRequest.sources ?? [],
+          targets: assignedSelf.targets ?? [],
+        })) {
+          appendNotice(notice);
+        }
+      }
       const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
@@ -5126,7 +5244,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
         ? existingState.port
         : requestedPort;
-      if (policyMode) stampPlayerPolicies(root, { onNotice: appendNotice });
+      if (policyMode) {
+        const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
+        assertSelfOpponentsConsistent({ root, players });
+        stampPlayerPolicies(root, { onNotice: appendNotice });
+      }
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
       return writeLoopState({ port });
     }
@@ -5165,6 +5287,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
     if (policyMode) {
+      const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
+      assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
     } else {
       if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
@@ -5572,6 +5696,7 @@ async function main() {
   let signalStopError = null;
   try {
     const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
+    validateSelfOpponentArgs(args);
     if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
     const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
       need,
@@ -5584,6 +5709,10 @@ async function main() {
       // main runs only in the store CLI child. Restrict newly created paths
       // before the catalog/loop lock; never chmod existing caller directories.
       process.umask(0o077);
+      let selfOpponentSource = null;
+      if (!args.resume && (args.mirrorSelf || args.exploitSelf)) {
+        selfOpponentSource = requireStoreTendency(args.storeDir);
+      }
       ensureSessionStore(args.storeDir);
       let storeLockHandle;
       try {
@@ -5620,6 +5749,13 @@ async function main() {
           const initialized = await initializePreparedSession(prepared.stagingDir, args);
           preparedInitialization = initialized;
           resolveSessionReference(prepared.stagingDir, { createNew: true });
+          if (args.mirrorSelf || args.exploitSelf) {
+            writeSelfOpponentsMarker(prepared.stagingDir, {
+              requested: { mirror: !!args.mirrorSelf, exploiter: !!args.exploitSelf },
+              sourceHands: selfOpponentSource?.tendency?.hands ?? 0,
+              sourceSessions: selfOpponentSource?.sources?.length ?? 0,
+            });
+          }
           const committed = commitSession(args.storeDir, prepared);
           loop = createGameLoop({
             gameDir: committed.sessionDir,
@@ -5632,6 +5768,13 @@ async function main() {
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
               solverAdapterId: args.solverAdapterId,
+              selfOpponents: (args.mirrorSelf || args.exploitSelf)
+                ? {
+                  requested: { mirror: !!args.mirrorSelf, exploiter: !!args.exploitSelf },
+                  tendency: selfOpponentSource?.tendency,
+                  sources: selfOpponentSource?.sources ?? [],
+                }
+                : null,
             },
           });
         }

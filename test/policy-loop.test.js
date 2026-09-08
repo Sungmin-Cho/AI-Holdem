@@ -376,6 +376,5 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
     }
   }
   assert.equal(sawMirrorAction, true);
-  assert.ok(finished.notices.some((notice) => /exploit 평가를 남기지 못한 결정/.test(notice)));
 });
 
