@@ -5,7 +5,6 @@
 // 그 둘은 그대로다. 관측된 5배 변동을 덮도록 안전망만 넓힌다.
 import { test as nodeTest } from 'node:test';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
-import { submitLearningAction } from './helpers/learning-action-driver.js';
 import { loadPreflopDataset } from '../tools/preflop-dataset.js';
 import { validateExplanation } from '../training/explain.js';
 import assert from 'node:assert/strict';
@@ -222,23 +221,35 @@ function makeExplain({ delayMs = 0, gate = null, calls, text = VALID_EXPLAIN, te
 async function playUntil(loop, gameDir, { until, timeoutMs = 20_000 } = {}) {
   const running = startRun(loop);
   const sent = new Set();
-  const driver = (async () => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      let loopState = null;
-      try { loopState = readJson(path.join(gameDir, 'loop-state.json')); } catch { /* */ }
-      if (loopState && until(loopState, gameDir)) return;
-      if (loopState?.halt) return;
-      try {
-        const { lock, snapshot } = await waitForUserSnapshot(gameDir, 250);
-        const legal = snapshot.view.legal;
-        await submitLearningAction(legal, sent, (action) => postUserAction(lock, action));
-      } catch { /* AI turn or terminal */ }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    throw new Error(`training action driver deadline: ${JSON.stringify({ sent: [...sent] })}`);
-  })();
-  await driver;
+  const deadline = Date.now() + timeoutMs;
+  let reached = false;
+  while (Date.now() < deadline) {
+    let loopState = null;
+    try { loopState = readJson(path.join(gameDir, 'loop-state.json')); } catch { /* */ }
+    if (loopState && until(loopState, gameDir)) { reached = true; break; }
+    if (loopState?.halt) { reached = true; break; }
+    try {
+      const { lock, snapshot } = await waitForUserSnapshot(gameDir, 250);
+      const legal = snapshot.view.legal;
+      if (!sent.has(legal.decisionId)) {
+        // Check/fold only: after issue #143, minRaiseTo is not always a legal
+        // v2 size. Marking a rejected raise as sent leaves the user to act
+        // forever, and the old driver then returned without throwing.
+        const action = {
+          decisionId: legal.decisionId,
+          action: legal.canCheck ? 'check' : 'fold',
+        };
+        const result = await postUserAction(lock, action);
+        if (result?.status === 409 || result?.code === 'ACTION_REJECTED') continue;
+        sent.add(legal.decisionId);
+      }
+    } catch { /* AI turn or terminal */ }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!reached) {
+    await loop.requestStop().catch(() => {});
+    throw new Error('training action driver deadline');
+  }
   return { running, sent };
 }
 
