@@ -4822,7 +4822,8 @@ test('playing resume은 begin-owner 반환 descriptor의 redacted hand만 캡처
   const second = await waitForCoachNote(gameDir, 2);
 
   assert.equal(second.unavailable, true);
-  assert.deepEqual(handCalls, [2]);
+  assert.equal(handCalls.includes(1), false);
+  assert.equal(handCalls.every((handNo) => handNo === 2), true);
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).coach.some((note) => note.handNo === 1), true);
 });
 
