@@ -1,3 +1,5 @@
+import { availableParallelism } from 'node:os';
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { snapshotDecision } from '../../engine/decision.js';
 import { applyAction, createGame, legalFor, startHand } from '../../engine/hand.js';
 import { decide } from '../../tools/policy-player.js';
@@ -29,6 +31,7 @@ export function simulateTable({
   aiCount = 5,
   blinds0 = [50, 100],
   startStack = 10_000,
+  samples,
 } = {}) {
   const rng = mulberry32(seed >>> 0);
   let state = createGame({
@@ -56,6 +59,7 @@ export function simulateTable({
         blinds: state.config.blinds0,
         legal,
       });
+      if (samples != null) snapshot.strengthSamples = samples;
       const { policy, extraDerived } = asPolicy(seats[toAct]);
       const decided = decide({
         snapshot,
@@ -77,4 +81,59 @@ export function simulateTable({
     if (state.lastHand) records.push(structuredClone(state.lastHand));
   }
   return records;
+}
+
+export function simulateTables(jobs, { concurrency } = {}) {
+  const list = [...jobs];
+  if (list.length === 0) return Promise.resolve([]);
+  const limit = Math.max(1, Math.min(
+    list.length,
+    Number.isInteger(concurrency) && concurrency > 0
+      ? concurrency
+      : Math.min(8, availableParallelism()),
+  ));
+  return new Promise((resolve, reject) => {
+    const results = new Array(list.length);
+    let next = 0;
+    let active = 0;
+    let failed = false;
+    const spawn = () => {
+      if (failed) return;
+      if (next >= list.length && active === 0) {
+        resolve(results);
+        return;
+      }
+      while (!failed && active < limit && next < list.length) {
+        const index = next;
+        next += 1;
+        active += 1;
+        const worker = new Worker(new URL(import.meta.url), {
+          workerData: { role: 'simulateTable', opts: list[index] },
+        });
+        worker.on('message', (records) => {
+          results[index] = records;
+        });
+        worker.on('error', (error) => {
+          failed = true;
+          reject(error);
+        });
+        worker.on('exit', (code) => {
+          active -= 1;
+          if (failed) return;
+          if (code !== 0) {
+            failed = true;
+            reject(new Error(`simulateTable worker exited ${code}`));
+            return;
+          }
+          spawn();
+        });
+      }
+    };
+    spawn();
+  });
+}
+
+if (!isMainThread && parentPort && workerData?.role === 'simulateTable') {
+  parentPort.postMessage(simulateTable(workerData.opts));
+  parentPort.close();
 }

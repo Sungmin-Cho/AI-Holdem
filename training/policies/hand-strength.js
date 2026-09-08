@@ -67,12 +67,13 @@ function sampleRunout(remaining, seed, sample, count) {
   return selected;
 }
 
-export function estimatePublicStrength(snapshot, { samples = 64 } = {}) {
+export function estimatePublicStrength(snapshot, { samples } = {}) {
   const { holeCards, board } = publicCards(snapshot);
   if (snapshot?.street === 'preflop' || board.length === 0) {
     return preflopStrength(holeCards, snapshot?.position);
   }
-  const sampleCount = Math.min(128, Math.max(16, Math.trunc(samples) || 64));
+  const raw = samples ?? snapshot?.strengthSamples ?? 64;
+  const sampleCount = Math.min(128, Math.max(16, Math.trunc(raw) || 64));
   const known = new Set([...holeCards, ...board]);
   const remaining = DECK.filter((card) => !known.has(card));
   const missingBoard = 5 - board.length;

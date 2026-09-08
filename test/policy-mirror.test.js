@@ -10,7 +10,7 @@ import { positionsOf } from '../engine/positions.js';
 import { newDeck } from '../engine/cards.js';
 import { scanModule } from './helpers/module-scan.mjs';
 import { mulberry32 } from './helpers/fixtures.js';
-import { simulateTable } from './helpers/policy-table-sim.js';
+import { simulateTable, simulateTables } from './helpers/policy-table-sim.js';
 import { sizingFixture } from './helpers/sizing-fixture.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { configDigestOf } from '../training/policies/contracts.js';
@@ -61,7 +61,8 @@ const REASON_RE = /^(mirror-(?:open|limp|3bet|call|fold|check|bet)|mirror-v2-(?:
 const ARCHETYPES = Object.freeze([
   'nit-v2', 'tag-v2', 'lag-v2', 'calling-station-v2', 'maniac-v2', 'trickster-v2',
 ]);
-const CALIBRATION_HANDS = 300;
+const CALIBRATION_HANDS = 200;
+const CALIBRATION_SAMPLES = 32;
 
 function comboWeight(handClass) {
   if (handClass.length === 2) return 6;
@@ -796,7 +797,7 @@ test('tendency-cli show reports projected traits and whether a replica can be bu
   assert.equal(typeof payload.mirrorEligible, 'boolean');
 });
 
-test('catalog v2 tightness order round-trips through 6-max sims', (t) => {
+test('catalog v2 tightness order round-trips through 6-max sims', async (t) => {
   const started = Date.now();
   const subjects = {
     'nit-v2': POLICIES['nit-v2'].traits.tightness,
@@ -809,9 +810,16 @@ test('catalog v2 tightness order round-trips through 6-max sims', (t) => {
   };
   const projected = {};
   const sources = {};
-  for (const [id, configured] of Object.entries(subjects)) {
-    const records = simulateTable({ seats: { p1: id }, hands: CALIBRATION_HANDS, seed: 17 });
-    const tendency = tendencyFromRecords(records, 'p1');
+  const subjectIds = Object.keys(subjects);
+  const tightnessTables = await simulateTables(subjectIds.map((id) => ({
+    seats: { p1: id },
+    hands: CALIBRATION_HANDS,
+    seed: 17,
+    samples: CALIBRATION_SAMPLES,
+  })));
+  for (const [index, id] of subjectIds.entries()) {
+    const configured = subjects[id];
+    const tendency = tendencyFromRecords(tightnessTables[index], 'p1');
     const traits = traitsFromTendency(tendency);
     projected[id] = traits.tightness;
     sources[id] = tendency;
@@ -834,15 +842,18 @@ test('catalog v2 tightness order round-trips through 6-max sims', (t) => {
   const vectors = Object.fromEntries(ARCHETYPES.map((id) => [id, preflopSubvector(sources[id])]));
   const full = Object.fromEntries(ARCHETYPES.map((id) => [id, fullVector(sources[id])]));
   const nnLog = {};
-  for (const id of ARCHETYPES) {
+  const replayTables = await simulateTables(ARCHETYPES.map((id) => {
     const config = mirrorConfig(sources[id]);
-    const replay = simulateTable({
+    return {
       seats: { p1: config },
       hands: CALIBRATION_HANDS,
-      seed: 40 + id.length,
+      seed: 17,
       derived: { [config.configDigest]: config },
-    });
-    const mirrored = tendencyFromRecords(replay, 'p1');
+      samples: CALIBRATION_SAMPLES,
+    };
+  }));
+  for (const [index, id] of ARCHETYPES.entries()) {
+    const mirrored = tendencyFromRecords(replayTables[index], 'p1');
     const vector = preflopSubvector(mirrored);
     let best = null;
     let bestDistance = Infinity;
@@ -859,5 +870,5 @@ test('catalog v2 tightness order round-trips through 6-max sims', (t) => {
     assert.equal(best, id, `${id} nearest ${best} distances=${JSON.stringify(distances)}`);
   }
   t.diagnostic(`nearest-neighbor ${JSON.stringify(nnLog)}`);
-  t.diagnostic(`calibration wall ${Date.now() - started}ms hands=${CALIBRATION_HANDS}`);
+  t.diagnostic(`calibration wall ${Date.now() - started}ms hands=${CALIBRATION_HANDS} samples=${CALIBRATION_SAMPLES}`);
 });

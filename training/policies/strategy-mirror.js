@@ -226,7 +226,10 @@ function observedVs(snapshot, tendency, strength, sized, counter) {
 export function distributionMirror(snapshot, legal, config) {
   const tendency = config?.params?.tendency;
   const traits = traitsFor(config);
-  const strength = estimatePublicStrength(snapshot);
+  const strength = estimatePublicStrength(
+    snapshot,
+    snapshot.strengthSamples != null ? { samples: snapshot.strengthSamples } : undefined,
+  );
   const sized = mirrorRaiseTo(snapshot, legal, tendency);
 
   if (unopenedPreflop(snapshot)) {

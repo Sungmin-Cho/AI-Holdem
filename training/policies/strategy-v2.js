@@ -90,7 +90,10 @@ export function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) 
 
 export function distributionV2(snapshot, legal, config) {
   const traits = traitsOf(config);
-  const strength = estimatePublicStrength(snapshot);
+  const strength = estimatePublicStrength(
+    snapshot,
+    snapshot.strengthSamples != null ? { samples: snapshot.strengthSamples } : undefined,
+  );
   const sized = raiseToFor(snapshot, legal);
   let proposed;
   if (unopenedPreflop(snapshot)) {
