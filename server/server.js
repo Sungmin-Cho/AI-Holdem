@@ -1131,13 +1131,20 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
           replayReport.stored.push(handNo);
           continue;
         }
+        if (isReplayMarker(existing) && isReplayMarker(materialized)) {
+          replayReport.markers.push({ handNo, reason: materialized.reason });
+          continue;
+        }
         if (!isReplayMarker(existing) && !isReplayMarker(materialized)
           && canonicalHandReplayJson(existing) !== canonicalHandReplayJson(materialized)) {
           replayReport.conflicts.push(handNo);
         }
       }
       trimHandReplays(next.handReplays);
-      if (delta.length) payload.handReplays = delta;
+      replayReport.stored = replayReport.stored.filter((n) => next.handReplays[n] && !isReplayMarker(next.handReplays[n]));
+      replayReport.markers = replayReport.markers.filter((entry) => next.handReplays[entry.handNo]);
+      const kept = delta.filter((entry) => next.handReplays[entry.handNo]);
+      if (kept.length) payload.handReplays = kept;
     }
 
     // Stamped for turn-latency measurement; kept off the payload so clients see no change.

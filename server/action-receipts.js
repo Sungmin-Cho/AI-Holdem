@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { normalizeActionRequest, sameActionIdentity, validateActionAck } from '../publish-contract.js';
+import {
+  normalizeActionRequest, sameActionIdentity, validateActionAck,
+  NOTE_MAX_CHARS, NOTE_MAX_BYTES,
+} from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
 
 const RECEIPT_FILE = 'ui-action-receipt.json';
@@ -159,8 +162,8 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
     }
     if (Object.hasOwn(row, 'note')
       && (typeof row.note !== 'string'
-        || [...row.note].length > 160
-        || Buffer.byteLength(JSON.stringify(row.note), 'utf8') > 512)) throw fail();
+        || [...row.note].length > NOTE_MAX_CHARS
+        || Buffer.byteLength(JSON.stringify(row.note), 'utf8') > NOTE_MAX_BYTES)) throw fail();
     let normalized;
     try { normalized = normalizeActionRequest(row); checkCapacity(row); } catch { throw fail(); }
     if (Object.entries(normalized).some(([key, value]) => row[key] !== value)) throw fail();
