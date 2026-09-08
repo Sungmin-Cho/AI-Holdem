@@ -10,7 +10,7 @@ export const ACTION_RECEIPT_MAX_BYTES = 4096;
 export const ACTION_REJECTION_LIMIT = 16;
 const PHASES = new Set(['accepted', 'delivered', 'consumed', 'rejected']);
 const TERMINAL = new Set(['consumed', 'rejected']);
-const KEYS = new Set(['schemaVersion', 'gameEpoch', 'decisionId', 'requestId', 'action', 'amount', 'digest', 'phase', 'publishId', 'reason', 'rejections', 'retiredAtPublishId']);
+const KEYS = new Set(['schemaVersion', 'gameEpoch', 'decisionId', 'requestId', 'action', 'amount', 'digest', 'phase', 'publishId', 'reason', 'rejections', 'retiredAtPublishId', 'note']);
 const REJECTION_KEYS = new Set(['requestId', 'digest', 'reason', 'publishId']);
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -157,9 +157,14 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       ids.add(entry.requestId);
       previousPublication = entry.publishId;
     }
+    if (Object.hasOwn(row, 'note')
+      && (typeof row.note !== 'string'
+        || [...row.note].length > 160
+        || Buffer.byteLength(JSON.stringify(row.note), 'utf8') > 512)) throw fail();
     let normalized;
     try { normalized = normalizeActionRequest(row); checkCapacity(row); } catch { throw fail(); }
     if (Object.entries(normalized).some(([key, value]) => row[key] !== value)) throw fail();
+    if (Object.hasOwn(row, 'note') && row.note !== normalized.note) throw fail();
     const rejection = row.rejections.find((entry) => entry.requestId === row.requestId);
     const retired = Object.hasOwn(row, 'retiredAtPublishId');
     if (TERMINAL.has(row.phase)) {
@@ -269,8 +274,13 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       if (!row || TERMINAL.has(row.phase) || row.decisionId !== currentDecision
         || (expectedDecision && row.decisionId !== expectedDecision)) return null;
       const delivered = row.phase === 'accepted' ? commit({ ...row, phase: 'delivered' }) : row;
-      const { gameEpoch: epoch, decisionId, requestId, action, amount, digest } = delivered;
-      return { gameEpoch: epoch, decisionId, requestId, action, ...(amount === null ? {} : { amount }), digest };
+      const { gameEpoch: epoch, decisionId, requestId, action, amount, digest, note } = delivered;
+      return {
+        gameEpoch: epoch, decisionId, requestId, action,
+        ...(amount === null ? {} : { amount }),
+        digest,
+        ...(note ? { note } : {}),
+      };
     },
     preflightAcknowledge(ack, publishId) { terminalRow(read(), ack, publishId); },
     shouldClearHistoricalAck(authoritativeView, lastActionAck, publishId) {

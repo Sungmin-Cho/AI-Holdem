@@ -949,7 +949,8 @@ test('receipt rows allow a bounded note and reject over-limit notes as corrupt',
 
 test('512-byte note plus max requestId still admits at least 8 rejections before CAPACITY', async (t) => {
   const f = await fixture(t);
-  const note = 'n'.repeat(510);
+  const note = `${'😀'.repeat(127)}xy`;
+  assert.ok([...note].length <= 160);
   assert.equal(Buffer.byteLength(JSON.stringify(note)), 512);
   let rejectedAt = null;
   for (let index = 0; index < 16; index += 1) {

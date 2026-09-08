@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  canonicalHandReplayJson,
   collectPrivateLiterals,
   gameEpochOf,
   validateActionAck,
@@ -12,17 +13,20 @@ import {
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   legacyTrainingPayloadSha256,
+  materializeHandReplay,
   payloadSha256,
   publicProofId,
   projectTrainingAnnotation,
   projectTrainingSummary,
   textLeaksPrivate,
+  validateHandReplayTrigger,
   validatePrivateEngineState,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
 import { createActionReceiptStore, createRelayRootOwner, writeRelayJsonAtomic } from './action-receipts.js';
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
+const HAND_REPLAY_KEEP = 200;
 // 서버가 읽기 전용 보안 술어로만 여는 세션 파일들. 엔진은 원자적 rename으로 쓰므로
 // 부분 읽기는 없고, 이 상한을 넘는 파일은 읽기 실패(=fail-closed)로 다룬다.
 const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
@@ -75,6 +79,7 @@ function emptyState() {
     review: undefined,
     publishId: undefined,
     history: [],
+    handReplays: Object.create(null),
   };
 }
 
@@ -135,6 +140,73 @@ function coded(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function replayMarker(handNo, reason) {
+  return { handNo, unavailable: true, reason };
+}
+
+function isReplayMarker(entry) {
+  return Boolean(entry && entry.unavailable === true);
+}
+
+function handReplayMap(value) {
+  const out = Object.create(null);
+  if (!value) return out;
+  const entries = Array.isArray(value) ? value.map((entry) => [entry?.handNo, entry]) : Object.entries(value);
+  for (const [key, entry] of entries) {
+    const handNo = entry?.handNo ?? Number(key);
+    if (Number.isInteger(handNo) && handNo >= 1) out[handNo] = entry;
+  }
+  return out;
+}
+
+function handReplayList(map) {
+  return Object.values(map ?? {}).sort((a, b) => a.handNo - b.handNo);
+}
+
+function trimHandReplays(map) {
+  const keys = Object.keys(map).map(Number).sort((a, b) => a - b);
+  while (keys.length > HAND_REPLAY_KEEP) delete map[keys.shift()];
+  return map;
+}
+
+function selectHandRecord(root, engineState, handNo) {
+  if (engineState?.lastHand?.handNo === handNo) {
+    return { record: engineState.lastHand, source: 'lastHand' };
+  }
+  const name = `hand-${String(handNo).padStart(4, '0')}.json`;
+  try {
+    return { record: readSecurityJson(root, ['hands', name]), source: 'archive' };
+  } catch (error) {
+    return { record: null, source: error?.code === 'ENOENT' ? null : 'archive' };
+  }
+}
+
+function recomputeHandReplay(root, engineState, handNo) {
+  if (!engineState) return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+  return materializeHandReplay({ handNo, engineState, ...selectHandRecord(root, engineState, handNo) });
+}
+
+function restoreHandReplays(raw, root, engineState) {
+  const out = Object.create(null);
+  for (const [key, entry] of Object.entries(handReplayMap(raw))) {
+    const handNo = entry?.handNo ?? Number(key);
+    if (!Number.isInteger(handNo) || handNo < 1) continue;
+    if (isReplayMarker(entry)) {
+      out[handNo] = { handNo, unavailable: true, reason: entry.reason };
+      continue;
+    }
+    const recomputed = recomputeHandReplay(root, engineState, handNo);
+    if (isReplayMarker(recomputed)) {
+      process.stderr.write(`ui-snapshot restore dropped hand replay ${handNo}\n`);
+      continue;
+    }
+    out[handNo] = canonicalHandReplayJson(entry) === canonicalHandReplayJson(recomputed)
+      ? entry
+      : recomputed;
+  }
+  return trimHandReplays(out);
 }
 
 function readSecurityJson(root, segments) {
@@ -387,6 +459,11 @@ function restoreHistory(rawHistory, context) {
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
     }
+    if ('handReplays' in payload) {
+      const rows = handReplayList(restoreHandReplays(payload.handReplays, context.root, context.engineState));
+      if (rows.length) payload.handReplays = rows;
+      else delete payload.handReplays;
+    }
     restored.push({ revision: Number(entry.revision) || 0, at: entry.at, payload });
   }
   return { history: restored, dropped };
@@ -475,8 +552,18 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
         ?? Object.create(null);
       restoredAnnotations[projected.evaluationId][projected.field] = projected;
     }
+    let engineState = null;
+    try {
+      engineState = validatePrivateEngineState(
+        readSecurityJson(gameDir, ['state.json']),
+        { expectedSessionToken },
+      );
+    } catch {
+      engineState = null;
+    }
     const replay = restoreHistory(raw.history, {
       machineById, literals, gate, annotations: restoredAnnotations, legacyProvenance,
+      root: gameDir, engineState,
     });
     if (droppedAnnotations || replay.dropped) {
       process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
@@ -492,6 +579,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       publishId: raw.publishId,
       history: replay.history,
       lastActionAck: raw.lastActionAck,
+      handReplays: restoreHandReplays(raw.handReplays, gameDir, engineState),
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -677,6 +765,7 @@ function publicSnapshot(state) {
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
   };
   if (state.review !== undefined) snap.review = state.review;
+  snap.handReplays = handReplayList(state.handReplays);
   return snap;
 }
 
@@ -701,6 +790,7 @@ function persistUiStateAtomic(owner, state) {
     publishId: state.publishId,
     history: state.history,
     lastActionAck: state.lastActionAck,
+    handReplays: state.handReplays ?? {},
   };
   if (state.review !== undefined) file.review = state.review;
   writeRelayJsonAtomic(owner, 'ui-snapshot.json', file);
@@ -902,6 +992,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       sendJson(res, 400, { ok: false, code: 'BAD_PUBLISH_ID' });
       return;
     }
+    if (body.handReplay !== undefined) {
+      try { validateHandReplayTrigger(body.handReplay); }
+      catch { sendJson(res, 400, { ok: false, code: 'BAD_HAND_REPLAY' }); return; }
+    }
     // publishIds only ever move forward, so anything at or below the last one is a
     // resend of something already applied — not just the immediately previous id.
     // Answering it as already-done is what makes a publisher's retry safe.
@@ -948,6 +1042,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       review: state.review,
       history: state.history,
       lastActionAck: boundAck ? { ...boundAck, publishId: boundAckPublishId } : state.lastActionAck,
+      handReplays: { ...(state.handReplays ?? {}) },
     };
 
     const payload = {};
@@ -1001,6 +1096,50 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       payload.trainingAnnotations = merged.projectedIncoming;
     }
 
+    let replayReport = null;
+    if (body.handReplay !== undefined) {
+      const handNos = validateHandReplayTrigger(body.handReplay);
+      replayReport = { stored: [], markers: [], conflicts: [] };
+      const delta = [];
+      let engineState = null;
+      let stateOk = true;
+      if (handNos.length) {
+        try {
+          engineState = validatePrivateEngineState(
+            readSecurityJson(root, ['state.json']),
+            { expectedSessionToken: token },
+          );
+        } catch {
+          stateOk = false;
+        }
+      }
+      for (const handNo of handNos) {
+        const materialized = stateOk
+          ? recomputeHandReplay(root, engineState, handNo)
+          : replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+        const existing = next.handReplays[handNo];
+        if (!existing) {
+          next.handReplays[handNo] = materialized;
+          delta.push(materialized);
+          if (isReplayMarker(materialized)) replayReport.markers.push({ handNo, reason: materialized.reason });
+          else replayReport.stored.push(handNo);
+          continue;
+        }
+        if (isReplayMarker(existing) && !isReplayMarker(materialized)) {
+          next.handReplays[handNo] = materialized;
+          delta.push(materialized);
+          replayReport.stored.push(handNo);
+          continue;
+        }
+        if (!isReplayMarker(existing) && !isReplayMarker(materialized)
+          && canonicalHandReplayJson(existing) !== canonicalHandReplayJson(materialized)) {
+          replayReport.conflicts.push(handNo);
+        }
+      }
+      trimHandReplays(next.handReplays);
+      if (delta.length) payload.handReplays = delta;
+    }
+
     // Stamped for turn-latency measurement; kept off the payload so clients see no change.
     next.history = [...next.history, { revision: next.revision, at: new Date().toISOString(), payload }];
 
@@ -1026,7 +1165,12 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
 
     Object.assign(state, next);
     fanoutCommitted();
-    sendJson(res, 200, { ok: true, revision: state.revision, applied: true });
+    sendJson(res, 200, {
+      ok: true,
+      revision: state.revision,
+      applied: true,
+      ...(replayReport ? { handReplay: replayReport } : {}),
+    });
   };
 
   const handleAction = (body, res) => {
