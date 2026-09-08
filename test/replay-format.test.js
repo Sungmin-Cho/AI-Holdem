@@ -226,6 +226,17 @@ test('formatReplay coach 3-line status: ready, pending, unavailable', () => {
   const down = rowsOf(unavailable).find((row) => row.decisionId === 'd-1-preflop-0');
   assert.equal(down.coach.status, 'unavailable');
   assert.equal(down.coach.message, '코치 피드백 불가');
+
+  const arrivedEmpty = formatReplay(replay, {
+    names: NAMES,
+    coachNote: { handNo: 1, text: '요약만 있습니다.', decisions: [] },
+  });
+  const emptyUser = rowsOf(arrivedEmpty).find((row) => row.decisionId === 'd-1-preflop-0');
+  assert.equal(emptyUser.coach, null);
+  assert.equal(arrivedEmpty.coachSummary, '요약만 있습니다.');
+
+  const arrivedPartial = rowsOf(ready).find((row) => row.decisionId === 'd-1-flop-0');
+  assert.equal(arrivedPartial.coach, null);
 });
 
 test('formatReplay matches a study card by decisionId', () => {
@@ -300,6 +311,16 @@ test('UI markup, overlay, note, and handReplays wiring are present', () => {
   assert.match(css, /\.replay-/);
   const replayCss = css.split('.replay-').slice(1).join('.replay-');
   assert.match(replayCss, /var\(--tw\)/);
+  assert.match(css, /\.replay-card\s*\{[^}]*--ch:\s*calc\(var\(--tw\)/s);
+  assert.match(css, /\.replay-card \.mini-card\s*\{[^}]*font-size:\s*var\(--ch\)/s);
+  assert.match(css, /\.replay-card \.mini-suit\s*\{[^}]*var\(--c[hw]\)/s);
+
+  const decisionReset = app.slice(
+    app.indexOf('legal.decisionId !== lastDecisionId'),
+    app.indexOf('legal.decisionId !== lastDecisionId') + 500,
+  );
+  assert.match(decisionReset, /intent-note/);
+  assert.match(decisionReset, /\.value\s*=\s*['"]{2}/);
 });
 
 test('H10 documents replay reveal, notes, and server recompute', () => {
@@ -336,6 +357,7 @@ test('H10 documents replay reveal, notes, and server recompute', () => {
   assert.match(agents, /--replay-reveal all\|showdown/);
   assert.match(agents, /복기 뷰/);
   assert.match(agents, /의도 메모/);
+  assert.match(agents, /export는 쇼다운 카드만/);
 });
 
 test('action-controller capture includes string note and excludes non-string', async () => {
