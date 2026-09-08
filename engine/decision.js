@@ -1,9 +1,7 @@
 import { positionsOf } from './positions.js';
+import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
 
-export const PRIOR_ACTION_KEYS = [
-  'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
-];
+export const PRIOR_ACTION_KEYS = SAFE_ACTION_KEYS;
 
 function throwSnapshot(message) {
   const error = new Error(message);

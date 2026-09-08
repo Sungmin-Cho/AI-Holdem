@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 
 export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS } from './shared/free-text.js';
+export {
+  replayRecord, canonicalHandReplayJson, HAND_REPLAY_SCHEMA_VERSION, SAFE_ACTION_KEYS,
+} from './shared/hand-replay.js';
 
 export const MAX_PUBLISH_BODY_BYTES = 65_536;
 export const MAX_PUBLISH_ID = Number.MAX_SAFE_INTEGER;

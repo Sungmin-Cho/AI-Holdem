@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { applyAction, blindsForLevel, createGame, forceDefault, legalFor, startHand } from '../engine/hand.js';
 import { snapshotDecision, PRIOR_ACTION_KEYS } from '../engine/decision.js';
 import { positionsOf } from '../engine/positions.js';
-import { redactRecord, SAFE_ACTION_KEYS } from '../engine/views.js';
+import { redactRecord } from '../engine/views.js';
+import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
 import { newDeck } from '../engine/cards.js';
 import { setup3 } from './helpers/fixtures.js';
 
@@ -278,7 +279,7 @@ test('priorActions의 currentBet이 hand.actions[i].currentBet과 정확히 일�
   }
 });
 
-test('PRIOR_ACTION_KEYS는 engine/views.js safeAction의 키 목록과 정확히 일치한다', () => {
+test('PRIOR_ACTION_KEYS는 shared/hand-replay.js SAFE_ACTION_KEYS와 정확히 일치한다', () => {
   assert.deepEqual([...PRIOR_ACTION_KEYS].sort(), [...SAFE_ACTION_KEYS].sort());
   for (const key of ['reason', 'note', 'forced', 'positions']) {
     assert.equal(SAFE_ACTION_KEYS.includes(key), false, key);
@@ -316,5 +317,28 @@ test('cli hand --redacted 에 user decisions만 있고 상대 홀카드가 없�
       const revealed = (redacted.showdown?.reveals ?? []).some((r) => r.cards?.includes(card));
       if (!revealed) assert.equal(json.includes(card), false, `홀카드 유출: ${card}`);
     }
+  }
+});
+
+test('cli hand --replay 의 decisions는 user만이다', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-replay-dec-'));
+  const run = (args) => JSON.parse(execFileSync(process.execPath, [CLI, ...args, '--game-dir', dir], {
+    encoding: 'utf8',
+    timeout: 20000,
+  }).trim());
+  run(['init', '--ai', '2', '--replay-reveal', 'all']);
+  run(['new-hand', '--deck', stackedDeck(['Ah', 'Kd', '7h', '2c', 'Qs', 'Jd'])]);
+  for (let i = 0; i < 40; i += 1) {
+    const legal = run(['legal']);
+    if (legal.handOver) break;
+    const action = legal.toAct === 'user' ? (legal.canCheck ? 'check' : 'fold') : (legal.canCheck ? 'check' : 'call');
+    run(['apply', legal.toAct, action]);
+  }
+  const replay = run(['hand', '1', '--replay']);
+  assert.ok(Array.isArray(replay.decisions));
+  assert.ok(replay.decisions.length >= 1);
+  for (const snap of replay.decisions) {
+    assert.equal('actorId' in snap, false);
+    assert.ok(snap.decisionId.startsWith('d-'));
   }
 });
