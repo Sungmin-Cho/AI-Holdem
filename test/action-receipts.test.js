@@ -933,3 +933,40 @@ test('S4 R4: a current acknowledgement still repairs the UI-before-receipt crash
   assert.equal(f.snapshot().revision, 4);
   assert.equal(f.receipt().rejections.length, 3);
 });
+
+test('receipt rows allow a bounded note and reject over-limit notes as corrupt', async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.action(request('note-1', { note: 'short memo' }))).status, 200);
+  assert.equal(f.receipt().note, 'short memo');
+  assert.equal((await f.wait()).body.note, 'short memo');
+
+  const valid = f.receipt();
+  for (const note of ['한'.repeat(161), 'n'.repeat(511)]) {
+    fs.writeFileSync(path.join(f.dir, 'ui-action-receipt.json'), JSON.stringify({ ...valid, note }));
+    await assert.rejects(f.restart(), (error) => error.code === 'ACTION_RECEIPT_CORRUPT');
+  }
+});
+
+test('512-byte note plus max requestId still admits at least 8 rejections before CAPACITY', async (t) => {
+  const f = await fixture(t);
+  const note = `${'😀'.repeat(127)}xy`;
+  assert.ok([...note].length <= 160);
+  assert.equal(Buffer.byteLength(JSON.stringify(note)), 512);
+  let rejectedAt = null;
+  for (let index = 0; index < 16; index += 1) {
+    const response = await f.action(request(`long-${index}-`.padEnd(128, 'x'), { note }));
+    if (response.status === 409) {
+      assert.equal(response.body.code, 'ACTION_RECEIPT_CAPACITY');
+      rejectedAt = index;
+      break;
+    }
+    assert.equal(response.status, 200);
+    assert.equal(f.receipt().note, note);
+    await f.wait();
+    assert.equal(
+      (await f.publish(index + 2, { actionAck: ack(f.receipt(), 'rejected', 'R'.repeat(64)) })).status,
+      200,
+    );
+  }
+  assert.ok(rejectedAt >= 8, `ACTION_RECEIPT_CAPACITY must not land before 8 (hit at ${rejectedAt})`);
+});

@@ -185,6 +185,50 @@ test('턴 계약: step→publish 시퀀스만으로 두 핸드가 끝까지 돌�
   }
 });
 
+test('턴 계약: 두 핸드 닫는 게시 뒤에만 그 핸드 복기가 생긴다', async () => {
+  const dir = tmpGame();
+  const init = await node([CLI, 'init', '--ai', '2', '--stack', '400', '--game-dir', dir]);
+  const token = init.sessionToken;
+  const started = await startServer({ gameDir: dir, port: 0, token });
+
+  try {
+    let handsPlayed = 0;
+    while (handsPlayed < 2) {
+      let out = await turn(dir, ['--new-hand'], ['--wait', '--wait-ms', '400']);
+      handsPlayed += 1;
+      for (let guard = 0; guard < 200 && !out.handOver; guard += 1) {
+        const { next, stateVersion } = out;
+        if (next.kind === 'user') {
+          let action = out.userAction;
+          if (!action || action.timeout) {
+            const press = pressUser(started.port, token, next.decisionId);
+            const waited = await publishOnly(dir, ['--wait-only', '--wait-ms', '10000']);
+            await press;
+            action = waited.userAction;
+          }
+          const args = ['user', action.action];
+          if (action.amount != null) args.push(String(action.amount));
+          out = await turn(dir, [...args, '--expect-version', String(stateVersion)], ['--wait', '--wait-ms', '400']);
+        } else {
+          const decided = decideFromMessage(next.message);
+          out = await turn(
+            dir,
+            [next.toAct, decided.action, '--expect-version', String(stateVersion)],
+            ['--wait', '--wait-ms', '400'],
+          );
+        }
+      }
+      assert.equal(out.handOver, true, `핸드 ${handsPlayed}가 닫히지 않았다`);
+      const snap = await (await fetch(`http://127.0.0.1:${started.port}/api/snapshot?token=${token}`)).json();
+      assert.equal(snap.handReplays.length, handsPlayed, `닫는 게시 뒤 복기 수 ${handsPlayed}`);
+      assert.equal(snap.handReplays[handsPlayed - 1].handNo, handsPlayed);
+      if (out.gameOver) break;
+    }
+  } finally {
+    await started.close();
+  }
+});
+
 test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..sample', async () => {
   const { createCoachControl } = await import('../tools/coach-control.js');
   const dir = tmpGame();

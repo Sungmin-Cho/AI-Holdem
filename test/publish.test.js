@@ -19,7 +19,13 @@ async function startServer(opts) {
   registerOwnedServer(relay.server, 'publish');
   return relay;
 }
-import { gameEpochOf, normalizeActionRequest } from '../publish-contract.js';
+import {
+  gameEpochOf,
+  normalizeActionRequest,
+  NOTE_MAX_CHARS,
+  sameActionIdentity,
+} from '../publish-contract.js';
+import { handRecordFixture } from './helpers/security-fixtures.js';
 import { skipOnWin32 } from './helpers/platform.js';
 
 const TOOL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tools/publish.js');
@@ -1137,4 +1143,146 @@ test('publish: a response without applied is treated as applied true', async () 
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+async function capturePublishPost(dir, envelope, extraArgs = [], response = {}) {
+  let posted = null;
+  const server = createHttpServer((req, res) => {
+    if (req.method !== 'POST' || !String(req.url).startsWith('/api/publish')) {
+      res.writeHead(404).end();
+      return;
+    }
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      posted = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        revision: 1,
+        applied: true,
+        handReplay: response.handReplay ?? { stored: posted.handReplay?.handNos ?? [], markers: [], conflicts: [] },
+      }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  writeLockJson(dir, server.address().port, 'tok');
+  try {
+    const out = await run(dir, ['--from', turnFile(dir, envelope), ...extraArgs]);
+    return { posted, out };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test('validateHandReplayTrigger: 정수 중복 제거, 빈 배열 허용, 17개 초과 거부', async () => {
+  const { HAND_REPLAY_TRIGGER_MAX, validateHandReplayTrigger } = await import('../publish-contract.js');
+  assert.equal(HAND_REPLAY_TRIGGER_MAX, 16);
+  assert.deepEqual(validateHandReplayTrigger({ handNos: [] }), []);
+  assert.deepEqual(validateHandReplayTrigger({ handNos: [2, 1, 2, 3] }), [2, 1, 3]);
+  assert.deepEqual(
+    validateHandReplayTrigger({ handNos: [4], holes: { p1: ['As', 'Ah'] }, reason: 'ignored' }),
+    [4],
+  );
+  assert.throws(
+    () => validateHandReplayTrigger({ handNos: Array.from({ length: 17 }, (_, i) => i + 1) }),
+    (error) => error.code === 'BAD_HAND_REPLAY',
+  );
+  for (const bad of [null, { handNos: [0] }, { handNos: [1.5] }, { handNos: ['1'] }, { handNos: 1 }]) {
+    assert.throws(() => validateHandReplayTrigger(bad), (error) => error.code === 'BAD_HAND_REPLAY');
+  }
+});
+
+test('materializeHandReplay: 표식과 아카이브 결박', async () => {
+  const { materializeHandReplay, replayRecord } = await import('../publish-contract.js');
+  const record = handRecordFixture(1, { positions: { user: 'BTN', p1: 'SB' } });
+  assert.deepEqual(
+    materializeHandReplay({ handNo: 1, engineState: null, record, source: 'lastHand' }),
+    { handNo: 1, unavailable: true, reason: 'REPLAY_UNAVAILABLE' },
+  );
+  assert.deepEqual(
+    materializeHandReplay({ handNo: 9, engineState: { config: {} }, record: null, source: null }),
+    { handNo: 9, unavailable: true, reason: 'REPLAY_NOT_COMPLETED' },
+  );
+  assert.equal(
+    materializeHandReplay({
+      handNo: 3,
+      engineState: { config: {} },
+      record: handRecordFixture(4),
+      source: 'archive',
+    }).reason,
+    'REPLAY_UNAVAILABLE',
+  );
+  assert.equal(
+    materializeHandReplay({
+      handNo: 1,
+      engineState: { config: {} },
+      record: { handNo: 1 },
+      source: 'archive',
+    }).reason,
+    'REPLAY_UNAVAILABLE',
+  );
+  const projected = materializeHandReplay({
+    handNo: 1,
+    engineState: { config: {} },
+    record,
+    source: 'lastHand',
+  });
+  assert.deepEqual(projected, replayRecord(record, { reveal: 'showdown' }));
+});
+
+test('buildBody: handReplay 트리거를 view-only와 무관하게 옮기고 빈 배열은 생략한다', async () => {
+  const dir = tmpDir();
+  const envelope = sampleTurn({
+    handReplay: { handNos: [4, 4], holes: { p1: ['As', 'Ah'] }, reason: 'ignored' },
+  });
+  const captured = await capturePublishPost(dir, envelope, ['--view-only'], {
+    handReplay: { stored: [4], markers: [], conflicts: [] },
+  });
+  assert.equal(captured.posted.viewOnly, true);
+  assert.equal('events' in captured.posted, false);
+  assert.deepEqual(captured.posted.handReplay, { handNos: [4] });
+  assert.equal('holes' in captured.posted.handReplay, false);
+  assert.deepEqual(captured.out.handReplay, { stored: [4], markers: [], conflicts: [] });
+
+  const emptyDir = tmpDir();
+  const empty = await capturePublishPost(emptyDir, sampleTurn({ handReplay: { handNos: [] } }));
+  assert.equal('handReplay' in empty.posted, false);
+});
+
+test('publish: 형태 불량 handReplay 트리거는 BAD_HAND_REPLAY로 거부한다', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const failed = await runFailing(dir, ['--from', turnFile(dir, sampleTurn({
+      handReplay: { handNos: Array.from({ length: 17 }, (_, i) => i + 1) },
+    }))]);
+    assert.equal(failed.json.code, 'BAD_HAND_REPLAY');
+    assert.equal((await snapshotOf(started.port)).revision, 0);
+  } finally {
+    await started.close();
+  }
+});
+
+test('normalizeActionRequest: note 정규화, 비문자열 거부, digest·identity 불변', () => {
+  const base = { decisionId: 'd-1-preflop-2', requestId: 'req-note', action: 'call' };
+  const without = normalizeActionRequest(base);
+  const folded = normalizeActionRequest({ ...base, note: '  hello\n\nworld  ' });
+  assert.equal(folded.note, 'hello world');
+  const cut = normalizeActionRequest({ ...base, note: '한'.repeat(NOTE_MAX_CHARS + 40) });
+  assert.equal([...cut.note].length, NOTE_MAX_CHARS);
+  const emoji = normalizeActionRequest({ ...base, note: '😀'.repeat(NOTE_MAX_CHARS) });
+  assert.ok(Buffer.byteLength(JSON.stringify(emoji.note)) <= 512);
+  assert.throws(
+    () => normalizeActionRequest({ ...base, note: 12 }),
+    (error) => error.code === 'BAD_ACTION',
+  );
+  const withNote = normalizeActionRequest({ ...base, note: 'intent' });
+  assert.equal(without.digest, withNote.digest);
+  assert.equal(without.digest, folded.digest);
+  assert.equal(sameActionIdentity(
+    { gameEpoch: gameEpochOf('tok'), ...without },
+    { gameEpoch: gameEpochOf('tok'), ...withNote },
+  ), true);
+  assert.equal('note' in without, false);
 });

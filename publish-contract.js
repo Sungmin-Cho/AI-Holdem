@@ -1,10 +1,16 @@
 import { projectReferenceCoverage } from './shared/reference-coverage.js';
 import { createHash } from 'node:crypto';
+import {
+  NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
+} from './shared/free-text.js';
+import { replayRecord } from './shared/hand-replay.js';
 
-export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS } from './shared/free-text.js';
+export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS, NOTE_MAX_BYTES } from './shared/free-text.js';
 export {
   replayRecord, canonicalHandReplayJson, HAND_REPLAY_SCHEMA_VERSION, SAFE_ACTION_KEYS,
 } from './shared/hand-replay.js';
+
+export const HAND_REPLAY_TRIGGER_MAX = 16;
 
 export const MAX_PUBLISH_BODY_BYTES = 65_536;
 export const MAX_PUBLISH_ID = Number.MAX_SAFE_INTEGER;
@@ -85,7 +91,53 @@ export function normalizeActionRequest(body) {
   if (typeof requestId !== 'string' || !ACTION_REQUEST_ID_RE.test(requestId)) {
     throw actionContractError('BAD_ACTION');
   }
-  return { decisionId: body.decisionId, requestId, action: body.action, amount, digest };
+  const out = { decisionId: body.decisionId, requestId, action: body.action, amount, digest };
+  if (body.note !== undefined) {
+    if (typeof body.note !== 'string') throw actionContractError('BAD_ACTION');
+    const note = normalizeFreeText(body.note, { maxChars: NOTE_MAX_CHARS, maxBytes: NOTE_MAX_BYTES });
+    if (note) out.note = note;
+  }
+  return out;
+}
+
+export function validateHandReplayTrigger(body) {
+  if (!plainObject(body) || !Array.isArray(body.handNos)) {
+    throw actionContractError('BAD_HAND_REPLAY');
+  }
+  const seen = new Set();
+  const handNos = [];
+  for (const value of body.handNos) {
+    if (!Number.isInteger(value) || value < 1) throw actionContractError('BAD_HAND_REPLAY');
+    if (seen.has(value)) continue;
+    seen.add(value);
+    handNos.push(value);
+  }
+  if (handNos.length > HAND_REPLAY_TRIGGER_MAX) throw actionContractError('BAD_HAND_REPLAY');
+  return handNos;
+}
+
+function replayMarker(handNo, reason) {
+  return { handNo, unavailable: true, reason };
+}
+
+export function materializeHandReplay({ handNo, engineState, record, source }) {
+  if (engineState == null) return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+  if (record == null) {
+    return replayMarker(handNo, source === 'archive' ? 'REPLAY_UNAVAILABLE' : 'REPLAY_NOT_COMPLETED');
+  }
+  if (source === 'archive') {
+    try {
+      if (record.handNo !== handNo) return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+      validatePrivateRecord(record, `hand-${handNo}`);
+    } catch {
+      return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+    }
+  }
+  try {
+    return replayRecord(record, { reveal: engineState.config?.replayReveal ?? 'showdown' });
+  } catch {
+    return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
+  }
 }
 
 export function sameActionIdentity(left, right) {
@@ -318,8 +370,9 @@ export function validatePrivateEngineState(engineState, { expectedSessionToken =
  * (`collectDenyLiterals`)가 같은 규칙을 쓰기 위한 정본이다.
  * `records`는 핸드 레코드의 배열이며, 각 레코드에서 showdown으로 공개된 카드는 뺀다.
  */
-export function collectPrivateLiterals({ players, engineState, records } = {}) {
-  const values = [];
+export function collectPrivateLiteralsDetailed({ players, engineState, records } = {}) {
+  const cards = new Set();
+  const others = new Set();
   const list = Array.isArray(players) ? players : players?.players;
   if (!Array.isArray(list) || !Array.isArray(records)) {
     throw coded('PRIVATE_LITERAL_INVALID', 'private literal inputs are incomplete');
@@ -337,15 +390,15 @@ export function collectPrivateLiterals({ players, engineState, records } = {}) {
     if (player.playerId === 'user') continue;
     for (const field of PRIVATE_PLAYER_FIELDS) {
       const value = player?.[field];
-      if (value !== undefined && value !== null) values.push(privateScalar(value, `player.${field}`));
+      if (value !== undefined && value !== null) others.add(privateScalar(value, `player.${field}`));
     }
     if (player.policy !== undefined && player.policy !== null) {
       if (!plainObject(player.policy)) {
         throw coded('PRIVATE_LITERAL_INVALID', 'player.policy is not an object');
       }
-      values.push(JSON.stringify(player.policy));
+      others.add(JSON.stringify(player.policy));
       for (const [field, value] of Object.entries(player.policy)) {
-        values.push(privateScalar(value, `player.policy.${field}`));
+        others.add(privateScalar(value, `player.policy.${field}`));
       }
     }
   }
@@ -354,21 +407,34 @@ export function collectPrivateLiterals({ players, engineState, records } = {}) {
     throw coded('PRIVATE_LITERAL_INVALID', 'players do not bind every engine seat');
   }
   if (engineState.policySeed !== undefined && engineState.policySeed !== null) {
-    values.push(privateScalar(engineState.policySeed, 'state.policySeed'));
+    others.add(privateScalar(engineState.policySeed, 'state.policySeed'));
   }
-  for (const [recordIndex, candidate] of records.entries()) {
-    const record = validatePrivateRecord(candidate, `records.${recordIndex}`, {
-      allowedPlayerIds: new Set(engineState.seats.map((seat) => seat.playerId)),
-    });
-    const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
-    for (const [playerId, cards] of Object.entries(record.holes)) {
-      if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
-      for (const card of cards) {
-        values.push(String(card));
+  const replayAll = engineState.config?.replayReveal === 'all';
+  if (replayAll) {
+    const holes = engineState.hand?.holes;
+    if (holes) {
+      for (const [playerId, holeCards] of Object.entries(holes)) {
+        if (playerId === 'user') continue;
+        for (const card of holeCards) cards.add(String(card));
       }
     }
   }
-  return [...new Set(values)];
+  const allowedPlayerIds = new Set(engineState.seats.map((seat) => seat.playerId));
+  for (const [recordIndex, candidate] of records.entries()) {
+    const record = validatePrivateRecord(candidate, `records.${recordIndex}`, { allowedPlayerIds });
+    if (replayAll) continue;
+    const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
+    for (const [playerId, holeCards] of Object.entries(record.holes)) {
+      if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
+      for (const card of holeCards) cards.add(String(card));
+    }
+  }
+  return { cards, others };
+}
+
+export function collectPrivateLiterals(args) {
+  const { cards, others } = collectPrivateLiteralsDetailed(args);
+  return [...new Set([...cards, ...others])];
 }
 
 /**
