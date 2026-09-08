@@ -1156,3 +1156,72 @@ test('--policy-meta와 --meta-file을 동시에 쓰면 AI apply가 둘 다 남�
   assert.equal(rec.policyId, 'tag-v2');
   assert.equal(rec.reasonCode, 'OPEN');
 });
+
+test('hand N --replay는 config.replayReveal만 따른다', () => {
+  const allDir = tmpGame();
+  initGame(allDir, ['--ai', '2', '--replay-reveal', 'all']);
+  playUntilOver(allDir, { preferFold: true });
+  const all = assertOk(cli(allDir, ['hand', '1', '--replay']));
+  assert.equal(all.reveal, 'all');
+  assert.ok(all.holes.p1 || all.holes.p2);
+
+  const showDir = tmpGame();
+  initGame(showDir, ['--ai', '2', '--replay-reveal', 'showdown']);
+  playUntilOver(showDir, { preferFold: true });
+  const shown = assertOk(cli(showDir, ['hand', '1', '--replay']));
+  assert.equal(shown.reveal, 'showdown');
+
+  const defDir = tmpGame();
+  initGame(defDir, ['--ai', '2']);
+  playUntilOver(defDir, { preferFold: true });
+  const def = assertOk(cli(defDir, ['hand', '1', '--replay']));
+  assert.equal(def.reveal, 'showdown');
+});
+
+test('--replay와 --redacted를 함께 쓰면 USAGE', () => {
+  const dir = tmpGame();
+  initGame(dir);
+  playUntilOver(dir, { preferFold: true });
+  const result = cli(dir, ['hand', '1', '--replay', '--redacted']);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, 'USAGE');
+});
+
+test('닫는 step에만 handReplay.handNos가 있고 중간 step·legal·열린 new-hand에는 없다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const started = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  assert.equal('handReplay' in started, false);
+  const legal = assertOk(cli(dir, ['legal']));
+  assert.equal('handReplay' in legal, false);
+  if (!started.handOver) {
+    const mid = assertOk(cli(dir, ['step', started.next.toAct, started.next.toAct === 'user' ? 'fold' : (legal.canCheck ? 'check' : 'call')]));
+    if (!mid.handOver) assert.equal('handReplay' in mid, false);
+  }
+  let last = started;
+  for (let i = 0; i < 40 && !last.handOver; i += 1) {
+    const next = assertOk(cli(dir, ['legal']));
+    last = assertOk(cli(dir, ['step', next.toAct, next.canCheck ? 'check' : 'fold']));
+  }
+  assert.equal(last.handOver, true);
+  assert.deepEqual(last.handReplay.handNos, [1]);
+});
+
+test('블라인드 올인으로 즉시 닫히는 --new-hand에도 handReplay가 있다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '1', '--stack', '25', '--blinds', '25/50']);
+  const started = assertOk(cli(dir, ['step', '--new-hand']));
+  assert.equal(started.handOver, true);
+  assert.deepEqual(started.handReplay.handNos, [1]);
+});
+
+test('archivePending envelope에도 handReplay가 있다', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const handsPath = path.join(dir, 'hands');
+  if (fs.existsSync(handsPath)) fs.rmSync(handsPath, { recursive: true, force: true });
+  fs.writeFileSync(handsPath, 'not-a-directory');
+  const { last } = playUntilOver(dir, { preferFold: true });
+  assert.equal(last.archivePending, true);
+  assert.deepEqual(last.handReplay.handNos, [1]);
+});
