@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { acquireOwnedLock, releaseOwnedLock } from './state.js';
+import { acquireOwnedLock, releaseOwnedLock, commitTmp } from './state.js';
 
 // Permanent per-game session directories plus an atomic "current" selector at the
 // store root. A game never moves or is deleted when the next game is initialized:
@@ -135,7 +135,7 @@ export function commitSession(storeDir, prepared) {
     const temp = path.join(catalogDirOf(root), `.${CURRENT_FILE}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
     try {
       fs.writeFileSync(temp, payload, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      fs.renameSync(temp, selectorPath);
+      commitTmp(temp, selectorPath);
     } catch (error) {
       try { fs.unlinkSync(temp); } catch { /* absent or preserved original failure */ }
       throw error;

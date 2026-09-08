@@ -3064,22 +3064,26 @@ test('BAD_SNAPSHOT verifies the server, removes the corrupt snapshot, and republ
 test('LOCK_TIMEOUT retries the same publish once after the competing publisher releases', { timeout: 120_000 }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
-  const releaseTimer = setTimeout(() => held.release(), 20_500);
   t.after(async () => {
-    clearTimeout(releaseTimer);
     held.release();
     await held.done.catch(() => {});
   });
   const running = startRun(loop);
-
+  // Release only after the loop has actually timed out on the held lock. A
+  // wall-clock 20.5s hold misses LOCK_TIMEOUT when Windows bootstrap is slower
+  // than the hold.
+  await waitWhileRunning(
+    running,
+    () => readLoopLog(gameDir).some((entry) => entry.event === 'publish-recovery' && entry.code === 'LOCK_TIMEOUT'),
+    'LOCK_TIMEOUT recovery was not logged',
+    25_000,
+  );
+  held.release();
   await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'LOCK_TIMEOUT retry did not resume play', 25_000);
   await stopRun(loop, running);
 
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
   assert.equal(Number.isInteger(readJson(path.join(gameDir, 'ui-snapshot.json')).view.handNo), true);
-  assert.equal(readLoopLog(gameDir).some((entry) => (
-    entry.event === 'publish-recovery' && entry.code === 'LOCK_TIMEOUT'
-  )), true);
 });
 
 function throwPublishIdReused() {
@@ -3597,6 +3601,7 @@ test('user waitError rejects a foreign healthy listener before any step republis
 });
 
 test('AI 3 plus user runs the finalization cutoff through the real loop with chips preserved', { timeout: 25_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   const loop = createGameLoop({

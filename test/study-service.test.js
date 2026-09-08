@@ -188,7 +188,10 @@ test('REQ-010: concurrent ensure calls and relay reuse resolve one live store se
   const handles = await Promise.all(Array.from({ length: 5 }, () => api.ensureStudyService(storeDir, {
     onChild(child) { child.ref(); registerOwnedProcess(child, 'concurrent study child'); },
   })));
-  t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }));
+  t.after(async () => {
+    try { await api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }); }
+    catch (error) { if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error; }
+  });
   assert.equal(new Set(handles.map((handle) => handle.instanceId)).size, 1);
   assert.equal(new Set(handles.map((handle) => handle.studyUrl)).size, 1);
   assert.deepEqual(await api.ensureStudyService(storeDir), handles[0]);

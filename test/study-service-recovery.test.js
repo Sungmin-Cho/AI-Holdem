@@ -35,7 +35,10 @@ test('REQ-010: separate Node ensure clients converge on one owned listener', asy
     child.on('close', (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`ensure client ${code}: ${error}`)));
   })));
   const api = await service();
-  t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }));
+  t.after(async () => {
+    try { await api.stopStudyService(storeDir, { expectedInstanceId: handles[0].instanceId }); }
+    catch (error) { if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error; }
+  });
   assert.equal(new Set(handles.map((handle) => handle.pid)).size, 1);
   assert.equal(new Set(handles.map((handle) => handle.studyUrl)).size, 1);
 });

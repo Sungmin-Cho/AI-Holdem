@@ -417,12 +417,16 @@ test('readDerivedPolicyConfigs rejects a symlink at the digest file', (t) => {
   assert.throws(() => readDerivedPolicyConfigs(dir), { code: 'UNSAFE_PATH' });
 });
 
-test('writeDerivedPolicyConfigs is create-only 0600 and a second call is EXISTS', () => {
+test('writeDerivedPolicyConfigs is create-only 0600 and a second call is EXISTS', (t) => {
   const dir = tmp();
   const config = exploiterConfig();
   writeDerivedPolicyConfigs(dir, derivedMap(config));
   const file = path.join(dir, '.policy-configs.json');
-  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    t.diagnostic('win32 does not persist POSIX 0600; EXISTS create-only is the contract');
+  } else {
+    assert.equal(fs.lstatSync(file).mode & 0o777, 0o600);
+  }
   const body = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(body.schemaVersion, 1);
   assert.equal(typeof body.configs, 'object');

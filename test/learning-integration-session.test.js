@@ -251,7 +251,10 @@ test('S8 full: default 20-hand production session records support then study rem
           return readFirstFixtureRecord(nextFake.log, nextCli.child);
         }, nextCli, remaining);
       } catch (error) {
-        if (!String(error?.message ?? error).includes('ACTIVE_GAME')) throw error;
+        const text = String(error?.message ?? error);
+        // Windows may still hold current.json open (this test polls it) while
+        // the next CLI's commitSession rename runs; treat that like ACTIVE_GAME.
+        if (!text.includes('ACTIVE_GAME') && !text.includes('EPERM')) throw error;
       }
     }
     const nextStateFile = path.join(nextGameDir, 'state.json');
