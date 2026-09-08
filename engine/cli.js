@@ -10,12 +10,13 @@ import {
   loadState, readHand, readOwnedLock, withMutation, writeHandArchive,
 } from './state.js';
 import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
+import { replayRecord } from '../shared/hand-replay.js';
 import {
   META_FILE_MAX_BYTES, NOTE_MAX_BYTES, NOTE_MAX_CHARS,
   normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS,
 } from '../shared/free-text.js';
 
-const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
+const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand', 'replay']);
 const VALUE_FLAGS = new Set([
   'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
@@ -152,6 +153,7 @@ function mutate(gameDir, fn) {
   }
   const lastHand = result.state.lastHand;
   if (lastHand && lastHand.handNo !== result.beforeHandNo) {
+    envelope.handReplay = { handNos: [lastHand.handNo] };
     try {
       writeHandArchive(gameDir, lastHand);
     } catch {
@@ -378,10 +380,16 @@ function cmdStep(gameDir, flags, rest) {
 
 function cmdHand(gameDir, flags, rest) {
   if (rest[0] == null) usage('hand에는 핸드 번호가 필요합니다.');
+  if (flags.replay && flags.redacted) usage('--replay와 --redacted는 함께 쓸 수 없습니다.');
   const n = parseIntArg(rest[0], 'hand');
   const state = requireState(loadState(gameDir));
   let record = state.lastHand?.handNo === n ? state.lastHand : readHand(gameDir, n);
   if (!record) throwCoded('HAND_NOT_FOUND', `핸드 ${n}을 찾을 수 없습니다.`);
+  if (flags.replay) {
+    const reveal = state.config?.replayReveal ?? 'showdown';
+    succeed({ stateVersion: state.stateVersion, ...replayRecord(record, { reveal }) });
+    return;
+  }
   if (flags.redacted) record = redactRecord(record);
   succeed({ stateVersion: state.stateVersion, ...record });
 }

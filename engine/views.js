@@ -1,6 +1,9 @@
 import { blindsForLevel, legalFor } from './hand.js';
 import { seatedFromButton, positionsOf } from './positions.js';
 import { buildPots } from './sidepots.js';
+import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
+
+export { SAFE_ACTION_KEYS };
 
 function currentHandData(state) {
   if (state.hand) return state.hand;
@@ -158,11 +161,6 @@ export function turnSummary(state, playerId) {
   lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?}`);
   return lines.join('\n');
 }
-
-export const SAFE_ACTION_KEYS = [
-  'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
-];
 
 function safeAction(action) {
   const result = {};

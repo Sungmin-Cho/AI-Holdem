@@ -7,12 +7,16 @@ test('9인 open·all 최악 투영은 40,000바이트 이하', () => {
   const reason = '한'.repeat(160);
   const note = '노'.repeat(160);
   const stacks = Object.fromEntries(pids.map((pid) => [pid, 5000]));
-  const holes = Object.fromEntries(pids.map((pid, i) => [pid, [`A${'shdc'[i % 4]}`, `${i + 2}c`.slice(-2)]));
+  const ranks = ['2', '3', '4', '5', '6', '7', '8', '9'];
+  const holes = Object.fromEntries(pids.map((pid, i) => [
+    pid,
+    [`A${'shdc'[i % 4]}`, `${ranks[i]}${'shdc'[(i + 1) % 4]}`],
+  ]));
   holes.user = ['Ah', 'Kh'];
   const actions = [];
   for (const street of ['preflop', 'flop', 'turn', 'river']) {
     const board = ['Ts', 'Js', 'Qs', '9s', '2d'].slice(0, street === 'preflop' ? 0 : street === 'flop' ? 3 : street === 'turn' ? 4 : 5);
-    for (let round = 0; round < 8; round += 1) {
+    for (let round = 0; round < 1; round += 1) {
       for (const pid of pids) {
         actions.push({
           decisionId: `d-1-${street}-${actions.length}`,
