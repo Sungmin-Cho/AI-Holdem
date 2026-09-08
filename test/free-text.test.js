@@ -35,6 +35,7 @@ test('normalizeFreeText: NFC 정규화', () => {
 test('normalizeFreeText: C0/C1 제어문자와 연속 공백을 공백 하나로 접는다', () => {
   assert.equal(norm('a \t\n\r  b'), 'a b');
   assert.equal(norm('a\u0001\u001f\u0080\u009f b'), 'a b');
+  assert.equal(norm('a' + String.fromCharCode(127) + 'b'), 'a b');
   assert.equal(norm('\n\nhello\t\t'), 'hello');
 });
 
@@ -80,11 +81,19 @@ test('normalizeFreeText: 멱등', () => {
     '😀'.repeat(160),
     '한'.repeat(200),
     '"\\'.repeat(80),
+    `${'a'.repeat(159)} ${'b'.repeat(10)}`,
   ];
   for (const sample of samples) {
     const once = norm(sample);
     assert.equal(norm(once), once);
   }
+});
+
+test('normalizeFreeText: 코드포인트 절단이 공백 경계에 떨어져도 멱등', () => {
+  const raw = `${'a'.repeat(159)} ${'b'.repeat(10)}`;
+  const once = norm(raw);
+  assert.equal(once, 'a'.repeat(159));
+  assert.equal(norm(once), once);
 });
 
 test('free-text 상수와 publish-contract re-export', () => {

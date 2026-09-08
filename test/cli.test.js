@@ -993,12 +993,6 @@ const META_DROPS = [
   ['타입', 'META_TYPE', (dir, legal) => writeMeta(dir, 'type.json', {
     decisionId: legal.decisionId, reason: 1,
   })],
-  ['actor', 'META_ACTOR', (dir, legal) => writeMeta(dir, 'actor.json', legal.toAct === 'user'
-    ? { decisionId: legal.decisionId, reason: 'user-reason' }
-    : { decisionId: legal.decisionId, note: 'ai-note' })],
-  ['빈 값', 'META_EMPTY', (dir, legal) => writeMeta(dir, 'empty.json', legal.toAct === 'user'
-    ? { decisionId: legal.decisionId, note: '  \n\t  ' }
-    : { decisionId: legal.decisionId, reason: '  \n\t  ' })],
 ];
 
 for (const [label, code, makePath] of META_DROPS) {
@@ -1017,6 +1011,33 @@ for (const [label, code, makePath] of META_DROPS) {
     assert.equal('note' in rec, false);
   });
 }
+
+function assertMetaDropped(playerId, payload, code) {
+  const dir = startCliHand();
+  const legal = advanceToPid(dir, playerId);
+  const metaPath = writeMeta(dir, `${code}-${playerId}.json`, {
+    decisionId: legal.decisionId,
+    ...payload,
+  });
+  const env = assertOk(cli(dir, [
+    'apply', legal.toAct, legal.canCheck ? 'check' : 'call', '--meta-file', metaPath,
+  ]));
+  assert.equal(env.meta.dropped, code);
+  const rec = lastAction(dir);
+  assert.equal(rec.playerId, playerId);
+  assert.equal('reason' in rec, false);
+  assert.equal('note' in rec, false);
+}
+
+test('--meta-file drop actor은 reason+user와 note+AI 모두 META_ACTOR', () => {
+  assertMetaDropped('user', { reason: 'user-reason' }, 'META_ACTOR');
+  assertMetaDropped('p1', { note: 'ai-note' }, 'META_ACTOR');
+});
+
+test('--meta-file drop 빈 값은 note+user와 reason+AI 모두 META_EMPTY', () => {
+  assertMetaDropped('user', { note: '  \n\t  ' }, 'META_EMPTY');
+  assertMetaDropped('p1', { reason: '  \n\t  ' }, 'META_EMPTY');
+});
 
 test('stale .decision-meta.json은 --meta-file 없이 읽히지 않는다', () => {
   const dir = startCliHand();
@@ -1088,12 +1109,33 @@ test('--meta-file와 --force-default를 함께 쓰면 USAGE', () => {
   for (const args of [
     ['apply', legal.toAct, '--force-default', '--meta-file', metaPath],
     ['step', legal.toAct, '--force-default', '--meta-file', metaPath],
+    ['apply', legal.toAct, '--force-default', '--meta-file', ''],
+    ['step', legal.toAct, '--force-default', '--meta-file', ''],
   ]) {
     const result = cli(dir, args);
-    assert.equal(result.status, 2, args[0]);
+    assert.equal(result.status, 2, JSON.stringify(args));
     assert.equal(result.json.code, 'USAGE');
   }
   assert.equal(readState(dir).stateVersion, legal.stateVersion);
+});
+
+test('step --new-hand와 --meta-file을 함께 쓰면 USAGE', () => {
+  const dir = tmpGame();
+  initGame(dir, ['--ai', '2']);
+  const before = fs.existsSync(path.join(dir, 'state.json'))
+    ? readState(dir).stateVersion
+    : null;
+  const metaPath = writeMeta(dir, 'meta.json', { decisionId: 'd-1-preflop-0', note: 'x' });
+  for (const args of [
+    ['step', '--new-hand', '--meta-file', metaPath],
+    ['step', '--new-hand', '--meta-file', ''],
+  ]) {
+    const result = cli(dir, args);
+    assert.equal(result.status, 2, JSON.stringify(args));
+    assert.equal(result.json.code, 'USAGE');
+  }
+  assert.equal(readState(dir).stateVersion, before);
+  assert.equal(readState(dir).hand, null);
 });
 
 test('--policy-meta와 --meta-file을 동시에 쓰면 AI apply가 둘 다 남긴다', () => {

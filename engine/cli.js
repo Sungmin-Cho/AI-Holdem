@@ -326,7 +326,7 @@ function stepEnvelope(gameDir, state, events) {
 function cmdStep(gameDir, flags, rest) {
   const newHand = Boolean(flags['new-hand']);
   const playerId = rest[0];
-  if (newHand && (playerId != null || flags['force-default'])) {
+  if (newHand && (playerId != null || flags['force-default'] || flags['meta-file'] != null)) {
     usage('step은 --new-hand와 액션을 동시에 받지 않습니다.');
   }
   rejectForceDefaultWithMeta(flags);
@@ -427,7 +427,7 @@ function parseReplayReveal(value) {
 }
 
 function rejectForceDefaultWithMeta(flags) {
-  if (flags['meta-file'] && flags['force-default']) {
+  if (flags['meta-file'] != null && flags['force-default']) {
     usage('--meta-file과 --force-default는 함께 쓸 수 없습니다.');
   }
 }
