@@ -1,4 +1,4 @@
-import { fallbackLegal, legalizeEntries, VERSION_V2 } from './contracts.js';
+import { fallbackLegal, isStrategyV2, legalizeEntries } from './contracts.js';
 import { estimatePublicStrength } from './hand-strength.js';
 import { raiseToFor } from './sizing.js';
 
@@ -9,8 +9,7 @@ function clamp(value, low = 0, high = 1) {
 function traitsOf(config) {
   const traits = config?.traits;
   if (
-    config?.policyVersion !== VERSION_V2
-    || config?.base !== 'strategy-v2'
+    !isStrategyV2(config)
     || !traits
     || ['tightness', 'aggression', 'calling', 'bluff'].some(
       (key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1,
@@ -27,13 +26,13 @@ function priorRaises(snapshot) {
   return (snapshot?.priorActions ?? []).filter((action) => action?.action === 'raise');
 }
 
-function unopenedPreflop(snapshot) {
+export function unopenedPreflop(snapshot) {
   return snapshot?.street === 'preflop'
     && priorRaises(snapshot).length === 0
     && !(snapshot?.priorActions ?? []).some((action) => action?.action === 'call');
 }
 
-function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule } = {}) {
+export function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule } = {}) {
   const pot = Math.max(0, Number(snapshot?.potBefore) || 0);
   const callAmount = Math.max(0, Number(legal?.callAmount) || 0);
   const price = callAmount / Math.max(1, pot + callAmount);
@@ -62,7 +61,7 @@ function facingDistribution(snapshot, legal, traits, strength, { raiseTo, rule }
   ];
 }
 
-function unopenedDistribution(traits, strength, { raiseTo } = {}) {
+export function unopenedDistribution(traits, strength, { raiseTo } = {}) {
   const threshold = 0.20 + 0.52 * traits.tightness;
   const participation = clamp(
     0.50 + 1.60 * (strength - threshold) + 0.25 * (0.50 - traits.tightness),
@@ -75,7 +74,7 @@ function unopenedDistribution(traits, strength, { raiseTo } = {}) {
   ];
 }
 
-function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) {
+export function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) {
   const bet = clamp(
     0.03
       + traits.aggression * (0.12 + 0.58 * strength)
@@ -91,7 +90,10 @@ function checkedToDistribution(traits, strength, { raiseTo, rule } = {}) {
 
 export function distributionV2(snapshot, legal, config) {
   const traits = traitsOf(config);
-  const strength = estimatePublicStrength(snapshot);
+  const strength = estimatePublicStrength(
+    snapshot,
+    snapshot.strengthSamples != null ? { samples: snapshot.strengthSamples } : undefined,
+  );
   const sized = raiseToFor(snapshot, legal);
   let proposed;
   if (unopenedPreflop(snapshot)) {

@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`, `--showdown-policy open|standard`, `--replay-reveal all|showdown`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이다. 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`, `--showdown-policy open|standard`, `--replay-reveal all|showdown`, `--mirror-self`, `--exploit-self`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이다. `--mirror-self`/`--exploit-self`는 policy 런타임과 누적 60핸드가 필요하다. 부트 로그 코드 `TENDENCY_INSUFFICIENT`는 표본 부족으로 기동을 거부한 것이다. 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -62,6 +62,7 @@ nohup node tools/game-loop.js --store-dir game --ai <n> \
   [--stack N] [--level-every N] [--blinds SB/BB] \
   [--mode cash-training|tournament] [--stack-bb N] [--hands N] [--opponent-runtime llm|policy] \
   [--showdown-policy open|standard] [--replay-reveal all|showdown] \
+  [--mirror-self] [--exploit-self] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 
@@ -118,6 +119,8 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 | `repair_failed` | 직전 핸드 아카이브를 쓰지 못해 멈췄습니다. 그 핸드는 코치·리뷰가 읽을 수 없습니다. `$SESSION_DIR/hands/` 상태를 확인해야 합니다 |
 | `NO_PLAYER_RUNTIME` | 적격 플레이어 런타임이 하나도 없어 게임을 시작(또는 재개)하지 않았습니다. `notices`의 probe 실패 내역대로 CLI 인증·설치를 고친 뒤 다시 시도합니다 |
 | `TRAINING_MIGRATION_CORRUPT` | training authority 마이그레이션 증거가 불완전해 재개 전에 멈췄습니다. `message`가 지목한 authority·digest map·JSONL·attempt 파일을 복구한 뒤 `/start-game resume`으로 다시 시도합니다 |
+| `SELF_OPPONENT_INCOMPLETE` | 자기 복제·공략 좌석 요청은 기록됐는데 배정이 없습니다. 이 세션은 재개하지 말고 새 게임을 시작합니다 |
+| `POLICY_CONFIG_MISMATCH` | 파생 정책 config가 없거나 digest가 맞지 않습니다. `.policy-configs.json`을 복구한 뒤 `/start-game resume`으로 다시 시도합니다 |
 
 그 밖의 `halt.code`는 코드와 `message`를 그대로 전하고 `$SESSION_DIR/loop.log`를 가리킨다. 딜러가 원인을 추측해 지어내지 않는다.
 

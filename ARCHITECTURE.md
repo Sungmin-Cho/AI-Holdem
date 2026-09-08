@@ -15,6 +15,10 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `engine/sidepots.js` | 컨트리뷰션·폴드 집합으로부터 사이드팟을 구성(`buildPots`)하고 승자에게 분배(`awardPots`). |
 | `engine/personas.js` | AI 좌석의 표현 필드(이름·말투·성격·아키타입)만 생성. 빈도 파라미터는 `training/policies/`가 소유한다. |
 | `training/policies/` | deterministic strategy policy와 RNG. 레이즈 사이징 규칙은 `sizing.js` 한 곳. 엔진은 정책 모듈을 import하지 않는다. |
+| `training/tendency/` | 핸드 아카이브에서 관측 빈도 프로파일을 만드는 순수 계층. `compare.js`는 휴리스틱 유사도만 계산한다. |
+| `training/policies/strategy-mirror.js` | 관측 빈도로 preflop을 재생하는 파생 정책 `strategy-mirror-v1`. |
+| `tools/self-opponents.js` | `--mirror-self`/`--exploit-self` 좌석 배정·마커·재개 검사·리뷰 비교 절. |
+| `tools/tendency-cli.js` | store 성향 프로파일 `show`/`check`. |
 | `tools/policy-player.js` | `--opponent-runtime policy`일 때 인프로세스 결정. LLM 워밍업을 생략한다. |
 | `training/exploit/` | 종료 후 heuristic exploit 비교. EV 숫자는 만들지 않는다. |
 | `tools/solver-runtime.js` | Postflop solver 자식. detached process group, RSS/stdout cap, fake adapter. |
@@ -102,6 +106,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 - **별도 study 수명**: store loop 락 소유자가 검증된 서비스에 parent로 붙는다. relay adoption은 pid·listener·세션 인증에 더해 protocol 2/actionReceipts/studyLink와 현재 study URL 일치를 요구한다. 서비스 재시작으로 URL이 바뀌면 identity를 증명한 relay만 교체하고 엔진 view를 동기화한다. 게임 종료는 study를 정지하지 않으며 인증 활동/부모 종료 후 유휴 10분에 정지한다.
 - **생성 권한**: 실제 store CLI 프로세스는 catalog·loop 락 생성 전에 umask 077을 설정한다. 호스트·API 호출자의 umask나 기존 디렉터리·foreign 락은 변경하지 않는다.
 - **버전 복구**: v1 배정은 정확한 v1 identity로 읽고 v2는 그대로 보존한다. 구버전 profile 검증은 복사본에서 실제 reader로 실행하며 raw 이벤트·평가·processed digest를 대조한다. 결과가 미확인인 accepted/delivered 액션은 rollback을 차단한다. 권위 동기화 후 matching study만 정지하고 호환 버전으로 roll-forward한다.
+- **파생 정책 identity**: 자기 복제·공략 좌석은 `players.json`의 삼중항(`policyId`/`policyVersion`/`configDigest`)과 세션 `.policy-configs.json`에 묶인다. digest가 config 본문을 결박하며, 서버·export는 그 파일을 읽지 않는다.
 
 ### Reference coverage v2 (#150)
 

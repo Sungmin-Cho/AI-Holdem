@@ -328,6 +328,44 @@ test('export CLI reads archive directories and --store-dir current sessions', ()
   assert.equal(JSON.parse(fs.readFileSync(storeOut, 'utf8')).hands.length, 1);
 });
 
+test('derived-seat export omits self-opponent vocabulary and .policy-configs.json', () => {
+  const dir = tmp();
+  const played = playRaiseFold();
+  const digest = 'ab'.repeat(32);
+  played.lastHand.actions = played.lastHand.actions.map((action, index) => (
+    index === 0
+      ? { ...action, policyId: 'self-mirror-v1', policyVersion: '1.0.0', reasonCode: 'mirror-open', configDigest: digest }
+      : action
+  ));
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({
+    lastHand: played.lastHand,
+    config: played.config,
+    seats: played.seats,
+    gameOver: true,
+  }));
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify([
+    { playerId: 'user', name: '나' },
+    {
+      playerId: 'p1',
+      name: '박지훈',
+      archetype: 'SelfMirror',
+      policy: { policyId: 'self-mirror-v1', policyVersion: '1.0.0', configDigest: digest },
+    },
+    { playerId: 'p2', name: '김민준', archetype: 'TAG' },
+  ]));
+  fs.writeFileSync(path.join(dir, '.policy-configs.json'), JSON.stringify({
+    schemaVersion: 1,
+    configs: { [digest]: { policyId: 'self-mirror-v1', configDigest: digest } },
+  }));
+  fs.mkdirSync(path.join(dir, 'hands'), { recursive: true });
+  writeHandArchive(dir, played.lastHand);
+  const canonical = buildCanonical(dir, { exportedAt: '2026-09-07T00:00:00.000Z' });
+  const payload = JSON.stringify(canonical);
+  assert.doesNotMatch(payload, /SelfMirror|SelfExploiter|self-mirror-v1|self-exploiter-v1|strategy-mirror-v1|mirror-[a-z0-9]|observed-tendency/);
+  assert.equal(payload.includes(digest), false);
+  assert.equal(payload.includes('.policy-configs.json'), false);
+});
+
 test('normalizeHand copies posts, uncalledReturns, and action currentBet', () => {
   const hand = normalizeHand({
     handNo: 1,

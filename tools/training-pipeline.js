@@ -14,6 +14,7 @@ import { validateExplanation } from '../training/explain.js';
 import { referenceQuality } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
+import { readDerivedPolicyConfigs } from './policy-player.js';
 import { killGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   annotationBodyByteLength,
@@ -585,6 +586,7 @@ export async function sealExploitAnnotations({
   const tc = createTrainingControl({ storeDir });
   const auth = tc.loadAuthority(sessionDir);
   if (!auth) return { sealed: 0, skipped: 0 };
+  const derived = readDerivedPolicyConfigs(sessionDir);
   let sealed = 0;
   let skipped = 0;
   for (const item of Object.values(auth.items)) {
@@ -614,6 +616,7 @@ export async function sealExploitAnnotations({
           policy,
           snapshot,
           chosen: snapshot.chosenAction,
+          derived,
         });
       } catch {
         unevaluated += 1;

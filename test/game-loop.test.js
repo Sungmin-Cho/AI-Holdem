@@ -7686,6 +7686,8 @@ test('CLI parser covers the full surface and halt errors map to stable process e
     blinds: '15/30',
     force: true,
     resume: false,
+    mirrorSelf: false,
+    exploitSelf: false,
     playerRuntime: 'codex',
     practiceFocusFile: path.resolve('/tmp/focus.json'),
     mode: undefined,

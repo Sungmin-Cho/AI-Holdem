@@ -258,3 +258,151 @@ test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves ext
   assert.deepEqual(secondNotices, []);
   assert.deepEqual(fs.readFileSync(playersPath), afterFirst);
 });
+
+test('stampPlayerPolicies preserves derived seats and extra keys from the session digest file', async () => {
+  const { writeDerivedPolicyConfigs } = await import('../tools/policy-player.js');
+  const { configDigestOf } = await import('../training/policies/contracts.js');
+  const { VERSION_V2 } = await import('../training/policies/catalog.js');
+  assert.equal(typeof writeDerivedPolicyConfigs, 'function');
+  const dir = tmp();
+  run(['init', '--ai', '2', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  stampPlayerPolicies(dir);
+  const config = {
+    policyId: 'self-exploiter-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    traits: { tightness: 0.62, aggression: 0.62, calling: 0.38, bluff: 0.12 },
+    params: {
+      strategyVersion: VERSION_V2,
+      source: { hands: 80, decisions: 200, sessions: 2, extractedAt: '2026-09-07T00:00:00.000Z' },
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  config.configDigest = configDigestOf(config);
+  const playersPath = path.join(dir, 'players.json');
+  const players = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  const derivedSeat = players.find((player) => player.playerId === 'p1');
+  derivedSeat.archetype = 'SelfExploiter';
+  derivedSeat.policy = {
+    policyId: config.policyId,
+    policyVersion: config.policyVersion,
+    configDigest: config.configDigest,
+    extra: 'keep',
+  };
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+  writeDerivedPolicyConfigs(dir, { [config.configDigest]: config });
+
+  const notices = [];
+  const stamped = stampPlayerPolicies(dir, { onNotice: (message) => notices.push(message) });
+  const again = stamped.find((player) => player.playerId === 'p1');
+  assert.equal(again.policy.extra, 'keep');
+  assert.equal(again.policy.policyId, 'self-exploiter-v1');
+  assert.equal(again.policy.policyVersion, '1.0.0');
+  assert.equal(again.policy.configDigest, config.configDigest);
+  assert.deepEqual(notices, []);
+});
+
+test('stampPlayerPolicies fail-closes when a derived seat has no digest file', async () => {
+  const { configDigestOf } = await import('../training/policies/contracts.js');
+  const { VERSION_V2 } = await import('../training/policies/catalog.js');
+  const dir = tmp();
+  run(['init', '--ai', '1', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  stampPlayerPolicies(dir);
+  const config = {
+    policyId: 'self-exploiter-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    traits: { tightness: 0.5, aggression: 0.5, calling: 0.5, bluff: 0.5 },
+    params: { strategyVersion: VERSION_V2 },
+  };
+  config.configDigest = configDigestOf(config);
+  const playersPath = path.join(dir, 'players.json');
+  const players = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  const seat = players.find((player) => player.playerId === 'p1');
+  seat.archetype = 'SelfExploiter';
+  seat.policy = {
+    policyId: config.policyId,
+    policyVersion: config.policyVersion,
+    configDigest: config.configDigest,
+  };
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+  assert.throws(() => stampPlayerPolicies(dir), { code: 'POLICY_CONFIG_MISMATCH' });
+});
+
+test('stampPlayerPolicies rejects SelfMirror without a policy and does not assign a catalog fallback', () => {
+  const dir = tmp();
+  run(['init', '--ai', '1', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  const playersPath = path.join(dir, 'players.json');
+  const players = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  const seat = players.find((player) => player.playerId === 'p1');
+  seat.archetype = 'SelfMirror';
+  delete seat.policy;
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+  assert.throws(() => stampPlayerPolicies(dir), { code: 'SELF_OPPONENT_INCOMPLETE' });
+  const after = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  assert.equal(after.find((player) => player.playerId === 'p1').policy, undefined);
+});
+
+test('stampPlayerPolicies emits catalog and derived roll-forward notices together without restamping derived', async () => {
+  const { writeDerivedPolicyConfigs } = await import('../tools/policy-player.js');
+  const { configDigestOf } = await import('../training/policies/contracts.js');
+  const { VERSION_V2 } = await import('../training/policies/catalog.js');
+  const dir = tmp();
+  run(['init', '--ai', '2', '--game-dir', dir, '--opponent-runtime', 'policy']);
+  stampPlayerPolicies(dir);
+  const config = {
+    policyId: 'self-exploiter-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    traits: { tightness: 0.62, aggression: 0.62, calling: 0.38, bluff: 0.12 },
+    params: {
+      strategyVersion: '2.0.0',
+      source: { hands: 80, decisions: 200, sessions: 2, extractedAt: '2026-09-07T00:00:00.000Z' },
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  config.configDigest = configDigestOf(config);
+  const playersPath = path.join(dir, 'players.json');
+  const marked = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  const derivedSeat = marked.find((player) => player.playerId === 'p1');
+  derivedSeat.archetype = 'SelfExploiter';
+  derivedSeat.policy = {
+    policyId: config.policyId,
+    policyVersion: config.policyVersion,
+    configDigest: config.configDigest,
+    extra: 'keep',
+  };
+  const catalogSeat = marked.find((player) => player.playerId === 'p2');
+  const predecessor = DIGEST_V2_2_0_0[catalogSeat.policy.policyId];
+  assert.ok(predecessor, catalogSeat.policy.policyId);
+  catalogSeat.policy = {
+    ...catalogSeat.policy,
+    policyVersion: '2.0.0',
+    configDigest: predecessor,
+    extra: 'keep',
+  };
+  fs.writeFileSync(playersPath, JSON.stringify(marked));
+  writeDerivedPolicyConfigs(dir, { [config.configDigest]: config });
+
+  const notices = [];
+  const stamped = stampPlayerPolicies(dir, { onNotice: (message) => notices.push(message) });
+  const derived = stamped.find((player) => player.playerId === 'p1');
+  const catalog = stamped.find((player) => player.playerId === 'p2');
+  assert.equal(derived.policy.extra, 'keep');
+  assert.equal(derived.policy.policyVersion, '1.0.0');
+  assert.equal(derived.policy.configDigest, config.configDigest);
+  assert.equal(catalog.policy.policyVersion, '2.1.0');
+  assert.equal(catalog.policy.extra, 'keep');
+  assert.deepEqual(
+    {
+      policyId: catalog.policy.policyId,
+      policyVersion: catalog.policy.policyVersion,
+      configDigest: catalog.policy.configDigest,
+    },
+    assignmentFor(catalog.archetype),
+  );
+  assert.equal(notices.length, 2);
+  assert.equal(notices[0], `policy roll-forward 2.0.0→2.1.0: p2`);
+  assert.equal(notices[1], `self-opponent strategy roll-forward 2.0.0→${VERSION_V2}: p1`);
+});
+

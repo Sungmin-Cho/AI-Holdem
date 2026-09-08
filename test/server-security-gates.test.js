@@ -314,6 +314,31 @@ test('C2: a persisted exploit annotation is dropped while the engine is not over
 
 // --- C1: deny 목록은 게시자 입력에 의존하지 않는다 ---
 
+test('T7: explanation containing SelfMirror is FORBIDDEN_LITERAL', async () => {
+  const dir = tmpDir();
+  writeSecurityFixtures(dir, {
+    hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'] } })],
+    players: [
+      { playerId: 'user' },
+      {
+        playerId: 'p1',
+        archetype: 'SelfMirror',
+        policy: { policyId: FIXTURE_POLICY_ID, configDigest: FIXTURE_CONFIG_DIGEST },
+      },
+    ],
+  });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const denied = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 SelfMirror 이다')],
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
 test('C1: nested policy literals are denied', async () => {
   const dir = tmpDir();
   writeSecurityFixtures(dir, { hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'] } })] });

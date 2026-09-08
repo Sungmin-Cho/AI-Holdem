@@ -26,7 +26,11 @@ test('hand strength has exactly the approved read-only engine evaluator edge', (
 
 test('policy v2 has no filesystem hidden-hole deck or hand-transition module edge', () => {
   const forbidden = /(?:^|\/)(?:fs|cards|hand|state|decision|views|game-archive|session-catalog)(?:\.js)?$/;
-  const offenders = ['training/policies/hand-strength.js', 'training/policies/strategy-v2.js']
+  const offenders = [
+    'training/policies/hand-strength.js',
+    'training/policies/strategy-v2.js',
+    'training/policies/strategy-mirror.js',
+  ]
     .flatMap((relative) => importsOf(relative).imports.map((entry) => ({ relative, ...entry })))
     .filter((entry) => forbidden.test(entry.specifier))
     .map((entry) => `${entry.relative} -> ${entry.specifier}`);
@@ -59,5 +63,33 @@ test('the heuristic strength estimate is consumed only by opponent policy strate
   };
   walk(path.join(ROOT, 'training'));
   walk(path.join(ROOT, 'tools'));
-  assert.deepEqual(consumers, ['training/policies/strategy-v2.js']);
+  assert.deepEqual(consumers.sort(), [
+    'training/policies/strategy-mirror.js',
+    'training/policies/strategy-v2.js',
+    'training/tendency/extract.js',
+  ]);
+});
+
+test('strategy-mirror.js imports exactly the six approved specifiers', () => {
+  const scan = importsOf('training/policies/strategy-mirror.js');
+  assert.deepEqual(scan.unresolved, []);
+  assert.deepEqual(
+    scan.imports.map((entry) => entry.specifier).sort(),
+    [
+      '../tendency/contracts.js',
+      '../tendency/traits.js',
+      './contracts.js',
+      './hand-strength.js',
+      './sizing.js',
+      './strategy-v2.js',
+    ],
+  );
+});
+
+test('tendency contracts do not import policies modules', () => {
+  const scan = importsOf('training/tendency/contracts.js');
+  assert.equal(
+    scan.imports.some((entry) => entry.specifier.includes('policies')),
+    false,
+  );
 });

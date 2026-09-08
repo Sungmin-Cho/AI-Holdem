@@ -1,6 +1,130 @@
-import { configDigestOf, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
+import { configDigestOf, isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
+import { TENDENCY_MIN_HANDS, assertTendency } from '../tendency/contracts.js';
+import {
+  EXPLOITER_LABELS,
+  exploiterFromTendency,
+  isExploiterAdjustment,
+} from '../tendency/exploit.js';
+import { traitsFromTendency } from '../tendency/traits.js';
 
-export { PREDECESSOR_VERSIONS_V2, VERSION_V2 };
+export { isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 };
+
+const TRAIT_KEYS = ['tightness', 'aggression', 'calling', 'bluff'];
+const STRATEGY_VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+function mismatch() {
+  const error = new Error('stored policy identity does not match the catalog');
+  error.code = 'POLICY_CONFIG_MISMATCH';
+  throw error;
+}
+
+function isCatalogV2Id(policyId) {
+  return typeof policyId === 'string'
+    && Object.hasOwn(POLICIES, policyId)
+    && isStrategyV2(POLICIES[policyId]);
+}
+
+function validateExploiterParams(config) {
+  const traits = config?.traits;
+  if (!traits || typeof traits !== 'object') return false;
+  if (TRAIT_KEYS.some((key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1)) {
+    return false;
+  }
+  const params = config?.params;
+  const version = params?.strategyVersion;
+  if (typeof version !== 'string' || !STRATEGY_VERSION_RE.test(version)) return false;
+  if (params && Object.hasOwn(params, 'tendency')) {
+    try {
+      assertTendency(params.tendency);
+    } catch (error) {
+      if (error.code === 'TENDENCY_INVALID') return false;
+      throw error;
+    }
+  }
+  const targets = params && Object.hasOwn(params, 'targets') ? params.targets : [];
+  if (!Array.isArray(targets) || targets.length > 3) return false;
+  for (const row of targets) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+    if (!EXPLOITER_LABELS.includes(row.label)) return false;
+    if (!isExploiterAdjustment(row.adjustment)) return false;
+  }
+  const startFrom = params && Object.hasOwn(params, 'startFrom') ? params.startFrom : 'tag-v2';
+  return isCatalogV2Id(startFrom);
+}
+
+function validateMirrorParams(config) {
+  try {
+    assertTendency(config?.params?.tendency);
+  } catch (error) {
+    if (error.code === 'TENDENCY_INVALID') return false;
+    throw error;
+  }
+  if (!Number.isInteger(config.params.tendency.hands) || config.params.tendency.hands < TENDENCY_MIN_HANDS) {
+    return false;
+  }
+  const traits = config?.traits;
+  if (!traits || typeof traits !== 'object') return false;
+  if (TRAIT_KEYS.some((key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1)) {
+    return false;
+  }
+  if (config.params?.evidence !== 'derived-from-user-observed-action-frequencies-heuristic') return false;
+  const version = config?.params?.strategyVersion;
+  return typeof version === 'string' && STRATEGY_VERSION_RE.test(version);
+}
+
+export const DERIVED_POLICY_FAMILIES = Object.freeze({
+  'self-exploiter-v1': Object.freeze({
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    validateParams: validateExploiterParams,
+  }),
+  'self-mirror-v1': Object.freeze({
+    policyVersion: '1.0.0',
+    base: 'strategy-mirror-v1',
+    validateParams: validateMirrorParams,
+  }),
+});
+
+export const SELF_ARCHETYPES = Object.freeze(['SelfMirror', 'SelfExploiter']);
+
+export function isStrategyMirror(config) {
+  return config?.base === 'strategy-mirror-v1';
+}
+
+export function buildMirrorConfig(tendency, { source, strategyVersion = VERSION_V2 } = {}) {
+  const config = {
+    policyId: 'self-mirror-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-mirror-v1',
+    traits: traitsFromTendency(tendency),
+    params: {
+      strategyVersion,
+      source,
+      tendency,
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  return completePolicy(config);
+}
+
+export function buildExploiterConfig(tendency, { source, strategyVersion = VERSION_V2 } = {}) {
+  const derived = exploiterFromTendency(tendency);
+  const config = {
+    policyId: 'self-exploiter-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    traits: derived.traits,
+    params: {
+      strategyVersion,
+      source,
+      tendency,
+      startFrom: derived.startFrom,
+      targets: derived.targets,
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  return completePolicy(config);
+}
 
 const VERSION = '1.0.0';
 
@@ -105,11 +229,7 @@ export function policyById(policyId) {
   return POLICIES[policyId];
 }
 
-export function isStrategyV2(config) {
-  return config?.base === 'strategy-v2';
-}
-
-export function resolveStoredPolicy(stored) {
+export function resolveStoredPolicy(stored, { derived } = {}) {
   const descriptors = stored && typeof stored === 'object'
     ? Object.fromEntries(['policyId', 'policyVersion', 'configDigest'].map(
       (key) => [key, Object.getOwnPropertyDescriptor(stored, key)],
@@ -119,14 +239,38 @@ export function resolveStoredPolicy(stored) {
     (key) => descriptors[key] && Object.hasOwn(descriptors[key], 'value'),
   );
   const policyId = complete ? descriptors.policyId.value : null;
+  if (
+    derived != null
+    && typeof derived === 'object'
+    && typeof policyId === 'string'
+    && Object.hasOwn(DERIVED_POLICY_FAMILIES, policyId)
+  ) {
+    const family = DERIVED_POLICY_FAMILIES[policyId];
+    const digest = descriptors.configDigest.value;
+    const storedVersion = descriptors.policyVersion.value;
+    const config = Object.hasOwn(derived, digest) ? derived[digest] : null;
+    if (
+      !config
+      || typeof config !== 'object'
+      || config.policyId !== policyId
+      || config.policyVersion !== family.policyVersion
+      || storedVersion !== family.policyVersion
+      || config.base !== family.base
+      || configDigestOf(config) !== digest
+      || !family.validateParams(config)
+    ) {
+      mismatch();
+    }
+    const strategyVersion = config.params.strategyVersion;
+    return {
+      config: deepFreeze(config),
+      rolledForwardFrom: strategyVersion !== VERSION_V2 ? strategyVersion : null,
+    };
+  }
   const config = typeof policyId === 'string' && Object.hasOwn(POLICIES, policyId)
     ? POLICIES[policyId]
     : null;
-  if (!config) {
-    const error = new Error('stored policy identity does not match the catalog');
-    error.code = 'POLICY_CONFIG_MISMATCH';
-    throw error;
-  }
+  if (!config) mismatch();
   if (
     descriptors.policyVersion.value === config.policyVersion
     && descriptors.configDigest.value === config.configDigest
@@ -144,9 +288,7 @@ export function resolveStoredPolicy(stored) {
       }
     }
   }
-  const error = new Error('stored policy identity does not match the catalog');
-  error.code = 'POLICY_CONFIG_MISMATCH';
-  throw error;
+  mismatch();
 }
 
 export function resolveExactPolicy(stored) {
@@ -186,7 +328,7 @@ export function assignmentFor(archetype) {
   };
 }
 
-export function sanitizePlayersForReview(players, { gameOver = false } = {}) {
+export function sanitizePlayersForReview(players, { gameOver = false, derived } = {}) {
   return (players ?? []).map((player) => {
     const out = {
       playerId: player.playerId,
@@ -198,10 +340,23 @@ export function sanitizePlayersForReview(players, { gameOver = false } = {}) {
       archetype: player.archetype,
     };
     if (gameOver && player.policy) {
-      const config = resolveStoredPolicy(player.policy).config;
+      const config = resolveStoredPolicy(player.policy, { derived }).config;
       out.policyId = config.policyId;
       out.policyVersion = config.policyVersion;
-      if (isStrategyV2(config)) {
+      if (Object.hasOwn(DERIVED_POLICY_FAMILIES, config.policyId)) {
+        const mirror = config.policyId === 'self-mirror-v1';
+        out.policyModelKind = mirror ? 'observed-tendency-mirror-v1' : 'observed-tendency-exploiter-v1';
+        out.policyTraitsEvidence = 'derived-from-user-observed-action-frequencies-heuristic';
+        out.policyTraits = { ...config.traits };
+        const selfOpponent = {
+          role: mirror ? 'mirror' : 'exploiter',
+          source: config.params?.source,
+        };
+        if (config.params && Object.hasOwn(config.params, 'targets')) {
+          selfOpponent.targets = config.params.targets;
+        }
+        out.selfOpponent = selfOpponent;
+      } else if (isStrategyV2(config)) {
         out.policyModelKind = 'qualitative-config-v2';
         out.policyTraitsEvidence = 'configured-not-observed-action-frequencies';
         out.policyTraits = { ...config.traits };
