@@ -23,30 +23,42 @@ export function defaultPlayers() {
   ];
 }
 
-export function handRecordFixture(handNo, { holes = {}, reveals = null } = {}) {
+export function handRecordFixture(handNo, {
+  holes = {},
+  reveals = null,
+  actions = [],
+  positions,
+  folded = [],
+  showdown,
+  board = [],
+} = {}) {
   const completeHoles = {
     user: ['Ah', 'Kh'],
     p1: ['7c', '2d'],
     ...holes,
   };
-  return {
+  const record = {
     handNo,
     level: 0,
     blinds: [50, 100],
     button: 'user',
     holes: completeHoles,
-    board: [],
-    folded: [],
+    board,
+    folded,
     allIn: [],
-    actions: [],
+    actions,
     decisions: [],
     pots: [],
-    showdown: reveals ? { reveals, mucks: [] } : null,
+    showdown: showdown !== undefined
+      ? showdown
+      : (reveals ? { reveals, mucks: [] } : null),
     startStacks: Object.fromEntries(Object.keys(completeHoles).map((playerId) => [playerId, 10_000])),
     endStacks: Object.fromEntries(Object.keys(completeHoles).map((playerId) => [playerId, 10_000])),
     posts: [],
     uncalledReturns: {},
   };
+  if (positions) record.positions = positions;
+  return record;
 }
 
 export function handFilePath(dir, handNo) {
@@ -59,6 +71,7 @@ export function writeSecurityFixtures(dir, {
   players = defaultPlayers(),
   handInProgress = null,
   state = {},
+  config = {},
 } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(players));
@@ -83,7 +96,7 @@ export function writeSecurityFixtures(dir, {
     schemaVersion: 1,
     stateVersion: 1,
     handNo: handInProgress?.handNo ?? lastHand?.handNo ?? 0,
-    config: { blinds0: [50, 100], levelEvery: 8 },
+    config: { blinds0: [50, 100], levelEvery: 8, ...config },
     sessionToken: 'tok',
     level: 0,
     phase: currentHand ? 'in_hand' : 'idle',
