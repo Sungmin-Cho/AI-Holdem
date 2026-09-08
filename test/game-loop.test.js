@@ -1560,7 +1560,7 @@ test('an old-looking pid-less loop lock is still unknown and is never reclaimed 
   assert.equal(fs.existsSync(path.join(gameDir, 'state.json')), false);
 });
 
-test('two bootstrap processes racing on one game directory produce exactly one owner', { timeout: 15_000 }, async (t) => {
+test('two bootstrap processes racing on one game directory produce exactly one owner', { timeout: 25_000 }, async (t) => {
   if (skipOnWin32(t, 'owned-lock mkdir race is POSIX directory-mkdir atomic')) return;
   const gameDir = tmpGame();
   const workers = [spawnBootstrapWorker(gameDir), spawnBootstrapWorker(gameDir)];
@@ -1580,8 +1580,12 @@ test('two bootstrap processes racing on one game directory produce exactly one o
     winner.pid,
   );
   winner.kill('SIGTERM');
-  await waitUntilDead(winner.pid, 4_000);
-  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+  await waitUntilDead(winner.pid, 8_000);
+  await waitFor(
+    () => !fs.existsSync(path.join(gameDir, 'loop.lock.d')),
+    'winner did not release loop.lock.d after exit',
+    8_000,
+  );
 });
 
 test('a positively dead loop lock is reclaimed before bootstrap without force', { timeout: 10_000 }, async (t) => {

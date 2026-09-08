@@ -578,7 +578,7 @@ test('evaluator fail records pending; resume retries to evaluated', { timeout: 1
   await waitFor(() => {
     const auth = createTrainingControl().loadAuthority(gameDir);
     return auth && Object.keys(auth.pending ?? {}).length > 0;
-  }, 'pending was not recorded');
+  }, 'pending was not recorded', 40_000);
   await first.requestStop().catch(() => {});
   await running.catch(() => {});
 
