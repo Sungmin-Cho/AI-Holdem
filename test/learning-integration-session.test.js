@@ -280,6 +280,14 @@ test('S8 full: default 20-hand production session records support then study rem
     checkpoint = 'delivered-action-recovery';
     diagnostic('recovery-start');
     const recoveredUserApplies = [];
+    // Windows may still report the just-stopped server PID as alive while
+    // startTimeOf is null (probe lag / PID reuse), which resume treats as
+    // SERVER_IDENTITY_UNAVAILABLE. Wait until the pid is gone or identifiable.
+    const nextServerPid = JSON.parse(fs.readFileSync(path.join(nextGameDir, 'lock.json'))).serverPid;
+    await waitValue(() => {
+      try { process.kill(nextServerPid, 0); } catch (error) { return error.code === 'ESRCH'; }
+      return ownedProcessStartTime(nextServerPid) != null;
+    }, studyBudget({ extraMs: 5000 }));
     loop = createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true,
