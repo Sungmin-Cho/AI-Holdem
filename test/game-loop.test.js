@@ -12,6 +12,7 @@ import {
   ownedProcessStartTime,
   readOwnedLock,
   withNamedLock,
+  writeJsonAtomic,
 } from '../engine/state.js';
 import { createStartTimeProbe, skipOnWin32 } from './helpers/platform.js';
 import {
@@ -945,6 +946,7 @@ async function setupCoachHand(t, {
   notices = ['fake coach runtime selected'],
   loopOpts = {},
   practiceFocusFile,
+  bootstrap = {},
 } = {}) {
   const gameDir = tmpGame();
   const loop = createGameLoop({
@@ -953,7 +955,7 @@ async function setupCoachHand(t, {
     opts: { port: 0, waitMs: 0, ...loopOpts },
   });
   t.after(() => loop.requestStop().catch(() => {}));
-  await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile });
+  await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile, ...bootstrap });
   putAiFirst(gameDir);
   await cliJson(gameDir, ['step', '--new-hand']);
   await cliJson(gameDir, ['apply', 'p1', 'call']);
@@ -3683,56 +3685,500 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
   assert.equal(authority.retiredAttempts.every((row) => row.ownerSessionId === owner), true);
 });
 
-test('코치 프롬프트는 상대 비공개 홀카드와 아키타입 literal을 감추고 deny 파일로만 검증한다', { timeout: 15_000 }, async (t) => {
-  let forbiddenFile = null;
+test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 카드·정책·아키타입을 유지한다', { timeout: 40_000 }, async (t) => {
+  async function runOnce(replayReveal) {
+    let forbiddenFile = null;
+    let inProgressHoles = null;
+    const upper = makeCoachAdapter({
+      rounds: [{ raw: JSON.stringify({ handNo: 1, text: '공개 액션만 보면 무난한 폴드입니다.' }) }],
+    });
+    const { gameDir, loop } = await setupCoachHand(t, {
+      upper,
+      bootstrap: { replayReveal },
+      loopOpts: {
+        onCoachInvoke(args) {
+          if (args[0] === 'accept' || args[0] === 'defer') {
+            const idx = args.indexOf('--forbidden-file');
+            if (idx !== -1) forbiddenFile = args[idx + 1];
+          }
+        },
+        async coachCaptureCheckpoint() {
+          const state = readJson(path.join(gameDir, 'state.json'));
+          inProgressHoles = state.hand?.holes ?? null;
+          const denyPath = path.join(gameDir, '.coach-deny-1.json');
+          if (fs.existsSync(denyPath) && !forbiddenFile) forbiddenFile = denyPath;
+        },
+      },
+    });
+    const players = readJson(path.join(gameDir, 'players.json'));
+    const villain = players.find((player) => player.playerId === 'p1');
+    Object.assign(villain, {
+      archetype: 'PRIVATE_ARCHETYPE_SENTINEL',
+      personality: 'PRIVATE_PERSONALITY_SENTINEL',
+      bluffFreq: 0.731927,
+      threeBetFreq: 0.418263,
+      tiltProne: true,
+      policy: { policyId: 'PRIVATE_POLICY_ID', configDigest: 'ab'.repeat(32) },
+    });
+    fs.writeFileSync(path.join(gameDir, 'players.json'), JSON.stringify(players));
+    const running = startRun(loop);
+    await waitForCoachNote(gameDir, 1);
+    if (!forbiddenFile) {
+      const denyPath = path.join(gameDir, '.coach-deny-1.json');
+      if (fs.existsSync(denyPath)) forbiddenFile = denyPath;
+    }
+    await stopRun(loop, running);
+    return { gameDir, upper, forbiddenFile, villain, inProgressHoles };
+  }
+
+  const all = await runOnce('all');
+  const showdown = await runOnce('showdown');
+
+  const allReplayRaw = fs.readFileSync(path.join(all.gameDir, '.coach-hand-1-replay.json'), 'utf8');
+  const allRedactedRaw = fs.readFileSync(path.join(all.gameDir, '.coach-hand-1-redacted.json'), 'utf8');
+  assert.equal(all.upper.prompts[0].includes(allReplayRaw), true, 'all prompt missing replay capture bytes');
+  assert.equal(all.upper.prompts[0].includes(allRedactedRaw), true, 'all prompt missing redacted capture bytes');
+
+  const allReplay = JSON.parse(allReplayRaw);
+  const allRecord = readJson(path.join(all.gameDir, 'hands', 'hand-0001.json'));
+  for (const [pid, cards] of Object.entries(allRecord.holes ?? {})) {
+    if (pid === 'user') continue;
+    const inReplay = allReplay.holes?.[pid] != null;
+    for (const card of cards) {
+      assert.equal(
+        all.upper.prompts[0].includes(JSON.stringify(card)),
+        inReplay,
+        `all prompt card ${pid} ${card} replay=${inReplay}`,
+      );
+    }
+  }
+
+  const showdownReplayRaw = fs.readFileSync(path.join(showdown.gameDir, '.coach-hand-1-replay.json'), 'utf8');
+  const showdownReplay = JSON.parse(showdownReplayRaw);
+  const showdownRecord = readJson(path.join(showdown.gameDir, 'hands', 'hand-0001.json'));
+  assert.equal(showdown.upper.prompts[0].includes(showdownReplayRaw), true);
+  for (const [pid, cards] of Object.entries(showdownRecord.holes ?? {})) {
+    if (pid === 'user') continue;
+    const inReplay = showdownReplay.holes?.[pid] != null;
+    for (const card of cards) {
+      assert.equal(
+        showdown.upper.prompts[0].includes(JSON.stringify(card)),
+        inReplay,
+        `showdown prompt card ${pid} ${card} replay=${inReplay}`,
+      );
+    }
+  }
+
+  const allDeny = readJson(all.forbiddenFile);
+  for (const literal of [all.villain.archetype, all.villain.personality, 'PRIVATE_POLICY_ID']) {
+    assert.equal(allDeny.includes(literal), true, `all deny omitted ${literal}`);
+  }
+  const liveCards = Object.entries(all.inProgressHoles ?? {})
+    .filter(([pid]) => pid !== 'user')
+    .flatMap(([, cards]) => cards);
+  for (const card of liveCards) {
+    assert.equal(allDeny.includes(card), true, `all deny omitted in-progress card ${card}`);
+  }
+
+  const folded = (allRecord.folded ?? []).filter((pid) => pid !== 'user');
+  for (const pid of folded) {
+    for (const card of allRecord.holes[pid] ?? []) {
+      const colliding = liveCards.includes(card);
+      assert.equal(allDeny.includes(card), colliding, `all deny fold card ${card} colliding=${colliding}`);
+    }
+  }
+
+  const showdownDeny = readJson(showdown.forbiddenFile);
+  for (const literal of [showdown.villain.archetype, showdown.villain.personality]) {
+    assert.equal(showdownDeny.includes(literal), true, `showdown deny omitted ${literal}`);
+  }
+  for (const pid of (showdownRecord.folded ?? []).filter((id) => id !== 'user')) {
+    for (const card of showdownRecord.holes[pid] ?? []) {
+      assert.equal(showdownDeny.includes(card), true, `showdown deny omitted fold card ${card}`);
+    }
+  }
+});
+
+test('코치 프롬프트는 redacted·replay 캡처 exact bytes를 모두 인라인한다', { timeout: 15_000 }, async (t) => {
   const upper = makeCoachAdapter({
-    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '공개 액션만 보면 무난한 폴드입니다.' }) }],
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '두 캡처를 사용했습니다.' }) }],
   });
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
+    bootstrap: { replayReveal: 'all' },
+  });
+  const running = startRun(loop);
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  const redacted = fs.readFileSync(path.join(gameDir, '.coach-hand-1-redacted.json'), 'utf8');
+  const replay = fs.readFileSync(path.join(gameDir, '.coach-hand-1-replay.json'), 'utf8');
+  assert.equal(upper.prompts[0].includes(redacted), true);
+  assert.equal(upper.prompts[0].includes(replay), true);
+  assert.match(upper.prompts[0], /hand 1 \(redacted\):/);
+  assert.match(upper.prompts[0], /hand 1 \(replay\):/);
+});
+
+test('replay에 없는 decisionId는 INVALID_COACH_OUTPUT으로 재시도한다', { timeout: 20_000 }, async (t) => {
+  let validId = 'd-1-preflop-0';
+  const rounds = [
+    {
+      raw: JSON.stringify({
+        handNo: 1,
+        text: '잘못된 결정 식별자입니다.',
+        decisions: [{
+          decisionId: 'd-1-flop-99',
+          why: '왜 그 액션을 했는지 설명합니다.',
+          outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+          alternative: '다른 라인을 검토할 수 있었습니다.',
+        }],
+      }),
+    },
+    {
+      get raw() {
+        return JSON.stringify({
+          handNo: 1,
+          text: '올바른 결정 식별자입니다.',
+          decisions: [{
+            decisionId: validId,
+            why: '왜 그 액션을 했는지 설명합니다.',
+            outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+            alternative: '다른 라인을 검토할 수 있었습니다.',
+          }],
+        });
+      },
+    },
+  ];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'all' },
     loopOpts: {
-      onCoachInvoke(args) {
-        if (args[0] === 'accept') forbiddenFile = args[args.indexOf('--forbidden-file') + 1];
+      async coachCaptureCheckpoint() {
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        validId = replay.decisions?.[0]?.decisionId ?? validId;
       },
     },
   });
-  const players = readJson(path.join(gameDir, 'players.json'));
-  const villain = players.find((player) => player.playerId === 'p1');
-  Object.assign(villain, {
-    archetype: 'PRIVATE_ARCHETYPE_SENTINEL',
-    personality: 'PRIVATE_PERSONALITY_SENTINEL',
-    bluffFreq: 0.731927,
-    threeBetFreq: 0.418263,
-    tiltProne: true,
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(note.unavailable, undefined);
+  assert.equal(upper.starts.length, 2);
+  assert.equal(note.decisions[0].decisionId, validId);
+});
+
+test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에서 거부한다', { timeout: 40_000 }, async (t) => {
+  async function runOnce(replayReveal) {
+    let foldCard = null;
+    let decisionId = 'd-1-preflop-0';
+    const rounds = [{
+      get raw() {
+        return JSON.stringify({
+          handNo: 1,
+          text: '폴드 상대 카드를 인용합니다.',
+          decisions: [{
+            decisionId,
+            why: '왜 그 액션을 했는지 설명합니다.',
+            outcome: foldCard ? `상대가 ${foldCard}를 버리고 폴드했다.` : '보드만 근거로 평가한다.',
+            alternative: '다른 라인을 검토할 수 있었습니다.',
+          }],
+        });
+      },
+    }, {
+      raw: JSON.stringify({ handNo: 1, text: '재시도 후 카드 없이 평가합니다.' }),
+    }];
+    const upper = makeCoachAdapter({ rounds });
+    const { gameDir, loop } = await setupCoachHand(t, {
+      upper,
+      bootstrap: { replayReveal },
+      loopOpts: {
+        async coachCaptureCheckpoint() {
+          const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+          decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+          const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
+          const folded = (record.folded ?? []).find((pid) => pid !== 'user');
+          foldCard = folded ? record.holes[folded][0] : record.holes.p1[0];
+        },
+      },
+    });
+    const running = startRun(loop);
+    const note = await waitForCoachNote(gameDir, 1);
+    await stopRun(loop, running);
+    return { note, starts: upper.starts.length, foldCard };
+  }
+
+  const all = await runOnce('all');
+  assert.equal(all.note.unavailable, undefined);
+  assert.equal(all.note.decisions[0].outcome.includes(all.foldCard), true);
+  assert.equal(all.starts, 1);
+
+  const showdown = await runOnce('showdown');
+  assert.equal(showdown.note.unavailable === true || showdown.starts === 2, true);
+  assert.equal(showdown.note.decisions, undefined);
+});
+
+test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 보관하고 핸드가 끝나면 게시한다', { timeout: 40_000 }, async (t) => {
+  let overlapCard = null;
+  let decisionId = 'd-1-preflop-0';
+  const rounds = [{
+    get raw() {
+      return JSON.stringify({
+        handNo: 1,
+        text: overlapCard ? `핸드 1에서 상대 ${overlapCard} 인용` : '카드 없이 평가',
+        decisions: [{
+          decisionId,
+          why: '왜 그 액션을 했는지 설명합니다.',
+          outcome: overlapCard ? `폴드 상대의 ${overlapCard}가 드러났다.` : '보드만 근거로 평가한다.',
+          alternative: '다른 라인을 검토할 수 있었습니다.',
+        }],
+      });
+    },
+  }];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'all' },
+    loopOpts: {
+      async coachCaptureCheckpoint({ handNo }) {
+        if (handNo !== 1) return;
+        await waitFor(() => {
+          const state = readJson(path.join(gameDir, 'state.json'));
+          return state.hand && state.lastHand?.handNo === 1 ? state : null;
+        }, 'hand 2 was not dealt before coach deny', 8_000);
+        const statePath = path.join(gameDir, 'state.json');
+        const state = readJson(statePath);
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+        const last = state.lastHand;
+        const foldPid = (last.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
+        overlapCard = last.holes[foldPid][0];
+        const villain = Object.keys(state.hand.holes).find((pid) => pid !== 'user');
+        state.hand.holes[villain][0] = overlapCard;
+        fs.writeFileSync(statePath, JSON.stringify(state));
+      },
+    },
   });
-  fs.writeFileSync(path.join(gameDir, 'players.json'), JSON.stringify(players));
   const running = startRun(loop);
 
-  await waitForCoachNote(gameDir, 1);
-  await stopRun(loop, running);
+  const deferred = await waitFor(() => {
+    try {
+      const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+      return auth.deferred?.['1'] ?? null;
+    } catch {
+      return null;
+    }
+  }, 'hand 1 coach was not deferred', 10_000);
+  assert.ok(deferred.note || deferred.text || deferred);
+  const during = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal((during.coach ?? []).some((note) => note.handNo === 1), false);
 
-  const record = readJson(path.join(gameDir, 'state.json')).lastHand;
-  const privateCards = record.holes.p1;
-  const prompt = upper.prompts[0];
-  // Cards are JSON string values in the inline process input. A raw substring
-  // check mistakes "Ac" inside "chosenAction"/"priorActions" for a leaked card.
-  assert.equal(JSON.stringify({ chosenAction: 'fold' }).includes('Ac'), true);
-  for (const card of privateCards) {
-    assert.equal(prompt.includes(JSON.stringify(card)), false, `private card leaked into prompt: ${card}`);
-  }
-  for (const literal of [
-    villain.archetype,
-    villain.personality,
-    String(villain.bluffFreq),
-    String(villain.threeBetFreq),
-  ]) {
-    assert.equal(prompt.includes(literal), false, `private literal leaked into prompt: ${literal}`);
-  }
-  const deny = readJson(forbiddenFile);
-  for (const literal of [...privateCards, villain.archetype, villain.personality]) {
-    assert.equal(deny.includes(literal), true, `deny file omitted ${literal}`);
-  }
-  assert.equal(path.dirname(forbiddenFile), gameDir);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  assert.equal(snapshot.view.handNo, 2);
+  await postUserAction(lock, {
+    decisionId: snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+  const published = await waitForCoachNote(gameDir, 1, 10_000);
+  await stopRun(loop, running);
+  assert.equal(published.unavailable, undefined);
+  assert.equal(published.text.includes(overlapCard), true);
+  const after = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(after.deferred?.['1'], undefined);
+});
+
+test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
+  let decisionId = 'd-1-preflop-0';
+  const ghost = 'As';
+  const rounds = [
+    {
+      get raw() {
+        return JSON.stringify({
+          handNo: 1,
+          text: '알 수 없는 카드를 인용합니다.',
+          decisions: [{
+            decisionId,
+            why: '왜 그 액션을 했는지 설명합니다.',
+            outcome: `상대는 ${ghost}를 가지고 있었다.`,
+            alternative: '다른 라인을 검토할 수 있었습니다.',
+          }],
+        });
+      },
+    },
+    { raw: JSON.stringify({ handNo: 1, text: '카드 없이 재작성했습니다.' }) },
+  ];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'all' },
+    loopOpts: {
+      async coachCaptureCheckpoint() {
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+      },
+    },
+  });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 2);
+  assert.equal(note.unavailable, undefined);
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(auth.deferred?.['1'], undefined);
+});
+
+test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { timeout: 40_000 }, async (t) => {
+  let overlapCard = null;
+  let decisionId = 'd-1-preflop-0';
+  const rounds = [{
+    get raw() {
+      return JSON.stringify({
+        handNo: 1,
+        text: overlapCard ? `이어서 게시할 ${overlapCard} 인용` : '카드 없이 평가',
+        decisions: [{
+          decisionId,
+          why: '왜 그 액션을 했는지 설명합니다.',
+          outcome: overlapCard ? `폴드 상대 ${overlapCard}` : '보드만 근거',
+          alternative: '다른 라인을 검토할 수 있었습니다.',
+        }],
+      });
+    },
+  }];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'all' },
+    loopOpts: {
+      async coachCaptureCheckpoint({ handNo }) {
+        if (handNo !== 1) return;
+        await waitFor(() => {
+          const state = readJson(path.join(gameDir, 'state.json'));
+          return state.hand && state.lastHand?.handNo === 1 ? state : null;
+        }, 'hand 2 was not dealt before defer', 8_000);
+        const statePath = path.join(gameDir, 'state.json');
+        const state = readJson(statePath);
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+        const foldPid = (state.lastHand.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
+        overlapCard = state.lastHand.holes[foldPid][0];
+        const villain = Object.keys(state.hand.holes).find((pid) => pid !== 'user');
+        state.hand.holes[villain][0] = overlapCard;
+        fs.writeFileSync(statePath, JSON.stringify(state));
+      },
+    },
+  });
+  const running = startRun(loop);
+  await waitFor(() => {
+    try {
+      return readJson(path.join(gameDir, '.coach-authority.json')).deferred?.['1'] ?? null;
+    } catch {
+      return null;
+    }
+  }, 'deferred note was not stored before stop', 10_000);
+  await stopRun(loop, running);
+  assert.equal((readJson(path.join(gameDir, 'ui-snapshot.json')).coach ?? []).some((note) => note.handNo === 1), false);
+
+  const resumedUpper = makeCoachAdapter();
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), resumedUpper),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  await resumed.resume();
+  assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).deferred?.['1']);
+  const resumedRun = startRun(resumed);
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir);
+  await postUserAction(lock, {
+    decisionId: snapshot.view.legal.decisionId,
+    action: 'fold',
+  });
+  const published = await waitForCoachNote(gameDir, 1, 10_000);
+  await stopRun(resumed, resumedRun);
+  assert.equal(published.unavailable, undefined);
+  assert.equal(published.text.includes(overlapCard), true);
+  assert.equal(resumedUpper.starts.length, 0);
+});
+
+test('finalizing은 남은 deferred 코치 노트를 먼저 flush한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const state = readJson(path.join(gameDir, 'state.json'));
+  state.config = { ...(state.config ?? {}), replayReveal: 'all' };
+  fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(state));
+  const epoch = gameEpochOf(init.sessionToken);
+  const owner = '11111111-1111-4111-8111-111111111111';
+  const deferredNote = {
+    handNo: 1,
+    text: '지연됐던 노트를 종료 국면에서 게시합니다.',
+    decisions: [{
+      decisionId: (state.lastHand.decisions ?? []).find((row) => row.actorId === 'user')?.decisionId ?? 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  };
+  writeJsonAtomic(path.join(gameDir, '.coach-authority.json'), {
+    schemaVersion: 2,
+    gameEpoch: epoch,
+    activeOwnerSessionId: owner,
+    adapterState: 'enabled',
+    legacyMigrationCompleted: true,
+    overfoldLease: null,
+    hands: {},
+    retiredAttempts: [],
+    publishQueue: {},
+    publishedSeals: {},
+    deferred: { 1: { note: deferredNote } },
+    noNewPlayTimePublishers: false,
+    finalization: null,
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { ownerSessionId: owner, handNo: 1 },
+  });
+  await loop.resume();
+  await loop.run();
+  const snap = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  const note = (snap.coach ?? []).find((row) => row.handNo === 1);
+  assert.ok(note);
+  assert.equal(note.text, deferredNote.text);
+  assert.deepEqual(note.decisions, deferredNote.decisions);
+  assert.equal(note.unavailable, undefined);
+});
+
+test('정상 노트 proof-bearing 게시는 스냅샷 coach[].decisions를 보존한다', { timeout: 15_000 }, async (t) => {
+  let decisionId = 'd-1-preflop-0';
+  const rounds = [{
+    get raw() {
+      return JSON.stringify({
+        handNo: 1,
+        text: '결정 단위 피드백입니다.',
+        decisions: [{
+          decisionId,
+          why: '왜 그 액션을 했는지 설명합니다.',
+          outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+          alternative: '다른 라인을 검토할 수 있었습니다.',
+        }],
+      });
+    },
+  }];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'all' },
+    loopOpts: {
+      async coachCaptureCheckpoint() {
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+      },
+    },
+  });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.ok(note.coachProof);
+  assert.equal(note.decisions[0].decisionId, decisionId);
+  assert.equal(note.decisions[0].why.includes('왜'), true);
 });
 
 test('코치 oneshot은 spawn 직후 done을 기다리기 전에 pid:startTime을 bind-handle한다', { timeout: 15_000 }, async (t) => {

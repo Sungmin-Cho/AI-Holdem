@@ -276,11 +276,25 @@ test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..samp
       });
       const desc = begun.descriptors.find((row) => row.handNo === handsPlayed);
       assert.ok(desc, `hand ${handsPlayed} descriptor 없음 ${JSON.stringify(begun)}`);
+      const archivePath = path.join(dir, 'hands', `hand-${String(handsPlayed).padStart(4, '0')}.json`);
+      const archive = fs.existsSync(archivePath)
+        ? JSON.parse(fs.readFileSync(archivePath, 'utf8'))
+        : JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).lastHand;
+      const decisionId = (archive.decisions ?? []).find((row) => row.actorId === 'user')?.decisionId
+        ?? (archive.actions ?? []).find((row) => row.playerId === 'user')?.decisionId;
       fs.writeFileSync(desc.exactResultPath, JSON.stringify({
         handNo: handsPlayed,
         text: handsPlayed === 1
           ? '프리플랍 폴드는 포지션 대비 무난합니다.'
           : `핸드 ${handsPlayed}의 핵심 결정은 타당합니다.`,
+        ...(decisionId ? {
+          decisions: [{
+            decisionId,
+            why: '왜 그 액션을 했는지 설명합니다.',
+            outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+            alternative: '다른 라인을 검토할 수 있었습니다.',
+          }],
+        } : {}),
       }));
       const accepted = await cc.accept({
         gameDir: dir, owner, handNo: handsPlayed, generation: desc.generation,
@@ -299,6 +313,7 @@ test('턴 계약: 3핸드 proof-bearing coach가 Published ∪ Pending = 1..samp
     for (const note of snap.coach) {
       assert.ok(note.text.trim().length > 0);
       assert.ok(note.coachProof);
+      assert.equal(Array.isArray(note.decisions) && note.decisions.length >= 1, true);
     }
   } finally {
     await started.close();
