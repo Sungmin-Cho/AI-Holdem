@@ -7,9 +7,19 @@ import {
   medianOf,
   rateOf,
 } from '../training/tendency/contracts.js';
+import { exploiterFromTendency } from '../training/tendency/exploit.js';
 import { traitsFromTendency } from '../training/tendency/traits.js';
 import { referenceClaimAllowed } from '../shared/reference.js';
 import { collectStoreTendency } from './self-opponents.js';
+
+const TARGET_NAMES = Object.freeze({
+  'over-folds-vs-bet': '베팅에 자주 접음',
+  'calls-too-wide': '베팅에 콜이 넓음',
+  'over-raises': '베팅에 레이즈가 잦음',
+  'underbluffs': '블러프가 적음',
+  'limps-often': '림프가 잦음',
+  'over-folds-vs-3bet': '3-bet에 자주 접음',
+});
 
 function fail(code, message) {
   fs.writeSync(2, `${message}\n`);
@@ -79,15 +89,37 @@ function indicatorsOf(t) {
   };
 }
 
+function formatEvidence(row) {
+  const n = row.evidence?.n ?? 0;
+  if (row.evidence?.metric === 'af') {
+    const rate = row.evidence.rate;
+    return rate == null ? `n=${n}` : `AF ${rate.toFixed(1)}, n=${n}`;
+  }
+  const rate = row.evidence?.rate;
+  if (rate == null) return `n=${n}`;
+  return `${(rate * 100).toFixed(1)}%, n=${n}`;
+}
+
+function formatTargets(targets) {
+  if (!targets.length) return '겨냥한 경향: 없음 — 정석 트레이트(tag-v2)로 둡니다';
+  const parts = targets.map((row) => {
+    const name = TARGET_NAMES[row.label] ?? row.label;
+    return `${name} (${formatEvidence(row)})`;
+  });
+  return `겨냥한 경향: ${parts.join('; ')}`;
+}
+
 function formatShow(result) {
   const t = result.tendency;
   const traits = traitsFromTendency(t);
+  const exploit = exploiterFromTendency(t);
   const eligible = t.hands >= TENDENCY_MIN_HANDS;
   const lines = [
     `누적 ${t.hands}핸드 · ${result.sources.length}세션`,
     `최소 표본(${TENDENCY_MIN_HANDS}핸드): ${t.hands >= TENDENCY_MIN_HANDS ? '충족' : '미달'}`,
     `복제 가능 여부: ${eligible ? '가능' : '불가'} (${t.hands}핸드 / 필요 ${TENDENCY_MIN_HANDS}핸드)`,
     `트레이트 투영  tightness ${traits.tightness.toFixed(2)} · aggression ${traits.aggression.toFixed(2)} · calling ${traits.calling.toFixed(2)} · bluff ${traits.bluff.toFixed(2)}`,
+    formatTargets(exploit.targets),
     '지표 (비율, n) — 관측 빈도이며 실력·수익의 증명이 아닙니다.',
     counterLine('자발적 참여(VPIP)', t.preflop.vpip),
     counterLine('프리플롭 레이즈(PFR)', t.preflop.pfr),
@@ -134,6 +166,7 @@ function main() {
       skippedHands: result.skippedHands,
       indicators: indicatorsOf(result.tendency),
       traitProjection: traitsFromTendency(result.tendency),
+      exploitTargets: exploiterFromTendency(result.tendency).targets,
       mirrorEligible: result.tendency.hands >= TENDENCY_MIN_HANDS,
       seatMix: result.tendency.seatMix,
       sources: result.sources,

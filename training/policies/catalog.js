@@ -1,5 +1,10 @@
 import { configDigestOf, isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
 import { TENDENCY_MIN_HANDS, assertTendency } from '../tendency/contracts.js';
+import {
+  EXPLOITER_LABELS,
+  exploiterFromTendency,
+  isExploiterAdjustment,
+} from '../tendency/exploit.js';
 import { traitsFromTendency } from '../tendency/traits.js';
 
 export { isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 };
@@ -13,14 +18,38 @@ function mismatch() {
   throw error;
 }
 
+function isCatalogV2Id(policyId) {
+  return typeof policyId === 'string'
+    && Object.hasOwn(POLICIES, policyId)
+    && isStrategyV2(POLICIES[policyId]);
+}
+
 function validateExploiterParams(config) {
   const traits = config?.traits;
   if (!traits || typeof traits !== 'object') return false;
   if (TRAIT_KEYS.some((key) => !Number.isFinite(traits[key]) || traits[key] < 0 || traits[key] > 1)) {
     return false;
   }
-  const version = config?.params?.strategyVersion;
-  return typeof version === 'string' && STRATEGY_VERSION_RE.test(version);
+  const params = config?.params;
+  const version = params?.strategyVersion;
+  if (typeof version !== 'string' || !STRATEGY_VERSION_RE.test(version)) return false;
+  if (params && Object.hasOwn(params, 'tendency')) {
+    try {
+      assertTendency(params.tendency);
+    } catch (error) {
+      if (error.code === 'TENDENCY_INVALID') return false;
+      throw error;
+    }
+  }
+  const targets = params && Object.hasOwn(params, 'targets') ? params.targets : [];
+  if (!Array.isArray(targets) || targets.length > 3) return false;
+  for (const row of targets) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+    if (!EXPLOITER_LABELS.includes(row.label)) return false;
+    if (!isExploiterAdjustment(row.adjustment)) return false;
+  }
+  const startFrom = params && Object.hasOwn(params, 'startFrom') ? params.startFrom : 'tag-v2';
+  return isCatalogV2Id(startFrom);
 }
 
 function validateMirrorParams(config) {
@@ -72,6 +101,25 @@ export function buildMirrorConfig(tendency, { source, strategyVersion = VERSION_
       strategyVersion,
       source,
       tendency,
+      evidence: 'derived-from-user-observed-action-frequencies-heuristic',
+    },
+  };
+  return completePolicy(config);
+}
+
+export function buildExploiterConfig(tendency, { source, strategyVersion = VERSION_V2 } = {}) {
+  const derived = exploiterFromTendency(tendency);
+  const config = {
+    policyId: 'self-exploiter-v1',
+    policyVersion: '1.0.0',
+    base: 'strategy-v2',
+    traits: derived.traits,
+    params: {
+      strategyVersion,
+      source,
+      tendency,
+      startFrom: derived.startFrom,
+      targets: derived.targets,
       evidence: 'derived-from-user-observed-action-frequencies-heuristic',
     },
   };
