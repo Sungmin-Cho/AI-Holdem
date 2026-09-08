@@ -338,7 +338,7 @@ function applyEventMutable(next, event, finalize = true) {
       reason: event.providerId === 'fake-solver' ? 'SYNTHETIC_SOURCE' : 'SOURCE_IDENTITY_UNVERIFIED',
     });
   }
-  if (eligibility.referenceAvailable) {
+  if (eligibility.referenceAvailable || (event.providerVersion === '1.0.0' && shouldAggregate(event))) {
     if (origin === 'game') {
       next.hasGameEvents = true;
       next.activeSegmentId = segmentKey(event);
