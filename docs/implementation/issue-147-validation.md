@@ -189,3 +189,13 @@ Sol R3는 과거 practice blocker 해소를 확인했고 source의 A→B→A 교
 model-router의 `max_review_rounds: 3`에 따라 추가 모델 리뷰를 종료했다. R3 뒤의 이 제한된 source fix는 root가 코드와 실패 주입으로 판정했으며 모델 PASS라고 기록하지 않는다. R2의 세 영수증은 `verify-evidence --require-receipt-guard --expect-count 3` 및 모델 multiset·decision fingerprint 검증 exit 0이었다. 이는 FAIL 판정을 PASS로 바꾸는 검사가 아니라 실행 증거의 무결성 검사다.
 
 마지막 focused authority/publication 검증은 14/14 통과(ABA 하위 2개 포함), 앞선 주요 boundary/profile/drill/hint 묶음은 89/89 통과했다. 원격 Node22에서 SSE 테스트가 concurrent HTTP 3-before-2의 정상 중복 처리로 id 2를 기다리던 결함을 확인했다. publish commit 순서를 보장하면서 proof I/O를 지연시켜 fanout 자체를 중첩시키는 테스트로 고쳤다. 같은 원격 실행의 기존 exploit action-driver timeout은 별도로 남겨 두고, 최신 커밋 CI에서 재검증한다.
+
+### 최신 main 통합과 CI 드라이버 보정
+
+main의 코치 PR #165 (`900469a`)를 `b674bb5`에 통합했다. 소스 회귀 86/86, 코치·힌트·policy·턴 계약 61/61, v2 99 × 169 = 16,731개 순수 조회 조합이 통과했다.
+
+CI run `34207017686`의 Node 20 Ubuntu 전체 suite와 Windows 20/22 플랫폼 게이트는 성공했다. Node 22 첫 실행은 코치 카드 게시 대기와 evaluator 재개에서 실패했고, 같은 코드 및 별도 main의 단독 실행은 통과했다. main 기준 반복 5회는 통과했지만 현재 코드 추가 반복에서는 pending 기록 대기 실패가 있었다. 실패 축만 재실행했을 때 첫 두 테스트는 통과했고 대신 exploit 액션 드라이버와 cutoff 실패 주입이 timeout으로 실패했다. 이 결과를 전체 green으로 간주하지 않았다.
+
+두 학습 테스트 드라이버가 `canRaise`이면 무조건 `minRaiseTo`를 전송하고 접수 결과 전부터 해당 decision을 전송 완료로 기록하는 결함을 확인했다. 엔진의 합법적인 숏 올인(`minRaiseTo > maxRaiseTo`)에서는 액션이 거부되고 드라이버가 사용자 차례에서 멈출 수 있었다. 실제 UI처럼 `min(minRaiseTo,maxRaiseTo)`를 사용하고, `ok:true` 이후에만 전송 완료로 기록하는 공유 테스트 helper로 보정했다. 실제 short-stack 엔진 fixture에서 기존 액션의 거부와 수정 액션의 다음 결정 진행을 검증하고, 거부된 POST의 재시도 및 성공 후 중복 방지까지 2/2 통과했다. training 드라이버도 deadline 이후 조용히 반환해 `running`을 무한 대기하지 않고 명시적으로 실패한다.
+
+코치 카드 공개 범위 테스트는 단일 cash-training 핸드로 고정하고 정상 종료까지 기다린다. 무작위 다음 핸드의 카드 충돌로 합법적인 deferred 경로에 들어가는 변수를 제거하며, deferred 자체의 별도 검증은 유지한다. 위 네 CI 실패 테스트는 Node 22 집중 실행에서 4/4 통과했다. 제품 코드, timeout 예산과 계약 단언은 이 보정으로 변경하지 않았다. 최종 원격 CI는 이 테스트 보정 커밋에 대해 다시 확인한다.

@@ -5,6 +5,7 @@
 // 그 둘은 그대로다. 관측된 5배 변동을 덮도록 안전망만 넓힌다.
 import { test as nodeTest } from 'node:test';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
+import { submitLearningAction } from './helpers/learning-action-driver.js';
 import { loadPreflopDataset } from '../tools/preflop-dataset.js';
 import { validateExplanation } from '../training/explain.js';
 import assert from 'node:assert/strict';
@@ -231,16 +232,11 @@ async function playUntil(loop, gameDir, { until, timeoutMs = 20_000 } = {}) {
       try {
         const { lock, snapshot } = await waitForUserSnapshot(gameDir, 250);
         const legal = snapshot.view.legal;
-        if (!sent.has(legal.decisionId)) {
-          sent.add(legal.decisionId);
-          const action = legal.canRaise
-            ? { decisionId: legal.decisionId, action: 'raise', amount: legal.minRaiseTo }
-            : { decisionId: legal.decisionId, action: legal.canCheck ? 'check' : 'fold' };
-          await postUserAction(lock, action);
-        }
+        await submitLearningAction(legal, sent, (action) => postUserAction(lock, action));
       } catch { /* AI turn or terminal */ }
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    throw new Error(`training action driver deadline: ${JSON.stringify({ sent: [...sent] })}`);
   })();
   await driver;
   return { running, sent };
