@@ -32,6 +32,7 @@ test('UI는 레거시 talk를 렌더링하지 않고 narration은 유지한다',
   assert.equal(source.includes("case 'talk'"), false);
   assert.match(source, /item\.type === 'talk'\) continue/);
   assert.match(source, /case 'narration'/);
+  assert.match(source, /handReplays/);
 });
 
 test('UI는 ESM module로 로드되고 training formatter를 import한다', async () => {
@@ -40,6 +41,7 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
   assert.match(html, /id="tab-training"/);
   const app = fs.readFileSync(path.join(process.cwd(), 'server/public/app.js'), 'utf8');
   assert.match(app, /from '\.\/training-format\.js'/);
+  assert.match(app, /from '\.\/replay-format\.js'/);
   const gameDir = tmpDir();
   const srv = await start(gameDir, 'tok-mod');
   try {
@@ -48,6 +50,9 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
     assert.equal(js.status, 200);
     assert.match(js.text, /formatTrainingCard/);
+    const replayJs = await req(srv.port, '/replay-format.js', { token: 'tok-mod' });
+    assert.equal(replayJs.status, 200);
+    assert.match(replayJs.text, /formatReplay/);
     const shared = await req(srv.port, '/shared/reference.js', { token: 'tok-mod' });
     assert.equal(shared.status, 200);
     assert.match(shared.headers['content-type'], /javascript/);

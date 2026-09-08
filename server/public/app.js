@@ -1,4 +1,5 @@
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
+import { formatReplay, actionVerbs } from './replay-format.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
 import { createActionController } from './action-controller.js';
@@ -13,7 +14,7 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined };
+const ui = { view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let pendingAction = true;
 let actionController = null;
 let selectedTab = 'log';
@@ -125,39 +126,6 @@ function revealedCards() {
     }
   }
   return { map, mucks };
-}
-
-// 엔진은 자발적 베팅을 전부 raise로 내보낸다. 스트리트에 선행 베팅이 없었다면
-// 그것은 레이즈가 아니라 벳이므로, 로그에서만 그 구분을 되살린다.
-function actionVerbs(items) {
-  const verbs = new Map();
-  let street = null;
-  let wagered = false;
-  for (const item of items) {
-    if (item.type === 'hand_start') {
-      street = 'preflop';
-      wagered = true;
-      continue;
-    }
-    if (item.type === 'street') {
-      street = item.street;
-      wagered = false;
-      continue;
-    }
-    if (item.type !== 'action') continue;
-    if (item.street !== street) {
-      street = item.street;
-      wagered = item.street === 'preflop';
-    }
-    if (item.action === 'raise') {
-      verbs.set(item, wagered ? 'raise' : 'bet');
-      wagered = true;
-      continue;
-    }
-    verbs.set(item, item.action);
-    if (item.action === 'call') wagered = true;
-  }
-  return verbs;
 }
 
 function myBetOf(view) {
@@ -423,12 +391,18 @@ function commitAmount() {
   markAmountValid(true);
 }
 
-function syncRaisePanel(legal) {
+function adoptDecision(legal) {
   if (legal.decisionId !== lastDecisionId) {
     lastDecisionId = legal.decisionId;
     raiseTo = legal.minRaiseTo > legal.maxRaiseTo ? legal.maxRaiseTo : legal.minRaiseTo;
     markAmountValid(true);
+    const intent = $('intent-note');
+    if (intent) intent.value = '';
   }
+}
+
+function syncRaisePanel(legal) {
+  adoptDecision(legal);
   raiseTo = clampRaiseTo(raiseTo, legal);
   const slider = $('raise-slider');
   slider.min = String(legal.minRaiseTo);
@@ -445,6 +419,7 @@ function paintActionBar(view) {
   const mine = Boolean(legal) && !view?.gameOver;
   bar.hidden = !mine;
   if (!mine) return;
+  adoptDecision(legal);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
   const raiseOff = pendingAction || !legal.canRaise;
@@ -480,9 +455,17 @@ function logNode(item, verb) {
   switch (item.type) {
     case 'hand_start': {
       const row = el('div', 'log-divider');
+      const label = el('div', 'log-divider-text', `핸드 ${item.handNo} · 버튼 ${playerName(item.button)}`);
+      const btn = el('button', 'replay-open', '복기');
+      btn.type = 'button';
+      const replay = ui.handReplays?.[item.handNo];
+      if (!replay) btn.disabled = true;
+      else if (replay.unavailable) btn.title = formatReplay(replay).message ?? '';
+      btn.addEventListener('click', () => openReplay(item.handNo));
+      label.append(btn);
       row.append(
         el('div', 'log-divider-rule'),
-        el('div', 'log-divider-text', `핸드 ${item.handNo} · 버튼 ${playerName(item.button)}`),
+        label,
         el('div', 'log-divider-rule'),
       );
       return row;
@@ -685,6 +668,115 @@ function paintTraining() {
   panel.scrollTop = scroll.panel;
 }
 
+let openReplayHandNo = null;
+
+function seatNames() {
+  const names = { user: '나' };
+  for (const seat of ui.view?.seats ?? []) {
+    names[seat.playerId] = seat.playerId === 'user' ? '나' : (seat.name ?? seat.playerId);
+  }
+  return names;
+}
+
+function replayViewFor(handNo) {
+  const replay = ui.handReplays?.[handNo]
+    ?? { handNo, unavailable: true, reason: 'REPLAY_NOT_COMPLETED' };
+  return formatReplay(replay, {
+    names: seatNames(),
+    coachNote: ui.coach.find((note) => note.handNo === handNo),
+    trainingItems: ui.training.filter((item) => item.handNo === handNo),
+  });
+}
+
+function paintReplay() {
+  const overlay = $('replay-overlay');
+  if (!overlay) return;
+  if (openReplayHandNo == null) {
+    overlay.hidden = true;
+    return;
+  }
+  overlay.hidden = false;
+  const view = replayViewFor(openReplayHandNo);
+  const title = $('replay-title');
+  const disclaimer = $('replay-disclaimer');
+  const body = $('replay-body');
+  body.replaceChildren();
+  if (view.kind === 'marker') {
+    title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
+    disclaimer.textContent = '';
+    body.append(el('p', 'replay-marker', view.message));
+    return;
+  }
+  title.textContent = `핸드 ${view.header.handNo} 복기`;
+  disclaimer.textContent = `${view.header.disclaimer}. ${view.header.reliability}`;
+  const meta = el('div', 'replay-meta');
+  if (view.header.blinds) {
+    meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
+  }
+  if (view.header.winners.length) {
+    meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
+  }
+  body.append(meta);
+  const board = el('div', 'replay-board');
+  for (const code of view.header.board) board.append(miniCard(code));
+  if (view.header.board.length) body.append(board);
+  for (const street of view.streets) {
+    const block = el('section', 'replay-street');
+    block.append(el('h2', 'replay-street-name', street.label));
+    for (const row of street.rows) {
+      const line = el('div', 'replay-row');
+      const who = [row.name, row.position].filter(Boolean).join(' · ');
+      line.append(el('span', 'replay-name', who));
+      line.append(el('span', `replay-act is-${row.verb}`, row.verbLabel ?? row.verb));
+      if (row.amount != null) line.append(el('span', 'replay-amount num', formatChip(row.amount)));
+      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${formatChip(row.pot)}`));
+      if (row.cards) {
+        const cards = el('span', 'replay-cards');
+        for (const code of row.cards) cards.append(miniCard(code));
+        line.append(cards);
+      }
+      if (row.reasonText) line.append(el('div', 'replay-reason', row.reasonText));
+      if (row.noteText) line.append(el('div', 'replay-note', row.noteText));
+      if (row.coach?.status === 'ready') {
+        const coach = el('div', 'replay-coach');
+        coach.append(el('div', 'replay-coach-line', `왜: ${row.coach.why}`));
+        coach.append(el('div', 'replay-coach-line', `결과: ${row.coach.outcome}`));
+        coach.append(el('div', 'replay-coach-line', `대안: ${row.coach.alternative}`));
+        line.append(coach);
+      } else if (row.coach?.message) {
+        line.append(el('div', 'replay-coach is-pending', row.coach.message));
+      }
+      if (row.study?.evaluationId) {
+        const link = el('button', 'replay-study', '학습 카드');
+        link.type = 'button';
+        link.addEventListener('click', () => {
+          closeReplay();
+          selectTab('training');
+          const card = document.querySelector(`[data-evaluation-id="${row.study.evaluationId}"]`);
+          if (card instanceof HTMLDetailsElement) card.open = true;
+          card?.scrollIntoView({ block: 'nearest' });
+        });
+        line.append(link);
+      }
+      block.append(line);
+    }
+    body.append(block);
+  }
+  if (view.coachSummary) body.append(el('p', 'replay-summary', view.coachSummary));
+}
+
+function openReplay(handNo) {
+  openReplayHandNo = handNo;
+  paintReplay();
+  $('replay-close')?.focus();
+}
+
+function closeReplay() {
+  openReplayHandNo = null;
+  const overlay = $('replay-overlay');
+  if (overlay) overlay.hidden = true;
+}
+
 function paintReview(view) {
   const overlay = $('review-overlay');
   $('review-reopen').hidden = !ui.review;
@@ -722,6 +814,15 @@ function paint() {
   paintTraining();
   paintUnread();
   paintReview(view);
+  if (openReplayHandNo != null) paintReplay();
+}
+
+function upsertHandReplays(rows, replace) {
+  if (replace) ui.handReplays = Object.create(null);
+  if (!Array.isArray(rows)) return;
+  for (const row of rows) {
+    if (row && Number.isInteger(row.handNo)) ui.handReplays[row.handNo] = row;
+  }
 }
 
 function mergeAnnotationOntoCards(ann) {
@@ -740,6 +841,7 @@ function renderSnapshot(snap) {
     : [];
   for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
+  upsertHandReplays(snap.handReplays, true);
   authenticatedStudyUrl = studyLink(snap.studyUrl);
   const study = $('study-open');
   study.hidden = !authenticatedStudyUrl;
@@ -788,12 +890,14 @@ function render(m) {
     ));
     ui.review = m.review;
   }
+  if (Array.isArray(m.handReplays) && m.handReplays.length) upsertHandReplays(m.handReplays, false);
   paint();
 }
 
 async function sendAction(action, amount) {
   if (!ui.view?.legal || pendingAction) return;
-  await actionController?.send(action, amount === undefined ? undefined : Number(amount));
+  const note = $('intent-note')?.value;
+  await actionController?.send(action, amount === undefined ? undefined : Number(amount), note);
 }
 
 $('btn-fold').addEventListener('click', () => sendAction('fold'));
@@ -889,6 +993,14 @@ $('tab-log').addEventListener('click', () => selectTab('log'));
 $('tab-coach').addEventListener('click', () => selectTab('coach'));
 $('tab-training')?.addEventListener('click', () => selectTab('training'));
 
+$('replay-close')?.addEventListener('click', () => {
+  closeReplay();
+  const last = document.querySelector('.replay-open:not([disabled])');
+  last?.focus();
+});
+$('replay-overlay')?.addEventListener('click', (ev) => {
+  if (ev.target === $('replay-overlay')) closeReplay();
+});
 $('review-close').addEventListener('click', () => {
   const overlay = $('review-overlay');
   overlay.dataset.dismissed = 'true';
@@ -924,8 +1036,15 @@ async function initializeController() {
   actionController = createActionController({
     gameEpoch, getSnapshot, getStatus, storage: sessionStorage,
     postAction: async (body, { signal }) => {
+      const live = $('intent-note')?.value;
+      const note = typeof body.note === 'string' ? body.note
+        : typeof live === 'string' ? live
+          : undefined;
+      const payload = { token, ...body };
+      if (typeof note === 'string') payload.note = note;
+      else delete payload.note;
       const response = await fetch('/api/action', { method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...body }) });
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const result = await response.json();
       return response.ok ? result : { ...result, ok: false };
     },

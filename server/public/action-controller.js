@@ -49,7 +49,11 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
     storageLoaded = true;
   }
   function capture(value) {
-    const next = Object.freeze({ decisionId: value.decisionId, requestId: value.requestId, action: value.action, ...(value.action === 'raise' ? { amount: value.amount } : {}) });
+    const next = Object.freeze({
+      decisionId: value.decisionId, requestId: value.requestId, action: value.action,
+      ...(value.action === 'raise' ? { amount: value.amount } : {}),
+      ...(typeof value.note === 'string' ? { note: value.note } : {}),
+    });
     if (JSON.stringify(next) === JSON.stringify(request)) return;
     requestGeneration += 1; knownReceipt = null; request = next;
   }
@@ -150,14 +154,17 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
     },
   };
 
-  async function sendAction(action, amount) {
+  async function sendAction(action, amount, note) {
     const unchanged = request?.decisionId === currentId() && request.action === action
       && request.amount === (action === 'raise' ? amount : undefined);
     if (!key || (request && !unchanged) || (state().disabled && !(unchanged && state().canRetry))) return state();
     if (!['fold', 'check', 'call', 'raise'].includes(action)
       || (action === 'raise' && !Number.isSafeInteger(amount))) return state();
-    if (!request && !persist({ decisionId: currentId(), requestId: uuid(), action,
-      ...(action === 'raise' ? { amount } : {}) })) return state();
+    if (!request && !persist({
+      decisionId: currentId(), requestId: uuid(), action,
+      ...(action === 'raise' ? { amount } : {}),
+      ...(typeof note === 'string' ? { note } : {}),
+    })) return state();
     const captured = request;
     const generation = requestGeneration;
     const stillCurrent = () => requestGeneration === generation && request === captured && currentId() === captured.decisionId;

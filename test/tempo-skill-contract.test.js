@@ -222,6 +222,17 @@ test('SKILL §2·AGENTS.md: fresh store 기본 showdownPolicy=open, replayReveal
   assert.match(agents, /replayReveal.*all|all.*replayReveal/i);
 });
 
+test('SKILL 절대 규약: 핸드 중 비공개, 종료 후 복기 범위는 저장된 설정', () => {
+  const skill = read(SKILL);
+  const rules = section(skill, '## 절대 규약');
+  assert.match(rules, /핸드 진행 중.*상대 홀카드·결정 사유·정책 필드/);
+  assert.match(rules, /핸드 종료 후.*showdownPolicy/);
+  assert.match(rules, /replayReveal/);
+  assert.match(rules, /복기 내용은 서버가 아카이브에서 재계산/);
+  assert.match(rules, /상대 LLM 플레이어는 복기 정보를 받지 않는다/);
+  assert.match(rules, /아키타입·정책 정체는 종합 리뷰까지 비공개/);
+});
+
 test('호스트 에이전트 정의 파일이 없다', () => {
   assert.ok(!fs.existsSync(path.join(ROOT, '.claude/agents/holdem-player.md')));
   assert.ok(!fs.existsSync(path.join(ROOT, '.grok/agents/holdem-player.md')));

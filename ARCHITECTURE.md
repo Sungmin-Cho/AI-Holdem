@@ -40,6 +40,9 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/study-service.js` | store inode·pid/startTime·instance identity와 private descriptor를 검증하는 독립 study 수명 소유자. parent attach와 제어 토큰은 UI 토큰과 분리된다. |
 | `tools/study-summary.js` | 검증된 학습 이벤트를 게임·연습·평가·재시험별 공개 요약으로 투영한다. |
 | `shared/reference.js` | 휴리스틱 기준표의 출처·허용 액션·분포 일치 계약. 학습 효과나 solver 권위로 승격하지 않는다. |
+| `shared/free-text.js` | 사유·메모 정규화(`normalizeFreeText`). 코드포인트·바이트 상한. import 없음. |
+| `shared/hand-replay.js` | 완료 핸드 복기 투영(`replayRecord`). 엔진 CLI와 서버가 같은 함수를 부른다. |
+| `server/public/replay-format.js` | 복기 오버레이용 순수 행 모델(`formatReplay`). 표식 문구와 벳/레이즈 동사. |
 | `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
@@ -66,7 +69,13 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 - 활성 게임 여부는 서버 pid와 loop 락 pid **양쪽**이 살아 있다는 것으로만 증명돼야 한다 — 한쪽만 보고 활성/비활성을 판정하면 안 된다(`engine/game-archive.js`의 `assertLoopAllowsInit`, `resume-check`의 `serverPidAlive`·`loopPidAlive`).
 - `--resume`은 어떤 경로로도 `init`을 호출하면 안 된다.
 - 종료 phase 체크포인트는 역행하면 안 된다: `playing → finalizing → review_generated → review_published → done`. `review_generated` 이후 재개는 선택된 session의 `review.md`를 다시 만들지 않고, 먼저 기록해 둔 sha256으로 그 산출물을 재사용해야 한다.
-- 서버는 세션 디렉터리의 `players.json`·`.coach-authority.json`·`state.json`·`hands/hand-*.json`을 **읽기 전용 보안 술어**로만 참조하며 어느 것도 쓰지 않는다 — 게시자의 주장(`view`·machine item의 `handNo`)은 exploit 게이트와 deny 목록의 입력이 될 수 없다.
+- 서버는 세션 디렉터리의 `players.json`·`.coach-authority.json`·`state.json`·`hands/hand-*.json`을 **읽기 전용**으로만 참조하며(보안 술어와 완료 핸드의 복기 재계산) 어느 것도 쓰지 않는다 — 게시자의 주장(`view`·machine item의 `handNo`·복기 트리거)은 exploit 게이트·deny 목록·복기 내용의 입력이 될 수 없다; 트리거의 `handNo`는 선택자다.
+- **핸드 진행 중** 상대 홀카드·결정 사유·정책 필드는 어떤 채널로도 나가지 않는다.
+- **상대 LLM 플레이어는 사용자 정보를 더 얻지 않는다.** `open`은 AI 좌석만 넓히고, 사용자가 진 쇼다운 패·폴드 카드·사유·메모는 상대 프롬프트에 들어가지 않는다.
+- **아키타입·정책 정체는 종합 리뷰까지 비공개.** 복기 투영은 `policyId`·`policyVersion`·`sampledProbability`·`reasonCode`를 싣지 않는다.
+- **핸드 종료 후** 공개 범위와 내용은 서버가 저장된 `state.json`·`hands/`에서 재계산한다 — 게시자는 트리거일 뿐이다.
+- `reason`·`note`·`forced`·`positions`는 `SAFE_ACTION_KEYS`·`PRIOR_ACTION_KEYS` 밖.
+- 코치 proof tuple은 `canonicalPayloadJson` 한 함수.
 - 오래된 `gameEpoch`/`activeOwnerSessionId`의 코치 콜백이 새 게임의 상태를 오염시키면 안 된다.
 - decision snapshot은 `engine/` 소유이며, redacted 핸드·코치 입력은 viewer 자신의 스냅샷만 남기고 `decisions[].priorActions`를 최상위 액션과 같은 허용 키로 다시 걸러 상대 홀카드·비공개 정책 필드가 새면 안 된다.
 
@@ -88,14 +97,14 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 | 의존 방향 | 허용 | 금지 |
 |---|---|---|
 | `tools/` → `engine/` | `engine/cli.js`를 **자식 프로세스**로 호출, `engine/state.js`의 락·원자적 쓰기·pid 프리미티브를 직접 import(사이드카·게시 도구 자신의 수명 락에 재사용) | `engine/hand.js` 등 게임 로직 함수를 tools에서 직접 import — 상태 변경은 항상 `engine/cli.js` 서브커맨드를 거친다 |
-| `server/` → `tools/`, `engine/` | `publish-contract.js`, 그리고 `tools/training-store.js`의 담기 원시자(`openContained`/`writeContained`)만 — 서버는 별도 프로세스라 주입이 불가능하고 담기 helper를 재구현해선 안 된다 | 사이드카 로직 모듈 전부. `test/boundaries.test.js`가 이름 단위로 강제한다 |
+| `server/` → `tools/`, `engine/` | `publish-contract.js`, 그리고 `tools/training-store.js`의 담기 원시자(`openContained`/`writeContained`)만 — 서버는 별도 프로세스라 주입이 불가능하고 담기 helper를 재구현해선 안 된다. `shared/free-text.js`·`shared/hand-replay.js`는 `publish-contract.js` re-export 경유 | 사이드카 로직 모듈 전부. `test/boundaries.test.js`가 이름 단위로 강제한다 |
 | `engine/` → `tools/`, `server/` | 없음 | 엔진이 상위 계층을 참조 |
 | 딜러 세션(호스트 LLM) → 게임 루프 | current가 선택한 session의 `loop-state.json` 폴링, 사이드카 기동 | 핸드 안 진행에 관여, 상태 파일 직접 수정 |
 
 ## 5. 횡단 관심사
 
 - **락**: pid(+startTime) identity 기반 owned-lock 프리미티브 하나(`engine/state.js`의 `acquireOwnedLock`/`readOwnedLock`/`withMutation`/`withNamedLock`)가 엔진 mutex, 사이드카 수명 락(`loop.lock.d/`), 게시 락(`publish.lock.d/`) 전부에 재사용된다. 새 락 구현을 따로 만들지 않는다. 회수는 stale pid 파일에 하드링크 aside를 붙여 inode를 검증하고 그 aside가 디렉터리를 비어 있지 않게 고정하는 동안만 지운다(경로 재바인딩 방지); 획득은 고유 이름 임시 디렉터리에 pid를 먼저 기록하고 rename으로 설치해 산 락이 한순간도 비어 있지 않게 한다. 회수에는 rename을 쓰지 않는다.
-- **게시 계약**: `publish-contract.js`가 body-byte 상한·`publishId` 상한·`gameEpoch` 파생을 `server/`와 `tools/` 양쪽에 단일 소스로 공급해, 두 프로세스가 같은 상수를 따로 정의하지 않게 한다.
+- **게시 계약**: `publish-contract.js`가 body-byte 상한·`publishId` 상한·`gameEpoch` 파생을 `server/`와 `tools/` 양쪽에 단일 소스로 공급해, 두 프로세스가 같은 상수를 따로 정의하지 않게 한다. 복기 채널은 `handReplay` 트리거(`handNos`)만 받고 내용은 서버가 아카이브에서 재계산한다. 형태 불량만 `BAD_HAND_REPLAY` 400이고, 그 밖의 실패는 표식(`REPLAY_NOT_COMPLETED`·`REPLAY_UNAVAILABLE`)으로 강등한 채 `view`·`events`를 커밋한다.
 - **원자적 쓰기**: JSON 상태 파일은 `engine/state.js`의 `writeJsonAtomic`이, 리뷰 같은 텍스트 산출물은 `tools/game-loop.js`의 `writeTextAtomic`이 각각 tmp-write-then-rename으로 쓴다 — 프로세스가 도중에 죽어도 부분 쓰기로 상태가 깨지지 않는다.
 - **contained I/O**: `tools/training-store.js`의 `openContained`/`writeContained`는 세그먼트 문법(`BAD_SEGMENT`)·조상 `lstat`(symlink 거부)·`O_NOFOLLOW`·열기 후 조상 재-`lstat`(dev/ino)로 경계를 좁힌다. Node 공개 API에 `openat`이 없어 이 검사-열기-재검사는 **완전 봉쇄가 아니다** — TOCTOU 창은 줄어들 뿐이고, 호출자는 root를 신뢰 경계로 둬야 한다. `writeContained({mode:'create'})`는 `link(tmp, dest)`만 허용하며(EEXIST → `EXISTS`) 존재 검사 후 rename으로 덮어쓰지 않는다.
 - **관찰 지점**: `game/.session-store/current.json`이 선택한 concrete session의 `loop-state.json`이 딜러 세션의 폴링 대상이다 — phase·port·notices·metrics·halt가 여기 모인다.
