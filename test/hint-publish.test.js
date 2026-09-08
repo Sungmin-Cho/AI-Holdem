@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {hintFixture} from './helpers/hint-fixture.mjs';
+import {skipOnWin32} from './helpers/platform.js';
 import {normalizeActionRequest} from '../publish-contract.js';
 import {createHintState,hintPotPercent,formatHint} from '../server/public/hint-format.js';
 import {verifyHintPublication} from '../tools/hint-proof.js';
@@ -103,6 +104,7 @@ async function replaceDescriptorAfterRead(f,nth,run) {
  try{await run();assert.equal(swapped,true,'fault must occur in the source parse window');}finally{fs.openSync=open;fs.readSync=read;}
 }
 test('source replacement between parse and descriptor capture disables relay initialization',async t=>{
+ if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
  const f=await hintFixture(t),context={};
  await replaceDescriptorAfterRead(f,1,async()=>{
   assert.deepEqual(await verifyHintPublication({sessionDir:f.dir,token:f.token,context,initialize:true}),{ready:false});
@@ -111,6 +113,7 @@ test('source replacement between parse and descriptor capture disables relay ini
  assert.deepEqual(f.state().hand.hintExposures,{});
 });
 test('source replacement during sidecar initialization cannot create an exposure',async t=>{
+ if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
   const f=await hintFixture(t);
   const original=fs.readFileSync(path.join(f.dir,'reference-source.json'));
  await replaceDescriptorAfterRead(f,2,async()=>{
@@ -136,6 +139,7 @@ async function abaDescriptorAtParse(f,nth,run) {
  try{await run();assert.ok(swapped&&restored);assert.deepEqual(fs.readFileSync(file),original);}finally{fs.openSync=open;fs.readSync=read;}
 }
 test('ABA source replacement cannot pair parsed B with captured A identity',async t=>{
+ if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
  for(const kind of ['relay','sidecar'])await t.test(kind,async t=>{
   const f=await hintFixture(t);
   await abaDescriptorAtParse(f,kind==='relay'?1:2,async()=>{
