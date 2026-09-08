@@ -6819,14 +6819,15 @@ test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면
     released = true;
     held.release();
   };
-  const timer = setTimeout(release, 800);
   t.after(async () => {
-    clearTimeout(timer);
     release();
     await held.done;
   });
 
+  // Resume initializes the relay before its result-wait clock starts. Keep
+  // contention until the deadline abort; a wall-clock release races that setup.
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(released, false, 'deadline abort waited for the lock release');
   release();
   await held.done;
   await new Promise((resolve) => setTimeout(resolve, 100));

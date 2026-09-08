@@ -205,3 +205,5 @@ CI run `34207017686`의 Node 20 Ubuntu 전체 suite와 Windows 20/22 플랫폼 �
 `395d32f`의 CI run `34211025376` 네 축은 모두 성공했다(Node 22 전체 2,198/2,198, 취소 0). 병합 시점에 main의 PR #167 (`92b10f6`, 복기 overlay·의도 메모)이 들어와 UI 충돌 두 곳을 통합했다. `ui`는 hint와 handReplays를 함께 보존하고, `sendAction`은 힌트를 숨긴 뒤 intent note를 action controller에 넘긴다.
 
 리플레이·액션 controller·힌트 관련 27/27 테스트가 통과했다. 모바일 Chromium 390×844에서 힌트·메모 입력·액션 바 배치를 확인했고, 실제 클릭 후 힌트 숨김 및 접수 기록의 메모 보존을 검증했다. 같은 fixture에서 실제 엔진 완료·assistance materialize 후 독립 0/도움받은 1을 유지하고, 서버가 재산출한 handReplay를 모바일 overlay로 열어 메모가 보존된 것을 확인했다. 이 수동 fixture는 전체 사이드카의 actionAck 소비까지 재현했다는 증거는 아니다. 통합 커밋의 전체 CI를 다시 확인한 뒤 병합한다.
+
+`4e78a63` 통합 CI의 Node 20 전체 suite와 Windows 20/22는 성공했다. Node 22는 2,209개 중 기존 Task 7A coach-control 잠금 fixture 1개만 `Missing expected rejection`으로 실패했다. 이 fixture는 resume 시작 전부터 800ms 후 잠금을 풀지만, result-wait cutoff는 relay 초기화 뒤에 시작한다. 느린 초기화에서는 deadline 전에 잠금이 풀려 정상 완료가 가능한 경쟁이었다. timer를 없애고 실제 deadline abort가 확인될 때까지 잠금을 유지하며, 해제 전에 중단됐다는 단언을 추가했다. timeout과 제품 코드는 바꾸지 않았고 관련 Task 7A full-review 9/9가 Node 22에서 통과했다. 이전 CI 실패를 지우지 않고, 보정 커밋의 최종 네 축을 확인한다.
