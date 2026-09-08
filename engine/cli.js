@@ -10,12 +10,17 @@ import {
   loadState, readHand, readOwnedLock, withMutation, writeHandArchive,
 } from './state.js';
 import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
+import {
+  META_FILE_MAX_BYTES, NOTE_MAX_BYTES, NOTE_MAX_CHARS,
+  normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS,
+} from '../shared/free-text.js';
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand']);
 const VALUE_FLAGS = new Set([
   'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta',
+  'showdown-policy', 'replay-reveal', 'meta-file',
 ]);
 
 const FAIL_MESSAGES = {
@@ -215,6 +220,8 @@ function cmdInit(gameDir, flags) {
     startStackBb: cash ? startStackBb : undefined,
     handLimit,
     opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
+    showdownPolicy: parseShowdownPolicy(flags['showdown-policy']),
+    replayReveal: parseReplayReveal(flags['replay-reveal']),
   });
   succeed({
     stateVersion: result.stateVersion,
@@ -243,6 +250,7 @@ function cmdLegal(gameDir) {
 function cmdApply(gameDir, flags, rest) {
   const playerId = rest[0];
   if (!playerId) usage('apply에는 playerId가 필요합니다.');
+  rejectForceDefaultWithMeta(flags);
   const expectVersion = flags['expect-version'] != null
     ? parseIntArg(flags['expect-version'], '--expect-version')
     : null;
@@ -258,10 +266,18 @@ function cmdApply(gameDir, flags, rest) {
     if (expectVersion != null && state.stateVersion !== expectVersion) {
       throwCoded('VERSION_MISMATCH');
     }
+    const metaResult = flags['force-default']
+      ? null
+      : readMetaFlag(flags, legalFor(state), playerId);
     const result = flags['force-default']
       ? forceDefault(state, playerId)
-      : applyAction(state, playerId, action, amount, { policyMeta: parsePolicyMeta(flags['policy-meta']) });
-    return { state: result.state, response: applyEnvelope(result.state, result.events) };
+      : applyAction(state, playerId, action, amount, {
+        policyMeta: parsePolicyMeta(flags['policy-meta']),
+        meta: metaResult?.meta,
+      });
+    const response = applyEnvelope(result.state, result.events);
+    attachMeta(response, metaResult);
+    return { state: result.state, response };
   });
   succeed(envelope);
 }
@@ -310,9 +326,10 @@ function stepEnvelope(gameDir, state, events) {
 function cmdStep(gameDir, flags, rest) {
   const newHand = Boolean(flags['new-hand']);
   const playerId = rest[0];
-  if (newHand && (playerId != null || flags['force-default'])) {
+  if (newHand && (playerId != null || flags['force-default'] || flags['meta-file'] != null)) {
     usage('step은 --new-hand와 액션을 동시에 받지 않습니다.');
   }
+  rejectForceDefaultWithMeta(flags);
 
   const expectVersion = flags['expect-version'] != null
     ? parseIntArg(flags['expect-version'], '--expect-version')
@@ -339,17 +356,22 @@ function cmdStep(gameDir, flags, rest) {
     requireState(state);
     if (expectVersion != null && state.stateVersion !== expectVersion) throwCoded('VERSION_MISMATCH');
     let result;
+    let metaResult = null;
     if (newHand) {
       if (state.hand) throwCoded('ILLEGAL_ACTION', '진행 중인 핸드가 있습니다.');
       result = startHand(state, deck ? { deck } : {});
     } else if (flags['force-default']) {
       result = forceDefault(state, playerId);
     } else {
+      metaResult = readMetaFlag(flags, legalFor(state), playerId);
       result = applyAction(state, playerId, action, amount, {
         policyMeta: parsePolicyMeta(flags['policy-meta']),
+        meta: metaResult?.meta,
       });
     }
-    return { state: result.state, response: stepEnvelope(gameDir, result.state, result.events) };
+    const response = stepEnvelope(gameDir, result.state, result.events);
+    attachMeta(response, metaResult);
+    return { state: result.state, response };
   });
   succeed(envelope);
 }
@@ -390,6 +412,82 @@ function parseOpponentRuntime(value) {
   if (value == null) return undefined;
   if (value !== 'llm' && value !== 'policy') usage('--opponent-runtime는 llm 또는 policy입니다.');
   return value;
+}
+
+function parseShowdownPolicy(value) {
+  if (value == null) return undefined;
+  if (value !== 'open' && value !== 'standard') usage('--showdown-policy는 open 또는 standard여야 합니다.');
+  return value;
+}
+
+function parseReplayReveal(value) {
+  if (value == null) return undefined;
+  if (value !== 'all' && value !== 'showdown') usage('--replay-reveal는 all 또는 showdown이어야 합니다.');
+  return value;
+}
+
+function rejectForceDefaultWithMeta(flags) {
+  if (flags['meta-file'] != null && flags['force-default']) {
+    usage('--meta-file과 --force-default는 함께 쓸 수 없습니다.');
+  }
+}
+
+const META_KEYS = new Set(['decisionId', 'reason', 'note']);
+
+function readDecisionMeta(metaPath, legal, playerId) {
+  let stat;
+  try {
+    stat = fs.statSync(metaPath);
+  } catch {
+    return { dropped: 'META_MISSING' };
+  }
+  if (stat.size > META_FILE_MAX_BYTES) return { dropped: 'META_TOO_LARGE' };
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  } catch {
+    return { dropped: 'META_PARSE' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { dropped: 'META_SHAPE' };
+  }
+  if (Object.keys(parsed).some((key) => !META_KEYS.has(key))) return { dropped: 'META_SHAPE' };
+  if (parsed.decisionId !== legal.decisionId) return { dropped: 'META_STALE' };
+  if (parsed.reason !== undefined && typeof parsed.reason !== 'string') return { dropped: 'META_TYPE' };
+  if (parsed.note !== undefined && typeof parsed.note !== 'string') return { dropped: 'META_TYPE' };
+  if (playerId === 'user' && parsed.reason !== undefined) return { dropped: 'META_ACTOR' };
+  if (playerId !== 'user' && parsed.note !== undefined) return { dropped: 'META_ACTOR' };
+
+  const meta = {};
+  const applied = [];
+  if (parsed.reason !== undefined) {
+    const reason = normalizeFreeText(parsed.reason, {
+      maxChars: REASON_MAX_CHARS, maxBytes: REASON_MAX_BYTES,
+    });
+    if (reason == null) return { dropped: 'META_EMPTY' };
+    meta.reason = reason;
+    applied.push('reason');
+  }
+  if (parsed.note !== undefined) {
+    const note = normalizeFreeText(parsed.note, {
+      maxChars: NOTE_MAX_CHARS, maxBytes: NOTE_MAX_BYTES,
+    });
+    if (note == null) return { dropped: 'META_EMPTY' };
+    meta.note = note;
+    applied.push('note');
+  }
+  return { meta, applied };
+}
+
+function readMetaFlag(flags, legal, playerId) {
+  if (flags['meta-file'] == null) return null;
+  return readDecisionMeta(flags['meta-file'], legal, playerId);
+}
+
+function attachMeta(response, metaResult) {
+  if (!metaResult) return;
+  if (metaResult.dropped) response.meta = { dropped: metaResult.dropped };
+  else response.meta = { applied: metaResult.applied };
 }
 
 function parsePolicyMeta(raw) {

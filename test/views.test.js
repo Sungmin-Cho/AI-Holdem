@@ -1,10 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { applyAction, blindsForLevel, createGame, legalFor, startHand } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
 import { fixedDeck, setup3 } from './helpers/fixtures.js';
 import { redactRecord, statsReport, turnSummary, userView, viewFor } from '../engine/views.js';
 import { positionsOf } from '../engine/positions.js';
+import { snapshotDecision } from '../engine/decision.js';
+
+const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
 function holeOf(state, playerId) {
   return state.hand?.holes[playerId] ?? state.lastHand?.holes[playerId];
@@ -208,4 +216,151 @@ test('turnSummary: 숏스택 올인만 가능하면 역방향 범위 대신 단�
   assert.equal(line.includes(`${legal.minRaiseTo}~${legal.maxRaiseTo}`), false, `역방향 범위 노출: ${line}`);
   assert.ok(line.includes(`raise ${legal.maxRaiseTo}`), line);
   assert.ok(line.includes('올인'), line);
+});
+
+function deckWith(ordered) {
+  const used = new Set(ordered);
+  return [...ordered, ...newDeck().filter((card) => !used.has(card))];
+}
+
+function startOpen3(holes, board) {
+  const deck = deckWith([
+    holes.p1[0], holes.p2[0], holes.user[0],
+    holes.p1[1], holes.p2[1], holes.user[1],
+    ...board,
+  ]);
+  let st = createGame({ aiCount: 2, showdownPolicy: 'open' });
+  st.button = 2;
+  return startHand(st, { deck }).state;
+}
+
+test('open 게임 redactRecord.showdown.reveals에 AI 전원, holes는 user만', () => {
+  const st = finishByChecks(startOpen3(
+    { p1: ['As', 'Ah'], p2: ['2c', '3d'], user: ['7s', '8s'] },
+    ['Ks', 'Kd', 'Kh', '9c', '6d'],
+  ));
+  const redacted = redactRecord(st.lastHand);
+  assert.deepEqual(redacted.showdown.reveals.map((row) => row.playerId).sort(), ['p1', 'p2']);
+  assert.deepEqual(Object.keys(redacted.holes), ['user']);
+  assert.deepEqual(redacted.holes.user, st.lastHand.holes.user);
+});
+
+test('completedHandObservation: 9인 open 쇼다운은 공개·통계 항목 9개, 출력 2줄', () => {
+  const holes = {
+    p1: ['2c', '3d'], p2: ['4c', '5d'], p3: ['6c', '8d'], p4: ['9c', 'Td'],
+    p5: ['2d', '3c'], p6: ['4d', '5c'], p7: ['6d', '8c'], p8: ['9d', 'Tc'],
+    user: ['As', 'Ah'],
+  };
+  const dealOrder = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'user'];
+  const pinned = [];
+  for (let round = 0; round < 2; round += 1) {
+    for (const pid of dealOrder) pinned.push(holes[pid][round]);
+  }
+  pinned.push('Ks', 'Qd', '7c', '4h', '8s');
+  let st = createGame({ aiCount: 8, showdownPolicy: 'open' });
+  st.button = 8;
+  st = startHand(st, { deck: deckWith(pinned) }).state;
+  st = finishByChecks(st);
+  assert.equal(st.lastHand.showdown.reveals.length, 9);
+  st = startHand(st, { deck: newDeck() }).state;
+  let legal = legalFor(st);
+  while (!legal.handOver && legal.toAct === 'user') {
+    st = applyAction(st, 'user', legal.canCheck ? 'check' : 'call').state;
+    legal = legalFor(st);
+  }
+  const text = turnSummary(st, legal.toAct);
+  const obs = text.split('\n').filter((line) => (
+    line.startsWith('최근 완료 핸드 공개 관측:') || line.startsWith('누적 공개 관측 통계:')
+  ));
+  assert.equal(obs.length, 2);
+  const showdownItems = obs[0].split('공개 쇼다운 ')[1];
+  assert.equal(showdownItems.split(' / ').length, 9);
+  const statsItems = obs[1].slice('누적 공개 관측 통계: '.length);
+  assert.equal(statsItems.split(' / ').length, 9);
+});
+
+test('reason·note 고유 토큰은 redactRecord·turnSummary·priorActions·hand --redacted에 없다', () => {
+  const reasonTok = 'ZXQ_REASON_TOKEN_7K2';
+  const noteTok = 'ZXQ_NOTE_TOKEN_9M4';
+  let st = setup3(5000, 5000, 5000);
+  st = applyAction(st, 'user', 'call', undefined, { meta: { note: noteTok } }).state;
+  st = applyAction(st, 'p1', 'call', undefined, { meta: { reason: reasonTok } }).state;
+  assert.equal(st.hand.actions[0].note, noteTok);
+  assert.equal(st.hand.actions[1].reason, reasonTok);
+
+  const p2Legal = legalFor(st);
+  const summary = turnSummary(st, p2Legal.toAct);
+  assert.equal(summary.includes(reasonTok), false);
+  assert.equal(summary.includes(noteTok), false);
+
+  st = applyAction(st, 'p2', 'check').state;
+  st = applyAction(st, 'p1', 'check').state;
+  st = applyAction(st, 'p2', 'check').state;
+  const userFlop = legalFor(st);
+  assert.equal(userFlop.toAct, 'user');
+  const snap = snapshotDecision(st, 'user', null, {
+    blinds: blindsForLevel(st.level, st.config.blinds0),
+    legal: userFlop,
+  });
+  assert.ok(st.hand.actions.some((row) => row.reason === reasonTok));
+  assert.equal(JSON.stringify(snap.priorActions).includes(reasonTok), false);
+  assert.equal(JSON.stringify(snap.priorActions).includes(noteTok), false);
+
+  st = finishByChecks(st);
+  const redacted = JSON.stringify(redactRecord(st.lastHand));
+  assert.ok(JSON.stringify(st.lastHand).includes(reasonTok));
+  assert.ok(JSON.stringify(st.lastHand).includes(noteTok));
+  assert.equal(redacted.includes(reasonTok), false);
+  assert.equal(redacted.includes(noteTok), false);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-views-meta-'));
+  const run = (args) => JSON.parse(execFileSync(process.execPath, [CLI, ...args, '--game-dir', dir], {
+    encoding: 'utf8',
+    timeout: 20000,
+  }).trim());
+  run(['init', '--ai', '2']);
+  run(['new-hand']);
+  const legal = run(['legal']);
+  const actor = legal.toAct;
+  const token = actor === 'user' ? noteTok : reasonTok;
+  const payload = actor === 'user'
+    ? { decisionId: legal.decisionId, note: noteTok }
+    : { decisionId: legal.decisionId, reason: reasonTok };
+  const metaPath = path.join(dir, 'meta.json');
+  fs.writeFileSync(metaPath, JSON.stringify(payload));
+  run(['apply', actor, legal.canCheck ? 'check' : 'call', '--meta-file', metaPath]);
+  const rawState = fs.readFileSync(path.join(dir, 'state.json'), 'utf8');
+  assert.ok(rawState.includes(token));
+  while (true) {
+    const next = run(['legal']);
+    if (next.handOver) break;
+    run(['apply', next.toAct, next.canCheck ? 'check' : 'fold']);
+  }
+  const redactedHand = JSON.stringify(run(['hand', '1', '--redacted']));
+  assert.equal(redactedHand.includes(noteTok), false);
+  assert.equal(redactedHand.includes(reasonTok), false);
+});
+
+test('open에서 사용자가 진 쇼다운 뒤 다음 핸드 turnSummary에 사용자 카드가 없다', () => {
+  const st0 = startOpen3(
+    { p1: ['As', 'Ah'], p2: ['2c', '3d'], user: ['7s', '8s'] },
+    ['Ks', 'Kd', 'Kh', '9c', '6d'],
+  );
+  const userCards = [...st0.hand.holes.user];
+  const p1Cards = [...st0.hand.holes.p1];
+  const p2Cards = [...st0.hand.holes.p2];
+  let st = finishByChecks(st0);
+  assert.equal(st.lastHand.showdown.mucks.includes('user'), true);
+  assert.deepEqual(st.lastHand.showdown.reveals.map((row) => row.playerId).sort(), ['p1', 'p2']);
+  st = startHand(st, { deck: newDeck() }).state;
+  let legal = legalFor(st);
+  while (!legal.handOver && legal.toAct === 'user') {
+    st = applyAction(st, 'user', legal.canCheck ? 'check' : 'call').state;
+    legal = legalFor(st);
+  }
+  const text = turnSummary(st, legal.toAct);
+  const line = text.split('\n').find((row) => row.startsWith('최근 완료 핸드 공개 관측:'));
+  assert.ok(line);
+  for (const card of userCards) assert.equal(line.includes(card), false, `사용자 카드 유출: ${card}`);
+  for (const card of [...p1Cards, ...p2Cards]) assert.ok(line.includes(card), `AI 공개 카드 부재: ${card}`);
 });

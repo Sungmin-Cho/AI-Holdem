@@ -1193,6 +1193,8 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     startStack: 700,
     blinds0: [10, 20],
     levelEvery: 2,
+    showdownPolicy: 'standard',
+    replayReveal: 'showdown',
   });
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   const lock = readJson(path.join(gameDir, 'lock.json'));

@@ -72,8 +72,8 @@ function playRaiseFold() {
   return applyAction(st, 'p2', 'fold').state;
 }
 
-test('10 authored hand-history fixtures match the PokerStars renderer', () => {
-  assert.equal(HANDS.length, 10);
+test('11 authored hand-history fixtures match the PokerStars renderer', () => {
+  assert.equal(HANDS.length, 11);
   const txtFiles = fs.readdirSync(FIXTURE_DIR).filter((name) => name.endsWith('.txt')).sort();
   assert.deepEqual(txtFiles, HANDS.map((entry) => entry.file).sort());
   for (const { file, record } of HANDS) {
@@ -83,6 +83,16 @@ test('10 authored hand-history fixtures match the PokerStars renderer', () => {
     const expected = fs.readFileSync(path.join(FIXTURE_DIR, file), 'utf8');
     assert.equal(text, expected, file);
   }
+});
+
+test('generated/open-split.json converges with 11-showdown-open-split.txt and canonical holes include p2', () => {
+  const record = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'generated', 'open-split.json'), 'utf8'));
+  const canonical = normalizeHand(record);
+  assert.ok(Array.isArray(canonical.holes.p2) && canonical.holes.p2.length === 2);
+  const { text, warnings } = renderPokerStars({ hands: [canonical] }, RENDER_OPTS);
+  assert.equal(warnings.length, 0);
+  const expected = fs.readFileSync(path.join(FIXTURE_DIR, '11-showdown-open-split.txt'), 'utf8');
+  assert.equal(text, expected);
 });
 
 test('archive → normalizer → PokerStars full path emits posts, raise-to, uncalled, collected', () => {

@@ -83,10 +83,10 @@ function completedHandObservation(state) {
     const amount = entry.action === 'raise' || entry.action === 'call' ? ` ${entry.amount}` : '';
     return `${STREET_KO[entry.street] ?? entry.street} ${nameOf(entry.playerId)} ${ACTION_KO[entry.action] ?? entry.action}${amount}`;
   });
-  const reveals = (record.showdown?.reveals ?? []).slice(0, 7).map((entry) => (
+  const reveals = (record.showdown?.reveals ?? []).slice(0, state.seats.length).map((entry) => (
     `${nameOf(entry.playerId)} ${Array.isArray(entry.cards) ? entry.cards.join(' ') : ''}`.trim()
   ));
-  const publicStats = state.seats.slice(0, 7).map((seat) => {
+  const publicStats = state.seats.slice(0, state.seats.length).map((seat) => {
     const raw = state.stats?.[seat.playerId] ?? {};
     const sample = raw.hands ?? 0;
     const vpip = sample > 0 ? (raw.vpip ?? 0) / sample : 0;
