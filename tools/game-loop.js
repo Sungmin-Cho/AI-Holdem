@@ -2651,9 +2651,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const replayPendingPath = path.join(root, '.replay-pending.json');
 
   const readReplayPendingNos = () => {
-    const raw = readJsonOptional(replayPendingPath, 'REPLAY_PENDING');
-    if (!Array.isArray(raw?.handNos)) return [];
-    return raw.handNos.filter((value) => Number.isInteger(value) && value >= 1);
+    try {
+      const raw = JSON.parse(fs.readFileSync(replayPendingPath, 'utf8'));
+      if (!Array.isArray(raw?.handNos)) return [];
+      return raw.handNos.filter((value) => Number.isInteger(value) && value >= 1);
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      log('replay-pending-unreadable', { code: error.code ?? 'PARSE' });
+      appendNotice('replay-pending unreadable; treated as empty');
+      return [];
+    }
   };
 
   const unionReplayPending = (handNos) => {

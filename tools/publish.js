@@ -586,11 +586,12 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');
       const httpMs = afterLock == null ? PUBLISH_TIMEOUT_MS : Math.min(PUBLISH_TIMEOUT_MS, afterLock);
       const json = await postPublish(lock, body, httpMs);
-      drainReplayPending(gameDir, json.handReplay, body.handReplay?.handNos ?? []);
       if (!opts.retry && json.applied === false) {
         try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
         bail('PUBLISH_ID_REUSED', '이 publishId는 이미 다른 본문이 소비했습니다. 기록을 지웠으니 새 id로 다시 게시하세요.');
       }
+      const fallback = opts.retry && json.applied === false ? (body.handReplay?.handNos ?? []) : [];
+      drainReplayPending(gameDir, json.handReplay, fallback);
       try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
       return {
         publishId: body.publishId,

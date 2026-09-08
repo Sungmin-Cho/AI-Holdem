@@ -1041,8 +1041,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
           const existing = state.handReplays?.[handNo];
           if (isReplayMarker(existing)) {
             replayReport.markers.push({ handNo, reason: existing.reason });
-          } else {
+          } else if (existing) {
             replayReport.stored.push(handNo);
+          } else {
+            replayReport.markers.push({ handNo, reason: 'REPLAY_UNAVAILABLE' });
           }
         }
       }
@@ -1163,9 +1165,12 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
           replayReport.markers.push({ handNo, reason: materialized.reason });
           continue;
         }
-        if (!isReplayMarker(existing) && !isReplayMarker(materialized)
-          && canonicalHandReplayJson(existing) !== canonicalHandReplayJson(materialized)) {
-          replayReport.conflicts.push(handNo);
+        if (!isReplayMarker(existing) && !isReplayMarker(materialized)) {
+          if (canonicalHandReplayJson(existing) !== canonicalHandReplayJson(materialized)) {
+            replayReport.conflicts.push(handNo);
+          } else {
+            replayReport.stored.push(handNo);
+          }
         }
       }
       trimHandReplays(next.handReplays);
