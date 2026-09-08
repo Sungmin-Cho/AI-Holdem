@@ -15,6 +15,7 @@ function tmp() {
 
 function evaluation(overrides = {}) {
   return {
+    ...(overrides.origin==='practice'?{assistance:{schemaVersion:1,hintShown:false,exposureId:null}}:{}),
     evaluationId: evaluationIdOf({
       gameEpoch: 'ab'.repeat(32),
       decisionId: 'd-1-preflop-0',
@@ -307,7 +308,7 @@ test('schema 3 file is not read as legacy mixed totals; duplicate apply projects
 });
 
 test('schema 1, 2 and 3 profiles replay to schema 6 without rewriting event bytes', async () => {
-  for (const schemaVersion of [1, 2, 3, 4]) {
+  for (const schemaVersion of [1, 2, 3, 4, 5]) {
     const storeDir = createOwnedTempDir(`profile-migrate-${schemaVersion}`);
     const store = createProfileStore(storeDir);
     const row = evaluation({

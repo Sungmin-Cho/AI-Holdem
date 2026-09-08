@@ -335,7 +335,7 @@ test('schema 2 legacy replay preserves processed ids as unverified evidence and 
   }));
 
   const profile = await store.show();
-  assert.equal(profile.schemaVersion, 5);
+  assert.equal(profile.schemaVersion, 6);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
   assert.equal(profile.skills['preflop.unknown'], undefined);
   assert.equal(profile.game.coverage.unverifiedDecisions, 1);
@@ -345,7 +345,7 @@ test('schema 2 legacy replay preserves processed ids as unverified evidence and 
   assert.equal(profile.processed[preflopId], preflopDigest);
   assert.equal(profile.processed[flopId], flopDigest);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 5);
+  assert.equal(disk.schemaVersion, 6);
   assert.deepEqual(disk.processed, profile.processed);
 });
 
@@ -380,7 +380,7 @@ test('new schema 4 profile events persist street additively', async () => {
   const store = createProfileStore(tmp());
   const result = await store.apply(preflopEvaluation());
   const [event] = fs.readFileSync(store.eventsPath, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(result.profile.schemaVersion, 5);
+  assert.equal(result.profile.schemaVersion, 6);
   assert.equal(event.street, 'preflop');
 });
 
@@ -514,7 +514,7 @@ test('NOT_LEARNABLE against a valid schema 2 profile is byte-for-byte read-only'
   const result = await store.apply(solvedEvaluation());
 
   assert.equal(result.reason, 'NOT_LEARNABLE');
-  assert.equal(result.profile.schemaVersion, 5);
+  assert.equal(result.profile.schemaVersion, 6);
   assert.deepEqual(fs.readFileSync(store.profilePath), profileBefore);
   assert.deepEqual(fs.readFileSync(store.eventsPath), eventsBefore);
 });

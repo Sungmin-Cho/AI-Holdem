@@ -1002,3 +1002,12 @@ main {
 .pre-action-hint { margin: 12px 0; padding: 12px 14px; border: 1px solid #647a91; border-radius: 10px; background: #172331; color: #edf3fa; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 .pre-action-hint strong { display: block; margin-bottom: 5px; }
 .pre-action-hint[hidden] { display: none; }
+.stage:has(> .pre-action-hint:not([hidden])) {
+  grid-template-rows: minmax(300px, 1fr) repeat(3, auto);
+  min-height: min-content;
+}
+body:has(.pre-action-hint:not([hidden])) { height: auto; }
+main:has(.pre-action-hint:not([hidden])) { min-height: min-content; }
+@media (max-width: 900px) {
+  main:has(.pre-action-hint:not([hidden])) { grid-template-rows: min-content minmax(190px, 32vh); }
+}

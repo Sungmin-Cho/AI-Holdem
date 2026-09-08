@@ -1098,6 +1098,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
         ok: true,
         revision: state.revision,
         applied: false,
+        ...(hintDisposition ? {hintDisposition} : {}),
         ...(replayReport ? { handReplay: replayReport } : {}),
       });
       return;

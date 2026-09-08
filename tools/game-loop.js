@@ -191,8 +191,6 @@ function integerValue(value, flag, minimum = 1) {
   if (!/^\d+$/.test(String(value))) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum) throw codedError('USAGE', `${flag}는 ${label}여야 합니다.`);
-  if (parsed.hints !== undefined && !['on','off'].includes(parsed.hints)) throw codedError('USAGE','--hints는 on 또는 off입니다.');
-  if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   return parsed;
 }
 
@@ -348,6 +346,8 @@ export function parseGameLoopArgs(argv) {
   if (parsed.replayReveal != null && parsed.replayReveal !== 'all' && parsed.replayReveal !== 'showdown') {
     throw codedError('USAGE', '--replay-reveal는 all 또는 showdown입니다.');
   }
+  if (parsed.hints !== undefined && !['on','off'].includes(parsed.hints)) throw codedError('USAGE','--hints는 on 또는 off입니다.');
+  if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   return parsed;
 }
 
@@ -2539,6 +2539,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   let hintReadyLatch = true;
   const hintControl = createHintControl({sessionDir:root,runCli:args=>runCliBeforeResultCutoff(args),
+    enabled:()=>opts.hints==='on',
     isFatal:isFatalRuntimeFailure,
     assertActive:()=>{assertNotStopping();if(finalizationCutoff) throw codedError('PLAYTIME_PUBLISH_STOPPED','hint cutoff');},log,
     ready:async()=>{
@@ -5348,7 +5349,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (typeof engineState.sessionToken !== 'string' || engineState.sessionToken === '') {
         throw codedError('BAD_ENGINE_IDENTITY', 'resume할 engine sessionToken이 없습니다.');
       }
-      checkHintResume(engineState.config, opts.hints);
+      opts.hints=checkHintResume(engineState.config, opts.hints);
       if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
       const canonicalEpoch = gameEpochOf(engineState.sessionToken);
       if (state && (

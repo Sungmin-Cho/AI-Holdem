@@ -1,4 +1,4 @@
-import { NO_HINT_ASSISTANCE, projectAssistance } from '../shared/assistance.js';
+import { NO_HINT_ASSISTANCE, projectAssistance, assistanceError } from '../shared/assistance.js';
 import { referenceAssessmentEligibility } from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
@@ -37,6 +37,7 @@ function coded(code, message) {
 }
 
 export function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
+  if (['practice','import'].includes(evaluation.origin) && evaluation.assistance === undefined) throw assistanceError();
   const event = {
     schemaVersion: PROFILE_SCHEMA_VERSION,
     assistance: projectAssistance(evaluation.assistance ?? NO_HINT_ASSISTANCE),

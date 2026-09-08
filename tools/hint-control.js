@@ -17,15 +17,19 @@ export function checkHintResume(config, requested) {
   if (requested !== undefined && requested !== config.hints) throw hintError('HINT_MODE_CONFLICT');
   return config.hints;
 }
-export function createHintControl({sessionDir,runCli,ready,assertActive=()=>{},isFatal=()=>false,log=()=>{}}) {
-  let source, dataset, descriptor;
+export function createHintControl({sessionDir,runCli,ready,enabled=()=>true,assertActive=()=>{},isFatal=()=>false,log=()=>{}}) {
+  let source, dataset, descriptor, blockedDecision;
   return { async prepare(envelope) {
-    const state=JSON.parse(openContained(sessionDir,['state.json'],{maxBytes:2*1024*1024}));
+    if (!enabled()) return envelope;
+    let state;
+    try { state=JSON.parse(openContained(sessionDir,['state.json'],{maxBytes:2*1024*1024})); }
+    catch(error) { log('hint-unavailable',{code:'HINT_STATE_UNAVAILABLE'});return {...envelope,hint:null}; }
     if (state.config?.hints!=='on' || state.config.hintContractVersion!==1) return envelope;
     if (!envelope.view || envelope.next?.toAct!=='user') return {...envelope,hint:null};
     const identity={schemaVersion:1,gameEpoch:gameEpochOf(state.sessionToken),decisionId:envelope.next.decisionId,
       handNo:envelope.view.handNo,stateVersion:envelope.stateVersion};
     const unavailable=code=>({...envelope,hint:{...identity,status:'unavailable',source:source??null,code}});
+    if (blockedDecision===identity.decisionId) return unavailable('HINT_EXPOSURE_CONFLICT');
     const started=performance.now();
     try {
       assertActive();
@@ -41,6 +45,7 @@ export function createHintControl({sessionDir,runCli,ready,assertActive=()=>{},i
       }
       const peek=await runCli(['decision-peek','--for','user','--expect-version',String(envelope.stateVersion)]);
       assertActive();
+      if (Buffer.byteLength(JSON.stringify(peek.snapshot))>16384) throw hintError('HINT_SNAPSHOT_INVALID');
       const hint=buildPreActionHint(peek.snapshot,dataset,identity);
       if (hint.status!=='supported') return {...envelope,hint};
       const marker=state.hand?.hintExposures?.[identity.decisionId];
@@ -58,10 +63,16 @@ export function createHintControl({sessionDir,runCli,ready,assertActive=()=>{},i
     } catch(error) {
       if (isFatal(error) || error.code === 'STOPPING' || error.code === 'FINALIZATION_RESULT_WAIT_CUTOFF') throw error;
       log('hint-unavailable',{code:error.code??'HINT_QUERY_UNAVAILABLE'});
+      if (['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH'].includes(error.code)) blockedDecision=identity.decisionId;
       // A commit may have succeeded before stdout loss: always re-sync identity.
       assertActive();
       const synchronized=await runCli(['step']);
-      return {...envelope,...synchronized,events:envelope.events,actionAck:envelope.actionAck,handReplay:envelope.handReplay,hint:null};
+      const code=['HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH','HINT_SNAPSHOT_INVALID'].includes(error.code)?error.code
+        :error.code==='SNAPSHOT_INVALID'?'HINT_SNAPSHOT_INVALID':error.code==='VERSION_MISMATCH'?'HINT_STALE_DECISION'
+        :error.code?.includes('TIMEOUT')?'HINT_PREPARE_TIMEOUT':error.code?.includes('SOURCE')?'HINT_SOURCE_UNAVAILABLE':'HINT_QUERY_UNAVAILABLE';
+      return {...envelope,...synchronized,events:envelope.events,actionAck:envelope.actionAck,handReplay:envelope.handReplay,
+        hint:synchronized.next?.toAct==='user'?{...identity,decisionId:synchronized.next.decisionId,
+          handNo:synchronized.view.handNo,stateVersion:synchronized.stateVersion,status:'unavailable',source:source??null,code}:null};
     } finally { log('hint-timing',{prepareMs:performance.now()-started}); }
   }};
 }

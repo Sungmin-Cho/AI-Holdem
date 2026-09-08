@@ -122,7 +122,8 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     const detail = receipt.detail;
     item = { ...item };
     for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage', 'assistance']) {
-      item[key] = detail[key];
+      if (key === 'assistance' && !Object.hasOwn(detail,key)) delete item[key];
+      else item[key] = detail[key];
     }
   }
   const identityQuality = referenceQuality(item.source);

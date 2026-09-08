@@ -48,6 +48,7 @@ test('S8 early: the new-store defaults are complete, pure and do not inject blin
     opponentRuntime: 'policy',
     showdownPolicy: 'open',
     replayReveal: 'all',
+    hints: 'off',
   });
   assert.equal(next.blinds, undefined);
   assert.deepEqual(applyModeDefaults(next), next);
@@ -83,8 +84,8 @@ for (const options of [
     assert.equal(next.showdownPolicy, 'open');
     assert.equal(next.replayReveal, 'all');
     assert.deepEqual(
-      { ...next, showdownPolicy: undefined, replayReveal: undefined },
-      { ...parsed, showdownPolicy: undefined, replayReveal: undefined },
+      { ...next, showdownPolicy: undefined, replayReveal: undefined, hints: undefined },
+      { ...parsed, showdownPolicy: undefined, replayReveal: undefined, hints: undefined },
     );
   });
 }

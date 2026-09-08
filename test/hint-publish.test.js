@@ -73,3 +73,15 @@ test('off creates no marker or numeric hint; formatter defines raise-to and call
   assert.equal(hintPotPercent(hint,150),100);
   assert.match(formatHint(hint).lines[2],/총 250칩까지 \(5.00 BB\), 추가 250칩/);
 });
+
+test('overlapping authenticated SSE fanouts preserve unique increasing revisions',async t=>{
+ const f=await hintFixture(t),e=await f.prepare();
+ await f.request('publish',{publishId:1,view:e.view,hint:e.hint});
+ const abort=new AbortController();t.after(()=>abort.abort());
+ const response=await fetch(f.url()+`/api/events?token=${f.token}&after=0`,{signal:abort.signal});
+ const reader=response.body.getReader();let buffer='',ids=[];
+ const reading=(async()=>{try{while(ids.length<3){const {value,done}=await reader.read();if(done)break;buffer+=new TextDecoder().decode(value);let at;while((at=buffer.indexOf('\n\n'))>=0){const frame=buffer.slice(0,at);buffer=buffer.slice(at+2);const id=/^id: (\d+)$/m.exec(frame);if(id)ids.push(Number(id[1]));}}}catch(error){if(!abort.signal.aborted)throw error;}})();
+ await Promise.all([f.request('publish',{publishId:2,view:e.view,hint:e.hint}),f.request('publish',{publishId:3,view:e.view,hint:e.hint})]);
+ let timer;try{await Promise.race([reading,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('SSE delivery deadline')),5000);})]);}finally{clearTimeout(timer);abort.abort();}
+ assert.deepEqual(ids,[1,2,3]);
+});

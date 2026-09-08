@@ -12,6 +12,7 @@ import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 const now = () => '2026-09-06T00:00:00.000Z';
 function evaluation(index, { status = 'supported', origin = 'game', identity = source } = {}) {
   return {
+    ...(origin==='practice'?{assistance:{schemaVersion:1,hintShown:false,exposureId:null}}:{}),
     evaluationId: `${'ab'.repeat(32)}:d-${index}-preflop-0:${identity.id}@${identity.version}`,
     payloadSha256: index.toString(16).padStart(64, '0'), street: 'preflop',
     status, origin, source: identity, forced: false, evLossBb: null,

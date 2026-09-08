@@ -32,7 +32,7 @@ export function verifyEvaluationAssistance(sessionDir, evaluation, handNo, gameE
   try { state=JSON.parse(openContained(sessionDir,['state.json'],{maxBytes:2*1024*1024})); }
   catch(error) { if(error.code!=='ENOENT') throw assistanceError(); }
   try { record=JSON.parse(openContained(sessionDir,['hands',`hand-${String(handNo).padStart(4,'0')}.json`],{maxBytes:2*1024*1024})); }
-  catch(error) { if(error.code!=='ENOENT') throw assistanceError(); record=state?.lastHand?.handNo===handNo?state.lastHand:null; }
+  catch(error) { if(error.code!=='ENOENT') throw assistanceError(); record=state?.lastHand && state.lastHand.handNo===handNo?state.lastHand:null; }
   const rows=(record?.decisions??[]).filter(row=>row.actorId==='user'&&row.decisionId===evaluation.decisionId);
   const required=state?.config?.hintContractVersion!=null || record?.hintContractVersion!=null || evaluation.assistance!==undefined;
   if (!required && !record?.hintExposures) return undefined;

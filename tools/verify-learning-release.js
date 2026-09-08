@@ -376,7 +376,7 @@ export function validateCompatibilityResult(result) {
     || result.priorReaders?.lockProtection?.code !== 'LOCKED'
     || result.priorReaders.lockProtection.wrote !== false
     || result.priorReaders.lockProtection.process?.expectedFailure !== true
-    || result.currentResume?.profileSchemaVersion !== 5 || result.currentResume?.policyId !== 'tag-v2'
+    || result.currentResume?.profileSchemaVersion !== 6 || result.currentResume?.policyId !== 'tag-v2'
     || !Number.isSafeInteger(result.currentResume?.bankEvidenceCount) || result.currentResume.bankEvidenceCount < 1
     || result.rollback?.actionRecovery?.unresolvedAccepted?.phase !== 'accepted'
     || result.rollback.actionRecovery.unresolvedAccepted.code !== 'OUTCOME_UNRESOLVED'

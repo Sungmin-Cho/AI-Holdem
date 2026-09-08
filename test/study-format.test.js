@@ -330,6 +330,7 @@ test('actual drill backend legacy source rejection survives refresh and allows o
   const sessionPath = `${storeDir}/.training/drill-session.json`;
   const persisted = JSON.parse((await import('node:fs')).readFileSync(sessionPath, 'utf8'));
   persisted.schemaVersion = 1;
+  delete persisted.assistanceContractVersion;
   delete persisted.sourceIdentity; delete persisted.studyRun;
   for (const q of persisted.queue) { delete q.sourceIdentity; delete q.candidateMistakeId; delete q.answerPolicy.contentSha256; }
   (await import('node:fs')).writeFileSync(sessionPath, JSON.stringify(persisted));

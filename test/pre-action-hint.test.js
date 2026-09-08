@@ -49,3 +49,13 @@ test('assistance is closed and cannot conflate absent, false, and true', () => {
   for (const value of [undefined, {}, {...NO_HINT_ASSISTANCE,exposureId:'a'.repeat(64)},
     {...NO_HINT_ASSISTANCE,hintShown:true}, {...NO_HINT_ASSISTANCE,note:'false'}]) assert.throws(() => projectAssistance(value));
 });
+
+test('hint flags validate before side effects and resume preserves the session contract',async()=>{
+ const {parseGameLoopArgs,applyModeDefaults}=await import('../tools/game-loop.js');
+ const {checkHintResume}=await import('../tools/hint-control.js');
+ for(const args of [['--store-dir','/tmp/unused-hint','--hints','invalid'],['--game-dir','/tmp/unused-hint','--hints','on']]) assert.throws(()=>parseGameLoopArgs(args),{code:'USAGE'});
+ assert.equal(applyModeDefaults(parseGameLoopArgs(['--store-dir','/tmp/unused-hint'])).hints,'off');
+ assert.equal(checkHintResume({hintContractVersion:1,hints:'on'},undefined),'on');
+ assert.throws(()=>checkHintResume({hintContractVersion:1,hints:'on'},'off'),{code:'HINT_MODE_CONFLICT'});
+ assert.throws(()=>checkHintResume({},'on'),{code:'HINT_SESSION_UPGRADE_REQUIRED'});
+});
