@@ -1,15 +1,14 @@
 export const HAND_REPLAY_SCHEMA_VERSION = 1;
 
-export const SAFE_ACTION_KEYS = [
+export const SAFE_ACTION_KEYS = Object.freeze([
   'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
   'callAmount', 'minRaiseTo', 'maxRaiseTo', 'board', 'stacks', 'currentBet',
-];
+]);
 
-export const REPLAY_ACTION_KEYS = [
-  'decisionId', 'playerId', 'action', 'amount', 'street', 'potTotal',
-  'callAmount', 'minRaiseTo', 'maxRaiseTo', 'currentBet', 'board',
+export const REPLAY_ACTION_KEYS = Object.freeze([
+  ...SAFE_ACTION_KEYS.filter((key) => key !== 'stacks'),
   'forced', 'reasonKind', 'reason', 'note',
-];
+]);
 
 const DECISION_KEYS = [
   'decisionId', 'street', 'position', 'holeCards', 'potBefore',
@@ -82,7 +81,7 @@ export function replayRecord(record, { reveal } = {}) {
     reveal: mode,
     handNo: record.handNo,
     level: record.level,
-    blinds: record.blinds,
+    blinds: Array.isArray(record.blinds) ? [...record.blinds] : record.blinds,
     button: record.button,
     board: [...(record.board ?? [])],
     folded: [...(record.folded ?? [])],

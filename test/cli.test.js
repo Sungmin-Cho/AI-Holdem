@@ -1191,13 +1191,13 @@ test('닫는 step에만 handReplay.handNos가 있고 중간 step·legal·열린 
   const dir = tmpGame();
   initGame(dir, ['--ai', '2']);
   const started = assertOk(cli(dir, ['step', '--new-hand', '--deck', FULL_DECK]));
+  assert.equal(started.handOver, false);
   assert.equal('handReplay' in started, false);
   const legal = assertOk(cli(dir, ['legal']));
   assert.equal('handReplay' in legal, false);
-  if (!started.handOver) {
-    const mid = assertOk(cli(dir, ['step', started.next.toAct, started.next.toAct === 'user' ? 'fold' : (legal.canCheck ? 'check' : 'call')]));
-    if (!mid.handOver) assert.equal('handReplay' in mid, false);
-  }
+  const mid = assertOk(cli(dir, ['step', started.next.toAct, legal.canCheck ? 'check' : 'call']));
+  assert.equal(mid.handOver, false);
+  assert.equal('handReplay' in mid, false);
   let last = started;
   for (let i = 0; i < 40 && !last.handOver; i += 1) {
     const next = assertOk(cli(dir, ['legal']));
@@ -1224,4 +1224,6 @@ test('archivePending envelope에도 handReplay가 있다', () => {
   const { last } = playUntilOver(dir, { preferFold: true });
   assert.equal(last.archivePending, true);
   assert.deepEqual(last.handReplay.handNos, [1]);
+  const replay = assertOk(cli(dir, ['hand', '1', '--replay']));
+  assert.equal(replay.handNo, 1);
 });

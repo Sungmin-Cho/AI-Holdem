@@ -42,7 +42,7 @@ function finish(st, script) {
 
 function playRecord(config, extras = {}) {
   let st = start3(config);
-  const script = [
+  const script = extras.script ?? [
     ['user', 'call', undefined, extras.user],
     ['p1', 'call', undefined, extras.p1],
     ['p2', 'check', undefined, extras.p2],
@@ -107,6 +107,14 @@ test('replayRecord all: 전원 holes·reasonKind 5종·note·stacks 부재·deci
     ].sort());
   }
   assert.ok(all.positions);
+
+  const folded = playRecord({ replayReveal: 'all' }, {
+    script: [['user', 'fold']],
+  });
+  const foldedReplay = replayRecord(folded, { reveal: 'all' });
+  assert.ok(folded.folded.includes('user'));
+  assert.deepEqual(foldedReplay.holes.user, folded.holes.user);
+  assert.ok(foldedReplay.holes.p1);
 });
 
 test('replayRecord showdown: holes ⊆ user∪reveals, 비공개 reason 제거, hidden', () => {
@@ -121,6 +129,9 @@ test('replayRecord showdown: holes ⊆ user∪reveals, 비공개 reason 제거, 
   assert.equal(hidden.reasonKind, 'hidden');
   assert.equal('reason' in hidden, false);
   assert.equal(JSON.stringify(shown).includes('secret-cards'), false);
+  for (const card of record.holes.p2) {
+    assert.equal(JSON.stringify(shown.holes).includes(card), false, card);
+  }
 });
 
 test('replayRecord open+showdown 조합과 legacy positions 부재', () => {
@@ -133,6 +144,16 @@ test('replayRecord open+showdown 조합과 legacy positions 부재', () => {
   const replayed = replayRecord(legacy, { reveal: 'all' });
   assert.equal('positions' in replayed, false);
   assert.deepEqual(Object.keys(replayed.holes).sort(), ['p1', 'p2', 'user']);
+});
+
+test('replayRecord는 상대 decisions 행을 버린다', () => {
+  const record = playRecord({ replayReveal: 'all' });
+  record.decisions = [
+    ...record.decisions,
+    { ...record.decisions[0], actorId: 'p1', decisionId: 'd-forged-p1' },
+  ];
+  const replay = replayRecord(record, { reveal: 'all' });
+  assert.equal(replay.decisions.some((row) => row.decisionId === 'd-forged-p1'), false);
 });
 
 test('canonicalHandReplayJson 키 순서 무관 동일성', () => {
