@@ -242,3 +242,5 @@ schema 4의 derived profile만 있고 원본 profile-events 저널이 없으면 
 종합 리뷰의 supported는 exactComparable이다. 분모는 total = supported + unsupported + nonComparableSupported이며 forced도 별도 진단 수로 제공한다. 게임의 verified referenceAvailable 이벤트는 투영뿐이어도 active source를 갱신한다. source별 점수와 calibration은 계속 분리한다.
 
 측정 도구는 봉인된 기존 평가의 supported/exact 수를 그대로 집계하고, 지원 확대 연구용 blocker 진단은 명시적으로 v2 API에 재질의한다. 따라서 v1 기록의 historical metric을 v2 재평가 점수로 대체하지 않는다. 데이터셋의 key metadata는 closed key grammar와 전역 capability에서 유도하며 같은 값을 99번 중복 저장하지 않는다.
+
+미지원 coverage의 reasonCodes에는 실제 blocker만 남긴다. 원시 스택·사이즈는 input에 보존하지만 reference가 없을 때 투영했다고 표시하지 않는다. 학습실의 기준표 선택 및 CLI `start --source-version 1.0.0`으로 v2 활성 store에서도 이전 v1 오답 복습을 요청할 수 있다. 전체 요약은 활성 게임 source 기준이며 선택한 연습 출처는 현재 문항에서 별도로 표시한다.

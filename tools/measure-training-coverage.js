@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {openContained} from './training-store.js';
 import {materializeLearningEvaluation} from './training-control.js';
 import {referenceAssessmentEligibility,projectReferenceCoverage} from '../shared/reference-coverage.js';
-import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
+import {V2_REFERENCE_SOURCE,referenceQuality} from '../shared/reference.js';
 import {loadReferenceDataset} from './preflop-dataset.js';
 import {resolvePreflopReference} from '../training/preflop-reference.js';
 function fail(message){const e=new Error(message);e.code='COVERAGE_EVIDENCE_INVALID';throw e;}
@@ -32,7 +32,7 @@ export function measureTrainingCoverage(sessionDir) {
   if(!journalIds.has(e.evaluationId)||!s||seen.has(e.decisionId))fail('Missing or conflicting decision/evaluation binding');
   seen.add(e.decisionId);
   const eligible=referenceAssessmentEligibility(e);
-  if(!eligible.verified&&e.status==='supported')fail('Source or coverage unavailable');
+  if(!eligible.verified&&e.status==='supported'&&referenceQuality(e.source).quality!=='synthetic')fail('Source or coverage unavailable');
   if(e.coverage)projectReferenceCoverage(e.coverage);
   const diagnosis=resolvePreflopReference(s,dataset);
   rows.push({decisionId:e.decisionId,street:s.street,forced:s.forced,status:e.status,source:e.source,

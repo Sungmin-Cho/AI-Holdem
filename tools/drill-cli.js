@@ -773,6 +773,8 @@ async function main() {
   const storeDir = flags['store-dir'];
   if (!storeDir) fail('USAGE', '--store-dir가 필요합니다.');
   if (cmd === 'start') {
+    const source = flags['source-version'] === undefined ? undefined : KNOWN_REFERENCE_SOURCES.find(s=>s.version===flags['source-version']);
+    if(flags['source-version'] !== undefined && !source) fail('SOURCE_CHANGED','Unknown reference source version');
     const session = await startDrill(storeDir, {
       mode: flags.mode ?? 'free',
       seed: flags.seed ?? '0',
@@ -780,6 +782,7 @@ async function main() {
       spotKey: flags['spot-key'],
       handClass: flags['hand-class'],
       assessmentId: flags['assessment-id'],
+      ...(source ? {source} : {}),
     });
     fs.writeSync(1, `${JSON.stringify({
       ok: true,

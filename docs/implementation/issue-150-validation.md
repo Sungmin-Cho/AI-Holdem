@@ -35,3 +35,7 @@ node --test test/preflop-baseline-v2.test.js test/preflop-reference.test.js test
 ```
 
 전체 테스트와 최종 리뷰의 종료 결과 및 병합 revision은 PR의 검증 기록에 남긴다. CI의 Windows 축은 저장소의 기존 #149 정책에 따라 플랫폼 게이트만 실행하며 전체 Windows suite 통과를 뜻하지 않는다. ESLint/Stryker는 설치되어 있지 않아 실행했다고 주장하지 않는다.
+
+두 번째 리뷰 후 112BB + limp/4bet 지원 제외 카드의 null reference 접근을 수정했다. unsupported coverage에서는 투영 사유를 제거하고 validator에서도 모순된 투영 사유를 거절한다. 공개 결정 전체를 112BB로 바꾼 detail 검증·카드 렌더링 회귀를 추가했다. 혼합 v1/v2 프로필, 합성 postflop 측정, UI/CLI의 명시적 이전 출처 복습도 검증한다. 긴 세션의 출처 history 전체 검증 비용과 기존 4MB authority 한도는 유지한다. 부분 tail만 검증해 출처 충돌을 놓치는 최적화는 하지 않는다.
+
+main의 PR #160을 통합한 뒤 게시·리플레이·학습 authority 집중 테스트 122건이 통과했다. Node 20 CI의 bootstrap race 실패는 테스트 자식이 SIGTERM 처리기를 등록하기 전에 준비 완료를 출력하는 순서 문제로 확인하여 처리기 등록을 먼저 하도록 수정했다. 서비스의 소유권 규칙은 바꾸지 않았다.

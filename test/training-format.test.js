@@ -1,3 +1,8 @@
+import fs from 'node:fs';
+import {loadReferenceDataset} from '../tools/preflop-dataset.js';
+import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
+import {evaluatePreflopReference} from '../training/preflop-reference.js';
+import {projectReferenceCoverage} from '../shared/reference-coverage.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatTrainingCard, verifyTrainingDetail } from '../server/public/training-format.js';
@@ -370,4 +375,24 @@ test('training DOM routes a verified supported practice target without altering 
   const href = new URL(dom.querySelector('a').href);
   assert.equal(href.searchParams.get('spotKey'), '6max-100bb-btn-rfi-unopened'); assert.equal(href.searchParams.get('handClass'), 'AJo');
   assert.equal(JSON.stringify(fixture.item), before);
+});
+
+test('112BB blocked and projected v2 decisions render safely after detail verification',async()=>{
+ const corpus=JSON.parse(fs.readFileSync(new URL('./fixtures/reference-coverage/decisions.json',import.meta.url),'utf8'));
+ const data=loadReferenceDataset(V2_REFERENCE_SOURCE);let blocked=0,projected=0;
+ for(const original of corpus.filter(s=>s.street==='preflop')){
+  const s=structuredClone(original);for(const p of s.publicSeats)p.stack+=600;
+  s.maxRaiseTo+=600;s.legal.maxRaiseTo+=600;s.effectiveStack+=600;
+  const e=evaluatePreflopReference(s,data,{gameEpoch:'a'.repeat(64)});e.handNo=s.handNo;
+  const summary=toPublicSummary(e,{handNo:e.handNo,detailSha256:createHash('sha256').update(JSON.stringify(e)).digest('hex')});
+  const verifiedDetail=await verifyTrainingDetail(summary,e);assert.ok(verifiedDetail);
+  const card=formatTrainingCard(summary,{verifiedDetail});assert.ok(card);
+  if(e.status==='unsupported'){
+   blocked++;assert.equal(e.coverage.reference,null);
+   assert.equal(e.coverage.reasonCodes.some(r=>r.endsWith('_PROJECTED')),false);
+   const forged=structuredClone(e.coverage);forged.reasonCodes.push('STACK_PROJECTED');
+   assert.throws(()=>projectReferenceCoverage(forged),{code:'REFERENCE_COVERAGE_INVALID'});
+  }else{projected++;assert.match(card.note,/112bb.*100bb.*점수 제외/);}
+ }
+ assert.ok(blocked>0);assert.ok(projected>0);
 });

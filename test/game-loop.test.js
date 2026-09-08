@@ -537,8 +537,8 @@ function spawnBootstrapWorker(gameDir) {
     });
     try {
       await loop.bootstrap({ai: 1, stack: 100});
-      process.stdout.write(JSON.stringify({ok: true, pid: process.pid}) + '\\n');
       process.once('SIGTERM', async () => { await loop.requestStop(); process.exit(0); });
+      process.stdout.write(JSON.stringify({ok: true, pid: process.pid}) + '\\n');
       setInterval(() => {}, 1000);
     } catch (error) {
       process.stdout.write(JSON.stringify({ok: false, code: error.code}) + '\\n');

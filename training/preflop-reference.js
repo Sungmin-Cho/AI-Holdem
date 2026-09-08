@@ -52,8 +52,10 @@ export function resolvePreflopReference(snapshot, dataset) {
   if(dataset.data.schemaVersion!==2) throw coded('DATASET_INVALID','v2 reference API requires v2 data');
   if(referenceQuality(source).quality!=='heuristic-reference')throw coded('SOURCE_UNAVAILABLE','v2 reference source is not registered');
   const reasons=[];
-  const fail=(code,coverage=null)=>finish({status:'unsupported',decisionId:s.decisionId,spot:null,actions:[],source,
-    code,reason:code,coverage});
+  const fail=(code,coverage=null)=>{
+    if(coverage)coverage.reasonCodes=sortedReasons([...coverage.reasonCodes.filter(r=>!r.endsWith('_PROJECTED')),code]);
+    return finish({status:'unsupported',decisionId:s.decisionId,spot:null,actions:[],source,code,reason:code,coverage});
+  };
   const finish=r=>{freeze(r);MINTED.set(r,JSON.stringify(s));return r;};
   if(s.street!=='preflop')return fail('UNSUPPORTED_SPOT');
   const live=s.publicSeats.filter(p=>!p.out),order=PREFLOP_ORDERS[live.length];

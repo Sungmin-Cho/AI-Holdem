@@ -1,3 +1,4 @@
+import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
 import { STUDY_MODES, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, formatSource, readStudyEntry, drillRequest } from './study-format.js';
 
 // Exact pre-start rejections from createDrillHandler/startDrill. An unknown
@@ -151,6 +152,7 @@ export function createStudyController({ api, storage, storageKey, initialTarget 
     async start(selectors) {
       if (busy || recovery || pending) return state();
       if (!Object.hasOwn(STUDY_MODES, selectors?.mode)) { error = { code: 'INVALID_DRILL_MODE' }; return emit(); }
+      if (selectors.source && target?.spotKey && selectors.source.version !== (target.spotKey.endsWith('-v2') ? '2.0.0' : '1.0.0')) target = null;
       return submit({ kind: 'start', body: { ...(selectors.mode === 'free' ? target : null), ...selectors, seed: uuid(), idempotencyKey: uuid() } });
     },
     async answer(action, sizeBb) {
@@ -211,6 +213,7 @@ async function mountStudy() {
     }
     $('start').disabled = state.busy || state.recovery || !authenticated;
     $('mode').disabled = state.busy;
+    if ($('reference-source')) $('reference-source').disabled = state.busy;
     $('recover').disabled = state.busy;
     $('retry').hidden = !state.pending;
     $('retry').disabled = state.busy;
@@ -288,7 +291,8 @@ async function mountStudy() {
     const identity = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
     controller = createStudyController({ api, storage: sessionStorage, storageKey: `holdem.study.v1.${identity}`, initialTarget: { spotKey: entry.spotKey, handClass: entry.handClass }, onState: render });
     $('start').addEventListener('click', async () => {
-      await controller.start({ mode: $('mode').value });
+      const source = KNOWN_REFERENCE_SOURCES.find(s=>s.version === $('reference-source')?.value);
+      await controller.start({ mode: $('mode').value, ...(source ? {source} : {}) });
       await refreshSummary();
     });
     $('next').addEventListener('click', async () => { await controller.next(); await refreshSummary(); });

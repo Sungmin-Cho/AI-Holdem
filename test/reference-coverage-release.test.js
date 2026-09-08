@@ -1,3 +1,5 @@
+import {execFileSync} from 'node:child_process';
+import {createStudyController} from '../server/drill-public/drill.js';
 import {createGame,startHand,applyAction,legalFor} from '../engine/hand.js';
 import {snapshotDecision} from '../engine/decision.js';
 import {newDeck} from '../engine/cards.js';
@@ -71,4 +73,19 @@ test('all 79 opener pairs resolve from real engine raise/fold transitions',()=>{
   }
  }
  assert.equal(pairs,79);
+});
+
+test('CLI exposes bundled v1 selection after a v2 practice run',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'reference-select-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ const session=await startDrill(d,{source:V2_REFERENCE_SOURCE,spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'});
+ await answerQuestion(d,{sessionId:session.sessionId,questionId:session.queue[0].questionId,attemptNo:0,action:'fold'});
+ const result=JSON.parse(execFileSync(process.execPath,['tools/drill-cli.js','start','--store-dir',d,'--source-version','1.0.0'],{encoding:'utf8'}));
+ assert.equal(result.session.sourceIdentity.version,'1.0.0');assert.ok(result.count>0);
+});
+test('study controller captures source selection and drops incompatible card target',async()=>{
+ const calls=[];const storage={getItem:()=>null,setItem(){},removeItem(){}};
+ const controller=createStudyController({storage,storageKey:'test',initialTarget:{spotKey:'6max-100bb-btn-rfi-v2',handClass:'AA'},api:async(route,options)=>{calls.push({route,options});return {ok:true};}});
+ await controller.restore();await controller.start({mode:'free',source:LEGACY_REFERENCE_SOURCE});
+ const request=calls.find(c=>c.route==='/api/start').options.body;
+ assert.deepEqual(request.source,LEGACY_REFERENCE_SOURCE);assert.equal(request.spotKey,undefined);
 });

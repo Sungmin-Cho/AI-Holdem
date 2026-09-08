@@ -37,7 +37,7 @@ export function projectReferenceCoverage(c) {
   ||typeof l.canCheck!=='boolean'||typeof l.canRaise!=='boolean'
   ||!['actorBetChips','callAmountChips','minRaiseToChips','maxRaiseToChips'].every(k=>chips(l[k]))
   ||l.canCheck!==(l.callAmountChips===0))invalid();
- if(c.referenceMatch==='unsupported') {if(c.reference!==null||c.metricEligible)invalid();}
+ if(c.referenceMatch==='unsupported') {if(c.reference!==null||c.metricEligible||c.reasonCodes.some(r=>r.endsWith('_PROJECTED')))invalid();}
  else {
   const r=c.reference;
   if(!keys(r,['seated','stackBb','openRaiseToBb','threeBetRaiseToBb','sizing'])||r.seated!==i.seated

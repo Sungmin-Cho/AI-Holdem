@@ -166,7 +166,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
       card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue}`;
     }
   }
-  if (sourceEligible && item.coverage) {
+  if (sourceEligible && item.coverage?.reference) {
     const c=item.coverage,i=c.input,r=c.reference;
     const projections=[];
     if(c.reasonCodes.includes('STACK_PROJECTED'))projections.push(`스택 ${i.effectiveStackBb}bb → ${r.stackBb}bb`);
@@ -182,7 +182,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   } else if (!sourceEligible) {
     card.note = formatReferenceReason(quality.reason);
   } else if (!referenceClaimAllowed(item.explanation)) {
-    card.note = '근거 범위를 벗어난 표현을 제외했습니다.';
+    card.note = [card.note,'근거 범위를 벗어난 표현을 제외했습니다.'].filter(Boolean).join(' · ');
   }
   if (['flop', 'turn', 'river'].includes(item.street)
     || (typeof item.spotKey === 'string' && item.spotKey.startsWith('postflop-'))) {

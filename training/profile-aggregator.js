@@ -89,7 +89,10 @@ export function assertProfileEvent(event) {
       || event.mixObservation.sourceIdentity.version !== event.providerVersion)) {
     throw coded('PROFILE_EVENT_INVALID', 'mix source identity does not match the event provider');
   }
-  if (event.coverage !== undefined) projectReferenceCoverage(event.coverage);
+  if (event.coverage !== undefined) {
+    try { projectReferenceCoverage(event.coverage); }
+    catch { throw coded('PROFILE_EVENT_INVALID','profile reference coverage is invalid'); }
+  }
   if (event.sourceIdentity && (event.sourceIdentity.id !== event.providerId || event.sourceIdentity.version !== event.providerVersion)) throw coded('PROFILE_EVENT_INVALID', 'source identity conflict');
   if (event.studyRun !== undefined) validateStudyRun(event.studyRun);
   return event;

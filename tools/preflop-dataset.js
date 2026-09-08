@@ -50,7 +50,7 @@ export function loadReferenceDataset(source) {
   if (!known) throw coded('SOURCE_UNAVAILABLE', 'Unknown reference source');
   const key = `${known.id}@${known.version}:${known.contentSha256}`;
   if (!bundled.has(key)) {
-    const file = new URL(`../training/data/preflop-baseline-v${known.version[0]}.json`, import.meta.url);
+    const file = new URL(`../training/data/preflop-baseline-v${known.version.split('.')[0]}.json`, import.meta.url);
     const parsed = loadPreflopDataset(fileURLToPath(file), { expectedSha256: known.contentSha256 });
     if (!sameReferenceSource({...parsed.data, contentSha256:parsed.contentSha256}, known)) {
       throw coded('SOURCE_UNAVAILABLE', 'Reference identity mismatch');

@@ -162,6 +162,20 @@ export function validateMixObservation(value) {
 }
 
 const REASONS = Object.freeze({
+  MODE_UNSUPPORTED: '이 게임 모드는 현재 기준표에서 지원하지 않습니다.',
+  SEAT_COUNT_UNSUPPORTED: '기준표는 6인, 8인, 9인 테이블을 지원합니다.',
+  POSITION_INVALID: '현재 액션 순서와 위치는 지원 트리 밖입니다.',
+  STACK_OUT_OF_RANGE: '현재 스택은 기준표의 참고 범위 밖입니다.',
+  UNSUPPORTED_STACK_CONFIGURATION: '참여자의 스택이 서로 달라 기준표 비교를 제공하지 않습니다.',
+  LIMP_OR_CALLER: '림프 또는 콜러가 있는 팟은 현재 기준표에서 지원하지 않습니다.',
+  FOUR_BET_PLUS: '여러 번 레이즈된 팟은 현재 기준표에서 지원하지 않습니다.',
+  FACING_SIZE_OUT_OF_RANGE: '직면한 오픈 사이즈가 기준표의 참고 범위 밖입니다.',
+  CHOICE_SIZE_OUT_OF_RANGE: '선택한 사이즈는 직접 비교 범위 밖이며 점수에서 제외됩니다.',
+  DATASET_SPOT_MISSING: '이 상황에 대응하는 기준표 자료가 없습니다.',
+  REFERENCE_ACTION_ILLEGAL: '기준표의 행동을 현재 합법 액션으로 제공할 수 없습니다.',
+  STACK_PROJECTED: '스택을 기준 깊이에 투영한 참고 자료이며 점수에서 제외됩니다.',
+  FACING_SIZE_PROJECTED: '오픈 사이즈를 투영한 참고 자료이며 점수에서 제외됩니다.',
+  CHOICE_SIZE_PROJECTED: '선택 사이즈는 투영 참고이며 점수에서 제외됩니다.',
   LEARNING_AUTHORITY_UNAVAILABLE: '봉인된 출처 상세를 확인할 수 없어 기준표 비교를 제공하지 않습니다.',
   SOURCE_MISSING: '출처 정보가 없어 기준표 비교를 제공할 수 없습니다.',
   SOURCE_IDENTITY_UNVERIFIED: '출처 식별값이 확인되지 않아 기준표 비교에서 제외했습니다.',

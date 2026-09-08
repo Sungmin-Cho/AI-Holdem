@@ -251,3 +251,12 @@ test('parseGameLoopArgs는 --mode/--stack-bb/--hands를 읽는다', () => {
   assert.equal(parsed.hands, 100);
   assert.equal(parsed.blinds, '50/100');
 });
+
+test('reference notice distinguishes projected stacks from unsupported configurations',()=>{
+ for(const seats of [6,8,9]){
+  assert.equal(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:100}),null);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:112}),/투영 참고/);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:40}),/지원 범위 밖/);
+ }
+ assert.match(gtoEvalNotice({mode:'cash-training',aiCount:6,startStackBb:100}),/지원 범위 밖/);
+});

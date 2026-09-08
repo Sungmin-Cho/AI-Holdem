@@ -221,7 +221,9 @@ export function gtoEvalNotice(config = {}) {
   const parts = [];
   if (badSeats) parts.push(Number.isFinite(seats) ? `${seats}인` : '좌석 수 확인 불가');
   if (badStack) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
-  return `휴리스틱 프리플롭 기준표는 6·8·9인 100BB의 미오픈·단일 오픈 상황을 지원합니다. 80~120BB는 투영 참고이며 점수에서 제외됩니다 (현재 ${parts.join(', ')}).`;
+  const availability = !badSeats && Number.isFinite(stackBb) && stackBb >= 80 && stackBb <= 120
+    ? '투영 참고이며 점수에서 제외됩니다' : '지원 범위 밖이므로 기준표 비교를 제공하지 않습니다';
+  return `휴리스틱 프리플롭 기준표는 6·8·9인 100BB의 미오픈·단일 오픈 상황을 지원합니다. 현재 ${parts.join(', ')}는 ${availability}.`;
 }
 
 export function parseGameLoopArgs(argv) {

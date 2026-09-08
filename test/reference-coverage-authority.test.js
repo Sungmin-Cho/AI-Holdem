@@ -74,7 +74,7 @@ test('coverage measurement binds canonical decisions and rejects duplicate journ
 test('v2 projected and unavailable explanations cannot introduce grades or numerical claims',()=>{
  for(const amount of [400,600]){
   const snapshot=snap();snapshot.chosenAction={action:'raise',amount};
-  const e=evaluatePreflopReference(snapshot,data,{gameEpoch:epoch});
+  const e=evaluatePreflopReference(snapshot,data,{gameEpoch:epoch});e.handNo=snapshot.handNo;
   assert.equal(referenceAssessmentEligibility(e).metricEligible,false);
   assert.equal(validateExplanation(e,'투영 또는 범위 밖 선택이므로 점수를 제공하지 않습니다.').ok,true);
   assert.equal(validateExplanation(e,'직접 비교한 주력 선택입니다.').ok,false);
@@ -82,4 +82,16 @@ test('v2 projected and unavailable explanations cannot introduce grades or numer
   assert.equal(validateExplanation(e,`핸드 ${e.handNo}의 선택은 점수에서 제외됩니다.`).ok,true);
   delete e.coverage;assert.equal(validateExplanation(e,'참고 자료입니다.').code,'REFERENCE_SOURCE_UNVERIFIED');
  }
+});
+
+test('synthetic postflop evaluations are measured without granting reference authority',async t=>{
+ const d=fs.mkdtempSync(path.join(os.tmpdir(),'coverage-synthetic-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
+ fs.mkdirSync(path.join(d,'hands'));
+ const corpus=JSON.parse(fs.readFileSync(new URL('./fixtures/reference-coverage/decisions.json',import.meta.url),'utf8'));
+ const snapshot=corpus.find(s=>s.street==='flop');assert.ok(snapshot);
+ fs.writeFileSync(path.join(d,'hands',`hand-${String(snapshot.handNo).padStart(4,'0')}.json`),JSON.stringify({decisions:[snapshot]}));
+ const e={schemaVersion:1,evaluationId:`${epoch}:${snapshot.decisionId}:fake-solver@1.0.0`,decisionId:snapshot.decisionId,status:'supported',street:'flop',spotKey:'postflop-test',handClass:'AA',grade:null,forced:false,recommended:[],chosen:{action:'fold',frequency:null,evBb:null},bestEvBb:null,evLossBb:null,source:{id:'fake-solver',version:'1.0.0',contentSha256:'c'.repeat(64)}};
+ const {accepted:[item]}=await createTrainingControl().acceptEvaluations(d,{gameEpoch:epoch,owner:'test',handNo:snapshot.handNo,evaluations:[e]});
+ fs.writeFileSync(path.join(d,'training','evaluations.jsonl'),JSON.stringify({...e,payloadSha256:item.payloadSha256})+'\n');
+ const report=measureTrainingCoverage(d);assert.equal(report.complete,true);assert.equal(report.postflop,1);assert.equal(report.exactComparable,0);assert.equal(report.referenceAvailable,0);
 });
