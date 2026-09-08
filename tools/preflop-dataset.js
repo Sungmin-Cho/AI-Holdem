@@ -1,3 +1,4 @@
+import { openContained } from './training-store.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,7 +52,8 @@ export function loadReferenceDataset(source) {
   const key = `${known.id}@${known.version}:${known.contentSha256}`;
   if (!bundled.has(key)) {
     const file = new URL(`../training/data/preflop-baseline-v${known.version.split('.')[0]}.json`, import.meta.url);
-    const parsed = loadPreflopDataset(fileURLToPath(file), { expectedSha256: known.contentSha256 });
+    const filename = fileURLToPath(file);
+    const parsed = parsePreflopJson(openContained(path.dirname(filename),[path.basename(filename)],{maxBytes:8*1024*1024}).toString('utf8'), { expectedSha256: known.contentSha256 });
     if (!sameReferenceSource({...parsed.data, contentSha256:parsed.contentSha256}, known)) {
       throw coded('SOURCE_UNAVAILABLE', 'Reference identity mismatch');
     }

@@ -279,6 +279,9 @@ function addHist(target, src) {
 export function mergeTendency(a, b) {
   const out = structuredClone(a);
   out.hands += b.hands ?? 0;
+  for (const key of ['excludedAssistedHands','excludedUnknownAssistanceHands']) {
+    if (a[key] !== undefined || b[key] !== undefined) out[key] = (a[key] ?? 0) + (b[key] ?? 0);
+  }
   out.decisions += b.decisions ?? 0;
   out.sources = [...(a.sources ?? []), ...(b.sources ?? [])];
   out.seatMix = { ...(a.seatMix ?? {}) };

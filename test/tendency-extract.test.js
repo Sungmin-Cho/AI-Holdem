@@ -626,3 +626,16 @@ test('entered keys of a real extract stay inside 6×169', () => {
     }
   }
 });
+
+test('59 independent hands plus 100 hinted hands remain below the self-opponent gate',()=>{
+ const base=readGeneratedRecord('split');
+ const hinted=structuredClone(base);hinted.hintContractVersion=1;
+ hinted.hintExposures={'d-1-preflop-0':{exposureId:'ab'.repeat(32)}};
+ const before=tendencyFromRecords(Array.from({length:59},()=>base),'user');
+ const after=tendencyFromRecords([...Array.from({length:59},()=>base),...Array.from({length:100},()=>hinted)],'user');
+ assert.equal(after.hands,59);assert.equal(after.excludedAssistedHands,100);
+ const {excludedAssistedHands,excludedUnknownAssistanceHands,...independent}=after;
+ assert.deepEqual(independent,before);
+ const damaged=structuredClone(base);damaged.hintContractVersion=1;
+ assert.equal(extractHandTendency(damaged,'user').excludedUnknownAssistanceHands,1);
+});

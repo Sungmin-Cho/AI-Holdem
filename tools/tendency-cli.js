@@ -116,6 +116,7 @@ function formatShow(result) {
   const eligible = t.hands >= TENDENCY_MIN_HANDS;
   const lines = [
     `누적 ${t.hands}핸드 · ${result.sources.length}세션`,
+    `독립 표본 제외: 힌트 ${result.excludedAssistedHands ?? 0}핸드 · 보조 증거 불명 ${result.excludedUnknownAssistanceHands ?? 0}핸드`,
     `최소 표본(${TENDENCY_MIN_HANDS}핸드): ${t.hands >= TENDENCY_MIN_HANDS ? '충족' : '미달'}`,
     `복제 가능 여부: ${eligible ? '가능' : '불가'} (${t.hands}핸드 / 필요 ${TENDENCY_MIN_HANDS}핸드)`,
     `트레이트 투영  tightness ${traits.tightness.toFixed(2)} · aggression ${traits.aggression.toFixed(2)} · calling ${traits.calling.toFixed(2)} · bluff ${traits.bluff.toFixed(2)}`,
@@ -164,6 +165,8 @@ function main() {
       minHandsMet: result.tendency.hands >= TENDENCY_MIN_HANDS,
       skippedSessions: result.skippedSessions,
       skippedHands: result.skippedHands,
+      excludedAssistedHands: result.excludedAssistedHands ?? 0,
+      excludedUnknownAssistanceHands: result.excludedUnknownAssistanceHands ?? 0,
       indicators: indicatorsOf(result.tendency),
       traitProjection: traitsFromTendency(result.tendency),
       exploitTargets: exploiterFromTendency(result.tendency).targets,

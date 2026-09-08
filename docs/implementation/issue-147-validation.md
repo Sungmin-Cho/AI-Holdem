@@ -132,3 +132,23 @@ Sol 최초 시도는 nested macOS sandbox의 파일 읽기 실패로 `INVALID_OU
 - design: `4ca8cbbd686e7cec949c1e780c44bb8b33408c449da4a1184bd13b0c8550dd02`
 - plan: `b2e21052c997713fb1006c70eaf8f12c66e576921a66ce44593f2e9bc7f26a46`
 - combined(design + 동일 구분자 + plan): `5fe022a48d0dd3a90f7651dd8ffda0635e02e6a2387ab3ba8ea6d8c2e8fc0e4e`
+
+## 구현 검증 진행 — 2026-09-08
+
+브랜치 `feat/pre-action-hints-147-delivery`, 기준 main `6bc286ae1671d30e90f71e104439520736b5f51f`. 사용자가 구현·PR·merge·wiki ingest·완료 판단 후 이슈 종료를 승인했다.
+
+구현은 engine durable exposure → sidecar 순수 v2 조회 → relay 재검증 → 현재 snapshot/SSE → 브라우저 억제 세대와, archive assistance → accept/materialize → schema6 → 독립 학습 소비자를 연결한다. v1 dataset 원본과 digest를 수정하지 않는다.
+
+현재 관측한 검증:
+- 엔진/primitive/기존 reference 25개, 학습 회귀 146개 통과.
+- 최신 힌트 게시/경계 24개 통과: durable-before-publish, resync 무변경, 재접속, 위조 빈도 거부, stale strip, 액션 receipt 숨김, source 장애, query memo와 매번 identity 재검증.
+- 독립 판단 20개에 보조 판단 100개를 더해도 점수·skills·오답 후보·분포가 같고 진단 집계만 늘어난다.
+- 독립 59핸드 + 보조 100핸드는 자기 성향 60핸드 gate 미달을 유지한다.
+- schema2 drill/schema5 journal의 기존 답안 replay는 원본 바이트를 유지하고 신규 답안만 schema6을 append한다.
+- 실제 policy sidecar bootstrap/resume/run 사용자 경계 게시 테스트 통과.
+- Playwright 실제 브라우저: 데스크톱 렌더, 390×844 가로 넘침 없음, 클릭 직후 hint hidden 및 내용 제거. 콘솔의 유일한 오류는 favicon 404. 세션 토큰은 이 문서에 기록하지 않는다.
+- `node tools/build-preflop-baseline.js --check`, `--version 1 --check` 통과. v1 SHA256 `7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf` 유지.
+- `node tools/benchmark-policies.js --assert --json` 통과. 이는 정책 휴리스틱 회귀 증거이며 실력·수익·GTO 품질 증거가 아니다.
+- 전체 `npm run test:ci` 진행 중. 초기 실패 중 새 diagnostic 필드 기대값과 schema3 pending fixture 5개를 고쳤고 집중 재실행 5/5 통과. 초기 병렬 실행의 재개 timeout 6개는 단독 실행에서 통과. 최종 전체 결과는 아래 완료 기록으로 확정한다.
+
+Model-router 구현 R1은 고정 diff/new-file pack SHA256 `0882871eb86264b6dede199ec7a455b19bd56b6814ac16b778bd7f6461e86fe6`, CRITICAL, MAX, Opus 5/Sol/Fable 5.1 세 좌석에 제출했다. 실행 종료·receipt·판정 및 수용 여부는 아직 미확정이다. 리뷰 도중 root가 추가 검증과 수정한 부분은 다음 고정 대상에 포함한다. 현재 기록은 merge 승인 근거가 아니다.

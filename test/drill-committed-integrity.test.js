@@ -104,6 +104,7 @@ test('corrupt prior feedback blocks an otherwise valid pending recovery before a
   session.index = 1;
   const profileEvent = {
     evaluationId: event.evaluationId, payloadSha256: event.payloadSha256,
+    ...(session.schemaVersion === 3 ? {assistance:{schemaVersion:1,hintShown:false,exposureId:null}} : {}),
     status: 'supported', street: 'preflop', spotKey: session.queue[1].prompt.spotKey,
     handClass: session.queue[1].prompt.handClass, grade: result.grade, forced: false, evLossBb: null,
     source: session.sourceIdentity, recommended: result.recommended, chosen: { action: 'fold' },
@@ -146,4 +147,26 @@ test('drill producer rejects the 8.45 tolerance boundary and commits only offere
   assert.equal(current.lastResult, null);
   await answerQuestion(store, { sessionId: fresh.sessionId, questionId: fresh.queue[0].questionId, attemptNo: 0, action: 'fold' });
   assert.equal((await readDrillSession(store)).index, 1);
+});
+
+test('schema2 session and schema5 committed journal replay unchanged before appending schema6',async()=>{
+ const store=createOwnedTempDir('drill-schema5-resume');
+ const initial=await startDrill(store,{spotKey,limit:2});
+ const request={sessionId:initial.sessionId,questionId:initial.queue[0].questionId,attemptNo:0,action:'fold'};
+ const applied=await answerQuestion(store,request);
+ const session=read(store);session.schemaVersion=2;delete session.assistanceContractVersion;write(store,session);
+ const journal=file(store,'profile-events.jsonl');
+ const rows=fs.readFileSync(journal,'utf8').trim().split('\n').map(JSON.parse);
+ const legacy=rows.map(row=>{const old={...row,schemaVersion:5};delete old.assistance;return old;});
+ const raw=legacy.map(JSON.stringify).join('\n')+'\n';fs.writeFileSync(journal,raw);
+ const {rebuildFromEvents}=await import('../training/profile-aggregator.js');
+ fs.writeFileSync(file(store,'profile.json'),JSON.stringify(rebuildFromEvents(legacy)));
+ assert.deepEqual((await answerQuestion(store,request)).result,applied.result);
+ assert.equal(fs.readFileSync(journal,'utf8'),raw);
+ await nextQuestion(store);const next=read(store);
+ await answerQuestion(store,{sessionId:next.sessionId,questionId:next.queue[next.index].questionId,attemptNo:next.index,action:'fold'});
+ const bytes=fs.readFileSync(journal,'utf8');assert.ok(bytes.startsWith(raw));
+ const appended=JSON.parse(bytes.trim().split('\n').at(-1));
+ assert.equal(appended.schemaVersion,6);assert.deepEqual(appended.assistance,{schemaVersion:1,hintShown:false,exposureId:null});
+ assert.equal(read(store).schemaVersion,2);
 });

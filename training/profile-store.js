@@ -1,3 +1,4 @@
+import { NO_HINT_ASSISTANCE, projectAssistance } from '../shared/assistance.js';
 import { referenceAssessmentEligibility } from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
@@ -38,6 +39,7 @@ function coded(code, message) {
 export function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
   const event = {
     schemaVersion: PROFILE_SCHEMA_VERSION,
+    assistance: projectAssistance(evaluation.assistance ?? NO_HINT_ASSISTANCE),
     evaluationId: evaluation.evaluationId,
     payloadSha256: evaluation.payloadSha256,
     skillKey: classified.skillKey,
@@ -79,6 +81,21 @@ export function eventFromEvaluation(evaluation, appliedAt, classified = classify
   }
   if (evaluation.studyRun !== undefined) event.studyRun = validateStudyRun(evaluation.studyRun);
   assertProfileEvent(event);
+  return event;
+}
+
+/** Reproduce a verified journal row's original version without rewriting it. */
+export function eventForPrior(evaluation, prior) {
+  assertProfileEvent(prior);
+  const event = eventFromEvaluation(evaluation, prior.appliedAt);
+  if (prior.schemaVersion === 6) return event;
+  if (evaluation.assistance?.hintShown || (evaluation.assistance !== undefined
+    && !['drill','retest'].includes(evaluation.origin))) {
+    throw coded('PROFILE_EVENT_CONFLICT', 'contract-bearing game cannot downgrade to historical omission');
+  }
+  if (prior.schemaVersion === undefined) delete event.schemaVersion;
+  else event.schemaVersion = prior.schemaVersion;
+  if (!Object.hasOwn(prior,'assistance')) delete event.assistance;
   return event;
 }
 
@@ -182,7 +199,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
           && persistLegacy) writeJsonSecure(profilePath, rebuilt);
         return rebuilt;
       }
-      if ([1, 2, 3, 4].includes(profile.schemaVersion)) {
+      if ([1, 2, 3, 4, 5].includes(profile.schemaVersion)) {
         return migrateLegacyProfile(profile, { persist: persistLegacy });
       }
       throw coded('UNSUPPORTED_PROFILE', `schema ${profile.schemaVersion}`);
@@ -211,7 +228,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
         throw coded('PROFILE_EVENT_INVALID', 'payloadSha256이 없습니다.');
       }
       const prior = validateLearningEvents(readJsonl(eventsPath)).find((row) => row.evaluationId === event.evaluationId);
-      if (prior && learningEventKey(prior, { includeTime: false }) !== learningEventKey(event, { includeTime: false })) {
+      if (prior && learningEventKey(prior, { includeTime: false }) !== learningEventKey(eventForPrior(evaluation, prior), { includeTime: false })) {
         throw coded('PROFILE_EVENT_CONFLICT', 'same evaluationId has different learning metadata');
       }
       let profile = loadProfile();
@@ -233,7 +250,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       let current = null;
       try {
         current = readJsonSecure(profilePath);
-        if (![1, 2, 3, 4, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+        if (![1, 2, 3, 4, 5, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
           throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
         }
       } catch (error) {
@@ -261,7 +278,7 @@ export function createProfileStore(storeDir, { now = () => new Date().toISOStrin
       const profile = rebuildLearnableFromEvents(events);
       try {
         const current = readJsonSecure(profilePath);
-        if (![1, 2, 3, 4, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
+        if (![1, 2, 3, 4, 5, PROFILE_SCHEMA_VERSION].includes(current.schemaVersion)) {
           throw coded('UNSUPPORTED_PROFILE', `schema ${current.schemaVersion}`);
         }
         assertProcessedBacked(current, profile);

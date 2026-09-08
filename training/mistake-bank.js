@@ -1,3 +1,4 @@
+import { independentAssessmentEligibility } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
@@ -84,7 +85,7 @@ function collectable(evaluation) {
   if (!classifyOpportunity(evaluation).learnable || evaluation.forced !== false
     || evaluation.status !== 'supported' || evaluation.grade !== 'off-policy') return false;
   const quality = referenceQuality(evaluation.source);
-  return quality.quality === 'heuristic-reference' && referenceAssessmentEligibility(evaluation).metricEligible;
+  return quality.quality === 'heuristic-reference' && independentAssessmentEligibility(evaluation).metricEligible;
 }
 
 function signatureOf(evaluation) {

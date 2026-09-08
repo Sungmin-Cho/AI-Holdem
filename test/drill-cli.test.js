@@ -60,6 +60,7 @@ function profileEventFor(session, question, attemptNo, result) {
   const key = attemptKey(session.sessionId, question.questionId, attemptNo);
   const digest = digestOf(key);
   return {
+    ...(session.schemaVersion===3?{assistance:{schemaVersion:1,hintShown:false,exposureId:null}}:{}),
     evaluationId: evaluationIdOf({
       gameEpoch: digest,
       decisionId: `d-${attemptNo + 1}-preflop-0`,

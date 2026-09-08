@@ -91,7 +91,7 @@ function originSummary(origin, allowed) {
     rate: allowed && supported > 0 ? percent(overall.allowedActionRate) : '측정 자료 없음',
     samples: `${supported}개 지원 표본 · 표본 가중치 ${number(overall.sampleWeight) ?? 0}`,
     coverage: Object.hasOwn(coverage,'exactComparableDecisions')
-      ? `${count(coverage.evaluatedDecisions)}개 결정 · 참고 가능 ${count(coverage.referenceAvailableDecisions)}개 · 직접 비교 ${count(coverage.exactComparableDecisions)}개 · 투영 ${count(coverage.projectedReferenceDecisions)}개 · 선택 비교 불가 ${count(coverage.comparisonUnavailableDecisions)}개 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개`
+      ? `${count(coverage.evaluatedDecisions)}개 결정 · 참고 가능 ${count(coverage.referenceAvailableDecisions)}개 · 직접 비교 ${count(coverage.exactComparableDecisions)}개 · 힌트 보조 ${count(coverage.assistedDecisions)}개 · 투영 ${count(coverage.projectedReferenceDecisions)}개 · 선택 비교 불가 ${count(coverage.comparisonUnavailableDecisions)}개 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개`
       : `${count(coverage.supportedDecisions)} / ${count(coverage.evaluatedDecisions)}개 결정이 기준표 범위에 포함 · 지원 제외 ${count(coverage.unsupportedDecisions)}개 · 출처 미검증 ${count(coverage.unverifiedDecisions)}개(지원 제외와 중복 가능)`,
     calibration: allowed && eligible > 0 && !calibration.reason
       ? `${percent(calibration.distributionAgreement)} · ${eligible}개 관측`

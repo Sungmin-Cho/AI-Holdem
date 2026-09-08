@@ -998,3 +998,7 @@ main {
   .study-entry { padding: 10px 14px; }
 }
 @media (max-width: 900px) { .raise-range { display: block; font-size: 10px; } }
+
+.pre-action-hint { margin: 12px 0; padding: 12px 14px; border: 1px solid #647a91; border-radius: 10px; background: #172331; color: #edf3fa; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.pre-action-hint strong { display: block; margin-bottom: 5px; }
+.pre-action-hint[hidden] { display: none; }

@@ -200,6 +200,7 @@ export function redactRecord(record, viewerId = 'user') {
   } else {
     result.showdown = null;
   }
+  if (record.hintContractVersion === 1) result.hintContractVersion = 1;
   if (Array.isArray(record.decisions)) {
     result.decisions = record.decisions
       .filter((snap) => snap.actorId === viewerId)

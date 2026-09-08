@@ -1,3 +1,4 @@
+import { assistanceAllowsIndependent, projectAssistance } from '../shared/assistance.js';
 import { referenceAssessmentEligibility, projectReferenceCoverage } from '../shared/reference-coverage.js';
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
@@ -5,7 +6,7 @@ import { actionKey, matchReferenceAction, isAllowedGrade, referenceQuality, vali
 import { validateStudyRun } from '../shared/study-contract.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@2.0.0';
-export const PROFILE_SCHEMA_VERSION = 5;
+export const PROFILE_SCHEMA_VERSION = 6;
 
 function coded(code, message) {
   const error = new Error(message);
@@ -32,7 +33,7 @@ function emptyCalibration() {
 function emptyProjection() {
   return {
     overall: emptyOverall(), skills: {}, leaks: [], candidates: [], coverageGaps: [],
-    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0, unverifiedDecisions: 0, referenceAvailableDecisions: 0, exactComparableDecisions: 0, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0 },
+    coverage: { evaluatedDecisions: 0, supportedDecisions: 0, unsupportedDecisions: 0, supportedRate: 0, unverifiedDecisions: 0, referenceAvailableDecisions: 0, exactComparableDecisions: 0, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0, assistedDecisions: 0 },
     calibration: emptyCalibration(), mixGroups: {}, studyRuns: {}, unverifiedEvidence: [],
   };
 }
@@ -61,8 +62,11 @@ function isSafeMapKey(key) {
 
 export function assertProfileEvent(event) {
   if (!event || (event.schemaVersion !== undefined
-      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 5))) {
+      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 6))) {
     throw coded('PROFILE_EVENT_INVALID', 'profile event schema is invalid');
+  }
+  if (event.schemaVersion === 6 || event.assistance !== undefined) {
+    try { projectAssistance(event.assistance); } catch { throw coded('PROFILE_EVENT_INVALID', 'assistance is required and must be valid'); }
   }
   if (typeof event.evaluationId !== 'string' || event.evaluationId.length === 0) {
     throw coded('PROFILE_EVENT_INVALID', 'evaluationId가 없습니다.');
@@ -103,7 +107,7 @@ function originOf(event) {
 }
 
 function shouldAggregate(event) {
-  return Boolean(event.mixObservation
+  return Boolean(assistanceAllowsIndependent(event) && event.mixObservation
     && (event.providerVersion === '1.0.0' ? referenceQuality(event.mixObservation.sourceIdentity).quality === 'heuristic-reference' : referenceAssessmentEligibility(event).metricEligible));
 }
 
@@ -254,6 +258,7 @@ function applyCoverage(projection, event) {
   const coverage = projection.coverage;
   const eligibility = referenceAssessmentEligibility(event);
   coverage.evaluatedDecisions += 1;
+  if (event.assistance?.hintShown) coverage.assistedDecisions = (coverage.assistedDecisions ?? 0) + 1;
   if (event.forced) coverage.forcedDecisions += 1;
   if (!event.forced && event.status === 'unsupported') coverage.unsupportedDecisions += 1;
   if (eligibility.referenceAvailable) coverage.referenceAvailableDecisions += 1;

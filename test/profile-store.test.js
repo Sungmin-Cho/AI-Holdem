@@ -138,17 +138,17 @@ test('apply returns {applied}; missing payloadSha256 is PROFILE_EVENT_INVALID', 
   });
 });
 
-test('new profile persist uses schemaVersion 5', async () => {
+test('new profile persist uses schemaVersion 6', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = await store.apply(evaluation());
-  assert.equal(first.profile.schemaVersion, 5);
+  assert.equal(first.profile.schemaVersion, 6);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 5);
+  assert.equal(disk.schemaVersion, 6);
   assert.equal(disk.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
 });
 
-test('schema 1 profile is rebuilt from events as schema 5 and is not returned raw', async () => {
+test('schema 1 profile is rebuilt from events as schema 6 and is not returned raw', async () => {
   const storeDir = tmp();
   const store = createProfileStore(storeDir);
   const first = evaluation();
@@ -191,14 +191,14 @@ test('schema 1 profile is rebuilt from events as schema 5 and is not returned ra
     },
   }));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 5);
+  assert.equal(shown.schemaVersion, 6);
   assert.equal(shown.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(shown.overall.evaluatedDecisions, 1);
   assert.equal(shown.segments['local-preflop-baseline@1.0.0'].overall.evaluatedDecisions, 1);
   assert.equal(shown.segments['local-preflop-baseline@2.0.0'], undefined);
   assert.equal(shown.game.coverage.unverifiedDecisions, 1);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 5);
+  assert.equal(disk.schemaVersion, 6);
   assert.equal(disk.overall.evaluatedDecisions, 1);
 });
 
@@ -292,21 +292,21 @@ test('schema 3 file is not read as legacy mixed totals; duplicate apply projects
   await store.apply(first);
   await store.apply(second);
   const disk = JSON.parse(fs.readFileSync(store.profilePath, 'utf8'));
-  assert.equal(disk.schemaVersion, 5);
+  assert.equal(disk.schemaVersion, 6);
   disk.schemaVersion = 3;
   disk.overall.evaluatedDecisions = 99;
   disk.overall.supportedDecisions = 99;
   fs.writeFileSync(store.profilePath, JSON.stringify(disk));
   const shown = await store.show();
-  assert.equal(shown.schemaVersion, 5);
+  assert.equal(shown.schemaVersion, 6);
   assert.equal(shown.overall.evaluatedDecisions, 1);
   const again = await store.apply(second);
   assert.equal(again.applied, false);
-  assert.equal(again.profile.schemaVersion, 5);
+  assert.equal(again.profile.schemaVersion, 6);
   assert.equal(again.profile.overall.evaluatedDecisions, 1);
 });
 
-test('schema 1, 2 and 3 profiles replay to schema 5 without rewriting event bytes', async () => {
+test('schema 1, 2 and 3 profiles replay to schema 6 without rewriting event bytes', async () => {
   for (const schemaVersion of [1, 2, 3, 4]) {
     const storeDir = createOwnedTempDir(`profile-migrate-${schemaVersion}`);
     const store = createProfileStore(storeDir);
@@ -332,7 +332,7 @@ test('schema 1, 2 and 3 profiles replay to schema 5 without rewriting event byte
 
     const shown = await store.show();
 
-    assert.equal(shown.schemaVersion, 5);
+    assert.equal(shown.schemaVersion, 6);
     assert.deepEqual(shown.processed, processed);
     assert.deepEqual(fs.readFileSync(store.eventsPath), eventBytes);
   }
@@ -362,7 +362,7 @@ test('prospective profile events retain validated mix observations in the existi
   const raw = fs.readFileSync(store.eventsPath, 'utf8');
   const events = raw.trim().split('\n').map(JSON.parse);
 
-  assert.equal(applied.profile.schemaVersion, 5);
+  assert.equal(applied.profile.schemaVersion, 6);
   assert.equal(events.length, 1);
   assert.deepEqual(events[0].mixObservation, {
     spotKey: row.spotKey,
@@ -589,7 +589,7 @@ test('schema 4 rebuild and digest migration preserve journal-backed evidence',as
   fs.writeFileSync(store.profilePath,JSON.stringify(profile));
   await store[operation]();
   assert.equal((await store.show()).overall.evaluatedDecisions,1);
-  assert.equal(JSON.parse(fs.readFileSync(store.profilePath,'utf8')).schemaVersion,5);
+  assert.equal(JSON.parse(fs.readFileSync(store.profilePath,'utf8')).schemaVersion,6);
  }
 });
 test('schema 4 derived profile without journal fails without rewriting evidence',async()=>{

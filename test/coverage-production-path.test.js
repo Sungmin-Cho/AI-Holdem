@@ -35,6 +35,7 @@ test('production coverage includes unsupported and unverified without granting s
   assert.deepEqual(pair.game.coverage, {
     evaluatedDecisions: 2, supportedDecisions: 1, unsupportedDecisions: 1,
     supportedRate: 0.5, unverifiedDecisions: 1,
+    assistedDecisions: 0,
     referenceAvailableDecisions: 1, exactComparableDecisions: 1, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0,
   });
   assert.deepEqual(score(pair.game), score(baseline.game));

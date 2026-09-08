@@ -1,3 +1,4 @@
+import { independentAssessmentEligibility, projectAssistance } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
@@ -37,6 +38,7 @@ export function learningEventKey(event, { includeTime = true } = {}) {
     origin: event.origin ?? 'game',
     ...(includeTime ? { appliedAt: event.appliedAt ?? null } : {}),
     mixObservation: event.mixObservation === undefined ? null : validateMixObservation(event.mixObservation),
+    ...(Object.hasOwn(event,'assistance') ? {assistance:projectAssistance(event.assistance)} : {}),
     ...(Object.hasOwn(event,'coverage') ? {coverage:event.coverage} : {}),
     ...(event.sourceIdentity ? {sourceIdentity:event.sourceIdentity} : {}),
     studyRun: event.studyRun === undefined ? null : validateStudyRun(event.studyRun),
@@ -110,8 +112,8 @@ function summarizeRun(entries, now) {
       || observation.sourceIdentity.version !== entry.event.providerVersion) inconsistent = true;
     if (sourceIdentity == null) sourceIdentity = observation.sourceIdentity;
     else if (sourceKey(sourceIdentity) !== sourceKey(observation.sourceIdentity)) inconsistent = true;
-    if (!referenceAssessmentEligibility(entry.event).metricEligible) verified = false;
-    if (![4,5].includes(entry.event.schemaVersion)) legacy = true;
+    if (!independentAssessmentEligibility(entry.event).metricEligible) verified = false;
+    if (![4,5,6].includes(entry.event.schemaVersion)) legacy = true;
     if (byIndex.has(candidate.index)) {
       inconsistent = true;
       continue;
@@ -197,7 +199,7 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
             spotKey: observation.spotKey,
             handClass: observation.handClass,
           });
-          if (event.grade === 'off-policy') {
+          if (independentAssessmentEligibility(event).metricEligible && event.grade === 'off-policy') {
             const candidate = {
               origin: projectionOrigin(event.origin),
               sourceIdentity: clone(observation.sourceIdentity),

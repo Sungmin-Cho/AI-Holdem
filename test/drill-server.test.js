@@ -99,6 +99,7 @@ function writePending(storeDir) {
     result,
     srsPatch,
     profileEvent: {
+      ...(session.schemaVersion===3?{assistance:{schemaVersion:1,hintShown:false,exposureId:null}}:{}),
       evaluationId: evaluationIdOf({
         gameEpoch: digest,
         decisionId: `d-${attemptNo + 1}-preflop-0`,

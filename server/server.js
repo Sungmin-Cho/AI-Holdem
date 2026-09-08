@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { verifyHintPublication } from '../tools/hint-proof.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -581,6 +582,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
     return {
       revision: Number(raw.revision) || 0,
       view: raw.view ?? null,
+      hint: raw.hint ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
       coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
       training: migrated.training,
@@ -765,10 +767,11 @@ function mergeCoach(existing, incoming) {
   return merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
 }
 
-function publicSnapshot(state) {
+function publicSnapshot(state, hint = null) {
   const snap = {
     revision: state.revision,
     view: state.view,
+    hint,
     log: state.log,
     coach: state.coach,
     training: state.training ?? [],
@@ -791,6 +794,7 @@ function validatedStudyUrl(value) {
 
 function persistUiStateAtomic(owner, state) {
   const file = {
+    hint: state.hint ?? null,
     revision: state.revision,
     view: state.view,
     log: state.log,
@@ -885,7 +889,7 @@ function readTrainingDetail(root, ref, expectedSha) {
 }
 
 function serveStatic(pathname, res) {
-  if (['/shared/reference.js','/shared/reference-coverage.js','/shared/preflop-key.js'].includes(pathname)) {
+  if (['/shared/reference.js','/shared/reference-coverage.js','/shared/preflop-key.js','/shared/assistance.js'].includes(pathname)) {
     fs.readFile(path.join(path.dirname(SHARED_REFERENCE_FILE), pathname.split('/').at(-1)), (error, data) => {
       if (error) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
       res.writeHead(200, { 'Content-Type': MIME['.js'] });
@@ -943,6 +947,26 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
   const receiptStore = createActionReceiptStore(root, gameEpoch, { checkpoint: receiptCheckpoint, owner });
   receiptStore.reconcile(state.view, state.lastActionAck, state.publishId);
   let recoveryRequired = false;
+  const hintContext = {};
+  const hintInitialized = verifyHintPublication({sessionDir:root,token,context:hintContext,initialize:true});
+  const currentHint = async () => {
+    await hintInitialized;
+    const revision=state.revision;
+    const proof=await verifyHintPublication({sessionDir:root,token,context:hintContext,hint:state.hint,view:state.view});
+    if (revision!==state.revision) return null;
+    try {
+      const receipt=receiptStore.read();
+      if (receipt?.decisionId===proof.hint?.decisionId && ['accepted','delivered','consumed'].includes(receipt.phase)) return null;
+    } catch { return null; }
+    return proof.hint;
+  };
+  const clearHintClients = decisionId => {
+    const payload=JSON.stringify({gameEpoch,decisionId});
+    for (const client of sseClients) {
+      try { client.res.write(`event: hint-clear\ndata: ${payload}\n\n`); } catch { /* reconnect revalidates */ }
+    }
+  };
+
 
   const checkToken = (provided, res) => {
     if (tokensEqual(provided, token)) return true;
@@ -969,20 +993,42 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
     return false;
   };
 
-  const sendCommitted = (client) => {
-    for (const entry of state.history) {
+  const sendCommitted = async (client) => {
+    const revision=state.revision; const history=state.history; const hint=await currentHint();
+    for (const entry of history) {
       if (entry.revision <= client.lastRevision) continue;
-      writeSse(client.res, entry.revision, entry.payload);
+      writeSse(client.res, entry.revision, {...entry.payload,hint:entry.revision===revision&&state.revision===revision?hint:null});
       client.lastRevision = entry.revision;
     }
   };
   const fanoutCommitted = () => {
     for (const client of sseClients) {
-      try { sendCommitted(client); } catch { /* disconnected clients replay on reconnect */ }
+      void sendCommitted(client).catch(() => {});
     }
   };
 
-  const handlePublish = (body, res) => {
+  let hintPublishTail=Promise.resolve();
+  const handlePublish = (body,res) => {
+    const next=hintPublishTail.then(()=>handlePublishUnlocked(body,res));
+    hintPublishTail=next.catch(()=>{}); return next;
+  };
+  const handlePublishUnlocked = async (body, res) => {
+    let hintDisposition=null;
+    if (body.view?.hint !== undefined || (body.view === undefined && body.hint !== undefined)) {
+      sendJson(res,400,{ok:false,code:'HINT_PROOF_MISMATCH'});return;
+    }
+    if (body.hint != null) {
+      await hintInitialized;
+      const proof=await verifyHintPublication({sessionDir:root,token,context:hintContext,hint:body.hint,view:body.view});
+      hintDisposition=proof.disposition;
+      if (hintDisposition==='mismatch') {
+        state.hint=null;clearHintClients(currentDecisionId());
+        sendJson(res,400,{ok:false,code:'HINT_PROOF_MISMATCH'});return;
+      }
+      if (hintDisposition==='unverifiable') hintContext.ready=false;
+      body={...body,hint:proof.hint};
+    }
+
     try { assertNoStudyCapability(body); }
     catch { sendJson(res, 400, { ok: false, code: 'FORBIDDEN_LITERAL' }); return; }
     if (recoveryRequired) {
@@ -1063,6 +1109,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
     // as published, present nowhere.
     const next = {
       revision: state.revision + 1,
+      hint: body.view !== undefined ? body.hint ?? null : state.hint ?? null,
       publishId: body.publishId,
       view: state.view,
       log: state.log,
@@ -1209,6 +1256,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       ok: true,
       revision: state.revision,
       applied: true,
+      ...(hintDisposition ? {hintDisposition} : {}),
       ...(replayReport ? { handReplay: replayReport } : {}),
     });
   };
@@ -1218,6 +1266,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
     if (!checkRecovery(res)) return;
     try {
       receiptStore.accept(body, current);
+      clearHintClients(current);
       deliverSlot();
     } catch (error) {
       const status = error.code === 'BAD_ACTION' ? 400
@@ -1247,7 +1296,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       }, HEARTBEAT_MS),
     };
     sseClients.add(client);
-    sendCommitted(client);
+    void sendCommitted(client).catch(()=>{});
 
     const cleanup = () => {
       clearInterval(client.heartbeat);
@@ -1295,7 +1344,8 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       // Keep the legacy liveness probe. Capability discovery requires credentials.
       if (supplied !== null && supplied !== undefined) {
         if (!checkToken(supplied, res)) return;
-        sendJson(res, 200, { ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true } });
+        await hintInitialized;
+        sendJson(res, 200, { ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, preActionHintsReady: hintContext.ready === true } });
       } else sendJson(res, 200, { ok: true });
       return;
     }
@@ -1316,7 +1366,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
 
     if (req.method === 'GET' && pathname === '/api/snapshot') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
-      sendJson(res, 200, { ...publicSnapshot(state), ...(trustedStudyUrl ? { studyUrl: trustedStudyUrl } : {}) });
+      sendJson(res, 200, { ...publicSnapshot(state, await currentHint()), ...(trustedStudyUrl ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
 
@@ -1355,7 +1405,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       const body = await readJsonBody(req, res);
       if (body == null) return;
       if (!checkToken(supplied ?? body.token, res)) return;
-      handlePublish(body, res);
+      await handlePublish(body, res);
       return;
     }
 

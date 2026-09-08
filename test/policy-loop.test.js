@@ -378,3 +378,28 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
   assert.equal(sawMirrorAction, true);
 });
 
+
+test('hint-enabled policy sidecar publishes only after durable exposure', {timeout:40_000},async t=>{
+ const {resolveSessionReference}=await import('../tools/reference-source.js');
+ const gameDir=tmp();
+ const loop=createGameLoop({gameDir,resolver:async()=>({player:null,upper:null,notices:[]}),
+  opts:{port:0,waitMs:10_000,opponentRuntime:'policy',hints:'on'}});
+ t.after(()=>loop.requestStop().catch(()=>{}));
+ // Start without a relay so the fixed session source exists before its readiness probe.
+ await loop.bootstrap({ai:5,mode:'cash-training',stackBb:100,hands:1,opponentRuntime:'policy',hints:'on'});
+ resolveSessionReference(gameDir,{createNew:true});
+ // Restart the owned relay to validate the newly installed fixture source.
+ await loop.requestStop();
+ const resumed=createGameLoop({gameDir,resolver:async()=>({player:null,upper:null,notices:[]}),
+  opts:{port:0,waitMs:10_000,opponentRuntime:'policy',hints:'on'}});
+ t.after(()=>resumed.requestStop().catch(()=>{}));
+ await resumed.resume();
+ const running=resumed.run();running.catch(()=>{});
+ const {snapshot}=await waitForUserSnapshot(gameDir,20_000);
+ assert.ok(snapshot.hint,'sidecar publishes a supported or explicit unsupported hint');
+ if(snapshot.hint.status==='supported') {
+  const state=readJson(path.join(gameDir,'state.json'));
+  assert.equal(state.hand.hintExposures[snapshot.hint.decisionId].exposureId,snapshot.hint.exposureId);
+ }
+ await resumed.requestStop();await running;
+});

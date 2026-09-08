@@ -1,3 +1,4 @@
+import { independentAssessmentEligibility } from '../../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../../shared/reference-coverage.js';
 import {parsePreflopKey} from '../../shared/preflop-key.js';
 import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
@@ -120,7 +121,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   if (verified) {
     const detail = receipt.detail;
     item = { ...item };
-    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage']) {
+    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage', 'assistance']) {
       item[key] = detail[key];
     }
   }
@@ -129,7 +130,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     : { quality: 'unverified', reason: 'LEARNING_AUTHORITY_UNAVAILABLE' };
   const eligibility = referenceAssessmentEligibility(item);
   const sourceEligible = verified && quality.quality === 'heuristic-reference' && eligibility.verified;
-  const metricEligible = sourceEligible && eligibility.metricEligible;
+  const metricEligible = sourceEligible && independentAssessmentEligibility(item).metricEligible;
   const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
@@ -176,6 +177,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     if(c.choiceMatch==='unavailable')card.note=[card.note,'선택 사이즈 비교 불가 · 점수 제외'].filter(Boolean).join(' · ');
     else if(c.metricEligible)card.note='직접 기준표 비교';
   }
+  if (item.assistance?.hintShown) card.note = [card.note,'힌트 도움을 받은 결정 · 점수 제외'].filter(Boolean).join(' · ');
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {
     card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);

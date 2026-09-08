@@ -133,6 +133,7 @@ function capturedPending(storeDir, answer = { action: 'fold' }) {
   const result = evaluateDrillAnswer(question, answer, strategy);
   const digest = createHash('sha256').update(`drill:${session.sessionId}:${question.questionId}:${session.index}`).digest('hex');
   const profileEvent = {
+    ...(session.schemaVersion === 3 ? {assistance:{schemaVersion:1,hintShown:false,exposureId:null}} : {}),
     evaluationId: evaluationIdOf({ gameEpoch: digest, decisionId: `d-${session.index + 1}-preflop-0`, providerId: SOURCE.id, providerVersion: SOURCE.version }),
     payloadSha256: digest, status: 'supported', street: 'preflop',
     spotKey: question.prompt.spotKey, handClass: question.prompt.handClass,

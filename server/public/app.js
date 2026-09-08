@@ -1,3 +1,4 @@
+import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
@@ -13,8 +14,23 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined };
+const ui = { hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined };
 let pendingAction = true;
+let revisionAtHintClear=-1;
+const hintState=createHintState();
+const hintRequests=new WeakMap();
+function hideHint(decisionId=ui.view?.legal?.decisionId) {revisionAtHintClear=typeof revision==='number'?revision:0;hintState.invalidate(decisionId);ui.hint=null;paintHint();}
+function paintHint() {
+  const card=$('pre-action-hint');if(!card)return;
+  const formatted=formatHint(ui.hint);card.hidden=!formatted;card.replaceChildren();if(!formatted)return;
+  const title=document.createElement('strong');title.textContent=formatted.title;card.append(title);
+  const lines=[...formatted.lines];
+  const pot=ui.view?.legal?.potTotal;
+  const percent=hintPotPercent(ui.hint,pot);
+  if(percent!==null)lines.push(`콜 후 팟 대비 추가 레이즈 ${percent.toFixed(1)}%`);
+  if(formatted.source)lines.push(formatted.source);
+  for(const text of lines){const row=document.createElement('div');row.textContent=text;card.append(row);}
+}
 let actionController = null;
 let selectedTab = 'log';
 const unread = { coach: 0, training: 0 };
@@ -172,6 +188,7 @@ function handsUntilLevel(view) {
 }
 
 function setConn(on) {
+  if(!on)hideHint();
   const box = $('conn');
   $('conn-text').textContent = on ? '연결됨' : '재접속 중…';
   box.classList.toggle('on', on);
@@ -715,6 +732,7 @@ function paint() {
   paintSeats(view);
   paintThinking(view);
   paintActionBar(view);
+  paintHint();
   paintLog();
   const coachScroll = $('panel-coach').scrollTop;
   paintCoach();
@@ -731,6 +749,7 @@ function mergeAnnotationOntoCards(ann) {
 }
 
 function renderSnapshot(snap) {
+  ui.hint=hintState.accept(snap.hint,snap.view,hintRequests.get(snap)??{generation:-1});
   ui.view = snap.view ?? null;
   ui.log = Array.isArray(snap.log) ? snap.log.slice() : [];
   ui.coach = Array.isArray(snap.coach) ? snap.coach.slice() : [];
@@ -749,6 +768,7 @@ function renderSnapshot(snap) {
 }
 
 function render(m) {
+  ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
     ui.view = m.view;
     actionController?.observe(ui.view, { revision: m.revision });
@@ -793,6 +813,7 @@ function render(m) {
 
 async function sendAction(action, amount) {
   if (!ui.view?.legal || pendingAction) return;
+  hideHint();
   await actionController?.send(action, amount === undefined ? undefined : Number(amount));
 }
 
@@ -909,9 +930,12 @@ const buffer = [];
 let booted = false;
 let opening = false;
 async function getSnapshot({ signal } = {}) {
+  const generation=hintState.capture();
   const response = await fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal });
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
-  return response.json();
+  const snapshot=await response.json();let canRestore=false;
+  try{const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
+  hintRequests.set(snapshot,{generation,canRestore});return snapshot;
 }
 async function getStatus({ signal } = {}) {
   const response = await fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal });
@@ -950,9 +974,12 @@ function applyMessage(m) {
 if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
 else {
   const es = new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
+  es.addEventListener('hint-clear',event=>{
+    try{const payload=JSON.parse(event.data);if(payload.decisionId===ui.view?.legal?.decisionId){hideHint(payload.decisionId);void actionController?.reconcile();}}catch{hideHint();}
+  });
   es.onmessage = (event) => {
     try {
-      const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data) };
+      const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data),hintGeneration:hintState.capture() };
       if (!booted) { buffer.push(msg); return; }
       applyMessage(msg);
     } catch { setConn(false); actionController?.disconnect(); }

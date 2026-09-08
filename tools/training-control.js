@@ -1,3 +1,4 @@
+import { verifyEvaluationAssistance } from './assistance-proof.js';
 import { readSessionReference } from './reference-source.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { evaluatePreflopReference } from '../training/preflop-reference.js';
@@ -1150,7 +1151,10 @@ export function materializeLearningEvaluation(sessionDir, item) {
   const proofDeclared = [
     item.detailRef, item.detailSha256, item.summary.detailRef, item.summary.detailSha256,
   ].some((value) => value !== undefined);
-  if (!proofDeclared) return canonicalSummary;
+  if (!proofDeclared) {
+    verifyEvaluationAssistance(sessionDir,canonicalSummary,item.handNo,item.evaluationId.split(':')[0]);
+    return canonicalSummary;
+  }
   if (item.detailRef !== detailRefOf(item.evaluationId)
     || !/^[0-9a-f]{64}$/.test(item.detailSha256 ?? '')
     || item.summary?.detailRef !== item.detailRef
@@ -1188,7 +1192,8 @@ export function materializeLearningEvaluation(sessionDir, item) {
     || item.summary?.source?.version !== identity.providerVersion) {
     throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning detail identity does not match authority');
   }
-  if (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0') {
+  verifyEvaluationAssistance(sessionDir,detail,item.handNo,item.evaluationId.split(':')[0]);
+  if (detail.assistance !== undefined || (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0')) {
     const projected = toPublicSummary(detail, {handNo:item.handNo, detailSha256:item.detailSha256, detailRef:item.detailRef});
     if (JSON.stringify(projected) !== JSON.stringify(canonicalSummary)) {
       throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'Versioned detail and summary differ');
@@ -1305,6 +1310,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
         ? readSessionReference(sessionDir) : null;
       const accepted = [];
       for (const evaluation of evaluations ?? []) {
+        verifyEvaluationAssistance(sessionDir, evaluation, handNo, gameEpoch);
         verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, source);
         const evaluationId = assertEvaluationId(evaluation.evaluationId);
         const detailRef = detailRefOf(evaluationId);

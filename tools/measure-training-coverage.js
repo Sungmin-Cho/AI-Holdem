@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {openContained} from './training-store.js';
 import {materializeLearningEvaluation} from './training-control.js';
+import {independentAssessmentEligibility} from '../shared/assistance.js';
 import {referenceAssessmentEligibility,projectReferenceCoverage} from '../shared/reference-coverage.js';
 import {V2_REFERENCE_SOURCE,referenceQuality} from '../shared/reference.js';
 import {loadReferenceDataset} from './preflop-dataset.js';
@@ -36,14 +37,14 @@ export function measureTrainingCoverage(sessionDir) {
   if(e.coverage)projectReferenceCoverage(e.coverage);
   const diagnosis=resolvePreflopReference(s,dataset);
   rows.push({decisionId:e.decisionId,street:s.street,forced:s.forced,status:e.status,source:e.source,
-   referenceAvailable:eligible.referenceAvailable,exactComparable:eligible.metricEligible,
+   referenceAvailable:eligible.referenceAvailable,exactComparable:eligible.metricEligible,independentExact:independentAssessmentEligibility(e).metricEligible,
    primaryReason:diagnosis.code??null,blockers:(diagnosis.coverage?.reasonCodes??[diagnosis.code]).filter(r=>r&&!r.endsWith('_PROJECTED'))});
  }
  const missing=[...snapshots.keys()].filter(id=>!seen.has(id));
  return {schemaVersion:1,complete:missing.length===0,decisions:snapshots.size,evaluated:rows.length,
   preflop:rows.filter(r=>r.street==='preflop').length,postflop:rows.filter(r=>r.street!=='preflop').length,
   supported:rows.filter(r=>r.status==='supported').length,synthetic:rows.filter(r=>referenceQuality(r.source).quality==='synthetic').length,referenceAvailable:rows.filter(r=>r.referenceAvailable).length,
-  exactComparable:rows.filter(r=>r.exactComparable).length,forced:rows.filter(r=>r.forced).length,
+  exactComparable:rows.filter(r=>r.exactComparable).length,independentExact:rows.filter(r=>r.independentExact).length,forced:rows.filter(r=>r.forced).length,
   missing,blockers:rows.reduce((totals,row)=>{for(const r of row.blockers)totals[r]=(totals[r]??0)+1;return totals;},{}),rows};
 }
 function main(argv){

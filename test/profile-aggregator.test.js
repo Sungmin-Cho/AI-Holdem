@@ -219,8 +219,8 @@ test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to 
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });
 });
 
-test('duplicate apply still projects the active segment and persists schemaVersion 5', () => {
-  assert.equal(emptyProfile().schemaVersion, 5);
+test('duplicate apply still projects the active segment and persists schemaVersion 6', () => {
+  assert.equal(emptyProfile().schemaVersion, 6);
   let profile = applyEvent(emptyProfile(), event());
   profile = applyEvent(profile, event({
     evaluationId: evaluationIdOf({
@@ -232,7 +232,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(profile.schemaVersion, 5);
+  assert.equal(profile.schemaVersion, 6);
   assert.equal(profile.activeSegmentId, 'local-preflop-baseline@1.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 1);
   profile.overall.evaluatedDecisions = 2;
@@ -247,7 +247,7 @@ test('duplicate apply still projects the active segment and persists schemaVersi
     payloadSha256: 'ee'.repeat(32),
     providerVersion: '2.0.0',
   }));
-  assert.equal(again.schemaVersion, 5);
+  assert.equal(again.schemaVersion, 6);
   assert.equal(again.overall.evaluatedDecisions, 1);
   assert.equal(again.overall.supportedDecisions, 1);
   assert.equal(again.skills['preflop.rfi.BTN'].opportunities, 1);
@@ -269,4 +269,23 @@ test('v1 and v2 scores and calibration remain separate while raw coverage combin
  p=rebuildFromEvents([...events.slice(0,20),eventFromEvaluation(projected,'2026-09-08T00:00:00.000Z')]);
  assert.equal(p.activeSegmentId,'local-preflop-baseline@2.0.0');assert.equal(p.overall.evaluatedDecisions,0);
  assert.equal(p.coverage.projectedReferenceDecisions,1);assert.equal(p.coverage.evaluatedDecisions,21);
+});
+
+test('100 assisted native decisions preserve independent scores and calibration',()=>{
+ const data=loadReferenceDataset(V2_REFERENCE_SOURCE);
+ const snapshot=nativePreflopSnapshot('6max-100bb-btn-rfi-v2','AA',{action:'raise',sizeBb:2.5});
+ const events=[];
+ for(let n=0;n<120;n++) {
+  const s=structuredClone(snapshot);
+  s.assistance={schemaVersion:1,hintShown:n>=20,exposureId:n>=20?'ab'.repeat(32):null};
+  const e=evaluatePreflopReference(s,data,{gameEpoch:n.toString(16).padStart(64,'0')});e.payloadSha256='dd'.repeat(32);
+  events.push(eventFromEvaluation(e,'2026-09-08T00:00:00.000Z'));
+ }
+ const before=rebuildFromEvents(events.slice(0,20)),after=rebuildFromEvents(events);
+ assert.deepEqual(after.overall,before.overall);
+ assert.deepEqual(after.skills,before.skills);
+ for(const key of ['overall','skills','leaks','candidates','coverageGaps','calibration','mixGroups','studyRuns']) assert.deepEqual(after.game[key],before.game[key]);
+ assert.equal(after.coverage.assistedDecisions,100);
+ assert.equal(after.coverage.evaluatedDecisions,before.coverage.evaluatedDecisions+100);
+ assert.ok(events[119].mixObservation,'assisted source observation remains available for authority verification');
 });

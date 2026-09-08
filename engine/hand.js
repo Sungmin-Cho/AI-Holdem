@@ -61,6 +61,7 @@ export function createGame({
   handLimit,
   showdownPolicy,
   replayReveal,
+  hints,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
   if (resolvedMode !== 'tournament' && resolvedMode !== 'cash-training') {
@@ -109,6 +110,10 @@ export function createGame({
     showdownPolicy: resolvedShowdown,
     replayReveal: resolvedReplay,
   };
+  if (hints !== undefined) {
+    if (!['on', 'off'].includes(hints)) throwBadConfig('hints는 on 또는 off여야 합니다.');
+    config.hintContractVersion = 1; config.hints = hints;
+  }
   if (resolvedMode === 'cash-training') {
     config.mode = 'cash-training';
     if (startStackBb != null) config.startStackBb = startStackBb;
@@ -263,6 +268,7 @@ export function startHand(state, options = {}) {
     acted: [],
     actions: [],
     decisions: [],
+    ...(state.config.hintContractVersion === 1 ? { hintContractVersion: 1, hintExposures: {} } : {}),
     posts,
     startStacks,
     vpipped: [],
@@ -572,6 +578,7 @@ function finishHand(state, events) {
     allIn: [...hand.allIn],
     actions: structuredClone(hand.actions),
     decisions: structuredClone(hand.decisions ?? []),
+    ...(hand.hintContractVersion === 1 ? { hintContractVersion: 1, hintExposures: structuredClone(hand.hintExposures) } : {}),
     pots: potRecords,
     showdown,
     startStacks: { ...hand.startStacks },

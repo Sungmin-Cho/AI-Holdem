@@ -91,7 +91,7 @@ test('wrong tokens reject status and POST bodies before new I/O', async (t) => {
 test('authenticated health advertises the receipt and study-link protocol', async (t) => {
   const f = await fixture(t);
   assert.deepEqual((await f.http('health')).body, {
-    ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true },
+    ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, preActionHintsReady: false },
   });
   assert.equal((await f.http('health', undefined, 'wrong')).status, 401);
 });
