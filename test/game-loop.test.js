@@ -965,6 +965,7 @@ async function setupCoachHand(t, {
   loopOpts = {},
   practiceFocusFile,
   bootstrap = {},
+  deck = null,
 } = {}) {
   const gameDir = tmpGame();
   const loop = createGameLoop({
@@ -975,7 +976,9 @@ async function setupCoachHand(t, {
   t.after(() => loop.requestStop().catch(() => {}));
   await loop.bootstrap({ ai: 1, stack: 100, practiceFocusFile, ...bootstrap });
   putAiFirst(gameDir);
-  await cliJson(gameDir, ['step', '--new-hand']);
+  const newHand = ['step', '--new-hand'];
+  if (deck) newHand.push('--deck', Array.isArray(deck) ? stackedDeck(deck) : deck);
+  await cliJson(gameDir, newHand);
   await cliJson(gameDir, ['apply', 'p1', 'call']);
   await cliJson(gameDir, ['apply', 'user', 'check']);
   await cliJson(gameDir, ['apply', 'user', 'raise', '50']);
@@ -4045,6 +4048,64 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
   await stopRun(loop, running);
   assert.equal(upper.starts.length, 2);
   assert.equal(note.unavailable, undefined);
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(auth.deferred?.['1'], undefined);
+});
+
+test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
+  let decisionId = 'd-1-preflop-0';
+  let liveKh = null;
+  const rounds = [
+    {
+      get raw() {
+        return JSON.stringify({
+          handNo: 1,
+          text: liveKh ? `상대는 ${liveKh}를 가지고 있었다.` : '보드만 근거로 평가한다.',
+          decisions: [{
+            decisionId,
+            why: '왜 그 액션을 했는지 설명합니다.',
+            outcome: liveKh ? `라이브 상대 ${liveKh}` : '보드만 근거로 평가한다.',
+            alternative: '다른 라인을 검토할 수 있었습니다.',
+          }],
+        });
+      },
+    },
+    { raw: JSON.stringify({ handNo: 1, text: '카드 없이 재작성했습니다.' }) },
+  ];
+  const upper = makeCoachAdapter({ rounds });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    bootstrap: { replayReveal: 'showdown' },
+    // p1 7c2d, user AhKd, flop 2h3h4h — completed record and its replay omit Kh.
+    deck: ['7c', 'Ah', '2d', 'Kd', '2h', '3h', '4h'],
+    loopOpts: {
+      async coachCaptureCheckpoint({ handNo }) {
+        if (handNo !== 1) return;
+        await waitFor(() => {
+          const state = readJson(path.join(gameDir, 'state.json'));
+          return state.hand && state.lastHand?.handNo === 1 ? state : null;
+        }, 'hand 2 was not dealt before live Kh deny', 8_000);
+        const statePath = path.join(gameDir, 'state.json');
+        const state = readJson(statePath);
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+        const completedCards = [
+          ...Object.values(state.lastHand.holes ?? {}).flat(),
+          ...(state.lastHand.board ?? []),
+        ];
+        assert.equal(completedCards.includes('Kh'), false);
+        liveKh = injectCurrentHandCard(state, 'Kh');
+        fs.writeFileSync(statePath, JSON.stringify(state));
+      },
+    },
+  });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+  assert.equal(liveKh, 'Kh');
+  assert.equal(upper.starts.length, 2);
+  assert.equal(note.unavailable, undefined);
+  assert.equal(note.text.includes('Kh'), false);
   const auth = readJson(path.join(gameDir, '.coach-authority.json'));
   assert.equal(auth.deferred?.['1'], undefined);
 });

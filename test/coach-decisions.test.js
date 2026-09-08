@@ -9,12 +9,14 @@ import { promisify } from 'node:util';
 import { writeJsonAtomic } from '../engine/state.js';
 import {
   canonicalPayloadJson,
+  collectPrivateLiteralsDetailed,
   payloadSha256,
   proofBearingCoachNote,
 } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { startServer } from '../server/server.js';
 import { createOwnedTempDir, registerOwnedProcess, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { handRecordFixture, writeSecurityFixtures } from './helpers/security-fixtures.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLISH = path.join(ROOT, 'tools/publish.js');
@@ -223,4 +225,24 @@ test('세 지점(coach-control·publish.js·server)이 decisions 노트에 같�
   } finally {
     await srv.close();
   }
+});
+
+test('showdown deny includes in-progress opponent Kh even when the completed record omits it', () => {
+  const dir = tmpGame();
+  const completed = handRecordFixture(1, { holes: { user: ['Ah', 'Kd'], p1: ['7c', '2d'] } });
+  const { players, state, hands } = writeSecurityFixtures(dir, {
+    hands: [completed],
+    handInProgress: { handNo: 2, holes: { user: ['As', 'Ad'], p1: ['Kh', 'Qs'] } },
+    config: { replayReveal: 'showdown' },
+  });
+  assert.equal(hands[0].holes.user.includes('Kh'), false);
+  assert.equal(hands[0].holes.p1.includes('Kh'), false);
+  assert.equal(state.config.replayReveal, 'showdown');
+  assert.deepEqual(state.hand.holes.p1, ['Kh', 'Qs']);
+  const { cards } = collectPrivateLiteralsDetailed({
+    players,
+    engineState: state,
+    records: hands,
+  });
+  assert.equal(cards.has('Kh'), true);
 });
