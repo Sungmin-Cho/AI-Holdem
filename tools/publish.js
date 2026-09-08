@@ -377,7 +377,6 @@ function unionHandNos(left, right) {
     if (!Number.isInteger(value) || value < 1 || seen.has(value)) continue;
     seen.add(value);
     out.push(value);
-    if (out.length >= HAND_REPLAY_TRIGGER_MAX) break;
   }
   return out;
 }
@@ -479,7 +478,9 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         if (!opts.retry) {
           const pendingNos = readReplayPendingNos(gameDir);
           const envelopeNos = body.handReplay?.handNos ?? [];
-          const handNos = unionHandNos(pendingNos, envelopeNos);
+          const allNos = unionHandNos(pendingNos, envelopeNos);
+          writeJsonAtomic(replayPendingPath(gameDir), { handNos: allNos });
+          const handNos = allNos.slice(0, HAND_REPLAY_TRIGGER_MAX);
           if (handNos.length) body.handReplay = { handNos };
           else delete body.handReplay;
         }
