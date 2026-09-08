@@ -985,7 +985,7 @@ async function setupCoachHand(t, {
   return { gameDir, loop, player, upper };
 }
 
-async function waitForCoachNote(gameDir, handNo, timeoutMs = 5_000) {
+async function waitForCoachNote(gameDir, handNo, timeoutMs = 5_000 * WIN32_SCALE) {
   return waitFor(() => {
     try {
       const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
@@ -5065,7 +5065,7 @@ test('heartbeat result-ready remediation은 다음 핸드를 막지 않지만 sh
   await running.catch(() => {});
 });
 
-test('heartbeat result-ready accept 실패는 handle 종료 확인·fence 후 generation-bearing unavailable로 봉인한다', { timeout: 20_000 }, async (t) => {
+test('heartbeat result-ready accept 실패는 handle 종료 확인·fence 후 generation-bearing unavailable로 봉인한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const never = new Promise(() => {});
   const upper = makeCoachAdapter({
     rounds: [{
