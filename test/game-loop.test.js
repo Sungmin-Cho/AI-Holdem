@@ -5070,7 +5070,9 @@ test('heartbeat result-ready accept 실패는 handle 종료 확인·fence 후 ge
     const value = readJson(authorityPath);
     return value.hands?.['1']?.agentHandle ? value : null;
   }, 'hand 1 coach generation was not running');
-  const forbidden = readJson(path.join(gameDir, '.coach-deny-1.json'))[0];
+  const villain = readJson(path.join(gameDir, 'players.json')).find((player) => player.playerId !== 'user');
+  const forbidden = villain.archetype ?? villain.personality ?? villain.policy?.policyId;
+  assert.ok(forbidden);
   fs.writeFileSync(authority.hands['1'].exactResultPath, JSON.stringify({
     handNo: 1,
     text: `forbidden ${forbidden}`,
