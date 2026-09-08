@@ -9,10 +9,12 @@ import {
   emptyTendency,
   medianOf,
   mergeTendency,
+  normalizePosition,
   rateOf,
 } from '../training/tendency/contracts.js';
 import { SIMILARITY_MIN_COMPONENTS, tendencySimilarity } from '../training/tendency/compare.js';
 import { tendencyFromRecords } from '../training/tendency/extract.js';
+import { positionsFromRecord } from '../training/tendency/positions.js';
 import { buildExploiterConfig, buildMirrorConfig, VERSION_V2 } from '../training/policies/catalog.js';
 import { writeDerivedPolicyConfigs } from './policy-player.js';
 import { openContained, writeContained } from './training-store.js';
@@ -433,23 +435,32 @@ function decisiveLine(records, replicaId, cumulative) {
   const index = actions.findIndex((row) => row?.playerId === replicaId && row.street === 'preflop');
   const action = index >= 0 ? actions[index] : null;
   const chosen = action?.action ?? '참여';
+  const placed = positionsFromRecord(best);
+  const engineLabel = placed?.[replicaId];
+  const pos = engineLabel ? normalizePosition(engineLabel, placed.seated) : null;
   let freq = null;
+  let regime = 'preflop';
   if (action) {
     const { raises, calls } = priorPreflop(actions, index);
     if (raises === 0 && calls === 0) {
-      const rfi = cumulative?.preflop?.byPosition?.BTN?.rfi
-        ?? cumulative?.preflop?.pfr;
+      regime = 'unopened';
+      const rfi = (pos && cumulative?.preflop?.byPosition?.[pos]?.rfi)
+        || cumulative?.preflop?.pfr;
       if (rfi?.n >= TENDENCY_MIN_N) freq = rateOf(rfi);
     } else if (raises === 1 && calls === 0) {
-      const vs = cumulative?.preflop?.vsRaise;
+      regime = 'vs-raise';
+      const positional = pos ? cumulative?.preflop?.byPosition?.[pos]?.vsRaise : null;
+      const vs = (positional?.n >= TENDENCY_MIN_N ? positional : null)
+        || cumulative?.preflop?.vsRaise;
       if (vs?.n >= TENDENCY_MIN_N) {
         const key = chosen === 'raise' ? 'raise' : chosen === 'call' ? 'call' : 'fold';
         freq = vs[key] / vs.n;
       }
     }
   }
+  const spot = [pos, regime].filter(Boolean).join(' ');
   const freqText = freq == null ? '표본이 부족해 빈도를 표시하지 않습니다' : `${Math.round(freq * 100)}%로 같은 선택을 했습니다`;
-  return `결정적 핸드: 복제 좌석이 핸드 ${best.handNo}에서 ${chosen} — 누적 기록에서 같은 국면의 나는 ${freqText}.`;
+  return `결정적 핸드: 복제 좌석이 핸드 ${best.handNo}에서 ${spot} ${chosen} — 누적 기록에서 같은 국면의 나는 ${freqText}.`;
 }
 
 function metricRows(cumulative, sessionUser, sessionReplica) {
@@ -566,11 +577,14 @@ export function buildSelfOpponentsRaw({ root, players, derived, records } = {}) 
   const exploiter = findSeat(players, 'self-exploiter-v1', 'SelfExploiter');
   const seats = [];
   let similarity = null;
+  let cumulative = null;
+  let sessionUser = null;
+  let sessionReplica = null;
   if (mirror) {
     const config = derived?.[mirror.policy?.configDigest];
-    const cumulative = config?.params?.tendency ?? emptyTendency('user');
-    const sessionUser = tendencyFromRecords(recs, 'user');
-    const sessionReplica = tendencyFromRecords(recs, mirror.playerId);
+    cumulative = config?.params?.tendency ?? emptyTendency('user');
+    sessionUser = tendencyFromRecords(recs, 'user');
+    sessionReplica = tendencyFromRecords(recs, mirror.playerId);
     similarity = tendencySimilarity(sessionUser, sessionReplica);
     seats.push({
       role: 'mirror',
@@ -587,5 +601,5 @@ export function buildSelfOpponentsRaw({ root, players, derived, records } = {}) 
       targets: config?.params?.targets ?? [],
     });
   }
-  return { seats, similarity };
+  return { seats, similarity, cumulative, sessionUser, sessionReplica };
 }

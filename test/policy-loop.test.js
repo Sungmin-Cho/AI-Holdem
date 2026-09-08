@@ -260,7 +260,7 @@ test('policy mode reaches done without an LLM player runtime', { timeout: 40_000
   assert.equal(review.includes(readJson(path.join(gameDir, 'state.json')).policySeed), false);
 });
 
-test('self-opponent policy game assigns seats, reviews them, and keeps identity private until done', { timeout: 60_000 }, async (t) => {
+test('self-opponent policy game assigns seats, reviews them, and keeps identity private until done', { timeout: 120_000 }, async (t) => {
   const { collectStoreTendency } = await import('../tools/self-opponents.js');
   const { readGeneratedRecord } = await import('./helpers/gen-hh-fixtures.js');
   const storeDir = tmp();
@@ -312,7 +312,7 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
     mode: 'cash-training',
     stackBb: 100,
     blinds: '50/100',
-    hands: 1,
+    hands: 20,
     opponentRuntime: 'policy',
   });
   const assigned = readJson(path.join(gameDir, 'players.json'));
@@ -329,11 +329,11 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
   running.catch(() => {});
   const sent = new Set();
   const driver = (async () => {
-    for (let i = 0; i < 80; i += 1) {
+    for (let i = 0; i < 4000; i += 1) {
       const state = readJson(path.join(gameDir, 'loop-state.json'));
       if (state.phase === 'done' || state.halt) return;
       try {
-        const { lock, snapshot } = await waitForUserSnapshot(gameDir, 400);
+        const { lock, snapshot } = await waitForUserSnapshot(gameDir, 250);
         const decisionId = snapshot.view.legal.decisionId;
         if (!sent.has(decisionId)) {
           sent.add(decisionId);
@@ -344,7 +344,7 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
           });
         }
       } catch { /* AI turn or terminal */ }
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) => setTimeout(resolve, 15));
     }
   })();
   const finished = await running;
@@ -364,7 +364,7 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
   assert.doesNotMatch(JSON.stringify(readJson(path.join(gameDir, 'loop-state.json'))), privacy);
   const handsDir = path.join(gameDir, 'hands');
   const handFiles = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter((name) => name.startsWith('hand-')) : [];
-  assert.ok(handFiles.length > 0);
+  assert.equal(handFiles.length, 20);
   let sawMirrorAction = false;
   for (const name of handFiles) {
     const hand = readJson(path.join(handsDir, name));

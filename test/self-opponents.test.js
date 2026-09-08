@@ -19,6 +19,7 @@ import {
 import { tendencyFromRecords } from '../training/tendency/extract.js';
 import {
   SIMILARITY_MIN_COMPONENTS,
+  tendencyComponents,
   tendencySimilarity,
   eligibleComponentCount,
 } from '../training/tendency/compare.js';
@@ -443,6 +444,22 @@ test('T8: similarity is 100 on identical vectors and omitted below 6 components'
   assert.ok(omitted.used < SIMILARITY_MIN_COMPONENTS);
 });
 
+test('T8: huge open and bet sizes clamp to [0,1] so similarity cannot go negative', () => {
+  const base = richTendency();
+  const huge = richTendency({
+    openBuckets: { 100: 15 },
+    betBuckets: { 3.5: 12 },
+  });
+  const open = tendencyComponents(huge).find((row) => row.id === 'openSizeBb');
+  const bet = tendencyComponents(huge).find((row) => row.id === 'betSizePot');
+  assert.equal(open.value, 1);
+  assert.equal(bet.value, 1);
+  const compared = tendencySimilarity(base, huge);
+  assert.ok(compared.similarity != null);
+  assert.ok(compared.similarity >= 0);
+  assert.ok(compared.similarity <= 100);
+});
+
 test('T8: review section table, advice, zero-target exploiter, empty when no derived seats', () => {
   const dir = initPolicyDir(3);
   const tendency = richTendency();
@@ -610,6 +627,12 @@ test('T8: synthesizer raw uses role not kind; notices omit seat ids', () => {
   assert.match(text, /"role":"mirror"/);
   assert.match(text, /"role":"exploiter"/);
   assert.doesNotMatch(text, /"kind"/);
+  const mirrorSeat = players.find((row) => row.archetype === 'SelfMirror');
+  const frozen = derived[mirrorSeat.policy.configDigest].params.tendency;
+  assert.equal(raw.cumulative.hands, frozen.hands);
+  assert.equal(raw.sessionUser.subject, 'user');
+  assert.equal(raw.sessionReplica.subject, mirrorSeat.playerId);
+  assert.equal(raw.cumulative.preflop.vpip.n, frozen.preflop.vpip.n);
   const exploiter = Object.values(derived).find((config) => config.policyId === 'self-exploiter-v1');
   const notices = selfOpponentNotices({
     assigned: { mirror: true, exploiter: true },
@@ -645,7 +668,92 @@ test('T8/T9: game-loop inserts the review section before the trainingOn guard an
   assert.match(parts[1], /assertSelfOpponentsConsistent/);
 });
 
+test('T8: decisive-hand line uses the replica preflop position, not BTN', () => {
+  const dir = initPolicyDir(3);
+  const tendency = richTendency({
+    rfi: {
+      UTG: { n: 10, k: 1 },
+      HJ: { n: 10, k: 1 },
+      CO: { n: 10, k: 9 },
+      BTN: { n: 10, k: 1 },
+      SB: { n: 10, k: 8 },
+      BB: { n: 0, k: 0 },
+    },
+  });
+  assignSelfOpponents({
+    root: dir,
+    players: readJson(path.join(dir, 'players.json')),
+    tendency,
+    sources: tendency.sources,
+    requested: { mirror: true, exploiter: false },
+    chooseSeat: () => 0,
+  });
+  const players = readJson(path.join(dir, 'players.json'));
+  const derived = readJson(path.join(dir, '.policy-configs.json')).configs;
+  const replica = players.find((row) => row.archetype === 'SelfMirror').playerId;
+  // 6-max deal order SB→BB→UTG→HJ→CO→BTN. button=user → last before BTN is CO.
+  const sixMax = (coOrSb, replicaPos) => {
+    const sb = replicaPos === 'SB' ? replica : 'p2';
+    const bb = 'p3';
+    const utg = 'p4';
+    const hj = 'p5';
+    const co = replicaPos === 'CO' ? replica : (coOrSb === replica ? 'p2' : coOrSb);
+    const stacks = { [sb]: 10000, [bb]: 10000, [utg]: 10000, [hj]: 10000, [co]: 10000, user: 10000 };
+    const holes = {
+      [sb]: ['2c', '3d'], [bb]: ['4c', '5d'], [utg]: ['6c', '7d'], [hj]: ['8c', '9d'],
+      [co]: ['Qs', 'Jh'], user: ['Ah', 'Kd'],
+    };
+    if (replicaPos === 'SB') holes[sb] = ['Qs', 'Jh'];
+    return { stacks, holes, utg, hj };
+  };
+  const coLayout = sixMax('p2', 'CO');
+  const coRecord = {
+    handNo: 4,
+    button: 'user',
+    holes: coLayout.holes,
+    startStacks: coLayout.stacks,
+    actions: [
+      { playerId: coLayout.utg, action: 'fold', street: 'preflop' },
+      { playerId: coLayout.hj, action: 'fold', street: 'preflop' },
+      { playerId: replica, action: 'raise', amount: 200, street: 'preflop' },
+    ],
+    pots: [{ amount: 400, eligible: [replica, 'user'] }],
+    board: [],
+    folded: [],
+    decisions: [],
+  };
+  const section = buildSelfOpponentSection({
+    root: dir, players, derived, records: [coRecord],
+  });
+  assert.match(section, /CO unopened raise/);
+  assert.match(section, /90%로 같은 선택을 했습니다/);
+  assert.doesNotMatch(section, /10%로 같은 선택을 했습니다/);
+
+  const sbLayout = sixMax('p2', 'SB');
+  const sbRecord = {
+    handNo: 5,
+    button: 'user',
+    holes: sbLayout.holes,
+    startStacks: sbLayout.stacks,
+    actions: [
+      { playerId: replica, action: 'call', amount: 50, street: 'preflop' },
+    ],
+    pots: [{ amount: 500, eligible: [replica, 'user'] }],
+    board: [],
+    folded: [],
+    decisions: [],
+  };
+  const sbSection = buildSelfOpponentSection({
+    root: dir, players, derived, records: [sbRecord],
+  });
+  assert.match(sbSection, /SB unopened call/);
+  assert.match(sbSection, /80%로 같은 선택을 했습니다/);
+  assert.doesNotMatch(sbSection, /10%로 같은 선택을 했습니다/);
+});
+
 test('T9: resume after assignment keeps the same derived seat and digest', async (t) => {
+  // Covers the resume stamp path (assertSelfOpponentsConsistent then stamp).
+  // A live SIGKILL of tools/game-loop.js main() is not part of this fixture.
   const dir = initPolicyDir(3);
   const tendency = richTendency();
   assignSelfOpponents({

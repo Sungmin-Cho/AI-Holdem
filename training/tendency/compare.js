@@ -43,6 +43,13 @@ function afComponent(tendency) {
   return { n, value: Math.min(1, raw / 3) };
 }
 
+function unitInterval(value) {
+  if (value == null || !Number.isFinite(value)) return null;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
 export function tendencyComponents(tendency) {
   const facing = pooledFacing(tendency);
   const bet = pooledBetSize(tendency);
@@ -61,8 +68,8 @@ export function tendencyComponents(tendency) {
     { id: 'cbet', n: tendency?.postflop?.cbet?.n ?? 0, value: rateOf(tendency?.postflop?.cbet) },
     { id: 'wtsd', n: tendency?.postflop?.wtsd?.n ?? 0, value: rateOf(tendency?.postflop?.wtsd) },
     { id: 'af', n: af.n, value: Number.isFinite(af.value) ? af.value : (af.n ? 1 : null) },
-    { id: 'openSizeBb', n: openHist?.n ?? 0, value: openMedian == null ? null : openMedian / 5 },
-    { id: 'betSizePot', n: bet.n, value: bet.median },
+    { id: 'openSizeBb', n: openHist?.n ?? 0, value: openMedian == null ? null : unitInterval(openMedian / 5) },
+    { id: 'betSizePot', n: bet.n, value: unitInterval(bet.median) },
   ];
 }
 
