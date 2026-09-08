@@ -391,12 +391,18 @@ function commitAmount() {
   markAmountValid(true);
 }
 
-function syncRaisePanel(legal) {
+function adoptDecision(legal) {
   if (legal.decisionId !== lastDecisionId) {
     lastDecisionId = legal.decisionId;
     raiseTo = legal.minRaiseTo > legal.maxRaiseTo ? legal.maxRaiseTo : legal.minRaiseTo;
     markAmountValid(true);
+    const intent = $('intent-note');
+    if (intent) intent.value = '';
   }
+}
+
+function syncRaisePanel(legal) {
+  adoptDecision(legal);
   raiseTo = clampRaiseTo(raiseTo, legal);
   const slider = $('raise-slider');
   slider.min = String(legal.minRaiseTo);
@@ -413,6 +419,7 @@ function paintActionBar(view) {
   const mine = Boolean(legal) && !view?.gameOver;
   bar.hidden = !mine;
   if (!mine) return;
+  adoptDecision(legal);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
   const raiseOff = pendingAction || !legal.canRaise;

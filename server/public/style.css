@@ -1017,6 +1017,8 @@ main {
 }
 .replay-name { font-weight: 600; color: var(--ink); }
 .replay-cards { display: inline-flex; gap: var(--card-gap); }
+.replay-card .mini-card { font-size: var(--ch); }
+.replay-card .mini-suit { width: var(--cw); height: var(--cw); }
 .replay-reason, .replay-note, .replay-coach, .replay-summary {
   flex: 1 0 100%;
   font-size: 12.5px;

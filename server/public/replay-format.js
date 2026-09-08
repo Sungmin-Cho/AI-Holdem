@@ -70,7 +70,8 @@ function reasonText(action) {
 function coachFor(action, coachNote) {
   if (action.playerId !== 'user') return null;
   if (coachNote?.unavailable) return { status: 'unavailable', message: '코치 피드백 불가' };
-  const hit = (coachNote?.decisions ?? []).find((row) => row.decisionId === action.decisionId);
+  if (coachNote == null) return { status: 'pending', message: '코치 피드백 대기 중' };
+  const hit = (coachNote.decisions ?? []).find((row) => row.decisionId === action.decisionId);
   if (hit) {
     return {
       status: 'ready',
@@ -79,7 +80,7 @@ function coachFor(action, coachNote) {
       alternative: hit.alternative,
     };
   }
-  return { status: 'pending', message: '코치 피드백 대기 중' };
+  return null;
 }
 
 function studyFor(action, trainingItems) {
