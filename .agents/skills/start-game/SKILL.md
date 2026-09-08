@@ -20,7 +20,7 @@ metadata:
 
 - **게시는 `tools/publish.js`만 한다.** 그 도구만이 `visibility==="public"` 필터와 `publishId` 증가를 책임진다. 딜러는 게시하지 않는다 — 사이드카가 한다.
 - **모델이 만든 문자열을 셸 인자에 넣지 않는다.** 사이드카는 프롬프트를 stdin으로, 본문을 파일로만 흘린다. 딜러가 남기는 모델 유래 문자열은 practiceFocus 파일 하나뿐이고, argv에는 그 **경로만** 넘긴다.
-- 사용자 노출 문자열은 한국어. 아키타입·스타일·비공개 홀카드는 종합 리뷰 전까지 공개하지 않는다 — 이 불변식도 사이드카가 지킨다.
+- 사용자 노출 문자열은 한국어. **핸드 진행 중** 상대 홀카드·결정 사유·정책 필드는 공개하지 않는다. **핸드 종료 후** 공개 범위는 store 초기화 시 기록된 `showdownPolicy`(AI 좌석 쇼다운 전원 공개, 기본 open — 사용자 좌석은 표준 규칙)와 `replayReveal`(복기 뷰·코치 입력의 상대 카드·사유 범위, 기본 all)이 정하고, 복기 내용은 서버가 아카이브에서 재계산하며, 상대 LLM 플레이어는 복기 정보를 받지 않는다. 아키타입·정책 정체는 종합 리뷰까지 비공개다.
 - 워치독·사용자 무제한 대기·서버 자가치유는 사이드카 소관이다. 명시한 llm 모드에서 적격 플레이어 런타임이 없으면 기동을 중단한다. 기본 policy 모드는 플레이어 LLM을 요구하지 않는다. 상위 모델이 없으면 LLM 코치·리뷰 설명 불가를 알리고 사실 기반 기계 피드백을 제공한다. 소유권·저장·복구 오류는 halt로 보고한다.
 
 ---
@@ -50,7 +50,7 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 새 `--store-dir` 게임은 mode와 무관하게 `showdownPolicy=open`, `replayReveal=all`을 주입한다. 명시한 `--showdown-policy standard`·`--replay-reveal showdown`은 덮지 않는다. resume과 legacy `--game-dir`에는 이 두 기본값을 주입하지 않는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
+인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 새 `--store-dir` 게임은 mode와 무관하게 `showdownPolicy=open`, `replayReveal=all`을 주입한다. 명시한 `--showdown-policy standard`·`--replay-reveal showdown`은 덮지 않는다. resume과 legacy `--game-dir`에는 이 두 기본값을 주입하지 않는다. 로그 탭의 복기 뷰는 핸드 종료 후 그 범위의 상대 카드·사유를 보여 주고, 액션 바의 의도 메모는 사용자 결정에만 붙는다. export는 쇼다운 카드만 싣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
 
 store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 새 세션의 v2 휴리스틱 기준표는 cash-training 6·8·9인, 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원한다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
 
