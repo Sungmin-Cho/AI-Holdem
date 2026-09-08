@@ -309,7 +309,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const startTimeOf = deps.processStartTime ?? processStartTime;
   const {
     aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
-    opponentRuntime, showdownPolicy, replayReveal,
+    opponentRuntime, showdownPolicy, replayReveal, hints,
   } = flags;
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
@@ -359,6 +359,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
       handLimit,
       showdownPolicy,
       replayReveal,
+      hints,
     });
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');

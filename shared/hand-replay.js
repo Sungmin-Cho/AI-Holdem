@@ -12,7 +12,7 @@ export const REPLAY_ACTION_KEYS = Object.freeze([
 
 const DECISION_KEYS = [
   'decisionId', 'street', 'position', 'holeCards', 'potBefore',
-  'toCall', 'effectiveStack', 'forced', 'chosenAction',
+  'toCall', 'effectiveStack', 'forced', 'chosenAction', 'assistance',
 ];
 
 function reasonKindOf(action) {
@@ -104,6 +104,7 @@ export function replayRecord(record, { reveal } = {}) {
         return out;
       }),
   };
+  if (record.hintContractVersion === 1) replay.hintContractVersion = 1;
   if (record.positions) replay.positions = structuredClone(record.positions);
   return replay;
 }

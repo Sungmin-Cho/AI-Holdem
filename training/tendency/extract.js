@@ -1,3 +1,4 @@
+import { handAssistanceDisposition } from '../../shared/assistance.js';
 import { estimatePublicStrength } from '../policies/hand-strength.js';
 import {
   HAND_CLASSES,
@@ -52,6 +53,14 @@ function wonContested(record, playerId) {
 
 export function extractHandTendency(record, playerId, { forcedDecisionIds, strengthSamples = 32 } = {}) {
   const t = emptyTendency(playerId);
+  if (playerId === 'user') {
+    const assistance = handAssistanceDisposition(record);
+    if (assistance !== 'independent') {
+      t.excludedAssistedHands = assistance === 'assisted' ? 1 : 0;
+      t.excludedUnknownAssistanceHands = assistance === 'unavailable' ? 1 : 0;
+      return t;
+    }
+  }
   if (!record?.holes?.[playerId]) return t;
   t.hands = 1;
   const posInfo = positionsFromRecord(record);

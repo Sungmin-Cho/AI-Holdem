@@ -80,6 +80,7 @@ function scanSessions(storeDir) {
         mode: state.config?.mode === 'cash-training' ? 'cash-training' : 'tournament',
         opponentRuntime,
         seats: Array.isArray(state.seats) ? state.seats.length : 0,
+        ...(state.config?.hintContractVersion != null ? {hintContractVersion:state.config.hintContractVersion} : {}),
       });
     } catch {
       skippedSessions += 1;
@@ -109,14 +110,20 @@ export function collectStoreTendency(storeDir) {
     const records = [];
     for (const name of files) {
       try {
-        records.push(readJson(session.sessionDir, ['hands', name], HAND_MAX_BYTES));
+        const record=readJson(session.sessionDir, ['hands', name], HAND_MAX_BYTES);
+        // A contract session cannot make a damaged archive appear legacy.
+        if (session.hintContractVersion != null && record.hintContractVersion == null) {
+          record.hintContractVersion=session.hintContractVersion;
+        }
+        records.push(record);
       } catch {
         skippedHands += 1;
       }
     }
+    const extracted = tendencyFromRecords(records, 'user');
     const source = {
       gameId: session.gameId,
-      hands: records.length,
+      hands: extracted.hands,
       mode: session.mode,
       opponentRuntime: session.opponentRuntime,
       seats: session.seats,
@@ -124,10 +131,12 @@ export function collectStoreTendency(storeDir) {
     sources.push(source);
     tendency = mergeTendency(
       tendency,
-      tendencyFromRecords(records, 'user', { sources: [source] }),
+      { ...extracted, sources: [source] },
     );
   }
-  return { tendency, sources, skippedSessions, skippedHands };
+  return { tendency, sources, skippedSessions, skippedHands,
+    excludedAssistedHands: tendency.excludedAssistedHands ?? 0,
+    excludedUnknownAssistanceHands: tendency.excludedUnknownAssistanceHands ?? 0 };
 }
 
 export function requireStoreTendency(storeDir) {

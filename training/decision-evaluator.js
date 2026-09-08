@@ -1,3 +1,4 @@
+import { projectAssistance } from '../shared/assistance.js';
 import { matchReferenceAction } from '../shared/reference.js';
 import { evaluationIdOf } from './contracts.js';
 import { handClassOf } from './cards.js';
@@ -56,6 +57,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
       evLossBb: null,
       grade: null,
       forced: Boolean(snapshot.forced),
+      ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
       code: spot.code,
       reason: spot.reason,
       source,
@@ -77,6 +79,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
       evLossBb: null,
       grade: null,
       forced: Boolean(snapshot.forced),
+      ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
       reason: strategy?.reason ?? 'unsupported',
       source,
     };
@@ -110,6 +113,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
     evLossBb: null,
     grade: gradeFrequency(matched.frequency, strategy.actions),
     forced: Boolean(snapshot.forced),
+    ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
     source,
   };
 }

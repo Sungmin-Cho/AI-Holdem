@@ -132,3 +132,9 @@ comparisons to scores, calibration and practice candidates. Event schemas 1–4 
 readable and their journal bytes are preserved. Source-aware drills resume the source
 of their stored queue or assessment. Roll forward with a compatible reader; do not
 open v2 stores with an older binary. Issue #147 hint publication remains separate.
+
+새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
+
+힌트 숫자의 권한은 엔진 `hint-expose` 마커와 순수 사전 조회 결과의 재계산으로 검증한다. relay의 `tools/hint-proof.js` 예외는 제한된 읽기와 검증만 허용한다. SSE 이력에는 숫자를 저장하지 않고 현재 판단만 재검증하여 전달한다. 액션 durable 접수 직후 revision 없는 `hint-clear`로 숨기며, 브라우저는 별도 세대로 오래된 snapshot의 재표시를 막는다. Profile/event schema 6은 명시적 assistance를 저장하고 기존 1~5 저널은 다시 쓰지 않는다. 새 drill session은 schema 3이며 기존 1/2의 pending 비교 형식을 유지한다. 이 형식을 쓴 store는 호환 버전으로 roll-forward하며 구버전 프로그램으로 열지 않는다.
+
+Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축하는 것도 roll-forward 경계다. 원본 저널을 보존한 채 호환 바이너리에서 재구축하며, `--hints off`나 구 profile 백업만으로 이미 추가된 schema 6 저널을 downgrade하지 않는다.

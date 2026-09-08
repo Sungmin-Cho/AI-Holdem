@@ -398,7 +398,7 @@ test('actual archived readers reject new identities without writes and compatibl
   assert.equal(result.priorReaders.lockProtection.wrote, false);
   assert.equal(result.priorReaders.lockProtection.process.exitCode, 1);
   assert.equal(result.priorReaders.lockProtection.process.expectedFailure, true);
-  assert.equal(result.currentResume.profileSchemaVersion, 5);
+  assert.equal(result.currentResume.profileSchemaVersion, 6);
   assert.equal(result.currentResume.policyId, 'tag-v2');
   assert.equal(result.currentResume.bankEvidenceCount, 1);
   assert.equal(result.currentResume.bankPayloadSha256, 'cd'.repeat(32));

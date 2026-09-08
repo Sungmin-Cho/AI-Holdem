@@ -12,6 +12,7 @@ import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 const now = () => '2026-09-06T00:00:00.000Z';
 function evaluation(index, { status = 'supported', origin = 'game', identity = source } = {}) {
   return {
+    ...(origin==='practice'?{assistance:{schemaVersion:1,hintShown:false,exposureId:null}}:{}),
     evaluationId: `${'ab'.repeat(32)}:d-${index}-preflop-0:${identity.id}@${identity.version}`,
     payloadSha256: index.toString(16).padStart(64, '0'), street: 'preflop',
     status, origin, source: identity, forced: false, evLossBb: null,
@@ -35,6 +36,7 @@ test('production coverage includes unsupported and unverified without granting s
   assert.deepEqual(pair.game.coverage, {
     evaluatedDecisions: 2, supportedDecisions: 1, unsupportedDecisions: 1,
     supportedRate: 0.5, unverifiedDecisions: 1,
+    assistedDecisions: 0,
     referenceAvailableDecisions: 1, exactComparableDecisions: 1, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0, forcedDecisions: 0,
   });
   assert.deepEqual(score(pair.game), score(baseline.game));

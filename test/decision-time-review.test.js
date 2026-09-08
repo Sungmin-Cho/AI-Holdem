@@ -258,6 +258,7 @@ test('process aggregate excludes synthetic grades while preserving pending lifec
   ], { pending: 7 });
   assert.deepEqual(aggregate, {
     total: 1, supported: 1, unsupported: 0, offPolicy: 0, pending: 7, supportedRate: 1,
+    assisted: 0,
     nonComparableSupported: 0, forced: 0, referenceAvailable: 1, exactComparable: 1, projected: 0, comparisonUnavailable: 0,
   });
   assert.equal('confidence' in aggregate, false);

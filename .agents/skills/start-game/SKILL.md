@@ -193,3 +193,5 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 | `node tools/publish.js … --retry` · `node tools/coach-control.js rollback-guard` | 롤백 2단계에서만 (§6) |
 
 관찰 지점: `$SESSION_DIR/loop-state.json`(phase·port·sessionToken·notices·metrics·halt·finishedAt), `$SESSION_DIR/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태와 게시 경로는 딜러가 열지 않는다.
+
+새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.

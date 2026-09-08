@@ -3915,7 +3915,9 @@ test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에�
     const upper = makeCoachAdapter({ rounds });
     const { gameDir, loop } = await setupCoachHand(t, {
       upper,
-      bootstrap: { replayReveal },
+      // This test checks replay permission; a random next-hand card collision
+      // belongs to the separate deferred-publication test below.
+      bootstrap: { replayReveal, mode: 'cash-training', stack: undefined, stackBb: 100, hands: 1 },
       loopOpts: {
         async coachCaptureCheckpoint() {
           const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
@@ -3928,7 +3930,7 @@ test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에�
     });
     const running = startRun(loop);
     const note = await waitForCoachNote(gameDir, 1);
-    await stopRun(loop, running);
+    await running;
     return { note, starts: upper.starts.length, foldCard };
   }
 
@@ -6817,14 +6819,15 @@ test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면
     released = true;
     held.release();
   };
-  const timer = setTimeout(release, 800);
   t.after(async () => {
-    clearTimeout(timer);
     release();
     await held.done;
   });
 
+  // Resume initializes the relay before its result-wait clock starts. Keep
+  // contention until the deadline abort; a wall-clock release races that setup.
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(released, false, 'deadline abort waited for the lock release');
   release();
   await held.done;
   await new Promise((resolve) => setTimeout(resolve, 100));

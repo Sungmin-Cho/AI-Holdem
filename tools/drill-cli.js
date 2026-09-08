@@ -10,7 +10,8 @@ import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
 import { createProfileStore, trainingStoreIo } from './training-stores.js';
 import { createMistakeBank as createReadOnlyBank } from '../training/mistake-bank.js';
-import { eventFromEvaluation } from '../training/profile-store.js';
+import { NO_HINT_ASSISTANCE } from '../shared/assistance.js';
+import { eventFromEvaluation, eventForPrior } from '../training/profile-store.js';
 import { learningEventKey } from '../training/study-history.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { lookup } from '../training/providers/preflop-json.js';
@@ -116,13 +117,14 @@ function assertAnswer(answer, question) {
 }
 
 function assertSession(session, now = new Date().toISOString()) {
-  if (!object(session) || ![1, 2].includes(session.schemaVersion) || !isSessionId(session.sessionId)
+  if (!object(session) || ![1, 2, 3].includes(session.schemaVersion) || !isSessionId(session.sessionId)
     || !['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest'].includes(session.mode)
     || !Array.isArray(session.queue) || session.queue.length > 100
     || !Number.isSafeInteger(session.index) || session.index < 0 || session.index > session.queue.length
     || !Array.isArray(session.answers) || session.answers.length !== session.index) {
     throw coded('PENDING_UNRESOLVED', 'stored drill session is invalid');
   }
+  if (session.schemaVersion === 3 ? session.assistanceContractVersion !== 1 : session.assistanceContractVersion !== undefined) throw coded('PENDING_UNRESOLVED', 'study assistance contract differs from capture schema');
   const legacy = session.schemaVersion === 1;
   const source = sourceIdentityOfDataset(loadStoredDataset(legacy ? LEGACY_REFERENCE_SOURCE : session.sourceIdentity));
   if (legacy) {
@@ -169,7 +171,7 @@ function assertSession(session, now = new Date().toISOString()) {
 async function committedProof(storeDir, session, now = new Date().toISOString()) {
   let events;
   try {
-    if (session?.schemaVersion === 2) events = await loadProfileEvents(storeDir);
+    if ([2,3].includes(session?.schemaVersion)) events = await loadProfileEvents(storeDir);
     // Recover ownership from each immutable event's original question and
     // attempt, never from the mutable session's run id or remaining queue.
     // The producer hashes sessionId/questionId/attempt; there is no parseable
@@ -208,6 +210,7 @@ async function committedProof(storeDir, session, now = new Date().toISOString())
     for (let index = 0; index < session.index; index += 1) {
       const question = session.queue[index];
       const prior = byIndex.get(index);
+      if (session.schemaVersion === 3 && prior?.schemaVersion !== 6) throw coded('PENDING_UNRESOLVED','new study contract lost assistance event');
       if (!prior) throw coded('PENDING_UNRESOLVED', 'committed answer has no learning evidence');
       const answer = assertAnswer(prior.mixObservation?.chosenAction, question);
       const result = evaluateDrillAnswer(question, answer, lookupStrategy(question));
@@ -217,7 +220,7 @@ async function committedProof(storeDir, session, now = new Date().toISOString())
         || new Date(prior.appliedAt).toISOString() !== prior.appliedAt
         || Date.parse(prior.appliedAt) > Date.parse(now)
         || Date.parse(prior.appliedAt) < Date.parse(session.studyRun.startedAt)
-        || learningEventKey(prior) !== learningEventKey(eventFromEvaluation(expected, prior.appliedAt))
+        || learningEventKey(prior) !== learningEventKey(eventForPrior(expected, prior))
         || !isDeepStrictEqual(session.answers[index], result)) {
         throw coded('PENDING_UNRESOLVED', 'committed answer differs from its confirmed learning evidence');
       }
@@ -306,6 +309,7 @@ function profileEventOf(session, question, attemptNo, result, source, answer) {
       ...(answer.sizeBb !== undefined ? { sizeBb: answer.sizeBb } : {}),
     },
     origin: session.mode === 'retest' ? 'retest' : 'drill',
+    ...(session.schemaVersion === 3 ? { assistance: {...NO_HINT_ASSISTANCE} } : {}),
     ...(session.studyRun ? {
       studyRun: {
         ...session.studyRun,
@@ -427,9 +431,10 @@ async function pendingProof(storeDir, session, eventSnapshot) {
   const pending = session.pending;
   const events = eventSnapshot ?? await loadProfileEvents(storeDir);
   const prior = events.find((event) => event.evaluationId === expectedEvent.evaluationId);
+  if (session.schemaVersion === 3 && prior && prior.schemaVersion !== 6) throw coded('PENDING_UNRESOLVED','new study contract lost assistance event');
   if (prior && (typeof prior.appliedAt !== 'string' || !Number.isFinite(Date.parse(prior.appliedAt))
     || Date.parse(prior.appliedAt) > Date.parse(serverNow)
-    || learningEventKey(prior) !== learningEventKey(eventFromEvaluation(expectedEvent, prior.appliedAt))
+    || learningEventKey(prior) !== learningEventKey(eventForPrior(expectedEvent, prior))
     || (session.studyRun && Date.parse(prior.appliedAt) < Date.parse(session.studyRun.startedAt)))) {
     throw coded('PENDING_UNRESOLVED', 'profile consumer contains different learning evidence');
   }
@@ -659,7 +664,8 @@ export async function startDrill(storeDir, {
       ...(mode === 'retest' ? { assessmentId: assessment.id } : {}),
     } : null;
     const session = {
-      schemaVersion: 2,
+      schemaVersion: 3,
+      assistanceContractVersion: 1,
       sessionId: randomUUID(),
       idempotencyKey: idempotencyKey ?? randomUUID(),
       mode,

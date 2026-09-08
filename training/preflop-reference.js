@@ -1,3 +1,4 @@
+import { projectAssistance } from '../shared/assistance.js';
 import { assertSnapshot, coded, evaluationIdOf } from './contracts.js';
 import { handClassOf } from './cards.js';
 import { lookup } from './providers/preflop-json.js';
@@ -184,5 +185,6 @@ export function evaluatePreflopReference(snapshot,dataset,{gameEpoch}={}) {
     street:snapshot.street,spotKey:ref.spot?.spotKey??null,handClass:handClassOf(snapshot.holeCards),
     recommended:[...ref.actions].sort((a,b)=>b.frequency-a.frequency||a.action.localeCompare(b.action)),
     chosen:comparison.chosen,bestEvBb:null,evLossBb:null,grade:comparison.grade,forced:snapshot.forced,
-    ...(ref.code?{code:ref.code,reason:ref.reason}:{}),source:ref.source,coverage:comparison.coverage};
+    ...(ref.code?{code:ref.code,reason:ref.reason}:{}),source:ref.source,coverage:comparison.coverage,
+    ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {})};
 }

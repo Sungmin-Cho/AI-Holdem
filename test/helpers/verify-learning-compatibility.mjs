@@ -281,7 +281,7 @@ async function buildCurrentFixtures(storeDir) {
   const evaluation = evaluationFixture();
   const profileStore = createProfileStore(storeDir, { now: () => '2026-09-06T00:00:00.000Z' });
   const applied = await profileStore.apply(evaluation);
-  if (applied.applied !== true || applied.profile.schemaVersion !== 5) throw coded('CURRENT_PROFILE_FIXTURE_FAILED');
+  if (applied.applied !== true || applied.profile.schemaVersion !== 6) throw coded('CURRENT_PROFILE_FIXTURE_FAILED');
   const bank = createMistakeBank(storeDir, { now: () => '2026-09-06T00:00:00.000Z' });
   const collected = await bank.collect(evaluation);
   if (collected.added !== true) throw coded('CURRENT_BANK_FIXTURE_FAILED');
@@ -740,7 +740,7 @@ export async function runCompatibilityVerification({ baseline, outDir }) {
   const resumedBank = await createMistakeBank(readerStore).listEvidence({ origin: 'game' });
   const currentProcessedDigests = { ...resumedProfile.processed };
   const currentProcessedIds = Object.keys(resumedProfile.processed).sort();
-  if (resumedProfile.schemaVersion !== 5 || JSON.stringify(processedIds) !== JSON.stringify(currentProcessedIds)
+  if (resumedProfile.schemaVersion !== 6 || JSON.stringify(processedIds) !== JSON.stringify(currentProcessedIds)
     || JSON.stringify(processedDigests) !== JSON.stringify(currentProcessedDigests)
     || resumedPolicy.policyId !== 'tag-v2' || resumedBank.length !== 1
     || resumedBank[0].payloadSha256 !== current.evaluation.payloadSha256

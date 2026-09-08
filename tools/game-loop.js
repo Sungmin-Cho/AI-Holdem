@@ -2,6 +2,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { resolveSessionReference } from './reference-source.js';
+import { openContained } from './training-store.js';
+import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -222,6 +224,7 @@ export function engineInitFlags(args = {}) {
   if (args.hands !== undefined) extra.push('--hands', String(args.hands));
   if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
   if (args.showdownPolicy !== undefined) extra.push('--showdown-policy', String(args.showdownPolicy));
+  if (args.hints !== undefined) extra.push('--hints',String(args.hints));
   if (args.replayReveal !== undefined) extra.push('--replay-reveal', String(args.replayReveal));
   return extra;
 }
@@ -243,6 +246,7 @@ export function applyModeDefaults(args) {
   if (freshStore) {
     next.showdownPolicy ??= 'open';
     next.replayReveal ??= 'all';
+    next.hints ??= 'off';
   }
   return next;
 }
@@ -304,6 +308,7 @@ export function parseGameLoopArgs(argv) {
     ['--port', 'port'],
     ['--showdown-policy', 'showdownPolicy'],
     ['--replay-reveal', 'replayReveal'],
+    ['--hints','hints'],
   ]);
   let sawGameDir = false;
 
@@ -347,6 +352,8 @@ export function parseGameLoopArgs(argv) {
   if (parsed.replayReveal != null && parsed.replayReveal !== 'all' && parsed.replayReveal !== 'showdown') {
     throw codedError('USAGE', '--replay-reveal는 all 또는 showdown입니다.');
   }
+  if (parsed.hints !== undefined && !['on','off'].includes(parsed.hints)) throw codedError('USAGE','--hints는 on 또는 off입니다.');
+  if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   return parsed;
 }
 
@@ -990,13 +997,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     });
   };
 
-  const runCli = (args, supervisor) => runJsonChild(
-    ENGINE_CLI,
-    args[0] === 'resume-check' && lockRoot !== root
-      ? [...args, '--lock-dir', lockRoot]
-      : args,
-    supervisor,
-  );
+  const assertHintEngine = async supervisor => {
+    let caps;
+    try { caps=await runJsonChild(ENGINE_CLI,['capabilities'],supervisor); }
+    catch(error) {
+      if (isFatalRuntimeFailure(error) || error.code === 'STOPPING' || error.code === 'FINALIZATION_RESULT_WAIT_CUTOFF') throw error;
+      throw codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability unavailable',{cause:error});
+    }
+    if (caps.preActionHints!==1 || caps.hintContractVersion!==1) throw codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability missing');
+  };
+  const runCli = async (args, supervisor) => {
+    const contract=readJsonOptional(engineStatePath,'ENGINE_STATE')?.config?.hintContractVersion;
+    if ((contract===1 && ['step','apply','new-hand','end','hint-expose','resume-check'].includes(args[0]))
+      || (args[0]==='init' && args.includes('--hints'))) await assertHintEngine(supervisor);
+    return runJsonChild(ENGINE_CLI,args[0]==='resume-check' && lockRoot!==root ? [...args,'--lock-dir',lockRoot] : args,supervisor);
+  };
   const runCoach = (args, supervisor) => runJsonChild(COACH_CLI, args, supervisor);
   const resultWaitSupervisor = () => (
     finalizeResultWaitCutoffNs === null
@@ -1156,6 +1171,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopAware) assertNotStopping();
     return response.ok && health?.ok === true && health.protocolVersion === 2
       && health.capabilities?.actionReceipts === true && health.capabilities?.studyLink === true
+      && (opts.hints !== 'on' || health.capabilities?.preActionHints === 1)
       && snapshot.studyUrl === study.studyUrl;
   };
 
@@ -2496,6 +2512,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       const out = await runPublish(args);
       reportHandReplay(out);
+      if (out.hintDisposition === 'unverifiable') hintReadyLatch = false;
       return out;
     } catch (error) {
       if (error.code !== 'PUBLISH_FAILED' && error.code !== 'PUBLISH_REJECTED') throw error;
@@ -2526,6 +2543,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  let hintReadyLatch = true;
+  const hintControl = createHintControl({sessionDir:root,runCli:args=>runCliBeforeResultCutoff(args),
+    enabled:()=>opts.hints==='on',
+    isFatal:isFatalRuntimeFailure,
+    assertActive:()=>{assertNotStopping();if(finalizationCutoff) throw codedError('PLAYTIME_PUBLISH_STOPPED','hint cutoff');},log,
+    ready:async()=>{
+      try {
+        const lock=readJsonOptional(path.join(root,'lock.json'),'SERVER_LOCK');
+        if (!lock?.port) return false;
+        const response=await fetch(`http://127.0.0.1:${lock.port}/api/health`,{headers:{'x-session-token':lock.sessionToken},signal:AbortSignal.timeout(1000)});
+        const health=await response.json();
+        hintReadyLatch=response.ok && health.capabilities?.preActionHints===1 && health.capabilities?.preActionHintsReady===true;
+      } catch {hintReadyLatch=false;}
+      return hintReadyLatch;
+    }});
+  const prepareHintEnvelope = envelope => hintControl.prepare(envelope);
   const turnPath = path.join(root, '.turn.json');
 
   const snapshotViewGameOver = () => (
@@ -2560,6 +2593,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalizationCutoff) {
       throw codedError('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시를 시작하지 않습니다.');
     }
+    envelope = await prepareHintEnvelope(envelope);
     writeJsonAtomic(turnPath, envelope);
     let currentArgs = ['--from', turnPath, ...flags];
     let args = currentArgs;
@@ -2607,7 +2641,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           assertNotStopping();
           const synchronized = await runCli(['step']);
           assertNotStopping();
-          writeJsonAtomic(turnPath, synchronized);
+          writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
           const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
           if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
           const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
@@ -5253,6 +5287,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     opponentRuntime,
     showdownPolicy,
     replayReveal,
+    hints,
   } = {}) => {
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
@@ -5291,6 +5326,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
         showdownPolicy,
         replayReveal,
+        hints,
       })];
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
@@ -5497,6 +5533,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (typeof engineState.sessionToken !== 'string' || engineState.sessionToken === '') {
         throw codedError('BAD_ENGINE_IDENTITY', 'resume할 engine sessionToken이 없습니다.');
       }
+      opts.hints=checkHintResume(engineState.config, opts.hints);
+      if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
       const canonicalEpoch = gameEpochOf(engineState.sessionToken);
       if (state && (
         state.sessionToken !== engineState.sessionToken
@@ -5848,7 +5886,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 }
 
-function initializePreparedSession(gameDir, args) {
+async function initializePreparedSession(gameDir, args) {
+  if (args.hints !== undefined) {
+    await new Promise((resolve,reject)=>execFile(process.execPath,[ENGINE_CLI,'capabilities'],{encoding:'utf8',timeout:5000,maxBuffer:4096},(error,stdout)=>{
+      let caps;try{caps=JSON.parse(stdout);}catch{}
+      if(error || caps?.preActionHints!==1 || caps?.hintContractVersion!==1) reject(codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability missing'));else resolve();
+    }));
+  }
   const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [ENGINE_CLI, ...initArgs], {
@@ -5909,6 +5953,7 @@ async function main() {
         if (args.resume) {
           const current = resolveCurrentSession(args.storeDir);
           if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
+          checkHintResume(JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024})).config,args.hints);
           resolveSessionReference(current.sessionDir);
           loop = createGameLoop({
             gameDir: current.sessionDir,
@@ -5917,6 +5962,7 @@ async function main() {
             resolver,
             opts: {
               port: args.port,
+              hints: args.hints,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5948,6 +5994,7 @@ async function main() {
             resolver,
             opts: {
               port: args.port,
+              hints: args.hints,
               trainingEnabled: true,
               storeDir: args.storeDir,
               opponentRuntime: args.opponentRuntime,
@@ -5997,6 +6044,7 @@ async function main() {
       opponentRuntime: args.opponentRuntime,
       showdownPolicy: args.showdownPolicy,
       replayReveal: args.replayReveal,
+      hints: args.hints,
     });
     await loop.run();
   } catch (error) {

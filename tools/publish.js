@@ -2,6 +2,7 @@
 // Dealer-side publisher: takes an `engine/cli.js step` envelope, posts the public part
 // to the relay server, and prints back only what the dealer needs for the next round.
 // The engine stays pure; every network call and every publishId lives here.
+import { projectHint } from '../shared/hint-contract.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
@@ -157,7 +158,10 @@ function checkEnvelope(envelope, file) {
 
 function buildBody(envelope, opts) {
   const body = {};
-  if (envelope.view !== undefined) body.view = envelope.view;
+  if (envelope.view !== undefined) {
+    body.view = envelope.view;
+    if (envelope.hint !== undefined) body.hint = envelope.hint === null ? null : projectHint(envelope.hint);
+  }
   // Tells the server this republish re-shows a state rather than acknowledging an
   // action, so a user action whose response was lost survives a dealer's resume.
   if (opts.viewOnly) body.viewOnly = true;
@@ -573,6 +577,10 @@ async function publishOnce(gameDir, lock, envelope, opts) {
           }
         }
       }
+      if (body.hint && utf8ByteLength(JSON.stringify(body)) > MAX_PUBLISH_BODY_BYTES) {
+        delete body.hint;
+        fs.writeSync(2,'HINT_BODY_BUDGET\n');
+      }
       const attemptRecord = { body, expectedGameEpoch: epoch };
       if (coachAuthority) attemptRecord.coachAuthority = coachAuthority;
       if (trainingAuthority) attemptRecord.trainingAuthority = trainingAuthority;
@@ -595,6 +603,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         hadCoach: Array.isArray(body.coach),
         applied: json.applied !== false,
         handReplay: json.handReplay,
+        hintDisposition: json.hintDisposition,
       };
     }, { timeoutMs: lockWaitMs });
     if (published.hadCoach) {
@@ -680,6 +689,7 @@ async function main() {
     out.hadCoach = published.hadCoach === true;
     out.reconcilePending = published.reconcilePending === true;
     out.applied = published.applied;
+    if (published.hintDisposition) out.hintDisposition = published.hintDisposition;
     if (published.handReplay) out.handReplay = published.handReplay;
   }
   // The dealer never reopens the envelope file, so its next command's inputs ship here.

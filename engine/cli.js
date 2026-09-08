@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exposeHint } from './hint-exposure.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +22,7 @@ const VALUE_FLAGS = new Set([
   'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta',
-  'showdown-policy', 'replay-reveal', 'meta-file',
+  'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id',
 ]);
 
 const FAIL_MESSAGES = {
@@ -221,6 +222,7 @@ function cmdInit(gameDir, flags) {
     mode: cash ? 'cash-training' : undefined,
     startStackBb: cash ? startStackBb : undefined,
     handLimit,
+    hints: flags.hints,
     opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
     showdownPolicy: parseShowdownPolicy(flags['showdown-policy']),
     replayReveal: parseReplayReveal(flags['replay-reveal']),
@@ -530,6 +532,29 @@ function cmdDecisionPeek(gameDir, flags) {
   });
 }
 
+function cmdHintExpose(gameDir, flags) {
+  if (flags.for !== 'user' || flags['expect-version'] == null || !flags['decision-id'] || !flags['hint-meta-file']) usage('hint-expose identity required');
+  const file = path.resolve(flags['hint-meta-file']);
+  if (!path.isAbsolute(flags['hint-meta-file'])) usage('hint meta path must be absolute');
+  let meta; let fd;
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) throwCoded('HINT_SNAPSHOT_INVALID');
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) throwCoded('HINT_SNAPSHOT_INVALID');
+    const bytes = Buffer.alloc(4097); const n = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    if (n > 4096) throwCoded('HINT_SNAPSHOT_INVALID');
+    meta = JSON.parse(bytes.subarray(0,n).toString('utf8'));
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  const envelope = mutate(gameDir, state => {
+    requireState(state);
+    const marker = exposeHint(state, meta, { playerId: flags.for, decisionId: flags['decision-id'],
+      expectVersion: parseIntArg(flags['expect-version'],'--expect-version') });
+    return { state, response: { ...stepEnvelope(gameDir,state,[]), exposureId: marker.exposureId } };
+  });
+  succeed(envelope);
+}
+
 function cmdResumeCheck(gameDir, lockDir = gameDir) {
   const state = requireState(loadState(gameDir));
   const lock = readLock(gameDir);
@@ -555,6 +580,7 @@ function cmdResumeCheck(gameDir, lockDir = gameDir) {
     toAct: legalFor(state).toAct,
     archiveRepaired,
     archiveStatus,
+    preActionHints: 1, hintContractVersion: 1,
   });
 }
 
@@ -566,6 +592,12 @@ function main() {
     const rest = positional.slice(1);
     const gameDir = path.resolve(flags['game-dir'] ?? 'game');
     switch (cmd) {
+      case 'capabilities':
+        succeed({ preActionHints: 1, hintContractVersion: 1 });
+        break;
+      case 'hint-expose':
+        cmdHintExpose(gameDir, flags);
+        break;
       case 'init':
         cmdInit(gameDir, flags);
         break;

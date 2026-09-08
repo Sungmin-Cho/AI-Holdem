@@ -164,6 +164,7 @@ test('consumer replay and later practice preserve exactly-once game evidence', a
     payloadSha256: 'bb'.repeat(32),
     source,
     origin: 'practice',
+    assistance: {schemaVersion:1,hintShown:false,exposureId:null},
     recommended: [
       { action: 'raise', sizeBb: 2.5, frequency: 0.85, evBb: null },
       { action: 'fold', frequency: 0.15, evBb: null },

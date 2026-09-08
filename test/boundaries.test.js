@@ -141,7 +141,7 @@ test('server imports only the publish contract and named containment primitives'
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'] };
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
@@ -502,4 +502,24 @@ test('store game loop attaches study through its verified lifetime helper', () =
   assert.equal(edges.length, 1);
   assert.equal(edges[0].dynamic, false);
   assert.deepEqual(edges[0].bindings, ['ensureStudyService']);
+});
+
+// #147 deliberately introduces one read-only reference verification façade.
+test('hint proof façade has a closed named dependency surface and no writes or spawn', () => {
+  const allowed={
+    'node:fs':['default'],'node:path':['default'],
+    'tools/reference-source.js':['readSessionReference'],
+    'tools/preflop-dataset.js':['loadReferenceDataset'],
+    'training/pre-action-hint.js':['buildPreActionHint','recommendationHash'],
+    'shared/decision-observation.js':['observationHash','canonicalJson'],
+    'shared/hint-contract.js':['projectHint'],
+    'shared/reference.js':['sameReferenceSource'],
+    'publish-contract.js':['gameEpochOf'],
+  };
+  for(const edge of staticGraph().edges.filter(edge=>edge.from==='tools/hint-proof.js')) {
+    assert.ok(!edge.dynamic && allowed[edge.to] && edge.bindings.length && edge.bindings.every(name=>allowed[edge.to].includes(name)),JSON.stringify(edge));
+  }
+  const source=fs.readFileSync(path.join(ROOT,'tools/hint-proof.js'),'utf8');
+  assert.equal(WRITE_PRIMITIVE_RE.test(source),false);
+  assert.equal(/child_process|\b(?:spawn|execFile|writeFile|appendFile|rename|unlink|mkdir|truncate)\s*\(/.test(source),false);
 });

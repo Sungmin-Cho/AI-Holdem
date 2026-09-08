@@ -1,3 +1,4 @@
+import { decisionAssistance } from '../shared/assistance.js';
 import { positionsOf } from './positions.js';
 import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
 
@@ -118,6 +119,11 @@ export function snapshotDecision(
     priorActions: (hand.actions ?? []).map(safePrior),
     legal: legalEvidence,
   };
+
+  if (playerId === 'user') {
+    const assistance = decisionAssistance(hand, decisionId);
+    if (assistance !== undefined) snapshot.assistance = assistance;
+  }
 
   if (chosenAction != null) {
     snapshot.chosenAction = {
