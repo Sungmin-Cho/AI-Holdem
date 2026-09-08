@@ -45,7 +45,11 @@ test('tightness is clamp(a0 − a1·VPIP) when vpip.n ≥ MIN_N', () => {
   const t = emptyTendency('user');
   fillVpip(t, 80, Math.round(0.12 * 80));
   const traits = traitsFromTendency(t);
-  const expected = CALIBRATION.a0 - CALIBRATION.a1 * (t.preflop.vpip.k / t.preflop.vpip.n);
+  const rate = t.preflop.vpip.k / t.preflop.vpip.n;
+  const expected = Math.min(
+    CALIBRATION.clampHigh,
+    Math.max(CALIBRATION.clampLow, CALIBRATION.a0 - CALIBRATION.a1 * rate),
+  );
   assert.ok(Math.abs(traits.tightness - expected) < 1e-12);
 });
 

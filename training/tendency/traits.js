@@ -1,8 +1,8 @@
 import { TENDENCY_MIN_N, rateOf } from './contracts.js';
 
 export const CALIBRATION = Object.freeze({
-  a0: 1.014,
-  a1: 1.053,
+  a0: 1.554,
+  a1: 2.177,
   b1: 0.42,
   b2: 0.42,
   c0: 0.10,
