@@ -669,6 +669,72 @@ test('accept CLI --forbidden-file이 배열이 아니면 BAD_FORBIDDEN_FILE', as
   }
 });
 
+test('accept --forbidden-file은 text가 깨끗해도 decisions.outcome literal을 거부한다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const started = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  writeResult(started.descriptors[0].exactResultPath, {
+    handNo: 1,
+    text: '공개 액션만 보면 무난한 폴드입니다.',
+    decisions: [{
+      decisionId: 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '상대는 Ah를 가지고 있었다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  });
+  const out = await cc.accept({
+    gameDir: dir,
+    owner,
+    handNo: 1,
+    generation: started.descriptors[0].generation,
+    forbiddenLiterals: ['Ah'],
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'INVALID_COACH_OUTPUT');
+  assert.equal(cc.loadAuthority(dir).publishQueue['1'], undefined);
+});
+
+test('defer 뒤 result 파일이 없어도 deadline heartbeat는 unavailable을 봉인하지 않는다', async () => {
+  const clock = new FakeClock();
+  const { dir, owner, cc, snapshotFile, statsFile } = setup({ clock });
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const started = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  const d1 = started.descriptors[0];
+  const note = {
+    handNo: 1,
+    text: '지연된 노트입니다.',
+    decisions: [{
+      decisionId: 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  };
+  writeResult(d1.exactResultPath, note);
+  const deferred = await cc.defer({
+    gameDir: dir, owner, handNo: 1, generation: d1.generation, note,
+  });
+  assert.equal(deferred.ok, true);
+  fs.unlinkSync(d1.exactResultPath);
+  clock.advanceMs(DEFAULT_ATTEMPT_MS + 1);
+  const heartbeat = await cc.heartbeat({ gameDir: dir, owner });
+  assert.deepEqual(heartbeat.actions, []);
+  const sealed = await cc.completeUnavailable({
+    gameDir: dir, owner, handNo: 1, generation: d1.generation, reason: 'game-over-cutoff', snapshotFile,
+  });
+  assert.equal(sealed.ok, false);
+  assert.equal(sealed.code, 'HAND_DEFERRED');
+  const auth = cc.loadAuthority(dir);
+  assert.equal(auth.publishQueue['1'], undefined);
+  assert.equal(auth.publishedSeals['1'], undefined);
+  assert.equal(auth.deferred['1'].note.text, note.text);
+});
+
 test('forbidden literal은 INVALID_COACH_OUTPUT이고 본문은 trace에 없다', async () => {
   const { dir, owner, cc, snapshotFile, statsFile } = setup();
   fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));

@@ -4167,6 +4167,63 @@ test('finalizing은 남은 deferred 코치 노트를 먼저 flush한다', { time
   assert.equal(note.unavailable, undefined);
 });
 
+test('finalizing flush에서 replay 캡처가 없으면 deferred 핸드를 unavailable로 봉인한다', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const state = readJson(path.join(gameDir, 'state.json'));
+  state.config = { ...(state.config ?? {}), replayReveal: 'all' };
+  fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(state));
+  const epoch = gameEpochOf(init.sessionToken);
+  const owner = '11111111-1111-4111-8111-111111111111';
+  const deferredNote = {
+    handNo: 1,
+    text: '지연됐지만 replay가 없어 봉인하지 못한 노트입니다.',
+    decisions: [{
+      decisionId: (state.lastHand.decisions ?? []).find((row) => row.actorId === 'user')?.decisionId ?? 'd-1-preflop-0',
+      why: '왜 그 액션을 했는지 설명합니다.',
+      outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
+      alternative: '다른 라인을 검토할 수 있었습니다.',
+    }],
+  };
+  writeJsonAtomic(path.join(gameDir, '.coach-authority.json'), {
+    schemaVersion: 2,
+    gameEpoch: epoch,
+    activeOwnerSessionId: owner,
+    adapterState: 'enabled',
+    legacyMigrationCompleted: true,
+    overfoldLease: null,
+    hands: {},
+    retiredAttempts: [],
+    publishQueue: {},
+    publishedSeals: {},
+    deferred: { 1: { note: deferredNote } },
+    noNewPlayTimePublishers: false,
+    finalization: null,
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { ownerSessionId: owner, handNo: 1 },
+    loopOpts: {
+      onEngineInvoke(args) {
+        if (args[0] === 'hand' && args.includes('--replay')) {
+          throw new Error('replay capture should not run for a missing flush file');
+        }
+      },
+    },
+  });
+  await loop.resume();
+  await loop.run();
+  assert.equal(fs.existsSync(path.join(gameDir, '.coach-hand-1-replay.json')), false);
+  const snap = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  const note = (snap.coach ?? []).find((row) => row.handNo === 1);
+  assert.ok(note);
+  assert.equal(note.unavailable, true);
+  const { UNAVAILABLE_TEXT } = await import('../tools/coach-control.js');
+  assert.equal(note.text, UNAVAILABLE_TEXT);
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(auth.deferred?.['1'], undefined);
+});
+
 test('정상 노트 proof-bearing 게시는 스냅샷 coach[].decisions를 보존한다', { timeout: 15_000 }, async (t) => {
   let decisionId = 'd-1-preflop-0';
   const rounds = [{
