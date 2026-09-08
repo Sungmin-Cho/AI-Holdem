@@ -260,3 +260,53 @@ test('reference notice distinguishes projected stacks from unsupported configura
  }
  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:6,startStackBb:100}),/지원 범위 밖/);
 });
+
+test('P3: fresh store injects showdownPolicy=open and replayReveal=all outside the cash-training branch', () => {
+  const cash = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x']));
+  assert.equal(cash.showdownPolicy, 'open');
+  assert.equal(cash.replayReveal, 'all');
+
+  const tourney = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x', '--mode', 'tournament']));
+  assert.equal(tourney.mode, 'tournament');
+  assert.equal(tourney.showdownPolicy, 'open');
+  assert.equal(tourney.replayReveal, 'all');
+  assert.equal(tourney.ai, undefined);
+
+  const explicit = applyModeDefaults(parseGameLoopArgs([
+    '--store-dir', '/tmp/x', '--showdown-policy', 'standard', '--replay-reveal', 'showdown',
+  ]));
+  assert.equal(explicit.showdownPolicy, 'standard');
+  assert.equal(explicit.replayReveal, 'showdown');
+
+  const resumed = applyModeDefaults(parseGameLoopArgs(['--store-dir', '/tmp/x', '--resume']));
+  assert.equal(resumed.showdownPolicy, undefined);
+  assert.equal(resumed.replayReveal, undefined);
+
+  const legacy = applyModeDefaults(parseGameLoopArgs(['--game-dir', '/tmp/g', '--ai', '2']));
+  assert.equal(legacy.showdownPolicy, undefined);
+  assert.equal(legacy.replayReveal, undefined);
+});
+
+test('P3: engineInitFlags forwards showdown-policy and replay-reveal', () => {
+  assert.deepEqual(
+    engineInitFlags({ showdownPolicy: 'open', replayReveal: 'all' }),
+    ['--showdown-policy', 'open', '--replay-reveal', 'all'],
+  );
+  assert.deepEqual(engineInitFlags({}), []);
+});
+
+test('P3: parseGameLoopArgs rejects invalid showdown-policy and replay-reveal', () => {
+  assert.throws(
+    () => parseGameLoopArgs(['--store-dir', '/tmp/x', '--showdown-policy', 'hidden']),
+    (error) => error.code === 'USAGE',
+  );
+  assert.throws(
+    () => parseGameLoopArgs(['--store-dir', '/tmp/x', '--replay-reveal', 'open']),
+    (error) => error.code === 'USAGE',
+  );
+  const parsed = parseGameLoopArgs([
+    '--store-dir', '/tmp/x', '--showdown-policy', 'standard', '--replay-reveal', 'showdown',
+  ]);
+  assert.equal(parsed.showdownPolicy, 'standard');
+  assert.equal(parsed.replayReveal, 'showdown');
+});

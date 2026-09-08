@@ -158,7 +158,7 @@ export function turnSummary(state, playerId) {
   }
   const observation = completedHandObservation(state);
   if (observation) lines.push(...observation);
-  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?}`);
+  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?,"reason":"한 줄 사유(선택)"}`);
   return lines.join('\n');
 }
 

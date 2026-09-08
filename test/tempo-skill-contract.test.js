@@ -207,7 +207,19 @@ test('플레이어 프롬프트 정본: talk 규약이 없고 JSON 한 줄 회�
   const prompt = read('tools/player-prompt.md');
   assert.ok(!prompt.includes('talk'));
   assert.match(prompt, /JSON 한 줄/);
+  assert.match(prompt, /"reason"/);
   assert.ok(!prompt.includes('SendMessage'));
+});
+
+test('SKILL §2·AGENTS.md: fresh store 기본 showdownPolicy=open, replayReveal=all', () => {
+  const start = section(read(SKILL), '## 2. 시작');
+  assert.match(start, /--showdown-policy/);
+  assert.match(start, /--replay-reveal/);
+  assert.match(start, /showdownPolicy.*open|open.*showdownPolicy/i);
+  assert.match(start, /replayReveal.*all|all.*replayReveal/i);
+  const agents = read('AGENTS.md');
+  assert.match(agents, /showdownPolicy.*open|open.*showdownPolicy/i);
+  assert.match(agents, /replayReveal.*all|all.*replayReveal/i);
 });
 
 test('호스트 에이전트 정의 파일이 없다', () => {

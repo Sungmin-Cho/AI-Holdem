@@ -12,7 +12,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2다. 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`, `--showdown-policy open|standard`, `--replay-reveal all|showdown`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이다. 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 
@@ -50,7 +50,7 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
+인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 새 `--store-dir` 게임은 mode와 무관하게 `showdownPolicy=open`, `replayReveal=all`을 주입한다. 명시한 `--showdown-policy standard`·`--replay-reveal showdown`은 덮지 않는다. resume과 legacy `--game-dir`에는 이 두 기본값을 주입하지 않는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
 
 store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 새 세션의 v2 휴리스틱 기준표는 cash-training 6·8·9인, 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원한다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
 
@@ -61,6 +61,7 @@ nohup node tools/game-loop.js --store-dir game --ai <n> \
   --player-runtime <이 호스트의 값: Claude Code=claude, Codex=codex, Grok=grok> \
   [--stack N] [--level-every N] [--blinds SB/BB] \
   [--mode cash-training|tournament] [--stack-bb N] [--hands N] [--opponent-runtime llm|policy] \
+  [--showdown-policy open|standard] [--replay-reveal all|showdown] \
   > /tmp/ai-holdem-boot.log 2>&1 &
 ```
 

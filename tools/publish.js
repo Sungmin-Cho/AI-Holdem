@@ -4,8 +4,9 @@
 // The engine stays pure; every network call and every publishId lives here.
 import fs from 'node:fs';
 import path from 'node:path';
-import { withNamedLock } from '../engine/state.js';
+import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
 import {
+  HAND_REPLAY_TRIGGER_MAX,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
@@ -355,6 +356,46 @@ function attemptPath(gameDir) {
   return path.join(gameDir, '.publish-attempt.json');
 }
 
+function replayPendingPath(gameDir) {
+  return path.join(gameDir, '.replay-pending.json');
+}
+
+function readReplayPendingNos(gameDir) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(replayPendingPath(gameDir), 'utf8'));
+    if (!Array.isArray(raw?.handNos)) return [];
+    return raw.handNos.filter((value) => Number.isInteger(value) && value >= 1);
+  } catch {
+    return [];
+  }
+}
+
+function unionHandNos(left, right) {
+  const seen = new Set();
+  const out = [];
+  for (const value of [...left, ...right]) {
+    if (!Number.isInteger(value) || value < 1 || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function drainReplayPending(gameDir, report, fallbackHandNos = []) {
+  const acked = new Set();
+  if (report && typeof report === 'object' && !Array.isArray(report)) {
+    for (const value of report.stored ?? []) acked.add(value);
+    for (const entry of report.markers ?? []) acked.add(entry?.handNo ?? entry);
+    for (const value of report.conflicts ?? []) acked.add(value);
+  }
+  if (acked.size === 0) {
+    for (const value of fallbackHandNos) acked.add(value);
+  }
+  if (acked.size === 0) return;
+  const next = readReplayPendingNos(gameDir).filter((value) => !acked.has(value));
+  writeJsonAtomic(replayPendingPath(gameDir), { handNos: next });
+}
+
 // A half-written record is worse than none: --retry would read it and stop the game.
 function writeAttempt(gameDir, record) {
   const target = attemptPath(gameDir);
@@ -433,6 +474,15 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         } catch (error) {
           if (error?.code === 'BAD_HAND_REPLAY') bail('BAD_HAND_REPLAY', 'handReplay 트리거가 올바르지 않습니다.');
           throw error;
+        }
+        if (!opts.retry) {
+          const pendingNos = readReplayPendingNos(gameDir);
+          const envelopeNos = body.handReplay?.handNos ?? [];
+          const allNos = unionHandNos(pendingNos, envelopeNos);
+          writeJsonAtomic(replayPendingPath(gameDir), { handNos: allNos });
+          const handNos = allNos.slice(0, HAND_REPLAY_TRIGGER_MAX);
+          if (handNos.length) body.handReplay = { handNos };
+          else delete body.handReplay;
         }
       }
       if (body.actionAck !== undefined) {
@@ -541,6 +591,8 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
         bail('PUBLISH_ID_REUSED', '이 publishId는 이미 다른 본문이 소비했습니다. 기록을 지웠으니 새 id로 다시 게시하세요.');
       }
+      const fallback = opts.retry && json.applied === false ? (body.handReplay?.handNos ?? []) : [];
+      drainReplayPending(gameDir, json.handReplay, fallback);
       try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
       return {
         publishId: body.publishId,

@@ -39,7 +39,16 @@ test('S8 early: the new-store defaults are complete, pure and do not inject blin
   assert.notEqual(next, parsed);
   assert.equal(parsed.mode, undefined);
   assert.equal(parsed.opponentRuntime, undefined);
-  assert.deepEqual(next, { ...parsed, mode: 'cash-training', ai: 5, stackBb: 100, hands: 20, opponentRuntime: 'policy' });
+  assert.deepEqual(next, {
+    ...parsed,
+    mode: 'cash-training',
+    ai: 5,
+    stackBb: 100,
+    hands: 20,
+    opponentRuntime: 'policy',
+    showdownPolicy: 'open',
+    replayReveal: 'all',
+  });
   assert.equal(next.blinds, undefined);
   assert.deepEqual(applyModeDefaults(next), next);
 });
@@ -70,7 +79,13 @@ for (const options of [
 ]) {
   test(`S8 early: explicit legacy-format options remain unchanged: ${options.join(' ')}`, () => {
     const parsed = parseGameLoopArgs([...STORE_ARGS, ...options]);
-    assert.deepEqual(applyModeDefaults(parsed), parsed);
+    const next = applyModeDefaults(parsed);
+    assert.equal(next.showdownPolicy, 'open');
+    assert.equal(next.replayReveal, 'all');
+    assert.deepEqual(
+      { ...next, showdownPolicy: undefined, replayReveal: undefined },
+      { ...parsed, showdownPolicy: undefined, replayReveal: undefined },
+    );
   });
 }
 
