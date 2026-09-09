@@ -7532,8 +7532,9 @@ test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FA
 
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(loopState.halt.code, 'REVIEW_FAILED');
-  assert.equal(loopState.finalization.budgetMs, 20_000, '기본 finalization 예산은 20초다');
-  assert.equal(loopState.finalization.resultWaitMs, 10_000);
+  const expectedBudget = process.platform === 'win32' ? 200_000 : 20_000;
+  assert.equal(loopState.finalization.budgetMs, expectedBudget, '기본 finalization 예산은 POSIX 20초, win32 200초다');
+  assert.equal(loopState.finalization.resultWaitMs, expectedBudget - 10_000);
   assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
   assert.equal(Object.hasOwn(loopState.finalization, 'deadlineScope'), false);
   assert.equal(Object.hasOwn(loopState.finalization, 'reviewHandoff'), false);

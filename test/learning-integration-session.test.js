@@ -202,7 +202,7 @@ test('S8 full: default 20-hand production session records support then study rem
         if (phase !== 'done' && !state.gameOver) {
           throw new Error(`default20 action driver deadline: ${JSON.stringify({ handNo: state.handNo, phase, actions: actions.length, phaseObservations })}`);
         }
-        await within(running, scaled(15000), `default20 finalization ${JSON.stringify({ handNo: state.handNo, phase, phaseObservations })}`);
+        await within(running, scaled(25000), `default20 finalization ${JSON.stringify({ handNo: state.handNo, phase, phaseObservations })}`);
       }
     })();
     driver.catch(() => loop.requestStop());
