@@ -162,9 +162,23 @@ export async function runLobbyJourney(outDir) {
     await click("#modes");
     await browser(["check", 'input[value="tournament"]']);
     await browser(["select", "#ai-count", "8"]);
+    // Interrupt a receipt read after mode replacement was submitted. The UI
+    // must reconcile its persisted command and leave the setup screen.
+    await evaluate(`(() => {
+      const original = window.fetch;
+      window.__receiptDisconnected = false;
+      window.fetch = async (url, options) => {
+        if (!window.__receiptDisconnected && String(url).startsWith('/api/commands/')) {
+          window.__receiptDisconnected = true;
+          throw new TypeError('fetch failed');
+        }
+        return original(url, options);
+      };
+    })()`);
     await click("#start");
     await click("#confirm-yes");
     await state("playing");
+    await wait(() => evaluate("window.__receiptDisconnected && document.querySelector('#setup').hidden && !sessionStorage.getItem('holdem.app.command.v1')"));
     assert.equal(
       JSON.parse(
         fs.readFileSync(

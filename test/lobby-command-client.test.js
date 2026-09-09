@@ -61,3 +61,29 @@ test("fallback re-POST with stale app clears pending rather than wedging the tab
   await assert.rejects(client.recover(), /STALE_APP/);
   assert.equal(client.pending, false);
 });
+
+
+test("accepted command survives receipt disconnect and recovers the same ID", async () => {
+  const saved = storage();
+  let posts = 0;
+  let reads = 0;
+  const client = createLobbyCommandClient({
+    storage: saved,
+    sleep: async () => {},
+    request: async (url, options) => {
+      if (options) {
+        posts++;
+        return { requestId: "accepted-id", status: "accepted" };
+      }
+      assert.equal(url, "/api/commands/accepted-id");
+      if (++reads === 1) throw new TypeError("fetch failed");
+      return { requestId: "accepted-id", status: "succeeded" };
+    },
+  });
+  await assert.rejects(client.send({ requestId: "accepted-id", kind: "start" }), /fetch failed/);
+  assert.equal(client.pending, true);
+  await client.recover();
+  assert.equal(posts, 1);
+  assert.equal(reads, 2);
+  assert.equal(client.pending, false);
+});

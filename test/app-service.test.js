@@ -48,18 +48,35 @@ test(
         JSON.stringify(await response.clone().json()),
       );
       let receipt;
+      let transportFailures = 0;
       const deadline =
         Date.now() + (process.platform === "win32" ? 240000 : 30000);
       while (Date.now() < deadline) {
-        receipt = await (
-          await fetch(`${app.origin}/api/commands/${payload.requestId}`, {
-            headers,
-          })
-        ).json();
+        try {
+          const response = await fetch(
+            `${app.origin}/api/commands/${payload.requestId}`,
+            { headers, signal: AbortSignal.timeout(10000) },
+          );
+          assert.equal(response.status, 200);
+          receipt = await response.json();
+        } catch (error) {
+          // Match the UI's pending-command recovery: retry only this read,
+          // never submit a second command or replace its durable request ID.
+          const transportError =
+            (error instanceof TypeError && error.message === "fetch failed") ||
+            error.name === "TimeoutError";
+          if (!transportError || ++transportFailures > 3) throw error;
+          t.diagnostic(
+            `receipt reconnect kind=${kind} attempt=${transportFailures} ` +
+              `cause=${error.cause?.code ?? error.name}`,
+          );
+          await sleep(100);
+          continue;
+        }
         if (receipt.status !== "accepted") break;
         await sleep(50);
       }
-      assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+      assert.equal(receipt?.status, "succeeded", JSON.stringify(receipt));
       return payload;
     }
     await command("start", { aiCount: 1 });

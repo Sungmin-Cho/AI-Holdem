@@ -274,7 +274,10 @@ async function recoverCommand() {
   render();
   try {
     await commands.recover();
+    selecting = false;
+    $("error").textContent = "";
     await refresh();
+    if (snapshot.state === "paused") $("pause-dialog").showModal();
   } catch (e) {
     showError(e);
   } finally {

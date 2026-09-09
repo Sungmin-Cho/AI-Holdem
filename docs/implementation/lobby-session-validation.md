@@ -58,3 +58,13 @@ model-router HIGH, 저자 가족 OpenAI 제외. Claude Opus 5와 Claude Fable 5.
 ## 한계와 계약
 
 파일 fsync와 원자적 rename은 프로세스 중단 복구를 대상으로 한다. 전원 손실까지 견디는 디렉터리 fsync 기반 transaction 보장은 이번 계약에 포함하지 않는다. 명령 복구는 기존 current와 예약 identity의 CAS를 유지하고, 불완전한 준비 자료는 삭제하거나 재초기화하지 않는다. 기본 정책의 분석 수치는 실력·수익·GTO 정답을 증명하지 않는다.
+
+
+## PR 플랫폼 검증 후속
+
+첫 PR CI의 Windows Node 22 로비 gate는 통과했다. Windows Node 20은 start 접수 후 receipt GET의 `TypeError: fetch failed` 한 건으로 실패했다. 원인 코드가 없는 기존 로그만으로 socket 종료 원인을 단정하지 않으며 keep-alive 설정 변경 같은 추측성 런타임 수정은 하지 않았다. 서비스 통합 테스트를 실제 UI의 pending-command 재접속 계약에 맞춰 동일 requestId의 읽기만 최대 3회 복구하도록 수정했다. HTTP 실패 상태·JSON 오류·최종 실패 영수증은 재시도하지 않고, 연결 오류의 cause code를 비밀 없이 출력한다. accepted 이후 단절→같은 ID 회복→POST 1회 회귀 테스트를 추가했다. 최종 PR checks가 플랫폼 검증의 정본이다.
+
+
+재접속 점검을 확장한 실제 브라우저 테스트에서 모드 변경 접수 후 receipt 조회를 한 번 끊으면 서버는 playing이지만 설정 화면이 남는 결함을 재현했다(`journey state timeout playing`). 복구 성공 시 설정 선택 상태와 오류 표시를 해제하고, pause 복구면 메뉴를 여는 것으로 정상 명령 완료와 화면 전환을 맞췄다. 브라우저 여정은 동일 requestId의 복구와 게임 화면 노출을 함께 검증한다.
+
+후속 로컬 검증: Node 20.20.2 집중 테스트 9개 PASS, 연결 단절 주입을 포함한 실제 Chromium 13개 여정 PASS. 최종 변경의 전체 suite는 새 PR CI에서 다시 실행한다.
