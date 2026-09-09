@@ -8639,7 +8639,7 @@ test('P3: wait-action note is written to --meta-file; unknown keys still apply',
   assert.equal(applied.note, NOTE_TOKEN);
 });
 
-test('P3: fresh bootstrap init argv includes showdown-policy and replay-reveal', { timeout: 10_000 }, async (t) => {
+test('P3: fresh bootstrap init argv includes showdown-policy and replay-reveal', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const engineCalls = [];
   const loop = createGameLoop({
