@@ -51,9 +51,22 @@ export async function standalone(t) {
 export async function launch(t, options = {}, storeDir = createOwnedTempDir('holdem-study-child')) {
   const api = await service();
   const children = [];
-  const handle = await api.ensureStudyService(storeDir, {
-    ...options, onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
-  });
+  const started = Date.now();
+  let handle;
+  for (;;) {
+    try {
+      handle = await api.ensureStudyService(storeDir, {
+        ...options, onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+      });
+      break;
+    } catch (error) {
+      // Fresh-dir launch STUDY_DESCRIPTOR_CORRUPT is ACL/budget, not a bad file.
+      // Do not retry once a child exists: that instance already owns the store.
+      if (!WIN32 || children.length > 0 || error.code !== 'STUDY_DESCRIPTOR_CORRUPT'
+        || Date.now() - started > 180_000) throw error;
+      await wait(250);
+    }
+  }
   t.after(async () => {
     try { await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }); }
     catch (error) {

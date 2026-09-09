@@ -182,5 +182,12 @@ $bytes=$acl.GetSecurityDescriptorBinaryForm(); $ptr=[Runtime.InteropServices.Mar
 try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=New-Object PrivateDirectoryNative+SA; $sa.length=[Runtime.InteropServices.Marshal]::SizeOf($sa); $sa.descriptor=$ptr; if (![PrivateDirectoryNative]::CreateDirectory(${quote(file)},[ref]$sa)) { $e=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); if($e -eq 183){exit 2}; exit 1 } } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }`;
   const result = powershell(script, spawnSync, { kind: 'create', paths: 1 });
   if (result.status === 2) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
-  if (result.status !== 0 || !isPrivatePath(file)) throw denied();
+  if (result.status !== 0) throw denied();
+  // CreateDirectoryW already applied the DACL. Get-Acl can still ETIMEDOUT
+  // under runner load; retry the proof instead of leaving a private dir unverified.
+  const deadline = Date.now() + 15_000;
+  while (!isPrivatePath(file)) {
+    if (Date.now() >= deadline) throw denied();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
 }
