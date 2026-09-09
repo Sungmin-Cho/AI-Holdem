@@ -15,16 +15,16 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Windows shards (measured minutes on run 6943f18, Node 22, before D5):
-#   study-a    study-service                         ≈ 21.5
-#   study-b    study-service-recovery                ≈ 23.5
-#   learning-a learning-integration + mistake-bank + publish ≈ 19.7
-#   learning-b learning-integration-session + action-receipts + drill-* ≈ 20.3
-#   loop       game-loop + release-verifier + server-security-gates ≈ 23
-#   rest       remaining test files + step 6 GATE    ≈ 21
+# Windows shards (worst minutes on 925fbb2 attempts 1–3, Windows suite green):
+#   study-a    study-service                         15.2
+#   study-b    study-service-recovery                21.1
+#   learning-a learning-integration + mistake-bank + publish 17.9
+#   learning-b learning-integration-session + action-receipts + drill-* 20.4
+#   loop       game-loop + release-verifier + server-security-gates 27.0
+#   rest       remaining test files + step 6 GATE    29.6
+# G5 (file ≤ 20, shard ≤ 22) missed: keep file cap 45 min and job 60.
 # Rebalance only by moving NAMED's small files (mistake-bank, publish,
-# action-receipts, drill-*). Do not split files further. Keep max ≤ 30 min
-# and max/min ≤ 1.5 after the first full matrix.
+# action-receipts, drill-*). Those cannot shrink rest/loop; do not split files.
 jobs:
   test:
     name: Node ${{ matrix.node-version }} (${{ matrix.os }})
