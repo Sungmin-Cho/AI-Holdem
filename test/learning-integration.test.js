@@ -13,9 +13,9 @@ test('REQ-001: new store sessions default to policy learning', () => {
 import fs from 'node:fs';
 import path from 'node:path';
 import { isPrivatePath } from '../shared/platform-files.js';
-import { skipOnWin32 } from './helpers/platform.js';
+import { skipOnWin32, studyBudget } from './helpers/platform.js';
 import { resolveRuntimes, RUNTIME_TABLE } from '../tools/player-runtime.js';
-import { ensureStudyService, inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { ensureStudyService, inspectStudyService, stopStudyService, HTTP_WAIT_MS } from '../tools/study-service.js';
 import {
   scaled,
   ROOT,
@@ -280,7 +280,7 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   assert.equal(process.umask(), hostMask, 'the host process umask is unchanged');
 });
 
-test('S8 full: store bootstrap attaches its owner and publishes the verified study URL', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: store bootstrap attaches its owner and publishes the verified study URL', { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-link');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -292,7 +292,7 @@ test('S8 full: store bootstrap attaches its owner and publishes the verified stu
   const service = await inspectStudyService(storeDir);
   assert.equal(service.status, 'running', 'store bootstrap must attach a verified independent study service');
   const response = await fetch(`http://127.0.0.1:${initialized.port}/api/snapshot?token=${encodeURIComponent(initialized.sessionToken)}`, {
-    signal: AbortSignal.timeout(2000),
+    signal: AbortSignal.timeout(Math.max(2_000, HTTP_WAIT_MS)),
   });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).studyUrl, service.studyUrl);
@@ -300,7 +300,7 @@ test('S8 full: store bootstrap attaches its owner and publishes the verified stu
 });
 
 for (const variant of ['missing study URL', 'rotated study URL', 'actual legacy capabilities']) {
-  test(`S8 full: store bootstrap replaces an authenticated owned relay with ${variant}`, { timeout: scaled(20000) }, async (t) => {
+  test(`S8 full: store bootstrap replaces an authenticated owned relay with ${variant}`, { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }) }, async (t) => {
     const storeDir = createOwnedTempDir('holdem-s8-relay-adoption');
     const gameDir = path.join(storeDir, 'session');
     fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -395,7 +395,7 @@ test('S8 full: corrupt study ownership blocks relay replacement without rewritin
   assert.doesNotThrow(() => process.kill(relay.child.pid, 0));
 });
 
-test('S8 full: capability verification rechecks the pinned relay lock before adoption', { timeout: scaled(10000), concurrency: false }, async (t) => {
+test('S8 full: capability verification rechecks the pinned relay lock before adoption', { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }), concurrency: false }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-capability-race');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });

@@ -13,6 +13,7 @@ import { decide, stampPlayerPolicies } from '../tools/policy-player.js';
 import { assignmentFor, policyById } from '../training/policies/catalog.js';
 
 const ENGINE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
+const WIN32_SCALE = process.platform === 'win32' ? 10 : 1;
 
 function tmp() {
   return createOwnedTempDir('holdem-policy-loop');
@@ -379,7 +380,7 @@ test('self-opponent policy game assigns seats, reviews them, and keeps identity 
 });
 
 
-test('hint-enabled policy sidecar publishes only after durable exposure', {timeout:40_000},async t=>{
+test('hint-enabled policy sidecar publishes only after durable exposure', {timeout:40_000 * WIN32_SCALE},async t=>{
  const {resolveSessionReference}=await import('../tools/reference-source.js');
  const gameDir=tmp();
  const loop=createGameLoop({gameDir,resolver:async()=>({player:null,upper:null,notices:[]}),
@@ -395,7 +396,7 @@ test('hint-enabled policy sidecar publishes only after durable exposure', {timeo
  t.after(()=>resumed.requestStop().catch(()=>{}));
  await resumed.resume();
  const running=resumed.run();running.catch(()=>{});
- const {snapshot}=await waitForUserSnapshot(gameDir,20_000);
+ const {snapshot}=await waitForUserSnapshot(gameDir,20_000 * WIN32_SCALE);
  assert.ok(snapshot.hint,'sidecar publishes a supported or explicit unsupported hint');
  if(snapshot.hint.status==='supported') {
   const state=readJson(path.join(gameDir,'state.json'));

@@ -28,10 +28,11 @@ function readJson(filePath) {
 // Windows refuses a rename while any reader holds the destination open, and a
 // relay reading state.json holds it for a moment on every request. That is a
 // collision to wait out, not a verdict: retry the same rename a bounded number
-// of times, and if it still fails, fail.
+// of times, and if it still fails, fail. POSIX almost never hits this; the
+// retries still fail closed and never copy-overwrite.
 const RENAME_RETRY_MS = 25;
-const RENAME_RETRIES = process.platform === 'win32' ? 20 : 0;
-function commitTmp(tmpPath, filePath) {
+const RENAME_RETRIES = 20;
+export function commitTmp(tmpPath, filePath) {
   // Rename is the commit boundary on every platform. Sharing violations are
   // failures, never permission to expose a partially copied destination.
   for (let attempt = 0; ; attempt += 1) {

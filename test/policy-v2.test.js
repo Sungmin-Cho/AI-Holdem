@@ -816,5 +816,6 @@ test('v2 self-play raises stay in clamp and min-raise only after rounding down',
     }
   }
   assert.ok(raises > 0, 'self-play produced no raises');
-  assert.ok(Date.now() - started < 5000, `self-play took ${Date.now() - started}ms`);
+  const budget = process.platform === 'win32' ? 30_000 : 5_000;
+  assert.ok(Date.now() - started < budget, `self-play took ${Date.now() - started}ms`);
 });

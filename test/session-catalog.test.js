@@ -64,6 +64,61 @@ test('commit promotes staging then atomically selects it as current', () => {
   assert.deepEqual(store.current, committed);
 });
 
+test('commitSession retries a transient sharing violation on current.json', () => {
+  const storeDir = tmpStore();
+  ensureSessionStore(storeDir);
+  const first = prepareSession(storeDir);
+  fs.writeFileSync(path.join(first.stagingDir, 'marker.txt'), 'first');
+  commitSession(storeDir, first);
+  const original = fs.readFileSync(path.join(storeDir, '.session-store', 'current.json'), 'utf8');
+
+  const second = prepareSession(storeDir);
+  fs.writeFileSync(path.join(second.stagingDir, 'marker.txt'), 'second');
+  const originalRename = fs.renameSync;
+  let currentAttempts = 0;
+  fs.renameSync = (from, to, ...rest) => {
+    if (path.basename(String(to)) === 'current.json' && currentAttempts < 2) {
+      currentAttempts += 1;
+      throw Object.assign(new Error('sharing'), { code: 'EPERM' });
+    }
+    return originalRename(from, to, ...rest);
+  };
+  try {
+    const committed = commitSession(storeDir, second);
+    assert.equal(currentAttempts, 2);
+    assert.equal(committed.selectionVersion, 2);
+    assert.notEqual(fs.readFileSync(path.join(storeDir, '.session-store', 'current.json'), 'utf8'), original);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+});
+
+test('exhausted sharing violation on current.json does not copy-overwrite the selector', () => {
+  const storeDir = tmpStore();
+  ensureSessionStore(storeDir);
+  const first = prepareSession(storeDir);
+  fs.writeFileSync(path.join(first.stagingDir, 'marker.txt'), 'first');
+  const firstCommitted = commitSession(storeDir, first);
+  const original = fs.readFileSync(path.join(storeDir, '.session-store', 'current.json'), 'utf8');
+
+  const second = prepareSession(storeDir);
+  fs.writeFileSync(path.join(second.stagingDir, 'marker.txt'), 'second');
+  const originalRename = fs.renameSync;
+  fs.renameSync = (from, to, ...rest) => {
+    if (path.basename(String(to)) === 'current.json') {
+      throw Object.assign(new Error('sharing'), { code: 'EPERM' });
+    }
+    return originalRename(from, to, ...rest);
+  };
+  try {
+    assert.throws(() => commitSession(storeDir, second), { code: 'EPERM' });
+    assert.equal(fs.readFileSync(path.join(storeDir, '.session-store', 'current.json'), 'utf8'), original);
+    assert.deepEqual(resolveCurrentSession(storeDir), firstCommitted);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+});
+
 test('second commit leaves the first session inode and bytes unchanged', () => {
   const storeDir = tmpStore();
   ensureSessionStore(storeDir);

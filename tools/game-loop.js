@@ -97,7 +97,8 @@ const REVIEW_HEADING_PATTERNS = Object.freeze([
 ]);
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
-const FINALIZE_BUDGET_MS = 20_000;
+// Win32 ACL proofs spent ~72s in a 20-hand session under that POSIX ceiling.
+const FINALIZE_BUDGET_MS = process.platform === 'win32' ? 200_000 : 20_000;
 const FINALIZE_CUTOFF_LEAD_MS = 10_000;
 // A finalization halt is a retryable operator condition: the next --resume re-enters the
 // same checkpoint. repair_failed/NO_PLAYER_RUNTIME keep their own play-time boundaries.
@@ -5225,17 +5226,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         canaries.delete(canary);
       }
 
-      if (stopError) {
-        persistCleanupFailure(stopError);
-        throw stopError;
-      }
-
       if (logFd !== null) {
         try {
           fs.closeSync(logFd);
           logFd = null;
         } catch (error) {
-          stopError = error;
+          stopError ??= error;
         }
       }
       if (stopError) {

@@ -574,7 +574,13 @@ async function actualActionRecovery(tmpDir) {
       return receipt.phase === 'consumed' ? receipt : null;
     });
     await loop.requestStop();
-    await running;
+    // D9: recoverServerForPublish throws STOPPING if requestStop races a
+    // dead-server retry. The fold is already consumed; that is a clean stop.
+    try {
+      await running;
+    } catch (error) {
+      if (error.code !== 'STOPPING') throw error;
+    }
     let recoveryRelayDead = false;
     try { process.kill(recoveryRelayPid, 0); } catch (error) { recoveryRelayDead = error.code === 'ESRCH'; }
     if (!recoveryRelayDead) throw coded('ACTION_RECOVERY_RELAY_FAILED');
