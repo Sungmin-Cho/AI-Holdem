@@ -472,7 +472,10 @@ export function parseJourneyArgs(argv) {
 }
 
 const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (direct && !browserCliEnabled()) process.stdout.write('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT\n');
+if (direct && !browserCliEnabled()) {
+  process.stdout.write('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT\n');
+  process.exit(0);
+}
 else if (direct) {
   const args = parseJourneyArgs(process.argv.slice(2));
   const result = await runLearningJourney(args);

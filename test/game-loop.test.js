@@ -1977,7 +1977,7 @@ test('restored-session repair의 RUNTIME_CLOSED는 비치명으로 격리되어 
   )), true);
 });
 
-test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 }, async (t) => {
+test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const original = createGameLoop({
     gameDir,
