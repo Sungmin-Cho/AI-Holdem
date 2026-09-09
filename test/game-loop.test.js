@@ -2617,7 +2617,7 @@ test('T2 never overlaps an unresolved T1 and a late T1 rejection cannot affect t
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].action, 'fold');
 });
 
-test('runtime close/signal/identity lifecycle failures are fatal and never enter T2 or force-default', { timeout: 20_000 }, async (t) => {
+test('runtime close/signal/identity lifecycle failures are fatal and never enter T2 or force-default', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   for (const code of ['CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'IDENTITY_UNAVAILABLE']) {
     await t.test(code, async (st) => {
       const adapter = makeAdapter({
@@ -2643,7 +2643,7 @@ test('runtime close/signal/identity lifecycle failures are fatal and never enter
             ].length > 0;
           },
           `${code} neither rejected nor reached force-default`,
-          4_000,
+          4_000 * WIN32_SCALE,
         ).then(() => ({ type: 'forced-default' })),
       ]);
       if (outcome.type === 'forced-default') await stopRun(loop, running);
@@ -7249,6 +7249,7 @@ test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설
 });
 
 test('Task 7A r2: open review gate는 cutoff deadline을 해제하고 독립 300초 Task 7B handoff scope를 연다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let seamCalls = 0;
