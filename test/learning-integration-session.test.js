@@ -289,11 +289,21 @@ test('S8 full: default 20-hand production session records support then study rem
       try { process.kill(nextServerPid, 0); } catch (error) { return error.code === 'ESRCH'; }
       return ownedProcessStartTime(nextServerPid) != null;
     }, studyBudget({ extraMs: 5000 }));
-    loop = createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
+    const makeRecoveryLoop = () => createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true,
         onEngineInvoke(args) { if (args[0] === 'step' && args[1] === 'user') recoveredUserApplies.push(args); } } });
-    await loop.resume();
+    loop = makeRecoveryLoop();
+    try {
+      await loop.resume();
+    } catch (error) {
+      // Stopping the next CLI can drop the study lock while resume still saw
+      // it alive; the following ensure cold-starts.
+      if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+      await loop.requestStop().catch(() => {});
+      loop = makeRecoveryLoop();
+      await loop.resume();
+    }
     const recovering = loop.run();
     recovering.catch(() => {});
     await waitValue(() => {
@@ -301,7 +311,7 @@ test('S8 full: default 20-hand production session records support then study rem
       return receipt.requestId === nextStop.requestId && receipt.phase === 'consumed';
     });
     await loop.requestStop();
-    await within(recovering, 8000, 'default20 delivered-action recovery stop');
+    await within(recovering, scaled(8000), 'default20 delivered-action recovery stop');
     assert.equal(recoveredUserApplies.length, 1, 'resume applies the delivered action exactly once');
     const recoveredState = JSON.parse(fs.readFileSync(nextStateFile));
     const applied = [recoveredState.hand, recoveredState.lastHand].filter(Boolean)
