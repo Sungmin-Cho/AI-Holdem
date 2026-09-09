@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { withActionGate, retryControlWrite } from '../tools/session-control.js';
 import { verifyHintPublication } from '../tools/hint-proof.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
@@ -768,7 +769,7 @@ function mergeCoach(existing, incoming) {
   return merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
 }
 
-function publicSnapshot(state, hint = null) {
+export function publicSnapshot(state, hint = null) {
   const snap = {
     revision: state.revision,
     view: state.view,
@@ -823,6 +824,7 @@ function parseArgs(argv) {
     if (arg === '--game-dir' && next != null) { out.gameDir = next; i += 1; }
     else if (arg === '--port' && next != null) { out.port = Number(next); i += 1; }
     else if (arg === '--token' && next != null) { out.token = next; i += 1; }
+    else if (arg === '--control-protocol' && next === '1') { out.controlProtocolVersion = 1; i += 1; }
     else if (arg === '--study-url' && next != null) { out.studyUrl = next; i += 1; }
   }
   return out;
@@ -925,7 +927,7 @@ function serveStatic(pathname, res) {
   });
 }
 
-export function startServer({ gameDir, port = 8877, token, studyUrl, receiptCheckpoint, publishCheckpoint = () => {} }) {
+export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
   const trustedStudyUrl = validatedStudyUrl(studyUrl);
@@ -1263,15 +1265,16 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
     });
   };
 
-  const handleAction = (body, res) => {
+  const handleAction = async (body, res) => {
     const current = currentDecisionId();
     if (!checkRecovery(res)) return;
     try {
-      receiptStore.accept(body, current);
+      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => receiptStore.accept(body,currentDecisionId())), {timeoutMs:250});
+      else receiptStore.accept(body, current);
       clearHintClients(current);
       deliverSlot();
     } catch (error) {
-      const status = error.code === 'BAD_ACTION' ? 400
+      const status = error.code === 'GAME_PAUSED' ? 409 : ['CONTROL_BUSY','CONTROL_UNAVAILABLE'].includes(error.code) ? 503 : error.code === 'BAD_ACTION' ? 400
         : ['STALE_DECISION', 'ACTION_ALREADY_RECEIVED', 'ACTION_REJECTED', 'ACTION_RECEIPT_CAPACITY'].includes(error.code) ? 409 : 500;
       sendJson(res, status, { ok: false, code: error.code ?? 'PERSIST_FAILED' });
       return;
@@ -1329,7 +1332,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       finish({ timeout: true });
     }, timeoutMs);
     waiters.add(waiter);
-    req.on('close', () => {
+    res.on('close', () => {
       if (waiters.has(waiter)) {
         waiters.delete(waiter);
         clearTimeout(waiter.timer);
@@ -1347,7 +1350,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       if (supplied !== null && supplied !== undefined) {
         if (!checkToken(supplied, res)) return;
         await hintInitialized;
-        sendJson(res, 200, { ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, preActionHintsReady: hintContext.ready === true } });
+        sendJson(res, 200, { ok: true, protocolVersion: 2, controlProtocolVersion, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, preActionHintsReady: hintContext.ready === true } });
       } else sendJson(res, 200, { ok: true });
       return;
     }
@@ -1418,7 +1421,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       const body = await readJsonBody(req, res);
       if (body == null) return;
       if (!checkToken(supplied ?? body.token, res)) return;
-      handleAction(body, res);
+      await handleAction(body, res);
       return;
     }
 
@@ -1468,6 +1471,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, receiptChec
       const actualPort = server.address().port;
       writeRelayJsonAtomic(owner, 'lock.json', {
         serverPid: process.pid,
+        ...(controlProtocolVersion === 1 ? {controlProtocolVersion} : {}),
         port: actualPort,
         sessionToken: token,
         startedAt: new Date().toISOString(),

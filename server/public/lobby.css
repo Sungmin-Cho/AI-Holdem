@@ -1,0 +1,134 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #10211e;
+  color: #edf4ef;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #36554a;
+}
+header strong {
+  margin-right: auto;
+}
+button,
+select,
+input {
+  font: inherit;
+}
+button {
+  background: #d6c18b;
+  color: #17251e;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px 18px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid #7bdec0;
+  outline-offset: 3px;
+}
+main,
+#result {
+  max-width: 780px;
+  margin: 40px auto;
+  padding: 0 24px;
+}
+fieldset {
+  border: 1px solid #4c685c;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  padding: 20px;
+}
+label {
+  display: block;
+  margin: 12px 0;
+}
+small {
+  display: block;
+  margin: 5px 25px;
+  color: #abc2b4;
+}
+input:not([type="radio"]):not([type="checkbox"]),
+select {
+  padding: 8px;
+  border: 1px solid #587568;
+  border-radius: 5px;
+  margin-left: 12px;
+  background: #1a3128;
+  color: inherit;
+  max-width: 200px;
+}
+details {
+  margin: 24px 0;
+  padding: 20px;
+  background: #1a3029;
+  border-radius: 12px;
+}
+p {
+  color: #b4c8be;
+  line-height: 1.6;
+}
+dialog {
+  background: #19352b;
+  color: #edf4ef;
+  border: 1px solid #628874;
+  border-radius: 16px;
+  max-width: 470px;
+  padding: 28px;
+}
+dialog::backdrop {
+  background: #0009;
+}
+dialog button {
+  display: block;
+  width: 100%;
+  margin: 12px 0;
+}
+#game iframe {
+  width: 100%;
+  height: calc(100dvh - 80px);
+  border: 0;
+}
+#error {
+  color: #ffb5aa;
+  margin: 16px 24px;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 600px) {
+  header {
+    padding: 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  header button {
+    font-size: 13px;
+    padding: 9px;
+  }
+  main {
+    margin: 24px auto;
+  }
+  h1 {
+    font-size: 25px;
+  }
+  #status {
+    font-size: 13px;
+  }
+}

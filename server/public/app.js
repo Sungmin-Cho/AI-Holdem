@@ -1,3 +1,4 @@
+import {appGameId, appEpoch, appFetch, eventStream} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
@@ -611,7 +612,7 @@ async function loadTrainingDetail(item) {
   detailErrors.delete(key);
   try {
     const params = new URLSearchParams({ token, ref: item.detailRef });
-    const response = await fetch(`/api/training-detail?${params}`);
+    const response = await (appGameId ? appFetch(`training-detail?${new URLSearchParams({ref:item.detailRef})}`) : fetch(`/api/training-detail?${params}`));
     if (!response.ok) throw new Error('DETAIL_UNAVAILABLE');
     const payload = await response.json();
     const verifiedDetail = await verifyTrainingDetail(item, payload.detail);
@@ -1036,27 +1037,27 @@ $('review-reopen').addEventListener('click', () => {
 $('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
 $('action-retry').addEventListener('click', () => void actionController?.retry());
 
-const token = new URLSearchParams(location.search).get('token');
+const token = appGameId ? sessionStorage.getItem('holdem-app-token') : new URLSearchParams(location.search).get('token');
 let revision = 0;
 const buffer = [];
 let booted = false;
 let opening = false;
 async function getSnapshot({ signal } = {}) {
   const generation=hintState.capture();
-  const response = await fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal });
+  const response = await (appGameId ? appFetch('snapshot',{signal}) : fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal }));
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
   const snapshot=await response.json();let canRestore=false;
-  try{const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
+  try{if(appGameId&&new URLSearchParams(location.search).get('terminal')==='1')return snapshot;const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
   hintRequests.set(snapshot,{generation,canRestore});return snapshot;
 }
 async function getStatus({ signal } = {}) {
-  const response = await fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal });
+  const response = await (appGameId ? appFetch('action-status',{signal}) : fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal }));
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
   return response.json();
 }
 async function initializeController() {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-  const gameEpoch = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const gameEpoch = appGameId ? appEpoch : Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
   actionController = createActionController({
     gameEpoch, getSnapshot, getStatus, storage: sessionStorage,
     postAction: async (body, { signal }) => {
@@ -1064,11 +1065,11 @@ async function initializeController() {
       const note = typeof body.note === 'string' ? body.note
         : typeof live === 'string' ? live
           : undefined;
-      const payload = { token, ...body };
+      const payload = appGameId ? {...body} : { token, ...body };
       if (typeof note === 'string') payload.note = note;
       else delete payload.note;
-      const response = await fetch('/api/action', { method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const actionOptions={method:'POST',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)};
+      const response=await (appGameId ? appFetch('action',actionOptions) : fetch('/api/action',actionOptions));
       const result = await response.json();
       return response.ok ? result : { ...result, ok: false };
     },
@@ -1091,8 +1092,11 @@ function applyMessage(m) {
   revision = m.revision; render(m);
 }
 if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
+else if (appGameId && new URLSearchParams(location.search).get('terminal') === '1') {
+  try { const snapshot=await getSnapshot();renderSnapshot(snapshot);setConn(true);$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
+}
 else {
-  const es = new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
+  const es = appGameId ? eventStream('events?after=0') : new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
   es.addEventListener('hint-clear',event=>{
     try{const payload=JSON.parse(event.data);if(payload.decisionId===ui.view?.legal?.decisionId){hideHint(payload.decisionId);void actionController?.reconcile();}}catch{hideHint();}
   });

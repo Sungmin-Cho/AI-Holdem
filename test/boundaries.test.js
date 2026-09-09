@@ -141,7 +141,7 @@ test('server imports only the publish contract and named containment primitives'
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'] };
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {

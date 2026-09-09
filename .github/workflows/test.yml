@@ -59,6 +59,9 @@ jobs:
         run: node test/helpers/windows-child-environment-probe.mjs
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Lobby lifecycle gates
+        if: runner.os == 'Windows'
+        run: npm run test:lobby:windows
       - name: Run tests
         # The full Windows suite measures 110+ minutes — every privacy proof
         # there is a PowerShell child — and does not fit one job. Until the

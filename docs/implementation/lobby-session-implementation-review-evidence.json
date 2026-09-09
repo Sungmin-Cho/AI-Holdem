@@ -1,0 +1,368 @@
+{
+  "schemaVersion": 1,
+  "reviewTargetSourceSha256": "074424887d21f92ca9e4713ac637d56da174b04b515c9dbd802f4b33250f5654",
+  "route": {
+    "route_schema_version": 1,
+    "router_plugin_version": "1.14.0",
+    "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+    "request_sha256": "a03236e2278db1d3db897b0a4872e83256d079dbeca7d6772df8645bf1b0da26",
+    "decision_fingerprint": "e1424cdc09285c9e3c6ddc8f6466f542db7e647a97b595337c9ac3a0ea9ec1f4",
+    "effective_policy": {
+      "minimum_capability_tier": null,
+      "minimum_effort": null,
+      "minimum_reviewers": null,
+      "minimum_provider_families": null,
+      "allowed_families": null
+    },
+    "host_seat_advisory": {
+      "declared": {
+        "model": "gpt-6",
+        "effort": null
+      },
+      "policy_ask": {
+        "tier": 0,
+        "effort": "MAX",
+        "raised_by": [
+          "orchestrator_blast_high"
+        ]
+      },
+      "model_comparison": "unrecognized",
+      "effort_comparison": "undeclared",
+      "advisory": "none"
+    },
+    "worker_seat": {
+      "kind": "read_only",
+      "source": "declared",
+      "overrode_class_default": false,
+      "write_capable_families": [
+        "claude",
+        "openai"
+      ]
+    },
+    "selected_capability_tier": 2,
+    "selected_families": [
+      "claude"
+    ],
+    "local_policy_applied": false,
+    "task_class": "REVIEW",
+    "complexity": 2,
+    "uncertainty": 1,
+    "blast_radius": 2,
+    "reversibility": 1,
+    "reasoning_centric": true,
+    "risk_score": 9,
+    "risk_band": "HIGH",
+    "execution_score": 8,
+    "execution_band": "EASY",
+    "band_overrides_applied": [
+      "critical_domain",
+      "concurrency_sensitive"
+    ],
+    "band_overrides_redundant": [
+      "critical_domain",
+      "concurrency_sensitive"
+    ],
+    "critical_flags": [
+      "security_sensitive",
+      "data_integrity_sensitive"
+    ],
+    "route_path": null,
+    "terminal": null,
+    "selected_role": "senior_engineer",
+    "selected_model": "claude-opus-5",
+    "selected_effort": "HIGH",
+    "selected_effort_effective": "HIGH",
+    "selected_effort_native": "high",
+    "review": {
+      "band": "HIGH",
+      "reviewers": [
+        "senior_engineer",
+        "principal_architect"
+      ],
+      "reviewer_models": [
+        "claude-opus-5",
+        "claude-fable-5-1"
+      ],
+      "effort": "HIGH",
+      "independence_required": true,
+      "review_independence": "planned",
+      "required_checks": [],
+      "judge": null,
+      "judge_model": null,
+      "self_review_avoided": [],
+      "independence_compromised": false,
+      "judge_unavailable": false,
+      "review_depth_reduced": [],
+      "band_floor_unsatisfiable": false,
+      "compensating_reviewers": 0
+    },
+    "cross_family_review": false,
+    "fallbacks_applied": [],
+    "effort_ceiling_applied": [],
+    "fallback_compensations_applied": [],
+    "unavailable_models": [],
+    "excluded_prior_failures": [],
+    "escalation_count": 0,
+    "retry_count": 2,
+    "routing_confidence": 0.95,
+    "routing_confidence_kind": "heuristic_policy_score",
+    "requires_human_confirmation": false,
+    "human_control_causes": [],
+    "human_confirmation_deferred": false,
+    "notes": [
+      "jointly allocated eligible models across the review and judge seats",
+      "provider may substitute another claude model for security_sensitive content; the requested identity of claude_architect is declared_only",
+      "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+      "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+      "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker",
+      "typed attempt history separates capability escalation from operational recovery; evidence hashes are caller declarations"
+    ],
+    "review_context": {
+      "target_sha256": "074424887d21f92ca9e4713ac637d56da174b04b515c9dbd802f4b33250f5654",
+      "author_model_ids": [],
+      "author_families": [
+        "openai"
+      ]
+    },
+    "dispatch_seats": [
+      {
+        "seat": "reviewer-1",
+        "role": "senior_engineer",
+        "model_id": "claude-opus-5",
+        "effort": "HIGH",
+        "effort_native": "high"
+      },
+      {
+        "seat": "reviewer-2",
+        "role": "principal_architect",
+        "model_id": "claude-fable-5-1",
+        "effort": "HIGH",
+        "effort_native": "high"
+      }
+    ],
+    "attempt_outcomes": [
+      {
+        "attempt_id": "impl-r1-reviewer-1",
+        "model_id": "claude-opus-5",
+        "kind": "timeout",
+        "evidence_sha256": "3fad9ce8825acd6fb6e1d2930e129180f58245d4a15913dfffb570ef10972758",
+        "recovery_sha256": "255219338d71091ac547c419c110f57b63e8e2c8cda96a7d84a3b39f8c87bcc8"
+      },
+      {
+        "attempt_id": "impl-r1-reviewer-2",
+        "model_id": "claude-fable-5-1",
+        "kind": "timeout",
+        "evidence_sha256": "7b708b7286fd45c0084457268e7abcda290d2bcd2231e522f687d68100e5d6ca",
+        "recovery_sha256": "1f547f7e05f1d4b18eb99c983cdb9194fd61bd2571f52a0041e2a52ba4e1a031"
+      }
+    ],
+    "attempt_outcome_summary": {
+      "classification": "caller_declared",
+      "total": 2,
+      "capability_failures": 0,
+      "operational_outcomes": 2,
+      "unconfirmed_terminations": 0
+    },
+    "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied. cross_family_review=false — reviewers share a family; weigh the second verdict accordingly."
+  },
+  "receipts": [
+    {
+      "attempt_id": "impl-r3-reviewer-1",
+      "seat": "reviewer-1",
+      "runtime": "codex",
+      "model_id": "claude-opus-5",
+      "effort_native": "high",
+      "permission_mode": "plan",
+      "decision_fingerprint": "e1424cdc09285c9e3c6ddc8f6466f542db7e647a97b595337c9ac3a0ea9ec1f4",
+      "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+      "transport_id": "codex.to_claude",
+      "host_cli_version": null,
+      "observed_model_id": null,
+      "observed_model_source": "unavailable",
+      "argv": [
+        "claude",
+        "-p",
+        "--model",
+        "claude-opus-5",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "plan",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--setting-sources",
+        "",
+        "--output-format",
+        "json"
+      ],
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "ef8953906af2994d1ea45b2dc40d2b060174abe3f891c792b62cdf7ea50f7c8a",
+        "protected_root": "/private/tmp/holdem-lobby-implementation/receipts",
+        "phase": "launched"
+      },
+      "prompt_sha256": "c74b154794567b176a4ea4051e0d0121d3b6ac8615d6e61a95f6cfc6b7a6251b",
+      "output_schema": "review",
+      "output_envelope": "claude-print-json-v1",
+      "session_evidence": null,
+      "child_cwd": null,
+      "grok_home": null,
+      "seat_profile": null,
+      "require_single_linked_cwd": false,
+      "process": {
+        "pid": 35761,
+        "process_group_id": 35761,
+        "supervisor_pid": 35756
+      },
+      "timing": {
+        "started_at": "2026-09-09T03:42:50Z",
+        "deadline_at": "2026-09-09T03:52:50Z",
+        "finished_at": "2026-09-09T03:50:18Z",
+        "launch_anchor_at": "2026-09-09T03:42:50Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "stdout_path": "/private/tmp/holdem-lobby-implementation/receipts/impl-r3-reviewer-1.stdout",
+        "stderr_path": "/private/tmp/holdem-lobby-implementation/receipts/impl-r3-reviewer-1.stderr",
+        "output_sha256": "b8c47466d93735292584ef550b2bffeefb47080c6960edfb42404407b595f2fb",
+        "schema_valid": true,
+        "verdict": "PASS_WITH_CHANGES",
+        "verdict_recovered": false,
+        "termination_confirmed": true,
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "3f923cb4-407a-484c-88c7-4a04ffcb7ccc",
+          "served_models": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 83588,
+            "cache_read_input_tokens": 3058,
+            "output_tokens": 34292
+          }
+        },
+        "invalid_reasons": null,
+        "artifacts": null,
+        "sandbox_events": null
+      }
+    },
+    {
+      "attempt_id": "impl-r3-reviewer-2",
+      "seat": "reviewer-2",
+      "runtime": "codex",
+      "model_id": "claude-fable-5-1",
+      "effort_native": "high",
+      "permission_mode": "plan",
+      "decision_fingerprint": "e1424cdc09285c9e3c6ddc8f6466f542db7e647a97b595337c9ac3a0ea9ec1f4",
+      "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+      "transport_id": "codex.to_claude",
+      "host_cli_version": null,
+      "observed_model_id": null,
+      "observed_model_source": "unavailable",
+      "argv": [
+        "claude",
+        "-p",
+        "--model",
+        "claude-fable-5-1",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "plan",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--setting-sources",
+        "",
+        "--output-format",
+        "json"
+      ],
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "14179263ba37f3ccb54923f3866387e2e2908c572125ec5e8ae4a3896468fb4f",
+        "protected_root": "/private/tmp/holdem-lobby-implementation/receipts",
+        "phase": "launched"
+      },
+      "prompt_sha256": "c74b154794567b176a4ea4051e0d0121d3b6ac8615d6e61a95f6cfc6b7a6251b",
+      "output_schema": "review",
+      "output_envelope": "claude-print-json-v1",
+      "session_evidence": null,
+      "child_cwd": null,
+      "grok_home": null,
+      "seat_profile": null,
+      "require_single_linked_cwd": false,
+      "process": {
+        "pid": 35760,
+        "process_group_id": 35760,
+        "supervisor_pid": 35755
+      },
+      "timing": {
+        "started_at": "2026-09-09T03:42:50Z",
+        "deadline_at": "2026-09-09T03:52:50Z",
+        "finished_at": "2026-09-09T03:51:55Z",
+        "launch_anchor_at": "2026-09-09T03:42:50Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "stdout_path": "/private/tmp/holdem-lobby-implementation/receipts/impl-r3-reviewer-2.stdout",
+        "stderr_path": "/private/tmp/holdem-lobby-implementation/receipts/impl-r3-reviewer-2.stderr",
+        "output_sha256": "d3fcfa5ce90f1ff11ee49c272cf8842f5b6ef1ecfece7185ae8bd2f8236b5251",
+        "schema_valid": true,
+        "verdict": "PASS_WITH_CHANGES",
+        "verdict_recovered": false,
+        "termination_confirmed": true,
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "1c452b4f-dc6f-4858-a55f-1206ba8f39c1",
+          "served_models": [
+            "claude-fable-5-1",
+            "claude-haiku-4-5-20251001"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 83593,
+            "cache_read_input_tokens": 3944,
+            "output_tokens": 41434
+          }
+        },
+        "invalid_reasons": null,
+        "artifacts": null,
+        "sandbox_events": null
+      }
+    }
+  ],
+  "reviews": [
+    "verdict: PASS_WITH_CHANGES\nconfidence: 0.6\nfindings:\n  - id: F1\n    file: tools/app-service.js\n    function: startAppService.close / onStop\n    severity: high\n    repro: \"Make manager.close() reject (pending command not settling within its deadline, or session.loop.requestStop() throwing during cleanup), then POST /api/stop.\"\n    impact: \"close() awaits manager?.close() first with no error isolation, so server.close() and releaseOwnedLock(lock) never run: app.lock.d stays held, the listener stays open and descriptor.json still advertises status=running, so the next `start game` attaches to a wedged instance. `closing` caches the rejected promise, so every later close() re-rejects. onStop does `void close()` with no catch, so the same rejection is an unhandled rejection that kills the service process mid-cleanup, potentially orphaning the relay/LLM children the loop owns.\"\n    fix: \"Wrap each step so cleanup always completes: `try { await manager?.close() } finally { await initializing?.catch(()=>{}); try { await server?.close() } finally { releaseOwnedLock(lock) } }`, and change onStop to `() => void close().catch(() => { process.exitCode = 1 })`.\"\n  - id: F2\n    file: tools/app-service.js\n    function: stopAppService\n    severity: medium\n    repro: \"Stop an app whose pending command takes >60s to settle (macOS).\"\n    impact: \"The confirm loop is 600 x 100ms = 60s, but createSessionManager.close waits for `pending` up to 120s (darwin) / 300s (win32). A normal, still-progressing shutdown is reported as APP_STOP_UNCONFIRMED, which combined with F1 makes a slow shutdown indistinguishable from a leaked one.\"\n    fix: \"Derive the poll budget from the same platform constants used in session-manager.close (e.g. 300000/120000 + margin) instead of a hardcoded 600 iterations.\"\n  - id: F3\n    file: tools/session-manager.js\n    function: initialize / snapshot\n    severity: medium\n    repro: \"Start a direct `node tools/game-loop.js` game, then run `start game` (app initialize -> emit('external','ACTIVE_GAME')). Finish/kill the CLI game and keep polling /api/app.\"\n    impact: \"`state` is latched at initialize time; snapshot() never re-reads loop.lock.d, and ALLOWED_COMMANDS.external is []. The lobby stays on '다른 게임 실행 중' with zero available actions forever, and re-running `start game` attaches to the same live instance rather than re-reconciling, so the only escape is an explicit `app:stop`. Design 7 expects the app to notice the external owner going away.\"\n    fix: \"When state is 'external' (also useful for 'error'), re-run the lock/current reconciliation on snapshot() or on a low-frequency timer and downgrade to lobby/ended/completed/error; or accept one command kind that replays initialize()'s reconciliation.\"\n  - id: F4\n    file: engine/cli.js\n    function: cmdEnd\n    severity: medium\n    repro: \"Interrupt/fail the end mutation after `.aborted-hand.json` is written but before state.result='abort' commits (disk error or crash inside mutate). Let the app mark that command row failed, then issue a new `end` (new requestId => new operation-id).\"\n    impact: \"The audit-conflict branch compares only against the persisted `.aborted-hand.json`, not against the engine's committed abort. A stale audit from a never-committed abort makes every subsequent end throw OPERATION_CONFLICT, so the game can never be ended through the app (paused only allows resume/end/restart) without manual file surgery.\"\n    fix: \"Treat the audit as binding only when the engine actually aborted: if `state.result !== 'abort'`, supersede the stale record (rename it aside or overwrite with the new operationId) instead of throwing; keep the conflict error for the already-aborted case, which cmdEnd's `prior.result === 'abort'` check already covers.\"\n  - id: F5\n    file: server/public/lobby.js\n    function: render / review onclick\n    severity: medium\n    repro: \"Finish or end a game, click 리뷰(#review) so viewingRecord=true with state ended/completed.\"\n    impact: \"`$(\\\"table\\\").inert = s !== \\\"playing\\\"` also applies while viewing the terminal record, so the whole review iframe is non-interactive: review-reopen, hand-replay overlay and any in-frame control cannot be clicked or focused, and keyboard navigation of the record is impossible. The read-only requirement is already enforced server-side (action is 409 unless state is playing, and the terminal branch is snapshot-only), so inert is both redundant and harmful here.\"\n    fix: \"`$(\\\"table\\\").inert = !(s === \\\"playing\\\" || viewingRecord);`\"\n  - id: F6\n    file: server/server.js\n    function: action handler / withActionGate\n    severity: medium\n    repro: \"Submit a user action in the same window in which the loop performs a control write (pause/resume/endGame), e.g. the 80ms contention window exercised by test/session-controls.test.js but from the relay side.\"\n    impact: \"withControlLock does a single acquireOwnedLock with no retry, so the accepted action is rejected with 503 CONTROL_BUSY even though the game is still playing. The loop side retries for 2s (retryControlWrite); the relay side does not, so the user's action is dropped to an error/unreceived receipt purely because of lock contention. Design 6 requires bounded retry before 503.\"\n    fix: \"Wrap the gate in the same bounded retry as retryControlWrite (short, e.g. 20ms x <=500ms, never held across engine step/LLM work) and return 503 only after the budget expires.\"\n  - id: F7\n    file: tools/session-manager.js\n    function: reconcileFailure\n    severity: low\n    repro: \"Fail a command while current points at a session whose state.json is unreadable (truncated/permission).\"\n    impact: \"`read(path.join(current.sessionDir,'state.json'))` is unguarded and throws inside execute()'s catch block; execute rejects, and the queueMicrotask handler latches `closed = true` and reports COMMAND_PERSISTENCE_FAILED. A transient read error therefore permanently disables every command (APP_STOPPING) until the service is restarted, and the lobby has no message for that code.\"\n    fix: \"Guard the state.json/loop-state.json reads in reconcileFailure and fall back to `emit('error', code)` instead of letting the exception escape.\"\n  - id: F8\n    file: tools/session-manager.js\n    function: initialize (abort-recovery branch)\n    severity: low\n    repro: \"Recover a journal row whose engine state is result=abort, and call close() while that recovery runs.\"\n    impact: \"That launchSession call omits `onLoop`, so the new loop is never assigned to `startingLoop` and never sees `closed`. close() cannot cancel it and can only spin on `pending` until its deadline; if the resume stalls, close throws APP_STOP_UNCONFIRMED and (per F1) leaks the app lock. Every other launch site passes the onLoop guard.\"\n    fix: \"Pass the same `onLoop` guard (set startingLoop, requestStop + throw APP_STOPPING when closed) to that launchSession call.\"\nmissing_tests:\n  - \"app-service close() when manager.close() rejects: assert app.lock.d is released, the listener is closed, and no unhandled rejection escapes onStop.\"\n  - \"stopAppService against a shutdown that legitimately exceeds 60s (or an assertion that the confirm budget >= the manager close deadline).\"\n  - \"external -> recovered transition: start a direct CLI loop, initialize the manager, terminate the CLI loop, then assert the snapshot leaves 'external' and offers a command.\"\n  - \"engine cmdEnd with an orphaned .aborted-hand.json and a different --operation-id while state.result !== 'abort' (currently OPERATION_CONFLICT dead-end).\"\n  - \"relay action under control-lock contention (mirror of the loop-side 80ms test) asserting the action is accepted rather than 503.\"\n  - \"restart/start issued from a naturally completed game (completed state) at the manager level; only restart-from-paused is covered.\"\n  - \"two concurrent ensureAppService invocations on the same store: one lock winner, both callers attach to the same instanceId, no duplicate descriptor.\"\n  - \"lobby render contract for the terminal review: table not inert while viewingRecord (the browser journey covers rendering, not interactivity).\"\nuncertainties:\n  - \"server/server.js action gate uses `root` and `gameEpoch` from startServer scope; neither is in the shown diff, so I could not verify that `root` is the session dir that createSessionControl writes to.\"\n  - \"loadUiState signature/validation for the terminal snapshot branch is not shown; I assumed publicSnapshot applies the same projection as the live path.\"\n  - \"Whether boundaries/archive integrity checks allowlist the new .session-control.json and session-control.lock.d entries inside session dirs; the full suite passing suggests yes.\"\n  - \"Default waitMs for managed loops launched by app-service (loopOptions does not set it), so I could not confirm the wait-action timeoutMs value or the AbortSignal.timeout(waitMs+10000) margin.\"\n  - \"GET /api/capabilities and /api/app-events from the approved design are absent; treated as an intentional descope (1s polling covers it), not a defect.\"",
+    "verdict: PASS_WITH_CHANGES\nconfidence: 0.72\nfindings:\n  - id: F1\n    severity: medium\n    blocking: false\n    file: server/public/lobby-command-client.js\n    function: settle (fallback re-POST after 404)\n    problem: >\n      The submit-path POST clears the persisted command on a definitive 4xx, but the\n      fallback path (GET receipt -> 404 -> re-POST) does not. If the original POST failed\n      without a status (fetch TypeError / AbortSignal.timeout) and the server never\n      accepted it, the re-POST can return 409 STALE_APP (revision moved, or the app\n      restarted so instanceId differs) and the key stays in sessionStorage.\n    repro: >\n      Open lobby, click start while the app is briefly unreachable (TypeError), restart\n      the app (new instanceId) or let any emit bump appRevision, then let the client\n      retry: every recoverCommand() tick does GET 404 -> POST 409 STALE_APP; pending stays\n      true forever; every later send() throws COMMAND_PENDING for the life of the tab.\n    impact: >\n      Lobby tab is permanently bricked (\"이전 요청을 처리 중입니다\") until the user opens a\n      new tab; no server-side harm.\n    fix: >\n      Wrap the fallback POST like the submit one: on error with status && status !== 503,\n      storage.removeItem(key) before rethrow. Consider also treating STALE_APP on\n      recover() as terminal and dropping the stored payload.\n  - id: F2\n    severity: low\n    blocking: false\n    file: tools/session-manager.js\n    function: start (recover:true) and recoverPaused\n    problem: >\n      Both await launched.loop.pause() and unconditionally emit(\"paused\") without\n      inspecting the returned state. requestStop resolves resolvePause with\n      {state:\"stopped\"}, so if run() fails during startPaused recovery (or close() lands\n      here) the journal row is saved as succeeded with result paused while observeRun\n      later emits error/ended. execute() already guards this for the pause command;\n      the recovery paths do not. Ordering also relies on run() yielding on runCli()\n      before pause() installs resolvePause (currently true, but implicit).\n    repro: >\n      Inject a run() rejection right after bootstrap on a recovered start journal;\n      receipt says succeeded/paused, snapshot says error.\n    impact: >\n      Misleading journal receipt and a transient false \"paused\" state; no lost data.\n    fix: >\n      Check the pause() result as execute does (throw SESSION_STOPPED unless\n      paused/finalizing) and prefer calling pause() before observeRun() so the ack is\n      installed before run() can reach the barrier.\n  - id: F3\n    severity: low\n    blocking: false\n    file: tools/session-manager.js\n    function: reconcileFailure (called from execute catch / initialize catch)\n    problem: >\n      reconcileFailure itself can throw: resolveCurrentSession may throw\n      CURRENT_SELECTOR_INVALID, read(state.json) may throw ENOENT/APP_FILE_INVALID, and\n      session.loop.playState performs an unlocked control read that throws\n      CONTROL_UNAVAILABLE. A throw there escapes the catch, execute() rejects, and the\n      queueMicrotask handler sets closed=true and emits COMMAND_PERSISTENCE_FAILED even\n      though persistence succeeded (finally already saved the row).\n    repro: >\n      Make current.json unparseable after a start command has been accepted; the\n      failed command turns into a permanently closed app instead of an error state.\n    impact: >\n      Whole service fails closed on a recoverable condition; requires app restart.\n    fix: >\n      Wrap the reconcile body in try/catch and fall back to emit(\"error\", code); keep\n      the COMMAND_PERSISTENCE_FAILED path for save() failures only.\n  - id: F4\n    severity: low\n    blocking: false\n    file: tools/app-service.js\n    function: startAppService close / stopAppService\n    problem: >\n      close() is `manager.close(); initializing; server.close(); releaseOwnedLock`. If\n      manager.close rejects with APP_STOP_UNCONFIRMED (pending command not settled in\n      120s), server.close() and lock release are skipped and `closing` memoizes the\n      rejection, so SIGTERM/`/api/stop` leave the listener up and the process alive with\n      exitCode=1 and no way to retry stop. Separately stopAppService polls for only 60s\n      while manager.close waits up to 120s, so `app:stop` can report\n      APP_STOP_UNCONFIRMED while shutdown is still progressing normally.\n    repro: >\n      Issue pause during a long coach task, immediately run app:stop.\n    impact: >\n      Operator must kill the process; lock then reads dead so recovery works, but the\n      stop CLI reports a false failure in the normal slow case.\n    fix: >\n      Close the HTTP server in a finally (keep the lock unreleased if unconfirmed, per\n      design), and make stopAppService wait at least the manager deadline.\n  - id: F5\n    severity: low\n    blocking: false\n    file: tools/game-loop.js\n    function: pauseBarrier (drain via waitOnlyForUser({drain:true}))\n    problem: >\n      In drain mode every relay identity/wait failure is rethrown, so a pause issued\n      while the relay is being self-healed (recoverServerForPublish in flight) or its\n      lock pin is momentarily unreadable rejects run(), tearing down the session\n      (adapters, relay) and emitting error. The live wait path recovers the server and\n      re-waits; the drain path has no such attempt.\n    repro: >\n      Kill the relay child, then send pause before the next user-wait error cycle\n      recovers it.\n    impact: >\n      Pause becomes a full loop restart; user must press resume; no state loss.\n    fix: >\n      On drain error call recoverServerForPublish() once and retry the drain; only then\n      rethrow.\nmissing_tests:\n  - lobby-command-client: fallback re-POST returning 409 must clear the stored key and\n    surface the error once (currently no test for the 404-then-4xx path).\n  - session-manager: close()/run failure during start(recover:true) leaves receipt and\n    snapshot consistent (receipt not succeeded/paused when loop stopped).\n  - session-manager: reconcileFailure with corrupt current.json or missing state.json\n    yields state error, not a closed app.\n  - Crash window: control file at playState=stopping (terminalIntent written) with engine\n    not yet aborted and an accepted end journal; recovery must complete abort exactly once\n    with the same operationId.\n  - restart from paused where the new init fails after the old game is aborted: state\n    ended, receipt failed with the init error code, old record preserved (design §5).\n  - pause while relay is unavailable: expected outcome documented and asserted.\n  - app-service: stopAppService timing vs manager close deadline; SIGTERM when\n    manager.close rejects still closes the listener.\nuncertainties:\n  - coachWorkSuspended now includes pauseRequested; at handOver the branch calls\n    launchCoachPipeline(out.handNo) before the second pauseBarrier, so a hand completed\n    while pausing may skip its coach generation. Whether heartbeat/begin-owner re-spawns\n    it on resume or it is only sealed at finalize-cutoff is not visible here.\n  - On startPaused recovery into a finalizing phase, pauseRequested stays true through\n    runFinalization (barrier never reached). Assumed equivalent to finalizationCutoff\n    semantics; not verified.\n  - playState getter and pause() read the control file without the control lock;\n    readSessionControl rejects nlink!==1, so a read overlapping the loop's own atomic\n    rename can spuriously throw CONTROL_UNAVAILABLE. Writers appear serialized in\n    practice, so treated as theoretical.\n  - Relay behavior for wait-action timeoutMs=0 with an accepted-but-undelivered receipt\n    after the gate closed is stated but not shown; drain correctness depends on it.\n  - prepareGameSession's `previous` (used for reservation.selectionVersion) is assumed to\n    be read after the store loop lock; not shown in the diff."
+  ],
+  "verification": {
+    "argv": [
+      "python3",
+      "/Users/sungmin/.codex/plugins/cache/claude-deep-suite/deep-model-router/1.14.0/skills/model-router/scripts/dispatch_agent.py",
+      "verify-evidence",
+      "--receipt-dir",
+      "/tmp/holdem-lobby-implementation/receipts",
+      "--ids",
+      "impl-r3-reviewer-1,impl-r3-reviewer-2",
+      "--expect-count",
+      "2",
+      "--expect-fingerprint",
+      "e1424cdc09285c9e3c6ddc8f6466f542db7e647a97b595337c9ac3a0ea9ec1f4",
+      "--expect-models",
+      "claude-opus-5,claude-fable-5-1",
+      "--require-receipt-guard"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "disposition": "Conditional findings independently evaluated and closed with fixes or reproduction tests; see lobby-session-validation.md. Reviewer verdicts are not unconditional PASS."
+}

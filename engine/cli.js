@@ -8,7 +8,7 @@ import { initGameDir, isAlive, readLock } from './game-archive.js';
 import { snapshotDecision } from './decision.js';
 import { applyAction, blindsForLevel, forceDefault, legalFor, startHand } from './hand.js';
 import {
-  loadState, readHand, readOwnedLock, withMutation, writeHandArchive,
+  loadState, readHand, readOwnedLock, withMutation, writeHandArchive, writeJsonAtomic,
 } from './state.js';
 import { redactRecord, statsReport, turnSummary, viewFor } from './views.js';
 import { replayRecord } from '../shared/hand-replay.js';
@@ -19,7 +19,7 @@ import {
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand', 'replay']);
 const VALUE_FLAGS = new Set([
-  'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
+  'operation-id', 'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta',
   'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id',
@@ -403,9 +403,32 @@ function cmdStats(gameDir) {
 
 function cmdEnd(gameDir, flags) {
   if (flags.result !== 'abort') usage('end는 --result abort만 지원합니다.');
+  const operationId = flags['operation-id'];
+  if (operationId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(operationId)) usage('invalid operation id');
+  const prior = loadState(gameDir);
+  if (operationId && prior?.result === 'abort') {
+    if (prior.abortOperationId !== operationId) fail('OPERATION_CONFLICT', '이미 종료된 게임입니다.');
+    succeed({gameOver:true,result:'abort',events:[],stateVersion:prior.stateVersion});
+  }
   const envelope = mutate(gameDir, (state) => {
     requireState(state);
+    if (operationId) {
+      const auditPath = path.join(gameDir,'.aborted-hand.json');
+      if (!fs.existsSync(auditPath)) writeJsonAtomic(auditPath,{schemaVersion:1,operationId,stateVersion:state.stateVersion,hand:state.hand,completedHands:state.lastHand?.handNo ?? 0});
+      else if (JSON.parse(fs.readFileSync(auditPath,'utf8')).operationId !== operationId) {
+        const priorBytes=fs.readFileSync(auditPath);
+        const prior=JSON.parse(priorBytes);
+        if(!/^[A-Za-z0-9_-]{1,128}$/.test(prior.operationId??''))throw Object.assign(new Error('abort audit invalid'),{code:'OPERATION_CONFLICT'});
+        const preserved=path.join(gameDir,`.aborted-hand.${prior.operationId}.json`);
+        if(fs.existsSync(preserved)){
+          if(!fs.readFileSync(preserved).equals(priorBytes))throw Object.assign(new Error('abort audit conflict'),{code:'OPERATION_CONFLICT'});
+          fs.unlinkSync(auditPath);
+        }else fs.renameSync(auditPath,preserved);
+        writeJsonAtomic(auditPath,{schemaVersion:1,operationId,stateVersion:state.stateVersion,hand:state.hand,completedHands:state.lastHand?.handNo??0});
+      }
+    }
     const next = structuredClone(state);
+    if (operationId) next.abortOperationId = operationId;
     next.gameOver = true;
     next.result = 'abort';
     next.phase = 'idle';

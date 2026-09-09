@@ -2,7 +2,9 @@
 
 스킬 정본: `.agents/skills/start-game/SKILL.md`
 
-**게임 루프는 사이드카(`tools/game-loop.js`)가 소유한다.** 부트스트랩(loop 락 → `init` → 서버)부터 핸드 안 액션, 코치, 종합 리뷰, 종료까지 그 detached 노드 프로세스가 전부 한다. 딜러 세션이 하는 일은 사전 점검 → 사이드카 기동 → 보고 셋뿐이고, 핸드 안 딜러 LLM 라운드는 0회다.
+**새 `start game` 요청은 `tools/app-service.js`로 웹 로비를 연다.** 모드·AI 수 선택과 시작, 일시정지·재개·재시작·종료는 웹 UI에서 처리한다. 앱 서비스는 동일 프로세스에서 하나의 game-loop를 호스팅한다. 기존 standalone 직접 실행/재개 경로는 정본 스킬의 legacy 절차를 사용한다.
+
+**게임 루프는 `tools/game-loop.js`가 소유한다.** 부트스트랩(loop 락 → `init` → 서버)부터 핸드 안 액션, 코치, 종합 리뷰, 종료까지 앱이 호스팅하는 loop 또는 legacy detached 노드 프로세스가 전부 한다. 딜러 세션이 하는 일은 사전 점검 → 앱 로비 기동 → 보고 셋뿐이고, 핸드 안 딜러 LLM 라운드는 0회다.
 
 새 `--store-dir` 게임은 cash-training·AI 5명·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이 기본이다. 옵션 `--showdown-policy open|standard`, `--replay-reveal all|showdown`. 로그 탭의 복기 뷰와 액션 바의 의도 메모를 쓴다. export는 쇼다운 카드만 싣는다. 명시한 `--opponent-runtime llm`, `--mode tournament`, `--mirror-self`·`--exploit-self`, AI 수·스택·블라인드·핸드 수를 보존한다. mode 없는 `--stack`/`--level-every`는 기존 토너먼트 설정이며, resume과 legacy `--game-dir`에는 새 기본값을 적용하지 않는다. policy 게임은 플레이어 LLM 없이 실행하고 상위 모델만 코치·리뷰 용도로 검사한다. 적격 상위 모델이 없으면 LLM 설명 불가를 알리고 사실 기반 기계 피드백을 남긴다.
 
