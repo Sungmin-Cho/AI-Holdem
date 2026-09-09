@@ -7401,6 +7401,7 @@ test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finali
 });
 
 test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 그 generation을 unavailable로 봉인한다', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   // Attempt 1 fails only after the finalization checkpoint exists, so the remaining
