@@ -1,0 +1,1121 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-09",
+  "source_head": "cb838484c967f59133bd45ca34fa03c2bdab0a84",
+  "verdict": "READY_FOR_IMPLEMENTATION",
+  "scope": "Documents only; no implementation/runtime test evidence",
+  "final_artifacts": {
+    "docs/implementation/lobby-session-design.md": {
+      "sha256": "95d1ceecc2e7ff6f54e3ef06b26dd88a0293be6951c6e36d1c83b461197744b4",
+      "bytes": 36153
+    },
+    "docs/implementation/lobby-session-plan.md": {
+      "sha256": "98d5cf13a5aadc7133955f2587433b5aa0a08f33f669bbba4015c26f9171fe7e",
+      "bytes": 28955
+    },
+    "docs/implementation/lobby-session-review.md": {
+      "sha256": "0dd3e0ce7ee1fc45993ff04b103cc2be9d81b62ff18960b03d6ba9d79df8ddf7",
+      "bytes": 13577
+    }
+  },
+  "final_post_review_amendments": [
+    "readiness status and review links",
+    "paused transition table row",
+    "state-command table-driven test ownership",
+    "lobby/CLI profile parity test ownership",
+    "session-pause added to Windows mandatory list",
+    "new app.lock wording"
+  ],
+  "independence_note": "Fresh distinct CLI sessions with peer outputs excluded. HIGH reviewers share Claude family; source author family excluded. Grok handles separate bounded UX review.",
+  "grok_transport_note": "Grok nested sandbox probe failed; tools-none input-only recipe succeeded with Darwin receipt guard retained; no claim of Grok filesystem read-only sandbox.",
+  "review_records": [
+    {
+      "phase": "design-r1",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "41f66fb0daacdfadb4f3bcff950d6283b91949e7aa0c5872feee8100176330e4",
+        "decision_fingerprint": "2fbea27c65d23a52d7f202df5a3046cd44da6c9e8b2e298c2b202a0231210219",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "claude-fable-5-1"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": false,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [
+          "claude-haiku-4-5-20251001",
+          "claude-sonnet-5",
+          "gemini-3.6-flash-high",
+          "gpt-5.6-luna",
+          "gpt-5.6-terra",
+          "gpt-6-astra",
+          "grok-4.6"
+        ],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "provider may substitute another claude model for security_sensitive content; the requested identity of claude_architect is declared_only",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "8608670caf6746ebf72127d26988610529ce9406fc5b065fa90486047924494f",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "claude-fable-5-1",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied. cross_family_review=false — reviewers share a family; weigh the second verdict accordingly."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "design-r1-1",
+          "declared_model": "claude-opus-5",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "session_id": "ecb38175-11ec-4d23-8683-9e22f3fa11aa",
+          "effort_native": "high",
+          "prompt_sha256": "dd9a7bc44019bfd13b0547808499980c13e870677f14fec728068e69b216ef2e",
+          "stdout_sha256": "be30c8ca81b3aa495a9238f8c88bc4fe1cbdd02c1f788f8b8a09bfb7f2ccc3d7",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "1f22c3907dc43191e1b9dda59ba6d1d84eb302238132dc09a12a6540799e6fa5",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "verdict: PASS_WITH_CHANGES\nconfidence: medium\nsummary: |\n  요구 3종(bare start→로비, 웹에서 모드·AI 수 선택, 플레이 중 pause 메뉴에서 모드 선택/재시작)은\n  §1~§2에서 모두 충족되고, 소유권(§4)·명령 선형화(§5)·보안 경계(§8)는 구현 가능한 수준으로 구체적이다.\n  다만 pause를 실제로 구현하려면 반드시 확정해야 하는 런루프 제어 흐름 2건(대기 중단 메커니즘,\n  paused 동안 run()의 소재), abort 이후 finalization 경로, restart 중 loop 락 소유권 공백이\n  미정이고, 문서가 선언한 범위(설계+구현 계획) 중 구현 계획(슬라이스/순서/테스트 매트릭스)이 비어 있다.\n  이 5건은 설계 단계에서 해소 가능하며, 해소되면 구현 착수에 지장이 없다.\n\nfindings:\n  - id: F1\n    severity: major\n    category: lifecycle/concurrency\n    description: |\n      §6.3은 \"게시 commit과 다음 입력 wait 분리\"와 waiter를 typed `control_interrupted`로 깨우는 것을\n      요구하지만, *누가 어떤 경로로* 대기를 중단시키는지가 설계에 없다. 현재 wait는 publish 도구에\n      `--wait` 플래그로 위임돼 있고(runAtomicStepPublish → publishEnvelope(…, waitFlags())),\n      relay의 attachWait는 expectDecisionId + setTimeout 기반 waiter만 가질 뿐 취소/깨우기 입구가 없다.\n      즉 pause 신호를 받아 대기를 깨우려면 (a) loop가 wait를 자기 프로세스 안에서 abortable하게 수행하도록\n      바꾸거나 (b) relay에 내부 전용 wake/cancel 입구를 추가해야 하는데, 둘 다 설계에 없다.\n      relay가 별도 프로세스(serverPid, stopServer)라는 점 때문에 \"그냥 in-process 취소\"로 해결되지 않는다.\n    evidence: |\n      tools/game-loop.js:2696-2706 (runAtomicStepPublish의 atomicUnit가 publish+wait를 함께 감쌈)\n      tools/game-loop.js:5116, 5776-5779 (waitFlags를 publish에 전달)\n      server/server.js:1311-1338 (attachWait: timeout/close 외 중단 입구 없음, finish는 {timeout:true} 형태만)\n      tools/game-loop.js:5163-5181 (기존 정지는 stopRequested + atomicTransition 대기로만 성립)\n    required_fix: |\n      wait 소유권을 명시할 것. 권장: publish(게시 commit)와 wait(다음 입력 대기)를 분리하고 wait는\n      loop 프로세스가 직접 소유하는 취소 가능한 호출로 이동시킨다. 그 위에서\n      (1) 취소 신호 전달 방식, (2) 반환 계약 확장(`out.waitError`/`out.userAction`/`out.timeout`에\n      `control_interrupted` 추가와 handleUserTurn/republishAfterRejectedUserAction의 분기),\n      (3) relay 측 waiter가 pause 시 어떤 상태로 남는지(그대로 timeout 소멸 vs 명시 종료)를 기술한다.\n      relay에 wake 입구를 두는 대안을 택한다면 loopback+relay 토큰 전용 내부 경로임을 §8 allowlist에 함께 못박는다.\n  - id: F2\n    severity: major\n    category: lifecycle/concurrency\n    description: |\n      paused 상태가 유지되는 동안 game-loop의 `run()`이 어디에 있는지가 정의되지 않았다.\n      현재 run()의 유일한 탈출 조건은 stopRequested이고(§3 표에서 pause는 requestStop을 부르지 않는다고\n      명시), stopRequested를 쓰지 않으면 run()은 while 루프 안에서 계속 다음 decision/hand로 진행하려 한다.\n      반대로 run()이 반환해 버리면 resume 시 재진입 지점(resumeEntryPending 경로 재사용 여부,\n      phase 검사 5740-5742)이 정의되지 않아 \"같은 gameId로 이어가기\"의 구현 근거가 사라진다.\n      §5는 loop 인스턴스가 pause 동안 살아 있다고만 말하고, §6은 gate가 새 작업을 막는다고만 말한다.\n    evidence: |\n      tools/game-loop.js:5782-5874 (while (!stopRequested) 루프, gate/park 개념 없음)\n      tools/game-loop.js:5731-5742 (run 진입 시 phase==='playing'만 허용, 재진입 전제 불명)\n      tools/game-loop.js:5163-5167 (requestStop만이 유일한 중단 신호)\n    required_fix: |\n      두 안 중 하나를 확정해 기술한다. (A) run() 내부 park: 루프 최상단에 control gate await를 두어\n      paused 동안 run()이 살아 있는 채로 대기하고 resume 시 같은 실행이 계속된다(재진입 계약 불필요,\n      대신 run()이 반환하지 않으므로 service의 session promise 관찰 규칙을 §4에 맞춰 조정).\n      (B) run() 반환 후 재진입: paused에서 run()이 정상 반환하고 resume이 새 run()을 부르되,\n      이때 필요한 loop-state phase 값과 resumeEntryPending/publish --retry 동등 절차를 명시.\n      어느 쪽이든 stopRequested와 pause gate가 서로 다른 신호임을 계약으로 못박고,\n      pause 중 watchdog/heartbeat/타이머가 gate를 무시하고 진행하지 않음을 어디서 강제하는지 적는다.\n  - id: F3\n    severity: major\n    category: data integrity / lifecycle\n    description: |\n      §7의 abort 확정 이후 loop-state phase와 finalization 경로가 정의되지 않았다.\n      engine의 `end --result abort`는 gameOver=true, result='abort', hand=null, phase='idle'로 만드는데,\n      loop-state의 phase가 'playing'으로 남으면 이후 어떤 경로로든 run()이 다시 진입할 때\n      `engine.gameOver` 분기가 phase='finalizing'을 쓰고 runFinalization()을 호출한다. 이는\n      \"abort는 일반 종합 LLM 리뷰를 요구하지 않는다\"는 설계와 충돌하고, 중단 게임에 정상 완주용\n      리뷰/판정이 붙을 수 있다. 또 abort 시점에 ended 게시와 requestStop을 누가 호출하는지도\n      F2(run()의 소재)와 얽혀 미정이다.\n    evidence: |\n      engine/cli.js:404-418 (abort가 hand=null, gameOver=true로 만듦)\n      tools/game-loop.js:5744-5749 (engine.gameOver 감지 시 무조건 finalizing → runFinalization)\n      tools/game-loop.js:5736-5739 (FINAL_PHASES/done 분기)\n    required_fix: |\n      abort 확정과 같은 복구 단위에서 loop-state에 기록할 terminal 표식(예: phase='ended' 또는\n      result='abort' 마커)을 정하고, runFinalization()이 result==='abort'를 만났을 때\n      (a) 완료 핸드 기준 중단 요약만 만들고 종합 LLM 리뷰를 건너뛰는지, (b) 어떤 phase로 종료하는지,\n      (c) 재시작·크래시 복구 시 이 표식을 보고 재-finalization을 하지 않는지를 명시한다.\n      ended 게시 → requestStop 호출 주체(파킹된 run인지 session-manager인지)도 함께 확정한다.\n  - id: F4\n    severity: major\n    category: lifecycle/concurrency\n    description: |\n      restart(및 '다른 모드로 새 게임')는 \"이전 게임 terminal 확정/정리 → 새 prepare/init/commit\"인데,\n      정리 단계인 requestStop이 loop 락을 해제하는 반면 launcher는 \"기존 loop 락을 획득한 뒤에만\n      init/resume\"한다(§4). 즉 두 단계 사이에 store loop 락이 비는 구간이 생기고, 그 사이 외부\n      direct CLI가 락을 잡으면 restart는 새 게임을 만들지 못한 채 \"이전 게임은 이미 ended\"인\n      상태로 실패한다. §5는 이 실패를 정직하게 표시하라고만 하고, 락 공백 자체를 줄이는\n      소유권 이양 설계는 없다.\n    evidence: |\n      tools/game-loop.js:5163-5250 및 §3 표(requestStop이 정리 후 loop 락 해제)\n      tools/game-loop.js:5945-5951 (loop 락 LOCKED → ACTIVE_GAME)\n      tools/game-loop.js:5958-5971, 5990-6010 (initialLockHandle을 주입받아 skipLock으로 진행)\n    required_fix: |\n      락 소유권 이양 계약을 정한다. 권장: requestStop에 락 해제를 생략하는 옵션(예: retainLock)을 두고\n      restart 시 manager가 같은 handle을 새 createGameLoop의 initialLockHandle로 넘긴다.\n      대안으로 app.lock.d가 store 단위 배타성을 대신 보장하고 loop 락 재획득 실패를 명시 오류로\n      다루는 방식도 가능하나, 그 경우 direct CLI와의 상호배제 규칙(§7)이 어떻게 유지되는지 적어야 한다.\n  - id: F5\n    severity: major\n    category: test adequacy / scope\n    description: |\n      문서 서두가 범위를 \"설계와 구현 계획\"으로 선언했으나 구현 계획이 없다. 작업 분할(슬라이스),\n      의존 순서, 각 슬라이스의 완료 조건, 테스트 매트릭스(단위/통합/브라우저 e2e, 어떤 하네스로\n      어떤 파일에), 활성화 순서의 검증 게이트가 §9의 \"opt-in CLI 먼저, 스킬 기본 전환은 마지막\"\n      한 문장과 §10 수용 기준 U1~U9뿐이다. U3/U4/U6처럼 런타임 증명이 필요한 항목이 어떤\n      자동 테스트로 커버되는지 알 수 없어 구현 착수 후 범위가 흔들린다.\n    evidence: |\n      본문 \"범위: 설계와 구현 계획\", §9 활성화 문단, §10 U1~U9(수용 기준만 존재)\n    required_fix: |\n      슬라이스별 구현 계획을 추가한다. 최소한 (1) shared/game-setup + launcher 추출,\n      (2) app-service/app-server + 로비 UI, (3) control state + pause/resume,\n      (4) end/restart + 중단 audit, (5) 복구/크래시 경로, (6) 스킬 기본 전환 순으로 나누고,\n      각 슬라이스에 U1~U9 중 어떤 기준을 어떤 테스트로 증명하는지, 어떤 항목을 구현 단계\n      검증 gate로 이월하는지를 표로 명시한다.\n  - id: F6\n    severity: minor\n    category: data integrity\n    description: |\n      §5는 start가 gameId와 selectionVersion을 prepare 전에 journal에 예약한다고 하지만,\n      selectionVersion은 prepare 시점의 current 기준 +1이고 commit은 expectedVersion CAS로\n      검증한다. 예약 후 재시도 사이에 다른 commit(예: 앞선 restart의 새 세션)이 성공하면\n      예약된 selectionVersion은 상한 미스로 CURRENT_CHANGED를 맞는다. 재시도가 예약값을\n      그대로 쓰는지, 재계산하는지가 정의돼 있지 않다.\n    evidence: |\n      engine/session-catalog.js:103-111 (prepare가 current 기준 +1 계산)\n      engine/session-catalog.js:119-131 (commit의 expectedVersion CAS)\n    required_fix: |\n      \"예약은 gameId만 durable, selectionVersion은 prepare/commit 시점에 재계산\" 또는\n      \"예약값 불일치 시 CURRENT_CHANGED를 재시도 가능한 오류로 분류하고 같은 requestId로\n      같은 gameId를 유지한 채 selectionVersion만 재발급\" 중 하나를 명시한다.\n  - id: F7\n    severity: minor\n    category: data integrity / UX\n    description: |\n      로비의 '이어서 하기'가 resume 명령으로 매핑될 때, 로비 기본값(hints=off 등)을 함께\n      전달하면 기존 resume 경로의 checkHintResume이 세션 config와 불일치로 실패한다.\n      §9는 \"기존 config를 새 기본값으로 덮지 않는다\"는 원칙만 말할 뿐, resume 명령의 payload가\n      setup을 갖지 않으며 launcher가 세션 state.json의 config에서 hints 등을 읽어 넘긴다는\n      구체 계약이 없다.\n    evidence: |\n      tools/game-loop.js:5953-5957 (resume 시 checkHintResume(state.json의 config, args.hints))\n      §5 명령 스키마의 `setup?` 선택 필드\n    required_fix: |\n      resume 명령에는 setup을 허용하지 않고(있으면 400), launcher가 current 세션 config에서\n      hints/opponentRuntime 등 resume 필수 인자를 읽어 재구성한다고 명시한다.\n  - id: F8\n    severity: minor\n    category: lifecycle / UX\n    description: |\n      starting 상태에 취소 경로가 없다. 상태표는 starting에서 playing 또는 error로만 나가며,\n      새 start는 금지된다. LLM 런타임 탐지/어댑터 resolve/부트스트랩이 오래 걸리거나 멈추면\n      사용자는 app:stop 외에 빠져나갈 방법이 없고, 이때 이미 commit된 세션의 처리도 미정이다.\n    evidence: |\n      §5 상태표 starting 행, tools/game-loop.js:5929-5934, 6032-6048 (resolver/bootstrap 경로)\n    required_fix: |\n      starting에 유계 타임아웃과 취소(cancel) 명령을 정의하고, 취소 시 (a) commit 전이면 staging 정리,\n      (b) commit 후면 §5의 \"생성된 gameId 유지 후 복구\" 규칙 중 어느 쪽인지, (c) 최종 도달 상태를\n      error인지 ended인지 명시한다.\n  - id: F9\n    severity: minor\n    category: lifecycle / error handling\n    description: |\n      외부 direct CLI가 lobby/ended 구간에서 loop 락이나 current를 선점하는 경합의 오류 매핑이 없다.\n      §7은 start game 시점의 탐지·차단만 다루고, 앱이 로비에 머무는 동안 외부가 게임을 시작한 경우\n      start 명령이 받게 되는 ACTIVE_GAME/LOCKED/CURRENT_CHANGED를 어떤 UI 코드와 복구 경로로\n      투영할지 정의돼 있지 않다.\n    evidence: |\n      tools/game-loop.js:5945-5951 (LOCKED → ACTIVE_GAME)\n      tools/game-loop.js:5973-5977 (이전 session server 생존 시 ACTIVE_GAME)\n    required_fix: |\n      start/restart의 실패 코드 표에 위 3종을 추가하고, 각각 \"외부 실행 감지 → 재탐지 후\n      기존 실행 안내 화면으로 전이\"처럼 §7의 foreign owner 처리와 연결한다.\n  - id: F10\n    severity: minor\n    category: lifecycle/concurrency\n    description: |\n      §6.1의 \"relay의 gate 확인+receipt accept와 loop의 gate 닫기를 같은 session control 락으로\n      직렬화\"는 relay가 별도 프로세스라는 점(serverPid/stopServer로 소유되는 자식)을 전제로 한\n      크로스 프로세스 파일 락이어야 하는데, 그 사실과 실패 시 동작이 명시돼 있지 않다.\n      relay가 control 파일을 읽지 못하거나 락 획득에 실패할 때 열림(수락)으로 falling back하면\n      pause 불변식이 깨진다.\n    evidence: |\n      server/server.js:1272-1280 (relay 프로세스의 action 수락/receipt 경로)\n      tools/game-loop.js:5885 (serverPid 노출 — relay는 별도 프로세스)\n      §6.1 \"같은 짧은 session control 락\"\n    required_fix: |\n      control 락을 크로스 프로세스 파일 락으로 명시하고, relay가 control 파일 부재/파싱 실패/\n      락 획득 실패 시 fail-closed(GAME_PAUSED 또는 5xx로 거절)임을 못박는다. 락 유지 시간 상한과\n      기존 receipt 저장 실패 코드(ACTION_RECEIPT_CAPACITY 등)와의 상태 코드 충돌도 정리한다.\n  - id: F11\n    severity: minor\n    category: data integrity\n    description: |\n      설정 정본을 shared/game-setup.js로 두면서 applyModeDefaults를 CLI 호환 어댑터로 \"남긴다\"고만\n      해 기본값이 두 곳에서 유지된다. 현재 applyModeDefaults의 기본값은 freshStore/모드 조건부이고\n      (cash-training에서만 ai=5·stackBb=100·hands=20·opponentRuntime=policy, 토너먼트는 policy 미설정),\n      로비 기본값과 조용히 어긋나면 CLI 값 prefill과 실제 실행이 달라진다.\n    evidence: |\n      tools/game-loop.js:232-252 (applyModeDefaults의 조건부 기본값)\n      §2 \"설정 정본은 신규 shared/game-setup.js\" + \"applyModeDefaults는 기존 CLI 호환 어댑터로 남는다\"\n    required_fix: |\n      applyModeDefaults가 shared/game-setup의 기본값을 위임 호출하도록 하거나(권장),\n      위임하지 않는다면 두 소스의 기본값 동등성을 검증하는 패리티 테스트를 계획에 명시한다.\n\nmissing_tests:\n  - U1 증명: bare start 실행 후 engine init/step, 카드 배분, player/coach LLM 호출이 0회임을\n    프로세스·로그·세션 디렉터리 부재로 검증하는 자동 테스트.\n  - pause 안전 지점 4종(사용자 무제한 대기 중 / AI 추론 중 / step+publish 중 / 핸드 경계)의\n    각각에 대해 paused 확정 후 engine hand·decisionId·stacks·level·stateVersion이 일정 시간\n    불변임을 기계 검증하는 테스트(§6.6 요구가 있으나 테스트 계획으로 연결돼 있지 않음).\n  - gate 경계 레이스: gate 닫기와 relay handleAction 동시 실행에서 accepted 액션이 유실되지도,\n    gate 이후 액션이 수락되지도 않음을 반복 실행으로 검증(§6.1의 TOCTOU 금지 조항 대응).\n  - resume 후 액션 중복/누락 부재: pause 직전 적용된 액션이 resume 후 재요청되지 않고,\n    accepted-but-unapplied 액션이 정확히 한 번 해소됨(U4).\n  - 명령 멱등성/선형화: 같은 requestId 재전송, 다른 payload 재전송(409 COMMAND_CONFLICT),\n    pending 중 다른 명령(409 COMMAND_IN_PROGRESS), HTTP 연결 조기 종료 후 결과 조회.\n  - 크래시 윈도 복구: init 중 / current commit 직후 / partial-hand audit 직후 abort 확정 전 /\n    abort 확정 후 cleanup 실패 각 지점에서 프로세스 kill 후 재기동 시 중복 terminal 이벤트나\n    중복 세션이 생기지 않음(U6, deterministic operation ID 검증).\n  - startPaused 복구 게이트: 관리 서비스 재시작 시 사용자가 resume을 누르기 전 새 hand/AI decision이\n    시작되지 않음(복구 엔진 진행보다 gate가 앞서는지).\n  - abort 데이터 무결성: 중단된 미완료 핸드가 완료 핸드 archive·승패·핸드 순손익·평가/profile 분모에\n    포함되지 않고, 기존 완료 핸드 평가가 재채점/삭제되지 않음.\n  - abort 이후 재진입 시 정상 완주용 종합 리뷰가 실행되지 않음(F3 대응 회귀 테스트).\n  - 보안: /api/game/* 중계의 method/path allowlist 위반(publish, wait-action, 임의 path/port),\n    클라이언트 제공 token/authorization/host/upstream 필드 무시, 다른 gameId·selectionVersion·\n    gameEpoch로 온 old tab 요청 409, 토큰이 로그/산출물에 남지 않음.\n  - 호환성: 기존 `node tools/game-loop.js --store-dir ...` 직접 실행, legacy --game-dir,\n    control metadata 없는 구버전 세션 열기, v1/v2 학습 기록 읽기가 회귀하지 않음(U8).\n  - 접근성/UX: 키보드만으로 로비→시작→pause→메뉴 탐색→취소→resume, dialog focus trap과\n    닫은 뒤 focus 복귀, 메뉴 열린 동안 폴드/콜 단축키 비활성, 복기 overlay와 메뉴의 동시 활성 금지.\n  - 브라우저 e2e(U9): 로비→플레이→pause→setup 취소→resume→restart→종료→학습실 전체 여정.\n  - 플랫폼: Windows 및 Node 20/22에서 app descriptor 검증·자식 정리·락 회수 경로.\n\nuncertainties:\n  - 액션 POST에서 브라우저가 gameEpoch(또는 그 해시)를 서버에 보내 relay가 검증하는지 여부가\n    제공된 소스에 없어(server/public/app.js와 relay action 핸들러 미제공), §8의 \"공개 gameEpoch를\n    별도 제공\"이 기존 receipt 결박을 깨지 않는지 확정할 수 없다. 구현 전에 실제 결박 지점을 확인해야 한다.\n  - tools/app-service.js가 신규 생성인지 기존 파일 확장인지, ensureStudyService helper의 시그니처와\n    descriptor 검증 절차가 그대로 재사용 가능한지 소스가 제공되지 않아 검증하지 못했다.\n  - 엔진이 AI 1~8명 전 범위를 실제로 허용하는지(특히 tournament의 ai=1 헤즈업, 블라인드/버스트 처리)\n    검증할 소스가 없다. gtoEvalNotice는 안내만 담당하므로 별도 확인 필요.\n  - publish 도구(tools/publish.js)가 wait를 수행하는 구체 방식(자식 프로세스/HTTP/재시도 identity)이\n    제공되지 않아, F1의 권장 수정(wait를 loop 소유로 이동)의 파급 범위를 정확히 산정하지 못했다.\n  - `.agents/skills/start-game/SKILL.md`가 로비 URL을 어떻게 사용자에게 열어 주는지(브라우저 자동 오픈\n    여부, 무인 환경 fallback)는 설계에 서술이 없고 소스도 미제공이라 UX 완결성을 확인하지 못했다.",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        },
+        {
+          "attempt_id": "design-r1-2",
+          "declared_model": "claude-fable-5-1",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5-1"
+          ],
+          "session_id": "12ea1165-941a-4a6b-bf26-dbbb3574c105",
+          "effort_native": "high",
+          "prompt_sha256": "dd9a7bc44019bfd13b0547808499980c13e870677f14fec728068e69b216ef2e",
+          "stdout_sha256": "be3ec1e7831a955d417d88047c123b2aadb789ee7da248f01f8215882fa399d2",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "fbb7745560f58cacdc719f47f436d046aa146263166f8cae865a7c4e60495e62",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "verdict: PASS_WITH_CHANGES\nconfidence: 0.72\nfindings:\n  - severity: medium\n    category: lifecycle/concurrency\n    description: |\n      pause가 \"waiter를 typed control_interrupted로 깨운다\"고 하지만, 현재 사용자 대기는 loop 프로세스 안의 promise가 아니라 publish CLI 자식(`--wait --wait-ms`)이 relay `/wait-action` 장기 폴링을 붙잡는 구조다. 어느 계층이 어떻게 깨우는지(relay가 waiter를 새 payload로 finish하는지, publish 자식을 종료하는지), 그리고 그 결과가 기존 `out.waitError`·`submitted.timeout` 분기와 어떻게 구분되는지가 정의돼 있지 않다. 현재 코드대로면 interrupt는 waitError로 읽혀 `recoverServerForPublish`(서버 재구축)나 `waitOnlyForUser` 재대기로 흘러간다. AI 턴 publish도 `waitFlags()`를 붙이므로 사용자 턴 외 경로에도 같은 계약이 필요하다.\n    evidence: |\n      tools/game-loop.js:2696-2708 (runAtomicStepPublish가 publish+wait를 한 자식 호출로 실행), 5067-5085 (waitError→recoverServerForPublish, timeout→waitOnlyForUser), 5859 (AI publish에도 waitFlags), server/server.js:1311-1338 (attachWait은 deliver 또는 timeout만 finish).\n    required_fix: |\n      설계에 다음을 명시한다. (1) relay `attachWait`에 control gate 관찰을 추가해 pause 시 `{controlInterrupted:true, controlRevision}`으로 waiter를 finish한다(연결 종료가 아니라 정상 200 payload). (2) publish CLI는 `--wait` 결과에 이 필드를 그대로 envelope에 투영하고 loop는 waitError/timeout보다 먼저 이를 검사해 pause 확정 경로로 분기한다. (3) 게시 commit(atomicTransition 종료)과 wait 시작을 분리한 뒤 wait는 atomic unit 밖에서 수행한다는 점을 상태 표(pausing→paused 안전 지점 목록)에 반영한다.\n  - severity: medium\n    category: lifecycle/data-integrity\n    description: |\n      사용자 종료는 `end --result abort`로 `gameOver=true`를 만든다. 그런데 현재 `run()`은 engine.gameOver를 보면 무조건 `phase=finalizing`→`runFinalization()`(정상 종합 리뷰·completed 경로)으로 간다. 설계는 abort가 종합 LLM 리뷰를 요구하지 않고 `ended`를 `completed`와 구분한다고 하지만, loop-state phase를 무엇으로 쓰고 기존 resume/run/finalization 분기를 어떻게 우회하는지가 없다. 이대로면 (a) end 후 loop가 finalization을 실행하거나, (b) CLI `--resume`/관리 resume이 abort된 current를 다시 finalizing으로 밀어 리뷰를 생성할 수 있다.\n    evidence: |\n      engine/cli.js:404-419 (abort는 gameOver=true, hand=null만 설정), tools/game-loop.js:5738-5749 (FINAL_PHASES·phase=done·engine.gameOver→runFinalization), 5798-5803 (자연 종료만 finalizing 진입 가정).\n    required_fix: |\n      abort 전용 loop-state 종단 phase(예: `aborted` + `result:'abort'` + `endedAt`)를 정의하고, `run()`/`resume()`/`resolveCurrentSession` 소비자가 이 phase를 만나면 finalization·리뷰·`finishDoneLifecycle`을 실행하지 않고 즉시 `ended`로 투영하도록 명시한다. paused 상태에서 end 명령이 들어왔을 때 `run()` promise가 어떤 경로로 반환/종료되는지(예: 내부 pause 대기점에서 `CONTROL_ENDED`로 탈출 후 requestStop)를 상태 표에 추가한다.\n  - severity: medium\n    category: data-integrity/rollback\n    description: |\n      start의 requestId에 gameId·selectionVersion을 prepare 전에 예약하는 것은 좋으나, 재시도 시 이미 존재하는 산출물 처리가 미정의다. `prepareSession`은 `mkdirSync(stagingDir)`을 non-recursive로 호출하므로 같은 gameId 재시도는 EEXIST로 실패한다. 또 `commitSession`은 staging→sessionDir rename과 selector 쓰기가 두 단계라 그 사이 crash면 \"sessionDir는 있고 current는 이전 값\"인 상태가 남는다. 설계는 \"commit 전 실패는 기존 current 유지\"만 말하고 이 중간 상태와 부분 초기화된 staging의 폐기/재사용 규칙을 정하지 않았다.\n    evidence: |\n      engine/session-catalog.js:104-111 (gameId 내부 생성, staging mkdir non-recursive), 131-138 (rename 후 selector 쓰기 분리), 설계 §5 \"재시도는 디렉터리 이름을 검색해서 다른 세션을 추측하지 않는다\".\n    required_fix: |\n      journal 예약 상태별 복구 규칙을 표로 고정한다: (1) staging만 존재+미커밋 → 예약 증거가 있는 같은 gameId에 한해 staging을 폐기하고 재생성(또는 `recovery_required`로 멈춤 중 택일, 권장은 폐기 후 재생성), (2) sessionDir 존재+current≠gameId → 같은 트랜잭션 락 아래 selector만 재기록해 commit을 완주, (3) current=gameId → committed로 간주하고 bootstrap 단계로 진행. `prepareSession(storeDir, {reserved:{gameId, selectionVersion}})` 확장 시 이 세 상태를 반환값으로 구분한다.\n  - severity: medium\n    category: lifecycle/concurrency\n    description: |\n      pausing 중 AI 추론 규칙이 상충한다. \"해당 추론이 기존 watchdog으로 settle될 때까지 pausing\"과 \"아직 시작하지 않은 watchdog fallback은 pause 동안 실행하지 않는다\"를 함께 두면, LLM이 응답하지 않을 때 fallback(강제 기본 액션 step)이 곧 settle 수단이므로 pause가 영원히 안전 지점에 도달하지 못하거나 error로 떨어진다. gate 전에 admission된 decision의 \"한 번 적용/게시\"에 timeout fallback mutation이 포함되는지 명확히 해야 한다.\n    evidence: |\n      설계 §6.4 두 문장, tools/game-loop.js:1863-1874 (decideOnce는 adapter timeout으로만 settle), 5831-5833 (decideWithWatchdog).\n    required_fix: |\n      admission generation을 받은 decision은 timeout fallback step까지를 하나의 outcome으로 간주해 완료를 허용하고, 그 뒤의 새 decision만 차단한다고 명시한다. \"실행하지 않는 fallback\"은 gate 뒤에 예약된 별도 타이머(예: 다음 decision용 watchdog)로 한정한다.\n  - severity: low\n    category: lifecycle\n    description: |\n      `createGameLoop()`를 장수 app 프로세스 안에서 반복 생성·폐기하려면 loop 공개 API에 pause/resume/end 진입점이 있어야 하는데 현재 반환 객체에는 없다. 또 `main()`이 세운 프로세스 전역 가정(umask 0o077, SIGTERM once 핸들러, direct-run 전제)이 app-service로 옮겨질 때 어디서 수행되는지 미정이다.\n    evidence: |\n      tools/game-loop.js:5878-5886 (반환 API), 5939 (umask), 6024-6030 (SIGTERM once).\n    required_fix: |\n      loop API 추가분(`requestPause`, `resumePlay`, `endGame({operationId})`, `controlState` getter)과 app-service가 프로세스 수준에서 1회 수행할 항목(umask, 신호 처리, unhandledRejection 관찰)을 §4에 열거한다.\n  - severity: low\n    category: security\n    description: |\n      loopback bind와 Origin 검증만으로는 DNS rebinding으로 Host가 바뀐 요청을 막지 못한다. Authorization 헤더가 있어 실제 위험은 낮지만 SSE·GET 경로가 헤더 없이 응답하지 않는지와 Host 허용값이 명시돼야 한다.\n    evidence: |\n      설계 §8 \"같은 origin 검증\".\n    required_fix: |\n      Host를 `127.0.0.1:port`/`localhost:port` allowlist로 검증하고, 모든 `/api/*`는 헤더 인증 실패 시 401로 고정한다고 한 줄 추가한다.\n  - severity: low\n    category: ux\n    description: |\n      \"클릭 즉시 조작 차단·멈추는 중 표시\"와 \"optimistic 표시 금지\"는 pausing이라는 명시적 중간 상태로 양립하지만, 명령 POST가 409/네트워크 오류로 실패했을 때 UI를 어떻게 복원하는지가 없다.\n    evidence: |\n      설계 §1 일시정지 행, §5 DTO/allowedCommands 규칙.\n    required_fix: |\n      command 접수 실패 시 서버 snapshot 재동기화 후 playing으로 복원하고 실패 사유를 aria-live로 알린다고 명시한다.\nmissing_tests:\n  - \"relay handleAction gate: 같은 control 락 아래 gate 닫기와 receipt accept가 교차하는 프로세스 간 경합 테스트(파일 읽기 후 receipt 쓰기 TOCTOU 재현 하네스 포함).\"\n  - \"pause 시점별 안전 지점: 사용자 무제한 대기 중, AI policy step 직후 publish 중, LLM 추론 중(정상 응답·timeout fallback 둘 다), handOver 후 training/coach launch 중, 새 핸드 시작 직전. 각 케이스에서 paused 이후 engine hand/decisionId/stacks/level 불변을 일정 시간 기계 검증.\"\n  - \"waiter interrupt가 waitError/timeout으로 오분류되지 않음(recoverServerForPublish 미호출, 강제 액션 미적용).\"\n  - \"resume: gate 전 accepted 액션이 pause 직전 적용된 경우 새 decision을 보여주고 중복 적용 없음(receipt/localStorage 보존 확인).\"\n  - \"start 재시도 매트릭스: journal 예약 후 staging 존재, rename 후 selector 미기록, commit 후 bootstrap 실패 각각에서 같은 gameId 재사용·현 current 불변·중복 세션 0건.\"\n  - \"abort 경로: 중단 핸드 audit가 완료 핸드 archive/평가/profile 분모에 포함되지 않음, 이전 완료 핸드 평가 불변, abort 후 run/resume이 finalization·종합 리뷰를 실행하지 않음, 중복 end가 같은 terminal 결과 반환.\"\n  - \"restart 복합 명령: old 종료 후 new init 실패 시 old=ended·이어하기 불가·실패 단계 코드 노출.\"\n  - \"command 멱등성: 같은 requestId+같은 payload 동일 응답, 다른 payload 409 COMMAND_CONFLICT, 이전 appRevision/gameId/instanceId 409, pending 중 COMMAND_IN_PROGRESS.\"\n  - \"프록시 allowlist: /publish, /wait-action, 임의 path·query token·Authorization 전달 거부; old epoch 요청 409; SSE epoch 전환 시 종료.\"\n  - \"토큰 노출: 최초 로드 후 URL fragment 제거, 로그/스크린샷 산출물에 토큰 부재.\"\n  - \"기존 CLI 회귀: applyModeDefaults·engineInitFlags 출력 불변, 명시 tournament→LLM 기본 유지, legacy --game-dir 경로.\"\n  - \"접근성: 메뉴 열린 상태에서 폴드/콜 단축키 무시, focus trap·복귀, Escape가 재개하지 않음.\"\n  - \"startPaused 복구: 서비스 재시작 뒤 resume 버튼 전까지 새 핸드/AI decision 0회, `.publish-attempt.json` 재시도와 resume-check는 gate 아래에서 수행.\"\n  - \"Windows/Node 20·22: 제어 락 mkdir 기반 단기 락과 descriptor identity 검증.\"\nuncertainties:\n  - \"엔진이 토너먼트 모드에서 AI 1~8명(총 2~9인) 전 범위를 실제로 지원하는지 소스 미제공.\"\n  - \"createGameLoop 내부에 모듈 전역 상태(캐시, process.on 핸들러)가 있어 같은 프로세스에서 인스턴스 재생성 시 누수가 있는지 미확인.\"\n  - \"브라우저용 공개 gameEpoch가 서버의 `gameEpochOf(sessionToken)` 값과 동일한지, 별도 매핑인지 불명. 동일 값이면 localStorage 키와 receipt 결박이 자연히 일치하지만 토큰 해시 노출 여부를 의식적으로 결정해야 한다.\"\n  - \"requestStop이 loop 락을 항상 해제하는 것으로 가정했으나 cleanup 실패(persistCleanupFailure) 시 락 잔류 처리가 restart 2단계와 어떻게 맞물리는지 소스 범위 밖.\"\n  - \"설계 파일이 docs/implementation/에 있다. 이 저장소 관례상 설계/플랜은 커밋 대상이 아닌 docs/design·docs/handoff에 둔다고 기억하고 있어 위치 확인이 필요하다.\"",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    },
+    {
+      "phase": "design-r2",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "96dba8146e274318b453a68894f514a4da83f04eeb096520c33eb2c483d93bd2",
+        "decision_fingerprint": "11e3c291959b9a3b32dd4cef62813d749875d94852fff3672d824eeff8b3cb26",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "claude-fable-5-1"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": false,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "provider may substitute another claude model for security_sensitive content; the requested identity of claude_architect is declared_only",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "31c5e6713bf4a4b7219c25cb25f0017d2440d21d085cb0fe8c017b1adedb73ed",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "claude-fable-5-1",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied. cross_family_review=false — reviewers share a family; weigh the second verdict accordingly."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "design-r2-1",
+          "declared_model": "claude-opus-5",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "session_id": "b42272df-c048-4e57-b1d7-aceb4b59da76",
+          "effort_native": "high",
+          "prompt_sha256": "046b734854e9e790c7f84e97bd428cce3e0965c52deb5ec68eadf4483c44e816",
+          "stdout_sha256": "7b65773379cfbe4a4b5ec7f5b124b3674c03504e603ea679d5e513c30412b322",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "0086045c773a140b26e7f9344a77d93991ee1d740f6df6d2da459ba2b18213bd",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.72\nfindings:\n- severity: high\n  category: 액션 선형화 / pause 취소\n  description: pause가 `/api/wait-action` fetch를 abort할 때, 서버가 이미 `receiptStore.deliver()`로 receipt를 delivered로 옮기고 응답만 유실된 창(window)에서 loop가 그 액션의 **payload를 되찾을 경로**가 설계에 없다. 설계는 \"상태 조회와 엔진 결과 대조로 drain\"이라고만 하는데, 현재 노출 계약상 action-status가 돌려주는 것은 phase/decisionId 수준이고(app.js:1052-1056 소비 형태), 중계 allowlist는 `/wait-action` 재호출을 금지한다. 즉 \"액션이 접수됐지만 무엇인지 모른다\"는 상태에서 §6-2의 \"delivered 액션은 적용 결과를 해소한다\"를 만족시킬 수단이 미정이다. 잘못 선택하면 U4가 깨진다(재요청 시 중복, 폐기 시 누락).\n  evidence: 설계 §6-2·§6-3(“HTTP 응답 유실을 액션 유실로 취급하지 않는다”), §8 중계 allowlist(`/wait-action` 금지); server/server.js:1320-1331 `deliver()`가 응답 전에 상태를 전이; server/public/action-controller.js:31 receiptRank accepted<delivered<consumed.\n  required_fix: 설계에 복구 읽기 계약을 명시할 것. (a) deliver가 같은 decisionId+requestId에 대해 **재전달 가능(idempotent)** 함을 계약으로 고정하고 loop가 abort 후 그 재전달로 payload를 회수하거나, (b) relay가 delivered 시점에 loop 소유 디렉터리에 durable delivery record를 먼저 쓰고 loop가 그것을 읽어 적용하거나, (c) delivered-미적용은 명시적으로 `ACTION_UNRESOLVED` error로 fail-closed(paused 성공 아님)임을 선언. 셋 중 하나를 고르고 U4 문장을 그 선택에 맞게 좁힐 것.\n- severity: medium\n  category: park/resume 실행 문맥 소유권\n  description: run()이 `await control.waitUntilPlayable()`에서 park할 때 직전 루프 변수 `out`(stateVersion/next/decisionId)을 그대로 들고 있다. 그런데 pausing 단계에서 in-flight 액션 drain·watchdog 1회 outcome 적용이 허용되므로 park 해제 시점의 엔진 상태는 `out`과 다를 수 있다. 설계는 \"동일 실행의 다음 문맥을 보존\"이라고만 해서, resume이 `step` 재동기화 후 dispatch하는지, 아니면 stale `out`으로 dispatch해 기존 VERSION_MISMATCH/STALE_DECISION 경로에 위임하는지가 미결이다. 후자는 사용자에게 불필요한 \"다시 기다립니다\" 재게시를 발생시키고 §6 마지막 문단(\"같은 액션을 반복하지 않는다\")과 충돌할 수 있다.\n  evidence: tools/game-loop.js:5782-5844(루프가 `out`을 이월하며 `--expect-version` 사용), 5054-5063 republishAfterRejectedUserAction, 5087-5093 stale decision 처리; 설계 §6 park/resume 문단.\n  required_fix: unpark 계약을 한 줄로 확정할 것 — resumePlay()가 gate를 열기 전에 `step` 재동기화 + view-only 재게시를 수행하고 run()은 park 해제 후 **재동기화된 문맥으로** dispatch한다(권장), 또는 stale 허용 시 어떤 재게시 문구/receipt phase가 사용자에게 보이는지 명시.\n- severity: medium\n  category: 종료 phase 라우팅\n  description: 신규 loop phase `aborted`가 기존 phase 분기 집합의 어디에 속하는지가 설계에 없다. run()의 선검사만 기술돼 있는데, resume/bootstrap이 지나는 `resolveForPhase`는 FINAL_PHASES / 'done' / 'bootstrap'|'playing' 외 phase를 `BAD_LOOP_PHASE`로 거절하는 폐쇄 분기다. `aborted`를 FINAL_PHASES에 넣으면 설계가 금지한 종합 리뷰 경로(runFinalization)로 흘러갈 위험이 있고, 넣지 않으면 중단 세션 재열람이 BAD_LOOP_PHASE로 막힌다. 어느 쪽이든 upper LLM adapter를 세우는지도 함께 갈린다(U1의 무-LLM 취지).\n  evidence: tools/game-loop.js:5738-5741(run의 FINAL_PHASES/done/else 분기), 5444-5487(resolveForPhase의 폐쇄 분기와 FINAL_PHASES에서의 adapter resolve/ensureServer); 설계 §7 \"resume-check/rollback-guard 소비자에도 반영\".\n  required_fix: `aborted`의 소속과 각 진입점 동작을 표로 확정할 것 — resolveForPhase에 read-only 종료 분기를 두고 adapter resolve 없이 공개 snapshot reader만 사용, FINAL_PHASES 승격 금지, halt/RESUMABLE 판정과의 관계 명시.\n- severity: medium\n  category: 락 순서 / 예약 트랜잭션\n  description: 락 순서가 control→receipt만 규정돼 있고, **command journal 예약 ↔ store loop 락 ↔ catalog transaction 락**의 순서가 없다. §5는 \"prepare 전에 journal에 예약\"이라 하고 §4는 \"launcher는 loop 락을 획득한 뒤에만 init/resume\"이라 하는데, 예약이 락 획득 전이면 ACTIVE_GAME/LOCKED로 실패한 requestId마다 고아 예약(“예약만 있고 두 경로 모두 없음”)이 남고, 그 예약의 selectionVersion은 외부 CLI가 소비할 수 있어 재시도가 항상 CAS 실패로 굳는다.\n  evidence: engine/session-catalog.js:104-123(prepare가 selectionVersion=current+1을 내부 계산, commit에서 CAS), tools/game-loop.js:5945-5951(loop 락 실패 시 ACTIVE_GAME); 설계 §5 예약 문단과 §5 마지막 락 문단.\n  required_fix: 예약을 loop 락 취득 **이후**로 못박고, 예약 레코드에 selectionVersion을 고정값이 아니라 \"예약 당시 기대 base\"로 저장해 CAS 실패 시 재발급 가능 여부를 명시할 것. 고아 예약의 만료/무효화 규칙(누가, 어떤 증거로 폐기)도 한 줄 추가.\nmissing_tests:\n- delivered-미적용 receipt 회수: abort와 deliver 경합 주입 후 pause→resume에서 액션 1회만 적용(또는 fail-closed) 검증 게이트\n- park 중 drain으로 stateVersion이 바뀐 뒤 resume: 재게시 문구·decisionId 연속성·중복 step 없음\n- phase=aborted 세션의 resume/bootstrap 진입: 종합 리뷰 미호출, LLM adapter 미생성, read-only 뷰 제공\n- 예약 후 loop 락 실패 → 외부 CLI가 selectionVersion 소비 → 동일 requestId 재시도의 확정 코드(CURRENT_CHANGED vs 재발급)\nuncertainties:\n- action-status 응답 스키마가 액션 payload를 포함하는지 원문 미확인(중계 계약만으로 판단). 포함한다면 finding 1은 medium으로 내려간다.\n- gtoEvalNotice의 6·8·9인 제한 표기와 AI 1~8 허용의 병기는 요구사항을 충족한다고 판단했으며 별도 결함으로 보지 않았다.\n- 테스트 행렬(T1-T8/M1-M16)은 미열람이므로 위 게이트가 이미 계획에 있다면 중복이다.",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        },
+        {
+          "attempt_id": "design-r2-2",
+          "declared_model": "claude-fable-5-1",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5-1"
+          ],
+          "session_id": "dc3eff62-dae0-475e-b6da-0bbb2ae39702",
+          "effort_native": "high",
+          "prompt_sha256": "046b734854e9e790c7f84e97bd428cce3e0965c52deb5ec68eadf4483c44e816",
+          "stdout_sha256": "6b6720ae7bd514b10ec4324bc2b47dc718572b98b6f97648ba2c4ce5f55d9050",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "9c44a3ff627091d32f37a69bc58a7e5dcdc2be452e5ceda2e3a1f9e6c7897b27",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.72\n\nfindings:\n\n- severity: medium / category: 호환성·보안 경계(pause gate)\n  description: §6.1은 managed control 파일 부재·손상을 503 `CONTROL_UNAVAILABLE`로 fail-closed 처리한다고 하고, §8 끝은 내부 relay를 쓰는 과거 standalone 클라이언트 호환 경로를 유지한다고 한다. relay가 \"이 세션이 managed인지\"를 어떻게 아는지가 정해져 있지 않다. 파일 존재 여부로 판단하면 legacy 세션(control 파일 없음)은 전부 503이 되거나, 반대로 부재를 unmanaged로 해석해 fail-open이 된다. 둘 다 U7/U8과 충돌한다.\n  evidence: 설계 §6.1 \"managed control 부재/손상은 503… 열린 상태로 fallback하지 않는다\", §8 \"호환 경로는 유지하되 managed 세션의 pause gate를 우회하지 못한다\"; 현재 `server/server.js:1272-1280` handleAction은 receipt 저장 후 즉시 deliver하며 어떤 제어 신호도 읽지 않음.\n  required_fix: managed 여부를 파일 존재가 아니라 loop가 relay를 spawn할 때 넘기는 명시 인자(예: control 경로+gameEpoch)와 server lock의 identity에 결박한다고 설계에 한 줄로 확정. 인자가 있으면 부재/손상=503, 인자가 없으면 legacy 동작. 어느 쪽도 파일 유무로 전환되지 않음을 명시.\n\n- severity: medium / category: abort terminal 라우팅·호환성\n  description: §7은 abort 후 loop-state phase를 `aborted`로 두고 FINAL_PHASES/`done` 분기보다 먼저 abort intent를 검사한다고 한다. 그러나 `aborted`가 FINAL_PHASES 밖의 새 terminal이면 기존 phase dispatch(`resolveForPhase`의 unknown phase 예외, `run()`의 `playing` 외 phase 예외)를 통과할 수 없다. 직접 CLI `--resume`, `ensureStudyForOwner`(done 전용), resume-check/rollback-guard가 `aborted` 세션을 만났을 때의 결과가 설계에 없다. \"소비자에도 반영\"만으로는 어떤 코드/메시지로 끝나는지 결정되지 않아 U8 판정을 구현자가 임의로 하게 된다.\n  evidence: `tools/game-loop.js:5484-5486` `BAD_LOOP_PHASE`, `5740-5742` `BOOTSTRAP_INCOMPLETE`, `5746-5749` `engine.gameOver`→finalizing(=cmdEnd가 gameOver=true를 만들므로 intent 검사가 앞서지 않으면 종합 리뷰로 감). 설계 §7 \"이 phase와 cleanup 판정은 … 소비자에도 함께 반영\".\n  required_fix: `aborted`를 별도 terminal 집합(예: ABORTED_PHASES)으로 정의하고, (1) `run`/`resume`/`bootstrap` 진입 시 FINAL_PHASES·gameOver 분기 **앞**에서 `engine.result==='abort' || control.terminalIntent`를 검사해 \"요약/게시/정리 복구만\" 수행, (2) 직접 CLI `--resume`는 명확한 코드(예: `GAME_ENDED`)로 비정상 아닌 종료, (3) study owner 경로는 `aborted`에서도 학습실을 열 수 있는지 여부를 한 줄로 확정.\n\n- severity: low / category: command crash 처리\n  description: `end`는 두 durable 기록(app journal의 command, session control의 terminal intent)을 남긴다. journal에 end가 accepted인데 control에 intent가 없는 crash window(202 응답 후·intent 기록 전)에서 복구가 자동 완주인지 `recovery_required`인지가 없다. §7의 \"intent만 있으면 동일 operation을 완주\"는 반대 방향만 다룬다.\n  evidence: 설계 §5 \"journal … durable write 후 202\", §7 \"terminal intent를 먼저 기록\", §7 \"pending command와 current를 대조\" (결과 미정).\n  required_fix: journal-only pending terminal command는 startPaused 복구 후 같은 requestId/operationId로 자동 재실행한다(사용자 확인이 이미 있었으므로) 또는 pending 상태로 표시하고 재확인을 요구한다 중 하나를 확정. 어느 쪽이든 새 terminal event가 중복되지 않는 근거는 operationId 멱등성임을 함께 적음.\n\n- severity: low / category: 대기 취소(waiting cancellation)\n  description: 입력 wait를 publish CLI 밖 loop 소유 fetch로 옮기는 결정은 타당하고, `control_interrupted`를 `waitError`/timeout보다 먼저 검사한다는 규정도 있다. 다만 abort 직전 relay가 이미 receipt를 delivered로 옮긴 경우 \"상태 조회+엔진 결과 대조로 drain\"이 pausing 단계에서 반드시 완료돼야 paused를 저장할 수 있다는 점이 §6.6 완료 조건에 명시적으로 연결돼 있지 않다.\n  evidence: `server/server.js:1320-1337` deliver 후 응답 유실 가능, `req.on('close')`로 waiter만 제거; 설계 §6.3 \"HTTP 응답 유실을 액션 유실로 취급하지 않는다\", §6.6 \"pending … action outcome이 없고\".\n  required_fix: §6.6의 paused 저장 전제조건에 \"delivered 상태의 receipt가 0건이거나 엔진 적용 결과와 대조 완료\"를 명시. 구현 세부는 계획으로 이월 가능.\n\nmissing_tests (구현 게이트로 이월 가능):\n- legacy 세션 relay(control 인자 없음)와 managed relay(인자 있음, 파일 삭제)에서 action이 각각 200/503으로 갈리는지.\n- 직접 CLI `--resume`이 `aborted` 세션에서 종합 리뷰·finishDoneLifecycle로 가지 않고 정의된 코드로 종료하는지; `engine.result=abort`만 있고 loop metadata가 없는 crash 상태의 복구.\n- journal-only pending `end` 후 서비스 재시작 시 terminal event가 1회만 생성되는지.\n- delivered receipt + wait abort 경합에서 paused 저장 시점에 미대조 receipt가 없고 resume 후 같은 액션이 재적용되지 않는지(U4).\n\nuncertainties:\n- `.session-control.json`을 session 디렉터리 안에 두는 것이 기존 publish/redaction·archive 소비자(`resume-check` 등)에 미지 파일로 인식되는지 확인하지 못했다.\n- relay가 gameDir의 control 파일을 프로세스 간 파일 락으로 읽는 경로가 Windows 프로세스 identity 검증 비용(study-service 주석 기준 초 단위) 안에서 bounded retry+503으로 수렴하는지는 설계만으로 판단할 수 없다.\n- 파킹 중 `endGame` 터미널 분기가 `stopRequested`를 세우기 전에 abort→publish를 수행한다는 순서는 설계상 정합하나, `beginAtomicTransition`의 `STOPPING` 예외와의 상호작용은 구현에서 검증이 필요하다.",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    },
+    {
+      "phase": "ux-r1",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "2054f1cba4c21eceb95f799ec8307b93583188b924ef2f4708ffb2d5ab32485f",
+        "decision_fingerprint": "b28911d783c4f99dfe352021dd2291b344135ed17a201393850e9c1730a6c7b5",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": [
+            "xai"
+          ]
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "HIGH",
+            "raised_by": []
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "task_class",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 1,
+        "selected_families": [
+          "xai"
+        ],
+        "local_policy_applied": true,
+        "task_class": "REVIEW",
+        "complexity": 1,
+        "uncertainty": 1,
+        "blast_radius": 1,
+        "reversibility": 0,
+        "reasoning_centric": false,
+        "risk_score": 5,
+        "risk_band": "MEDIUM",
+        "execution_score": 5,
+        "execution_band": "EASY",
+        "band_overrides_applied": [],
+        "band_overrides_redundant": [],
+        "critical_flags": [],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "worker_balanced",
+        "selected_model": "grok-4.6",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "MEDIUM",
+          "reviewers": [
+            "worker_balanced"
+          ],
+          "reviewer_models": [
+            "grok-4.6"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": true,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "673a14898afb7376643f19d8d818579756b20ad35d7e447d802b08a16b2583c9",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "worker_balanced",
+            "model_id": "grok-4.6",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 5/18 (c=1 u=1 b=1 r=0) -> band MEDIUM; execution 5/18 -> EASY. Worker worker_balanced at HIGH effort. Review band MEDIUM: worker_balanced, independence_required=True, review_independence=planned. No fallbacks applied."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "ux-r1-1",
+          "declared_model": "grok-4.6",
+          "model_usage_keys": [
+            "grok-4.6-build"
+          ],
+          "session_id": "af909c98-4044-402f-bc59-9dd7ab9195a9",
+          "effort_native": "high",
+          "prompt_sha256": "a4b71555a3dced4683d29d751c0a876f3fa2861122cde01622fb673469afea4f",
+          "stdout_sha256": "9f6b0afdd3487ce3df893d04ee986a9abadf366181b995f24c979243fa69372f",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "a9b4f253242830c1147e2051336d15e8aacd6e6f07724a89b099f7b3c046dc72",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.74\n\n핵심 요구(맨손 start→웹 모드 선택·자동 시작 없음, 웹에서 AI 수, 일시정지 메뉴의 모드 선택/재시작, 단일 이어가기 세션, 시작 취소 없음)는 설계에 반영되어 있다. 부족한 것은 구현이 아니라 **일시정지↔설정 왕복의 취소/복귀**, **학습실을 모드로 묶은 계층**, **메뉴 닫기 vs 재개**, **종료 후 라벨**이다.\n\nfindings:\n1. severity: high | category: cancel/back/continue\n   description: 일시정지 중 `모드 선택`에 명시적 취소·뒤로가 없다. 설정만 보다가 새 게임을 확정하지 않을 때 paused 메뉴로 돌아가는 버튼·목적지·라벨이 없다. 로비를 재사용하면 상단 `이어서 하기`와 하단 `게임 시작`이 동시에 보여, 뒤로가기가 재개인지 새 시작인지 헷갈린다.\n   evidence: §1 「설정 화면을 탐색하는 동안 현재 게임은 정지. 새 게임 확정 때만 기존 종료」만 있고, 미확정 이탈 경로가 없다. 로비 §2는 이어하기 카드와 게임 시작을 한 화면에 둔다.\n   required_fix: 설정에 `메뉴로 돌아가기`(paused 유지, 세션 유지)를 두고 `게임 시작`과 분리하라. 로비 재사용 시 이어하기를 1차 CTA로, 새 시작은 「현재 이어하기가 끝난다」확인 뒤에만 실행하라.\n\n2. severity: medium | category: mode/options hierarchy\n   description: 학습실을 캐시/토너먼트와 같은 「모드 카드」로 두면 테이블 모드처럼 보인다. 일시정지 메뉴는 `모드 선택`과 `학습실`을 형제로 두어, 모드 선택 안에 학습실이 다시 나오는지 불명하다. 학습실 왕복이 일시정지 세션을 유지하는지도 없다.\n   evidence: §2 로비 「모드 카드: 캐시 연습 / 토너먼트 / 학습실」 vs 「학습실은 테이블 모드가 아니다」. 테이블 메뉴에 둘 다 존재.\n   required_fix: 학습실을 모드가 아닌 `다른 화면`/`도구`로 분리하라. `모드 선택`은 캐시·토너먼트만. 학습실 입구에 「게임은 일시정지 상태로 유지」와 복귀 경로를 적어라.\n\n3. severity: medium | category: menu labels / continue\n   description: Escape는 자동 재개하지 않는다고만 하고, 메뉴를 닫는 컨트롤명이 없다. 일시정지 후에도 버튼이 `일시정지 · 메뉴`로 남으면 이미 멈춘 테이블에서 의미가 이중이다. 오버레이를 닫은 뒤 정지 상태를 나타내는 고정 진입점이 없다.\n   evidence: §2 「메뉴를 닫는 동작과 게임 재개는 구분하며 Escape는 게임을 자동 재개하지 않는다」. 재개 CTA는 `이어서 하기`뿐이다.\n   required_fix: `메뉴 닫기`(paused 유지)와 `이어서 하기`(재개)를 분리하라. 정지 중 테이블 크롬은 `일시정지됨 · 메뉴`로 바꾸고, 닫은 뒤에도 같은 버튼으로 메뉴를 다시 열게 하라.\n\n4. severity: medium | category: labels / completeness\n   description: 정상 종료의 `다시 플레이`가 일시정지의 `같은 설정으로 새 게임`과 같은지 불명하다. 접근성은 범위에만 있고 기본 계약(일시정지 키, 모달 포커스, 복귀 포커스, 모바일에서 상단 버튼 도달)이 없다.\n   evidence: 종료 후 CTA `다시 플레이` vs 메뉴 `같은 설정으로 새 게임`. 추가 기능에 「키보드·모바일 접근성」만 열거.\n   required_fix: 종료 후 동일 설정 재시작은 메뉴와 같은 문장으로 통일하라. 오버레이는 포커스 가둠·Esc=닫기(비재개)·복귀 포커스, 일시정지는 키보드 한 개와 모바일에서 닿는 위치를 명시하라.\n\nmissing_tests:\n- 일시정지 → 모드 선택 → 메뉴로 돌아가기 → 같은 gameId 재개\n- Esc/메뉴 닫기 후 비재개, 크롬에서 메뉴 재오픈\n- 학습실 왕복 후 이어하기 유지\n- 종료 후 `다시 플레이` = 같은 설정·새 gameId\n- 시작 전 캐시↔토너먼트 전환 시 숨은 필드가 잘못 제출되지 않음\n\nuncertainties:\n- `모드 선택`이 로비 전체 재사용인지 설정 패널인지\n- 학습실이 별도 탭/라우트일 때 일시정지 세션 생존\n- 구현 계획 테스트 행렬이 왕복·라벨을 이미 보완하는지(본문만 검토)",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    },
+    {
+      "phase": "ux-r2",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "06c2a9ed95a3d816900e3d42d8569a53723e70b9cfcf4f6ce1aaf772c5841b31",
+        "decision_fingerprint": "c1deef4fe52100fd316c5674e72a19195caa5e4aa5b672bf1246f03acb4b62ef",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": [
+            "xai"
+          ]
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "HIGH",
+            "raised_by": []
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "task_class",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 1,
+        "selected_families": [
+          "xai"
+        ],
+        "local_policy_applied": true,
+        "task_class": "REVIEW",
+        "complexity": 1,
+        "uncertainty": 1,
+        "blast_radius": 1,
+        "reversibility": 0,
+        "reasoning_centric": false,
+        "risk_score": 5,
+        "risk_band": "MEDIUM",
+        "execution_score": 5,
+        "execution_band": "EASY",
+        "band_overrides_applied": [],
+        "band_overrides_redundant": [],
+        "critical_flags": [],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "worker_balanced",
+        "selected_model": "grok-4.6",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "MEDIUM",
+          "reviewers": [
+            "worker_balanced"
+          ],
+          "reviewer_models": [
+            "grok-4.6"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": true,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "b0b90970c76bd174b2362afc41f8b6c8ce483a0296af1d2ea8368a29c4a7097c",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "worker_balanced",
+            "model_id": "grok-4.6",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 5/18 (c=1 u=1 b=1 r=0) -> band MEDIUM; execution 5/18 -> EASY. Worker worker_balanced at HIGH effort. Review band MEDIUM: worker_balanced, independence_required=True, review_independence=planned. No fallbacks applied."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "ux-r2-1",
+          "declared_model": "grok-4.6",
+          "model_usage_keys": [
+            "grok-4.6-build"
+          ],
+          "session_id": "bb9439f4-013e-4a96-9288-67710bd7c0bc",
+          "effort_native": "high",
+          "prompt_sha256": "5f0043c6268cd1389a4d77aec93fc0cf37c6598cfffdb48aa3d9ae319c425bc0",
+          "stdout_sha256": "4cf98a9a7e80d90386a6e666429d124e568c20440ca737cd6651d4122c50d4d9",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "d406b010ef96cef97ed581c63056b5f373b378eb4fdb0c111a14391f2b1c2b34",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.84\n\n맨손 `start game`은 세션·배분·LLM 없이 로비만 열고 자동 재개하지 않는다. 캐시/토너먼트와 AI 1~8(총원 병기)을 고른 뒤 `게임 시작`한다. 일시정지는 즉시 조작을 막고 메뉴에 이어하기·같은 설정 새 게임·모드 선택·기록 남기고 종료를 둔다. 메뉴 닫기·Escape는 재개가 아니다. 학습실은 별도 진입·별도 탭이다. 단일 이어가기·시작 취소 없음은 1차에 맞다. 아래 세 가지를 고치면 구현 가능하다.\n\nfindings:\n1. severity: medium / category: 확인\n   description: 유일한 이어가기 게임이 있는데 로비에서 `게임 시작`을 누르면 이전 이어하기가 끝나지만, 그 경고가 테이블 메뉴 쪽에만 있다.\n   evidence: §1 「확정하면 이어하기는 종료, 기록은 남는다」. 종료·새 게임 확인문(핸드 중단·이어가기 불가)은 테이블 메뉴에만 명시. §2 로비는 요약과 `게임 시작`만 적는다.\n   required_fix: 이어하기 카드가 보일 때 로비 `게임 시작`에도 같은 확인을 넣고, 취소 시 로비와 현재 게임을 유지한다.\n2. severity: medium / category: 라벨\n   description: `모드 선택`은 모드만이 아니라 AI 수·상대·고급 설정 전체다. 요구명 `다시 시작`과 버튼 `같은 설정으로 새 게임`, 로비 `학습실 열기`와 메뉴/종료 후 `학습실`이 갈린다.\n   evidence: §1 표 「다른 모드」→`모드 선택`. §2는 로비 설정 컴포넌트 재사용. 학습실 표기는 화면마다 다름.\n   required_fix: 메뉴를 `모드·설정`처럼 범위가 보이게 한다. 재시작은 `같은 설정으로 새 게임`만 쓴다. 학습실 진입은 모두 `학습실 열기`.\n3. severity: medium / category: 접근성\n   description: 복기/리뷰와 메뉴의 모달 승자가 없고, `일시정지됨 · 메뉴`가 재개 토글처럼 읽힐 수 있다. 모바일 터치 최소 크기는 없다.\n   evidence: 접근성 절은 「두 modal 동시 활성 금지·우선순위」만 있고 승자를 안 적는다. 닫기 후 남는 버튼이 상태와 메뉴 열기를 한 컨트롤에 붙인다.\n   required_fix: 일시정지 메뉴가 복기 overlay보다 위이고 단축키는 메뉴 동안 죽인다. paused 버튼은 `메뉴 열기`로 재개와 분리한다. 포커스 복귀·44px 터치·가로 스크롤 없는 메뉴를 적는다.\n\nmissing_tests: 옵션 없는 start가 저장 게임이 있어도 로비만 열 것; 키보드 start→pause→Escape(비재개)→`이어서 하기`; 로비 새 게임 확인 취소; 학습실 새 탭 동안 paused 유지; 복기+메뉴 충돌; 좁은 화면 확인창.\n\nuncertainties: `멈추는 중`에 학습실 허용 여부. 모드·설정 화면 Escape가 메뉴 복귀인지 overlay만 닫기인지(본문은 후자). 같은 URL에서 브라우저 뒤로가기가 설정 탐색과 생명주기를 어떻게 나누는지.",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    },
+    {
+      "phase": "plan-r1",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "9a041bf94cd0e8a909af118cfa13cdf8549be2ca43a454d2cd3a8c8fa40f21fe",
+        "decision_fingerprint": "81634493e1b2bc4b0fa8a5d9e1d2684c214a46a8ca041b909ca966eb20f0317d",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "claude-fable-5-1"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": false,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "provider may substitute another claude model for security_sensitive content; the requested identity of claude_architect is declared_only",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "5ffaf6cb323aff18ee32d5800747ac04968803f13735da5f7eb2115dc61f103a",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "claude-fable-5-1",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied. cross_family_review=false — reviewers share a family; weigh the second verdict accordingly."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "plan-r1-1",
+          "declared_model": "claude-opus-5",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "session_id": "2036aa8e-355f-43fc-97e9-bc6a1586669d",
+          "effort_native": "high",
+          "prompt_sha256": "9f2cdd684b6737a58fc9e710fd548bdc26d4c2d37babbd5467ef0ca5f05065a0",
+          "stdout_sha256": "49a9c8e40dd01087faaa5068bbbd18cdab35439887795308f228154e65f71750",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "4f07e6992171f4287f86be679b04ff326e9b89c3ba4ce9deeee50272a7c84e8b",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.74\nfindings:\n  - severity: medium\n    category: regression-coverage\n    description: T4 requires `aborted` phase to be accepted by resume-check/rollback-guard consumers, but no test file is named for that consumer, and the current allowlist rejects the new phase outright.\n    evidence: \"tools/coach-control.js:1130 `const phases = new Set(['bootstrap','playing','finalizing','review_generated','review_published','done'])` -> an aborted loop-state yields reasons.push({code:'loop_state_unreadable', detail:{error:'UNKNOWN_PHASE'}}). Plan T4 names tools/coach-control.js in prose but its test list is only test/session-abort.test.js, test/training-async-pipeline.test.js, test/study-summary.test.js, '기존 종료/복구 테스트'.\"\n    required_fix: Add the concrete resume-check/rollback-guard test file to T4 with a RED case asserting phase=aborted + result=abort is terminal-but-not-done, and that pending publish/action/coach/training/cleanup errors still gate.\n  - severity: medium\n    category: ci-activation\n    description: T8.4 mandates Windows-only required tests for app lifecycle/lock/control-race/cleanup but names neither the test file set, the npm script, nor the workflow job, so activation of the mandatory Windows boundary is left undefined.\n    evidence: \".github/workflows/test.yml:62-68 runs the full suite only `if: runner.os != 'Windows'`; the Windows leg executes only test/platform-learning-runtime.test.js. Plan T8 says only '필요 시 .github/workflows/test.yml의 기존 지원 축에 필수 테스트 연결'.\"\n    required_fix: Enumerate the Windows-required files (e.g. app-service/app-command-store/session-control-race/session-launcher cleanup), the package.json script that runs exactly those, and the workflow step guarded by runner.os == 'Windows'.\n  - severity: medium\n    category: production-path-validation\n    description: The new browser journey has no defined entry point or gating parity with the existing journey harness, so U9/T8.1 cannot be invoked or enforced as written.\n    evidence: \"Plan T8 adds test/browser/lobby-session-journey.mjs and test/helpers/lobby-session-fixtures.mjs but no run command; the existing harness exports journeyScenarioPlan/requiredJourneyChecks and browserCliEnabled(env){return !env.NODE_TEST_CONTEXT} (test/browser/learning-journey.mjs:18-42) plus test/helpers/learning-browser-fixture.mjs (createLearningBrowserFixture, runOwnedCommand, hashTree).\"\n    required_fix: State that the new journey reuses the learning-browser-fixture ownership/cleanup and CLI-gating pattern, declare the required-scenario list, and name the npm script plus the test that asserts scenario coverage.\n  - severity: low\n    category: plan-design-consistency\n    description: The HTTP surface omits replace-current, which §5, T1 and T5 treat as a first-class command with distinct setup rules and journal stages.\n    evidence: \"Design §8 table: 'POST /api/commands | start/pause/resume/end/restart'. Design §5: 'start/resume/pause/end/restart/replace-current 모두 같은 직렬 큐를 통과한다' and 'setup은 start/replace-current에만 허용한다'.\"\n    required_fix: Add replace-current to the §8 endpoint enumeration (same route, same allowlist) so T5's route/allowlist implementation and T1's setup-rejection matrix agree with the API contract.\nmissing_tests:\n  - resume-check/rollback-guard accepting phase=aborted while still failing on pending publish/coach/training/cleanup errors\n  - Windows-specific app.lock descriptor, control->receipt cross-process lock ordering, and child/relay cleanup on the supported Windows CI axis\n  - browser journey scenario-coverage assertion (required checks list) plus real-store-unchanged and orphan-process/leftover-lock checks for app/loop/relay/study\n  - deliver() idempotent re-delivery of an already-delivered receipt driven through the loop's private wait-action recovery path (server/action-receipts.js:275-287) after fetch abort\n  - relay refusal with CONTROL_UNAVAILABLE/CONTROL_BUSY when a managed-launched relay restarts with the same controlProtocolVersion/epoch but a deleted or corrupt control file\nuncertainties:\n  - operationId derivation for endGame/restart (from requestId vs independently generated) is unspecified; deterministic derivation is implied by idempotent duplicate end but not stated\n  - concrete file-lock adapter and scheduler APIs for session-control are deliberately deferred to existing implementations and proven only via M3-M14\n  - exact loop-side acquisition of relay port/sessionToken for the extracted wait fetch (currently read from the server lock in tools/publish.js:630) is left to the implementer\n  - real-LLM smoke scope in T8.2 is measured once and separated from fake adapters; its pass/fail threshold is not defined",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        },
+        {
+          "attempt_id": "plan-r1-2",
+          "declared_model": "claude-fable-5-1",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5-1"
+          ],
+          "session_id": "e78e31e2-1a6e-41e2-a2e1-e19933017f25",
+          "effort_native": "high",
+          "prompt_sha256": "9f2cdd684b6737a58fc9e710fd548bdc26d4c2d37babbd5467ef0ca5f05065a0",
+          "stdout_sha256": "cc3c7a72a44ccf63548454ea8f722ec6f6b7d08430a9b632f79a122e93bd91a2",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "69ada2c8a07e33cb63dadb7b343c168678ec44457af73c25114f08bcedbf12bf",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS_WITH_CHANGES\nconfidence: 0.78\nfindings:\n  - severity: medium\n    category: plan/design consistency (ownership)\n    description: \"Signal-handler ownership is stated two ways. Design §4 requires app-service to install umask/signal handlers once and never per loop; plan T2 says process signal handlers/exit live 'only in CLI main'. T5 never assigns handler installation to app-service, so managed mode has no named owner.\"\n    evidence: \"Design §4 'app-service는 umask 0077와 프로세스 신호 처리기를 한 번 설치'; Plan T2 '프로세스 signal handler/exit는 CLI main에만 둔다'; T5 bullets omit it.\"\n    required_fix: \"Reword T2 to 'launcher/loop install none'; add a T5 bullet: app-service installs handlers once at process start, forwards to current loop.requestStop, and a test asserts listener count is stable across N loop re-creations.\"\n  - severity: medium\n    category: activation ordering\n    description: \"T7 rewrites the start-game skill default before T8 integration, while plan §4 and design §9 require opt-in first and default flip only after T8/review. The opt-in mechanism itself (env flag vs npm entry only) is not named.\"\n    evidence: \"T7 '스킬 기본은 …로비 open으로 바꾼다' precedes T8; §4 'T8 완료 후 기본 진입을 바꾼다'; T8.6 '전체 통합/리뷰 완료 뒤에만 스킬 default 활성화'.\"\n    required_fix: \"Split T7: T7a adds `npm run app`/`app:stop`, docs, and the lobby contract test under an explicit opt-in (SKILL.md unchanged); T7b flips SKILL.md default and is sequenced after T8 gates. State that rollback of T7b is a doc revert while T3/T5 runtime metadata follows the roll-forward rule.\"\n  - severity: low\n    category: concrete files\n    description: \"T1 lists only new files, but delegating applyModeDefaults to the CLI profile requires editing its existing host module, and parity with engine/cli.js parseAi/parseBlinds needs a stated mechanism since those call usage() (process exit) and cannot be imported as pure validators.\"\n    evidence: \"T1 files: 신규 shared/game-setup.js, shared/session-control-contract.js only; engine/cli.js:100-108.\"\n    required_fix: \"Name the file holding applyModeDefaults under T1 '수정'; state parity is proven by a table-driven test over cli.js via child invocation, not by import.\"\n  - severity: low\n    category: design internal consistency\n    description: \"Design §8 POST /api/commands enumerates start/pause/resume/end/restart but §5 and plan T1/T5 include replace-current.\"\n    evidence: \"Design §8 table vs §5 'replace-current는 paused에서…' and T1 'setup은 start/replace-current 전용'.\"\n    required_fix: \"Add replace-current to the §8 route row (design edit only).\"\n  - severity: low\n    category: reuse\n    description: \"T8 introduces test/helpers/lobby-session-fixtures.mjs without reusing the existing browser fixture utilities (productionDependencies, runOwnedCommand, hashTree, real-store-unchanged check).\"\n    evidence: \"test/browser/learning-journey.mjs:6-13, scenario 'real-user-store-unchanged'.\"\n    required_fix: \"State that the new fixture composes learning-browser-fixture.mjs and keeps the real-user-store-unchanged scenario.\"\nmissing_tests:\n  - \"Pause issued after natural game end / during finalization resolves to finalizing→completed, never paused (design §5 pausing row).\"\n  - \"Managed relay control gate: lock contention returns 503 CONTROL_BUSY after bounded retry; control file deleted/corrupt returns 503 CONTROL_UNAVAILABLE; standalone relay without controlProtocolVersion keeps legacy behavior.\"\n  - \"External direct CLI changes current between accepted journal write and loop lock: same requestId retry stays CURRENT_CHANGED, reservation/staging audit preserved.\"\n  - \"Signal/exit listener count unchanged across repeated loop create/stop in one app process.\"\n  - \"Study open from paused game: new tab, no resume command sent, playState still paused; study open from bare lobby creates no session.\"\n  - \"coach-control resume-check/rollback-guard with loop-state phase=aborted: not UNKNOWN_PHASE, not cleanup-success by phase alone (tools/coach-control.js:1130).\"\n  - \"Windows-only run of app lifecycle/lock/control-race/cleanup tests wired into test:ci:windows or a new CI step, asserted present in test/lobby-release.test.js.\"\nuncertainties:\n  - \"Whether T2 can 'prepare' resume() for the pause gate before session-control.js exists in T3; assume T2 threads an optional gate hook with a no-op default.\"\n  - \"Location of the command journal/app descriptor directory inside the store is unspecified; routine choice, must be covered by the private-path-not-logged test.\"\n  - \"Engine partial-hand audit shape (T4 'necessary engine mutation/archive helper') is left to implementation; acceptable only if the completed-hand aggregate byte-preservation test is written first.\"",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    },
+    {
+      "phase": "plan-r2",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "63e91815c8bdfffc7747c860dc758b16f21a78f81ca9a35665733cda65bb64a7",
+        "decision_fingerprint": "3622c47d137a03d7ee767b160b246014e0ddecbf1c508f43fc6fb9658d204a49",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "unrecognized",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "claude-fable-5-1"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": false,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "provider may substitute another claude model for security_sensitive content; the requested identity of claude_architect is declared_only",
+          "host seat model is not in the registry (model_comparison=unrecognized): the registry may be stale - bump the id and re-probe",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "bb7b988d99fa353d0db3c666839bf24226223faaa71b8f1b00ff97eca162f9ec",
+          "author_model_ids": [],
+          "author_families": [
+            "openai"
+          ]
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "claude-fable-5-1",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied. cross_family_review=false — reviewers share a family; weigh the second verdict accordingly."
+      },
+      "verification": {
+        "exit_code": 0,
+        "fingerprint_and_model_match": true,
+        "receipt_guard_required": true
+      },
+      "reviews": [
+        {
+          "attempt_id": "plan-r2-1",
+          "declared_model": "claude-opus-5",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "session_id": "5db980f4-b3c2-42e5-837a-c2d001656600",
+          "effort_native": "high",
+          "prompt_sha256": "d20e92512065b5e4df72322a24ae09906773b46d05cc7528afb3b57696382630",
+          "stdout_sha256": "6e7b6ee296df8171ffbe3b6951593e434f3564e9fe0c1ae9c1add83b70bc2d65",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "e35f0f7ed82f643556110187d039aa70e76136b4604636ba955485f058e3bf78",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS\nconfidence: 0.79\nfindings:\n  - severity: MEDIUM\n    category: contract-completeness\n    description: 상태×명령 허용 행렬이 설계·계획 어디에도 열거되지 않고 T1로 위임된다. restart/replace-current가 paused 외에 completed/ended/error에서 허용되는지 문서에 확정 문장이 없다.\n    evidence: 설계 §5 전이표의 ended/completed 행은 \"새 게임 또는 학습실\"만 적고, 계획 T1 마지막 불릿은 \"상태별 allowedCommands/error code를 확정한다\"로 넘긴다.\n    required_fix: 비차단. T1의 test/session-control-contract.test.js를 상태×명령 table-driven으로 작성해 행렬을 코드 계약으로 고정하면 충분하다.\n  - severity: LOW\n    category: platform-coverage\n    description: test:lobby:windows 고정 6파일에 test/session-pause.test.js가 없어 Windows에서는 control→receipt 경합(session-control-race)만 돌고 drain/park 경계 자체는 macOS/Linux 증거에 의존한다.\n    evidence: 계획 T8-4의 test:lobby:windows 목록은 app-service/app-command-store/session-launcher/session-control-race/session-abort/app-server-security.\n    required_fix: 비차단. 의도적 축소면 T8 validation 문서에 \"Windows 미실행 항목\"으로 기록.\n  - severity: LOW\n    category: doc-consistency\n    description: 신규 락인 app.lock.d를 \"기존 app.lock.d\"로 서술해 study helper 락 재사용처럼 읽힐 여지가 있다.\n    evidence: 계획 T5 두 번째 불릿 \"descriptor/journal은 ... 기존 app.lock.d는 store root다\".\n    required_fix: 비차단. 구현 시 신규 락임을 문구로 정정.\nmissing_tests: []\nuncertainties:\n  - T1 RED/GREEN은 스키마↔엔진 검증 parity를 명시하지만 lobby/CLI 두 profile의 의도적 차이(토너먼트 상대 기본)를 고정하는 케이스는 T2의 \"기존 direct CLI 결과와 비교\"에 흡수된 것으로 읽힌다. 구현 시 어느 파일이 소유하는지만 정하면 된다.\n  - 설계 §6.3의 private wait-action 재호출 회수는 현재 action-receipts deliver(이미 delivered면 동일 payload 재전달)와 일치함을 소스로 확인했으나, relay 재기동 직후 in-memory waiter 부재 시 재호출 경로는 T3 구현에서 실측 필요(테스트 행렬 M4/M6에 배정됨).\n  - T7a/T7b 분리로 스킬 기본 전환이 T8 뒤로 밀리는 점은 명시 opt-in npm entry가 존재해 정합적이나, T8 step 1이 그 entry에 의존하므로 T7a 산출물이 실행 가능한 최소 형태여야 한다.",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        },
+        {
+          "attempt_id": "plan-r2-2",
+          "declared_model": "claude-fable-5-1",
+          "model_usage_keys": [
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5-1"
+          ],
+          "session_id": "fc6e2316-d022-45c1-8142-ce49eed50b18",
+          "effort_native": "high",
+          "prompt_sha256": "d20e92512065b5e4df72322a24ae09906773b46d05cc7528afb3b57696382630",
+          "stdout_sha256": "e4825d4061bbb32a5846301b307d931dcadfaee97c7ed223b68e80aa1fcca876",
+          "receipt_guard": {
+            "mechanism": "darwin-sandbox-v1",
+            "profile_sha256": "26d28382b070f3dfb325822c695feddb6fe75311318d3e03f8723937d1a71ca5",
+            "protected_root": "/private/tmp/ai-holdem-lobby-design-20260909/receipts",
+            "phase": "launched"
+          },
+          "termination_confirmed": true,
+          "result_state": "SUCCEEDED",
+          "review_text": "=== REVIEW ===\nverdict: PASS\nconfidence: 0.82\nfindings:\n  - severity: LOW\n    category: state-transition\n    description: 설계 §5 전이표는 paused에서 resume/end/setup 탐색만 나열하고 restart·replace-current(paused→stopping→starting 복합)는 본문에만 기술한다. 구현자는 본문(§5 restart 단락, T5 old terminal→cleanup→new)을 따르면 되므로 차단 아님.\n    evidence: \"설계 §5 표 'paused | resume → playing; confirmed end → stopping' vs 같은 절 'restart는 하나의 command 안에 ... 단계를 기록'\"\n    required_fix: 선택. 표에 'paused | restart/replace-current → stopping(old)→starting(new), 같은 requestId' 한 행 추가.\n  - severity: LOW\n    category: test-naming\n    description: lobby profile과 CLI profile의 의도적 차이(토너먼트 상대 기본 policy vs LLM)를 고정하는 parity 테스트는 설계 §2에 요구되나 T1 RED/GREEN 목록에는 엔진 검증 동치만 있고 profile 차이 고정 사례가 명시되지 않았다. 파일(test/game-setup.test.js)은 있으므로 사례만 추가하면 된다.\n    evidence: \"설계 §2 '두 profile의 의도적 차이 ... parity 테스트로 고정' / 계획 T1 RED/GREEN 목록\"\n    required_fix: 선택. T1 RED 목록에 'lobby/CLI profile 토너먼트 opponentRuntime 기본값 차이 및 applyModeDefaults 위임 결과 동치' 추가.\n  - severity: INFO\n    category: consistency-check\n    description: 순서 T1→…→T7a→T8→T7b 일관, signal 소유(launcher/loop 미설치·app-service 1회·listener count 테스트), aborted 소비자 RED(coach-control UNKNOWN_PHASE, rollback gate, CLI --resume GAME_ENDED), Windows 스크립트/step/release 가드, 브라우저 requiredJourneyChecks·browserCliEnabled, 메뉴 5항목↔6명령 매핑, RECOVERY_REQUIRED/CURRENT_CHANGED/ACTIVE_GAME 무자동복구 경계 모두 확인됨. 락/파일 어댑터 구체 API는 기존 구현 재사용으로 위임되어 허용 범위.\n    evidence: \"계획 §1, T2, T4, T5, T8(4), 설계 §5 복구표·§7 소비자표\"\n    required_fix: 없음.\nmissing_tests:\n  - \"T1: lobby vs CLI profile 기본값 차이 고정 사례(위 LOW)\"\n  - \"T3: 자연 종료(finalizing)와 pause 경쟁은 T8 추가 사례에만 있음; test/session-pause.test.js에도 단위 수준 사례로 두는 것을 권장(비차단)\"\nuncertainties:\n  - \"CLAUDE.md 실재 여부는 T7a가 '확인 후'로 조건화해 두었으므로 착수 시 확인\"\n  - \"T8 실제 LLM smoke는 환경 가용성에 따라 미실행 보고가 될 수 있으며 계획이 이를 허용함\"",
+          "schema_note": "Supervisor validates verdict presence, not every YAML field; original text retained for manual assessment."
+        }
+      ]
+    }
+  ]
+}
