@@ -82,6 +82,13 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'holdem-diag'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           echo "AI_HOLDEM_PLATFORM_DIAGNOSTICS=$dir" >> $env:GITHUB_ENV
+      # Hosted images may spend most of the first call loading Windows
+      # PowerShell/.NET and compiling the native directory helper. Preparation
+      # proves the actual ACL/lock under a bounded cold budget; the gate below
+      # repeats the same operations with the unchanged production 15s cap.
+      - name: Prepare cold Windows privacy dependencies
+        timeout-minutes: 3
+        run: node test/helpers/windows-privacy-probe.mjs --cold-start
       - name: Verify Windows private directory creation
         run: node test/helpers/windows-privacy-probe.mjs
       - name: Verify the Windows child environment can prove privacy
