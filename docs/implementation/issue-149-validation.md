@@ -58,7 +58,25 @@ child-allowlist proof. No product code, ACL policy or required check is changed.
 
 The larger allowance addresses measured cold setup costs on hosted CI; it does
 not claim that Windows process startup has been optimized or that every possible
-host stall is eliminated. Final Windows matrix evidence is pending.
+host stall is eliminated. Final matrix status and subsequent validation are
+tracked on [PR #178](https://github.com/Sungmin-Cho/AI-Holdem/pull/178).
+
+## First full matrix and residual lifecycle budget
+
+- SHA `919e3fd482414000c25ea58bd3f22b840fd59922`: local Node 22 full suite passed
+  2,253 tests, zero failed/cancelled/skipped (697 seconds).
+- [Run 34438962309](https://github.com/Sungmin-Cho/AI-Holdem/actions/runs/34438962309):
+  all 12 cold/ordinary/child-environment gates passed. Node 22 Windows loop later
+  cancelled `repair_failed halt clears only after resume-check reports a successful
+  repair boundary` at its literal 10-second test timeout (11.93s including
+  cancellation). There was no failed assertion; the same test passed in 5.12s on
+  Node 20 Windows. The loop proof profile had zero PowerShell timeouts.
+- Its inner `waitForUserSnapshot` already allows `3_000 * WIN32_SCALE` (30s on
+  Windows), exceeding the enclosing 10s lifecycle budget. The test is about repair
+  correctness, not a performance SLA. Its outer timeout now uses the existing
+  `10_000 * WIN32_SCALE`, like adjacent recovery tests; assertions, inner waits,
+  product deadlines and POSIX budgets are unchanged.
+- Long-term warm proof-call optimization is tracked separately in issue #179.
 
 The privacy/identity checks, caller deadlines, retry diagnostics and six-shard
 coverage must remain enforced. No unchecked timeout or unknown proof becomes
