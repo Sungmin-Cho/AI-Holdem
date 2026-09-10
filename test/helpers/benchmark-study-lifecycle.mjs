@@ -8,7 +8,9 @@ import {execFileSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 import {completeProofRows,summarizeStudyRows} from './study-benchmark-evidence.mjs';
 
+async function main() {
 const args=process.argv.slice(2);
+if(!args.includes('--out')) throw new Error('--out is required for an explicit benchmark');
 const option=(name,fallback)=>args.includes(name)?args[args.indexOf(name)+1]:fallback;
 const implementation=path.resolve(option('--implementation','.'));
 const out=path.resolve(option('--out','study-lifecycle.json'));
@@ -123,3 +125,5 @@ for(let rep=0;rep<repeats;rep++) {
 const result=persistEvidence(true);
 process.stdout.write(JSON.stringify({label,sha,passed:result.passed,summary:result.summary})+'\n');
 process.exitCode=failed?1:0;
+}
+if(process.argv.includes('--out') || !process.env.NODE_TEST_CONTEXT) await main();

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {summarizeStudyRows} from './study-benchmark-evidence.mjs';
+function main() {
 const dir=path.resolve(process.argv[2]??'evidence');
 const files=fs.readdirSync(dir).filter(name=>/^(baseline|candidate)-[0-2]\.json$/.test(name));
 const records=files.map(name=>JSON.parse(fs.readFileSync(path.join(dir,name),'utf8')));
@@ -30,3 +31,5 @@ process.stdout.write(markdown);
 if(process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,markdown);
 fs.writeFileSync(path.join(dir,'paired-summary.json'),JSON.stringify({schemaVersion:1,passed,...sides},null,2));
 process.exitCode=passed?0:1;
+}
+if(!process.env.NODE_TEST_CONTEXT) main();
