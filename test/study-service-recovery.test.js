@@ -9,6 +9,7 @@ import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtur
 import { skipOnWin32 } from './helpers/platform.js';
 import { acquireOwnedLock, releaseOwnedLock, ownedProcessStartTime as processStartTime } from '../engine/state.js';
 import { CLIENT_WAIT_MS } from '../tools/study-service.js';
+import {createPrivateDirectory} from '../shared/platform-files.js';
 import {
   descriptorPath,
   lockPath,
@@ -19,6 +20,18 @@ import {
   request,
   REQUEST_MS,
 } from './helpers/study-service-fixtures.mjs';
+
+test('inspect and stop retain ownership through a noncanonical ancestor alias',async t=>{
+  const root=createOwnedTempDir('holdem-study-alias');
+  const actual=path.join(root,'actual'),store=path.join(actual,'store'),alias=path.join(root,'alias');
+  createPrivateDirectory(actual);createPrivateDirectory(store);
+  fs.symlinkSync(actual,alias,process.platform==='win32'?'junction':'dir');
+  const launched=await launch(t,{},store),api=await service();
+  const requested=path.join(alias,'store');
+  assert.notEqual(path.resolve(requested),fs.realpathSync(requested));
+  assert.equal((await api.inspectStudyService(requested)).instanceId,launched.handle.instanceId);
+  assert.equal((await api.stopStudyService(requested,{expectedInstanceId:launched.handle.instanceId})).stopped,true);
+});
 
 test('REQ-010: separate Node ensure clients converge on one owned listener', async (t) => {
   const storeDir = createOwnedTempDir('holdem-study-multi-client');

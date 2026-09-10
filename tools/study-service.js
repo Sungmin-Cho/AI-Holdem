@@ -497,10 +497,17 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
 function readContextOwnership(storeDir) {
   if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
   const root = path.resolve(storeDir);
-  return aclTransaction({ root, training: path.join(root, '.training') }, () => {
+  const initial = aclTransaction({ root, training: path.join(root, '.training') }, () => {
     const ctx = context(storeDir);
+    // Alias/8.3 spellings do not match the canonical proof keys. Keep the
+    // original second transaction for those paths, rather than doing every
+    // canonical read as an individual proof fallback inside the alias scope.
+    if (ctx.root !== root) return { ctx };
     return { ctx, descriptor: readDescriptor(ctx), owner: readLock(ctx) };
   });
+  if (initial.ctx.root === root) return initial;
+  const ctx = initial.ctx;
+  return aclTransaction(ctx, () => ({ ctx, descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
 }
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
