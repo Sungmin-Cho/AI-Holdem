@@ -230,7 +230,7 @@ function codexThreadId(stdout) {
 // 앞선 error/progress 뒤 정말 마지막 completed item이 비어 있지 않은 agent_message일
 // 때만 그 text를 모델 응답으로 취급한다. 이전 메시지 뒤 error/reasoning 등 다른
 // completed item이 오면 이전 메시지를 재사용하지 않는다.
-function codexFinalMessage(stdout) {
+function codexFinalMessage(stdout, { allowEmpty = false } = {}) {
   const events = parseJsonLines(stdout);
   if (events === null) return null;
   let finalCompletedItem = null;
@@ -244,7 +244,7 @@ function codexFinalMessage(stdout) {
     || finalCompletedItem?.type !== 'agent_message'
     || typeof finalCompletedItem.text !== 'string') return null;
   const text = finalCompletedItem.text.trim();
-  return text === '' ? null : text;
+  return text === '' && !allowEmpty ? null : text;
 }
 
 function claudeStreamText(events) {
@@ -295,11 +295,11 @@ function claudeStreamAudit(stdout) {
   return { clean, text: claudeStreamText(events) };
 }
 
-function parseResponse(format, stdout) {
-  if (format === 'codex-jsonl') return codexFinalMessage(stdout);
+function parseResponse(format, stdout, { allowEmpty = false } = {}) {
+  if (format === 'codex-jsonl') return codexFinalMessage(stdout, { allowEmpty });
   if (format === 'claude-stream') return claudeStreamAudit(stdout).text;
   const trimmed = String(stdout).trim();
-  return trimmed === '' ? null : trimmed;
+  return trimmed === '' && !allowEmpty ? null : trimmed;
 }
 
 // ── 플레이어 프롬프트 정본 ───────────────────────────────────────────────────
@@ -688,9 +688,12 @@ export function createPlayerRuntime(kind, opts = {}) {
         } finally {
           timer.cancel();
         }
-        const raw = parseResponse(format, result.stdout);
+        const raw = parseResponse(format, result.stdout, { allowEmpty: true });
         if (result.code !== 0 || !raw) {
-          throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 1회성 호출이 실패했습니다.`, { exitCode: result.code, signal: result.signal });
+          throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 1회성 호출이 실패했습니다.`, {
+            exitCode: result.code, signal: result.signal,
+            ...(result.code === 0 && raw === '' ? { outputKind: 'empty', raw: '' } : {}),
+          });
         }
         return { raw };
       })();

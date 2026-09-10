@@ -22,7 +22,7 @@ import {
   engineInitFlags,
   applyModeDefaults,
 } from '../tools/game-loop.js';
-import { RUNTIME_TABLE } from '../tools/player-runtime.js';
+import { RUNTIME_TABLE, createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { newDeck } from '../engine/cards.js';
 import { prepareSession } from '../engine/session-catalog.js';
@@ -38,6 +38,7 @@ const CLI = path.join(ROOT, 'engine/cli.js');
 const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER = path.join(ROOT, 'server/server.js');
 const GAME_LOOP = path.join(ROOT, 'tools/game-loop.js');
+const REVIEW_TEST_TIMEOUT = process.platform === 'win32' ? 200_000 : 40_000;
 const REAL_PS = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
 const REAL_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 const VALID_REVIEW = [
@@ -3636,15 +3637,14 @@ test('AI 3 plus user runs the finalization cutoff through the real loop with chi
     }
   })();
 
-  // The fake upper has no oneshotStart, so the sequence runs the full cutoff and then
-  // refuses to fabricate a review.
-  await assert.rejects(running, (error) => error.code === 'REVIEW_FAILED');
+  // The fake upper has no oneshotStart; the factual fallback still closes the game.
+  assert.equal((await running).phase, 'done');
   await driver;
   const engine = readJson(path.join(gameDir, 'state.json'));
   assert.equal(chipTotal(engine), 400);
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(loopState.phase, 'finalizing');
-  assert.equal(loopState.halt.code, 'REVIEW_FAILED');
+  assert.equal(loopState.phase, 'done');
+  assert.equal(loopState.halt, undefined);
   assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
   assert.equal(adapter.decideCalls.length > 0, true);
   assert.equal(sent.size > 0, true);
@@ -6392,7 +6392,7 @@ test('done resume adopts a live server so normal cleanup stops it without spawni
   await waitUntilDead(external.child.pid);
 });
 
-test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and re-halts on the review gate', { timeout: 20_000 }, async (t) => {
+test('upper-null finalization keeps notices, clears REVIEW_FAILED, and finishes with a factual review', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   writeLoopStateFixture(gameDir, init.sessionToken, {
@@ -6422,7 +6422,7 @@ test('upper-null finalization keeps notices and phase, clears REVIEW_FAILED, and
   ]);
   assert.equal(Object.hasOwn(resumed, 'halt'), false);
   assert.notEqual(resumed.ownerSessionId, 'old-owner');
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+  assert.equal((await loop.run()).phase, 'done');
 });
 
 test('종료: 마지막 핸드 코치를 재-reserve하지 않고 finalizing 체크포인트로 전이한다', { timeout: 40_000 }, async (t) => {
@@ -7528,16 +7528,16 @@ test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION
   assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
 });
 
-test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FAILED로 멈춘다', { timeout: 40_000 }, async (t) => {
+test('#171: upperAdapter가 null이면 사실 기반 리뷰로 종료한다', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, { upper: null });
 
   await loop.resume();
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+  assert.equal((await loop.run()).phase, 'done');
 
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(loopState.halt.code, 'REVIEW_FAILED');
+  assert.equal(loopState.halt, undefined);
   const expectedBudget = process.platform === 'win32' ? 200_000 : 20_000;
   assert.equal(loopState.finalization.budgetMs, expectedBudget, '기본 finalization 예산은 POSIX 20초, win32 200초다');
   assert.equal(loopState.finalization.resultWaitMs, expectedBudget - 10_000);
@@ -7546,7 +7546,7 @@ test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FA
   assert.equal(Object.hasOwn(loopState.finalization, 'reviewHandoff'), false);
   assert.equal(coachInvocations(calls, 'completeness').length, 0);
   assert.equal(loopState.notices.some((notice) => notice.includes('리뷰')), true);
-  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+  assert.match(fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8'), /LLM 설명을 제공할 수 없습니다/);
   assert.equal(coachInvocations(calls, 'reserve').length, 0);
   const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
   assert.equal(note.unavailable, true, '코치 노트가 봉인되지 않았다');
@@ -7557,7 +7557,9 @@ test('종료: upperAdapter가 null이면 리뷰를 지어내지 않고 REVIEW_FA
 test('종료: finalizing 체크포인트는 재개해도 다시 봉인·게시하지 않는다', { timeout: 40_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
-  const first = finalizingLoop(t, gameDir, init.sessionToken, { upper: null });
+  const first = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter({ evaluatorRounds: [{ raw: '', terminate: { confirmed: false } }] }),
+  });
   await first.loop.resume();
   await assert.rejects(first.loop.run(), (error) => error.code === 'REVIEW_FAILED');
   await first.loop.requestStop();
@@ -7743,7 +7745,7 @@ test('Task 7B full review: concurrent requestStop이 먼저 시작돼도 done pa
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
-test('Task 7B: 종합자 heading 검증이 두 번 실패하면 각 attempt를 종료하고 REVIEW_FAILED로 원본 게임과 코치를 보존한다', { timeout: 40_000 }, async (t) => {
+test('#171: 종합자 heading 실패는 종료 확인 뒤 기계 리뷰로 원본 게임과 코치를 보존한다', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter({
@@ -7757,7 +7759,7 @@ test('Task 7B: 종합자 heading 검증이 두 번 실패하면 각 attempt를 �
   await loop.resume();
   const engineBefore = fs.readFileSync(path.join(gameDir, 'state.json'));
 
-  await assert.rejects(loop.run(), (error) => error.code === 'REVIEW_FAILED');
+  assert.equal((await loop.run()).phase, 'done');
 
   assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBefore);
   assert.equal(upper.evaluatorStarts.length, 1);
@@ -7769,9 +7771,11 @@ test('Task 7B: 종합자 heading 검증이 두 번 실패하면 각 attempt를 �
     [true, true],
   );
   const state = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(state.phase, 'finalizing');
-  assert.equal(state.halt.code, 'REVIEW_FAILED');
-  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+  assert.equal(state.phase, 'done');
+  assert.equal(state.halt, undefined);
+  const review = fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8');
+  assert.match(review, /LLM 설명을 제공할 수 없습니다/);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, review);
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).coach.length, 1);
 });
 
@@ -7793,6 +7797,193 @@ test('Task 7B: 실패한 evaluator 종료를 확인하지 못하면 retry나 종
   assert.equal(upper.synthesizerStarts.length, 0);
   assert.deepEqual(upper.reviewTerminations.map((entry) => entry.result.confirmed), [false]);
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
+});
+
+test('#172: review failures classify empty, claims and headings without logging rejected text', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: '' }, { raw: '참고용 과정 평가' }],
+    synthesizerRounds: [{ raw: '확정 누수입니다.' }, { raw: '필수 heading이 없습니다.' }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  const failures = readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed');
+  assert.deepEqual(failures.map((row) => row.code), ['EMPTY_REVIEW_OUTPUT', 'REVIEW_CLAIM_REJECTED', 'REVIEW_HEADINGS_MISSING']);
+  for (const row of failures) {
+    assert.equal(row.outputStatus, 'saved');
+    assert.ok(row.message.length > 0);
+    assert.equal(row.terminationConfirmed, true);
+  }
+  assert.equal(fs.readFileSync(path.join(gameDir, failures[0].outputPath), 'utf8'), '');
+  assert.equal(fs.readFileSync(path.join(gameDir, failures[1].outputPath), 'utf8'), '확정 누수입니다.');
+  assert.doesNotMatch(fs.readFileSync(path.join(gameDir, 'loop.log'), 'utf8'), /확정 누수입니다/);
+});
+
+test('#169: real Codex adapter completes first finalization with safe Korean caveats', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const scriptDir = createOwnedTempDir('review-codex-cli');
+  const scriptPath = path.join(scriptDir, 'script.json');
+  const logPath = path.join(scriptDir, 'calls.jsonl');
+  const caveats = [
+    '최적성이나 확정적 누수는 판정할 수 없다.',
+    '따라서 플레이의 최적성이나 확정적 누수를 판정할 근거는 없다.',
+    '선택 자체의 정답 여부보다 사전 계획을 점검한다.',
+    '아직 반복 성향이나 확정 누수로 단정할 수는 없습니다.',
+    '실제 아키타입은 참고 정보이지 개별 행동의 정답표가 아닙니다.',
+    '특정 액션을 정답으로 외우는 것이 아니라 근거를 세운다.',
+  ].join('\n');
+  const jsonl = (text) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\n';
+  fs.writeFileSync(scriptPath, JSON.stringify({
+    matchers: [
+      { includes: '역할: 격리 evaluator', reply: jsonl(caveats) },
+      { includes: '역할: 종합자', reply: jsonl(VALID_REVIEW + '\n' + caveats) },
+    ],
+    default: { reply: jsonl(JSON.stringify({ handNo: 1, text: '참고용 코치 기록' })) },
+  }));
+  const upper = createPlayerRuntime('codex', {
+    env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath },
+    exec: (spec) => spawnCli({ ...spec, command: process.execPath, args: [path.join(ROOT, 'test/helpers/fake-cli.js'), ...spec.args] }),
+  });
+  t.after(() => upper.dispose());
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter((row) => row.stdin.includes('역할: 격리 evaluator')).length, 1);
+  assert.equal(calls.filter((row) => row.stdin.includes('역할: 종합자')).length, 1);
+  assert.ok(calls.every((row) => row.argv.includes('--json')));
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW + '\n' + caveats);
+  assert.equal(readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed').length, 0);
+});
+
+for (const stage of ['evaluator', 'synthesizer']) {
+  test(`#171: ${stage} exhaustion requires confirmed termination on the second attempt`, { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const upper = makeCoachAdapter({
+      [`${stage}Rounds`]: [{ raw: '' }, { raw: '', terminate: { confirmed: false } }],
+    });
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+    await loop.resume();
+    await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+    const state = readJson(path.join(gameDir, 'loop-state.json'));
+    assert.equal(state.halt.reason, 'REVIEW_TERMINATION_UNCONFIRMED');
+    assert.equal(state.phase, 'finalizing');
+    assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+    assert.equal(readLoopLog(gameDir).some((row) => row.event === 'review-machine-fallback'), false);
+  });
+}
+
+test('#171: an undefined adapter rejection still terminates its review handle', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: 'unused', terminate: { confirmed: false } }] });
+  const start = upper.oneshotStart.bind(upper);
+  upper.oneshotStart = (input) => {
+    const handle = start(input);
+    return input.prompt.includes('역할: 격리 evaluator')
+      ? { ...handle, done: Promise.reject(undefined) }
+      : handle;
+  };
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+  assert.equal(upper.reviewTerminations.length, 1);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.reason, 'REVIEW_TERMINATION_UNCONFIRMED');
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+});
+
+for (const opponentRuntime of ['llm', 'policy']) {
+  test(`#171: ${opponentRuntime} evaluator exhaustion publishes factual review and supports done resume`, { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: '확정 누수라고 판정한다.' }, { error: Object.assign(new Error('CLI failed'), { code: 'CLI_FAILED' }) }] });
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { opponentRuntime } });
+    await loop.resume();
+    const engineBefore = fs.readFileSync(path.join(gameDir, 'state.json'));
+    assert.equal((await loop.run()).phase, 'done');
+    assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBefore);
+    assert.equal(upper.evaluatorStarts.length, 2);
+    assert.equal(upper.synthesizerStarts.length, 0);
+    const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+    assert.match(snapshot.review, /LLM 설명을 제공할 수 없습니다/);
+    assert.equal(snapshot.coach.length, 1);
+    const next = createGameLoop({ gameDir, resolver: async () => { throw new Error('done resume must not resolve models'); }, opts: { port: 0 } });
+    t.after(() => next.requestStop().catch(() => {}));
+    assert.equal((await next.resume()).phase, 'done');
+    assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).publishId, snapshot.publishId);
+  });
+}
+
+test('#171: corruption discovered after model exhaustion cannot become a fallback', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: '' }, {
+    raw: '',
+    onTerminate: () => {
+      const state = readJson(path.join(gameDir, 'state.json'));
+      state.result = 'unknown-result';
+      fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(state));
+    },
+  }] });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.reason, 'BAD_REVIEW_RESULT');
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+});
+
+test('#171: fallback rechecks completed-hand authority after the last review child terminates', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: '' }, {
+    raw: '',
+    onTerminate: () => {
+      const state = readJson(path.join(gameDir, 'state.json'));
+      state.lastHand.handNo += 1;
+      fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(state));
+    },
+  }] });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.reason, 'BAD_REVIEW_EVIDENCE');
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+});
+
+test('#172: real Codex empty output is classified and private diagnostics do not reach export', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const fixture = createOwnedTempDir('review-codex-empty');
+  const scriptPath = path.join(fixture, 'script.json');
+  const jsonl = (text) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\n';
+  fs.writeFileSync(scriptPath, JSON.stringify({
+    matchers: [{ includes: '역할: 격리 evaluator', reply: jsonl('') }],
+    default: { reply: jsonl(JSON.stringify({ handNo: 1, text: '참고용 코치 기록' })) },
+  }));
+  const upper = createPlayerRuntime('codex', {
+    env: { FAKE_CLI_SCRIPT: scriptPath },
+    exec: (spec) => spawnCli({ ...spec, command: process.execPath, args: [path.join(ROOT, 'test/helpers/fake-cli.js'), ...spec.args] }),
+  });
+  t.after(() => upper.dispose());
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  const failures = readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed');
+  assert.deepEqual(failures.map((row) => row.code), ['EMPTY_REVIEW_OUTPUT', 'EMPTY_REVIEW_OUTPUT']);
+  for (const row of failures) {
+    assert.equal(row.outputStatus, 'saved');
+    assert.equal(fs.readFileSync(path.join(gameDir, row.outputPath), 'utf8'), '');
+  }
+  const sentinel = 'PRIVATE_DIAGNOSTIC_SENTINEL';
+  fs.writeFileSync(path.join(gameDir, failures[0].outputPath), sentinel);
+  const out = path.join(fixture, 'export.json');
+  await execFileAsync(process.execPath, [path.join(ROOT, 'tools/export-hh.js'), '--game-dir', gameDir, '--format', 'canonical-json', '--out', out]);
+  assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /PRIVATE_DIAGNOSTIC_SENTINEL|review-diagnostics/);
+  assert.doesNotMatch(JSON.stringify(readJson(path.join(gameDir, 'ui-snapshot.json'))), /PRIVATE_DIAGNOSTIC_SENTINEL|review-diagnostics/);
 });
 
 test('Task 7B: review_generated resume은 모델을 재호출하지 않고 file envelope만 게시해 done으로 간다', { timeout: 20_000 }, async (t) => {

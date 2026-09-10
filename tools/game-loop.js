@@ -51,6 +51,7 @@ import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
 import { referenceClaimAllowed } from '../shared/reference.js';
+import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   buildExplanationPrompt,
@@ -4263,14 +4264,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const validateReviewOutput = (raw, { requireHeadings = false } = {}) => {
     if (typeof raw !== 'string' || raw.trim() === '') {
-      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+      throw codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
     }
     const text = raw.trim();
     if (!referenceClaimAllowed(text)) {
-      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 출력이 근거 범위를 벗어납니다.');
+      throw codedError('REVIEW_CLAIM_REJECTED', '리뷰 출력이 근거 범위를 벗어납니다.');
     }
     if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
-      throw codedError('INVALID_REVIEW_OUTPUT', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
+      throw codedError('REVIEW_HEADINGS_MISSING', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
     }
     return text;
   };
@@ -4294,6 +4295,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       let handle = null;
       let failure = null;
+      let raw;
       try {
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
@@ -4304,32 +4306,39 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('INVALID_REVIEW_HANDLE', `${stage} oneshot handle 계약이 올바르지 않습니다.`);
         }
         const completed = await handle.done;
-        return validateReviewOutput(completed?.raw, { requireHeadings });
+        raw = completed?.raw;
+        return validateReviewOutput(raw, { requireHeadings });
       } catch (error) {
-        failure = error;
+        if (error?.code === 'CLI_FAILED' && error?.exitCode === 0 && error?.outputKind === 'empty') {
+          raw = '';
+          failure = codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+        } else failure = error;
       }
 
       // Each failed attempt owns a distinct child and distinct 300-second adapter timer.
       // A second child may start only after the first child has positively terminated.
       const termination = await terminateReviewAttempt(handle);
+      const secrets = [readLoopState()?.sessionToken];
       log('review-attempt-failed', {
         stage,
         attempt,
         code: failure?.code ?? 'ERROR',
+        message: sanitizeReviewDiagnostic(failure?.message, secrets, 512),
         terminationConfirmed: termination.confirmed === true,
+        ...preserveReviewFailure(root, { stage, attempt, raw, secrets }),
       });
-      if (attempt === 1 && termination.confirmed === true) continue;
-      if (attempt === 1) {
+      if (termination.confirmed !== true) {
         throw codedError(
           'REVIEW_TERMINATION_UNCONFIRMED',
-          `${stage} 첫 시도 종료를 확인하지 못해 교체 시도를 시작하지 않습니다.`,
-          { cause: failure },
+          `${stage} ${attempt}번째 시도 종료를 확인하지 못해 리뷰를 중단합니다.`,
+          { cause: failure, stage, attempt },
         );
       }
+      if (attempt === 1) continue;
       throw codedError(
         'REVIEW_ATTEMPTS_EXHAUSTED',
         `${stage} 출력이 두 번 모두 계약을 만족하지 못했습니다.`,
-        { cause: failure },
+        { cause: failure, stage, terminationConfirmed: true },
       );
     }
     throw codedError('REVIEW_ATTEMPTS_EXHAUSTED', `${stage} 시도를 완료하지 못했습니다.`);
@@ -4437,7 +4446,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, observed?.sample)}, `
           + `프리플롭 레이즈 ${percent(observed?.pfr, observed?.sample)}.`;
       });
-    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배', loss: '패배' }[result] ?? '종료';
+    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배' }[result] ?? '종료';
     return [
       '## 내 성향 통계', '',
       `- 플레이한 핸드: ${count(user?.sample)}핸드`,
@@ -4475,15 +4484,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const generateReview = async ({ completed, statsRaw }) => {
+    const fallback = (reason) => {
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const players = readJsonOptional(playersPath, 'PLAYERS');
+      if (engine?.gameOver !== true || !['completed', 'abort', 'win', 'lose'].includes(engine.result)) {
+        throw codedError('BAD_REVIEW_RESULT', '기계 리뷰에 필요한 종료 결과가 올바르지 않습니다.');
+      }
+      if (!Array.isArray(players) || !players.some((player) => player?.playerId === 'user')
+        || players.some((player) => !player || typeof player.playerId !== 'string')) {
+        throw codedError('BAD_PLAYERS', '기계 리뷰에 필요한 플레이어 정보가 올바르지 않습니다.');
+      }
+      const stats = JSON.parse(statsRaw)?.perPlayer;
+      // A missing measurement can be displayed as unavailable, but a present
+      // malformed player row is corrupt evidence, including non-user rows.
+      if (!stats || typeof stats !== 'object' || Array.isArray(stats) || !stats.user
+        || Object.values(stats).some((row) => !row || !Number.isSafeInteger(row.sample) || row.sample < 0
+          || (row.net != null && !Number.isSafeInteger(row.net))
+          || ['vpip', 'pfr'].some((key) => row[key] != null && (!Number.isFinite(row[key]) || row[key] < 0 || row[key] > 1)))) {
+        throw codedError('BAD_REVIEW_STATS', '기계 리뷰에 필요한 관찰 통계가 올바르지 않습니다.');
+      }
+      const cutoff = readLoopState()?.finalization?.cutoff;
+      if (cutoff?.reviewGate !== 'open' || cutoff.terminationConfirmed !== true
+        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed
+        || stats.user.sample !== completed) {
+        throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
+      }
+      // Read derived evidence before optional sections can downgrade its errors.
+      readDerivedPolicyConfigs(root);
+      const review = validateReviewOutput(appendTrainingPendingToReview(machineReview({
+        statsRaw, players, result: engine.result,
+      })), { requireHeadings: true });
+      appendNotice('LLM 종합 리뷰를 제공할 수 없어 이번 세션의 관찰 기록으로 기계 리뷰를 작성했습니다.');
+      log('review-machine-fallback', { reason });
+      return review;
+    };
     try {
-      const engineEarly = readJsonOptional(engineStatePath, 'ENGINE_STATE');
-      const playersEarly = readJsonOptional(playersPath, 'PLAYERS');
-      if (!upperAdapter && opponentRuntimeOf() === 'policy') {
-        return appendTrainingPendingToReview(machineReview({
-          statsRaw,
-          players: playersEarly,
-          result: engineEarly?.result,
-        }));
+      if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
+        return fallback('UPPER_ADAPTER_UNAVAILABLE');
       }
       const hands = [];
       for (let handNo = 1; handNo <= completed; handNo += 1) {
@@ -4551,9 +4588,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       });
       return appendTrainingPendingToReview([synthesized, unavailableNotice].filter(Boolean).join('\n\n'));
     } catch (error) {
+      if (error.code === 'REVIEW_ATTEMPTS_EXHAUSTED' && error.terminationConfirmed === true) {
+        try { return fallback(error.code); } catch (fallbackError) { error = fallbackError; }
+      }
       throw haltFinalization(
         'REVIEW_FAILED',
         `종합 리뷰 생성을 완료하지 못했습니다(${error.code ?? 'ERROR'}). 게임 상태와 코치 노트는 그대로 남습니다.`,
+        { reason: error.code ?? 'ERROR' },
       );
     }
   };
@@ -5002,15 +5043,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         `코치 봉인이 1..${completed} 핸드를 덮지 못해(누락 ${missing.join(',') || '불명'}) 리뷰를 시작하지 않습니다.`,
       );
     }
-    const policyMachineOnly = opponentRuntimeOf() === 'policy'
-      && (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function');
-    if (!policyMachineOnly && (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function')) {
-      throw haltFinalization(
-        'REVIEW_FAILED',
-        '상위 모델 런타임이 없어 종합 리뷰를 만들지 않습니다. 게임 상태와 코치 노트는 그대로 남습니다.',
-      );
-    }
-    if (!policyMachineOnly) await enterReviewGenerationScope(completed);
+    const machineOnly = !upperAdapter || typeof upperAdapter.oneshotStart !== 'function';
+    if (!machineOnly) await enterReviewGenerationScope(completed);
     const review = await generateReview({ completed, statsRaw: stats.raw });
     return checkpointGeneratedReview(review);
   };
