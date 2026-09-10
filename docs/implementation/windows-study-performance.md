@@ -1,0 +1,9 @@
+# Windows study lifecycle evidence
+
+Issue #179 measures request wall time independently of suite-wide cumulative proof time. `tools/benchmark-study-lifecycle.js` runs an actual detached service in an isolated private store, records fresh-service ensure and warmed ensure/inspect/HTTP/stop operations, rejects a wrong token, and verifies the exact stopped process and removed descriptor/lock. The harness preserves failed/censored rows in denominators. No user store or credentials are exported.
+
+The paired Windows workflow uses the same runner for baseline and candidate, alternating order across three fresh lifecycles per revision, with ten warm samples per lifecycle. It records SHA, OS image, Node, PowerShell, wall-time rows and redacted proof kinds/durations. Fresh service/store is not a cold operating-system cache. Concurrent service checkpoints may fall inside client operation windows. Cumulative proof time must not be reported as request latency.
+
+The candidate merges only adjacent synchronous context/ownership reads in inspect and stop into one existing before/after ACL transaction. Stop's context assertion also stays inside that transaction. All inode, descriptor bytes, owner/start-time, reparse, deadline and post-await revalidation checks remain. Identity memoization is transaction-local; no TTL, persisted cache, await-spanning proof or long-lived PowerShell host is added. Writes and process ownership handoffs retain their existing boundaries.
+
+Local POSIX lifecycle and security/recovery tests: 55 passed. Local benchmark smoke passed; POSIX has no PowerShell proof calls and is not Windows performance evidence. Windows paired results and full Node 20/22 Linux/Windows gates must be recorded before accepting the optimization.
