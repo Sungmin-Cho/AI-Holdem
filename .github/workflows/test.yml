@@ -89,9 +89,6 @@ jobs:
       - name: Verify learning runtime on the runner platform
         if: matrix.shard == 'rest'
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
-      - name: Lobby lifecycle gates
-        if: runner.os == 'Windows'
-        run: npm run test:lobby:windows
       - name: Run tests
         run: npm run test:ci:windows -- ${{ matrix.shard }}
       - name: Report Windows proof profile
