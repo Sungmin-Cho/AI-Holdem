@@ -8,7 +8,7 @@ import { applyModeDefaults, parseGameLoopArgs } from '../../tools/game-loop.js';
 import { createOwnedTempDir, registerOwnedProcess } from './owned-fixtures.mjs';
 import { windowsPowerShellEnvironment } from '../../shared/platform-files.js';
 import { ownedProcessStartTime } from '../../engine/state.js';
-import { inspectStudyService, stopStudyService } from '../../tools/study-service.js';
+import { inspectStudyService, stopStudyService, HTTP_WAIT_MS } from '../../tools/study-service.js';
 
 // Every wait in this file is sized for a host whose proofs are in-process. On
 // win32 each proof is a PowerShell child and a cold study start alone may take
@@ -108,10 +108,14 @@ export async function until(predicate, cli, milliseconds = scaled(6000)) {
 
 export async function stopOwnedStudy(storeDir) {
   if (!fs.existsSync(path.join(storeDir, '.training', 'study-service.json'))) return;
-  const service = await inspectStudyService(storeDir);
-  if (service.status !== 'running') return;
-  assert.equal((await stopStudyService(storeDir, { expectedInstanceId: service.instanceId })).stopped, true);
-  assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+  try {
+    const service = await inspectStudyService(storeDir);
+    if (service.status !== 'running') return;
+    assert.equal((await stopStudyService(storeDir, { expectedInstanceId: service.instanceId })).stopped, true);
+    assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+  } catch (error) {
+    if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+  }
 }
 
 export async function command(file, args, options = {}) {
@@ -173,7 +177,7 @@ export async function studyRequest(service, route, body) {
   const response = await fetch(`http://127.0.0.1:${service.port}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'x-drill-token': new URL(service.studyUrl).hash.slice(7), 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(scaled(2000)),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(HTTP_WAIT_MS),
   });
   const result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));

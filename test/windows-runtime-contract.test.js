@@ -42,7 +42,8 @@ test('untracked Windows identity never grants numeric PID termination', async ()
  assert.equal(windows.isOwnedWindowsChild({pid:process.pid,ownedWindowsJob:true}),false);
 });
 
-import { inspectStudyService, stopStudyService, ensureStudyService } from '../tools/study-service.js';
+import { inspectStudyService, stopStudyService, ensureStudyService, CLIENT_WAIT_MS, HTTP_WAIT_MS } from '../tools/study-service.js';
+import { studyBudget } from './helpers/platform.js';
 import { acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
 import { runSolver, hasLiveSolverChild } from '../tools/solver-runtime.js';
 
@@ -97,7 +98,7 @@ test('HTTP timeout floors fractional remaining and intersects both deadlines', (
  },{now:()=>0.25});
 });
 
-test('real study ensure inspect stop accept fractional remaining below HTTP cap', {timeout:180000}, async (t) => {
+test('real study ensure inspect stop accept fractional remaining below HTTP cap', {timeout:studyBudget({ coldStarts: 1, extraMs: 60_000 })}, async (t) => {
  const dir=createOwnedTempDir('study-fractional');
  let handle;
  try {
@@ -105,17 +106,18 @@ test('real study ensure inspect stop accept fractional remaining below HTTP cap'
   const nativeTimeout=AbortSignal.timeout.bind(AbortSignal);
   const timers=[];
   t.mock.method(AbortSignal,'timeout',(milliseconds)=>{timers.push(milliseconds); if(!Number.isInteger(milliseconds)) t.diagnostic(`noninteger HTTP timer: ${milliseconds}`); return nativeTimeout(milliseconds);});
+  const outer = process.platform === 'win32' ? CLIENT_WAIT_MS : 5000;
   const bounded=client=>{
    let reads=0;
-   const clock=()=>++reads<=2 ? 0 : 5000-(process.platform==='win32'?4000:400)+0.25;
-   return files.withPlatformDeadline(5000,client,{now:clock});
+   const clock=()=>++reads<=2 ? 0 : outer-(process.platform==='win32'?HTTP_WAIT_MS:400)+0.25;
+   return files.withPlatformDeadline(outer,client,{now:clock});
   };
   const reused=await bounded(()=>ensureStudyService(dir));
   assert.equal(reused.instanceId,handle.instanceId);
   assert.equal((await bounded(()=>inspectStudyService(dir))).status,'running');
   assert.equal((await bounded(()=>stopStudyService(dir,{expectedInstanceId:handle.instanceId}))).stopped,true);
   assert.ok(timers.length>=7);
-  assert.ok(timers.every(ms=>Number.isInteger(ms)&&ms>0&&ms<(process.platform==='win32'?30_000:500)));
+  assert.ok(timers.every(ms=>Number.isInteger(ms)&&ms>0&&ms<(process.platform==='win32'?HTTP_WAIT_MS:500)));
  } finally {
   t.mock.restoreAll();
   if(handle) await stopStudyService(dir,{expectedInstanceId:handle.instanceId});

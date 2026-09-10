@@ -21,13 +21,13 @@ const WAIT_MS = process.platform === 'win32' ? 60_000 : 5000;
 // assert repair and refusal against this, not against a POSIX literal.
 export const CLIENT_WAIT_MS = WAIT_MS;
 // Only positively absent/dead ownership may enter the cold-start allowance.
-const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
+export const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
 // A request is not answered until the service has re-proved its own boundaries,
 // and on Windows each of those proofs is a PowerShell child. Serving
 // /internal/parent-attach costs an ownership check, a descriptor read and a
 // parent lock read — six or so proofs at about a second each — which overran the
 // previous 8s ceiling on a CI runner. This is a ceiling on waiting, not a spend.
-const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 500;
+export const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 500;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
@@ -81,12 +81,16 @@ function proveEntries(candidates, phase) {
   const present = (file) => { const stat = statOrNull(file); return stat && !stat.isSymbolicLink(); };
   let entries = candidates.filter(({ file }) => present(file));
   let reasons = [];
-  for (let attempt = 0; attempt <= candidates.length; attempt += 1) {
+  let transportTries = 0;
+  for (let attempt = 0; attempt <= candidates.length + 3; attempt += 1) {
     reasons = [];
     if (arePrivatePaths(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
     const relisted = candidates.filter(({ file }) => present(file));
-    if (listing(relisted) === listing(entries)) break;
-    entries = relisted;
+    const listingChanged = listing(relisted) !== listing(entries);
+    const transport = reasons.some((reason) => /powershell:.*error=ETIMEDOUT/.test(reason));
+    if (listingChanged) entries = relisted;
+    else if (transport && transportTries < 3) transportTries += 1;
+    else break;
   }
   fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
 }
@@ -250,7 +254,8 @@ function publicHandle(value) {
 export function isStudyTransportFailure(error) {
   const message = String(error?.message ?? '');
   if (error?.name === 'TypeError' && message.includes('fetch failed')) return true;
-  return error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && message.includes('transport');
+  if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') return false;
+  return message.includes('transport') || /powershell:.*error=ETIMEDOUT/.test(message);
 }
 export function shouldRetryLiveWait(error, { afterOwner, owner, descriptorState, sameOwner }) {
   if (afterOwner?.status !== 'alive' || sameOwner !== true) return false;
@@ -442,14 +447,23 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   // Every WAIT_MS deadline is capped by the budget in force, so a caller's
   // monotonic budget is consumed, never extended past by a fresh window.
   let deadline = platformNow() + platformTimeout(WAIT_MS);
-  let ctx = context(storeDir);
   let coldDeadline;
   optionsForChild(options);
+  // A 5s caller deadline is too small for the first ACL proof of a cold store.
+  // Extend before context() so that proof uses COLD_START_MS, not the leftover.
+  if (typeof storeDir === 'string' && storeDir && !storeDir.includes('\0')
+    && !statOrNull(path.join(path.resolve(storeDir), '.training'))) {
+    coldDeadline = platformNow() + COLD_START_MS;
+    extendPlatformDeadline(coldDeadline);
+  }
+  let ctx = context(storeDir);
   if (!ctx.trainingStat) {
     // Safe root identity plus positively absent training metadata authorizes
     // cold directory creation. This does not authorize a raced-in live owner.
-    coldDeadline = platformNow() + COLD_START_MS;
-    extendPlatformDeadline(coldDeadline);
+    if (coldDeadline === undefined) {
+      coldDeadline = platformNow() + COLD_START_MS;
+      extendPlatformDeadline(coldDeadline);
+    }
     assertContext(ctx);
     const created = context(storeDir, { create: true });
     if (created.root !== ctx.root || !sameInode(created.rootStat, ctx.rootStat)) fail();

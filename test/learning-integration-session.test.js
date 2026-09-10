@@ -9,6 +9,7 @@ import { newDeck } from '../engine/cards.js';
 import { ownedProcessStartTime } from '../engine/state.js';
 import { engineInitFlags, createGameLoop } from '../tools/game-loop.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { studyBudget } from './helpers/platform.js';
 import {
   scaled,
   ROOT,
@@ -148,9 +149,10 @@ test('S8 full: default 20-hand production session records support then study rem
     const running = loop.run().finally(() => { settled = true; });
     running.catch(() => {});
     const driver = (async () => {
-      // Isolated default20 took 68s; a full-suite run reached 117s. Preserve
-      // all 20 random production hands and leave 40s for finalization/cleanup.
-      const deadline = Date.now() + 200000;
+      // Isolated default20 took 68s; a full-suite POSIX run reached 117s.
+      // Win32 n20 under #166 load spent 188s on 19 hands and missed the 200s
+      // cutoff. Preserve all 20 hands; finalization still has scaled(15000).
+      const deadline = Date.now() + (process.platform === 'win32' ? 400_000 : 200_000);
       while (!settled && Date.now() < deadline) {
         const state = JSON.parse(fs.readFileSync(stateFile));
         if (state.hand && !observedHands.has(state.handNo)) {
@@ -200,7 +202,7 @@ test('S8 full: default 20-hand production session records support then study rem
         if (phase !== 'done' && !state.gameOver) {
           throw new Error(`default20 action driver deadline: ${JSON.stringify({ handNo: state.handNo, phase, actions: actions.length, phaseObservations })}`);
         }
-        await within(running, 15000, `default20 finalization ${JSON.stringify({ handNo: state.handNo, phase, phaseObservations })}`);
+        await within(running, scaled(25000), `default20 finalization ${JSON.stringify({ handNo: state.handNo, phase, phaseObservations })}`);
       }
     })();
     driver.catch(() => loop.requestStop());
@@ -233,14 +235,29 @@ test('S8 full: default 20-hand production session records support then study rem
     assert.equal(after.practice.overall.supportedDecisions, before.practice.overall.supportedDecisions + 3);
     checkpoint = 'next-cli-bootstrap';
     diagnostic('next-cli-start');
-    const nextFake = failedCliFixtures({ hold: true });
-    nextCli = startCli(['--store-dir', storeDir], nextFake.env);
-    await until(() => {
-      const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
-      if (current.gameId === selected.gameId) return null;
-      nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
-      return readFirstFixtureRecord(nextFake.log, nextCli.child);
-    }, nextCli, 10000);
+    const nextCliBudget = studyBudget({ coldStarts: 1, extraMs: 5000 });
+    const nextCliDeadline = Date.now() + nextCliBudget;
+    let nextFake;
+    let nextRecord = null;
+    while (nextRecord == null) {
+      const remaining = nextCliDeadline - Date.now();
+      if (remaining <= 0) assert.fail('owned CLI bootstrap checkpoint was not reached');
+      nextFake = failedCliFixtures({ hold: true });
+      nextCli = startCli(['--store-dir', storeDir], nextFake.env);
+      try {
+        nextRecord = await until(() => {
+          const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
+          if (current.gameId === selected.gameId) return null;
+          nextGameDir = path.join(storeDir, '.session-store', current.sessionRel);
+          return readFirstFixtureRecord(nextFake.log, nextCli.child);
+        }, nextCli, remaining);
+      } catch (error) {
+        const text = String(error?.message ?? error);
+        // Windows may still hold current.json open (this test polls it) while
+        // the next CLI's commitSession rename runs; treat that like ACTIVE_GAME.
+        if (!text.includes('ACTIVE_GAME') && !text.includes('EPERM')) throw error;
+      }
+    }
     const nextStateFile = path.join(nextGameDir, 'state.json');
     const nextInitial = JSON.parse(fs.readFileSync(nextStateFile));
     assert.equal(nextInitial.handNo, 0);
@@ -255,7 +272,7 @@ test('S8 full: default 20-hand production session records support then study rem
       if (!fs.existsSync(loopFile)) return null;
       const nextState = JSON.parse(fs.readFileSync(loopFile));
       return nextState.phase === 'playing' ? { current, state: nextState } : null;
-    }, nextCli, 10000);
+    }, nextCli, studyBudget({ coldStarts: 1, extraMs: 5000 }));
     assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
     assert.equal((await relayRequest({ port: next.state.port, sessionToken: next.state.sessionToken }, '/api/snapshot')).body.studyUrl, service.studyUrl);
     checkpoint = 'next-cli-stop';
@@ -264,11 +281,29 @@ test('S8 full: default 20-hand production session records support then study rem
     checkpoint = 'delivered-action-recovery';
     diagnostic('recovery-start');
     const recoveredUserApplies = [];
-    loop = createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
+    // Windows may still report the just-stopped server PID as alive while
+    // startTimeOf is null (probe lag / PID reuse), which resume treats as
+    // SERVER_IDENTITY_UNAVAILABLE. Wait until the pid is gone or identifiable.
+    const nextServerPid = JSON.parse(fs.readFileSync(path.join(nextGameDir, 'lock.json'))).serverPid;
+    await waitValue(() => {
+      try { process.kill(nextServerPid, 0); } catch (error) { return error.code === 'ESRCH'; }
+      return ownedProcessStartTime(nextServerPid) != null;
+    }, studyBudget({ extraMs: 5000 }));
+    const makeRecoveryLoop = () => createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true,
         onEngineInvoke(args) { if (args[0] === 'step' && args[1] === 'user') recoveredUserApplies.push(args); } } });
-    await loop.resume();
+    loop = makeRecoveryLoop();
+    try {
+      await loop.resume();
+    } catch (error) {
+      // Stopping the next CLI can drop the study lock while resume still saw
+      // it alive; the following ensure cold-starts.
+      if (error.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+      await loop.requestStop().catch(() => {});
+      loop = makeRecoveryLoop();
+      await loop.resume();
+    }
     const recovering = loop.run();
     recovering.catch(() => {});
     await waitValue(() => {
@@ -276,7 +311,7 @@ test('S8 full: default 20-hand production session records support then study rem
       return receipt.requestId === nextStop.requestId && receipt.phase === 'consumed';
     });
     await loop.requestStop();
-    await within(recovering, 8000, 'default20 delivered-action recovery stop');
+    await within(recovering, scaled(8000), 'default20 delivered-action recovery stop');
     assert.equal(recoveredUserApplies.length, 1, 'resume applies the delivered action exactly once');
     const recoveredState = JSON.parse(fs.readFileSync(nextStateFile));
     const applied = [recoveredState.hand, recoveredState.lastHand].filter(Boolean)
@@ -365,21 +400,21 @@ test('S8 full: private CLI creation never relabels an existing live foreign loop
   assert.equal(fs.readFileSync(pidFile, 'utf8'), bytes);
 });
 
-test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: package study commands require an explicit store and own service start and stop', { timeout: studyBudget({ coldStarts: 1, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-study-command');
   t.after(() => stopOwnedStudy(storeDir));
   const npm = process.platform === 'win32' ? process.execPath : path.join(path.dirname(process.execPath), 'npm');
   const npmArgs = process.platform === 'win32' ? [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')] : [];
   await assert.rejects(command(npm, [...npmArgs, 'run', '--silent', 'study'], { cwd: ROOT }), /usage:/);
   assert.equal(fs.existsSync(path.join(storeDir, '.training')), false);
-  const output = await command(npm, [...npmArgs, 'run', '--silent', 'study', '--', storeDir], { cwd: ROOT });
+  const output = await command(npm, [...npmArgs, 'run', '--silent', 'study', '--', storeDir], { cwd: ROOT, timeout: studyBudget({ coldStarts: 1 }) });
   const service = await inspectStudyService(storeDir);
   assert.equal(output.trim(), service.studyUrl);
   await command(npm, [...npmArgs, 'run', '--silent', 'study:stop', '--', storeDir], { cwd: ROOT });
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 });
 
-test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-rotation-heal');
   const gameDir = path.join(storeDir, 'session');
   fs.mkdirSync(gameDir, { mode: 0o700 });
@@ -402,7 +437,7 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
     if (lock.serverPid === oldPid) return null;
     const snapshot = await relayRequest(lock, '/api/snapshot');
     return snapshot.body.view?.legal?.decisionId ? { lock, snapshot } : null;
-  });
+  }, studyBudget({ coldStarts: 1 }));
   const service = await inspectStudyService(storeDir);
   assert.notEqual(service.instanceId, firstService.instanceId);
   assert.notEqual(service.studyUrl, firstService.studyUrl);
@@ -413,13 +448,13 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
   assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
 });
 
-test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated relay', { timeout: studyBudget({ coldStarts: 1, warmCalls: 2 }) }, async (t) => {
   const storeDir = createOwnedTempDir('holdem-s8-cli-port');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', storeDir, '--port', '0'], fake.env);
   let gameDir;
   t.after(async () => { await cleanupCli(cli, gameDir); await stopOwnedStudy(storeDir); });
-  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);
+  await until(() => readFirstFixtureRecord(fake.log, cli.child), cli, studyBudget({ coldStarts: 1 }));
   const current = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
   gameDir = path.join(storeDir, '.session-store', current.sessionRel);
   const file = path.join(gameDir, 'state.json');
@@ -431,7 +466,7 @@ test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated
   const lock = await until(() => {
     const file = path.join(gameDir, 'lock.json');
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : null;
-  }, cli);
+  }, cli, studyBudget({ coldStarts: 1 }));
   assert.ok(lock.port > 0 && lock.port <= 65535);
   assert.match(captureCliRelay(gameDir).args, /--port 0(?: |$)/);
   assert.equal((await relayRequest(lock, '/api/snapshot')).status, 200);

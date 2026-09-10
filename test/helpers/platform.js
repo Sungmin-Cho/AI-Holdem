@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { processStartTime as realProcessStartTime } from '../../engine/process-identity.js';
+import { CLIENT_WAIT_MS, COLD_START_MS } from '../../tools/study-service.js';
+
+export function studyBudget({ coldStarts = 0, warmCalls = 0, extraMs = 0 } = {}) {
+  return Math.ceil((coldStarts * COLD_START_MS + warmCalls * CLIENT_WAIT_MS + extraMs) * 1.1);
+}
 
 export function prependPath(dir, env = process.env) {
   const current = env.PATH ?? env.Path ?? '';

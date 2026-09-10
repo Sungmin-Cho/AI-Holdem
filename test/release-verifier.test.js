@@ -26,6 +26,7 @@ import {
   assertCompatibilityDestination,
 } from './helpers/verify-learning-compatibility.mjs';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+import { studyBudget } from './helpers/platform.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHA = 'a4822d74a4251f199b52e0f02914ef659ea905dd';
@@ -365,7 +366,7 @@ test('default integration evidence requires controlled20 completion, four exclus
   }), { code: 'RELEASE_GATE_EVIDENCE_INVALID' });
 });
 
-test('actual archived readers reject new identities without writes and compatible code resumes', { timeout: process.platform === 'win32' ? 600_000 : 60_000 }, async () => {
+test('actual archived readers reject new identities without writes and compatible code resumes', { timeout: studyBudget({ coldStarts: 2, warmCalls: 4, extraMs: 60_000 }) }, async () => {
   const dir = createOwnedTempDir('holdem-compatibility-proof');
   const outDir = path.join(dir, 'evidence');
   const result = await runCompatibilityVerification({ baseline: SHA, outDir });

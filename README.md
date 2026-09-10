@@ -147,7 +147,7 @@ node --test
 
 인자 없이 실행한다. **`node --test test/`처럼 디렉터리 인자를 주면 Node v26에서 실패하므로 금지.** 단건은 `node --test test/<파일>.test.js`.
 
-CI는 프로세스·락 통합 테스트끼리의 교차 부하를 피하기 위해 테스트 파일만 직렬화하는 `npm run test:ci`를 사용한다. 각 테스트가 내부에서 만드는 동시성·race는 그대로 검증한다.
+CI는 프로세스·락 통합 테스트끼리의 교차 부하를 피하기 위해 테스트 파일만 직렬화하는 `npm run test:ci`를 사용한다. Windows는 실측 기준 6샤드다. 각 테스트가 내부에서 만드는 동시성·race는 그대로 검증한다.
 
 정책 검증은 `npm run benchmark:policies`다. 릴리스 검증은 `node tools/verify-learning-release.js --baseline <commit> --before-manifest <manifest> --out-dir <evidence>`로 실행하며, 실제 이전 버전 호환성·브라우저·정리 증빙 등이 없거나 실패하면 통과하지 않는다. 테스트 통과만으로 사람의 학습 효과를 주장하지 않는다.
 

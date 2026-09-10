@@ -15,24 +15,26 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Windows shards (worst minutes on 925fbb2 attempts 1–3, Windows suite green):
+#   study-a    study-service                         15.2
+#   study-b    study-service-recovery                21.1
+#   learning-a learning-integration + mistake-bank + publish 17.9
+#   learning-b learning-integration-session + action-receipts + drill-* 20.4
+#   loop       game-loop + release-verifier + server-security-gates 27.0
+#   rest       remaining test files + step 6 GATE    29.6
+# G5 (file ≤ 20, shard ≤ 22) missed: keep file cap 45 min and job 60.
+# Rebalance only by moving NAMED's small files (mistake-bank, publish,
+# action-receipts, drill-*). Those cannot shrink rest/loop; do not split files.
 jobs:
   test:
     name: Node ${{ matrix.node-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Every privacy proof on Windows is a PowerShell child of about a second, and
-    # the suite runs its files one at a time because they spawn real services and
-    # share lock state. That puts a full Windows run near 75 minutes against 10 on
-    # Linux; the run cancelled at 60 was still progressing, 1346 tests in.
-    # Measured at 110+ minutes with the hour-per-file cap: study-service 42,
-    # learning-integration 29, game-loop 13. Sharding the matrix is the real
-    # answer; until then one job needs room to finish.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 40 }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
-          - windows-latest
         node-version:
           - 20.x
           - 22.x
@@ -45,34 +47,65 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Verify learning runtime on the runner platform
+        run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Run tests
+        run: npm run test:ci
+  windows:
+    name: Node ${{ matrix.node-version }} (windows-latest, ${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20.x
+          - 22.x
+        shard:
+          - study-a
+          - study-b
+          - learning-a
+          - learning-b
+          - loop
+          - rest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ matrix.node-version }}
       - name: Prepare Windows diagnostics directory
-        if: runner.os == 'Windows'
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'holdem-diag'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           echo "AI_HOLDEM_PLATFORM_DIAGNOSTICS=$dir" >> $env:GITHUB_ENV
       - name: Verify Windows private directory creation
-        if: runner.os == 'Windows'
         run: node test/helpers/windows-privacy-probe.mjs
       - name: Verify the Windows child environment can prove privacy
-        if: runner.os == 'Windows'
         run: node test/helpers/windows-child-environment-probe.mjs
       - name: Verify learning runtime on the runner platform
+        if: matrix.shard == 'rest'
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Lobby lifecycle gates
         if: runner.os == 'Windows'
         run: npm run test:lobby:windows
       - name: Run tests
-        # The full Windows suite measures 110+ minutes — every privacy proof
-        # there is a PowerShell child — and does not fit one job. Until the
-        # matrix is sharded (#149) Windows runs only the platform gates above,
-        # which pass for real; the full suite returns with that issue.
-        if: runner.os != 'Windows'
-        run: npm run ${{ runner.os == 'Windows' && 'test:ci:windows' || 'test:ci' }}
+        run: npm run test:ci:windows -- ${{ matrix.shard }}
       - name: Report Windows proof profile
-        if: runner.os == 'Windows' && always()
+        if: always()
         run: |
           $file = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'proofs.jsonl'
           if (Test-Path $file) { node test/helpers/proof-profile-report.mjs $file } else { echo 'no proofs.jsonl' }
           $log = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'study-children.log'
           if (Test-Path $log) { Get-Content $log }
+  windows-suite:
+    name: Windows suite
+    needs: windows
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Windows shard
+        run: test "${{ needs.windows.result }}" = "success"

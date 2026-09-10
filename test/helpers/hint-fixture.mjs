@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createOwnedTempDir } from './owned-fixtures.mjs';
 import { startHand } from '../../engine/hand.js';
 import { startServer } from '../../server/server.js';
@@ -9,7 +10,8 @@ import { createHintControl } from '../../tools/hint-control.js';
 import { gameEpochOf } from '../../publish-contract.js';
 export async function hintFixture(t,{hints='on'}={}) {
   const dir=createOwnedTempDir('holdem-hint');
-  const cli=(...args)=>JSON.parse(execFileSync(process.execPath,[new URL('../../engine/cli.js',import.meta.url).pathname,...args,'--game-dir',dir],{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
+  const engine=fileURLToPath(new URL('../../engine/cli.js',import.meta.url));
+  const cli=(...args)=>JSON.parse(execFileSync(process.execPath,[engine,...args,'--game-dir',dir],{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
   cli('init','--ai','5','--mode','cash-training','--hints',hints);
   const state=JSON.parse(fs.readFileSync(path.join(dir,'state.json')));
   state.button=2;

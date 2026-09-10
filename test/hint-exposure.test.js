@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createGame, startHand, legalFor, applyAction, blindsForLevel } from '../engine/hand.js';
 import { snapshotDecision } from '../engine/decision.js';
 import { exposeHint } from '../engine/hint-exposure.js';
@@ -13,7 +14,7 @@ import { buildPreActionHint, recommendationHash } from '../training/pre-action-h
 import { V2_REFERENCE_SOURCE } from '../shared/reference.js';
 import { loadReferenceDataset } from '../tools/preflop-dataset.js';
 import { verifyDecisionAssistance } from '../tools/assistance-proof.js';
-const CLI = new URL('../engine/cli.js',import.meta.url).pathname;
+const CLI = fileURLToPath(new URL('../engine/cli.js',import.meta.url));
 const data = loadReferenceDataset(V2_REFERENCE_SOURCE);
 function setup() {
   let state = createGame({aiCount:5,mode:'cash-training',levelEvery:null,hints:'on'});
