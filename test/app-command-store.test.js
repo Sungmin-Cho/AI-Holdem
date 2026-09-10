@@ -71,6 +71,38 @@ test(
     await settle(manager, end.requestId);
   },
 );
+test('managed command journal retries the displayed LLM decision once and preserves configured budget', { timeout: process.platform === 'win32' ? 300000 : 30000 }, async (t) => {
+  const root = createOwnedTempDir('lobby-llm-recovery');
+  const calls = [];
+  const adapter = { kind: 'fake',
+    async warmup({playerId}) { return {sessionId:`session-${playerId}`,raw:'ready'}; },
+    async decide(input) { calls.push(input); return {raw:'invalid'}; }, async dispose() {} };
+  const manager = createSessionManager({storeDir:root,
+    resolver:async()=>({player:adapter,upper:null,notices:[]})});
+  t.after(()=>manager.close());
+  await manager.initialize();
+  const start = {...payload(manager),setup:{aiCount:5,opponentRuntime:'llm',playerSoftMs:100,playerHardMs:1000}};
+  manager.command(start);
+  assert.equal((await settle(manager,start.requestId)).status,'succeeded');
+  const waitPaused = async () => {
+    const deadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
+    while (manager.snapshot().state !== 'paused' && Date.now() < deadline) await new Promise(r=>setTimeout(r,20));
+    assert.equal(manager.snapshot().state,'paused');
+  };
+  await waitPaused();
+  assert.equal(manager.snapshot().allowedCommands.includes('resume'),false);
+  const retry = {...payload(manager,'retry-decision'), decisionId:manager.snapshot().pendingDecision.decisionId};
+  manager.command(retry);
+  manager.command(retry);
+  assert.equal((await settle(manager,retry.requestId)).status,'succeeded');
+  await waitPaused();
+  assert.deepEqual(calls.map(call=>call.timeoutMs),[1000,1000]);
+  const end = payload(manager,'end');
+  manager.command(end);
+  assert.equal((await settle(manager,end.requestId)).status,'succeeded');
+  assert.equal(manager.snapshot().state,'ended');
+});
+
 test("reserved initialization proof rejects partial state and permits sealed commit recovery", async () => {
   const root = createOwnedTempDir("lobby-preparation");
   const reservation = { gameId: randomUUID(), selectionVersion: 1 };

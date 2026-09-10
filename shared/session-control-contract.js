@@ -2,6 +2,7 @@ export const COMMANDS = Object.freeze([
   "start",
   "pause",
   "resume",
+  "retry-decision",
   "end",
   "restart",
   "replace-current",
@@ -11,7 +12,7 @@ export const ALLOWED_COMMANDS = Object.freeze({
   starting: [],
   playing: ["pause"],
   pausing: [],
-  paused: ["resume", "end", "restart", "replace-current"],
+  paused: ["resume", "retry-decision", "end", "restart", "replace-current"],
   stopping: [],
   finalizing: [],
   completed: ["start", "restart"],
@@ -33,6 +34,7 @@ export function validateCommand(body) {
     "expectedSelectionVersion",
     "kind",
     "setup",
+    "decisionId",
   ];
   if (
     Object.keys(body).some((k) => !keys.includes(k)) ||
@@ -50,5 +52,7 @@ export function validateCommand(body) {
     throw controlError("BAD_COMMAND");
   if ("setup" in body && !["start", "replace-current"].includes(body.kind))
     throw controlError("BAD_COMMAND");
+  if (body.kind === 'retry-decision' && (typeof body.decisionId !== 'string' || !/^d-\d+-(preflop|flop|turn|river)-\d+$/.test(body.decisionId))) throw controlError('BAD_COMMAND');
+  if ('decisionId' in body && body.kind !== 'retry-decision') throw controlError('BAD_COMMAND');
   return body;
 }

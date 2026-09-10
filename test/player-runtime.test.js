@@ -1487,6 +1487,21 @@ test('dispose: 빈 작업 디렉터리를 정리하고 성공 뒤에도 runtime�
   }
 });
 
+test('spawn failure confirms independent close before allowing recovery or dispose', async () => {
+  const rt = createPlayerRuntime('claude', { command: path.join(tmpDir('absent-cli'), 'does-not-exist') });
+  await assert.rejects(rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1000 }), { code: 'ENOENT' });
+  await rt.dispose();
+});
+
+test('rejected result with independently confirmed close does not remain in the child registry', async () => {
+  let finishClose;
+  const rt = createPlayerRuntime('claude', { terminateKillWaitMs: 100,
+    exec: () => ({ pid: 424242, done: Promise.reject(Object.assign(new Error('command failed'), {code:'CLI_FAILED'})),
+      closed: new Promise(resolve => {finishClose = resolve;}), kill: () => {finishClose(); return true;} }) });
+  await assert.rejects(rt.decide({playerId:'p1',sessionId:'s',message:'m',timeoutMs:1000}), {code:'CLI_FAILED'});
+  await rt.dispose();
+});
+
 test('dispose: concurrent watchdog and shutdown share one termination and preserve diagnostics', async () => {
   let kills = 0;
   let resolveDone;

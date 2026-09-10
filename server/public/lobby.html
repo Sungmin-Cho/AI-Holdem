@@ -55,6 +55,9 @@
             </select></label
           >
           <p>LLM 모드는 AI 응답을 기다리므로 진행이 더 느릴 수 있습니다.</p>
+          <label>오래 기다림 알림 (ms)<input name="playerSoftMs" type="number" min="1" value="25000" /></label>
+          <label>LLM 호출 최대 대기 (ms)<input name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>
+          <p>알림은 추론을 중단하지 않습니다. 최대 대기 초과 시 결정을 보존하고 재시도 또는 종료를 기다립니다.</p>
           <label
             >블라인드
             <input name="blinds" value="25/50" required pattern="[0-9]+/[0-9]+"
@@ -141,6 +144,7 @@
       <h2>게임 메뉴</h2>
       <p id="pause-message">일시정지 중입니다.</p>
       <button id="resume">계속하기</button
+      ><button id="retry-decision" hidden>LLM 결정 재시도</button
       ><button id="restart">같은 설정으로 새 게임</button
       ><button id="modes">모드 선택</button><button id="end">게임 종료</button
       ><button id="close-menu">메뉴 닫기 (일시정지 유지)</button>

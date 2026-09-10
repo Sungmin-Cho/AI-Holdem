@@ -49,6 +49,15 @@ function render() {
   const paused = s === "paused";
   $("table").inert = !viewingRecord && s !== "playing";
   $("status").textContent = labels[s] ?? s;
+  if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
+  const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
+  $("pause-message").textContent = recovery
+    ? (snapshot.pendingDecision.status === 'unsafe'
+      ? '자식 프로세스 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
+      : `LLM 결정을 보존했습니다 (${snapshot.pendingDecision.code ?? '복구 대기'}). 재시도하거나 종료하세요.`) : '일시정지 중입니다.';
+  $("retry-decision").hidden = !recovery;
+  $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
+  $("resume").hidden = !!recovery;
   $("setup").hidden = !(selecting || s === "lobby");
   $("game").hidden =
     !viewingRecord &&
@@ -157,6 +166,7 @@ async function command(kind, setup) {
       expectedGameId: snapshot.gameId,
       expectedSelectionVersion: snapshot.selectionVersion,
       kind,
+      ...(kind === 'retry-decision' ? { decisionId: snapshot.pendingDecision?.decisionId } : {}),
       ...(setup ? { setup } : {}),
     };
     await commands.send(payload);
@@ -196,6 +206,7 @@ $("menu").onclick = () =>
     ? $("pause-dialog").showModal()
     : command("pause");
 $("resume").onclick = () => command("resume");
+$("retry-decision").onclick = () => command('retry-decision');
 $("recover").onclick = () => command("resume");
 $("restart").onclick = () => confirm(() => command("restart"));
 $("end").onclick = () => confirm(() => command("end"));
@@ -232,6 +243,8 @@ form.onsubmit = (e) => {
       ].map((k) => [k, data.get(k)]),
     );
   for (const k of [
+    "playerSoftMs",
+    "playerHardMs",
     "aiCount",
     ...(setup.mode === "cash-training"
       ? ["stackBb", "hands"]

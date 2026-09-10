@@ -355,7 +355,8 @@ export function spawnCli({ command, args, cwd, env, input }) {
     child.on('error', reject);
     child.on('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
   });
-  return { pid: child.pid ?? null, kill: (signal) => child.kill(signal), done };
+  const closed = new Promise((resolve) => child.once('close', () => resolve()));
+  return { pid: child.pid ?? null, kill: (signal) => child.kill(signal), done, closed };
 }
 
 function isAlive(pid) {
@@ -454,6 +455,12 @@ export function createPlayerRuntime(kind, opts = {}) {
     const handle = { ...spawned, done };
     entry.handle = handle;
     activeHandles.add(entry);
+    if (spawned.closed) {
+      Promise.resolve(spawned.closed).then(() => {
+        entry.closed = true;
+        activeHandles.delete(entry);
+      }, () => {}).catch(() => {});
+    }
     // 경합에서 진 쪽의 거부가 unhandled rejection이 되지 않도록 관찰자를 하나 붙인다.
     handle.done.catch(() => {});
     return { handle, format, args, entry };
@@ -469,6 +476,8 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   async function confirmChildClose(entry, signal) {
+    await Promise.resolve();
+    if (entry.closed) return;
     const started = Date.now();
     const details = () => ({ runtime: kind, pid: entry.handle.pid ?? null,
       purpose: entry.purpose, model: entry.model, signal,
@@ -476,7 +485,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       closeConfirmed: entry.closed });
     let delivered;
     try {
-      delivered = entry.handle.kill(signal);
+      delivered = entry.handle.pid === null && entry.handle.closed ? true : entry.handle.kill(signal);
     } catch (error) {
       throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
     }
@@ -487,7 +496,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { details: details() });
     }
     const outcome = await Promise.race([
-      entry.handle.done.then(
+      (entry.handle.closed ?? entry.handle.done).then(
         () => ({ closed: true }),
         (error) => ({ closed: false, error }),
       ),
@@ -510,7 +519,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       const result = await Promise.race([handle.done, timer.promise]);
       return { ...result, format, elapsedMs: Date.now() - started };
     } catch (error) {
-      if (error.code === 'TIMEOUT') {
+      if (!entry.closed) {
         // T2가 같은 세션에 오버랩되지 않도록 SIGKILL 전송만이 아니라
         // child `close`(전 stdio 종료)까지 확인한 뒤에만 TIMEOUT을 반환한다.
         await killAndConfirmClose(entry, 'SIGKILL');
