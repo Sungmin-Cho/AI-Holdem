@@ -1,4 +1,5 @@
 import { independentAssessmentEligibility, projectAssistance } from '../shared/assistance.js';
+import {dealSelectionFields} from '../shared/deal-selection.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
@@ -39,6 +40,7 @@ export function learningEventKey(event, { includeTime = true } = {}) {
     ...(includeTime ? { appliedAt: event.appliedAt ?? null } : {}),
     mixObservation: event.mixObservation === undefined ? null : validateMixObservation(event.mixObservation),
     ...(Object.hasOwn(event,'assistance') ? {assistance:projectAssistance(event.assistance)} : {}),
+    ...dealSelectionFields(event),
     ...(Object.hasOwn(event,'coverage') ? {coverage:event.coverage} : {}),
     ...(event.sourceIdentity ? {sourceIdentity:event.sourceIdentity} : {}),
     studyRun: event.studyRun === undefined ? null : validateStudyRun(event.studyRun),

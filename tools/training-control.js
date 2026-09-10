@@ -1193,7 +1193,7 @@ export function materializeLearningEvaluation(sessionDir, item) {
     throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning detail identity does not match authority');
   }
   verifyEvaluationAssistance(sessionDir,detail,item.handNo,item.evaluationId.split(':')[0]);
-  if (detail.assistance !== undefined || (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0')) {
+  if (detail.assistance !== undefined || detail.dealSelectionContractVersion != null || (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0')) {
     const projected = toPublicSummary(detail, {handNo:item.handNo, detailSha256:item.detailSha256, detailRef:item.detailRef});
     if (JSON.stringify(projected) !== JSON.stringify(canonicalSummary)) {
       throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'Versioned detail and summary differ');

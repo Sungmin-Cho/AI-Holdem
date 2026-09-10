@@ -22,7 +22,7 @@ const VALUE_FLAGS = new Set([
   'operation-id', 'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta',
-  'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id',
+  'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id', 'deal-bias',
 ]);
 
 const FAIL_MESSAGES = {
@@ -223,6 +223,7 @@ function cmdInit(gameDir, flags) {
     startStackBb: cash ? startStackBb : undefined,
     handLimit,
     hints: flags.hints,
+    dealBias: flags['deal-bias'],
     opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
     showdownPolicy: parseShowdownPolicy(flags['showdown-policy']),
     replayReveal: parseReplayReveal(flags['replay-reveal']),

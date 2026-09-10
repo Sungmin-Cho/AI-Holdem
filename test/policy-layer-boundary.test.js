@@ -29,6 +29,7 @@ test('policy v2 has no filesystem hidden-hole deck or hand-transition module edg
   const offenders = [
     'training/policies/hand-strength.js',
     'training/policies/strategy-v2.js',
+    'training/policies/public-line.js',
     'training/policies/strategy-mirror.js',
   ]
     .flatMap((relative) => importsOf(relative).imports.map((entry) => ({ relative, ...entry })))
@@ -42,7 +43,7 @@ test('v2 strategy depends only on policy-layer modules', () => {
   assert.deepEqual(scan.unresolved, []);
   assert.deepEqual(
     scan.imports.map((entry) => entry.specifier).sort(),
-    ['./contracts.js', './hand-strength.js', './sizing.js'],
+    ['./contracts.js', './hand-strength.js', './public-line.js', './sizing.js'],
   );
 });
 

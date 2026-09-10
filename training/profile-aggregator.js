@@ -1,4 +1,5 @@
 import { assistanceAllowsIndependent, projectAssistance } from '../shared/assistance.js';
+import {dealSelectionFields,dealSelectionDisposition} from '../shared/deal-selection.js';
 import { referenceAssessmentEligibility, projectReferenceCoverage } from '../shared/reference-coverage.js';
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
@@ -62,10 +63,11 @@ function isSafeMapKey(key) {
 
 export function assertProfileEvent(event) {
   if (!event || (event.schemaVersion !== undefined
-      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 6))) {
+      && (!Number.isInteger(event.schemaVersion) || event.schemaVersion < 1 || event.schemaVersion > 7))) {
     throw coded('PROFILE_EVENT_INVALID', 'profile event schema is invalid');
   }
-  if (event.schemaVersion === 6 || event.assistance !== undefined) {
+  try {dealSelectionFields(event);} catch {throw coded('PROFILE_EVENT_INVALID','invalid deal selection provenance');}
+  if (event.schemaVersion >= 6 || event.assistance !== undefined) {
     try { projectAssistance(event.assistance); } catch { throw coded('PROFILE_EVENT_INVALID', 'assistance is required and must be valid'); }
   }
   if (typeof event.evaluationId !== 'string' || event.evaluationId.length === 0) {
@@ -258,6 +260,7 @@ function applyCoverage(projection, event) {
   const coverage = projection.coverage;
   const eligibility = referenceAssessmentEligibility(event);
   coverage.evaluatedDecisions += 1;
+  if(dealSelectionDisposition(event)==='biased') coverage.biasedDecisions=(coverage.biasedDecisions??0)+1;
   if (event.assistance?.hintShown) coverage.assistedDecisions = (coverage.assistedDecisions ?? 0) + 1;
   if (event.forced) coverage.forcedDecisions += 1;
   if (!event.forced && event.status === 'unsupported') coverage.unsupportedDecisions += 1;

@@ -12,6 +12,7 @@ export const SETUP_KEYS = Object.freeze([
   "mirrorSelf",
   "exploitSelf",
   "hints",
+  "dealBias",
   "showdownPolicy",
   "replayReveal",
   "playerSoftMs",
@@ -45,6 +46,7 @@ export function cliModeDefaults(args) {
     next.showdownPolicy ??= "open";
     next.replayReveal ??= "all";
     next.hints ??= "off";
+    next.dealBias ??= "off";
   }
   return next;
 }
@@ -58,6 +60,7 @@ export function normalizeSetup(input = {}) {
     aiCount: 5,
     opponentRuntime: "policy",
     hints: "off",
+    dealBias: "off",
     showdownPolicy: "open",
     replayReveal: "all",
     mirrorSelf: false,
@@ -75,6 +78,7 @@ export function normalizeSetup(input = {}) {
     mode: ["cash-training", "tournament"],
     opponentRuntime: ["policy", "llm"],
     hints: ["on", "off"],
+    dealBias: ["off", "light", "strong"],
     showdownPolicy: ["open", "standard"],
     replayReveal: ["all", "showdown"],
   })) {

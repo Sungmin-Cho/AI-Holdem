@@ -4,6 +4,8 @@ import { snapshotDecision } from './decision.js';
 import { compareScore, evaluate7 } from './evaluator.js';
 import { positionsOf } from './positions.js';
 import { awardPots, buildPots } from './sidepots.js';
+import { selectedDeck } from './deal-selection.js';
+import { DEAL_BIAS_MODES, checkDealBiasResume, dealSelectionFields } from '../shared/deal-selection.js';
 
 const DEFAULT_BLINDS = [25, 50];
 const BASE_BLINDS = [
@@ -62,8 +64,10 @@ export function createGame({
   showdownPolicy,
   replayReveal,
   hints,
+  dealBias,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
+  if (dealBias !== undefined && !DEAL_BIAS_MODES.includes(dealBias)) throwBadConfig('dealBias는 off/light/strong이어야 합니다.');
   if (resolvedMode !== 'tournament' && resolvedMode !== 'cash-training') {
     throwBadConfig('mode는 tournament 또는 cash-training이어야 합니다.');
   }
@@ -110,6 +114,7 @@ export function createGame({
     showdownPolicy: resolvedShowdown,
     replayReveal: resolvedReplay,
   };
+  if (dealBias !== undefined) { config.dealBias=dealBias; config.dealSelectionContractVersion=1; }
   if (hints !== undefined) {
     if (!['on', 'off'].includes(hints)) throwBadConfig('hints는 on 또는 off여야 합니다.');
     config.hintContractVersion = 1; config.hints = hints;
@@ -239,7 +244,9 @@ export function startHand(state, options = {}) {
   post(sbIdx, sb);
   post(bbIdx, bb);
 
-  const deck = options.deck ? [...options.deck] : shuffle(newDeck(), options.rng);
+  const dealBias = checkDealBiasResume(state.config);
+  if(options.deck && dealBias !== 'off') throwBadConfig('편향 딜은 명시적 테스트 덱과 함께 사용할 수 없습니다.');
+  const deck = options.deck ? [...options.deck] : selectedDeck(dealBias,dealOrder.findIndex(index=>next.seats[index].playerId==='user'),dealOrder.length,options.rng);
   for (let round = 0; round < 2; round += 1) {
     for (const seatIdx of dealOrder) {
       const pid = next.seats[seatIdx].playerId;
@@ -268,6 +275,8 @@ export function startHand(state, options = {}) {
     acted: [],
     actions: [],
     decisions: [],
+    ...(state.config.dealSelectionContractVersion === 1 ? {dealSelectionContractVersion:1,
+      dealSelection:{schemaVersion:1,algorithmVersion:'weighted-holes-v1',mode:dealBias}} : {}),
     ...(state.config.hintContractVersion === 1 ? { hintContractVersion: 1, hintExposures: {} } : {}),
     posts,
     startStacks,
@@ -578,6 +587,7 @@ function finishHand(state, events) {
     allIn: [...hand.allIn],
     actions: structuredClone(hand.actions),
     decisions: structuredClone(hand.decisions ?? []),
+    ...dealSelectionFields(hand),
     ...(hand.hintContractVersion === 1 ? { hintContractVersion: 1, hintExposures: structuredClone(hand.hintExposures) } : {}),
     pots: potRecords,
     showdown,

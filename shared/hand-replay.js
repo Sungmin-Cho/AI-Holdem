@@ -1,3 +1,4 @@
+import {dealSelectionFields} from './deal-selection.js';
 export const HAND_REPLAY_SCHEMA_VERSION = 1;
 
 export const SAFE_ACTION_KEYS = Object.freeze([
@@ -13,6 +14,7 @@ export const REPLAY_ACTION_KEYS = Object.freeze([
 const DECISION_KEYS = [
   'decisionId', 'street', 'position', 'holeCards', 'potBefore',
   'toCall', 'effectiveStack', 'forced', 'chosenAction', 'assistance',
+  'dealSelection','dealSelectionContractVersion',
 ];
 
 function reasonKindOf(action) {
@@ -105,6 +107,7 @@ export function replayRecord(record, { reveal } = {}) {
       }),
   };
   if (record.hintContractVersion === 1) replay.hintContractVersion = 1;
+  Object.assign(replay,dealSelectionFields(record));
   if (record.positions) replay.positions = structuredClone(record.positions);
   return replay;
 }

@@ -309,8 +309,9 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const startTimeOf = deps.processStartTime ?? processStartTime;
   const {
     aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
-    opponentRuntime, showdownPolicy, replayReveal, hints,
+    opponentRuntime, showdownPolicy, replayReveal, hints, dealBias,
   } = flags;
+  if(dealBias!==undefined && !['off','light','strong'].includes(dealBias)) throwCoded('BAD_CONFIG','invalid deal bias');
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
   // 절차의 소관이다. loopPid == callerPpid(자신의 자식 init을 부른 사이드카)는
@@ -360,6 +361,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
       showdownPolicy,
       replayReveal,
       hints,
+      dealBias,
     });
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');

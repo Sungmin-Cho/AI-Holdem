@@ -8,11 +8,11 @@ import { startServer } from '../../server/server.js';
 import { resolveSessionReference } from '../../tools/reference-source.js';
 import { createHintControl } from '../../tools/hint-control.js';
 import { gameEpochOf } from '../../publish-contract.js';
-export async function hintFixture(t,{hints='on'}={}) {
+export async function hintFixture(t,{hints='on',dealBias}={}) {
   const dir=createOwnedTempDir('holdem-hint');
   const engine=fileURLToPath(new URL('../../engine/cli.js',import.meta.url));
   const cli=(...args)=>JSON.parse(execFileSync(process.execPath,[engine,...args,'--game-dir',dir],{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
-  cli('init','--ai','5','--mode','cash-training','--hints',hints);
+  cli('init','--ai','5','--mode','cash-training','--hints',hints,...(dealBias===undefined?[]:['--deal-bias',dealBias]));
   const state=JSON.parse(fs.readFileSync(path.join(dir,'state.json')));
   state.button=2;
   const started=startHand(state).state;

@@ -54,6 +54,8 @@
               <option value="llm">LLM 플레이어</option>
             </select></label
           >
+          <label>연습용 유리한 딜<select name="dealBias"><option value="off">끔 — 일반 딜</option><option value="light">약하게</option><option value="strong">강하게</option></select></label>
+          <p>유리한 딜은 독립 평가·성향 표본에서 제외됩니다. 승리나 좋은 보드를 보장하지 않습니다.</p>
           <p>LLM 모드는 AI 응답을 기다리므로 진행이 더 느릴 수 있습니다.</p>
           <label>오래 기다림 알림 (ms)<input name="playerSoftMs" type="number" min="1" value="25000" /></label>
           <label>LLM 호출 최대 대기 (ms)<input name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>

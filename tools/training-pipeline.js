@@ -168,6 +168,7 @@ export function buildExplanationPrompt(evaluation) {
   return [
     '역할: 학습 해설',
     evaluation?.assistance?.hintShown ? '힌트 도움을 받은 결정이다. 독립 실력·성적 향상이라고 해설하지 마라.' : '',
+    evaluation?.dealSelection?.mode && evaluation.dealSelection.mode!=='off' ? '유리한 딜로 선택된 연습 표본이다. 독립 평가·실력·수익 향상 증거가 아니다.' : '',
     'JSON 한 줄만 출력하라: {"evaluationId":"...","explanation":"..."}',
     'evaluator 수치를 바꾸지 마라. 새 숫자를 만들지 마라.',
     '이 평가는 검증된 GTO 정답이나 EV 손실이 아니라 출처가 확인된 경우에도 휴리스틱 기준표 비교다.',
@@ -183,6 +184,8 @@ export function buildExplanationPrompt(evaluation) {
       ? '투영 참고 또는 비교 불가다. 등급을 주장하지 말고 핸드 번호 외 모든 숫자를 생략하라. 직접 비교라고 쓰지 마라.' : '',
     JSON.stringify({
       assistance: evaluation?.assistance,
+      dealSelection: evaluation?.dealSelection,
+      dealSelectionContractVersion: evaluation?.dealSelectionContractVersion,
       coverage: evaluation?.coverage,
       metricEligible: independentAssessmentEligibility(evaluation).metricEligible,
       evaluationId: evaluation?.evaluationId,
@@ -213,6 +216,7 @@ export function aggregateProcessRows(rows, { pending = 0 } = {}) {
     unsupported: eligible.filter(row=>row.status!=='supported').length,
     nonComparableSupported: eligible.filter(row=>row.status==='supported'&&!independentAssessmentEligibility(row).metricEligible).length,
     assisted: eligible.filter(row=>row.assistance?.hintShown).length,
+    biased: eligible.filter(row=>row.dealSelection?.mode && row.dealSelection.mode!=='off').length,
     forced: eligible.filter(row=>row.forced===true).length,
     referenceAvailable: available.length,
     exactComparable: supported.length,

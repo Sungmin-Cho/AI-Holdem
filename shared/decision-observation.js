@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { SAFE_ACTION_KEYS } from './hand-replay.js';
 import { projectAssistance } from './assistance.js';
+import {dealSelectionFields} from './deal-selection.js';
 
 export function hintError(code = 'HINT_SNAPSHOT_INVALID') {
   return Object.assign(new Error(code), { code });
@@ -32,7 +33,8 @@ const PRIOR = ['playerId','decisionId','action','amount','street'];
 const pick = (value, keys) => Object.fromEntries(keys.map(key => [key, value[key]]));
 const chips = value => Number.isSafeInteger(value) && value >= 0;
 export function projectDecisionObservation(snapshot) {
-  closed(snapshot, [...ROOT, 'forced'], ['chosenAction', 'assistance']);
+  closed(snapshot, [...ROOT, 'forced'], ['chosenAction', 'assistance','dealSelection','dealSelectionContractVersion']);
+  dealSelectionFields(snapshot);
   if (snapshot.schemaVersion !== 2 || typeof snapshot.forced !== 'boolean') throw hintError();
   if (snapshot.assistance !== undefined) projectAssistance(snapshot.assistance);
   if (snapshot.chosenAction !== undefined) closed(snapshot.chosenAction, ['action','amount']);

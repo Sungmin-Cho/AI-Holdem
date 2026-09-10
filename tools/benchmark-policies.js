@@ -9,6 +9,8 @@ import { policyById } from '../training/policies/catalog.js';
 import { raiseToFor, roundToUnit } from '../training/policies/sizing.js';
 import { distributionV2 } from '../training/policies/strategy-v2.js';
 import { decide } from './policy-player.js';
+import { deriveUnit, sampleWeighted } from '../training/policies/rng.js';
+import { publicLine } from '../training/policies/public-line.js';
 
 const PERSONA_IDS = Object.freeze([
   'nit-v2', 'tag-v2', 'lag-v2', 'calling-station-v2', 'maniac-v2', 'trickster-v2',
@@ -113,7 +115,9 @@ function buildSizingScenarios() {
 const SIZING_SCENARIOS = buildSizingScenarios();
 
 function benchmarkSizing() {
-  const sizing = SIZING_SCENARIOS.map(({ spot, snapshot, legal }) => {
+  const scenarios=SIZING_SCENARIOS.map(row=>({...row,snapshot:row.snapshot.street==='preflop'?row.snapshot:{...row.snapshot,
+    holeCards:['Js','Ts'],board:['As','Ks','Qs','2c','3d'].slice(0,row.snapshot.board.length)}}));
+  const sizing = scenarios.map(({ spot, snapshot, legal }) => {
     const sized = raiseToFor(snapshot, legal);
     const raises = distributionV2(snapshot, legal, policyById('tag-v2'))
       .filter((item) => item.action === 'raise');
@@ -123,10 +127,12 @@ function benchmarkSizing() {
       minRaiseTo: legal.minRaiseTo,
       maxRaiseTo: legal.maxRaiseTo,
       amount: raises[0]?.amount ?? null,
+      sizeSupport: raises.map(row=>({amount:row.amount,frequency:row.frequency})),
+      raiseFrequency: raises.reduce((sum,row) => sum + row.frequency,0),
     };
   });
   let minRaiseOutsideClampCount = 0;
-  for (const { snapshot, legal } of SIZING_SCENARIOS) {
+  for (const { snapshot, legal } of scenarios) {
     const sized = raiseToFor(snapshot, legal);
     const unit = snapshot.blinds[0];
     for (const id of PERSONA_IDS) {
@@ -317,6 +323,47 @@ function benchmarkSafety() {
   return { illegalOutputCount, determinismViolationCount, hiddenStateViolationCount };
 }
 
+export function benchmarkPositionMix() {
+  const samples=10_000, tolerance=0.02, seed='policy-2.2-fixed-grid';
+  const rows=[];
+  for(const id of PERSONA_IDS) for(const position of ['UTG','CO','BTN']) {
+    const snapshot={...PREFLOP_SCENARIOS.unopened.snapshot,position,holeCards:['8h','7h']};
+    const declared=distributionV2(snapshot,PREFLOP_SCENARIOS.unopened.legal,policyById(id));
+    const counts=new Map();
+    for(let i=0;i<samples;i++) {
+      const sampled=sampleWeighted(declared,deriveUnit(seed,'benchmark',String(i),id+position));
+      const key=sampled.action+':'+sampled.amount;
+      counts.set(key,(counts.get(key)??0)+1);
+    }
+    const frequencies=declared.map(row=>({...row,observed:(counts.get(row.action+':'+row.amount)??0)/samples}));
+    rows.push({id,position,participation:1-(declared.find(row=>row.action==='fold')?.frequency??0),frequencies});
+  }
+  return {samples,tolerance,seed,rows,maxError:Math.max(...rows.flatMap(row=>row.frequencies.map(f=>Math.abs(f.frequency-f.observed))))};
+}
+
+export function benchmarkPublicLines() {
+  const snapshot={actorId:'user',decisionId:'line-grid',street:'flop',position:'BTN',
+    holeCards:['6h','5h'],board:['Kh','8h','2c'],blinds:[25,50],potBefore:300,actorBet:0,currentBet:0,toCall:0,
+    publicSeats:[{playerId:'user',position:'BTN'},{playerId:'p1',position:'BB'}],
+    priorActions:[{playerId:'user',street:'preflop',action:'raise',amount:125},{playerId:'p1',street:'preflop',action:'call',amount:125},
+      {playerId:'p1',street:'flop',action:'check',amount:0}]};
+  const legal={canCheck:true,canRaise:true,callAmount:0,minRaiseTo:50,maxRaiseTo:5000};
+  const cases=[['initiative',snapshot],['missing-history',{...snapshot,priorActions:undefined}],
+    ['multiway',{...snapshot,publicSeats:[...snapshot.publicSeats,{playerId:'p2',position:'CO'}]}],
+    ['facing-raise',{...snapshot,priorActions:[...snapshot.priorActions,{playerId:'p1',street:'flop',action:'raise',amount:100}]}]];
+  const rows=[];
+  for(const id of PERSONA_IDS) for(const [name,input] of cases) {
+    const items=distributionV2(input,legal,policyById(id));
+    const value=distributionV2({...input,holeCards:['Ks','Kd']},legal,policyById(id));
+    const raises=items.filter(row=>row.action==='raise');
+    rows.push({id,name,eligible:publicLine(input).eligible,
+      bluffMass:raises.filter(row=>row.reasonCode.startsWith('v2-bluff:')).reduce((s,row)=>s+row.frequency,0),
+      bluffSizes:raises.map(row=>row.amount),valueSizes:value.filter(row=>row.action==='raise').map(row=>row.amount)});
+  }
+  return {rows,eligibilityViolations:rows.filter(row=>!row.eligible && row.bluffMass!==0).length,
+    supportViolations:rows.filter(row=>row.eligible && (!row.bluffMass || JSON.stringify(row.bluffSizes)!==JSON.stringify(row.valueSizes))).length};
+}
+
 export function benchmarkPolicies() {
   const started = performance.now();
   const personaStarted = performance.now();
@@ -332,6 +379,7 @@ export function benchmarkPolicies() {
   const safety = benchmarkSafety();
   const safetyMs = performance.now() - safetyStarted;
   const sizingReport = benchmarkSizing();
+  const positionMix = benchmarkPositionMix();
   const nutsFolds = PERSONA_IDS.map((id) => personaResponses[id].strong.fold);
   const nutsAirDifferences = PERSONA_IDS.map(
     (id) => personaResponses[id].air.fold - personaResponses[id].strong.fold,
@@ -374,6 +422,8 @@ export function benchmarkPolicies() {
     personaResponses,
     priceResponses: price.responses,
     preflop,
+    positionMix,
+    publicLines: benchmarkPublicLines(),
     scenarios: {
       preflop: {
         unopened: scenarioFacts(PREFLOP_SCENARIOS.unopened),
@@ -406,6 +456,17 @@ export function assertBenchmark(result) {
     if (t[key] !== 0) failures.push(key);
   }
   if (!Array.isArray(result?.sizing) || result.sizing.length !== 8) failures.push('sizing');
+  else if(result.sizing.some(row=>!(row.raiseFrequency>0)||!row.sizeSupport?.length
+    ||row.sizeSupport.some(size=>!Number.isFinite(size.amount)||size.amount<row.minRaiseTo||size.amount>row.maxRaiseTo))) failures.push('sizingSupport');
+  if (!(result?.positionMix?.maxError <= 0.02) || result.positionMix.samples !== 10000) failures.push('positionMix');
+  for(const id of PERSONA_IDS) {
+    const rows=result.positionMix?.rows.filter(row=>row.id===id)??[];
+    // Saturated persona participation can tie at the 0.98 cap, but its size
+    // frequencies must still differ by position.
+    if(rows.length!==3 || !(rows[0].participation<=rows[1].participation && rows[1].participation<=rows[2].participation)
+      || JSON.stringify(rows[0].frequencies.map(f=>f.frequency))===JSON.stringify(rows[2].frequencies.map(f=>f.frequency))) failures.push('positionOrder:'+id);
+  }
+  if(result.publicLines?.eligibilityViolations!==0 || result.publicLines?.supportViolations!==0) failures.push('publicLines');
   for (const key of ['unopened', 'facingOpen']) {
     if (JSON.stringify(result?.scenarios?.preflop?.[key]) !== JSON.stringify(EXPECTED_PREFLOP_FACTS[key])) {
       failures.push(`preflopScenario.${key}`);

@@ -1,6 +1,7 @@
 import { fallbackLegal, isStrategyV2, legalizeEntries } from './contracts.js';
 import { estimatePublicStrength } from './hand-strength.js';
 import { raiseToFor } from './sizing.js';
+import { hasPublicDraw, positionSizeMix, publicLine } from './public-line.js';
 
 function clamp(value, low = 0, high = 1) {
   return Math.min(high, Math.max(low, value));
@@ -103,6 +104,29 @@ export function distributionV2(snapshot, legal, config) {
   } else {
     proposed = checkedToDistribution(traits, strength, sized);
   }
+  if (snapshot.street !== 'preflop') {
+    const line = publicLine(snapshot);
+    const role = strength >= 0.67 ? 'value' : hasPublicDraw(snapshot) ? 'draw' : 'showdown';
+    for (const entry of proposed) {
+      if (entry.action !== 'raise') continue;
+      if (role !== 'value') {
+        // A conservative heuristic cap, not a solved bluff/value ratio.
+        const mass = line.eligible ? Math.min(entry.frequency, traits.bluff * (role === 'draw' ? 0.35 : 0.15)) : 0;
+        const removed = entry.frequency - mass;
+        entry.frequency = mass;
+        const passive = proposed.find(row => row.action === (legal.canCheck ? 'check' : 'call'));
+        if (passive) passive.frequency += removed;
+      }
+      entry.reasonCode = `v2-${role === 'value' ? 'value' : 'bluff'}:${line.reason}:${sized.rule}`;
+    }
+  }
+  // The same size support is used for value and every eligible bluff. Keep
+  // the canonical size first for existing diagnostics; legalize merges clamps.
+  const sizeMix = positionSizeMix(snapshot.position);
+  proposed = proposed.flatMap(entry => entry.action !== 'raise' ? [entry] : [
+    {...entry, frequency:entry.frequency * sizeMix},
+    {...entry, raiseTo: Math.round(sized.target * 1.2 / (snapshot.blinds?.[0] || 1)) * (snapshot.blinds?.[0] || 1), frequency:entry.frequency * (1-sizeMix)},
+  ]);
   const legalItems = legalizeEntries(proposed, legal, { bb: snapshot?.blinds?.[1] });
   return legalItems.length ? legalItems : fallbackLegal(legal);
 }

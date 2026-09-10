@@ -1,4 +1,5 @@
 import { projectAssistance } from '../shared/assistance.js';
+import {dealSelectionFields} from '../shared/deal-selection.js';
 import { matchReferenceAction } from '../shared/reference.js';
 import { evaluationIdOf } from './contracts.js';
 import { handClassOf } from './cards.js';
@@ -58,6 +59,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
       grade: null,
       forced: Boolean(snapshot.forced),
       ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
+      ...dealSelectionFields(snapshot),
       code: spot.code,
       reason: spot.reason,
       source,
@@ -80,6 +82,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
       grade: null,
       forced: Boolean(snapshot.forced),
       ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
+      ...dealSelectionFields(snapshot),
       reason: strategy?.reason ?? 'unsupported',
       source,
     };
@@ -114,6 +117,7 @@ export function evaluateDecision(snapshot, strategy, { gameEpoch } = {}) {
     grade: gradeFrequency(matched.frequency, strategy.actions),
     forced: Boolean(snapshot.forced),
     ...(snapshot.assistance !== undefined ? {assistance:projectAssistance(snapshot.assistance)} : {}),
+    ...dealSelectionFields(snapshot),
     source,
   };
 }

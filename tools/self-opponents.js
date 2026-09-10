@@ -1,4 +1,5 @@
 import { randomInt } from 'node:crypto';
+import {checkDealBiasResume,dealSelectionFields,dealSelectionError} from '../shared/deal-selection.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic } from '../engine/state.js';
@@ -61,6 +62,7 @@ function scanSessions(storeDir) {
     const sessionDir = path.join(sessionsRoot, entry.name);
     try {
       const state = readJson(sessionDir, ['state.json'], STATE_MAX_BYTES);
+      checkDealBiasResume(state.config);
       if (state?.gameOver !== true) {
         skippedSessions += 1;
         continue;
@@ -81,6 +83,7 @@ function scanSessions(storeDir) {
         opponentRuntime,
         seats: Array.isArray(state.seats) ? state.seats.length : 0,
         ...(state.config?.hintContractVersion != null ? {hintContractVersion:state.config.hintContractVersion} : {}),
+        ...(state.config?.dealSelectionContractVersion != null ? {dealSelectionContractVersion:state.config.dealSelectionContractVersion,dealBias:state.config.dealBias} : {}),
       });
     } catch {
       skippedSessions += 1;
@@ -114,6 +117,9 @@ export function collectStoreTendency(storeDir) {
         // A contract session cannot make a damaged archive appear legacy.
         if (session.hintContractVersion != null && record.hintContractVersion == null) {
           record.hintContractVersion=session.hintContractVersion;
+        }
+        if(session.dealSelectionContractVersion!=null) {
+          if(dealSelectionFields(record).dealSelection?.mode!==session.dealBias) throw dealSelectionError();
         }
         records.push(record);
       } catch {

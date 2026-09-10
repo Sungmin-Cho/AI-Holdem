@@ -1,4 +1,5 @@
 import { decisionAssistance } from '../shared/assistance.js';
+import {dealSelectionFields} from '../shared/deal-selection.js';
 import { positionsOf } from './positions.js';
 import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
 
@@ -89,6 +90,7 @@ export function snapshotDecision(
   const legalEvidence = authoritativeLegal(legal, playerId, decisionId);
   const snapshot = {
     schemaVersion: 2,
+    ...dealSelectionFields(hand),
     decisionId,
     gameMode: state.config?.mode ?? 'tournament',
     handNo: state.handNo,

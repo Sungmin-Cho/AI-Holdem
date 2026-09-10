@@ -2,6 +2,7 @@ import { blindsForLevel, legalFor } from './hand.js';
 import { seatedFromButton, positionsOf } from './positions.js';
 import { buildPots } from './sidepots.js';
 import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
+import {dealSelectionFields} from '../shared/deal-selection.js';
 
 export { SAFE_ACTION_KEYS };
 
@@ -65,6 +66,7 @@ export function viewFor(state, playerId) {
 
   if (state.hand && legal?.toAct === playerId) view.legal = structuredClone(legal);
   if (state.result != null) view.result = state.result;
+  if(playerId==='user' && state.config?.dealSelectionContractVersion===1) view.dealBias=state.config.dealBias;
   if (state.config?.mode) view.mode = state.config.mode;
   if (state.config?.handLimit != null) view.handLimit = state.config.handLimit;
   if (state.sessionNet) view.sessionNet = structuredClone(state.sessionNet);
@@ -201,6 +203,7 @@ export function redactRecord(record, viewerId = 'user') {
     result.showdown = null;
   }
   if (record.hintContractVersion === 1) result.hintContractVersion = 1;
+  Object.assign(result,dealSelectionFields(record));
   if (Array.isArray(record.decisions)) {
     result.decisions = record.decisions
       .filter((snap) => snap.actorId === viewerId)
