@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "browser": {
+    "schemaVersion": 1,
+    "pass": true,
+    "node": "v26.0.0",
+    "browser": "agent-browser@0.36.0",
+    "checks": [
+      "bare-lobby-no-init",
+      "mode-ai-selection",
+      "setup-back-no-resume",
+      "menu-close-reopen",
+      "keyboard-mobile",
+      "pause-resume",
+      "command-reconnect",
+      "study-paused-roundtrip",
+      "restart-new-id",
+      "abort-summary",
+      "completed-review-reload",
+      "real-user-store-unchanged",
+      "owned-cleanup"
+    ],
+    "pending": [],
+    "additionalScenario": "Receipt GET disconnected once during mode replacement; persisted request recovered and setup screen closed without another command."
+  },
+  "realLlm": {
+    "pass": true,
+    "runtime": "codex",
+    "outcome": "accepted",
+    "modelMs": 5733.712124999998,
+    "elapsedMs": 39007,
+    "pausedStateUnchanged": true,
+    "terminal": "aborted",
+    "ownedCleanup": true
+  },
+  "fullSuite": {
+    "command": "npm run test:ci",
+    "node": "v26.0.0",
+    "tests": 2240,
+    "pass": 2240,
+    "fail": 0,
+    "skipped": 0,
+    "durationMs": 739782.197292,
+    "logSha256": "0f267ced7dd43f91f0721f787601bdd399f47c7cbf1c4bc0d4a1dfe33d3c396b",
+    "scope": "Before final receipt recovery UI/test follow-up; final cross-platform full suite is recorded by PR checks."
+  },
+  "followupFocused": {
+    "node": "v20.20.2",
+    "tests": 9,
+    "pass": 9,
+    "fail": 0
+  }
+}

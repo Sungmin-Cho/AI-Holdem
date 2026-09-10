@@ -2,7 +2,7 @@
 
 ## 1. 개요
 
-AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 플레이하고 복습하는 시스템이다. 새 store 기본값은 cash-training·AI 5명·100BB·20핸드·policy v2다. 순수 규칙 엔진(`engine/`)은 네트워크·LLM을 모르고, detached 사이드카(`tools/game-loop.js`)가 게임 진행과 자식 프로세스를 소유한다. HTTP relay(`server/`)는 UI 게시와 durable 액션 접수를 소유하며 게임 규칙을 실행하지 않는다. 독립 `tools/study-service.js`가 store 학습 요약·드릴을 제공한다. LLM 호출은 `tools/player-runtime.js` 하나를 통하고, 호스트 딜러는 사전 점검·기동·보고만 맡는다.
+AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 플레이하고 복습하는 시스템이다. 새 store 기본값은 cash-training·AI 5명·100BB·20핸드·policy v2다. 순수 규칙 엔진(`engine/`)은 네트워크·LLM을 모르고, game-loop(`tools/game-loop.js`)가 게임 진행과 자식 프로세스를 소유한다. 웹 경로에서는 detached 앱 서비스가 이 루프를 동일 프로세스에서 하나만 호스팅하고, 기존 직접 CLI는 독립 사이드카로 실행한다. HTTP relay(`server/`)는 UI 게시와 durable 액션 접수를 소유하며 게임 규칙을 실행하지 않는다. 독립 `tools/study-service.js`가 store 학습 요약·드릴을 제공한다. LLM 호출은 `tools/player-runtime.js` 하나를 통하고, 호스트 딜러는 사전 점검·기동·보고만 맡는다.
 
 실행·운영 절차는 [`README.md`](README.md), 호스트별 딜러 절차는 [`AGENTS.md`](AGENTS.md)와 그것이 가리키는 정본 스킬이 담당한다. 이 문서는 경계와 불변식만 다룬다.
 
@@ -50,6 +50,10 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `engine/state.js` | `state.json` 원자적 I/O(`loadState`/`saveState`)와 이 저장소 전체가 재사용하는 pid(+startTime) identity 기반 owned-lock 프리미티브(`withMutation`/`withNamedLock`/`acquireOwnedLock`). |
 | `engine/cli.js` | 엔진의 유일한 외부 표면 — `init`/`new-hand`/`legal`/`apply`/`view`/`step`/`hand`/`stats`/`end`/`resume-check`/`decision-peek` 서브커맨드. |
 | `engine/session-catalog.js` | store의 영구 `sessions/<gameId>` namespace와 atomic current selector. normal resolve는 directory scan을 하지 않는다. |
+| `tools/app-service.js`, `tools/app-server.js` | store별 앱 수명 락, 비공개 descriptor, 인증된 로비 HTTP와 current game에 한정된 relay 프록시. |
+| `tools/session-manager.js` | requestId 저널, app/selection CAS, 순차 명령, 시작/정지/교체 및 crash 복구. |
+| `tools/session-control.js` | loop와 relay의 공통 액션 게이트 락. pause ACK 전에 접수 행동·진행 중 작업을 drain한다. |
+| `tools/session-launcher.js`, `tools/session-preparation.js` | 기존 CLI와 앱이 공유하는 store launcher 및 초기화 완료 증거. |
 | `tools/game-loop.js` | 사이드카 본체 — 부트스트랩(loop 락 → `init` → 서버 기동), 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스를 한 detached 프로세스에서 오케스트레이션. |
 | `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). |
 | `tools/coach-control.js` | 코치 authority 상태기계 — `gameEpoch`/`activeOwnerSessionId`/핸드별 `generation`으로 큐·재개·중복 요청을 판정. |
@@ -97,7 +101,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 | 의존 방향 | 허용 | 금지 |
 |---|---|---|
 | `tools/` → `engine/` | `engine/cli.js`를 **자식 프로세스**로 호출, `engine/state.js`의 락·원자적 쓰기·pid 프리미티브를 직접 import(사이드카·게시 도구 자신의 수명 락에 재사용) | `engine/hand.js` 등 게임 로직 함수를 tools에서 직접 import — 상태 변경은 항상 `engine/cli.js` 서브커맨드를 거친다 |
-| `server/` → `tools/`, `engine/` | `publish-contract.js`, 그리고 `tools/training-store.js`의 담기 원시자(`openContained`/`writeContained`)만 — 서버는 별도 프로세스라 주입이 불가능하고 담기 helper를 재구현해선 안 된다. `shared/free-text.js`·`shared/hand-replay.js`는 `publish-contract.js` re-export 경유 | 사이드카 로직 모듈 전부. `test/boundaries.test.js`가 이름 단위로 강제한다 |
+| `server/` → `tools/`, `engine/` | `publish-contract.js`, 그리고 `tools/training-store.js`의 담기 원시자(`openContained`/`writeContained`)와 `tools/session-control.js`의 `withActionGate`/`retryControlWrite`만 — 서버는 별도 프로세스라 주입이 불가능하고 담기 helper를 재구현해선 안 된다. `shared/free-text.js`·`shared/hand-replay.js`는 `publish-contract.js` re-export 경유 | 사이드카 로직 모듈 전부. `test/boundaries.test.js`가 이름 단위로 강제한다 |
 | `engine/` → `tools/`, `server/` | 없음 | 엔진이 상위 계층을 참조 |
 | 딜러 세션(호스트 LLM) → 게임 루프 | current가 선택한 session의 `loop-state.json` 폴링, 사이드카 기동 | 핸드 안 진행에 관여, 상태 파일 직접 수정 |
 
@@ -138,3 +142,11 @@ open v2 stores with an older binary. Issue #147 hint publication remains separat
 힌트 숫자의 권한은 엔진 `hint-expose` 마커와 순수 사전 조회 결과의 재계산으로 검증한다. relay의 `tools/hint-proof.js` 예외는 제한된 읽기와 검증만 허용한다. SSE 이력에는 숫자를 저장하지 않고 현재 판단만 재검증하여 전달한다. 액션 durable 접수 직후 revision 없는 `hint-clear`로 숨기며, 브라우저는 별도 세대로 오래된 snapshot의 재표시를 막는다. Profile/event schema 6은 명시적 assistance를 저장하고 기존 1~5 저널은 다시 쓰지 않는다. 새 drill session은 schema 3이며 기존 1/2의 pending 비교 형식을 유지한다. 이 형식을 쓴 store는 호환 버전으로 roll-forward하며 구버전 프로그램으로 열지 않는다.
 
 Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축하는 것도 roll-forward 경계다. 원본 저널을 보존한 채 호환 바이너리에서 재구축하며, `--hints off`나 구 profile 백업만으로 이미 추가된 schema 6 저널을 downgrade하지 않는다.
+
+## 웹 로비 수명
+
+`app.lock.d`는 앱 수명, `loop.lock.d`는 현재 게임 수명이다. pause는 loop lock과 relay를 유지한 채 `run()`을 park한다. managed relay는 명시된 control protocol v1을 사용하며 `.session-control.json`이 없거나 손상되면 액션을 거부한다. legacy relay에 자동으로 이 규칙을 추정 적용하지 않는다. 공유 제어 락 안에서 게이트 변경과 receipt 접수를 직렬화하며 네트워크/엔진 await는 락 밖에서 수행한다.
+
+앱 HTTP는 Host·Origin·Authorization을 검사하고 current gameId/epoch에 묶인 snapshot/events/action-status/training-detail/action만 전달한다. publish/wait-action은 공개 프록시가 없다. gameEpoch는 기존 private sessionToken의 SHA-256이며 앱 토큰과 구별한다. 중도 종료는 엔진 `result: abort`와 loop `phase: aborted`, `endedAt`으로 기록한다. 정상 완료 `done`, `finishedAt`, 종합 리뷰와 구분한다. 미완료 핸드는 private abort audit에 남기고 완료 핸드 archive에는 쓰지 않는다.
+
+명령은 부작용 전에 `.app/commands/<requestId>.json`에 저장한다. 동일 payload 재전송은 CAS보다 먼저 같은 receipt를 반환한다. 새 게임은 락 획득 후 UUID/selectionVersion을 예약하고 staging init 완료 hash를 남긴 뒤 current를 교체한다. crash 복구에서 불완전한 staging은 보존하고 `RECOVERY_REQUIRED`로 닫는다. 게임이 복원되면 자동 플레이하지 않고 paused 상태로 대기한다. 구현·검증 근거는 `docs/implementation/lobby-session-*.md`에 있다.

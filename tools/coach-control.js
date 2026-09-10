@@ -1127,7 +1127,7 @@ export function createCoachControl(deps = {}) {
         }
       }
       if (loopState) {
-        const phases = new Set(['bootstrap', 'playing', 'finalizing', 'review_generated', 'review_published', 'done']);
+        const phases = new Set(['bootstrap', 'playing', 'finalizing', 'review_generated', 'review_published', 'done', 'aborted']);
         if (!phases.has(loopState.phase)) reasons.push({ code: 'loop_state_unreadable', detail: { error: 'UNKNOWN_PHASE' } });
         if (loopState.cleanupError) reasons.push({ code: 'cleanup_error', detail: { code: loopState.cleanupError.code ?? null } });
         if (['finalizing', 'review_generated', 'review_published'].includes(loopState.phase)) {

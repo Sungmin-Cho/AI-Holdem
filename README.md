@@ -51,9 +51,23 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 6�
 
 ### 스킬 (권장)
 
-이 저장소의 Claude Code·Codex·Grok 세션에서 `/start-game`을 실행한다. 기본은 AI 5명과 20핸드 cash-training이며, AI 수는 1~8명을 선택할 수 있다. `--opponent-runtime llm`은 상대 결정 방식만 바꾼다. `--mode tournament` 또는 mode 없는 `--stack N`/`--level-every N` 요청은 기존 토너먼트·LLM 설정을 보존한다. 명시한 스택·블라인드·핸드 수는 덮어쓰지 않는다. 중단 재개는 `/start-game resume`.
+이 저장소의 Claude Code·Codex·Grok 세션에서 `start game` 또는 `/start-game`을 요청하면 웹 로비가 열린다. 웹에서 모드와 AI 수(1~8명)를 선택하고 게임을 시작한다. 상세 설정의 기본은 캐시 트레이닝·AI 5명·100BB·20핸드·로컬 정책이다. 명시한 옵션은 로비 선택값으로 보존한다. 이미 앱이 실행 중이면 같은 로비로 연결한다. 기존 standalone 게임의 명시 `resume`은 legacy 절차를 유지한다.
 
 절차 정본은 [`.agents/skills/start-game/SKILL.md`](.agents/skills/start-game/SKILL.md), 호스트 포인터는 [`AGENTS.md`](AGENTS.md)다.
+
+### 웹 로비
+
+```bash
+npm run app -- /absolute/path/to/game --player-runtime codex
+# 앱 자체를 종료할 때
+npm run app:stop -- /absolute/path/to/game
+```
+
+출력된 링크를 열어 모드(캐시 트레이닝/토너먼트)와 AI 1~8명을 고른 뒤 시작한다. 로비를 여는 것만으로 게임이나 LLM 호출이 시작되지는 않는다. 기본은 캐시·AI 5명·100BB·20핸드·로컬 정책이다. 로비 토너먼트도 로컬 정책을 기본으로 하며 LLM 상대는 상세 설정에서 선택한다. 학습실은 별도 창으로 열린다.
+
+게임 중 `일시정지 · 메뉴`를 누르면 현재 접수된 행동을 마친 뒤 정지한다. 계속하기, 같은 설정의 새 게임, 모드 선택, 종료를 제공한다. 메뉴 닫기와 Escape는 일시정지를 유지한다. 새 게임은 새 ID를 사용하고 완료한 핸드 기록은 보존한다. 중도 종료는 `aborted`이며 진행 중이던 핸드를 완료 성적에 포함하지 않는다. 정상 완주 리뷰는 종료된 게임의 `게임 기록 보기`에서 다시 열 수 있다.
+
+앱 서비스와 학습 서비스는 게임보다 오래 유지된다. 로비의 접속 토큰은 URL fragment에서 sessionStorage로 옮겨지고 relay 토큰은 브라우저에 전달하지 않는다. 링크와 private descriptor를 공유하지 않는다. 기존 직접 실행 게임이 활성 상태면 로비가 소유권을 가져오지 않는다.
 
 ### 사이드카 직접 기동
 

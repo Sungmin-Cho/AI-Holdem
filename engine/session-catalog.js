@@ -95,19 +95,23 @@ export function ensureSessionStore(storeDir) {
   return { storeDir: root, sessionsDir: sessionsDirOf(root), current };
 }
 
-export function prepareSession(storeDir) {
+export function prepareSession(storeDir, reservation = null) {
   const root = path.resolve(storeDir);
   fs.mkdirSync(catalogDirOf(root), { recursive: true, mode: 0o700 });
   const sessionsDir = sessionsDirOf(root);
   fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
   const current = readCurrentSelector(root);
-  const gameId = randomUUID();
+  if (reservation && (!UUID_RE.test(reservation.gameId ?? '') || reservation.selectionVersion !== (current?.selectionVersion ?? 0) + 1)) {
+    throw codedError('CURRENT_CHANGED', '예약한 current version이 일치하지 않습니다.');
+  }
+  const gameId = reservation?.gameId ?? randomUUID();
   const sessionDir = path.join(sessionsDir, gameId);
   const stagingDir = path.join(sessionsDir, `.${gameId}.creating`);
-  fs.mkdirSync(stagingDir, { mode: 0o700 });
+  const recovering = !!reservation && (fs.existsSync(stagingDir) || fs.existsSync(sessionDir));
+  if (!recovering) fs.mkdirSync(stagingDir, { mode: 0o700 });
   const selectionVersion = (current?.selectionVersion ?? 0) + 1;
   return {
-    gameId, sessionDir, stagingDir, selectionVersion,
+    gameId, sessionDir, stagingDir, selectionVersion, recovering,
   };
 }
 
@@ -128,7 +132,8 @@ export function commitSession(storeDir, prepared) {
     if (sessionDir !== expectedSessionDir || stagingDir !== expectedStagingDir || !UUID_RE.test(gameId)) {
       throw codedError('SESSION_PREPARATION_INVALID', 'prepared session 경로가 store와 일치하지 않습니다.');
     }
-    fs.renameSync(stagingDir, sessionDir);
+    if (fs.existsSync(stagingDir)) fs.renameSync(stagingDir, sessionDir);
+    else if (!prepared.recovering || !fs.lstatSync(sessionDir).isDirectory() || fs.lstatSync(sessionDir).isSymbolicLink()) throw codedError('SESSION_PREPARATION_INVALID');
 
     const selectorPath = currentPathOf(root);
     const payload = JSON.stringify({ gameId, sessionRel: `${SESSIONS_DIR}/${gameId}`, selectionVersion });

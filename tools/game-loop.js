@@ -5,6 +5,9 @@ import { resolveSessionReference } from './reference-source.js';
 import { openContained } from './training-store.js';
 import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
+import {sealPreparation, readPreparation} from './session-preparation.js';
+import { cliModeDefaults } from '../shared/game-setup.js';
+import { createSessionControl, retryControlWrite } from './session-control.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -230,27 +233,7 @@ export function engineInitFlags(args = {}) {
   return extra;
 }
 
-export function applyModeDefaults(args) {
-  const next = { ...args };
-  const freshStore = next.storeDir !== undefined && !next.resume;
-  if (freshStore && next.mode === undefined && next.stack === undefined && next.levelEvery === undefined) {
-    next.mode = 'cash-training';
-  }
-  if (!next.resume && next.mode === 'cash-training' && next.ai === undefined) {
-    next.ai = 5;
-  }
-  if (freshStore && next.mode === 'cash-training') {
-    if (next.stack === undefined && next.stackBb === undefined) next.stackBb = 100;
-    if (next.hands === undefined) next.hands = 20;
-    if (next.opponentRuntime === undefined) next.opponentRuntime = 'policy';
-  }
-  if (freshStore) {
-    next.showdownPolicy ??= 'open';
-    next.replayReveal ??= 'all';
-    next.hints ??= 'off';
-  }
-  return next;
-}
+export const applyModeDefaults = cliModeDefaults;
 
 export function gtoEvalNotice(config = {}) {
   if (config.mode !== 'cash-training') return null;
@@ -580,6 +563,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let resumeEntryPending = false;
   let doneResumeNoTrainingWrite = false;
   let stopRequested = false;
+  const managed = opts.controlProtocolVersion === 1;
+  let control = null;
+  let recoveringControl = false;
+  let pauseRequested = !!opts.startPaused;
+  let waitController = null;
+  let parkWake = null;
+  let pauseCompletion = null;
+  let resolvePause = null;
+  let terminalOperation = null;
+  const auxiliaryTasks = new Set();
+  const trackAuxiliary = (promise) => {
+    auxiliaryTasks.add(promise);
+    promise.finally(() => auxiliaryTasks.delete(promise)).catch(() => {});
+    return promise;
+  };
   let stopPromise = null;
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
@@ -610,7 +608,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // Coach work stops taking new authority/publication steps once shutdown or the
   // game-over cutoff owns the sequence. After the cutoff, `finalize-cutoff` seals every
   // still-missing hand in one transaction and the residual drain publishes it.
-  const coachWorkSuspended = () => stopRequested || finalizationCutoff;
+  const coachWorkSuspended = () => stopRequested || finalizationCutoff || pauseRequested;
 
   // During finalization every accepted note remains in the owner-neutral Q until the
   // cutoff transaction has stopped play-time publishers. The residual drain is the only
@@ -1375,6 +1373,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     recovery = false,
   } = {}) => {
     if (stopAware) assertNotStopping();
+    if (managed && !control) {
+      control = createSessionControl(root, gameEpochOf(sessionToken), { startPaused: pauseRequested, gameId:path.basename(root), mustExist:recoveringControl && readLoopState()?.controlProtocolVersion===1 });
+      writeLoopState({controlProtocolVersion:1});
+    }
     if (!Number.isSafeInteger(desiredPort) || desiredPort < 0 || desiredPort > 65_535) {
       throw codedError('BAD_SERVER_PORT', `서버 재기동 port가 올바르지 않습니다: ${desiredPort}`);
     }
@@ -1385,7 +1387,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       const existing = pin?.lock ?? null;
       if (existing) {
-        if (existing.sessionToken !== sessionToken) {
+        if (existing.sessionToken !== sessionToken || (existing.controlProtocolVersion ?? null) !== (managed ? 1 : null)) {
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
         if (processAlive(existing.serverPid)) {
@@ -1446,7 +1448,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--game-dir', root,
         '--port', String(desiredPort),
         '--token', sessionToken,
-        ...(study ? ['--study-url', study.studyUrl] : []),
+        ...(study ? ['--study-url', study.studyUrl] : []), ...(managed ? ['--control-protocol', '1'] : []),
       ];
       const child = spawn(process.execPath, argv, {
         cwd: ROOT,
@@ -2706,7 +2708,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const waitFlags = () => ['--wait', '--wait-ms', String(waitMs)];
+  const waitFlags = () => managed ? [] : ['--wait', '--wait-ms', String(waitMs)];
 
   const coachSnapshotPath = path.join(root, 'ui-snapshot.json');
   const coachStatsPath = (handNo) => path.join(root, `.coach-stats-${handNo}.json`);
@@ -5035,10 +5037,103 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     writeLoopState({ metrics });
   };
 
-  const waitOnlyForUser = () => executePublish([
-    '--from', turnPath,
-    '--wait-only', '--wait-ms', String(waitMs),
-  ]);
+  const waitOnlyForUser = async (out, { drain = false } = {}) => {
+    if (!managed) return executePublish(['--from', turnPath, '--wait-only', '--wait-ms', String(waitMs)]);
+    const current = out ?? await runCli(['step']);
+    if (current.next?.kind !== 'user') return current;
+    if (pauseRequested && !drain) return { ...current, controlInterrupted: true };
+    const pin=openServerLockPin();
+    let lock;
+    try {
+      lock=assertPinnedServerLock(pin);
+      if(!serverIdentity || startTimeOf(lock.serverPid)!==serverIdentity.startTime)throw codedError('SERVER_IDENTITY_UNAVAILABLE','relay identity changed');
+      await assertServerBinding(lock);
+      lock=assertPinnedServerLock(pin);
+    } catch(error){if(drain)throw error;return {...current,waitError:error.code??'WAIT_FAILED'};} finally {closeServerLockPin(pin);}
+    if (!lock || lock.sessionToken !== readLoopState()?.sessionToken || lock.serverPid !== serverPid) throw codedError('SERVER_IDENTITY_UNAVAILABLE', 'relay identity unavailable');
+    if(pauseRequested&&!drain)return {...current,controlInterrupted:true};
+    const controller = new AbortController();
+    if (!drain) waitController = controller;
+    const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(drain ? 0 : waitMs)});
+    try {
+      const response = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {signal:AbortSignal.any([controller.signal,AbortSignal.timeout((drain ? 0 : waitMs)+10000)])});
+      if (!response.ok) throw codedError('WAIT_FAILED', 'relay wait failed');
+      return { ...current, userAction: await response.json(), controlInterrupted: undefined, waitError: undefined };
+    } catch (error) {
+      if (controller.signal.aborted && (pauseRequested || stopRequested)) return { ...current, controlInterrupted: true };
+      if(drain)throw error;
+      return {...current,waitError:error.code??'WAIT_FAILED'};
+    } finally { if (waitController === controller) waitController = null; }
+  };
+
+  const pause = () => {
+    if (!managed || readLoopState()?.phase !== 'playing' || terminalOperation || stopRequested) throw codedError('INVALID_TRANSITION', '현재 상태에서는 일시정지할 수 없습니다.');
+    if (pauseCompletion) return pauseCompletion;
+    if(control.read().playState==='paused')return Promise.resolve({state:'paused'});
+    pauseCompletion = (async()=>{
+      await retryControlWrite(()=>control.set('pausing',{pauseIntent:true}));
+      if(stopRequested)return {state:'stopped'};
+      if(readLoopState()?.phase!=='playing')return {state:'finalizing'};
+      pauseRequested=true;
+      const ack=new Promise(resolve=>{resolvePause=resolve;});
+      waitController?.abort();
+      return ack;
+    })().catch(error=>{pauseCompletion=null;throw error;});
+    return pauseCompletion;
+  };
+  const resumePlay = async () => {
+    if (!managed || control?.read().playState !== 'paused' || terminalOperation) throw codedError('INVALID_TRANSITION','일시정지 상태가 아닙니다.');
+    const current = await runCli(['step']);
+    await publishEnvelope(current, ['--view-only']);
+    await retryControlWrite(()=>control.set('playing', {pauseIntent:false}));
+    assertNotStopping();
+    pauseRequested = false;
+    pauseCompletion = null;
+    parkWake?.();
+  };
+  const endGame = async (operationId) => {
+    if (!managed || control?.read().playState !== 'paused') throw codedError('INVALID_TRANSITION','종료 전에 일시정지가 필요합니다.');
+    await retryControlWrite(()=>control.set('stopping', {terminalIntent:{operationId,kind:'end'}}));
+    assertNotStopping();
+    terminalOperation = operationId;
+    parkWake?.();
+  };
+  const pauseBarrier = async (out) => {
+    if (!managed || !pauseRequested || stopRequested) return out;
+    // Gate is durable before draining a receipt. Delivered replies may be read again.
+    if (out?.next?.kind === 'user') {
+      let drained;
+      try {drained=await waitOnlyForUser(out,{drain:true});}
+      catch {
+        await recoverServerForPublish();assertNotStopping();
+        const current=await runCli(['step']);
+        await publishEnvelope(current,['--view-only']);
+        drained=await waitOnlyForUser(current,{drain:true});
+      }
+      if (drained.userAction && !drained.userAction.timeout) out = await handleUserTurn(drained);
+    }
+    await Promise.allSettled([...coachTasks, ...trainingTasks, ...auxiliaryTasks]);
+    if (stopRequested) return out;
+    if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
+      pauseRequested = false;
+      resolvePause?.({state:'finalizing'}); resolvePause = null;
+      return out;
+    }
+    await retryControlWrite(()=>control.set('paused'));
+    if(stopRequested)return out;
+    const parked = new Promise(resolve => {parkWake = resolve;});
+    resolvePause?.({state:'paused'}); resolvePause = null;
+    await parked;
+    parkWake = null;
+    if (terminalOperation && !stopRequested) {
+      await runCli(['end','--result','abort','--operation-id',terminalOperation]);
+      writeLoopState({phase:'aborted',result:'abort',endedAt:isoNow(now)});
+      await retryControlWrite(()=>control.set('aborted'));
+      await requestStop();
+      return null;
+    }
+    return out ? await publishEnvelope(await runCli(['step']), ['--view-only']) : out;
+  };
 
   const userActionAck = (submitted, phase, reason) => {
     const { gameEpoch, decisionId, requestId, digest } = submitted;
@@ -5077,13 +5172,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await publishEnvelope(synchronized, ['--view-only']);
       assertNotStopping();
       log('user-view-republished', { decisionId: synchronized.next?.decisionId ?? null });
-      return waitOnlyForUser();
+      return waitOnlyForUser(out);
     }
 
     const submitted = out.userAction;
     if (!submitted || submitted.timeout) {
       log('user-wait-timeout', { decisionId: next.decisionId });
-      return waitOnlyForUser();
+      return waitOnlyForUser(out);
     }
     if (submitted.decisionId !== next.decisionId) {
       log('user-stale-decision', {
@@ -5165,6 +5260,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
+    waitController?.abort();
+    parkWake?.();
+    resolvePause?.({state:"stopped"});
     const attempt = (async () => {
       let stopError = null;
       try {
@@ -5204,7 +5302,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try { handle.terminate(); } catch { /* best-effort */ }
       }
       await Promise.allSettled([...coachTasks]);
-      await Promise.allSettled([...trainingTasks]);
+      await Promise.allSettled([...trainingTasks, ...auxiliaryTasks]);
       try {
         await terminateActiveChildren();
       } catch (error) {
@@ -5437,9 +5535,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const finishAbortedLifecycle = async (engineState) => {
+    const pin = openServerLockPin();
+    try {
+      if (pin && processAlive(pin.lock.serverPid)) {
+        const lock = assertPinnedServerLock(pin);
+        if (lock.sessionToken !== engineState.sessionToken) throw codedError('SERVER_LOCK_MISMATCH', '종료 게임 relay identity 불일치');
+        const startTime = startTimeOf(lock.serverPid);
+        if (!startTime) throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 게임 relay identity 미확인');
+        await assertServerBinding(lock);
+        assertPinnedServerLock(pin);
+        if (startTimeOf(lock.serverPid) !== startTime) throw codedError('SERVER_IDENTITY_MISMATCH', '종료 게임 relay identity 변경');
+        serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverAdopted = true;
+      }
+    } finally {closeServerLockPin(pin);}
+    writeLoopState({phase:'aborted',result:'abort',endedAt:readLoopState()?.endedAt ?? isoNow(now)});
+    await requestStop();
+    return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
+  };
+
   const resolveForPhase = async (phase, engineState, existingState, {
     beforePlayerRestore = null,
   } = {}) => {
+    if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState);
     if (FINAL_PHASES.has(phase)) {
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
@@ -5514,6 +5632,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const resume = async ({ skipLock = false } = {}) => {
+    recoveringControl = true;
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
     } else {
@@ -5529,8 +5648,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (typeof engineState.sessionToken !== 'string' || engineState.sessionToken === '') {
         throw codedError('BAD_ENGINE_IDENTITY', 'resume할 engine sessionToken이 없습니다.');
       }
-      opts.hints=checkHintResume(engineState.config, opts.hints);
-      if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
       const canonicalEpoch = gameEpochOf(engineState.sessionToken);
       if (state && (
         state.sessionToken !== engineState.sessionToken
@@ -5541,6 +5658,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           'loop-state sessionToken/gameEpoch가 engine identity와 일치하지 않습니다.',
         );
       }
+      if (state?.phase === 'aborted' && engineState.result !== 'abort') throw codedError('LOOP_STATE_IDENTITY_MISMATCH','종료 상태가 엔진과 일치하지 않습니다.');
+      if (engineState.result === 'abort') return finishAbortedLifecycle(engineState);
+      opts.hints=checkHintResume(engineState.config, opts.hints);
+      if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
       openLog();
       lifecycleStarted = true;
 
@@ -5731,6 +5852,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (engineForPending) unionReplayPending(completedReplayHandNos(engineForPending));
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
+    if (state.phase === 'aborted' || engineForPending?.result === 'abort') { await finishAbortedLifecycle(engineForPending); return readLoopState(); }
     if (FINAL_PHASES.has(state.phase)) return runFinalization();
     if (state.phase === 'done') return finishDoneLifecycle();
     if (state.phase !== 'playing') {
@@ -5745,6 +5867,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
 
     let out;
+    if (managed && pauseRequested) { await pauseBarrier(await runCli(['step'])); if (stopRequested) return readLoopState(); }
     if (resumeEntryPending) {
       const current = await runCli(['step']);
       if (fs.existsSync(path.join(root, '.publish-attempt.json'))) {
@@ -5776,13 +5899,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
 
     while (!stopRequested) {
+      out = await pauseBarrier(out);
+      if (stopRequested || out === null) break;
       await checkArchivePending(out);
       if (out.handOver) {
         const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
         const ending = out.gameOver || userBusted;
         if (ending) ensureFinalizationResultWaitCutoff();
         launchTrainingPipeline(out.handNo);
-        consumeTrainingNow().catch(() => {});
+        trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {
           await heartbeatCoach();
         } catch (error) {
@@ -5792,12 +5917,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (stopRequested) break;
         launchCoachPipeline(out.handNo);
         if (ending) {
+          pauseRequested=false;resolvePause?.({state:'finalizing'});resolvePause=null;
           // §5 finalizing 1: handOver 분기가 이미 async로 띄운 마지막 핸드 generation을
           // 그대로 둔다. 여기서 reserve를 다시 부르면 그 prior가 discard된다.
           writeLoopState({ phase: 'finalizing', handNo: out.handNo });
           return await runFinalization();
         }
         if (stopRequested) break;
+        out = await pauseBarrier(out);
+        if (stopRequested || out === null) break;
         out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
           const narration = started.events?.find((event) => event.type === 'level_up');
           return narration
@@ -5876,13 +6004,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     resume,
     run,
     coachPipeline,
+    pause, resumePlay, endGame,
+    get playState() { return control?.read().playState ?? null; },
     requestStop,
     get stopping() { return stopRequested; },
     get serverPid() { return serverPid; },
   };
 }
 
-async function initializePreparedSession(gameDir, args) {
+export async function initializePreparedSession(gameDir, args) {
   if (args.hints !== undefined) {
     await new Promise((resolve,reject)=>execFile(process.execPath,[ENGINE_CLI,'capabilities'],{encoding:'utf8',timeout:5000,maxBuffer:4096},(error,stdout)=>{
       let caps;try{caps=JSON.parse(stdout);}catch{}
@@ -5911,28 +6041,14 @@ async function initializePreparedSession(gameDir, args) {
   });
 }
 
-async function main() {
+export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   let loop = null;
   let preparedInitialization = null;
-  let caught = null;
-  let handlingSignal = false;
-  let signalStopPromise = null;
-  let signalStopError = null;
-  try {
-    const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
-    validateSelfOpponentArgs(args);
-    if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
-    const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
-      need,
-      canaryAbsPath,
-      preferred: args.playerRuntime ?? null,
-      onAdapterCreated: registerAdapter,
-    });
     if (args.storeDir !== undefined) {
       if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
-      // main runs only in the store CLI child. Restrict newly created paths
-      // before the catalog/loop lock; never chmod existing caller directories.
-      process.umask(0o077);
+      // Process entrypoints restrict umask; the shared launcher never changes
+      // process-wide settings or chmods caller-owned directories.
+
       let selfOpponentSource = null;
       if (!args.resume && (args.mirrorSelf || args.exploitSelf)) {
         selfOpponentSource = requireStoreTendency(args.storeDir);
@@ -5957,6 +6073,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              ...loopOptions,
               port: args.port,
               hints: args.hints,
               trainingEnabled: true,
@@ -5971,17 +6088,20 @@ async function main() {
           if (previousServer && isAlive(previousServer.serverPid)) {
             throw codedError('ACTIVE_GAME', '이전 session server가 아직 실행 중입니다.');
           }
-          const prepared = prepareSession(args.storeDir);
-          const initialized = await initializePreparedSession(prepared.stagingDir, args);
+          const reservation = onReserve ? await onReserve(previous) : null;
+          const prepared = prepareSession(args.storeDir, reservation);
+          const initialized = prepared.recovering ? readPreparation(prepared) : await initializePreparedSession(prepared.stagingDir, args);
           preparedInitialization = initialized;
-          resolveSessionReference(prepared.stagingDir, { createNew: true });
-          if (args.mirrorSelf || args.exploitSelf) {
+          if (!prepared.recovering) resolveSessionReference(prepared.stagingDir, { createNew: true });
+          if (!prepared.recovering && (args.mirrorSelf || args.exploitSelf)) {
             writeSelfOpponentsMarker(prepared.stagingDir, {
               requested: { mirror: !!args.mirrorSelf, exploiter: !!args.exploitSelf },
               sourceHands: selfOpponentSource?.tendency?.hands ?? 0,
               sourceSessions: selfOpponentSource?.sources?.length ?? 0,
             });
           }
+          if (!prepared.recovering && loopOptions.appSetup) writeJsonAtomic(path.join(prepared.stagingDir,'.app-setup.json'),loopOptions.appSetup);
+          if (!prepared.recovering) sealPreparation(prepared, initialized);
           const committed = commitSession(args.storeDir, prepared);
           loop = createGameLoop({
             gameDir: committed.sessionDir,
@@ -5989,6 +6109,7 @@ async function main() {
             initialLockHandle: storeLockHandle,
             resolver,
             opts: {
+              ...loopOptions,
               port: args.port,
               hints: args.hints,
               trainingEnabled: true,
@@ -6014,9 +6135,32 @@ async function main() {
       loop = createGameLoop({
         gameDir: args.gameDir,
         resolver,
-        opts: { port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
+        opts: {
+              ...loopOptions, port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
+  return { loop, preparedInitialization };
+}
+
+async function main() {
+  process.umask(0o077);
+  let loop = null;
+  let preparedInitialization = null;
+  let caught = null;
+  let handlingSignal = false;
+  let signalStopPromise = null;
+  let signalStopError = null;
+  try {
+    const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
+    validateSelfOpponentArgs(args);
+    if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
+    const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
+      need,
+      canaryAbsPath,
+      preferred: args.playerRuntime ?? null,
+      onAdapterCreated: registerAdapter,
+    });
+    ({ loop, preparedInitialization } = await prepareGameSession(args, { resolver }));
     process.once('SIGTERM', () => {
       if (handlingSignal) return;
       handlingSignal = true;
@@ -6024,7 +6168,7 @@ async function main() {
         signalStopError = error;
       });
     });
-    if (args.resume) await loop.resume({ skipLock: args.storeDir !== undefined });
+    if (args.resume) {const resumed = await loop.resume({ skipLock: args.storeDir !== undefined });if(resumed?.code==='GAME_ENDED')fs.writeSync(1,JSON.stringify(resumed)+'\n');}
     else await loop.bootstrap({
       ai: args.ai,
       stack: args.stack,
