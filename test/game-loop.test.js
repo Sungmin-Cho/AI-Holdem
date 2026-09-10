@@ -1864,11 +1864,7 @@ test('playing resume recreates only missing, corrupt, runtime-mismatched, or arg
   });
 });
 
-test('a remotely rejected restored session recreates only that player once, persists it, and retries without overlap', { timeout: 15_000 }, async (t) => {
-  // This asserts a 25ms decide budget against a 10ms adapter. On win32 the
-  // loop's own identity and lock checks are synchronous PowerShell children of
-  // about a second, which blocks the timer and fires that budget spuriously.
-  if (skipOnWin32(t, 'a 25ms decide budget cannot be kept while in-process proofs block the loop for seconds on win32')) return;
+test('a remotely rejected restored session recreates only that player once, persists it, and retries without overlap', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
@@ -1880,12 +1876,14 @@ test('a remotely rejected restored session recreates only that player once, pers
   }));
   let active = 0;
   let maxActive = 0;
+  let clockMs = 0;
   const adapter = makeAdapter({
     onDecide: async ({ sessionId, message }) => {
       active += 1;
       maxActive = Math.max(maxActive, active);
       try {
         await new Promise((resolve) => setTimeout(resolve, 10));
+        clockMs += 10;
         if (sessionId === 'expired-p1') {
           const error = new Error('remote session expired');
           error.code = 'CLI_FAILED';
@@ -1897,7 +1895,8 @@ test('a remotely rejected restored session recreates only that player once, pers
       }
     },
   });
-  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, monotonicNow: () => clockMs } });
   t.after(() => loop.requestStop());
   await loop.resume();
 
@@ -1952,7 +1951,7 @@ test('a repaired fresh session is never recreated again and failures preserve th
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(adapter),
-    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 } },
+    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 }, monotonicNow: () => 0 },
   });
   t.after(() => loop.requestStop());
   await loop.resume();
@@ -1970,7 +1969,12 @@ test('a repaired fresh session is never recreated again and failures preserve th
   assert.equal(pending.sessionRepaired, true);
 });
 
-test('restored-session repair RUNTIME_CLOSED preserves an unresolved decision', { timeout: 15_000 }, async (t) => {
+for (const { elapsedMs, exhausted, label } of [
+  { elapsedMs: 0, exhausted: false, label: 'RUNTIME_CLOSED preserves an unresolved decision' },
+  { elapsedMs: 50, exhausted: true, label: 'is skipped when the decision budget is exhausted' },
+  { elapsedMs: 43, exhausted: false, label: 'runs with exactly seven milliseconds remaining' },
+  { elapsedMs: 44, exhausted: true, label: 'is skipped with six milliseconds remaining' },
+]) test(`restored-session repair ${label}`, { timeout: 15_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
@@ -1979,8 +1983,12 @@ test('restored-session repair RUNTIME_CLOSED preserves an unresolved decision', 
     p1: { runtime: 'fake', sessionId: 'expired-p1', createdAt: '2026-08-29T01:00:00.000Z' },
     p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: '2026-08-29T01:00:00.000Z' },
   }));
+  let clockMs = 0;
+  let engineAtDecision;
   const adapter = makeAdapter({
     onDecide: async () => {
+      engineAtDecision = fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8');
+      clockMs = elapsedMs;
       throw Object.assign(new Error('remote session expired'), { code: 'CLI_FAILED' });
     },
   });
@@ -1991,7 +1999,10 @@ test('restored-session repair RUNTIME_CLOSED preserves an unresolved decision', 
   const loop = createGameLoop({
     gameDir,
     resolver: resolverFor(adapter),
-    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 } },
+    // This fixture tests repair semantics, not host disk/scheduler latency.
+    // Keep the 50ms budget and explicitly select remaining/exhausted time;
+    // real-clock soft/hard deadline behavior is covered by real-child tests.
+    opts: { port: 0, waitMs: 0, watchdog: { t1Ms: 50, t2Ms: 50 }, monotonicNow: () => clockMs },
   });
   t.after(() => loop.requestStop());
   await loop.resume();
@@ -2000,9 +2011,15 @@ test('restored-session repair RUNTIME_CLOSED preserves an unresolved decision', 
 
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.pendingDecision.status, 'recovery_required');
+  assert.equal(state.pendingDecision.code, exhausted ? 'CLI_FAILED' : 'RUNTIME_CLOSED');
+  assert.equal(state.pendingDecision.sessionRepaired, false);
+  assert.equal(state.pendingDecision.elapsedMs, elapsedMs);
+  assert.equal(adapter.decideCalls.length, 1);
+  assert.equal(adapter.calls.length, exhausted ? 0 : 1);
+  assert.equal(fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8'), engineAtDecision);
   assert.equal(readLoopLog(gameDir).some((row) => (
     row.event === 'player-session-repair-failed' && row.code === 'RUNTIME_CLOSED'
-  )), true);
+  )), !exhausted);
 });
 
 test('playing resume without a server lock restarts on the persisted actual port', { timeout: 10_000 * WIN32_SCALE }, async (t) => {

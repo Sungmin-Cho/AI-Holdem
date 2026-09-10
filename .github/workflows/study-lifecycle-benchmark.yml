@@ -1,0 +1,60 @@
+name: Study lifecycle benchmark
+on:
+  pull_request:
+    paths:
+      - 'tools/study-service.js'
+      - 'test/helpers/benchmark-study-lifecycle.mjs'
+      - 'test/helpers/study-benchmark-evidence.mjs'
+      - 'test/helpers/report-study-benchmark.mjs'
+      - '.github/workflows/study-lifecycle-benchmark.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: study-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  paired:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20.x, 22.x]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: candidate
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: baseline
+          ref: 477728fcc5b5341a8faa7f29499c7f4e19d0e737
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Bounded cold dependency preparation
+        run: node candidate/test/helpers/windows-privacy-probe.mjs --cold-start
+      - name: Paired same-runner fresh and warm lifecycle samples
+        run: |
+          $failed = $false
+          for ($rep = 0; $rep -lt 3; $rep++) {
+            $order = if ($rep % 2 -eq 0) { @('baseline','candidate') } else { @('candidate','baseline') }
+            foreach ($revision in $order) {
+              node candidate/test/helpers/benchmark-study-lifecycle.mjs --implementation $revision --label "$revision-$rep" --repeats 1 --warm 10 --out "evidence/$revision-$rep.json"
+              if ($LASTEXITCODE -ne 0) { $failed = $true }
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Compare paired request and proof measurements
+        if: always()
+        env:
+          BENCHMARK_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node candidate/test/helpers/report-study-benchmark.mjs evidence
+      - name: Preserve redacted raw operation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: study-lifecycle-node-${{ matrix.node }}
+          path: evidence/*.json
+          if-no-files-found: error

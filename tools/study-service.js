@@ -491,10 +491,27 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   if (options.parentIdentity !== undefined) await attachParent(ctx, value, options.parentIdentity, deadline);
   return publicHandle(value);
 }
+// Context creation and initial ownership reads are adjacent synchronous reads.
+// One before/after proof boundary covers both; inode/byte checks still run at
+// every read. No memo or ACL scope survives an await or a write operation.
+function readContextOwnership(storeDir) {
+  if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
+  const root = path.resolve(storeDir);
+  const initial = aclTransaction({ root, training: path.join(root, '.training') }, () => {
+    const ctx = context(storeDir);
+    // Alias/8.3 spellings do not match the canonical proof keys. Keep the
+    // original second transaction for those paths, rather than doing every
+    // canonical read as an individual proof fallback inside the alias scope.
+    if (ctx.root !== root) return { ctx };
+    return { ctx, descriptor: readDescriptor(ctx), owner: readLock(ctx) };
+  });
+  if (initial.ctx.root === root) return initial;
+  const ctx = initial.ctx;
+  return aclTransaction(ctx, () => ({ ctx, descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
+}
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  const ctx = context(storeDir);
-  const { descriptor, owner } = aclTransaction(ctx, () => ({ descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
+  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
   if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
   if (owner?.status === 'dead' && descriptor.state === 'valid'
     && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime
@@ -505,8 +522,7 @@ async function inspectStudyServiceWithinBudget(storeDir) {
 async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {}) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
-  const ctx = context(storeDir);
-  const { descriptor, owner } = aclTransaction(ctx, () => ({ descriptor: readDescriptor(ctx), owner: readLock(ctx) }));
+  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
   if (!owner && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
   if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
     && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
@@ -519,8 +535,10 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   catch { fail(); }
   if (response.status !== 200 || response.body.ok !== true) fail();
   while (platformNow() < deadline) {
-    assertContext(ctx);
-    const { current, lock } = aclTransaction(ctx, () => ({ current: readDescriptor(ctx), lock: readLock(ctx) }));
+    const { current, lock } = aclTransaction(ctx, () => {
+      assertContext(ctx);
+      return { current: readDescriptor(ctx), lock: readLock(ctx) };
+    });
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }

@@ -35,6 +35,11 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.12.0
+      - name: Prepare cold Windows privacy dependencies
+        timeout-minutes: 3
+        run: node test/helpers/windows-privacy-probe.mjs --cold-start
+      - name: Verify Windows private directory creation
+        run: node test/helpers/windows-privacy-probe.mjs
       - name: Verify publisher exit on the reported Node version
         run: node --test --test-name-pattern="publish shutdown:" test/publish.test.js
   test:

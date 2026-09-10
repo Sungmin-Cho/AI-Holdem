@@ -26,10 +26,17 @@ test('cold preparation caps each child and consumes one original total deadline'
 
 test('CI keeps the ordinary privacy gate after bounded cold preparation', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8');
-  const cold = workflow.indexOf('run: node test/helpers/windows-privacy-probe.mjs --cold-start');
-  const normal = workflow.indexOf('run: node test/helpers/windows-privacy-probe.mjs\n');
-  const child = workflow.indexOf('run: node test/helpers/windows-child-environment-probe.mjs');
-  assert.ok(cold > 0 && normal > cold && child > normal);
+  for (const job of ['windows-publisher', 'windows']) {
+    const body = workflow.split(`\n  ${job}:\n`)[1]?.split(/\n  [a-z-]+:\n/)[0];
+    assert.ok(body, `missing ${job}`);
+    const cold = body.indexOf('run: node test/helpers/windows-privacy-probe.mjs --cold-start');
+    const normal = body.indexOf('run: node test/helpers/windows-privacy-probe.mjs\n');
+    const verify = body.indexOf(job === 'windows-publisher'
+      ? 'run: node --test --test-name-pattern="publish shutdown:"'
+      : 'run: node test/helpers/windows-child-environment-probe.mjs');
+    assert.ok(cold > 0 && normal > cold && verify > normal, `${job} must prepare, prove, then test`);
+    assert.match(body.slice(0, cold), /timeout-minutes: 3/);
+  }
   assert.doesNotMatch(workflow, /continue-on-error/);
 });
 
