@@ -22,3 +22,9 @@ Local POSIX lifecycle and security/recovery tests: 55 passed. Final combined loc
 | 22 | stop (3 samples) | 23410.5 / 23651.7 | 19471.2 / 19627.8 | 80 / 65 |
 
 Not every operation improved: HTTP-summary median rose from 1750.8 to 1873.3 ms on Node 20 and 1754.1 to 1903.6 ms on Node 22, while its service-side proof counts also changed. Cold ensure was approximately unchanged; warm ensure had mixed small changes. Neither the HTTP difference nor the inspect/stop improvements are attributed solely to the optimization in this preliminary comparison. Raw per-operation evidence and proof kinds remain in the run artifacts. Final isolated measurements and acceptance adjudication are recorded in [PR #186](https://github.com/Sungmin-Cho/AI-Holdem/pull/186), separately from this preliminary run.
+
+## Final controlled baseline
+
+The final workflow and evidence validator pin `477728fcc5b5341a8faa7f29499c7f4e19d0e737`, main after #184 and #185 merged. Those recovery, policy and deal-provenance features are therefore present on both sides. The candidate's only production-file difference is `tools/study-service.js`; remaining changes are the test harness, workflow, regression tests and this document. Exact candidate SHA, raw records, same-runner environment, request/proof comparison and the acceptance decision are recorded in PR #186 before merge. This avoids adding a results-only commit that would supersede the measured candidate.
+
+For a future optimization, repin both the workflow and validator to its reviewed baseline. A fixed historical baseline must not silently become an evergreen claim that isolates later feature changes. Complete measurement alone never implies a performance win, and this optimization does not claim to solve every Windows latency bottleneck.

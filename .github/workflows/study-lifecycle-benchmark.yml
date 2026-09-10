@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: baseline
-          ref: 87512461c37372032f8eda044a15d2621ec20412
+          ref: 477728fcc5b5341a8faa7f29499c7f4e19d0e737
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: ${{ matrix.node }}

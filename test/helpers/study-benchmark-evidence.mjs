@@ -8,7 +8,7 @@ export function completeProofRows(bytes) {
   return rows;
 }
 
-export const BENCHMARK_BASELINE='87512461c37372032f8eda044a15d2621ec20412';
+export const BENCHMARK_BASELINE='477728fcc5b5341a8faa7f29499c7f4e19d0e737';
 export function evaluatePairedRecords(records,{expectedCandidate}={}) {
   let passed=records.length===6&&records.every(row=>row?.complete===true&&row.passed===true&&row.platform==='win32');
   const valid=records.filter(row=>row&&Array.isArray(row.rows)&&typeof row.label==='string');
