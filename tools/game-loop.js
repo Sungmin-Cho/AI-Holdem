@@ -4309,7 +4309,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         raw = completed?.raw;
         return validateReviewOutput(raw, { requireHeadings });
       } catch (error) {
-        if (error.code === 'CLI_FAILED' && error.exitCode === 0 && error.outputKind === 'empty') {
+        if (error?.code === 'CLI_FAILED' && error?.exitCode === 0 && error?.outputKind === 'empty') {
           raw = '';
           failure = codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
         } else failure = error;

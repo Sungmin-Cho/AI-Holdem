@@ -7877,6 +7877,25 @@ for (const stage of ['evaluator', 'synthesizer']) {
   });
 }
 
+test('#171: an undefined adapter rejection still terminates its review handle', { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: 'unused', terminate: { confirmed: false } }] });
+  const start = upper.oneshotStart.bind(upper);
+  upper.oneshotStart = (input) => {
+    const handle = start(input);
+    return input.prompt.includes('역할: 격리 evaluator')
+      ? { ...handle, done: Promise.reject(undefined) }
+      : handle;
+  };
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+  assert.equal(upper.reviewTerminations.length, 1);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.reason, 'REVIEW_TERMINATION_UNCONFIRMED');
+  assert.equal(fs.existsSync(path.join(gameDir, 'review.md')), false);
+});
+
 for (const opponentRuntime of ['llm', 'policy']) {
   test(`#171: ${opponentRuntime} evaluator exhaustion publishes factual review and supports done resume`, { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
     const gameDir = tmpGame();

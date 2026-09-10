@@ -99,3 +99,13 @@ self-opponent refactoring was not required: diagnostics remain private with thei
 session and fallback validates required derived data before optional rendering.
 These decisions do not claim arbitrary concurrent same-user filesystem mutation
 is contained, or prove live model reliability.
+
+The implementation re-review found one further accepted regression: accessing
+`error.code` on an undefined adapter rejection skipped handle termination. Optional
+access and a lifecycle regression close it. Other suggestions were checked against
+source: Claude stream text already preserves an explicit empty string and normal
+oneshot uses plain text; nonzero CLI/protocol failures intentionally do not retain
+raw stdout/stderr, which can contain transport credentials. The engine has no
+`result = 'loss'` producer in reachable Git history. Present malformed stats remain
+errors by design. Speculative Korean paraphrases and alternate diagnostic windows
+are not additional accepted authority syntax without regression evidence.
