@@ -68,6 +68,13 @@ function terminalForMigration(sessionDir) {
   }
 }
 
+function observedSessionPhase(sessionDir) {
+  try {
+    const state = readJsonSecure(path.join(sessionDir, 'loop-state.json'));
+    return typeof state?.phase === 'string' ? state.phase : 'unknown';
+  } catch { return 'unknown'; }
+}
+
 async function settleRunner(out) {
   const handle = toRunnerHandle(out);
   return handle.promise;
@@ -176,6 +183,8 @@ function profileHasFocus(profile) {
 
 export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   const notices = [];
+  const skipped = [];
+  const errors = [];
   let applied = 0;
   let profiled = 0;
   let banked = 0;
@@ -187,7 +196,9 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   for (const sessionDir of listTrainingSessions(storeDir)) {
     try {
       if (!terminalForMigration(sessionDir)) {
-        throw coded('SESSION_NOT_TERMINAL', '비terminal 세션은 profile sweep이 변경하지 않습니다.');
+        skipped.push({ gameId: path.basename(sessionDir), phase: observedSessionPhase(sessionDir),
+          code: 'SESSION_NOT_TERMINAL' });
+        continue;
       }
       const migration = await tc.migrateAuthority(sessionDir);
       for (const notice of migration?.notices ?? []) {
@@ -213,10 +224,17 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
       banked += consume.banked ?? 0;
       failed += consume.failed ?? 0;
     } catch (error) {
-      const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
+      const detail = { gameId: path.basename(sessionDir), phase: observedSessionPhase(sessionDir), code: error.code ?? 'ERROR' };
+      errors.push(detail);
+      const notice = `profile sweep 실패: ${detail.code} (${detail.gameId}, ${detail.phase})`;
       notices.push(notice);
       onNotice?.(notice);
     }
+  }
+  if (skipped.length > 0) {
+    const notice = `profile sweep 안내: 과거 미완료 세션 ${skipped.length}개를 안전하게 건너뛰었습니다 (SESSION_NOT_TERMINAL). 상세는 loop.log를 확인하세요.`;
+    notices.push(notice);
+    onNotice?.(notice);
   }
   let profile = null;
   try {
@@ -228,7 +246,7 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
     onNotice?.(notice);
   }
   return {
-    applied, profiled, banked, failed, pendingRetried, notices, profile,
+    applied, profiled, banked, failed, pendingRetried, notices, profile, skipped, errors,
   };
 }
 

@@ -380,7 +380,7 @@ test('authority v1 sweep migrates and enables the profile consumer in the same r
   assert.equal(fs.existsSync(path.join(sessionDir, 'training', '.migration-v2.json')), false);
   const swept = await sweepStore(storeDir);
   assert.equal(swept.applied, 1);
-  assert.equal(swept.skipped, undefined);
+  assert.deepEqual(swept.skipped, []);
   assert.equal(swept.profile.overall.evaluatedDecisions, 1);
   const { createTrainingControl } = await import('../tools/training-control.js');
   const auth = createTrainingControl({ storeDir }).loadAuthority(sessionDir);
@@ -407,6 +407,15 @@ test('sweep skips nonterminal and missing-phase v1 sessions without migration wr
 
   assert.equal(swept.applied, 0);
   assert.equal(swept.notices.some((notice) => /SESSION_NOT_TERMINAL/.test(notice)), true);
+  assert.equal(swept.notices.length, 1);
+  assert.equal(swept.notices[0].includes('실패'), false);
+  assert.deepEqual(swept.skipped.map(({ gameId, phase }) => ({ gameId, phase })), [
+    { gameId: path.basename(playing), phase: 'playing' },
+    { gameId: path.basename(missing), phase: 'unknown' },
+  ]);
+  const again = await sweepStore(storeDir);
+  assert.deepEqual(again.skipped, swept.skipped);
+  assert.deepEqual(again.notices, swept.notices);
   for (const [dir, before] of [[playing, beforePlaying], [missing, beforeMissing]]) {
     assert.deepEqual(fs.readFileSync(path.join(dir, 'training', '.training-authority.json')), before);
     assert.equal(fs.existsSync(path.join(dir, 'training', '.migration-v2.json')), false);

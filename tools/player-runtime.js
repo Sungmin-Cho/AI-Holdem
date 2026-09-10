@@ -437,7 +437,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
     const { args, format } = argvBuilder(purpose, model, sessionId);
     const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(), input });
-    const entry = { handle: null, closed: false, error: null };
+    const entry = { handle: null, closed: false, error: null, purpose, model, termination: null };
     const done = Promise.resolve(spawned.done).then(
       (result) => {
         entry.closed = true;
@@ -461,14 +461,30 @@ export function createPlayerRuntime(kind, opts = {}) {
 
   async function killAndConfirmClose(entry, signal = 'SIGKILL') {
     if (entry.closed) return;
+    // Watchdog and shutdown can reach the same child concurrently. Share one
+    // signal/close observation; a second kill is not additional exit evidence.
+    if (entry.termination) return entry.termination;
+    entry.termination = confirmChildClose(entry, signal);
+    return entry.termination;
+  }
+
+  async function confirmChildClose(entry, signal) {
+    const started = Date.now();
+    const details = () => ({ runtime: kind, pid: entry.handle.pid ?? null,
+      purpose: entry.purpose, model: entry.model, signal,
+      waitBudgetMs: killWaitMs, waitedMs: Date.now() - started,
+      closeConfirmed: entry.closed });
     let delivered;
     try {
       delivered = entry.handle.kill(signal);
     } catch (error) {
-      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error });
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
     }
     if (delivered === false) {
-      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`);
+      // A close queued just before kill may settle on the next microtask.
+      await Promise.resolve();
+      if (entry.closed) return;
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { details: details() });
     }
     const outcome = await Promise.race([
       entry.handle.done.then(
@@ -477,11 +493,11 @@ export function createPlayerRuntime(kind, opts = {}) {
       ),
       sleep(killWaitMs).then(() => ({ closed: false, timeout: true })),
     ]);
-    if (entry.closed && outcome.closed) return;
+    if (entry.closed) return;
     throw runtimeError(
       'CHILD_CLOSE_UNCONFIRMED',
       `CHILD_CLOSE_UNCONFIRMED: ${kind} 자식의 close를 확인하지 못했습니다.`,
-      { cause: outcome.error },
+      { cause: outcome.error, details: details() },
     );
   }
 

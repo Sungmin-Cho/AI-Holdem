@@ -1280,6 +1280,32 @@ test('bootstrap auto-select ignores a symlink practice-focus and records a notic
   );
 });
 
+test('bootstrap summarizes historical skips once and logs identities on repeated boots', { timeout: 15_000 }, async (t) => {
+  const storeDir = tmpGame();
+  const histories = ['playing', 'review_generated', 'aborted'];
+  const authorityBytes = JSON.stringify({ schemaVersion: 1, fixture: true });
+  const dirs = histories.map((phase, index) => {
+    const dir = path.join(storeDir, '.session-store', 'sessions', `history-${index}`);
+    fs.mkdirSync(path.join(dir, 'training'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'loop-state.json'), JSON.stringify({ phase }));
+    fs.writeFileSync(path.join(dir, 'training', '.training-authority.json'), authorityBytes);
+    return dir;
+  });
+  for (let boot = 0; boot < 2; boot += 1) {
+    const gameDir = tmpGame();
+    const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()),
+      opts: { port: 0, waitMs: 0, storeDir } });
+    t.after(() => loop.requestStop().catch(() => {}));
+    const state = await loop.bootstrap({ ai: 1, stack: 100 });
+    assert.equal(state.notices.filter((notice) => notice.includes('SESSION_NOT_TERMINAL')).length, 1);
+    const details = readLoopLog(gameDir).filter((row) => row.event === 'profile-sweep-skipped');
+    assert.deepEqual(details.map(({ gameId, phase }) => ({ gameId, phase })),
+      histories.map((phase, index) => ({ gameId: `history-${index}`, phase })));
+    for (const dir of dirs) assert.equal(fs.readFileSync(path.join(dir, 'training', '.training-authority.json'), 'utf8'), authorityBytes);
+    await loop.requestStop();
+  }
+});
+
 test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 }, async (t) => {
   const storeDir = tmpGame();
   const terminalDir = path.join(
@@ -5935,6 +5961,10 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
   const failedState = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(failedState.stoppedAt, undefined);
   assert.equal(failedState.cleanupError.code, 'SERVER_IDENTITY_MISMATCH');
+  const cleanupLog = fs.readFileSync(path.join(gameDir, 'loop.log'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line))
+    .findLast((row) => row.event === 'cleanup-failed');
+  assert.equal(cleanupLog.code, 'SERVER_IDENTITY_MISMATCH');
 
   const recovery = createGameLoop({
     gameDir,
