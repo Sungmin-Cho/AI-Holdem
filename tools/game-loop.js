@@ -5276,16 +5276,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const persistCleanupFailure = (error) => {
+    const cleanupError = {
+      code: error.code ?? 'ERROR',
+      message: error.message ?? String(error),
+      ...(error.details ? { details: error.details } : {}),
+    };
+    try {
+      // requestStop may already have closed the normal log descriptor.
+      openLog();
+      log('cleanup-failed', cleanupError);
+      fs.closeSync(logFd);
+      logFd = null;
+    } catch { /* Persist state even when the log is unavailable. */ }
     try {
       if (!fs.existsSync(loopStatePath)) return;
       writeLoopState({
         stopping: true,
         stoppedAt: undefined,
         cleanupFailedAt: isoNow(now),
-        cleanupError: {
-          code: error.code ?? 'ERROR',
-          message: error.message ?? String(error),
-        },
+        cleanupError,
       });
     } catch { /* 원래 cleanup failure와 lock ownership을 보존한다 */ }
   };
@@ -5433,6 +5442,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       readServerLock();
       let sweepNotices = [];
       let sweepFailed = 0;
+      let sweepDetails = [];
       if (storeDir) {
         try {
           const swept = await sweepStore(storeDir, {
@@ -5441,6 +5451,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           });
           sweepNotices = swept.notices ?? [];
           sweepFailed = swept.failed ?? 0;
+          sweepDetails = [...(swept.skipped ?? []).map((row) => ({ event: 'profile-sweep-skipped', ...row })),
+            ...(swept.errors ?? []).map((row) => ({ event: 'profile-sweep-error', ...row }))];
           if (sweepFailed > 0) {
             sweepNotices.push(`profile sweep consumer 실패: ${sweepFailed}건`);
           }
@@ -5461,6 +5473,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const initialized = preinitialized ?? await runCli(initArgs);
       if (storeDir) resolveSessionReference(root, { createNew: true });
       openLog();
+      for (const { event, ...detail } of sweepDetails) log(event, detail);
       const startedAt = isoNow(now);
       writeLoopState({
         phase: 'bootstrap',

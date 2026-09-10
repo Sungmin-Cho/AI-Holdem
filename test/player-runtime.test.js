@@ -1487,6 +1487,43 @@ test('dispose: 빈 작업 디렉터리를 정리하고 성공 뒤에도 runtime�
   }
 });
 
+test('dispose: concurrent watchdog and shutdown share one termination and preserve diagnostics', async () => {
+  let kills = 0;
+  let resolveDone;
+  const rt = createPlayerRuntime('claude', {
+    terminateKillWaitMs: 20,
+    exec: () => ({ pid: 424242, kill: () => { kills += 1; return true; },
+      done: new Promise((resolve) => { resolveDone = resolve; }) }),
+  });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1 });
+  const rejected = assert.rejects(decision, (error) => {
+    assert.equal(error.code, 'CHILD_CLOSE_UNCONFIRMED');
+    assert.equal(error.details.pid, 424242);
+    assert.equal(error.details.purpose, 'resume');
+    assert.equal(error.details.closeConfirmed, false);
+    assert.equal(error.details.waitBudgetMs, 20);
+    return true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await assert.rejects(rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+  await rejected;
+  assert.equal(kills, 1);
+  resolveDone({ code: 0, stdout: '', stderr: '' });
+});
+
+test('dispose: kill false with a queued confirmed close is not a cleanup failure', async () => {
+  let resolveDone;
+  const rt = createPlayerRuntime('claude', {
+    exec: () => ({ pid: 424242,
+      kill: () => { resolveDone({ code: 0, stdout: '{}', stderr: '' }); return false; },
+      done: new Promise((resolve) => { resolveDone = resolve; }) }),
+  });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1000 });
+  decision.catch(() => {});
+  await rt.dispose();
+  await decision.catch(() => {});
+});
+
 test('dispose: 종료 확인 실패 뒤에도 runtime은 영구 closed이고 두 번째 child를 만들지 않는다', async () => {
   let rejectDone;
   let execCalls = 0;
