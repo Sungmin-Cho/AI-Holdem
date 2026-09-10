@@ -14,7 +14,7 @@ test("command matrix and setup authority are explicit", () => {
     expectedSelectionVersion: 0,
   };
   for (const kind of COMMANDS) {
-    assert.equal(validateCommand({ ...base, kind }).kind, kind);
+    assert.equal(validateCommand({ ...base, kind, ...(kind === 'retry-decision' ? { decisionId: 'd-1-preflop-0' } : {}) }).kind, kind);
     if (!["start", "replace-current"].includes(kind))
       assert.throws(() => validateCommand({ ...base, kind, setup: {} }), {
         code: "BAD_COMMAND",

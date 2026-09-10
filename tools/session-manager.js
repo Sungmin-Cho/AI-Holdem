@@ -83,6 +83,8 @@ export function createSessionManager({
       } catch {}
     }
     let publicState = state;
+    const pendingDecision = session?.loop.pendingDecision ?? null;
+    if (session && state === 'playing' && session.loop.playState === 'paused') publicState = 'paused';
     if (session && state === "playing") {
       try {
         const phase = read(
@@ -103,8 +105,15 @@ export function createSessionManager({
       gameEpoch: epoch,
       setup: currentSetup(),
       defaultSetup,
+      pendingDecision: pendingDecision ? {
+        decisionId: pendingDecision.decisionId, status: pendingDecision.status,
+        code: pendingDecision.code ?? null, softWait: pendingDecision.softWait === true,
+        closeConfirmed: pendingDecision.closeConfirmed === true,
+      } : null,
       allowedCommands:
-        closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []),
+        closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []).filter((kind) =>
+          kind === 'retry-decision' ? pendingDecision?.status === 'recovery_required' && pendingDecision.closeConfirmed === true
+            : kind === 'resume' && publicState === 'paused' ? !pendingDecision : true),
       pendingRequestId: pending?.requestId ?? null,
       error,
     };
@@ -271,14 +280,21 @@ export function createSessionManager({
         if (!["paused", "finalizing"].includes(paused.state))
           throw controlError("SESSION_STOPPED");
         emit(paused.state);
+      } else if (row.kind === 'retry-decision') {
+        if (!session) throw controlError('SESSION_STOPPED');
+        await session.loop.retryDecision(row.decisionId);
+        emit('playing');
       } else if (row.kind === "resume") {
         if (!session) {
           emit("starting");
           await recoverPaused();
         }
         if (session?.loop.playState === "paused") {
-          await session.loop.resumePlay();
-          emit("playing");
+          if (session.loop.pendingDecision) emit('paused');
+          else {
+            await session.loop.resumePlay();
+            emit("playing");
+          }
         }
       } else {
         if (state === "paused" || session) {

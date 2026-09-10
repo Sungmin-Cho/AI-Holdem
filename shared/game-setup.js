@@ -1,4 +1,5 @@
 // Browser-safe settings. CLI and lobby profiles deliberately differ for tournament.
+import { playerBudget } from './player-budget.js';
 export const SETUP_KEYS = Object.freeze([
   "mode",
   "aiCount",
@@ -13,6 +14,8 @@ export const SETUP_KEYS = Object.freeze([
   "hints",
   "showdownPolicy",
   "replayReveal",
+  "playerSoftMs",
+  "playerHardMs",
 ]);
 export function setupError(field) {
   return Object.assign(new Error(`게임 설정을 확인하세요: ${field}`), {
@@ -61,6 +64,13 @@ export function normalizeSetup(input = {}) {
     exploitSelf: false,
     ...input,
   };
+  let budget;
+  try { budget = playerBudget({
+    ...(value.playerSoftMs !== undefined ? { softMs: value.playerSoftMs } : {}),
+    ...(value.playerHardMs !== undefined ? { hardMs: value.playerHardMs } : {}),
+  }); } catch { throw setupError('playerSoftMs/playerHardMs'); }
+  value.playerSoftMs = budget.softMs;
+  value.playerHardMs = budget.hardMs;
   for (const [key, allowed] of Object.entries({
     mode: ["cash-training", "tournament"],
     opponentRuntime: ["policy", "llm"],
