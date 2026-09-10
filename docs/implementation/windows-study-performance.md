@@ -1,6 +1,6 @@
 # Windows study lifecycle evidence
 
-Issue #179 measures request wall time independently of suite-wide cumulative proof time. `tools/benchmark-study-lifecycle.js` runs an actual detached service in an isolated private store, records fresh-service ensure and warmed ensure/inspect/HTTP/stop operations, rejects a wrong token, and verifies the exact stopped process and removed descriptor/lock. The harness preserves failed/censored rows in denominators. No user store or credentials are exported.
+Issue #179 measures request wall time independently of suite-wide cumulative proof time. `test/helpers/benchmark-study-lifecycle.mjs` runs an actual detached service in an isolated private store, records fresh-service ensure and warmed ensure/inspect/HTTP/stop operations, rejects a wrong token, and verifies the exact stopped process and removed descriptor/lock. The harness preserves failed/censored rows in denominators. No user store or credentials are exported. Its external-checkout loading belongs to the test harness, not the guarded production dependency graph.
 
 The paired Windows workflow uses the same runner for baseline and candidate, alternating order across three fresh lifecycles per revision, with ten warm samples per lifecycle. It records SHA, OS image, Node, PowerShell, wall-time rows and redacted proof kinds/durations. Fresh service/store is not a cold operating-system cache. Concurrent service checkpoints may fall inside client operation windows. Cumulative proof time must not be reported as request latency.
 

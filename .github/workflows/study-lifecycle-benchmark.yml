@@ -3,7 +3,7 @@ on:
   pull_request:
     paths:
       - 'tools/study-service.js'
-      - 'tools/benchmark-study-lifecycle.js'
+      - 'test/helpers/benchmark-study-lifecycle.mjs'
       - '.github/workflows/study-lifecycle-benchmark.yml'
   workflow_dispatch:
 permissions:
@@ -39,7 +39,7 @@ jobs:
           for ($rep = 0; $rep -lt 3; $rep++) {
             $order = if ($rep % 2 -eq 0) { @('baseline','candidate') } else { @('candidate','baseline') }
             foreach ($revision in $order) {
-              node candidate/tools/benchmark-study-lifecycle.js --implementation $revision --label "$revision-$rep" --repeats 1 --warm 10 --out "evidence/$revision-$rep.json"
+              node candidate/test/helpers/benchmark-study-lifecycle.mjs --implementation $revision --label "$revision-$rep" --repeats 1 --warm 10 --out "evidence/$revision-$rep.json"
               if ($LASTEXITCODE -ne 0) { $failed = $true }
             }
           }
