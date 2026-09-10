@@ -1969,9 +1969,12 @@ test('a repaired fresh session is never recreated again and failures preserve th
   assert.equal(pending.sessionRepaired, true);
 });
 
-for (const exhausted of [false, true]) test(exhausted
-  ? 'restored-session repair is skipped when the decision budget is exhausted'
-  : 'restored-session repair RUNTIME_CLOSED preserves an unresolved decision', { timeout: 15_000 }, async (t) => {
+for (const { elapsedMs, exhausted, label } of [
+  { elapsedMs: 0, exhausted: false, label: 'RUNTIME_CLOSED preserves an unresolved decision' },
+  { elapsedMs: 50, exhausted: true, label: 'is skipped when the decision budget is exhausted' },
+  { elapsedMs: 43, exhausted: false, label: 'runs with exactly seven milliseconds remaining' },
+  { elapsedMs: 44, exhausted: true, label: 'is skipped with six milliseconds remaining' },
+]) test(`restored-session repair ${label}`, { timeout: 15_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   putAiFirst(gameDir);
@@ -1985,7 +1988,7 @@ for (const exhausted of [false, true]) test(exhausted
   const adapter = makeAdapter({
     onDecide: async () => {
       engineAtDecision = fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8');
-      clockMs = exhausted ? 50 : 0;
+      clockMs = elapsedMs;
       throw Object.assign(new Error('remote session expired'), { code: 'CLI_FAILED' });
     },
   });
@@ -2009,6 +2012,8 @@ for (const exhausted of [false, true]) test(exhausted
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.pendingDecision.status, 'recovery_required');
   assert.equal(state.pendingDecision.code, exhausted ? 'CLI_FAILED' : 'RUNTIME_CLOSED');
+  assert.equal(state.pendingDecision.sessionRepaired, false);
+  assert.equal(state.pendingDecision.elapsedMs, elapsedMs);
   assert.equal(adapter.decideCalls.length, 1);
   assert.equal(adapter.calls.length, exhausted ? 0 : 1);
   assert.equal(fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8'), engineAtDecision);
