@@ -47,6 +47,7 @@ async function run(dir, args) {
     encoding: 'utf8',
     timeout: 20000,
   });
+  assert.equal(stdout.trim().split('\n').length, 1, 'publisher must emit exactly one JSON line');
   return JSON.parse(stdout.trim());
 }
 
@@ -200,6 +201,8 @@ async function runFailing(dir, args) {
       timeout: 20000,
     });
   } catch (error) {
+    assert.equal(String(error.stdout ?? '').trim().split('\n').length, 1,
+      'publisher errors must emit exactly one JSON line');
     return { code: error.code, json: JSON.parse(String(error.stdout ?? '').trim() || 'null') };
   }
   throw new Error('실패했어야 하는 호출이 성공했습니다');
@@ -548,6 +551,48 @@ test('publish --wait: 사용자가 조용하면 timeout으로 돌아온다', asy
     assert.deepEqual(out.userAction, { timeout: true });
   } finally {
     await started.close();
+  }
+});
+
+test('publish shutdown: repeated publish-then-wait exits cleanly (#170 Windows regression)', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const file = turnFile(dir, userTurn());
+    for (let i = 0; i < 6; i += 1) {
+      const out = await run(dir, ['--from', file, '--wait', '--wait-ms', '1500']);
+      assert.equal(out.ok, true);
+      assert.equal(out.publishId, i + 1);
+      assert.deepEqual(out.userAction, { timeout: true });
+    }
+    const out = await run(dir, ['--from', file, '--wait-only', '--wait-ms', '10']);
+    assert.equal(out.publishId, undefined);
+    assert.deepEqual(out.userAction, { timeout: true });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8')).publishId, 6);
+    const noWait = await run(dir, ['--from', file]);
+    assert.equal(noWait.publishId, 7);
+    assert.equal(noWait.userAction, undefined);
+    const epoch = await run(dir, ['--print-game-epoch']);
+    assert.deepEqual(epoch, { ok: true, gameEpoch: gameEpochOf('tok') });
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish shutdown: usage, invalid envelope and internal errors emit one JSON line with exit 1', async () => {
+  const dir = tmpDir();
+  writeLockJson(dir, 8877, 'tok-errors');
+  const cases = [
+    [[], 'USAGE'],
+    [['--from', turnFile(dir, { ok: false })], 'BAD_ENVELOPE'],
+    // Valid side envelope, but invalid events triggers an unexpected TypeError.
+    [['--from', path.join(dir, 'internal.json'), '--wait-only'], 'INTERNAL'],
+  ];
+  fs.writeFileSync(path.join(dir, 'internal.json'), JSON.stringify({ coach: [{}], events: {} }));
+  for (const [args, code] of cases) {
+    const failed = await runFailing(dir, args);
+    assert.equal(failed.code, 1);
+    assert.equal(failed.json.code, code);
   }
 });
 

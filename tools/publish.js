@@ -29,10 +29,15 @@ const PUBLISH_TIMEOUT_MS = 10_000;
 const LOCK_NAME = 'publish.lock.d';
 const CONTROL_TYPES = new Set(['bust', 'level_up', 'game_over']);
 
-// fetch keeps its socket pooled, so the loop never drains on its own: write and leave.
+// Let closing fetch sockets drain before exiting (Windows libuv can assert on
+// immediate exit). Bound shutdown if pooled sockets keep the event loop alive.
+let replied = false;
 function reply(envelope, exitCode) {
+  if (replied) return;
+  replied = true;
   fs.writeSync(1, `${JSON.stringify(envelope)}\n`);
-  process.exit(exitCode);
+  process.exitCode = exitCode;
+  setTimeout(() => process.exit(exitCode), 100).unref();
 }
 
 class ToolError extends Error {
@@ -660,6 +665,7 @@ async function main() {
   if (opts.printGameEpoch) {
     const lock = readLock(gameDir);
     reply({ ok: true, gameEpoch: gameEpochOf(lock.sessionToken) }, 0);
+    return;
   }
   const envelope = readJson(opts.from, 'BAD_ENVELOPE', 'envelope');
   // A --retry that resolves a pending attempt sends the recorded body, never this
@@ -713,5 +719,5 @@ try {
   await main();
 } catch (error) {
   if (error instanceof ToolError) reply({ ok: false, code: error.code, message: error.message }, 1);
-  reply({ ok: false, code: 'INTERNAL', message: error?.message ?? '알 수 없는 오류' }, 1);
+  else reply({ ok: false, code: 'INTERNAL', message: error?.message ?? '알 수 없는 오류' }, 1);
 }
