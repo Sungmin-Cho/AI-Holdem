@@ -86,7 +86,23 @@ test('managed command journal retries the displayed LLM decision once and preser
   assert.equal((await settle(manager,start.requestId)).status,'succeeded');
   const waitPaused = async () => {
     const deadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
-    while (manager.snapshot().state !== 'paused' && Date.now() < deadline) await new Promise(r=>setTimeout(r,20));
+    let submitted=false;
+    const lock=JSON.parse(fs.readFileSync(path.join(manager.current.sessionDir,'lock.json')));
+    const base=`http://127.0.0.1:${lock.port}`;
+    while (manager.snapshot().state !== 'paused' && Date.now() < deadline) {
+      // The initial button is random. If the user acts first, advance that
+      // real UI decision rather than assuming an AI recovery already exists.
+      if(calls.length===0&&!submitted) {
+        const snapshot=await (await fetch(`${base}/api/snapshot?token=${lock.sessionToken}`)).json();
+        if(snapshot.view?.legal?.toAct==='user') {
+          const response=await fetch(`${base}/api/action?token=${lock.sessionToken}`,{
+            method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({decisionId:snapshot.view.legal.decisionId,requestId:randomUUID(),action:'fold'})});
+          assert.equal(response.ok,true);submitted=true;
+        }
+      }
+      await new Promise(r=>setTimeout(r,20));
+    }
     assert.equal(manager.snapshot().state,'paused');
   };
   await waitPaused();
