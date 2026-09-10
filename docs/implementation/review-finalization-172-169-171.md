@@ -42,3 +42,60 @@ three issues and merge only after required checks succeed.
 No migration of existing sessions, no live game modification and no change to
 the coach termination or publication gates. Fallback explicitly says LLM
 explanation is unavailable and does not claim poker skill, EV or GTO proof.
+
+## Implemented contracts and review decisions
+
+- Error precedence is `EMPTY_REVIEW_OUTPUT`, `REVIEW_CLAIM_REJECTED`, then
+  `REVIEW_HEADINGS_MISSING`. Successful empty Codex CLI output carries an empty
+  output discriminator through the existing CLI_FAILED adapter error; malformed
+  protocol output remains CLI_FAILED. Only model-attempt output is retained;
+  checkpoint/fallback validation failures do not get an extra output slot.
+- `.review-diagnostics/{evaluator,synthesizer}-{1,2}.txt` contains at most 16 KiB
+  per slot, with one fixed `.pending.tmp` scratch slot for crash recovery.
+  Retention continues after done for diagnosis; a subsequent attempt replaces
+  its own slot. Oversized input is omitted, recognized credentials are redacted
+  before truncation, and invisible/control separators are removed before secret
+  matching. This is bounded local diagnostics, not a universal secret detector.
+- Existing directories and files must pass POSIX privacy/Windows ACL checks.
+  Windows checks are batched; failed privacy or I/O leaves `outputStatus` as
+  `not_saved` without replacing the primary review failure. Diagnostic writes
+  run after the coach result-wait cutoff, outside its publication deadline.
+- Export enumerates `hands/hand-N.json` plus engine lastHand and explicit learning
+  inputs (`export/hand-normalizer.js`, `export/manifest.js`). UI reads the explicit
+  snapshot. Prompts use captured hand data and successful evaluator output.
+  Diagnostics have no reader in those paths; export and UI exclusion are tested.
+  Session archival may retain diagnostics as intended session-private data.
+- Korean coordination delegates only when the entire gap is a noun conjunction.
+  The two meta constructions have complete narrow predicates; general `여부` or
+  a later clause's negation does not permit a positive authority claim.
+- Fallback is entered only for missing oneshot capability or an exhaustion error
+  carrying positive termination evidence. Any failed termination takes precedence
+  on either attempt. Fallback rechecks engine result, players, stats, derived
+  policy data and completed-hand agreement with the persisted cutoff.
+- All present stats rows must be well-formed, including AI rows. The engine emits
+  complete rows; corruption is not converted to an absent measurement. Engine
+  result producers use completed/abort/win/lose; unused loss display alias removed.
+- Complete appended fallback text passes heading/claim validation and the existing
+  atomic review checkpoint. Invalid fallback output halts without recursive retry.
+  After review_generated, digest-checked resume publishes the same review without
+  invoking a model. Existing review and replay artifacts are preserved.
+
+Both plan and implementation were reviewed by independently dispatched
+claude-opus-5/high and gpt-5.6-sol/high, through model-router 1.14.0 (HIGH risk
+9/18, execution EASY 8/18, data_integrity_sensitive, routing confidence 0.95).
+The first file-reading seats had operational failures: Sol's nested sandbox
+could not read files and was cancelled with confirmed termination; Opus timed
+out with confirmed termination. Each missing plan seat was retried once using
+inline source. Both returned PASS_WITH_CHANGES. No peer findings were included
+in either independent input.
+
+Implementation findings accepted: late cutoff/hand-count revalidation, actual
+adapter empty-output classification, bounded crash scratch retention, normalized
+secret matching, batched Windows privacy proofs, explicit export exclusion test
+and valid result vocabulary. Rejected: permitting malformed AI stats as missing
+data, treating an unsupported result alias as legal, and deleting diagnostics at
+done (would defeat the requested post-failure diagnosis). Broad archival/optional
+self-opponent refactoring was not required: diagnostics remain private with their
+session and fallback validates required derived data before optional rendering.
+These decisions do not claim arbitrary concurrent same-user filesystem mutation
+is contained, or prove live model reliability.

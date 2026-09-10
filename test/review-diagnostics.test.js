@@ -12,6 +12,10 @@ test('review diagnostics redact credentials before bounded UTF-8 truncation', ()
   assert.ok(text.endsWith('[truncated]'));
   assert.doesNotMatch(text, /\ufffd/);
   assert.equal(sanitizeReviewDiagnostic('x'.repeat(1024 * 1024 + 1)), '[oversized diagnostic omitted]');
+  assert.equal(sanitizeReviewDiagnostic('ses\u200bsion-token-value', ['session-token-value']), '[REDACTED]');
+  assert.equal(sanitizeReviewDiagnostic('ses\u0001sion-token-value', ['session-token-value']), '[REDACTED]');
+  assert.ok(Buffer.byteLength(sanitizeReviewDiagnostic('한'.repeat(500), [], 512)) <= 512);
+  for (const cap of [0, 1, 5, 11]) assert.ok(Buffer.byteLength(sanitizeReviewDiagnostic('한'.repeat(100), [], cap)) <= cap);
 });
 
 test('review diagnostics retain four private latest-attempt slots including empty output', () => {
@@ -24,6 +28,11 @@ test('review diagnostics retain four private latest-attempt slots including empt
     if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(root, result.outputPath)).mode & 0o777, 0o600);
   }
   assert.equal(fs.readdirSync(path.join(root, '.review-diagnostics')).length, 4);
+  const scratch = path.join(root, '.review-diagnostics', '.pending.tmp');
+  fs.writeFileSync(scratch, 'interrupted rejected output', { mode: 0o600 });
+  assert.equal(preserveReviewFailure(root, { stage: 'evaluator', attempt: 1, raw: 'recovered' }).outputStatus, 'saved');
+  assert.equal(fs.readdirSync(path.join(root, '.review-diagnostics')).length, 4);
+  assert.equal(fs.existsSync(scratch), false);
   assert.equal(preserveReviewFailure(root, { stage: 'evaluator', attempt: 1 }).outputStatus, 'unavailable');
 });
 
@@ -35,4 +44,13 @@ test('review diagnostic unsafe slots do not overwrite or follow another file', (
   fs.linkSync(target, linked);
   assert.equal(preserveReviewFailure(root, { stage: 'evaluator', attempt: 1, raw: 'overwrite' }).outputStatus, 'not_saved');
   assert.equal(fs.readFileSync(linked, 'utf8'), 'first');
+});
+
+test('review diagnostics omit content for an insecure directory', { skip: process.platform === 'win32' }, () => {
+  const root = createOwnedTempDir('review-diagnostics');
+  const directory = path.join(root, '.review-diagnostics');
+  fs.mkdirSync(directory, { mode: 0o755 });
+  fs.chmodSync(directory, 0o755);
+  assert.equal(preserveReviewFailure(root, { stage: 'evaluator', attempt: 1, raw: 'private' }).outputStatus, 'not_saved');
+  assert.deepEqual(fs.readdirSync(directory), []);
 });

@@ -4309,7 +4309,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         raw = completed?.raw;
         return validateReviewOutput(raw, { requireHeadings });
       } catch (error) {
-        failure = error;
+        if (error.code === 'CLI_FAILED' && error.exitCode === 0 && error.outputKind === 'empty') {
+          raw = '';
+          failure = codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+        } else failure = error;
       }
 
       // Each failed attempt owns a distinct child and distinct 300-second adapter timer.
@@ -4443,7 +4446,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, observed?.sample)}, `
           + `프리플롭 레이즈 ${percent(observed?.pfr, observed?.sample)}.`;
       });
-    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배', loss: '패배' }[result] ?? '종료';
+    const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배' }[result] ?? '종료';
     return [
       '## 내 성향 통계', '',
       `- 플레이한 핸드: ${count(user?.sample)}핸드`,
@@ -4492,11 +4495,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('BAD_PLAYERS', '기계 리뷰에 필요한 플레이어 정보가 올바르지 않습니다.');
       }
       const stats = JSON.parse(statsRaw)?.perPlayer;
+      // A missing measurement can be displayed as unavailable, but a present
+      // malformed player row is corrupt evidence, including non-user rows.
       if (!stats || typeof stats !== 'object' || Array.isArray(stats) || !stats.user
         || Object.values(stats).some((row) => !row || !Number.isSafeInteger(row.sample) || row.sample < 0
           || (row.net != null && !Number.isSafeInteger(row.net))
           || ['vpip', 'pfr'].some((key) => row[key] != null && (!Number.isFinite(row[key]) || row[key] < 0 || row[key] > 1)))) {
         throw codedError('BAD_REVIEW_STATS', '기계 리뷰에 필요한 관찰 통계가 올바르지 않습니다.');
+      }
+      const cutoff = readLoopState()?.finalization?.cutoff;
+      if (cutoff?.reviewGate !== 'open' || cutoff.terminationConfirmed !== true
+        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed
+        || stats.user.sample !== completed) {
+        throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
       }
       // Read derived evidence before optional sections can downgrade its errors.
       readDerivedPolicyConfigs(root);
