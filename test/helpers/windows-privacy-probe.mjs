@@ -5,15 +5,52 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-async function main() {
+const COLD_CALL_MS = 60_000;
+const COLD_TOTAL_MS = 120_000;
+
+// Only the explicit CI preparation invocation receives a cold-start allowance.
+// Never return zero to spawnSync: zero disables its timeout altogether.
+export function privacyProbeTimeout(originalTimeout, { coldStart = false, deadline, now = performance.now() } = {}) {
+  if (!coldStart) return originalTimeout;
+  const remaining = Math.floor(deadline - now);
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    throw Object.assign(new Error('WINDOWS_PRIVACY_COLD_START_TIMEOUT'), { code: 'WINDOWS_PRIVACY_COLD_START_TIMEOUT' });
+  }
+  return Math.min(COLD_CALL_MS, remaining);
+}
+
+async function main({ coldStart = false } = {}) {
   if (process.platform !== 'win32') throw new Error('Windows privacy probe requires Windows');
+  const deadline = performance.now() + COLD_TOTAL_MS;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-windows-privacy-'));
   const identity = fs.lstatSync(root);
   const original = cp.spawnSync;
+  let invocation = 0;
   cp.spawnSync = (...args) => {
-    const result = original(...args);
     const script = args[1]?.at(-1) ?? '';
+    const isPowerShell = /powershell\.exe$/i.test(String(args[0]));
+    const trace = path.join(root, `powershell-${++invocation}.trace`);
+    // Leave stdout/stderr intact: production rejects an ACL proof with stderr.
+    // These diagnostic-only stage markers distinguish cold host startup, C#
+    // compilation, native creation and ACL/provider discovery on a timed-out run.
+    const mark = (stage) => `try { [System.IO.File]::AppendAllText('${trace.replaceAll("'", "''")}', '${stage} ' + [DateTime]::UtcNow.Ticks + [Environment]::NewLine) } catch {}; `;
+    if (isPowerShell) {
+      let measured = mark('script-start') + script;
+      measured = measured.replace("Add-Type @'", `${mark('compile-start')}Add-Type @'`)
+        .replace("'@;", `'@;\n${mark('compile-end')}`)
+        .replace('$me=[System.Security.Principal.WindowsIdentity]', `${mark('acl-build-start')}$me=[System.Security.Principal.WindowsIdentity]`)
+        .replace('try { [Runtime.InteropServices.Marshal]::Copy', `${mark('native-create-start')}try { [Runtime.InteropServices.Marshal]::Copy`)
+        .replace('$a=Get-Acl', `${mark('acl-read-start')}$a=Get-Acl`)
+        .replace('$rules=@();', `${mark('acl-read-end')}$rules=@();`);
+      args[1] = [...args[1].slice(0, -1), measured + '\n' + mark('script-end')];
+      args[2] = { ...args[2], timeout: privacyProbeTimeout(args[2]?.timeout, { coldStart, deadline }) };
+    }
+    const started = performance.now();
+    const result = original(...args);
     console.log(JSON.stringify({ kind: String(script).includes('PrivateDirectoryNative') ? 'private-create' : 'private-read',
+      coldStart,
+      wallMs: Math.round(performance.now() - started), timeoutMs: args[2]?.timeout,
+      stages: fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').trim().split(/\r?\n/) : [],
       status: result.status, signal: result.signal, errorCode: result.error?.code ?? null,
       stdout: String(result.stdout ?? '').slice(0, 8192), stderr: String(result.stderr ?? '').slice(0, 8192) }));
     return result;
@@ -21,11 +58,8 @@ async function main() {
   syncBuiltinESMExports();
   try {
     const { createPrivateDirectory, isPrivatePath } = await import('../../shared/platform-files.js');
-    // A hosted runner's PowerShell occasionally stalls past the 15s per-call
-    // cap once, in a job that otherwise proves in under a second per call. One
-    // stall is not a verdict on the platform, and it must not cost the 75
-    // minutes behind this gate. Try once more on a fresh directory; both
-    // attempts stay in the log, and a second stall fails the step.
+    // Preserve the existing single retry on a fresh directory. Cold preparation
+    // still has to prove the path and owned lock; a timeout is never success.
     let target = path.join(root, 'private');
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -50,6 +84,7 @@ async function main() {
         if (!verified) throw new Error(`OWNED_LOCK_ACL_UNVERIFIED:${label}`);
       }
     } finally { releaseOwnedLock(owner); }
+    if (coldStart) console.log(JSON.stringify({ windowsPrivacyColdStartVerified: true }));
   } finally {
     cp.spawnSync = original;
     syncBuiltinESMExports();
@@ -60,4 +95,10 @@ async function main() {
   }
 }
 const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (direct && !process.env.NODE_TEST_CONTEXT) await main();
+if (direct && !process.env.NODE_TEST_CONTEXT) {
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--cold-start')) {
+    throw new Error('usage: windows-privacy-probe.mjs [--cold-start]');
+  }
+  await main({ coldStart: args[0] === '--cold-start' });
+}

@@ -2020,7 +2020,10 @@ test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume bo
   await runUntilUserBoundary(loop, gameDir);
 });
 
-test('repair_failed halt clears only after resume-check reports a successful repair boundary', { timeout: 10_000 }, async (t) => {
+// This is a recovery/cleanup contract, not a latency assertion. On Windows the
+// snapshot wait alone allows 30s for out-of-process proofs, so the enclosing
+// init/resume/run/stop lifecycle must use the same platform scale as its peers.
+test('repair_failed halt clears only after resume-check reports a successful repair boundary', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   writeLoopStateFixture(gameDir, init.sessionToken, {
