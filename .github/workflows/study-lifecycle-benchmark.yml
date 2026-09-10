@@ -48,6 +48,8 @@ jobs:
           if ($failed) { exit 1 }
       - name: Compare paired request and proof measurements
         if: always()
+        env:
+          BENCHMARK_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node candidate/test/helpers/report-study-benchmark.mjs evidence
       - name: Preserve redacted raw operation evidence
         if: always()

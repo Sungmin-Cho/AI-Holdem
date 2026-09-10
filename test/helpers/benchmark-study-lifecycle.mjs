@@ -42,7 +42,8 @@ function persistEvidence(complete=false) {
   const result={schemaVersion:1,label,sha,platform:process.platform,release:os.release(),arch:process.arch,node:process.version,powershell,
     image:process.env.ImageVersion??null,repeats,warm,complete,passed:complete&&!failed,
     methodology:'Fresh private store/service coldness, not cold OS; sequential operation windows include concurrent service checkpoint proofs. Proof cumulative time is not request wall time. Success-only latency percentiles exclude censored failures, retained in failure counts and maxObservedMs. Incomplete runs never pass.',summary,rows};
-  fs.mkdirSync(path.dirname(out),{recursive:true});fs.writeFileSync(out,JSON.stringify(result,null,2));
+  fs.mkdirSync(path.dirname(out),{recursive:true});
+  const pending=out+'.pending';fs.writeFileSync(pending,JSON.stringify(result,null,2));fs.renameSync(pending,out);
   return result;
 }
 persistEvidence();
@@ -56,6 +57,9 @@ async function measured(operation,rep,sample,fn) {
   try {events=proofs().slice(before).map(row=>({kind:row.kind,ms:row.ms,status:row.status,timedOut:row.timedOut,
     phase:row.phase,side:row.pid===process.pid?'client':'service'}));} catch(e){proofError=e;}
   if(proofError) error??=Object.assign(new Error('diagnostic evidence unavailable'),{code:'BENCHMARK_DIAGNOSTICS_INVALID'});
+  if(process.platform==='win32'&&operation==='cold-ensure'&&!events.some(row=>row.side==='client')) {
+    error??=Object.assign(new Error('client diagnostics absent'),{code:'BENCHMARK_DIAGNOSTICS_INVALID'});
+  }
   rows.push({operation,rep,sample,ms,ok:!error,code:error?.code??(error?'ERROR':null),
     censored:!!error,proofs:events});
   if(error) failed=true;
