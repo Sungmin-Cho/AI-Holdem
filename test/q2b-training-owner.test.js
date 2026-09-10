@@ -308,7 +308,9 @@ test('Q2b sweep skips playing, finalizing, and missing-phase v1/v2 sessions byte
 
   const swept = await sweepStore(storeDir);
 
-  assert.equal(swept.notices.filter((notice) => /SESSION_NOT_TERMINAL/.test(notice)).length, 4);
+  assert.equal(swept.notices.filter((notice) => /SESSION_NOT_TERMINAL/.test(notice)).length, 1);
+  assert.deepEqual(swept.skipped.map(({gameId, phase}) => ({gameId, phase})),
+    variants.map(({id, phase}) => ({gameId: id, phase: phase ?? 'unknown'})));
   for (const [sessionDir, hashes] of before) {
     assert.deepEqual(fileHashes(path.join(sessionDir, 'training')), hashes);
   }
