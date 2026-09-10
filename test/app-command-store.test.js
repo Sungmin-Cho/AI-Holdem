@@ -5,7 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { createSessionManager } from "../tools/session-manager.js";
-import { prepareSession, commitSession } from "../engine/session-catalog.js";
+import { prepareSession, commitSession, resolveCurrentSession } from "../engine/session-catalog.js";
 import { initializePreparedSession } from "../tools/game-loop.js";
 import {
   sealPreparation,
@@ -117,6 +117,30 @@ test('managed command journal retries the displayed LLM decision once and preser
   manager.command(end);
   assert.equal((await settle(manager,end.requestId)).status,'succeeded');
   assert.equal(manager.snapshot().state,'ended');
+});
+
+test('managed favorable deal survives app restart and restart-game setup', {timeout:process.platform==='win32'?300000:30000}, async t=>{
+  const root=createOwnedTempDir('lobby-biased-deal');
+  let manager=createSessionManager({storeDir:root,resolver});
+  t.after(()=>manager.close());
+  await manager.initialize();
+  const start={...payload(manager),setup:{aiCount:1,dealBias:'strong'}};
+  manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');
+  const pause=payload(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
+  const gameId=manager.snapshot().gameId;
+  assert.equal(manager.snapshot().setup.dealBias,'strong');
+  await manager.close();
+  manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
+  assert.equal(manager.snapshot().setup.dealBias,'strong');
+  const resume=payload(manager,'resume');manager.command(resume);assert.equal((await settle(manager,resume.requestId)).status,'succeeded');
+  const repause=payload(manager,'pause');manager.command(repause);assert.equal((await settle(manager,repause.requestId)).status,'succeeded');
+  const restart=payload(manager,'restart');manager.command(restart);assert.equal((await settle(manager,restart.requestId)).status,'succeeded');
+  assert.notEqual(manager.snapshot().gameId,gameId);
+  assert.equal(manager.snapshot().setup.dealBias,'strong');
+  const state=JSON.parse(fs.readFileSync(path.join(resolveCurrentSession(root).sessionDir,'state.json')));
+  assert.equal(state.config.dealBias,'strong');
+  const paused=payload(manager,'pause');manager.command(paused);await settle(manager,paused.requestId);
+  const end=payload(manager,'end');manager.command(end);assert.equal((await settle(manager,end.requestId)).status,'succeeded');
 });
 
 test("reserved initialization proof rejects partial state and permits sealed commit recovery", async () => {

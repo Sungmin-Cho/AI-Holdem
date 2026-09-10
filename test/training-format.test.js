@@ -13,6 +13,15 @@ import './helpers/owned-fixtures.mjs';
 
 const CONTENT_SHA256 = '7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf';
 
+test('biased exclusion note survives forced and unsupported explanations',()=>{
+  for(const extra of [{forced:true},{status:'unsupported'}]) {
+    const card=formatTrainingCard({status:'supported',...extra,dealSelectionContractVersion:1,
+      dealSelection:{schemaVersion:1,algorithmVersion:'weighted-holes-v1',mode:'strong'}});
+    assert.match(card.note,/유리한 딜 연습/);
+    assert.match(card.note,/독립 평가 제외/);
+  }
+});
+
 async function canonicalFixture(overrides) {
   const handNo = overrides.handNo ?? 1;
   const decisionId = `d-${handNo}-preflop-0`;

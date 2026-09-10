@@ -16,6 +16,7 @@ import {
 export const requiredJourneyChecks = [
   "bare-lobby-no-init",
   "mode-ai-selection",
+  "deal-bias-selection-restart",
   "pause-resume",
   "setup-back-no-resume",
   "menu-close-reopen",
@@ -103,8 +104,12 @@ export async function runLobbyJourney(outDir) {
     assert.equal(await evaluate("location.hash"), "");
     check("bare-lobby-no-init");
     await browser(["screenshot", path.join(outDir, "lobby.png")]);
+    assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
+    await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");
     await state("playing");
+    assert.equal(readEngine().config.dealBias, "strong");
+    assert.equal(app.manager.snapshot().setup.dealBias, "strong");
     const players = JSON.parse(
       fs.readFileSync(
         path.join(app.manager.current.sessionDir, "players.json"),
@@ -156,6 +161,8 @@ export async function runLobbyJourney(outDir) {
     await click("#confirm-yes");
     await state("playing");
     assert.notEqual(app.manager.snapshot().gameId, old);
+    assert.equal(readEngine().config.dealBias, "strong");
+    check("deal-bias-selection-restart");
     check("restart-new-id");
     await click("#menu");
     await state("paused");

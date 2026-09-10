@@ -238,6 +238,7 @@ form.onsubmit = (e) => {
         "blinds",
         "opponentRuntime",
         "hints",
+        "dealBias",
         "showdownPolicy",
         "replayReveal",
       ].map((k) => [k, data.get(k)]),

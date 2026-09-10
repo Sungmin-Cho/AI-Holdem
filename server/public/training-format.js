@@ -121,8 +121,8 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   if (verified) {
     const detail = receipt.detail;
     item = { ...item };
-    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage', 'assistance']) {
-      if (key === 'assistance' && !Object.hasOwn(detail,key)) delete item[key];
+    for (const key of ['status', 'grade', 'chosen', 'recommended', 'source', 'spotKey', 'handClass', 'street', 'forced', 'coverage', 'assistance','dealSelection','dealSelectionContractVersion']) {
+      if (['assistance','dealSelection','dealSelectionContractVersion'].includes(key) && !Object.hasOwn(detail,key)) delete item[key];
       else item[key] = detail[key];
     }
   }
@@ -178,7 +178,6 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     if(c.choiceMatch==='unavailable')card.note=[card.note,'선택 사이즈 비교 불가 · 점수 제외'].filter(Boolean).join(' · ');
     else if(c.metricEligible)card.note='직접 기준표 비교';
   }
-  if (item.assistance?.hintShown) card.note = [card.note,'힌트 도움을 받은 결정 · 점수 제외'].filter(Boolean).join(' · ');
   if (item.forced) card.note = '워치독 몰수 폴드 — 실력 표본에서 제외';
   else if (item.status === 'unsupported') {
     card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);
@@ -187,6 +186,8 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   } else if (!referenceClaimAllowed(item.explanation)) {
     card.note = [card.note,'근거 범위를 벗어난 표현을 제외했습니다.'].filter(Boolean).join(' · ');
   }
+  if (item.assistance?.hintShown) card.note = [card.note,'힌트 도움을 받은 결정 · 점수 제외'].filter(Boolean).join(' · ');
+  if(item.dealSelection?.mode && item.dealSelection.mode!=='off') card.note=[card.note,'유리한 딜 연습 · 독립 평가 제외'].filter(Boolean).join(' · ');
   if (['flop', 'turn', 'river'].includes(item.street)
     || (typeof item.spotKey === 'string' && item.spotKey.startsWith('postflop-'))) {
     card.note = [card.note, '학습 집계 제외(postflop)'].filter(Boolean).join('\n');

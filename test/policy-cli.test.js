@@ -238,7 +238,7 @@ test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves ext
   const ai = first.filter((player) => player.playerId !== 'user');
   assert.equal(ai.length, 2);
   for (const player of ai) {
-    assert.equal(player.policy.policyVersion, '2.1.0');
+    assert.equal(player.policy.policyVersion, '2.2.0');
     assert.equal(player.policy.extra, 'keep');
     assert.deepEqual(
       {
@@ -250,7 +250,7 @@ test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves ext
     );
   }
   assert.equal(notices.length, 1);
-  assert.equal(notices[0], `policy roll-forward 2.0.0→2.1.0: ${ai.map((player) => player.playerId).join(',')}`);
+  assert.equal(notices[0], `policy roll-forward 2.0.0→2.2.0: ${ai.map((player) => player.playerId).join(',')}`);
 
   const afterFirst = fs.readFileSync(playersPath);
   const secondNotices = [];
@@ -391,7 +391,7 @@ test('stampPlayerPolicies emits catalog and derived roll-forward notices togethe
   assert.equal(derived.policy.extra, 'keep');
   assert.equal(derived.policy.policyVersion, '1.0.0');
   assert.equal(derived.policy.configDigest, config.configDigest);
-  assert.equal(catalog.policy.policyVersion, '2.1.0');
+  assert.equal(catalog.policy.policyVersion, '2.2.0');
   assert.equal(catalog.policy.extra, 'keep');
   assert.deepEqual(
     {
@@ -402,7 +402,6 @@ test('stampPlayerPolicies emits catalog and derived roll-forward notices togethe
     assignmentFor(catalog.archetype),
   );
   assert.equal(notices.length, 2);
-  assert.equal(notices[0], `policy roll-forward 2.0.0→2.1.0: p2`);
+  assert.equal(notices[0], `policy roll-forward 2.0.0→2.2.0: p2`);
   assert.equal(notices[1], `self-opponent strategy roll-forward 2.0.0→${VERSION_V2}: p1`);
 });
-

@@ -7,6 +7,7 @@ import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
 import { cliModeDefaults } from '../shared/game-setup.js';
+import {checkDealBiasResume} from '../shared/deal-selection.js';
 import { playerBudget, playerFailureCategory } from '../shared/player-budget.js';
 import { createSessionControl, retryControlWrite } from './session-control.js';
 import path from 'node:path';
@@ -231,6 +232,7 @@ export function engineInitFlags(args = {}) {
   if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
   if (args.showdownPolicy !== undefined) extra.push('--showdown-policy', String(args.showdownPolicy));
   if (args.hints !== undefined) extra.push('--hints',String(args.hints));
+  if (args.dealBias !== undefined) extra.push('--deal-bias',String(args.dealBias));
   if (args.replayReveal !== undefined) extra.push('--replay-reveal', String(args.replayReveal));
   return extra;
 }
@@ -295,6 +297,7 @@ export function parseGameLoopArgs(argv) {
     ['--showdown-policy', 'showdownPolicy'],
     ['--replay-reveal', 'replayReveal'],
     ['--hints','hints'],
+    ['--deal-bias','dealBias'],
     ['--player-soft-ms', 'playerSoftMs'],
     ['--player-hard-ms', 'playerHardMs'],
     ['--retry-decision', 'retryDecisionId'],
@@ -343,6 +346,7 @@ export function parseGameLoopArgs(argv) {
     throw codedError('USAGE', '--replay-reveal는 all 또는 showdown입니다.');
   }
   if (parsed.hints !== undefined && !['on','off'].includes(parsed.hints)) throw codedError('USAGE','--hints는 on 또는 off입니다.');
+  if (parsed.dealBias !== undefined && !['off','light','strong'].includes(parsed.dealBias)) throw codedError('USAGE','--deal-bias는 off/light/strong입니다.');
   if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   if (parsed.retryDecisionId !== undefined && !parsed.resume) throw codedError('USAGE', '--retry-decision은 --resume과 함께 사용하세요.');
   const budgetOverrides = { ...(parsed.playerSoftMs !== undefined ? { softMs: parsed.playerSoftMs } : {}),
@@ -5526,6 +5530,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     showdownPolicy,
     replayReveal,
     hints,
+    dealBias,
   } = {}) => {
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
@@ -5568,6 +5573,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         showdownPolicy,
         replayReveal,
         hints,
+        dealBias,
       })];
       // Engine의 legacy --force는 PID-only server 정지를 포함한다. sidecar가
       // 안전하게 server lock을 없앤 후이므로 init에 force를 위임하지 않는다.
@@ -5811,6 +5817,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (state?.phase === 'aborted' && engineState.result !== 'abort') throw codedError('LOOP_STATE_IDENTITY_MISMATCH','종료 상태가 엔진과 일치하지 않습니다.');
       if (engineState.result === 'abort') return finishAbortedLifecycle(engineState);
       opts.hints=checkHintResume(engineState.config, opts.hints);
+      opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
       if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
       openLog();
       lifecycleStarted = true;
@@ -6232,7 +6239,7 @@ export async function initializePreparedSession(gameDir, args) {
 }
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
-  loopOptions = { ...loopOptions, retryDecisionId: args.retryDecisionId,
+  loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) },
     playerBudget: args.resume ? undefined : playerBudget({ ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
@@ -6260,7 +6267,9 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
         if (args.resume) {
           const current = resolveCurrentSession(args.storeDir);
           if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
-          checkHintResume(JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024})).config,args.hints);
+          const storedConfig=JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024})).config;
+          checkHintResume(storedConfig,args.hints);
+          checkDealBiasResume(storedConfig,args.dealBias);
           resolveSessionReference(current.sessionDir);
           loop = createGameLoop({
             gameDir: current.sessionDir,
@@ -6380,6 +6389,7 @@ async function main() {
       showdownPolicy: args.showdownPolicy,
       replayReveal: args.replayReveal,
       hints: args.hints,
+      dealBias: args.dealBias,
     });
     await loop.run();
   } catch (error) {

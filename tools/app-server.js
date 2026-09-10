@@ -82,6 +82,7 @@ export async function startAppServer({
             "reference-coverage.js",
             "preflop-key.js",
             "assistance.js",
+            "deal-selection.js",
           ].includes(name)
         ) {
           json(res, 404, { code: "NOT_FOUND" });

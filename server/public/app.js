@@ -213,6 +213,7 @@ function paintTop(view) {
   $('hand-no').textContent = view?.handLimit ? `${view.handNo} / ${view.handLimit}` : (view?.handNo ?? '—');
   const cash = view?.mode === 'cash-training';
   $('game-mode').textContent = cash ? '캐시 연습' : '토너먼트';
+  if(view?.dealBias && view.dealBias!=='off') $('game-mode').textContent += ' · 유리한 딜 (평가 제외)';
   for (const row of document.querySelectorAll('[data-tournament-meta]')) row.hidden = cash;
   const net = view?.sessionNet?.user;
   $('session-net').textContent = Number.isFinite(net) ? `${net > 0 ? '+' : ''}${formatChip(net)}` : '—';

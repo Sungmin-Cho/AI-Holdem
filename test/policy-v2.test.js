@@ -344,17 +344,17 @@ test('higher call price never increases marginal participation for any persona',
   }
 });
 
-test('v2 unopened pots have no limp and use a 2.5BB raise-to', async () => {
+test('v2 unopened pots have no limp and share 2.5BB/3BB size support', async () => {
   const { distributionV2 } = await import('../training/policies/strategy-v2.js');
   const { policyById } = await import('../training/policies/catalog.js');
   for (const id of PERSONA_IDS) {
     const items = distributionV2(unopenedPreflop(['Ah', 'Kd']), openLegal, policyById(id));
     assert.equal(probability(items, 'call'), 0, id);
-    assert.deepEqual([...new Set(items.filter((item) => item.action === 'raise').map((item) => item.amount))], [250]);
+    assert.deepEqual([...new Set(items.filter((item) => item.action === 'raise').map((item) => item.amount))], [250,300]);
   }
 });
 
-test('v2 single-open responses use an 8.5BB standard 3bet', async () => {
+test('v2 single-open responses retain an 8.5BB canonical 3bet and mixed larger size', async () => {
   const { distributionV2 } = await import('../training/policies/strategy-v2.js');
   const { policyById } = await import('../training/policies/catalog.js');
   const input = facingOpenPreflop(['Ah', 'Ad']);
@@ -362,7 +362,7 @@ test('v2 single-open responses use an 8.5BB standard 3bet', async () => {
   for (const id of PERSONA_IDS) {
     const raises = distributionV2(input, legal, policyById(id)).filter((item) => item.action === 'raise');
     assert.ok(raises.length > 0, id);
-    assert.ok(raises.every((item) => item.amount === 850), id);
+    assert.deepEqual(raises.map(item => item.amount), [850,1000], id);
   }
 });
 
@@ -569,9 +569,9 @@ test('policy benchmark asserts the published heuristic thresholds', async () => 
   assert.equal(result.thresholds.hiddenStateViolationCount, 0);
   assert.equal(result.sizing.length, 8);
   assert.ok(result.sizing.every((row) => (
-    Number.isInteger(row.amount)
+    (row.amount === null && row.raiseFrequency === 0) || (Number.isInteger(row.amount)
     && row.amount >= row.minRaiseTo
-    && row.amount <= row.maxRaiseTo
+    && row.amount <= row.maxRaiseTo)
   )));
   assert.equal(result.thresholds.minRaiseOutsideClampCount, 0);
   assert.ok(Number.isFinite(result.measurements.wallClockMs.total));
@@ -673,30 +673,37 @@ const SIZED_SPOTS = Object.freeze([
   { name: 'short all-in', stack: 300, actions: [['raise', 125]], amount: 300, reason: 'v2-raise:3bet-3.4x' },
 ]);
 
-test('v2 sizes every engine spot the same for all personas and stamps the rule on reasonCode', async () => {
+test('v2 uses common legal size support across personas and retains the sizing rule', async () => {
   const { distributionV2 } = await import('../training/policies/strategy-v2.js');
   const { policyById } = await import('../training/policies/catalog.js');
   const { sizingFixture } = await import('./helpers/sizing-fixture.js');
   for (const spot of SIZED_SPOTS) {
     const { snapshot, legal } = sizingFixture({ stack: spot.stack, actions: spot.actions });
+    if(snapshot.street!=='preflop') {
+      // A made royal flush keeps this a sizing test, independent of the
+      // conservative bluff gate tested separately with weak hands.
+      snapshot.holeCards=['Js','Ts'];
+      snapshot.board=['As','Ks','Qs','2c','3d'].slice(0,snapshot.board.length);
+    }
     const amounts = [];
     for (const id of PERSONA_IDS) {
       const raises = distributionV2(snapshot, legal, policyById(id)).filter((item) => item.action === 'raise');
-      assert.ok(raises.length > 0, `${spot.name} ${id}`);
-      assert.ok(raises.every((item) => item.amount === spot.amount), `${spot.name} ${id}`);
-      assert.ok(raises.every((item) => item.reasonCode === spot.reason), `${spot.name} ${id} ${raises[0]?.reasonCode}`);
-      amounts.push(spot.amount);
+      assert.ok(raises.length>0,`${spot.name} ${id}: sizing support must be exercised`);
+      assert.equal(raises[0].amount, spot.amount, `${spot.name} ${id}`);
+      assert.ok(raises.every(item => item.amount >= legal.minRaiseTo && item.amount <= legal.maxRaiseTo));
+      assert.ok(raises.every((item) => item.reasonCode === spot.reason || item.reasonCode.endsWith(':'+spot.reason.split(':').at(-1))), `${spot.name} ${id} ${raises[0]?.reasonCode}`);
+      amounts.push(JSON.stringify(raises.map(item => item.amount)));
     }
-    assert.ok(amounts.every((amount) => amount === spot.amount));
+    assert.ok(amounts.every((amount) => amount === amounts[0]));
   }
 });
 
-test('v2 catalog is 2.1.0 and recompute of the frozen 2.0.0 tag-v2 digest matches history', async () => {
+test('v2 catalog is 2.2.0 and recompute of the frozen 2.0.0 tag-v2 digest matches history', async () => {
   const { POLICIES, VERSION_V2 } = await import('../training/policies/catalog.js');
   const { configDigestOf } = await import('../training/policies/contracts.js');
-  assert.equal(VERSION_V2, '2.1.0');
+  assert.equal(VERSION_V2, '2.2.0');
   for (const id of V2_IDS) {
-    assert.equal(POLICIES[id].policyVersion, '2.1.0', id);
+    assert.equal(POLICIES[id].policyVersion, '2.2.0', id);
   }
   assert.equal(
     configDigestOf({ ...POLICIES['tag-v2'], policyVersion: '2.0.0' }),
@@ -704,7 +711,7 @@ test('v2 catalog is 2.1.0 and recompute of the frozen 2.0.0 tag-v2 digest matche
   );
 });
 
-test('resolveStoredPolicy accepts current 2.1.0 and exact 2.0.0 predecessors only', async () => {
+test('resolveStoredPolicy accepts current 2.2.0 and exact 2.0.0 predecessors only', async () => {
   const {
     POLICIES, resolveStoredPolicy,
   } = await import('../training/policies/catalog.js');
@@ -741,7 +748,7 @@ test('resolveStoredPolicy accepts current 2.1.0 and exact 2.0.0 predecessors onl
   }
 });
 
-test('sanitizePlayersForReview and toOpponentModel roll a 2.0.0 stamp to 2.1.0 traits', async () => {
+test('sanitizePlayersForReview and toOpponentModel roll a 2.0.0 stamp to 2.2.0 traits', async () => {
   const { sanitizePlayersForReview } = await import('../training/policies/catalog.js');
   const { toOpponentModel } = await import('../training/exploit/policy-model.js');
   const stored = {
@@ -751,12 +758,12 @@ test('sanitizePlayersForReview and toOpponentModel roll a 2.0.0 stamp to 2.1.0 t
   };
   const post = sanitizePlayersForReview([{ playerId: 'p1', policy: stored }], { gameOver: true })[0];
   assert.equal(post.policyId, 'tag-v2');
-  assert.equal(post.policyVersion, '2.1.0');
+  assert.equal(post.policyVersion, '2.2.0');
   assert.deepEqual(post.policyTraits, {
     tightness: 0.62, aggression: 0.62, calling: 0.38, bluff: 0.12,
   });
   const model = toOpponentModel(stored);
-  assert.equal(model.policyVersion, '2.1.0');
+  assert.equal(model.policyVersion, '2.2.0');
   assert.deepEqual(model.traits, post.policyTraits);
 });
 

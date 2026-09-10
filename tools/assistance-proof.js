@@ -1,4 +1,5 @@
 import { openContained } from './training-store.js';
+import {checkDealBiasResume,dealSelectionFields,dealSelectionError} from '../shared/deal-selection.js';
 import { decisionAssistance, projectAssistance, assistanceError } from '../shared/assistance.js';
 import { observationHash, exposureIdentity } from '../shared/decision-observation.js';
 import { sameReferenceSource } from '../shared/reference.js';
@@ -34,6 +35,17 @@ export function verifyEvaluationAssistance(sessionDir, evaluation, handNo, gameE
   try { record=JSON.parse(openContained(sessionDir,['hands',`hand-${String(handNo).padStart(4,'0')}.json`],{maxBytes:2*1024*1024})); }
   catch(error) { if(error.code!=='ENOENT') throw assistanceError(); record=state?.lastHand && state.lastHand.handNo===handNo?state.lastHand:null; }
   const rows=(record?.decisions??[]).filter(row=>row.actorId==='user'&&row.decisionId===evaluation.decisionId);
+  const dealRequired=state?.config?.dealSelectionContractVersion!=null || state?.config?.dealBias!=null
+    || record?.dealSelectionContractVersion!=null || record?.dealSelection!=null
+    || evaluation.dealSelectionContractVersion!=null || evaluation.dealSelection!=null;
+  if(dealRequired) {
+    const mode=checkDealBiasResume(state?.config);
+    if(!record || record.handNo!==handNo || rows.length!==1) throw dealSelectionError();
+    const expected=dealSelectionFields(record);
+    if(!expected.dealSelection || (state?.config && expected.dealSelection.mode!==mode)
+      || JSON.stringify(expected)!==JSON.stringify(dealSelectionFields(rows[0]))
+      || JSON.stringify(expected)!==JSON.stringify(dealSelectionFields(evaluation))) throw dealSelectionError();
+  }
   const required=state?.config?.hintContractVersion!=null || record?.hintContractVersion!=null || evaluation.assistance!==undefined;
   if (!required && !record?.hintExposures) return undefined;
   if (rows.length!==1) throw assistanceError();

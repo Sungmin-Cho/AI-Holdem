@@ -258,10 +258,20 @@ test('process aggregate excludes synthetic grades while preserving pending lifec
   ], { pending: 7 });
   assert.deepEqual(aggregate, {
     total: 1, supported: 1, unsupported: 0, offPolicy: 0, pending: 7, supportedRate: 1,
-    assisted: 0,
+    assisted: 0, biased: 0,
     nonComparableSupported: 0, forced: 0, referenceAvailable: 1, exactComparable: 1, projected: 0, comparisonUnavailable: 0,
   });
   assert.equal('confidence' in aggregate, false);
+});
+
+test('biased process grades remain visible but cannot enter independent aggregate scores', () => {
+  const aggregate=aggregateProcessRows([{status:'supported',grade:'off-policy',source:CANONICAL_REFERENCE_SOURCE,
+    dealSelectionContractVersion:1,dealSelection:{schemaVersion:1,algorithmVersion:'weighted-holes-v1',mode:'strong'}}]);
+  assert.equal(aggregate.total,1);
+  assert.equal(aggregate.biased,1);
+  assert.equal(aggregate.supported,0);
+  assert.equal(aggregate.offPolicy,0);
+  assert.equal(aggregate.nonComparableSupported,1);
 });
 
 test('an unbound canonical-looking export preserves input without inventing transport authority', () => {

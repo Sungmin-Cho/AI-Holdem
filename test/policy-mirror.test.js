@@ -471,11 +471,11 @@ test('distributionMirror is deterministic, ignores hidden state, and stays legal
   }
 });
 
-test('strategy-v2 import pin stays #143 and distributionV2 body is unmodified besides exports', () => {
+test('strategy-v2 retains mirror helper exports without importing mirror state', () => {
   const source = fs.readFileSync(path.join(ROOT, 'training/policies/strategy-v2.js'), 'utf8');
   const scan = scanModule(source);
   assert.deepEqual(scan.imports.map((entry) => entry.specifier).sort(), [
-    './contracts.js', './hand-strength.js', './sizing.js',
+    './contracts.js', './hand-strength.js', './public-line.js', './sizing.js',
   ]);
   assert.equal(typeof unopenedPreflop, 'function');
   assert.equal(typeof facingDistribution, 'function');

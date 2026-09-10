@@ -1,4 +1,5 @@
 import { referenceAssessmentEligibility } from './reference-coverage.js';
+import {dealSelectionDisposition,dealSelectionFields} from './deal-selection.js';
 
 export const NO_HINT_ASSISTANCE = Object.freeze({ schemaVersion: 1, hintShown: false, exposureId: null });
 export function assistanceError() {
@@ -19,20 +20,26 @@ export function projectAssistance(value) {
  * A schema-6 event cannot fall back to historical omission. */
 export function independentAssessmentEligibility(event) {
   const reference = referenceAssessmentEligibility(event);
+  let result=reference;
   try {
     if (!Object.hasOwn(event, 'assistance')) {
       if (event.schemaVersion >= 6 || event.hintContractVersion != null) throw assistanceError();
-      return reference;
+    } else {
+      const assistance = projectAssistance(event.assistance);
+      result = { ...reference, metricEligible: reference.metricEligible && !assistance.hintShown,
+        reason: assistance.hintShown ? 'ASSISTED_DECISION' : reference.reason };
     }
-    const assistance = projectAssistance(event.assistance);
-    return { ...reference, metricEligible: reference.metricEligible && !assistance.hintShown,
-      reason: assistance.hintShown ? 'ASSISTED_DECISION' : reference.reason };
   } catch {
     return { ...reference, verified: false, metricEligible: false, reason: 'ASSISTANCE_INVALID' };
   }
+  const deal=dealSelectionDisposition(event);
+  if(deal!=='independent') return {...result,verified:deal!=='unavailable' && result.verified,
+    metricEligible:false,reason:deal==='biased'?'BIASED_DEAL':'DEAL_SELECTION_INVALID'};
+  return result;
 }
 
 export function assistanceAllowsIndependent(event) {
+  if(dealSelectionDisposition(event)!=='independent') return false;
   try {
     if (event.assistance === undefined) return !(event.schemaVersion >= 6) && event.hintContractVersion == null;
     return !projectAssistance(event.assistance).hintShown;
@@ -51,7 +58,13 @@ export function decisionAssistance(hand, decisionId) {
 }
 
 export function handAssistanceDisposition(record) {
+  const deal=dealSelectionDisposition(record);
+  if(deal!=='independent') return deal==='biased'?'assisted':'unavailable';
   const decisions = (record?.decisions ?? []).filter(row => row.actorId === 'user');
+  try {
+    const expected=JSON.stringify(dealSelectionFields(record));
+    if(decisions.some(row=>JSON.stringify(dealSelectionFields(row))!==expected)) return 'unavailable';
+  } catch {return 'unavailable';}
   if (record?.hintContractVersion == null && record?.hintExposures == null
     && decisions.every(row => row.assistance === undefined)) return 'independent';
   try {

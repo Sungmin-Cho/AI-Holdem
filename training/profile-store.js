@@ -1,4 +1,5 @@
 import { NO_HINT_ASSISTANCE, projectAssistance, assistanceError } from '../shared/assistance.js';
+import {dealSelectionFields} from '../shared/deal-selection.js';
 import { referenceAssessmentEligibility } from '../shared/reference-coverage.js';
 import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
@@ -39,7 +40,8 @@ function coded(code, message) {
 export function eventFromEvaluation(evaluation, appliedAt, classified = classifyOpportunity(evaluation)) {
   if (['practice','import'].includes(evaluation.origin) && evaluation.assistance === undefined) throw assistanceError();
   const event = {
-    schemaVersion: PROFILE_SCHEMA_VERSION,
+    schemaVersion: evaluation.dealSelectionContractVersion != null ? 7 : PROFILE_SCHEMA_VERSION,
+    ...dealSelectionFields(evaluation),
     assistance: projectAssistance(evaluation.assistance ?? NO_HINT_ASSISTANCE),
     evaluationId: evaluation.evaluationId,
     payloadSha256: evaluation.payloadSha256,
@@ -93,6 +95,13 @@ export function eventForPrior(evaluation, prior) {
   const historicalPractice = prior.schemaVersion !== 6 && !Object.hasOwn(prior,'assistance')
     && evaluation.assistance === undefined && ['practice','import'].includes(evaluation.origin);
   const event = eventFromEvaluation(historicalPractice ? {...evaluation,assistance:NO_HINT_ASSISTANCE} : evaluation, prior.appliedAt);
+  if (prior.schemaVersion === 7) {
+    if (event.schemaVersion !== 7 || JSON.stringify(dealSelectionFields(prior)) !== JSON.stringify(dealSelectionFields(event))) {
+      throw coded('PROFILE_EVENT_CONFLICT','deal selection contract cannot change');
+    }
+    return event;
+  }
+  if (event.schemaVersion === 7) throw coded('PROFILE_EVENT_CONFLICT','deal selection contract cannot be downgraded');
   if (prior.schemaVersion === 6) return event;
   if (evaluation.assistance?.hintShown || (evaluation.assistance !== undefined
     && !['drill','retest'].includes(evaluation.origin))) {

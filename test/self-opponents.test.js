@@ -572,7 +572,7 @@ test('T8: buildSelfOpponentSection catches injected failures', () => {
   assert.match(text, /자기 상대 비교를 만들지 못했습니다 \(INJECTED\)/);
 });
 
-test('T8: 20-hand 6-max clones keep the similarity floor at 6', () => {
+test('T8: sparse 20-hand clones suppress scores below the six-component floor', () => {
   const mixed = { p2: 'lag-v2', p3: 'maniac-v2', p4: 'lag-v2', p5: 'maniac-v2' };
   const lagRecords = simulateTable({ seats: { p1: 'lag-v2', ...mixed }, hands: 20, seed: 11, samples: 8 });
   const baseRecords = simulateTable({ seats: { p1: 'baseline-v2', ...mixed }, hands: 20, seed: 5, samples: 8 });
@@ -581,9 +581,13 @@ test('T8: 20-hand 6-max clones keep the similarity floor at 6', () => {
   const baseline = tendencyFromRecords(baseRecords, 'p1');
   const nit = tendencyFromRecords(nitRecords, 'p1');
   assert.ok(eligibleComponentCount(lag) >= 6, `LAG components ${eligibleComponentCount(lag)}`);
-  assert.ok(eligibleComponentCount(baseline) >= 6, `baseline components ${eligibleComponentCount(baseline)}`);
-  const nitCount = eligibleComponentCount(nit);
-  if (nitCount < 6) {
+  // Policy 2.2 reaches only five eligible components in this fixed 20-hand
+  // sample. Keep the six-component authority floor: suppress, never inflate it.
+  assert.ok(eligibleComponentCount(baseline)<6);
+  const longer=tendencyFromRecords(simulateTable({seats:{p1:'baseline-v2',...mixed},hands:40,seed:5,samples:8}),'p1');
+  assert.ok(eligibleComponentCount(longer)>=6);
+  for (const [short,records] of [[baseline,baseRecords],[nit,nitRecords]]) {
+    if (eligibleComponentCount(short)>=6) continue;
     const nitConfig = buildMirrorConfig(richTendency(), { source: sourceOf(richTendency()) });
     const players = [
       { playerId: 'user', name: '나' },
@@ -601,8 +605,8 @@ test('T8: 20-hand 6-max clones keep the similarity floor at 6', () => {
     const section = buildSelfOpponentSection({
       root: tmp('holdem-self-nit-rev'),
       players,
-      derived: { [nitConfig.configDigest]: { ...nitConfig, params: { ...nitConfig.params, tendency: nit } } },
-      records: nitRecords,
+      derived: { [nitConfig.configDigest]: { ...nitConfig, params: { ...nitConfig.params, tendency: short } } },
+      records,
     });
     assert.doesNotMatch(section, /휴리스틱 유사도:\s*\d+\/100/);
     assert.match(section, /--hands 40/);
