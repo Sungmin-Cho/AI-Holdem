@@ -68,3 +68,10 @@ model-router HIGH, 저자 가족 OpenAI 제외. Claude Opus 5와 Claude Fable 5.
 재접속 점검을 확장한 실제 브라우저 테스트에서 모드 변경 접수 후 receipt 조회를 한 번 끊으면 서버는 playing이지만 설정 화면이 남는 결함을 재현했다(`journey state timeout playing`). 복구 성공 시 설정 선택 상태와 오류 표시를 해제하고, pause 복구면 메뉴를 여는 것으로 정상 명령 완료와 화면 전환을 맞췄다. 브라우저 여정은 동일 requestId의 복구와 게임 화면 노출을 함께 검증한다.
 
 후속 로컬 검증: Node 20.20.2 집중 테스트 9개 PASS, 연결 단절 주입을 포함한 실제 Chromium 13개 여정 PASS. 최종 변경의 전체 suite는 새 PR CI에서 다시 실행한다.
+
+
+## 2026-09-10 main 통합
+
+병합 시 main의 #155·#177 Windows 전체 suite 분할을 반영했다. 로비 테스트는 `rest` shard에 자동 포함되므로 기존 별도 gate의 6중 중복 실행을 제거하고 release guard를 shard 배정 검증으로 바꿨다. 통합 집중 테스트 22개와 실제 Chromium 13개 여정이 통과했다.
+
+첫 통합 CI에서 Linux 전체 2,249개가 통과했다. Windows Node 22 `loop`의 기존 잘못된 action/amount 거부 테스트 1개가 15초 한도로 취소됐다(검증식 실패 없음); 같은 Node 20 테스트는 3.69초에 통과했다. 테스트는 지연시간 계약이 아닌 HTTP 거부·엔진 무변경 계약을 확인하므로 Windows 외부 프로세스 확인과 정리 비용을 위한 한도만 60초로 늘렸다. POSIX 한도와 모든 무결성 assertion은 유지한다. 최종 통합 CI 결과는 PR #176 checks에 기록한다.

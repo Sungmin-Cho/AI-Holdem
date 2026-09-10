@@ -3293,7 +3293,9 @@ test('wait-only child supervision exceeds waitMs plus network margin (the defaul
   assert.equal(Date.now() - started >= 1_800, true, 'child supervisor killed wait before waitMs');
 });
 
-test('user action·amount의 잘못된 shape는 HTTP에서 거부되고 engine argv로 넘어가지 않는다', { timeout: 15_000 }, async (t) => {
+// Windows performs process/privacy proofs around real relay startup and cleanup.
+// This is a rejection-integrity test, not a 15-second latency contract.
+test('user action·amount의 잘못된 shape는 HTTP에서 거부되고 engine argv로 넘어가지 않는다', { timeout: process.platform === 'win32' ? 60_000 : 15_000 }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
   const running = startRun(loop);
   let current = await waitForUserSnapshot(gameDir);
