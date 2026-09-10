@@ -51,6 +51,7 @@ import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
 import { referenceClaimAllowed } from '../shared/reference.js';
+import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   buildExplanationPrompt,
@@ -4263,14 +4264,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const validateReviewOutput = (raw, { requireHeadings = false } = {}) => {
     if (typeof raw !== 'string' || raw.trim() === '') {
-      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+      throw codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
     }
     const text = raw.trim();
     if (!referenceClaimAllowed(text)) {
-      throw codedError('INVALID_REVIEW_OUTPUT', '리뷰 출력이 근거 범위를 벗어납니다.');
+      throw codedError('REVIEW_CLAIM_REJECTED', '리뷰 출력이 근거 범위를 벗어납니다.');
     }
     if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
-      throw codedError('INVALID_REVIEW_OUTPUT', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
+      throw codedError('REVIEW_HEADINGS_MISSING', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
     }
     return text;
   };
@@ -4294,6 +4295,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       let handle = null;
       let failure = null;
+      let raw;
       try {
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
@@ -4304,7 +4306,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('INVALID_REVIEW_HANDLE', `${stage} oneshot handle 계약이 올바르지 않습니다.`);
         }
         const completed = await handle.done;
-        return validateReviewOutput(completed?.raw, { requireHeadings });
+        raw = completed?.raw;
+        return validateReviewOutput(raw, { requireHeadings });
       } catch (error) {
         failure = error;
       }
@@ -4312,11 +4315,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // Each failed attempt owns a distinct child and distinct 300-second adapter timer.
       // A second child may start only after the first child has positively terminated.
       const termination = await terminateReviewAttempt(handle);
+      const secrets = [readLoopState()?.sessionToken];
       log('review-attempt-failed', {
         stage,
         attempt,
         code: failure?.code ?? 'ERROR',
+        message: sanitizeReviewDiagnostic(failure?.message, secrets, 512),
         terminationConfirmed: termination.confirmed === true,
+        ...preserveReviewFailure(root, { stage, attempt, raw, secrets }),
       });
       if (attempt === 1 && termination.confirmed === true) continue;
       if (attempt === 1) {

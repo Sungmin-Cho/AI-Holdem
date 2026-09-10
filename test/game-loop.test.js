@@ -7795,6 +7795,28 @@ test('Task 7B: 실패한 evaluator 종료를 확인하지 못하면 retry나 종
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).phase, 'finalizing');
 });
 
+test('#172: review failures classify empty, claims and headings without logging rejected text', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    evaluatorRounds: [{ raw: '' }, { raw: '참고용 과정 평가' }],
+    synthesizerRounds: [{ raw: '확정 누수입니다.' }, { raw: '필수 heading이 없습니다.' }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  await assert.rejects(loop.run(), { code: 'REVIEW_FAILED' });
+  const failures = readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed');
+  assert.deepEqual(failures.map((row) => row.code), ['EMPTY_REVIEW_OUTPUT', 'REVIEW_CLAIM_REJECTED', 'REVIEW_HEADINGS_MISSING']);
+  for (const row of failures) {
+    assert.equal(row.outputStatus, 'saved');
+    assert.ok(row.message.length > 0);
+    assert.equal(row.terminationConfirmed, true);
+  }
+  assert.equal(fs.readFileSync(path.join(gameDir, failures[0].outputPath), 'utf8'), '');
+  assert.equal(fs.readFileSync(path.join(gameDir, failures[1].outputPath), 'utf8'), '확정 누수입니다.');
+  assert.doesNotMatch(fs.readFileSync(path.join(gameDir, 'loop.log'), 'utf8'), /확정 누수입니다/);
+});
+
 test('Task 7B: review_generated resume은 모델을 재호출하지 않고 file envelope만 게시해 done으로 간다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
