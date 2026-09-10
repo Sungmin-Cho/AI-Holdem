@@ -10,10 +10,30 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-windows-privacy-'));
   const identity = fs.lstatSync(root);
   const original = cp.spawnSync;
+  let invocation = 0;
   cp.spawnSync = (...args) => {
-    const result = original(...args);
     const script = args[1]?.at(-1) ?? '';
+    const isPowerShell = /powershell\.exe$/i.test(String(args[0]));
+    const trace = path.join(root, `powershell-${++invocation}.trace`);
+    // Leave stdout/stderr intact: production rejects an ACL proof with stderr.
+    // These diagnostic-only stage markers distinguish cold host startup, C#
+    // compilation, native creation and ACL/provider discovery on a timed-out run.
+    const mark = (stage) => `try { [System.IO.File]::AppendAllText('${trace.replaceAll("'", "''")}', '${stage} ' + [DateTime]::UtcNow.Ticks + [Environment]::NewLine) } catch {}; `;
+    if (isPowerShell) {
+      let measured = mark('script-start') + script;
+      measured = measured.replace("Add-Type @'", `${mark('compile-start')}Add-Type @'`)
+        .replace("'@;", `'@;\n${mark('compile-end')}`)
+        .replace('$me=[System.Security.Principal.WindowsIdentity]', `${mark('acl-build-start')}$me=[System.Security.Principal.WindowsIdentity]`)
+        .replace('try { [Runtime.InteropServices.Marshal]::Copy', `${mark('native-create-start')}try { [Runtime.InteropServices.Marshal]::Copy`)
+        .replace('$a=Get-Acl', `${mark('acl-read-start')}$a=Get-Acl`)
+        .replace('$rules=@();', `${mark('acl-read-end')}$rules=@();`);
+      args[1] = [...args[1].slice(0, -1), measured + '\n' + mark('script-end')];
+    }
+    const started = performance.now();
+    const result = original(...args);
     console.log(JSON.stringify({ kind: String(script).includes('PrivateDirectoryNative') ? 'private-create' : 'private-read',
+      wallMs: Math.round(performance.now() - started), timeoutMs: args[2]?.timeout,
+      stages: fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').trim().split(/\r?\n/) : [],
       status: result.status, signal: result.signal, errorCode: result.error?.code ?? null,
       stdout: String(result.stdout ?? '').slice(0, 8192), stderr: String(result.stderr ?? '').slice(0, 8192) }));
     return result;
