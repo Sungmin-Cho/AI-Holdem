@@ -47,6 +47,31 @@ test('authority claim validation resists invisible separators and mixed caveat c
   assert.equal(referenceClaimAllowed('not a verified GTO answer'), true);
 });
 
+test('#169: Korean negative and meta claims stay local to their predicates', () => {
+  const safe = [
+    '최적성이나 확정적 누수는 판정할 수 없다.',
+    '따라서 플레이의 최적성이나 확정적 누수를 판정할 근거는 없다.',
+    '선택 자체의 정답 여부보다 사전 계획을 점검한다.',
+    '아직 반복 성향이나 확정 누수로 단정할 수는 없습니다.',
+    '실제 아키타입은 참고 정보이지 개별 행동의 정답표가 아닙니다.',
+    '특정 액션을 정답으로 외우는 것이 아니라 근거를 세운다.',
+  ];
+  for (const text of safe) assert.equal(referenceClaimAllowed(text), true, text);
+  for (const text of [
+    '확정 누수라고 판정한다.', '이 선택은 GTO 전략입니다.',
+    '최적성이나 확정적 누수는 판정할 수 있다.',
+    '최적성이나 확정적 누수를 판정할 근거는 있다.',
+    '확정 누수로 단정할 수 있습니다.', '정답표입니다.',
+    '정답 여부는 확인됐습니다.', '정답 여부보다 사전 계획을 점검한다는 말은 틀렸다.',
+    '최적성은 입증됐고 확정적 누수는 판정할 수 없다.',
+    '최적성이나. 확정적 누수는 판정할 수 없다.',
+    '최적성이나 확정적 누수는 판정할 수 없다는 말은 틀렸다.',
+    '확정 누수로 단정할 수 없다는 것은 아니다.',
+    ...safe.map((text) => `${text} 이 선택은 GTO 전략입니다.`),
+    ...safe.map((text) => `정답은 콜입니다. ${text}`),
+  ]) assert.equal(referenceClaimAllowed(text), false, text);
+});
+
 test('legacy display drops invalid explanation and unqualified reference labels', () => {
   const card = formatTrainingCard({
     handNo: 1,

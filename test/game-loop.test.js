@@ -22,7 +22,7 @@ import {
   engineInitFlags,
   applyModeDefaults,
 } from '../tools/game-loop.js';
-import { RUNTIME_TABLE } from '../tools/player-runtime.js';
+import { RUNTIME_TABLE, createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { newDeck } from '../engine/cards.js';
 import { prepareSession } from '../engine/session-catalog.js';
@@ -7815,6 +7815,44 @@ test('#172: review failures classify empty, claims and headings without logging 
   assert.equal(fs.readFileSync(path.join(gameDir, failures[0].outputPath), 'utf8'), '');
   assert.equal(fs.readFileSync(path.join(gameDir, failures[1].outputPath), 'utf8'), '확정 누수입니다.');
   assert.doesNotMatch(fs.readFileSync(path.join(gameDir, 'loop.log'), 'utf8'), /확정 누수입니다/);
+});
+
+test('#169: real Codex adapter completes first finalization with safe Korean caveats', { timeout: 40_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const scriptDir = createOwnedTempDir('review-codex-cli');
+  const scriptPath = path.join(scriptDir, 'script.json');
+  const logPath = path.join(scriptDir, 'calls.jsonl');
+  const caveats = [
+    '최적성이나 확정적 누수는 판정할 수 없다.',
+    '따라서 플레이의 최적성이나 확정적 누수를 판정할 근거는 없다.',
+    '선택 자체의 정답 여부보다 사전 계획을 점검한다.',
+    '아직 반복 성향이나 확정 누수로 단정할 수는 없습니다.',
+    '실제 아키타입은 참고 정보이지 개별 행동의 정답표가 아닙니다.',
+    '특정 액션을 정답으로 외우는 것이 아니라 근거를 세운다.',
+  ].join('\n');
+  const jsonl = (text) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\n';
+  fs.writeFileSync(scriptPath, JSON.stringify({
+    matchers: [
+      { includes: '역할: 격리 evaluator', reply: jsonl(caveats) },
+      { includes: '역할: 종합자', reply: jsonl(VALID_REVIEW + '\n' + caveats) },
+    ],
+    default: { reply: jsonl(JSON.stringify({ handNo: 1, text: '참고용 코치 기록' })) },
+  }));
+  const upper = createPlayerRuntime('codex', {
+    env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath },
+    exec: (spec) => spawnCli({ ...spec, command: process.execPath, args: [path.join(ROOT, 'test/helpers/fake-cli.js'), ...spec.args] }),
+  });
+  t.after(() => upper.dispose());
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter((row) => row.stdin.includes('역할: 격리 evaluator')).length, 1);
+  assert.equal(calls.filter((row) => row.stdin.includes('역할: 종합자')).length, 1);
+  assert.ok(calls.every((row) => row.argv.includes('--json')));
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW + '\n' + caveats);
+  assert.equal(readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed').length, 0);
 });
 
 test('Task 7B: review_generated resume은 모델을 재호출하지 않고 file envelope만 게시해 done으로 간다', { timeout: 20_000 }, async (t) => {
