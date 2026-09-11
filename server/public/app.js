@@ -6,7 +6,7 @@ import { formatReplay, actionVerbs } from './replay-format.js';
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
 import { createActionController } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
-import {seatPresentation, participantSummary, mobileSeatSlot} from './seat-format.js';
+import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
@@ -309,17 +309,6 @@ function paintPots(view) {
   }
 }
 
-// 좌석은 스타디움 레일을 따라 앉는다. 지수 2/3의 초타원이 원형 배치보다
-// 모서리 쪽으로 좌석을 밀어내 실제 테이블 윤곽에 붙는다.
-function ovalPoint(index, count, rx, ry) {
-  const angle = (Math.PI * 2 * index) / count;
-  const bulge = (v) => Math.sign(v) * Math.abs(v) ** (2 / 3);
-  return {
-    x: 50 - rx * bulge(Math.sin(angle)),
-    y: 52 + ry * bulge(Math.cos(angle)),
-  };
-}
-
 function avatarRing() {
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('class', 'avatar-ring');
@@ -377,6 +366,7 @@ function paintSeats(view) {
   const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === 'user'));
   const { map: revealed, mucks } = revealedCards();
   const n = seats.length;
+  const positions = blindPositions(view);
 
   for (let i = 0; i < n; i += 1) {
     const seat = seats[(userIdx + i) % n];
@@ -386,21 +376,27 @@ function paintSeats(view) {
 
     const node = previous.get(seat.playerId) ?? el('div', 'seat');
     node.dataset.playerId = seat.playerId;
+    node.dataset.status = state.status;
     node.className = 'seat';
     if (isHero) node.classList.add('is-hero');
     if (state.folded) node.classList.add('is-folded');
     if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
     const at = ovalPoint(i, n, 38, 40);
+    node.dataset.side = at.x < 50 ? 'left' : 'right';
+    node.dataset.betBand = at.y > 75 ? 'lower' : at.y > 16 && at.y < 40 ? 'upper' : 'middle';
+    node.dataset.betEdge = at.y < 25 || at.y > 75 ? 'bottom' : at.x < 50 ? 'right' : 'left';
     node.style.left = `${at.x}%`;
     node.style.top = `${at.y}%`;
+    node.style.setProperty('--desktop-seat-x', `${at.x}%`);
+    node.style.setProperty('--desktop-seat-y', `${at.y}%`);
     const mobile = mobileSeatSlot(i,n);
     node.style.setProperty('--seat-x', `${mobile.x}%`);
     node.style.setProperty('--seat-y', `${mobile.y}%`);
 
     const plate = node.querySelector('.plate') ?? el('button', 'plate');
     plate.type = 'button';
-    plate.setAttribute('aria-label', `${seat.name ?? seat.playerId}, ${state.status}, ${amountText(seat.stack)}. 좌석 상세`);
+    plate.setAttribute('aria-label', `${seat.name ?? seat.playerId}, ${positions[seat.playerId] ?? ''}, ${state.status}, 스택 ${amountText(seat.stack)}, 이번 스트리트 베팅 ${amountText(seat.bet)}. 좌석 상세`);
     plate.onclick = () => openSeatDetails(seat.playerId);
     plate.replaceChildren();
     const avatarWrap = el('span', 'avatar-wrap');
@@ -415,7 +411,16 @@ function paintSeats(view) {
     plate.append(avatarWrap, info);
 
     plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
-    if (state.showButton) plate.append(el('span', 'dealer-btn', 'D'));
+    const position = positions[seat.playerId];
+    if (state.showButton || position) {
+      const badge = el('span', `dealer-btn${position?.includes('SB') ? ' is-sb' : position === 'BB' ? ' is-bb' : ''}`, position ?? 'D');
+      badge.title = position === 'D/SB' ? '딜러 · 스몰 블라인드' : position === 'SB' ? '스몰 블라인드' : position === 'BB' ? '빅 블라인드' : '딜러';
+      plate.append(badge);
+    }
+    if (state.showBet) {
+      const bet = el('span', 'seat-bet', `베팅 ${formatAmount(seat.bet, view.blinds?.[1], displayUnit).primary}`);
+      plate.append(bet);
+    }
 
     const cards=seatCards(seat, view, revealed, mucks);
     node.querySelector('.seat-cards')?.remove();
@@ -424,13 +429,13 @@ function paintSeats(view) {
     if(!node.parentNode)seatRoot.append(node);
     previous.delete(seat.playerId);
 
-    if (state.showBet) {
-      const spot = ovalPoint(i, n, 26, 26);
-      const marker = el('div', 'bet-marker');
-      marker.style.left = `${spot.x}%`;
-      marker.style.top = `${spot.y}%`;
-      marker.append(svgUse('chip', 'bet-chip'), el('span', 'bet-amount', amountText(seat.bet)));
-      betRoot.append(marker);
+    if (state.showBet && !isHero) {
+      const marker = el('span', 'bet-marker');
+      marker.setAttribute('aria-hidden', 'true');
+      marker.dataset.playerId = seat.playerId;
+      marker.title = `${seat.name ?? seat.playerId} · 이번 스트리트 베팅 ${amountText(seat.bet)}`;
+      marker.append(svgUse('chip', 'bet-chip'), el('span', 'bet-amount', formatAmount(seat.bet, view.blinds?.[1], displayUnit).primary));
+      plate.append(marker);
     }
   }
   for(const node of previous.values())node.remove();

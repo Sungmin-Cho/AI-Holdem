@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,7 @@ import {
   hashTree,
 } from "../helpers/learning-browser-fixture.mjs";
 export const requiredJourneyChecks = [
+  "missing-module-visible-error",
   "bare-lobby-no-init",
   "mode-ai-selection",
   "deal-bias-selection-restart",
@@ -36,7 +38,7 @@ export async function runLobbyJourney(outDir) {
   const userStore = path.resolve("game"),
     before = hashTree(userStore),
     session = `lobby-${randomUUID()}`;
-  let app;
+  let app, outdatedServer;
   const checks = [];
   let failure;
   const browser = async (args) => {
@@ -94,6 +96,25 @@ export async function runLobbyJourney(outDir) {
     app = await startAppService(root, {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
     });
+    // Reproduce an already-running server whose allowlist predates the UI update.
+    outdatedServer = http.createServer(async (req, res) => {
+      if (req.url === '/shared/game-setup.js') {
+        res.writeHead(404, {'content-type':'application/json'});
+        res.end('{"code":"NOT_FOUND"}');
+        return;
+      }
+      const response = await fetch(app.origin + req.url);
+      res.writeHead(response.status, {'content-type':response.headers.get('content-type')});
+      res.end(Buffer.from(await response.arrayBuffer()));
+    });
+    await new Promise(resolve => outdatedServer.listen(0, '127.0.0.1', resolve));
+    await browser(['open', `http://127.0.0.1:${outdatedServer.address().port}/`]);
+    await wait(() => evaluate("document.querySelector('#status').textContent==='로비를 불러오지 못했습니다'"));
+    assert.equal(await evaluate("document.querySelector('#start').disabled"), true);
+    assert.match(await evaluate("document.querySelector('#error').textContent"), /로비 서버를 다시 실행/);
+    check('missing-module-visible-error');
+    await new Promise(resolve => outdatedServer.close(resolve));
+    outdatedServer = null;
     await browser(["open", app.url]);
     await browser(["set", "viewport", "1280", "900"]);
     await browser(["snapshot", "-i"]);
@@ -258,6 +279,7 @@ export async function runLobbyJourney(outDir) {
     } catch {}
   } finally {
     await browser(["close"]).catch(() => {});
+    if (outdatedServer) await new Promise(resolve => outdatedServer.close(resolve));
     await app?.close();
     const study = await inspectStudyService(root);
     if (study.status === "running")

@@ -48,45 +48,47 @@
         </div>
       </div>
 
-      <p id="thinking" class="thinking" hidden aria-live="polite"></p>
-      <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
-      <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 확인</button></div>
+      <div class="action-area">
+        <p id="thinking" class="thinking" hidden aria-live="polite"></p>
+        <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
+        <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 확인</button></div>
 
-      <aside id="pre-action-hint" class="pre-action-hint" aria-live="polite" hidden></aside>
-      <div id="action-bar" class="action-bar" hidden>
-        <p id="action-summary" class="action-summary"></p>
-        <div class="act-group">
-          <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
-          <button type="button" id="btn-check" class="btn btn-neutral">체크</button>
-          <button type="button" id="btn-call" class="btn btn-neutral">콜</button>
-        </div>
-        <div id="act-sep" class="act-sep" aria-hidden="true"></div>
-        <div id="raise-panel" class="raise-panel">
-          <div class="raise-top">
-            <div class="presets">
-              <button type="button" class="preset" data-preset="min">최소</button>
-              <button type="button" class="preset" data-preset="half">½ 팟</button>
-              <button type="button" class="preset" data-preset="pot">팟</button>
-              <button type="button" class="preset" data-preset="allin">올인</button>
-              <button type="button" class="preset" data-preset="rfi" hidden>2.5BB</button>
-              <button type="button" class="preset" data-preset="threebet" hidden>8.5BB</button>
-            </div>
-            <div class="amount-field">
-              <label class="amount-label" for="raise-amount">총액 (칩)</label>
-              <input id="raise-amount" class="amount-input num" type="text" inputmode="numeric"
-                     autocomplete="off" spellcheck="false" aria-label="이번 스트리트 레이즈 총액 직접 입력 (칩)" aria-describedby="raise-range amount-error">
-            </div>
+        <aside id="pre-action-hint" class="pre-action-hint" aria-live="polite" hidden></aside>
+        <div id="action-bar" class="action-bar" hidden>
+          <p id="action-summary" class="action-summary"></p>
+          <div class="act-group">
+            <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
+            <button type="button" id="btn-check" class="btn btn-neutral">체크</button>
+            <button type="button" id="btn-call" class="btn btn-neutral">콜</button>
           </div>
-          <input id="raise-slider" class="slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액 슬라이더">
-          <p id="raise-range" class="raise-range num"></p>
-          <p id="amount-error" class="amount-error" role="status"></p>
+          <div id="act-sep" class="act-sep" aria-hidden="true"></div>
+          <div id="raise-panel" class="raise-panel">
+            <div class="raise-top">
+              <div class="presets">
+                <button type="button" class="preset" data-preset="min">최소</button>
+                <button type="button" class="preset" data-preset="half">½ 팟</button>
+                <button type="button" class="preset" data-preset="pot">팟</button>
+                <button type="button" class="preset" data-preset="allin">올인</button>
+                <button type="button" class="preset" data-preset="rfi" hidden>2.5BB</button>
+                <button type="button" class="preset" data-preset="threebet" hidden>8.5BB</button>
+              </div>
+              <div class="amount-field">
+                <label class="amount-label" for="raise-amount">총액 (칩)</label>
+                <input id="raise-amount" class="amount-input num" type="text" inputmode="numeric"
+                       autocomplete="off" spellcheck="false" aria-label="이번 스트리트 레이즈 총액 직접 입력 (칩)" aria-describedby="raise-range amount-error">
+              </div>
+            </div>
+            <input id="raise-slider" class="slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액 슬라이더">
+            <p id="raise-range" class="raise-range num"></p>
+            <p id="amount-error" class="amount-error" role="status"></p>
+          </div>
+          <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
+          <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
+          <label class="intent-note-wrap" for="intent-note">의도
+            <input id="intent-note" class="intent-note" type="text" maxlength="160"
+                   autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
+          </label>
         </div>
-        <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
-        <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
-        <label class="intent-note-wrap" for="intent-note">의도
-          <input id="intent-note" class="intent-note" type="text" maxlength="160"
-                 autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
-        </label>
       </div>
     </section>
 
