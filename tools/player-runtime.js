@@ -3,8 +3,8 @@
 // 지키는 규칙 (전부 계약 테스트로 고정돼 있다):
 //   - 모든 프롬프트는 stdin으로만 간다. 모델 텍스트·요약·decisionId·레포/게임 경로는
 //     argv에 절대 넣지 않는다. argv에 실리는 런타임 값은 세션 id 하나뿐이다.
-//   - cwd는 레포·game/ 밖의 per-runtime 빈 tmp 디렉터리, env는 `HOME`/`PATH` allowlist다
-//     (`PWD`·`OLDPWD`·워크스페이스/프로젝트 포인터는 상속하지 않는다).
+//   - cwd는 레포·game/ 밖의 per-runtime 빈 tmp 디렉터리, env는 `HOME`/`PATH`/`USER`
+//     allowlist다(`PWD`·`OLDPWD`·워크스페이스/프로젝트 포인터는 상속하지 않는다).
 //   - argv 상수는 Task 0 실측 프로브(`docs/sidecar-probe-notes.md`)의 핀 값이다.
 //     Grok은 테이블·사다리에 남지만 이 핀 버전에서는 기동 때마다 도는 카나리 부정
 //     probe가 탈락시킨다 — 정적 `eligible` 필드를 만들지 않는다.
@@ -37,7 +37,13 @@ export const isArgvSafeSessionId = (id) => (
 );
 
 const LADDER = ['claude', 'codex', 'grok'];
-const ENV_ALLOWLIST = ['HOME', 'PATH'];
+// `USER`는 자격이 아니라 계정 이름이고, claude CLI는 그것 없이는 자기 credential
+// 저장소를 열지 못한다 — `env -i HOME PATH`에서 claude는 매번 0.74s 만에
+// "OAuth session expired and could not be refreshed"로 떨어져 사다리에서 통째로
+// 탈락했다(2026-09-11 실측, docs/sidecar-probe-notes.md의 2026-09-11 추가 기록).
+// 그 결과 모든 게임 시작이 codex 하나에 의존했다. 키를 넓힌 게 아니라 이름 하나를
+// 돌려준 것이며, 카나리 부정 검증은 추가 뒤에도 그대로 통과한다.
+const ENV_ALLOWLIST = ['HOME', 'PATH', 'USER'];
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PROMPT_FILE = fileURLToPath(new URL('./player-prompt.md', import.meta.url));
 
