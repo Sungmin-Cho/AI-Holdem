@@ -23,3 +23,28 @@ export function mobileSeatSlot(index, count) {
   const [x,y] = POINTS[index === 0 ? 'H' : SLOTS[count]?.[index-1]] ?? POINTS.H;
   return {x,y};
 }
+
+// Stadium rail coordinates, clockwise from the hero at the bottom.
+export function ovalPoint(index, count, rx, ry) {
+  const angle = (Math.PI * 2 * index) / count;
+  const bulge = (v) => Math.sign(v) * Math.abs(v) ** (2 / 3);
+  return {
+    x: 50 - rx * bulge(Math.sin(angle)),
+    y: 52 + ry * bulge(Math.cos(angle)),
+  };
+}
+
+/** Public seat order and the dealer remain stable throughout a hand, even when
+ * a blind folds or goes all-in. Never infer blind identity from the bet size. */
+export function blindPositions(view) {
+  if (view?.handInProgress === false || !view?.street) return {};
+  const seats = view.seats ?? [];
+  if (!seats.every(seat => typeof seat.out === 'boolean')) return {};
+  const live = seats.filter(seat => !seat.out);
+  const dealers = live.filter(seat => seat.isButton);
+  if (live.length < 2 || dealers.length !== 1) return {};
+  const at = live.indexOf(dealers[0]);
+  const next = offset => live[(at + offset) % live.length].playerId;
+  if (live.length === 2) return {[next(0)]: 'D/SB', [next(1)]: 'BB'};
+  return {[next(0)]: 'D', [next(1)]: 'SB', [next(2)]: 'BB'};
+}

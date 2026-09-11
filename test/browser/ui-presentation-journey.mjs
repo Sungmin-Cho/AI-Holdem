@@ -11,7 +11,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -50,6 +50,10 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       for(const width of ci?[390,1440]:[360,390,768,1024,1440]) {
         await browser(['set','viewport',String(width),'900']);await browser(['snapshot','-i']);
         const metrics=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,size:parseFloat(getComputedStyle(n.querySelector('.amount-primary')).fontSize)}});const overlaps=[];for(let i=0;i<plates.length;i++)for(let j=i+1;j<plates.length;j++){const a=plates[i],b=plates[j];if(a.x<b.x+b.w-1&&a.x+a.w>b.x+1&&a.y<b.y+b.h-1&&a.y+a.h>b.y+1)overlaps.push([i,j]);}return {width:innerWidth,scroll:document.documentElement.scrollWidth,plates,overlaps};})()`);
+        const markers=await evaluate(`(()=>{const visible=n=>!!n&&n.getClientRects().length>0&&getComputedStyle(n).display!=='none';return ${JSON.stringify(state.hand.posts)}.map(post=>{const seat=document.querySelector('.seat[data-player-id="'+post.playerId+'"]'),badge=seat.querySelector('.dealer-btn'),bet=document.querySelector('.bet-marker[data-player-id="'+post.playerId+'"]');return {role:badge?.textContent,betVisible:visible(bet)||visible(seat.querySelector('.seat-bet'))}})})()`);
+        assert.equal(markers[0].role,count===2?'D/SB':'SB');
+        assert.equal(markers[1].role,'BB');
+        assert.ok(markers.every(m=>m.betVisible),JSON.stringify({count,width,markers}));
         measurements.push({count,...metrics});
         await browser(['screenshot',path.join(outDir,`table-${count}-${width}.png`)]);
         assert.ok(metrics.scroll<=width,`horizontal overflow ${count}/${width}: ${metrics.scroll}`);
@@ -59,6 +63,78 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       }
     }
     checks.push('responsive');
+    checks.push('blind-and-bet-markers');
+    await browser(['set','viewport','1094','500']);await browser(['snapshot','-i']);
+    const veryShort=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>n.getBoundingClientRect());return {overflow:getComputedStyle(document.body).overflowY,width:document.documentElement.scrollWidth,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1))}})()`);
+    assert.notEqual(veryShort.overflow,'hidden');
+    assert.equal(veryShort.overlap,false,JSON.stringify(veryShort));
+    assert.ok(veryShort.width<=1094,JSON.stringify(veryShort));
+    checks.push('very-short-desktop');
+    // Include the user's short desktop frame (outer lobby header already removed).
+    for (const [width,height] of [[1094,559],[1440,720],[1280,640]]) {
+      await browser(['set','viewport',String(width),String(height)]);
+      await browser(['snapshot','-i']);
+      const fit=await evaluate(`(()=>{const body=document.body,a=document.querySelector('#action-bar').getBoundingClientRect(),plates=[...document.querySelectorAll('.plate')].map(n=>n.getBoundingClientRect());return {height:innerHeight,width:innerWidth,scrollWidth:document.documentElement.scrollWidth,scroll:body.scrollHeight,bottom:a.bottom,top:a.top,plates:plates.every(r=>r.top>=0&&r.bottom<=a.top),overlap:plates.some((r,i)=>plates.slice(i+1).some(s=>r.left<s.right-1&&r.right>s.left+1&&r.top<s.bottom-1&&r.bottom>s.top+1))}})()`);
+      assert.ok(fit.scroll<=height+1,JSON.stringify({width,height,fit}));
+      assert.ok(fit.scrollWidth<=width+1,JSON.stringify(fit));
+      assert.ok(fit.bottom<=height&&fit.top>=0,JSON.stringify(fit));
+      assert.equal(fit.plates,true,JSON.stringify(fit));
+      assert.equal(fit.overlap,false,JSON.stringify(fit));
+      const spacing=await evaluate(`(()=>{const shapes=[...document.querySelectorAll('.seat .plate,.seat .card,.seat .dealer-btn')].filter(n=>n.getClientRects().length).map(n=>({player:n.closest('.seat').dataset.playerId,...n.getBoundingClientRect().toJSON()}));let minGap=Infinity;for(let i=0;i<shapes.length;i++)for(let j=i+1;j<shapes.length;j++){const a=shapes[i],b=shapes[j];if(a.player!==b.player)minGap=Math.min(minGap,Math.hypot(Math.max(a.left-b.right,b.left-a.right,0),Math.max(a.top-b.bottom,b.top-a.bottom,0)));}const hero=document.querySelector('.seat.is-hero'),cards=[...hero.querySelectorAll('.card--hero')].map(n=>n.getBoundingClientRect());return {minGap,cardToPlate:hero.querySelector('.plate').getBoundingClientRect().top-Math.max(...cards.map(r=>r.bottom))}})()`);
+      assert.ok(spacing.minGap>=8,JSON.stringify({width,height,spacing}));
+      assert.ok(spacing.cardToPlate>=8,JSON.stringify({width,height,spacing}));
+      await browser(['screenshot',path.join(outDir,`desktop-fit-${width}-${height}.png`)]);
+    }
+    const classic=await evaluate(`(()=>{const t=document.querySelector('.table').getBoundingClientRect(),cards=[...document.querySelectorAll('.card--hero')].map(n=>({width:n.offsetWidth,height:n.offsetHeight,rank:parseFloat(getComputedStyle(n.querySelector('.card-rank')).fontSize)}));return {ratio:t.width/t.height,cards}})()`);
+    assert.ok(Math.abs(classic.ratio-1.83)<0.01,JSON.stringify(classic));
+    assert.equal(classic.cards.length,2);
+    assert.ok(classic.cards.every(c=>c.width>=56&&c.width<=64&&c.height>=80&&c.height<=90&&c.rank>=22),JSON.stringify(classic));
+    checks.push('desktop-viewport-fit');
+    // Desktop log scrolling must use the same element as paintLog and log-new.
+    await click('#tab-log');
+    await evaluate("const n=document.querySelector('#log-list');n.scrollTop=n.scrollHeight");
+    await publish(Array.from({length:60},(_,i)=>({type:'narration',text:`Desktop reading fixture ${i}`})));
+    const logPosition=()=>evaluate("(()=>{const n=document.querySelector('#log-list');return {top:n.scrollTop,remaining:n.scrollHeight-n.clientHeight-n.scrollTop}})()");
+    assert.ok((await logPosition()).remaining<2,'desktop log should follow new events');
+    await evaluate("document.querySelector('#log-list').scrollTop=0");
+    await publish([{type:'narration',text:'Desktop unread event'}]);
+    assert.equal((await logPosition()).top,0,'desktop reading position preserved');
+    assert.equal(await evaluate("document.querySelector('#log-new').hidden"),false);
+    await click('#log-new');
+    assert.ok((await logPosition()).remaining<2,'latest event button scrolls the visible log');
+    await publish([{type:'narration',text:'Desktop follow event'}]);
+    assert.ok((await logPosition()).remaining<2,'desktop log keeps following');
+    checks.push('desktop-log-follow');
+
+    const ownView=view;
+    let turnState=createGame({aiCount:8});turnState.button=5;
+    turnState=startHand(turnState,{deck:fixedDeck()}).state;
+    const opponentView=userView(applyAction(turnState,'user','call').state);
+    const tableRect=()=>evaluate("document.querySelector('.table').getBoundingClientRect().toJSON()");
+    for(const [width,height] of [[1094,559],[1280,640],[1440,720]]) {
+      await browser(['set','viewport',String(width),String(height)]);
+      view=ownView;await publish();await browser(['snapshot','-i']);
+      const before=await tableRect();
+      view=opponentView;await publish();await browser(['snapshot','-i']);
+      const during=await tableRect();
+      assert.equal(await evaluate("document.querySelector('#action-bar').hidden"),true);
+      for(const field of ['x','y','width','height'])assert.ok(Math.abs(before[field]-during[field])<1,JSON.stringify({width,height,before,during}));
+      view=ownView;await publish();await browser(['snapshot','-i']);
+      const after=await tableRect();
+      for(const field of ['x','y','width','height'])assert.ok(Math.abs(before[field]-after[field])<1);
+    }
+    checks.push('turn-layout-stability');
+    // Presentation stress: every seat has committed chips at once.
+    view={...ownView,seats:ownView.seats.map(seat=>({...seat,bet:125}))};await publish();
+    for(const [width,height] of [[1094,559],[1440,900]]) {
+      await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+      const bets=await evaluate(`(()=>{const visible=n=>n.getClientRects().length&&getComputedStyle(n).display!=='none',targets=[...document.querySelectorAll('.plate,.seat .card,#board .card,#pots')].filter(visible),overlaps=[],gaps=[];for(const m of [...document.querySelectorAll('.bet-marker')].filter(visible)){const a=m.getBoundingClientRect(),plate=m.closest('.plate'),p=plate.getBoundingClientRect();gaps.push(Math.hypot(Math.max(a.left-p.right,p.left-a.right,0),Math.max(a.top-p.bottom,p.top-a.bottom,0)));for(const n of targets){if(n===plate)continue;const b=n.getBoundingClientRect();if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)overlaps.push({player:m.dataset.playerId,target:n.className,targetPlayer:n.closest('.seat')?.dataset.playerId,marker:a.toJSON(),targetRect:b.toJSON()});}}return {gaps,overlaps}})()`);
+      assert.equal(bets.gaps.length,ownView.seats.length-1);
+      assert.ok(bets.gaps.every(gap=>gap>=4&&gap<=9),JSON.stringify(bets));
+      assert.deepEqual(bets.overlaps,[],JSON.stringify({width,height,bets}));
+      await browser(['screenshot',path.join(outDir,`bet-spacing-${width}-${height}.png`)]);
+    }
+    view=ownView;await publish();checks.push('bet-owner-spacing');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
@@ -90,7 +166,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const shortMetrics=await evaluate("(()=>{const a=document.querySelector('#action-bar'),h=document.querySelector('.seat.is-hero');a.scrollIntoView({block:'end'});const ar=a.getBoundingClientRect(),hr=h.getBoundingClientRect();return {overlap:ar.top<hr.bottom&&ar.bottom>hr.top,summary:a.querySelector('#action-summary').textContent,controls:[...a.querySelectorAll('button')].filter(n=>n.getClientRects().length).every(n=>n.getBoundingClientRect().height>=44)}})()");
     assert.equal(shortMetrics.overlap,false);assert.match(shortMetrics.summary,/내 스택.*팟.*내 카드/);assert.equal(shortMetrics.controls,true);checks.push('short-viewport');
     view={...view,seats:view.seats.map((s,i)=>i===1?{...s,out:true,stack:0}:s)};await publish();
-    assert.equal(await evaluate("document.querySelector('[data-player-id=p1]').classList.contains('is-out')"),true);
+    assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);
     assert.equal(await evaluate("document.querySelectorAll('[data-player-id=p1] .card--back').length"),0);checks.push('elimination');
     await click('[data-player-id=p1] .plate');
     assert.equal(await evaluate("document.querySelector('#seat-overlay').hidden"),false);
@@ -111,7 +187,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['select','#display-unit','bb']);
     assert.equal(await evaluate("document.querySelector('#log-list').scrollTop"),0);
     await browser(['reload']);await ready();
-    assert.equal(await evaluate("document.querySelector('[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
+    assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     await browser(['fill','#raise-amount','9999999']);await browser(['press','Tab']);await click('#btn-raise');
     assert.equal(await evaluate('window.actionBodies.length'),0);
@@ -184,7 +260,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     if(cleanupErrors.length) failure=new AggregateError([...(failure?[failure]:[]),...cleanupErrors],'UI journey or cleanup failed');
     else checks.push('owned-cleanup');
     const pending=requiredJourneyChecks.filter(n=>!checks.includes(n));
-    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure&&!pending.length,checks,pending,measurements,error:failure?.message,errors:failure instanceof AggregateError?failure.errors.map(e=>e.message):[],browser:'agent-browser@0.36.0',scope:'Real relay/public engine views; synthetic out and events; lifecycle covered separately by lobby journey'},null,2));
+    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure&&!pending.length,checks,pending,measurements,error:failure?.message,errors:failure instanceof AggregateError?failure.errors.map(e=>e.message):[],browser:'agent-browser@0.36.0',scope:'Real relay/public engine views; synthetic out, bet amounts and events; lifecycle covered separately by lobby journey'},null,2));
     if(pending.length&&!failure)failure=Error(`Missing required checks: ${pending.join(', ')}`);
   }
   if(failure)throw failure;

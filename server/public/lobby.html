@@ -6,7 +6,7 @@
     <title>AI 홀덤 · 게임 로비</title>
     <link rel="stylesheet" href="/design-tokens.css" />
     <link rel="stylesheet" href="/lobby.css" />
-    <script type="module" src="/lobby.js"></script>
+    <script type="module" src="/lobby-bootstrap.js"></script>
   </head>
   <body>
     <header>
@@ -15,8 +15,7 @@
       ><button id="study">학습 열기 ↗</button>
     </header>
     <main id="setup">
-      <p class="eyebrow">YOUR NEXT BETTER DECISION</p>
-      <h1>한 핸드씩, 더 나은 선택.</h1>
+      <h1>게임 시작</h1>
       <p>
         모드와 AI 플레이어 수를 선택하세요. 실제 금전을 사용하지 않는 연습
         게임입니다.
@@ -47,7 +46,7 @@
           </select></label
         >
         <p id="seats">나 1명 + AI 5명 = 총 6명</p>
-        <section class="setup-summary" aria-label="선택한 게임 설정"><span class="eyebrow">SESSION PREVIEW</span><p id="setup-summary"></p><p id="setup-assistance"></p></section>
+        <section class="setup-summary" aria-label="선택한 게임 설정"><p id="setup-summary"></p><p id="setup-assistance"></p></section>
         <details>
           <summary>상세 설정</summary>
           <label
@@ -129,7 +128,7 @@
             선택하면 AI가 2명 이상이어야 합니다.
           </p>
         </details>
-        <button id="start" type="submit">게임 시작</button
+        <button id="start" disabled type="submit">게임 시작</button
         ><button type="button" id="back" hidden>
           일시정지 메뉴로 돌아가기
         </button>

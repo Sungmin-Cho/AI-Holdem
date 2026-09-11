@@ -1,13 +1,4 @@
 /* Presentation overrides; engine/action authority stays in the existing modules. */
-:root {
-  --bg:var(--ui-bg);--panel:var(--ui-panel);--raised:var(--ui-raised);
-  --ink:var(--ui-ink);--ink-2:var(--ui-muted);--muted:var(--ui-muted);
-  --gold:var(--ui-gold);--gold-2:var(--ui-gold);--gold-3:var(--ui-gold);
-  --danger-ink:var(--ui-danger);--pos-ink:var(--ui-accent);
-  --f-ui:var(--ui-font);--f-num:var(--ui-number);
-  --felt-1:#17473e;--felt-2:#12382f;--felt-3:#102b29;
-  --rail-1:#253647;--rail-2:#1b2938;--rail-3:#131d29;
-}
 html,body {height:auto;min-height:100%;}
 .sr-only {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;}
 body {font-size:14px;overflow:auto;}
@@ -15,19 +6,18 @@ button,select,input {font:inherit;}
 button,select,summary,.study-link {min-height:44px;}
 :focus-visible {outline:3px solid var(--ui-accent);outline-offset:3px;}
 .topbar {height:auto;min-height:64px;gap:16px;flex-wrap:wrap;padding:14px 24px;background:var(--panel);}
-.brand-name {font-family:var(--f-ui);letter-spacing:-.04em;}
 .meta {flex-wrap:wrap;gap:12px;min-width:0;}
 .meta-seg {flex:0 0 auto;max-width:100%;}
 .topbar .meta {flex-basis:200px;}
 .meta-value,.meta-label {font-size:12px;}
 main {display:grid;grid-template-columns:minmax(0,1fr) 340px;grid-template-rows:auto;height:auto;min-height:calc(100dvh - 90px);}
-.stage {display:flex;flex-direction:column;gap:12px;padding:20px;min-width:0;background:radial-gradient(ellipse at 50% 25%,#16302d,var(--bg) 70%);}
+.stage {display:flex;flex-direction:column;gap:12px;padding:20px;min-width:0;}
 .table-context {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--muted);}
 .table-context label {display:flex;align-items:center;gap:8px;font-size:12px;}
 select {border:1px solid var(--ui-border);background:var(--panel);color:var(--ink);border-radius:10px;padding:8px;}
 .table-wrap {container-type:inline-size;display:block;padding:40px 0 65px;flex:none;}
 .table {--tw:min(960px,100cqw);width:var(--tw);margin:auto;aspect-ratio:1.65;height:auto;max-height:none;}
-.plate {pointer-events:auto;color:var(--ink);font-family:var(--f-ui);background:var(--panel);border:1px solid #61758b;cursor:pointer;min-width:112px;max-width:154px;padding:9px;gap:7px;flex-wrap:wrap;justify-content:center;}
+.plate {pointer-events:auto;color:var(--ink);font-family:var(--f-ui);cursor:pointer;min-width:112px;max-width:154px;padding:9px;gap:7px;flex-wrap:wrap;justify-content:center;}
 .plate-info {min-width:0;flex:1;display:block;}
 .plate-name {display:block;}
 .plate-name {max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;}
@@ -45,26 +35,23 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
 .plate .plate-tag {width:100%;color:var(--muted);}
 .seat.is-hero .plate {border-color:var(--gold);}
 .seat.is-hero .amount-primary {font-size:18px;color:var(--gold);}
-.seat.is-out .plate {border-style:dashed;background:#18212b;}
+.seat.is-out .plate {border-style:dashed;background:var(--panel);}
 .seat.is-out .avatar {filter:grayscale(1);}
-.seat.is-folded .plate {opacity:1;border-style:dashed;}
-.seat.is-to-act .plate {border-color:var(--ui-accent);box-shadow:0 0 0 2px #5bdfb055;}
-.avatar-ring {display:none;}
-.pots {border-radius:16px;flex-wrap:wrap;justify-content:center;max-width:100%;white-space:normal;gap:6px;padding:10px;background:#0b1118e8;}
+.seat.is-folded .plate {border-style:dashed;}
+.seat.is-to-act .plate {border-color:var(--ui-accent);box-shadow:0 0 0 2px rgba(201,168,96,.25);}
+.pots {border-radius:16px;flex-wrap:wrap;justify-content:center;max-width:100%;white-space:normal;gap:6px;padding:10px;background:rgba(8,14,10,.75);}
 .pot-label {font-size:12px;color:var(--muted);}
 .pot-amount {font-size:20px;}
 .pot-detail {width:100%;font-size:12px;max-height:140px;overflow:auto;}
 .pot-detail summary {cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .bet-amount {font-size:12px;white-space:normal;max-width:145px;text-align:center;}
 .bet-marker {max-width:155px;}
-.action-bar {position:relative;display:flex;flex-wrap:wrap;gap:12px;padding:18px;border:1px solid var(--ui-border);border-radius:16px;background:var(--panel);margin:0;}
+.plate .bet-marker {display:none;}
+.action-area {display:contents;}
+.action-bar {position:relative;display:flex;flex-wrap:wrap;gap:12px;}
 .action-summary {flex:0 0 100%;margin:0;color:var(--muted);font-size:13px;line-height:1.7;overflow-wrap:anywhere;}
 .btn,.preset,.study-entry .btn,.action-feedback .btn,.replay-open,.replay-study {min-height:44px;min-width:44px;font-size:14px;}
-.btn-raise {background:var(--ui-accent);color:#0b2119;border-color:var(--ui-accent);}
-.btn-raise .amount-secondary {color:#173a2d;}
-.btn-raise:hover:not(:disabled) {background:#87eac8;}
-.btn-fold {color:var(--ui-danger);background:var(--raised);}
-.btn-neutral,.btn-ghost,.preset {background:var(--raised);color:var(--ink);border:1px solid var(--ui-border);}
+.btn-raise .amount-secondary {color:var(--gold-ink);}
 .raise-panel {flex:1 1 300px;min-width:0;}
 .raise-top {flex-wrap:wrap;gap:10px;}
 .amount-field {min-width:0;max-width:100%;border-color:var(--ui-border);}
@@ -76,13 +63,13 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
 .slider {min-height:44px;}
 .intent-note-wrap {width:100%;}
 .intent-note {min-height:44px;}
-.side {min-width:0;background:var(--panel);border-color:#344556;}
+.side {min-width:0;background:var(--panel);border-color:var(--line-strong);}
 .tabs {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));}
 .tab {font-size:13px;padding:12px 3px;min-width:0;}
 .panel {min-height:260px;max-height:70dvh;overflow:auto;}
 .log-list {max-height:60dvh;overflow:auto;}
 .study-entry p,.learning-scope {font-size:12px;color:var(--muted);}
-.participant-row {display:grid;gap:8px;padding:16px;border-bottom:1px solid #344556;overflow-wrap:anywhere;}
+.participant-row {display:grid;gap:8px;padding:16px;border-bottom:1px solid var(--line-strong);overflow-wrap:anywhere;}
 .cash-reset-note {font-size:12px;color:var(--muted);line-height:1.6;margin:0;}
 .overlay {padding:16px;}
 .review-card,.replay-card {background:var(--panel);border-color:var(--ui-border);max-width:100%;}
@@ -158,4 +145,142 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
   .table .plate .amount-secondary {display:block;}
   .act-group {flex-wrap:wrap;}
   .presets {flex-wrap:wrap;}
+}
+
+/* Restore the pre-191 oval and seat presentation on desktop. The surrounding
+   controls share the viewport; the player's cards keep a readable minimum.
+   Below 550px, use the scrolling layout instead of clipping crowded seats. */
+@media (min-width:1024px) and (min-height:550px) {
+  html,body {height:100%;min-height:0;}
+  body {grid-template-rows:auto minmax(0,1fr);overflow:hidden;}
+  .topbar {min-height:38px;padding:6px 16px;gap:12px;}
+  main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
+  .stage {min-height:0;gap:4px;padding:6px 12px;}
+  .stage > :not(.table-wrap) {flex-shrink:0;}
+  .table-context {font-size:12px;}
+  .table-context select {min-height:26px;padding:2px 8px;}
+  .table-wrap {flex:1;min-height:0;container-type:size;display:grid;place-items:center;padding:12px 0 55px;}
+  .table,.table.is-crowded {--tw:min(960px,100cqw,100cqh * 1.83);width:var(--tw);height:auto;aspect-ratio:1.83;max-height:100%;}
+  .table .seats,.table.is-crowded .seats {inset:0;}
+  .table .seat,.table.is-crowded .seat {left:var(--desktop-seat-x)!important;top:var(--desktop-seat-y)!important;width:max-content;gap:8px;}
+  .table .center {top:50%;width:40%;min-width:180px;gap:8px;}
+  .table .plate,.table.is-crowded .plate {display:flex;flex-wrap:nowrap;min-width:0;width:auto;max-width:none;padding:5px 8px;gap:7px;justify-content:normal;}
+  .table.is-crowded .plate {padding:3px 6px;gap:5px;}
+  .table.is-crowded .plate-info {gap:0;}
+  .table .seat.is-hero .plate,.table.is-crowded .seat.is-hero .plate {min-width:0;width:max-content;max-width:none;padding:8px 12px;}
+  .table .avatar-wrap,.table.is-crowded .seat:not(.is-hero) .avatar-wrap {display:block;}
+  .table .plate-info {display:flex;flex-direction:column;flex:initial;gap:1px;}
+  .table .plate-name {font-size:12px;max-width:90px;}
+  .table .plate-stack {font-size:14px;line-height:1.25;}
+  .table .plate-tag {position:static;width:auto;max-width:none;margin-left:auto;font-size:10px;line-height:1.2;white-space:nowrap;padding:2px 5px;}
+  .table .dealer-btn {top:-4px;}
+  .table .plate .amount-pair {gap:0;white-space:nowrap;}
+  .table .plate .amount-primary {white-space:nowrap;overflow-wrap:normal;}
+  .table .plate .amount-secondary {display:none;}
+  .table .seat.is-hero .amount-primary {font-size:16px;}
+  .table .card--sm {--cw:calc(var(--tw) * .0418);--ch:calc(var(--tw) * .0585);}
+  .table .card--back.card--sm {--cw:calc(var(--tw) * .0313);--ch:calc(var(--tw) * .0438);}
+  .table.is-crowded .card--sm {--cw:calc(var(--tw) * .0334);--ch:calc(var(--tw) * .047);}
+  .table.is-crowded .card--back.card--sm {--cw:calc(var(--tw) * .0253);--ch:calc(var(--tw) * .0354);}
+  .table .card--hero {--cw:clamp(56px,calc(var(--tw) * .061),64px);--ch:clamp(80px,calc(var(--tw) * .0866),90px);}
+  .table .seat.is-hero {gap:14px;}
+  .table .seat.is-hero .seat-cards {margin-bottom:0;}
+  .table .seat.is-hero .card--hero:first-child {transform:rotate(-3deg);}
+  .table .seat.is-hero .card--hero:last-child {margin-left:6px;transform:rotate(3deg);}
+  .pots {padding:6px 10px;gap:4px;}
+  .pot-label {font-size:11px;}
+  .pot-amount {font-size:18px;}
+  .pots .amount-secondary {display:none;}
+  .action-feedback,#action-status,.idle-hint,.thinking {margin:0;}
+  .action-feedback {min-height:18px;}
+  .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) {display:none;}
+  /* Reserve the compact controls and status line across turns; errors and
+     coaching hints can still expand naturally. */
+  .action-area {display:flex;flex-direction:column;gap:4px;min-height:136px;}
+  .action-area > * {flex-shrink:0;}
+  .action-bar {display:grid;grid-template-columns:auto minmax(0,1fr) auto;width:100%;margin:0;padding:6px 8px;gap:4px 8px;}
+  .action-summary {grid-column:1/3;grid-row:1;font-size:11px;line-height:1.3;align-self:center;}
+  .intent-note-wrap {grid-column:3;grid-row:1;width:150px;justify-self:end;gap:4px;}
+  .intent-note {min-height:26px;height:26px;width:100px;font-size:11px;padding:0 6px;}
+  .act-group {grid-column:1;grid-row:2;gap:5px;}
+  .raise-panel {grid-column:2;grid-row:2;min-width:0;gap:4px;}
+  #btn-raise,#btn-allin-only {grid-column:3;grid-row:2;}
+  .act-sep {display:none;}
+  .btn {padding:8px 12px;}
+  .raise-top {gap:4px;flex-wrap:nowrap;}
+  .presets {gap:3px;flex-wrap:wrap;}
+  .preset {padding:4px 6px;min-width:30px;min-height:30px;font-size:11px;}
+  .amount-field {flex:none;}
+  .amount-input {width:64px;min-height:30px;font-size:16px;}
+  .amount-label {font-size:10px;}
+  .slider {min-height:16px;height:16px;margin:0;}
+  .raise-range {font-size:10px;margin:0;}
+  .side {min-height:0;overflow:hidden;display:flex;flex-direction:column;}
+  .side > :not(.panel) {flex-shrink:0;}
+  .tabs {margin:8px 6px;}
+  .tab {white-space:nowrap;font-size:12px;}
+  .panel {flex:1;min-height:0;max-height:none;}
+  #panel-log {display:flex;flex-direction:column;overflow:hidden;}
+  #log-new {flex-shrink:0;}
+  .log-list {flex:1;min-height:0;max-height:none;overflow:auto;}
+}
+/* Give the upper shoulder seats room around the original oval in short frames. */
+@media (min-width:1024px) and (min-height:550px) and (max-height:650px) {
+  .table:has(.seat:nth-child(9)) .seat:nth-child(5),
+  .table:has(.seat:nth-child(9)) .seat:nth-child(6) {margin-top:-14px;}
+  .table:has(.seat:nth-child(9)) .seat:nth-child(4),
+  .table:has(.seat:nth-child(9)) .seat:nth-child(7) {margin-top:12px;}
+  .table:has(.seat:nth-child(8)):not(:has(.seat:nth-child(9))) .seat:nth-child(4),
+  .table:has(.seat:nth-child(8)):not(:has(.seat:nth-child(9))) .seat:nth-child(6) {margin-top:24px;}
+}
+
+/* Blind identity is independent of current bet size or all-in status. */
+.dealer-btn.is-sb,.dealer-btn.is-bb {width:auto;min-width:25px;padding:0 4px;white-space:nowrap;}
+.dealer-btn.is-sb {background:#d6c18b;color:#241a06;}
+.dealer-btn.is-bb {background:#c3d8c8;color:#17251e;}
+.seat-bet {position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:4px;padding:2px 6px;border-radius:8px;background:#0a0d0bee;color:var(--gold-2);font-size:12px;white-space:nowrap;}
+@media (min-width:1024px) and (min-height:550px) {
+  /* Keep committed chips attached to their owner as the table resizes. */
+  .table .plate .bet-marker {display:flex;width:max-content;max-width:120px;padding:3px 6px;gap:3px;top:50%;left:auto;right:calc(100% + 8px);transform:translateY(-50%);pointer-events:none;}
+  .table .seat[data-bet-edge="right"] .bet-marker {right:auto;left:calc(100% + 8px);}
+  .table .seat[data-bet-edge="bottom"] .bet-marker {right:auto;left:50%;top:calc(100% + 6px);transform:translateX(-50%);}
+  .table .bet-amount {font-size:12px;white-space:nowrap;}
+  .table .bet-chip {width:13px;height:13px;}
+  .seat-bet {display:none;}
+}
+@media (min-width:1024px) and (min-height:550px) {
+  /* The hero's large cards cover the inner felt marker; keep that amount on
+     their own plate so the cards and the committed chips are both readable. */
+  .seat.is-hero .seat-bet {display:block;position:static;transform:none;margin:0 0 0 4px;padding:0;font-size:11px;}
+}
+
+@media (min-width:1024px) and (min-height:550px) {
+  .table .seat[data-status="플레이 중"] .plate-tag {display:none;}
+}
+@media (min-width:1024px) and (min-height:550px) and (max-height:650px) {
+  /* Opponent cards sit beside their own nameplate, away from neighboring seats. */
+  .table .seat:not(.is-hero) .seat-cards {position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:12px;}
+  .table .seat[data-side="left"]:not(.is-hero) .seat-cards {left:auto;right:100%;margin-left:0;margin-right:12px;}
+}
+
+@media (min-width:1024px) and (min-height:550px) {
+  .table .seat[data-bet-band="lower"][data-side="left"] .bet-marker {left:-16px;transform:none;}
+  .table .seat[data-bet-band="lower"][data-side="right"] .bet-marker {left:auto;right:-16px;transform:none;}
+}
+@media (min-width:1024px) and (min-height:550px) and (max-height:650px) {
+  .table:has(.seat:nth-child(8)):not(:has(.seat:nth-child(9))) .seat:nth-child(5) {margin-top:-6px;}
+  .table .seat[data-bet-band="upper"] .bet-marker {left:50%;right:auto;top:auto;bottom:calc(100% + 6px);transform:translateX(-50%);}
+  .table:has(.seat:nth-child(8)):not(:has(.seat:nth-child(9))) .seat:nth-child(3) .bet-marker,
+  .table:has(.seat:nth-child(8)):not(:has(.seat:nth-child(9))) .seat:nth-child(7) .bet-marker {left:50%;right:auto;top:calc(100% + 6px);transform:translateX(-50%);}
+}
+
+@media (min-width:1024px) and (min-height:550px) and (max-height:650px) {
+  /* Leave room for wider fallback fonts in the crowded upper and middle seats. */
+  .table .seat[data-bet-band="upper"][data-side="left"] .bet-marker {left:0;transform:none;}
+  .table .seat[data-bet-band="upper"][data-side="right"] .bet-marker {left:auto;right:0;transform:none;}
+  .table:has(.seat:nth-child(9)) .seat[data-bet-band="middle"] .bet-marker {top:auto;bottom:calc(100% + 6px);transform:none;}
+  .table:has(.seat:nth-child(9)) .seat[data-bet-band="middle"][data-side="left"] .bet-marker {left:0;right:auto;}
+  .table:has(.seat:nth-child(9)) .seat[data-bet-band="middle"][data-side="right"] .bet-marker {left:auto;right:0;}
+  .table.is-crowded .seat[data-bet-band="top"][data-side="left"] .bet-marker {left:calc(50% + 16px);}
+  .table.is-crowded .seat[data-bet-band="top"][data-side="right"] .bet-marker {left:calc(50% - 16px);}
 }
