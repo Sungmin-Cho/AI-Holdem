@@ -5487,7 +5487,13 @@ test('SIGTERM during D9 health await cannot unlink, spawn, retry, or resolve the
 
 test('D9 preserves an identical-byte replacement lock by pinned path identity and aborts recovery', { timeout: 15_000 }, async (t) => {
   if (skipOnWin32(t, 'cannot rename-replace a pinned lock.json handle on win32')) return;
-  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
+  // blackhole 서버는 /api/health에 영영 응답하지 않는다. 이 테스트가 다투는 것은
+  // 교체 lock의 pin 판정이지 health 상한이 아니므로, 프로덕션 기본값(느린 기기용
+  // 5s)이 아니라 짧은 프로브로 고정해 아래 4s 경주 창을 의미 있게 유지한다.
+  const { gameDir, loop } = await setupAiFirst(t, {
+    adapter: makeAdapter(),
+    loopOpts: { waitMs: 0, localHttpProbeMs: 500 },
+  });
   const lockPath = path.join(gameDir, 'lock.json');
   const originalRaw = fs.readFileSync(lockPath, 'utf8');
   const original = readJson(lockPath);

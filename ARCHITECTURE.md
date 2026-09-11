@@ -69,7 +69,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 - `engine/`은 네트워크도 LLM도 몰라야 한다 — 외부 npm 의존성이 없고, `node:fs`/`node:path`/`node:crypto`/`node:child_process`(로컬 pid 조회) 밖의 무언가를 끌어들이면 안 된다.
 - 선택된 session의 `state.json`은 `engine/state.js`의 락(`withMutation`)을 통해서만 바뀌어야 한다 — 사이드카·게시 도구도 상태를 직접 쓰지 않고 `engine/cli.js`를 자식 프로세스로 부른다.
 - LLM CLI는 `tools/player-runtime.js` 바깥에서 spawn되면 안 된다.
-- 그 자식의 argv에는 세션 id 외의 런타임 값(모델 문자열, 프롬프트, decisionId, 저장소·게임 경로)이 실리면 안 된다 — 프롬프트는 반드시 stdin, cwd는 레포·`game/` 밖의 per-runtime 빈 tmp 디렉터리, env는 `HOME`/`PATH`만 상속한다.
+- 그 자식의 argv에는 세션 id 외의 런타임 값(모델 문자열, 프롬프트, decisionId, 저장소·게임 경로)이 실리면 안 된다 — 프롬프트는 반드시 stdin, cwd는 레포·`game/` 밖의 per-runtime 빈 tmp 디렉터리, env는 `HOME`/`PATH`/`USER`만 상속한다(`USER`는 자격이 아니라 계정 이름이며, 그것 없이는 claude CLI가 자기 credential 저장소를 열지 못한다).
 - 활성 게임 여부는 서버 pid와 loop 락 pid **양쪽**이 살아 있다는 것으로만 증명돼야 한다 — 한쪽만 보고 활성/비활성을 판정하면 안 된다(`engine/game-archive.js`의 `assertLoopAllowsInit`, `resume-check`의 `serverPidAlive`·`loopPidAlive`).
 - `--resume`은 어떤 경로로도 `init`을 호출하면 안 된다.
 - 종료 phase 체크포인트는 역행하면 안 된다: `playing → finalizing → review_generated → review_published → done`. `review_generated` 이후 재개는 선택된 session의 `review.md`를 다시 만들지 않고, 먼저 기록해 둔 sha256으로 그 산출물을 재사용해야 한다.

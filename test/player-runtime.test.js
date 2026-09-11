@@ -210,9 +210,9 @@ test('자식 cwd는 레포·게임 밖 빈 tmp 디렉터리이고 env는 최소 
     assert.ok(call.cwd.startsWith(fs.realpathSync(os.tmpdir())), `tmp 밖 cwd: ${call.cwd}`);
     assert.equal(call.cwd.startsWith(fs.realpathSync(REPO_ROOT)), false);
     assert.deepEqual(fs.readdirSync(call.cwd), [], 'cwd가 비어 있지 않다');
-    // 어댑터 allowlist(HOME·PATH) + 이 테스트가 주입한 두 키가 전부다. `__CF_...`는
+    // 어댑터 allowlist(HOME·PATH·USER) + 이 테스트가 주입한 두 키가 전부다. `__CF_...`는
     // macOS CoreFoundation이 exec 뒤 자식에 스스로 붙이는 값으로 상속 경로가 아니다.
-    const fromAdapter = new Set(['HOME', 'PATH', 'FAKE_CLI_SCRIPT', 'FAKE_CLI_LOG']);
+    const fromAdapter = new Set(['HOME', 'PATH', 'USER', 'FAKE_CLI_SCRIPT', 'FAKE_CLI_LOG']);
     const fromPlatform = new Set([
       '__CF_USER_TEXT_ENCODING',
       'HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'SYSTEMROOT',
@@ -221,6 +221,14 @@ test('자식 cwd는 레포·게임 밖 빈 tmp 디렉터리이고 env는 최소 
     assert.deepEqual(call.envKeys.filter((k) => !fromAdapter.has(k) && !fromPlatform.has(k)), []);
     assert.equal(call.envKeys.some((k) => /PWD|WORKSPACE|PROJECT|KEY|SECRET|TOKEN|^npm_/i.test(k)), false);
     assert.ok(call.envKeys.includes('HOME') && call.envKeys.includes('PATH'));
+    // USER는 계정 이름이지 자격이 아니다. claude CLI는 그것 없이는 자기 credential
+    // 저장소를 열지 못해 사다리에서 통째로 탈락한다(docs/sidecar-probe-notes.md의
+    // 2026-09-11 추가 기록). 이 셸에 있으면 반드시 자식에게도 있어야 한다.
+    assert.equal(
+      call.envKeys.includes('USER'),
+      typeof process.env.USER === 'string',
+      'USER allowlist 상속이 끊겼다',
+    );
   } finally {
     f.cleanup();
   }

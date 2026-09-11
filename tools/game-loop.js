@@ -116,6 +116,12 @@ const RESUMABLE_FINAL_HALTS = new Set([
 ]);
 const DEFAULT_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 const DEFAULT_WAIT_NETWORK_MARGIN_MS = 11_000;
+// 127.0.0.1 왕복 한 번의 상한. health는 실패해도 startup 루프가 다시 돌지만
+// `assertAuthenticatedServer`의 두 프로브는 재시도가 없어서, 느린 기기에서 스냅샷
+// 한 번이 이 값을 넘기면 정상 서버인데도 부트스트랩이 통째로 실패한다. 이 머신에서는
+// 왕복이 1ms대지만(2026-09-11 실측) 그건 상한을 좁게 둘 근거가 아니다 — 기다림의
+// 천장이지 소비하는 지연이 아니다.
+const LOCAL_HTTP_PROBE_MS = 5_000;
 const FATAL_RUNTIME_CODES = new Set([
   'CHILD_CLOSE_UNCONFIRMED',
   'CHILD_SIGNAL_FAILED',
@@ -505,9 +511,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const now = opts.now ?? (() => new Date());
   const requestedPort = opts.port ?? 8877;
   const pollMs = opts.pollMs ?? 20;
-  const serverStartMs = opts.serverStartMs ?? 5_000;
-  const childTimeoutMs = opts.childTimeoutMs ?? 30_000;
-  const osVerifyMs = opts.osVerifyMs ?? 1_000;
+  // 아래 셋은 전부 "정상인데 느린" 기기에 대한 인내심이지 지연 예산이 아니다. 이
+  // 머신 실측은 server health 0.14–0.21s, lsof 0.03s로 여유가 24–33배였고 load
+  // average 32에서도 그대로였지만(2026-09-11), 느린 기기의 node 부팅·프로세스
+  // 테이블 조회는 그 배수를 쉽게 먹는다. 만료는 기동 실패로 직결되므로 넉넉히 둔다.
+  const serverStartMs = opts.serverStartMs ?? 20_000;
+  const childTimeoutMs = opts.childTimeoutMs ?? 60_000;
+  const osVerifyMs = opts.osVerifyMs ?? 5_000;
+  const localHttpProbeMs = opts.localHttpProbeMs ?? LOCAL_HTTP_PROBE_MS;
   const waitMs = opts.waitMs ?? 60_000;
   const waitNetworkMarginMs = opts.waitNetworkMarginMs ?? DEFAULT_WAIT_NETWORK_MARGIN_MS;
   const monotonicNow = opts.monotonicNow ?? (() => performance.now());
@@ -1077,7 +1088,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const serverHealthy = async (port, { stopAware = false } = {}) => {
     if (!Number.isInteger(port) || port < 1) return false;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(500));
+    const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(localHttpProbeMs));
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal });
       if (stopAware) assertNotStopping();
@@ -1106,7 +1117,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const assertAuthenticatedServer = async (port, sessionToken, { stopAware = false } = {}) => {
     const requestSnapshot = async (token) => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(500));
+      const timer = setTimeout(() => controller.abort(), assertAndBoundFinalizationMs(localHttpProbeMs));
       try {
         const response = await fetch(
           `http://127.0.0.1:${port}/api/snapshot?token=${encodeURIComponent(token)}`,
@@ -1184,7 +1195,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!study) return true;
     const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
       headers: { 'x-session-token': sessionToken },
-      signal: AbortSignal.timeout(assertAndBoundFinalizationMs(500)),
+      signal: AbortSignal.timeout(assertAndBoundFinalizationMs(localHttpProbeMs)),
     });
     if (stopAware) assertNotStopping();
     let health = null;

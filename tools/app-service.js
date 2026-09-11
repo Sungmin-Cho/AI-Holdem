@@ -24,7 +24,10 @@ import { startAppServer } from "./app-server.js";
 const SELF = fileURLToPath(import.meta.url),
   LOCK = "app.lock.d";
 const listenerOwnedBy = createListenerOwnedBy({
-  timeoutMs: process.platform === "win32" ? 15000 : 1000,
+  // lsof는 이 머신에서 0.03s지만(2026-09-11 실측) 프로세스 테이블이 크거나 느린
+  // 디스크에서는 초 단위로 늘어난다. 만료는 APP_LISTENER_MISMATCH — 살아 있는
+  // 서비스를 못 붙는 실패다.
+  timeoutMs: process.platform === "win32" ? 15000 : 5000,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function appDir(store) {
@@ -175,7 +178,7 @@ export async function ensureAppService(
     const owner = readOwnedLock(store, LOCK);
     if (owner?.status !== "alive") throw error;
     const deadline =
-      Date.now() + (process.platform === "win32" ? 120000 : 15000);
+      Date.now() + (process.platform === "win32" ? 120000 : 45000);
     while (Date.now() < deadline) {
       await sleep(100);
       try {
@@ -197,7 +200,10 @@ export async function ensureAppService(
   );
   child.unref();
   fs.closeSync(log);
-  const deadline = Date.now() + (process.platform === "win32" ? 120000 : 15000);
+  // 콜드 기동은 이 머신에서 0.38–0.60s였지만(2026-09-11 실측) 느린 기기의 node
+  // 부팅과 첫 privacy 증명은 그보다 훨씬 오래 걸릴 수 있다. 만료하면 로비 자체가
+  // 열리지 않으므로 상한을 넉넉히 둔다 — 기다림의 천장이지 소비하는 지연이 아니다.
+  const deadline = Date.now() + (process.platform === "win32" ? 120000 : 45000);
   let last;
   while (Date.now() < deadline) {
     await sleep(100);
