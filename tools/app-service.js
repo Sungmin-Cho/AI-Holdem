@@ -8,6 +8,7 @@ import {
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { childSpawnOptions } from "../shared/child-spawn-options.js";
 import { fileURLToPath } from "node:url";
 import {
   acquireOwnedLock,
@@ -196,7 +197,7 @@ export async function ensureAppService(
   const child = spawn(
     process.execPath,
     [SELF, "serve", store, "--player-runtime", playerRuntime],
-    { detached: true, stdio: ["ignore", log, log] },
+    childSpawnOptions({ detached: true, stdio: ["ignore", log, log] }),
   );
   child.unref();
   fs.closeSync(log);

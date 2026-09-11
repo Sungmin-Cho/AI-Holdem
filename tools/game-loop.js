@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { resolveSessionReference } from './reference-source.js';
 import { openContained } from './training-store.js';
 import { createHintControl, checkHintResume } from './hint-control.js';
@@ -991,11 +992,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const argv = [script, ...childArgs];
       if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
       if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
-      const child = execFile(process.execPath, argv, {
+      const child = execFile(process.execPath, argv, childSpawnOptions({
         encoding: 'utf8',
         timeout,
         maxBuffer: 4 * 1024 * 1024,
-      }, (error, stdout, stderr) => {
+      }), (error, stdout, stderr) => {
         activeChildren.delete(child);
         let envelope = null;
         try { envelope = JSON.parse(String(stdout).trim()); } catch { /* classified below */ }
@@ -1483,10 +1484,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--token', sessionToken,
         ...(study ? ['--study-url', study.studyUrl] : []), ...(managed ? ['--control-protocol', '1'] : []),
       ];
-      const child = spawn(process.execPath, argv, {
+      const child = spawn(process.execPath, argv, childSpawnOptions({
         cwd: ROOT,
         stdio: 'ignore',
-      });
+      }));
       serverChild = child;
       serverPid = child.pid ?? null;
       serverAdopted = false;
@@ -6222,18 +6223,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
 export async function initializePreparedSession(gameDir, args) {
   if (args.hints !== undefined) {
-    await new Promise((resolve,reject)=>execFile(process.execPath,[ENGINE_CLI,'capabilities'],{encoding:'utf8',timeout:5000,maxBuffer:4096},(error,stdout)=>{
+    await new Promise((resolve,reject)=>execFile(process.execPath,[ENGINE_CLI,'capabilities'],childSpawnOptions({encoding:'utf8',timeout:5000,maxBuffer:4096}),(error,stdout)=>{
       let caps;try{caps=JSON.parse(stdout);}catch{}
       if(error || caps?.preActionHints!==1 || caps?.hintContractVersion!==1) reject(codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability missing'));else resolve();
     }));
   }
   const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, [ENGINE_CLI, ...initArgs], {
+    execFile(process.execPath, [ENGINE_CLI, ...initArgs], childSpawnOptions({
       encoding: 'utf8',
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
+    }), (error, stdout, stderr) => {
       let envelope = null;
       try { envelope = JSON.parse(String(stdout).trim()); } catch { /* classified below */ }
       if (error || envelope?.ok !== true) {

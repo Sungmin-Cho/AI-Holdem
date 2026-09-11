@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { fileURLToPath } from 'node:url';
 import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
 import { readPersistedSolver } from './solver-runtime.js';
@@ -947,7 +948,7 @@ export function createCoachControl(deps = {}) {
           const publisher = path.join(path.dirname(fileURLToPath(import.meta.url)), 'publish.js');
           const spawned = spawnSync(process.execPath, [
             publisher, '--from', item.exactEnvelopePath, '--lock-wait-ms', '15000',
-          ], { encoding: 'utf8' });
+          ], childSpawnOptions({ encoding: 'utf8' }));
           let published;
           try {
             published = JSON.parse(String(spawned.stdout).trim().split('\n').at(-1));

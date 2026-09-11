@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import fs from 'node:fs';
 import { stopOwnedProcessTree, spawnOwnedCommand } from '../test/helpers/platform.js';
 import os from 'node:os';
@@ -114,11 +115,11 @@ function canonicalCandidate(target) {
 }
 
 function defaultProtectedRoot(repoRoot = ROOT) {
-  const commonText = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+  const commonText = execFileSync('git', ['rev-parse', '--git-common-dir'], childSpawnOptions({
     cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
+  })).trim();
   const common = path.isAbsolute(commonText) ? commonText : path.resolve(repoRoot, commonText);
   return canonicalCandidate(path.join(path.dirname(common), 'game'));
 }
