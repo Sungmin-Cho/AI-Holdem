@@ -138,7 +138,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
     await browser(['screenshot',path.join(outDir,'large-values-zoom.png')]);
     await evaluate("document.body.style.zoom='1'");checks.push('large-values');
-    let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;settlement.handNo=50;
+    let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;settlement.handNo=2;
     const prefix=['7s','2c','As','8s','3d','Ah','Ks','Kd','Kh','9c','6d'];
     const deal=startHand(settlement,{deck:[...prefix,...newDeck().filter(c=>!prefix.includes(c))]});settlement=deal.state;
     view=userView(settlement);await publish(deal.events);
