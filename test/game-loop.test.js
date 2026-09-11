@@ -6769,6 +6769,7 @@ test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 
 });
 
 test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked worker 종료 전에 차단한다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const never = new Promise(() => {});

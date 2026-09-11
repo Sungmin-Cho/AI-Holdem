@@ -1,10 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { ownedIdentityStatus } from '../engine/state.js';
 import {
-  aclTransaction, nextCheckpointDelay, memoizedStartTimeOf,
+  aclTransaction, withClientAclScope, markAclDirty, nextCheckpointDelay, memoizedStartTimeOf,
   isStudyTransportFailure, shouldRetryLiveWait,
 } from '../tools/study-service.js';
+
+function countingProve() {
+  const calls = [];
+  const prove = (entries) => {
+    calls.push(entries.map(({ file }) => file));
+    return true;
+  };
+  return { calls, prove };
+}
+
+function storeCtx() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acl-scope-'));
+  fs.chmodSync(root, 0o700);
+  const training = path.join(root, '.training');
+  fs.mkdirSync(training, { mode: 0o700 });
+  return { root, training };
+}
 
 test('aclTransaction refuses a thenable transaction body', () => {
   assert.throws(
@@ -53,4 +73,133 @@ test('live wait retries transport resets while the same owner is alive', () => {
   assert.equal(shouldRetryLiveWait(answer, alive), false);
   assert.equal(shouldRetryLiveWait(wrapped, { ...alive, descriptorState: 'missing' }), true);
   assert.equal(shouldRetryLiveWait(wrapped, { ...alive, sameOwner: false }), false);
+});
+
+test('standalone win32 transactions still pay a before/after pair each', () => {
+  const ctx = storeCtx();
+  const { calls, prove } = countingProve();
+  try {
+    aclTransaction(ctx, () => 1, { platform: 'win32', prove });
+    aclTransaction(ctx, () => 2, { platform: 'win32', prove });
+    assert.equal(calls.length, 4);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('client ACL scope shares one before/after pair across sequential transactions and awaits', async () => {
+  const ctx = storeCtx();
+  const { calls, prove } = countingProve();
+  try {
+    await withClientAclScope(async () => {
+      aclTransaction(ctx, () => 1, { platform: 'win32', prove });
+      await Promise.resolve();
+      aclTransaction(ctx, () => 2, { platform: 'win32', prove });
+      aclTransaction(ctx, () => {
+        aclTransaction(ctx, () => 3, { platform: 'win32', prove });
+      }, { platform: 'win32', prove });
+    }, { platform: 'win32', prove });
+    assert.equal(calls.length, 2, `expected before+after, got ${calls.length}`);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('client ACL scope still after-proves when the body throws', () => {
+  const ctx = storeCtx();
+  const { calls, prove } = countingProve();
+  try {
+    assert.throws(() => withClientAclScope(() => {
+      aclTransaction(ctx, () => { throw Object.assign(new Error('boom'), { code: 'X' }); }, { platform: 'win32', prove });
+    }, { platform: 'win32', prove }), { code: 'X' });
+    assert.equal(calls.length, 2);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('an unproven path is not private under a client scope', () => {
+  const ctx = storeCtx();
+  try {
+    const prove = () => false;
+    assert.throws(
+      () => withClientAclScope(() => aclTransaction(ctx, () => {}, { platform: 'win32', prove }), { platform: 'win32', prove }),
+      (error) => error.code === 'STUDY_DESCRIPTOR_CORRUPT' && String(error.message).startsWith('STUDY_DESCRIPTOR_CORRUPT before'),
+    );
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('writes and listing changes invalidate the client before-proof', () => {
+  const ctx = storeCtx();
+  const { calls, prove } = countingProve();
+  try {
+    withClientAclScope(() => {
+      aclTransaction(ctx, () => 1, { platform: 'win32', prove });
+      markAclDirty();
+      aclTransaction(ctx, () => 2, { platform: 'win32', prove });
+      fs.writeFileSync(path.join(ctx.training, 'study-service.json'), '{}', { mode: 0o600 });
+      aclTransaction(ctx, () => 3, { platform: 'win32', prove });
+    }, { platform: 'win32', prove });
+    assert.equal(calls.length, 4);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('concurrent client scopes do not share ACL memos', async () => {
+  const left = storeCtx();
+  const right = storeCtx();
+  const { calls, prove } = countingProve();
+  try {
+    await Promise.all([
+      withClientAclScope(async () => {
+        aclTransaction(left, () => 1, { platform: 'win32', prove });
+        await Promise.resolve();
+        aclTransaction(left, () => 2, { platform: 'win32', prove });
+      }, { platform: 'win32', prove }),
+      withClientAclScope(async () => {
+        aclTransaction(right, () => 1, { platform: 'win32', prove });
+        await Promise.resolve();
+        aclTransaction(right, () => 2, { platform: 'win32', prove });
+      }, { platform: 'win32', prove }),
+    ]);
+    assert.equal(calls.length, 4);
+  } finally {
+    fs.rmSync(left.root, { recursive: true, force: true });
+    fs.rmSync(right.root, { recursive: true, force: true });
+  }
+});
+
+test('a client call with no transaction does not prove', () => {
+  const { calls, prove } = countingProve();
+  assert.equal(withClientAclScope(() => 7, { platform: 'win32', prove }), 7);
+  assert.equal(calls.length, 0);
+});
+
+test('same-path inode replacement invalidates the client before-proof', () => {
+  const ctx = storeCtx();
+  const { calls, prove } = countingProve();
+  const file = path.join(ctx.training, 'study-service.json');
+  try {
+    fs.writeFileSync(file, 'a', { mode: 0o600 });
+    const before = fs.lstatSync(file, { bigint: true });
+    let after;
+    withClientAclScope(() => {
+      aclTransaction(ctx, () => 1, { platform: 'win32', prove });
+      fs.unlinkSync(file);
+      fs.writeFileSync(file, 'b', { mode: 0o600 });
+      after = fs.lstatSync(file, { bigint: true });
+      aclTransaction(ctx, () => 2, { platform: 'win32', prove });
+    }, { platform: 'win32', prove });
+    // Linux tmpfs often reuses the inode; that is not a listing change.
+    const reused = after.ino === before.ino && after.dev === before.dev;
+    assert.equal(calls.length, reused ? 2 : 3);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('after-proof failure on a thrown body keeps the caller error code', () => {
+  const ctx = storeCtx();
+  let n = 0;
+  const prove = () => { n += 1; return n === 1; };
+  try {
+    assert.throws(
+      () => withClientAclScope(() => {
+        aclTransaction(ctx, () => { throw Object.assign(new Error('boom'), { code: 'X' }); }, { platform: 'win32', prove });
+      }, { platform: 'win32', prove }),
+      { code: 'X' },
+    );
+    assert.equal(n, 2);
+  } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
 });

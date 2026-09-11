@@ -2,6 +2,7 @@ import { independentAssessmentEligibility } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,11 +108,11 @@ function cliRunner(argv, { timeoutMs, failCode, solverSessionDir = null }) {
   let child = null;
   let settled = false;
   const promise = new Promise((resolve) => {
-    child = execFile(process.execPath, argv, {
+    child = execFile(process.execPath, argv, childSpawnOptions({
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
-    }, (error, stdout) => {
+    }), (error, stdout) => {
       settled = true;
       let parsed = null;
       try { parsed = JSON.parse(String(stdout ?? '').trim()); } catch { /* not json */ }

@@ -1,4 +1,5 @@
 import { windowsPowerShellEnvironment } from './platform-files.js';
+import { childSpawnOptions } from './child-spawn-options.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -58,7 +59,7 @@ export async function terminateOwnedWindowsChild(child) {
 export function spawnOwnedCommand(command, args, options = {}) {
   const { ownedTimeoutMs, ...spawnOptions } = options;
   options = spawnOptions;
-  if (process.platform !== 'win32') return spawn(command, args, { ...options, detached: true });
+  if (process.platform !== 'win32') return spawn(command, args, childSpawnOptions({ ...options, detached: true }));
   if (command === 'npm' || command === 'npx') {
     const cli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', `${command}-cli.js`);
     if (!fs.statSync(cli).isFile()) throw new Error('Windows npm CLI is unavailable');

@@ -4,8 +4,101 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as files from '../shared/platform-files.js';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { win32ProcessStartTime } from '../engine/process-identity.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('childSpawnOptions forces windowsHide even when a caller tries to disable it', () => {
+  assert.equal(childSpawnOptions({}).windowsHide, true);
+  assert.equal(childSpawnOptions({ windowsHide: false, detached: true }).windowsHide, true);
+  assert.equal(childSpawnOptions({ windowsHide: false, detached: true }).detached, true);
+});
+
+function jsFilesUnder(...dirs) {
+  const out = [];
+  const walk = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && /\.(js|mjs|cjs)$/.test(entry.name)) out.push(full);
+    }
+  };
+  for (const dir of dirs) walk(path.join(ROOT, dir));
+  return out;
+}
+
+function spawnCallBodies(source) {
+  const names = ['spawn', 'spawnSync', 'execFile', 'execFileSync'];
+  const bodies = [];
+  for (const name of names) {
+    const re = new RegExp(`\\b${name}\\s*\\(`, 'g');
+    let match;
+    while ((match = re.exec(source))) {
+      const open = match.index + match[0].length - 1;
+      let depth = 0, inStr = null, esc = false;
+      for (let i = open; i < source.length; i += 1) {
+        const c = source[i];
+        if (inStr) {
+          if (esc) { esc = false; continue; }
+          if (c === '\\') { esc = true; continue; }
+          if (c === inStr) inStr = null;
+          continue;
+        }
+        if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+        if (c === '(') depth += 1;
+        else if (c === ')') {
+          depth -= 1;
+          if (depth === 0) {
+            bodies.push(source.slice(open + 1, i));
+            break;
+          }
+        }
+      }
+    }
+  }
+  return bodies;
+}
+
+function firstArg(body) {
+  let depth = 0, inStr = null, esc = false, start = 0;
+  while (start < body.length && /\s/.test(body[start])) start += 1;
+  for (let i = start; i < body.length; i += 1) {
+    const c = body[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') depth -= 1;
+    else if (c === ',' && depth === 0) return body.slice(start, i).trim();
+  }
+  return body.slice(start).trim();
+}
+
+test('production child processes hide the Windows console', () => {
+  const posixCmd = /^(?:'ps'|"ps")$/;
+  const hidden = [];
+  const missing = [];
+  for (const file of jsFilesUnder('tools', 'engine', 'server', 'shared')) {
+    const relative = path.relative(ROOT, file).split(path.sep).join('/');
+    for (const body of spawnCallBodies(fs.readFileSync(file, 'utf8'))) {
+      const cmd = firstArg(body);
+      if (posixCmd.test(cmd)) continue;
+      const ok = /\bwindowsHide\s*:\s*true\b/.test(body)
+        || /\bchildSpawnOptions\s*\(/.test(body)
+        || /\bwindowsOwnedSpawnOptions\s*\(/.test(body);
+      (ok ? hidden : missing).push(`${relative} ${cmd}`);
+    }
+  }
+  assert.ok(hidden.length >= 9, `expected production spawn sites, found ${hidden.length}`);
+  assert.deepEqual(missing, []);
+});
 
 test('one monotonic deadline bounds sequential ACL and identity children', () => {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runtime-budget-'));

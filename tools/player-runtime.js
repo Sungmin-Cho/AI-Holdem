@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { processStartTime as defaultProcessStartTime } from '../engine/state.js';
@@ -347,7 +348,7 @@ export function buildPlayerPrompt({ persona, summaryPlaceholder = DEFAULT_SUMMAR
  * 때만 reject한다. 테스트는 command만 바꿔 이 함수에 위임한다.
  */
 export function spawnCli({ command, args, cwd, env, input }) {
-  const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(command, args, childSpawnOptions({ cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }));
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');

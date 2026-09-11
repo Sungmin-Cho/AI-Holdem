@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { isPrivatePath, arePrivatePaths, createPrivateDirectory, withPlatformDeadline, platformNow, platformTimeout, extendPlatformDeadline, setProofPhase } from '../shared/platform-files.js';
+import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,12 +67,56 @@ function statOrNull(file) {
   platformTimeout(WAIT_MS);
   try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
 }
-// A synchronous read transaction batches mutable ACL proof before and after
-// all inode/bytes checks. No proof is cached across awaits or transactions.
+// Windows ACL proof is a PowerShell child. A client call (ensure/inspect/stop)
+// opens one AsyncLocalStorage scope: one before proof, nested and sequential
+// transactions reuse it across awaits, one after proof when the call finishes.
+// Concurrent clients do not share the memo. Invalidate (re-prove before) on
+// write, lock/descriptor replacement, or a changed present-path listing.
+// Standalone transactions (service checkpoints) keep their own before/after
+// pair. A path not in the proved set is never treated as private — privatePath
+// falls through to a live proof rather than succeeding unproven.
+const clientAcl = new AsyncLocalStorage();
 let aclScope = null;
 let identityMemo = null;
+let inTransaction = false;
+function activeScope() {
+  return clientAcl.getStore()?.files ?? aclScope;
+}
 function privatePath(file, privateMode) {
-  return aclScope?.has(file) || isPrivatePath(file, { privateMode });
+  return activeScope()?.has(file) || isPrivatePath(file, { privateMode });
+}
+function aclCandidates(ctx) {
+  return [
+    { file: ctx.root, privateMode: false }, { file: ctx.training, privateMode: true },
+    { file: path.join(ctx.training, DESCRIPTOR), privateMode: true },
+    { file: path.join(ctx.training, LOCK), privateMode: false },
+    { file: path.join(ctx.training, LOCK, 'pid'), privateMode: false },
+    { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
+    { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
+  ];
+}
+function present(file) {
+  const stat = statOrNull(file);
+  return stat && !stat.isSymbolicLink();
+}
+function presentListing(candidates) {
+  return candidates.map(({ file }) => {
+    try {
+      const stat = fs.lstatSync(file, { bigint: true });
+      if (stat.isSymbolicLink()) return '';
+      return `${file}:${stat.dev}:${stat.ino}`;
+    } catch (error) {
+      if (error.code === 'ENOENT') return '';
+      fail();
+    }
+  }).join('\u0000');
+}
+export function markAclDirty() {
+  const batch = clientAcl.getStore();
+  if (batch) batch.dirty = true;
+}
+function rememberProved(file) {
+  activeScope()?.add(file);
 }
 // A path can be removed between the moment it is listed and the moment the proof
 // reads it, and on Windows that proof is a PowerShell child, so the window is
@@ -81,18 +127,17 @@ function privatePath(file, privateMode) {
 // as long as the listing keeps changing under the proof; only a listing that held
 // still across a proof makes an unproven path final. The bound is the number of
 // candidates: a listing can only change that many times before it is empty.
-function proveEntries(candidates, phase) {
+function proveEntries(candidates, phase, prove = arePrivatePaths) {
   const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
   // A symlink is never a private path, and every read of one is refused on
   // its own. Listing it here would veto the whole transaction instead — an
   // owner could not release its own lock beside a symlinked descriptor.
-  const present = (file) => { const stat = statOrNull(file); return stat && !stat.isSymbolicLink(); };
   let entries = candidates.filter(({ file }) => present(file));
   let reasons = [];
   let transportTries = 0;
   for (let attempt = 0; attempt <= candidates.length + 3; attempt += 1) {
     reasons = [];
-    if (arePrivatePaths(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
+    if (prove(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
     const relisted = candidates.filter(({ file }) => present(file));
     const listingChanged = listing(relisted) !== listing(entries);
     const transport = reasons.some((reason) => /powershell:.*error=ETIMEDOUT/.test(reason));
@@ -107,21 +152,78 @@ function settleTransaction(fn) {
   if (result && typeof result.then === 'function') fail('STUDY_DESCRIPTOR_CORRUPT', 'async transaction');
   return result;
 }
-export function aclTransaction(ctx, fn, { platform = process.platform } = {}) {
-  if (platform !== 'win32' || aclScope) return settleTransaction(fn);
-  const candidates = [
-    { file: ctx.root, privateMode: false }, { file: ctx.training, privateMode: true },
-    { file: path.join(ctx.training, DESCRIPTOR), privateMode: true },
-    { file: path.join(ctx.training, LOCK), privateMode: false },
-    { file: path.join(ctx.training, LOCK, 'pid'), privateMode: false },
-    { file: path.join(ctx.root, 'loop.lock.d'), privateMode: false },
-    { file: path.join(ctx.root, 'loop.lock.d', 'pid'), privateMode: false },
-  ];
+function runWithMemo(memo, fn) {
+  const previous = identityMemo;
+  identityMemo = memo;
+  try { return fn(); }
+  finally { identityMemo = previous; }
+}
+function enterTransaction(fn) {
+  const previous = inTransaction;
+  inTransaction = true;
+  try { return fn(); }
+  finally { inTransaction = previous; }
+}
+function needsRefresh(batch, ctx) {
+  if (!batch.files || batch.dirty) return true;
+  return presentListing(aclCandidates(ctx)) !== batch.listing;
+}
+function openBatchProof(batch, ctx, proveFn) {
+  const candidates = aclCandidates(ctx);
+  batch.candidates = candidates;
+  batch.listing = presentListing(candidates);
+  batch.identityMemo = new Map();
+  batch.files = new Set(proveEntries(candidates, 'before', proveFn).map(({ file }) => file));
+  batch.dirty = false;
+  batch.opened = true;
+}
+export function withClientAclScope(fn, { platform = process.platform, prove } = {}) {
+  if (platform !== 'win32') return fn();
+  if (clientAcl.getStore()) return fn();
+  const batch = {
+    files: null, dirty: false, opened: false, prove,
+    candidates: null, listing: null, identityMemo: null,
+  };
+  const finish = () => {
+    if (!batch.opened || !batch.candidates) return;
+    const proveFn = prove ?? arePrivatePaths;
+    try { proveEntries(batch.candidates, 'after', proveFn); }
+    finally { batch.files = null; batch.opened = false; }
+  };
+  return clientAcl.run(batch, () => {
+    let result;
+    try { result = fn(); }
+    catch (error) {
+      try { finish(); } catch { /* keep the caller's error code */ }
+      throw error;
+    }
+    if (result && typeof result.then === 'function') {
+      return Promise.resolve(result).then(
+        (value) => { finish(); return value; },
+        (error) => { try { finish(); } catch { /* keep the caller's error code */ } throw error; },
+      );
+    }
+    finish();
+    return result;
+  });
+}
+export function aclTransaction(ctx, fn, { platform = process.platform, prove } = {}) {
+  if (platform !== 'win32') return settleTransaction(fn);
+  if (inTransaction) return settleTransaction(fn);
+  const batch = clientAcl.getStore();
+  const proveFn = prove ?? batch?.prove ?? arePrivatePaths;
+  if (batch) {
+    if (!batch.files || needsRefresh(batch, ctx)) openBatchProof(batch, ctx, proveFn);
+    else batch.identityMemo = new Map();
+    return runWithMemo(batch.identityMemo, () => enterTransaction(() => settleTransaction(fn)));
+  }
+  if (aclScope) return settleTransaction(fn);
+  const candidates = aclCandidates(ctx);
   identityMemo = new Map();
   try {
-    aclScope = new Set(proveEntries(candidates, 'before').map(({ file }) => file));
-    try { return settleTransaction(fn); }
-    finally { aclScope = null; proveEntries(candidates, 'after'); }
+    aclScope = new Set(proveEntries(candidates, 'before', proveFn).map(({ file }) => file));
+    try { return enterTransaction(() => settleTransaction(fn)); }
+    finally { aclScope = null; proveEntries(candidates, 'after', proveFn); }
   } finally { identityMemo = null; }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
@@ -132,14 +234,14 @@ function directory(file, { privateMode = false } = {}) {
   return stat;
 }
 function assertContext(ctx) {
-  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => assertContext(ctx));
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => assertContext(ctx));
   if (!sameInode(directory(ctx.root), ctx.rootStat) || fs.realpathSync(ctx.root) !== ctx.root) fail();
   if (ctx.trainingStat && !sameInode(directory(ctx.training, { privateMode: true }), ctx.trainingStat)) fail();
 }
 function context(storeDir, { create = false } = {}) {
   if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
   const requested = path.resolve(storeDir);
-  if (process.platform === 'win32' && !aclScope) {
+  if (process.platform === 'win32' && !inTransaction) {
     return aclTransaction({ root: requested, training: path.join(requested, '.training') }, () => context(storeDir, { create }));
   }
   const original = directory(requested); // Reject a symlink store itself before canonicalizing ancestors.
@@ -151,7 +253,11 @@ function context(storeDir, { create = false } = {}) {
   let stat = statOrNull(training);
   if (!stat && create) {
     assertContext(ctx);
-    try { createPrivateDirectory(training); } catch (error) { if (error.code !== 'EEXIST') fail(); }
+    try {
+      createPrivateDirectory(training);
+      rememberProved(training);
+    } catch (error) { if (error.code !== 'EEXIST') fail(); }
+    markAclDirty();
     stat = statOrNull(training);
   }
   if (stat) ctx.trainingStat = directory(training, { privateMode: true });
@@ -164,26 +270,40 @@ function safeFile(stat, privateMode, file) {
     && (process.platform === 'win32' ? privatePath(file, privateMode) : (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0));
 }
 function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
-  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
-  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) fail();
+  const missing = () => vanishedPath(file, before);
+  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) {
+    if (missing()) return null;
+    fail();
+  }
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
     const opened = fs.fstatSync(fd);
-    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) fail();
+    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) {
+      if (missing()) return null;
+      fail();
+    }
     assertContext(ctx);
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
     const after = fs.fstatSync(fd);
-    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) fail();
+    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) {
+      if (missing()) return null;
+      fail();
+    }
     assertContext(ctx);
     return { text: bytes.subarray(0, length).toString('utf8'), stat: opened };
   } catch (error) {
-    if (error.code === 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+    if (error.code === 'STUDY_DESCRIPTOR_CORRUPT') {
+      if (missing()) return null;
+      throw error;
+    }
+    if (missing()) return null;
     fail();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
@@ -207,17 +327,37 @@ function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   return status;
 }
+function vanishedPath(file, before, { directory: asDir = false } = {}) {
+  const after = statOrNull(file);
+  if (!after || after.isSymbolicLink()) return true;
+  if (asDir ? !after.isDirectory() : !after.isFile()) return true;
+  return Boolean(before && !sameInode(before, after));
+}
 function readLock(ctx, parent = false) {
-  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => readLock(ctx, parent));
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
   assertContext(ctx);
   if (!parent && !ctx.trainingStat) return null;
   const file = path.join(parent ? ctx.root : ctx.training, parent ? 'loop.lock.d' : LOCK);
   const stat = statOrNull(file);
   if (!stat) return null;
-  const checked = directory(file);
+  let checked;
+  try { checked = directory(file); }
+  catch (error) {
+    // A lock being released is absent, not unproven. Windows delete-pending
+    // directories can fail the live ACL read after the listing already dropped
+    // them from the proved set.
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedPath(file, stat, { directory: true })) return null;
+    throw error;
+  }
   const exact = exactInode(file);
   const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
-  if (!sameInode(checked, directory(file))) fail();
+  let after;
+  try { after = directory(file); }
+  catch (error) {
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedPath(file, stat, { directory: true })) return null;
+    throw error;
+  }
+  if (!sameInode(checked, after)) fail();
   if (!pidFile) return { status: 'unknown', stat: checked, exact };
   const parsed = parseOwnedLockIdentity(pidFile.text);
   if (!parsed) return { status: 'unknown', stat: checked, exact };
@@ -423,13 +563,13 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     extendPlatformDeadline(deadline);
     const childLog = openChildLog();
     const child = spawn(process.execPath, [SELF, '--serve', ctx.root, JSON.stringify(config),
-      ctx.storeIdentity, trainingIdentity(ctx)], {
+      ctx.storeIdentity, trainingIdentity(ctx)], childSpawnOptions({
       cwd: path.dirname(SELF), detached: true,
       stdio: childLog === undefined ? 'ignore' : ['ignore', 'ignore', childLog],
       // Existing owned locks use ps lstart in the caller's locale/timezone.
       // Preserve that identity format without inheriting game/provider secrets.
       env: childEnvironment(),
-    });
+    }));
     if (childLog !== undefined) fs.closeSync(childLog);
     let spawnError = null;
     child.on('error', (error) => { spawnError = error; });
@@ -499,9 +639,8 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   if (options.parentIdentity !== undefined) await attachParent(ctx, value, options.parentIdentity, deadline);
   return publicHandle(value);
 }
-// Context creation and initial ownership reads are adjacent synchronous reads.
-// One before/after proof boundary covers both; inode/byte checks still run at
-// every read. No memo or ACL scope survives an await or a write operation.
+// Context creation and initial ownership reads stay one transaction. The
+// client scope around ensure/inspect/stop is what survives the later awaits.
 function readContextOwnership(storeDir) {
   if (typeof storeDir !== 'string' || !storeDir || storeDir.includes('\0')) fail();
   const root = path.resolve(storeDir);
@@ -576,8 +715,19 @@ export function transportDetail(error) {
 }
 function withClientPhase(label, fn) {
   setProofPhase(label);
-  try { return fn(); }
-  finally { setProofPhase(null); }
+  const done = () => setProofPhase(null);
+  try {
+    const result = fn();
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(done);
+    done();
+    return result;
+  } catch (error) {
+    done();
+    throw error;
+  }
+}
+function withClientDeadline(fn) {
+  return withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => withClientAclScope(fn));
 }
 
 export function ensureStudyService(storeDir, options = {}) {
@@ -585,13 +735,13 @@ export function ensureStudyService(storeDir, options = {}) {
   // has left, so an outer monotonic deadline is honoured rather than replaced.
   // POSIX hid this: its WAIT_MS happened to equal the budget the contract test
   // hands in, and the 60s Windows budget overran that test by 55s.
-  return withClientPhase('ensure', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => ensureStudyServiceWithinBudget(storeDir, options)));
+  return withClientPhase('ensure', () => withClientDeadline(() => ensureStudyServiceWithinBudget(storeDir, options)));
 }
 export function inspectStudyService(storeDir) {
-  return withClientPhase('inspect', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => inspectStudyServiceWithinBudget(storeDir)));
+  return withClientPhase('inspect', () => withClientDeadline(() => inspectStudyServiceWithinBudget(storeDir)));
 }
 export function stopStudyService(storeDir, options = {}) {
-  return withClientPhase('stop', () => withPlatformDeadline(platformNow() + platformTimeout(WAIT_MS), () => stopStudyServiceWithinBudget(storeDir, options)));
+  return withClientPhase('stop', () => withClientDeadline(() => stopStudyServiceWithinBudget(storeDir, options)));
 }
 
 function assertOwnLock(ctx, own) {
@@ -611,7 +761,7 @@ function assertOwnLock(ctx, own) {
   return current;
 }
 function publish(ctx, own, value) {
-  if (process.platform === 'win32' && !aclScope) return aclTransaction(ctx, () => publish(ctx, own, value));
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => publish(ctx, own, value));
   assertOwnLock(ctx, own);
   const file = path.join(ctx.training, DESCRIPTOR);
   const before = readPrivate(ctx, file, MAX_DESCRIPTOR, { allowOversized: true });
@@ -629,6 +779,8 @@ function publish(ctx, own, value) {
     fs.writeFileSync(fd, bytes); fs.fsyncSync(fd);
     assertContext(ctx);
     if (!sameInode(opened, statOrNull(file)) || !safeFile(fs.fstatSync(fd), true, file)) fail();
+    rememberProved(file);
+    markAclDirty();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 async function runService(storeDir, config, expectedStore, expectedTraining) {
@@ -662,11 +814,12 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
         const file = path.join(ctx.training, DESCRIPTOR);
         if (!sameInode(statOrNull(file), descriptor.stat)) fail();
         fs.unlinkSync(file);
+        markAclDirty();
       }
     } catch { /* Unsafe/foreign descriptor stays untouched; HTTP still closes. */ }
     finally { setProofPhase(null); }
     setProofPhase('stop');
-    try { assertOwnLock(ctx, own); releaseOwnedLock(own); } catch { /* Never traverse a replaced owner boundary. */ }
+    try { assertOwnLock(ctx, own); releaseOwnedLock(own); markAclDirty(); } catch { /* Never traverse a replaced owner boundary. */ }
     finally { setProofPhase(null); }
   };
   const checkpoint = () => {
