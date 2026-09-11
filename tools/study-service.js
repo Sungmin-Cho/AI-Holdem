@@ -16,18 +16,26 @@ const MAX_DESCRIPTOR = 4096;
 // client call makes several of them. A POSIX-sized budget cannot bound that
 // work: a cold ensure on a CI runner spent over 13s before its budget expired
 // mid-proof. This is a ceiling on waiting, never a delay that is spent.
-const WAIT_MS = process.platform === 'win32' ? 60_000 : 5000;
+const WAIT_MS = process.platform === 'win32' ? 60_000 : 15_000;
 // The budget a client spends before it gives up on an unrepaired owner. Tests
 // assert repair and refusal against this, not against a POSIX literal.
 export const CLIENT_WAIT_MS = WAIT_MS;
 // Only positively absent/dead ownership may enter the cold-start allowance.
-export const COLD_START_MS = process.platform === 'win32' ? 120_000 : WAIT_MS;
+// Spawning a service and waiting for it to listen is not the same shape of work
+// as a warm call, so this is deliberately its own number rather than WAIT_MS.
+// Tying the POSIX value to WAIT_MS made the extension below a no-op there: the
+// "extend before context() so the first cold ACL proof gets COLD_START_MS"
+// comment described Windows-only behaviour.
+export const COLD_START_MS = process.platform === 'win32' ? 120_000 : 60_000;
 // A request is not answered until the service has re-proved its own boundaries,
 // and on Windows each of those proofs is a PowerShell child. Serving
 // /internal/parent-attach costs an ownership check, a descriptor read and a
 // parent lock read — six or so proofs at about a second each — which overran the
 // previous 8s ceiling on a CI runner. This is a ceiling on waiting, not a spend.
-export const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 500;
+// POSIX proofs are plain syscalls, but a slow or loaded machine can still take
+// longer than half a second to answer one local request, and a ceiling that a
+// healthy-but-slow service cannot meet is a ceiling that never accepts it.
+export const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 3_000;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;

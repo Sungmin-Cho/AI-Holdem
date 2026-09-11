@@ -33,10 +33,16 @@ async function api(url, options = {}) {
     authorization: `Bearer ${sessionStorage.getItem("holdem-app-token") ?? ""}`,
     ...options.headers,
   };
+  const { timeoutMs, ...init } = options;
   const response = await fetch(url, {
-    ...options,
+    ...init,
     headers,
-    signal: options.signal ?? AbortSignal.timeout(10000),
+    // 시작 명령은 즉시 accepted를 받고 250ms 간격 폴링으로 진행하지만, 그 폴링
+    // 한 건이라도 여기서 끊기면 사용자에게는 시작 실패로 보인다. 앱 서비스는
+    // game-loop와 같은 프로세스라 부트 중 응답이 밀릴 수 있다. 서버가 자기 상한
+    // 안에서 끝낼 수 있는 일을 클라이언트가 먼저 포기하면 안 되므로, 오래 걸리는
+    // 라우트는 `timeoutMs`로 자기 상한을 명시한다.
+    signal: options.signal ?? AbortSignal.timeout(timeoutMs ?? 30000),
   });
   const data = await response.json();
   if (!response.ok)
@@ -293,7 +299,11 @@ $("review").onclick = () => {
 $("study").onclick = async () => {
   const tab = window.open("about:blank", "_blank");
   try {
-    const result = await api("/api/study", { method: "POST" });
+    // `/api/study`는 요청 안에서 ensureStudyService를 끝까지 돈다. 콜드 기동은
+    // 서버 쪽 COLD_START_MS(POSIX 60s, Windows 120s)까지 쓸 수 있고, Windows는
+    // attach 경로조차 ACL 증명이 동기 PowerShell 자식이라 27–35s가 걸린 실측이
+    // 있다. 10s 기본값은 그 일을 항상 중도 포기해 빈 탭만 닫았다.
+    const result = await api("/api/study", { method: "POST", timeoutMs: 150000 });
     if (tab) {
       tab.opener = null;
       tab.location = result.url;
