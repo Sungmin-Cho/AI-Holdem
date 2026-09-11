@@ -140,6 +140,9 @@ test('server imports only the publish contract and named containment primitives'
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
+    // Lobby previews reuse the same pure validator as the authoritative server.
+    if (edge.from === 'server/public/lobby.js' && edge.to === 'shared/game-setup.js'
+      && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]

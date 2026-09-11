@@ -1,0 +1,15 @@
+:root {
+  color-scheme: dark;
+  --ui-bg: #0b1118;
+  --ui-panel: #131d29;
+  --ui-raised: #1b2938;
+  --ui-ink: #edf3f8;
+  --ui-muted: #a9b8c8;
+  --ui-accent: #5bdfb0;
+  --ui-gold: #e5bf75;
+  --ui-danger: #f18a8a;
+  --ui-border: #61758b;
+  --ui-font: system-ui, -apple-system, BlinkMacSystemFont, 'Malgun Gothic', sans-serif;
+  --ui-number: Arial, ui-monospace, monospace;
+  --ui-radius: 16px;
+}

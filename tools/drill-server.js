@@ -14,6 +14,7 @@ const STATIC = new Map([
   ['/drill.html', ['server/drill-public/drill.html', 'text/html; charset=utf-8']],
   ['/drill.js', ['server/drill-public/drill.js', 'text/javascript; charset=utf-8']],
   ['/drill.css', ['server/drill-public/drill.css', 'text/css; charset=utf-8']],
+  ['/design-tokens.css', ['server/public/design-tokens.css', 'text/css; charset=utf-8']],
   ['/study-format.js', ['server/drill-public/study-format.js', 'text/javascript; charset=utf-8']],
   ['/shared/preflop-key.js', ['shared/preflop-key.js', 'text/javascript; charset=utf-8']],
   ['/shared/reference.js', ['shared/reference.js', 'text/javascript; charset=utf-8']],

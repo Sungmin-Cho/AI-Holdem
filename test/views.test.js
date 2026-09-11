@@ -14,6 +14,20 @@ import { snapshotDecision } from '../engine/decision.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/cli.js');
 
+test('public view exposes authoritative elimination and hand lifecycle additively', () => {
+  let state=setup3(5000,5000,5000);
+  assert.equal(userView(state).handInProgress,true);
+  assert.ok(userView(state).seats.every(seat=>seat.out===false));
+  state.seats[1].stack=0;
+  state.hand.allIn.push('p1');
+  assert.equal(userView(state).seats[1].out,false);
+  state.seats[1].out=true;
+  assert.equal(userView(state).seats[1].out,true);
+  state=finishByChecks(setup3(5000,5000,5000));
+  assert.equal(userView(state).handInProgress,false);
+  assert.deepEqual(userView(state).pots,state.lastHand.pots);
+});
+
 function holeOf(state, playerId) {
   return state.hand?.holes[playerId] ?? state.lastHand?.holes[playerId];
 }

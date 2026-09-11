@@ -41,6 +41,7 @@ const BROWSER_CHECK_PLAN = Object.freeze({
   'illegal-action-correction': ['1280x900'],
   'training-detail-source': ['1280x900'],
   'training-reading-context': ['1280x900'],
+  'replay-reading-context': ['1280x900'],
   'review-reopen-unread': ['390x844', '1280x900'],
   'study-fragment-header-auth': ['390x844'],
   'study-explicit-modes': ['390x844', '1280x900'],

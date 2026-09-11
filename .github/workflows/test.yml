@@ -26,6 +26,19 @@ concurrency:
 # Rebalance only by moving NAMED's small files (mistake-bank, publish,
 # action-receipts, drill-*). Those cannot shrink rest/loop; do not split files.
 jobs:
+  ui-browser:
+    name: UI browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22.x
+      - name: Install pinned browser and dependencies
+        run: npx --yes agent-browser@0.36.0 install --with-deps
+      - name: Check UI presentation
+        run: npm run test:ui:browser -- --ci
   windows-publisher:
     name: Publisher shutdown (Windows Node 24.12.0)
     runs-on: windows-latest

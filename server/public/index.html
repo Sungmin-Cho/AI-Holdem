@@ -4,12 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 홀덤</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <!-- 폰트는 진행을 막지 않는다. 오프라인이면 시스템 폰트 스택으로 그대로 렌더된다. -->
-  <link rel="stylesheet" media="print" onload="this.media='all'"
-        href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/design-tokens.css">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/table-design.css">
 </head>
 <body>
   <header class="topbar">
@@ -24,13 +21,16 @@
       <div class="meta-seg" data-tournament-meta><span class="meta-label">레벨</span><span class="meta-value num" id="level">—</span></div>
       <div class="meta-seg"><span class="meta-label">블라인드</span><span class="meta-value num" id="blinds">—</span></div>
       <div class="meta-seg" data-tournament-meta><span class="meta-label">다음 레벨까지</span><span class="meta-value"><span class="num" id="level-left">—</span>핸드</span></div>
-      <div class="meta-seg"><span class="meta-label">세션 순손익</span><span class="meta-value num" id="session-net">—</span></div>
+      <div class="meta-seg"><span class="meta-label">누적 손익</span><span class="meta-value num" id="session-net">—</span></div>
     </div>
     <div id="conn" class="conn off" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span id="conn-text">연결 중…</span></div>
   </header>
 
   <main>
     <section class="stage">
+      <div class="table-context"><span id="participants-summary">참가자 —</span><label>표시 단위 <select id="display-unit"><option value="bb">BB 중심</option><option value="chips">칩 중심</option></select></label></div>
+      <p id="seat-announcement" class="sr-only" role="status"></p>
+      <p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드를 위해 스택을 복원했습니다. 완료 핸드의 결과는 복기에서 확인하세요.</p>
       <div class="table-wrap">
         <div class="table" id="table" aria-label="포커 테이블">
           <div class="rail" aria-hidden="true"></div>
@@ -54,6 +54,7 @@
 
       <aside id="pre-action-hint" class="pre-action-hint" aria-live="polite" hidden></aside>
       <div id="action-bar" class="action-bar" hidden>
+        <p id="action-summary" class="action-summary"></p>
         <div class="act-group">
           <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
           <button type="button" id="btn-check" class="btn btn-neutral">체크</button>
@@ -71,13 +72,14 @@
               <button type="button" class="preset" data-preset="threebet" hidden>8.5BB</button>
             </div>
             <div class="amount-field">
-              <label class="amount-label" for="raise-amount">총액</label>
+              <label class="amount-label" for="raise-amount">총액 (칩)</label>
               <input id="raise-amount" class="amount-input num" type="text" inputmode="numeric"
-                     autocomplete="off" spellcheck="false" aria-label="이번 스트리트 레이즈 총액 직접 입력" aria-describedby="raise-range">
+                     autocomplete="off" spellcheck="false" aria-label="이번 스트리트 레이즈 총액 직접 입력 (칩)" aria-describedby="raise-range amount-error">
             </div>
           </div>
           <input id="raise-slider" class="slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액 슬라이더">
           <p id="raise-range" class="raise-range num"></p>
+          <p id="amount-error" class="amount-error" role="status"></p>
         </div>
         <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
         <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
@@ -94,9 +96,11 @@
         <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
         <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치 <span id="unread-coach" class="unread" hidden></span></button>
         <button type="button" id="tab-training" class="tab" role="tab" aria-selected="false" aria-controls="panel-training">학습 <span id="unread-training" class="unread" hidden></span></button>
+        <button type="button" id="tab-participants" class="tab" role="tab" aria-selected="false" aria-controls="panel-participants">참가자</button>
       </div>
       <div id="panel-log" class="panel" role="tabpanel" aria-labelledby="tab-log">
-        <div id="log-list" class="log-list" aria-live="polite"></div>
+        <button type="button" id="log-new" class="btn btn-ghost" hidden>최신 이벤트로</button>
+        <div id="log-list" class="log-list"></div>
       </div>
       <div id="panel-coach" class="panel" role="tabpanel" aria-labelledby="tab-coach" hidden>
         <div id="coach-list" class="coach-list"></div>
@@ -104,9 +108,11 @@
       <div id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
         <div id="training-list" class="training-list"></div>
       </div>
+      <div id="panel-participants" class="panel" role="tabpanel" aria-labelledby="tab-participants" hidden><div id="participants-list"></div></div>
     </aside>
   </main>
 
+  <div id="seat-overlay" class="overlay" hidden><section class="review-card review-card--tight" role="dialog" aria-modal="true" aria-labelledby="seat-detail-title"><div class="review-head"><h1 id="seat-detail-title">좌석 상세</h1><button id="seat-close" type="button" class="btn btn-ghost">닫기</button></div><div id="seat-detail-body"></div></section></div>
   <div id="replay-overlay" class="overlay" hidden>
     <div class="replay-card" role="dialog" aria-modal="true" aria-labelledby="replay-title">
       <div class="replay-head">

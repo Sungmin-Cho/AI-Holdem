@@ -5,6 +5,11 @@ import { formatReplay, actionVerbs } from './replay-format.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
 import { createActionController } from './action-controller.js';
+import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
+import {seatPresentation, participantSummary, mobileSeatSlot} from './seat-format.js';
+import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
+import {createAmountEditor, parseChipInput} from './amount-editor.js';
+import {createDialogController} from './dialog-controller.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -42,8 +47,15 @@ const detailErrors = new Set();
 let authenticatedStudyUrl = null;
 let raiseTo = 0;
 let lastDecisionId = null;
+let displayUnit = readPreference();
+const amountEditor = createAmountEditor();
 
 const $ = (id) => document.getElementById(id);
+const dialogs = createDialogController(document, () => {
+  if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
+  queueMicrotask(()=>paintReview(ui.view));
+});
+let selectedSeatId = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -73,6 +85,17 @@ function escapeHtml(value) {
 
 function formatChip(n) {
   return Number(n).toLocaleString('ko-KR');
+}
+
+function amountText(value, bb = ui.view?.blinds?.[1], signed = false) {
+  const parts = signed ? formatSignedAmount(value, bb, displayUnit) : formatAmount(value, bb, displayUnit);
+  return [parts.primary, parts.secondary].filter(Boolean).join(' / ');
+}
+function amountNode(value, bb = ui.view?.blinds?.[1], className = '') {
+  const parts = formatAmount(value, bb, displayUnit);
+  const node = el('span', `amount-pair ${className}`);
+  node.append(el('span', 'amount-primary', parts.primary), el('span', 'amount-secondary', parts.secondary));
+  return node;
 }
 
 function formatCard(code) {
@@ -132,12 +155,14 @@ function playerName(playerId) {
 function revealedCards() {
   const map = {};
   const mucks = new Set();
+  let matching = false;
   for (const item of ui.log) {
     if (item.type === 'hand_start') {
+      matching = item.handNo === ui.view?.handNo;
       for (const key of Object.keys(map)) delete map[key];
       mucks.clear();
     }
-    if (item.type === 'showdown') {
+    if (matching && item.type === 'showdown') {
       for (const reveal of item.reveals ?? []) map[reveal.playerId] = reveal;
       for (const pid of item.mucks ?? []) mucks.add(pid);
     }
@@ -170,7 +195,29 @@ function showBootError(text) {
 }
 
 function setBtnLabel(btn, label, amount) {
-  btn.replaceChildren(document.createTextNode(`${label} `), el('span', 'num', formatChip(amount)));
+  btn.replaceChildren(document.createTextNode(`${label} `), amountNode(amount, ui.view?.blinds?.[1], 'num'));
+}
+
+function paintParticipants(view) {
+  const list=$('participants-list');
+  const signature=JSON.stringify([view?.seats,view?.handInProgress,view?.toAct,displayUnit,view?.blinds]);
+  if(list._signature===signature)return;
+  list._signature=signature;list.replaceChildren();
+  for(const seat of view?.seats??[]) {
+    const row=el('div','participant-row');
+    row.append(el('strong','',seat.name??seat.playerId),el('span','',seatPresentation(view,seat).status),amountNode(seat.stack));
+    list.append(row);
+  }
+  paintSeatDetails();
+}
+function paintSeatDetails() {
+  const seat=ui.view?.seats?.find(s=>s.playerId===selectedSeatId);
+  if(!seat)return;
+  $('seat-detail-title').textContent=seat.name??seat.playerId;
+  $('seat-detail-body').replaceChildren(el('p','',seatPresentation(ui.view,seat).status),amountNode(seat.stack),el('p','',`이번 스트리트 베팅 ${amountText(seat.bet)}`));
+}
+function openSeatDetails(playerId) {
+  selectedSeatId=playerId;paintSeatDetails();dialogs.open($('seat-overlay'),()=>dialogs.close());
 }
 
 function renderMarkdown(src) {
@@ -216,12 +263,15 @@ function paintTop(view) {
   if(view?.dealBias && view.dealBias!=='off') $('game-mode').textContent += ' · 유리한 딜 (평가 제외)';
   for (const row of document.querySelectorAll('[data-tournament-meta]')) row.hidden = cash;
   const net = view?.sessionNet?.user;
-  $('session-net').textContent = Number.isFinite(net) ? `${net > 0 ? '+' : ''}${formatChip(net)}` : '—';
+  $('session-net').closest('.meta-seg').hidden = !cash;
+  $('session-net').textContent = amountText(net, view?.blinds?.[1], true);
+  $('participants-summary').textContent = view ? participantSummary(view) : '참가자 —';
+  $('cash-reset-note').hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
   $('learning-scope').textContent = cash
     ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
     : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
   $('level').textContent = view == null ? '—' : String((view.level ?? 0) + 1);
-  $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])}/${formatChip(view.blinds[1])}` : '—';
+  $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])} / ${formatChip(view.blinds[1])} 칩 · 1 BB = ${formatChip(view.blinds[1])} 칩` : '—';
   const left = view ? handsUntilLevel(view) : null;
   $('level-left').textContent = left == null ? '—' : String(left);
 }
@@ -237,17 +287,23 @@ function paintBoard(view) {
 
 function paintPots(view) {
   const box = $('pots');
+  const previous = box.querySelector('.pot-detail');
+  const sameHand = box.dataset.handNo === String(view?.handNo);
+  const wasOpen = sameHand && previous?.open;
+  const hadFocus = sameHand && previous?.contains(document.activeElement);
+  box.dataset.handNo = String(view?.handNo);
   box.replaceChildren(svgUse('chip', 'pot-chip'));
-  const pots = view?.pots ?? [];
-  if (pots.length <= 1) {
-    box.append(el('span', 'pot-label', '팟'), el('span', 'pot-amount num', formatChip(pots[0]?.amount ?? 0)));
-    return;
+  const pot = aggregatePot(view);
+  box.hidden = pot.kind === 'hidden';
+  if (pot.kind !== 'ready') {box.append(el('span', 'pot-label', pot.kind === 'mismatch' ? '팟 정보 확인 중' : '팟 정보 없음'));return;}
+  box.append(el('span', 'pot-label', view.handInProgress === true ? '현재 베팅 포함 총액' : '팟 합계'), amountNode(pot.total, view.blinds?.[1], 'pot-amount num'));
+  if (showPotBreakdown(view)) {
+    const detail = el('details', 'pot-detail');detail.append(el('summary', '', '정산 팟 상세'));
+    detail.open = Boolean(wasOpen);
+    view.pots.forEach((p,i)=>detail.append(el('div','',`${i ? `사이드 ${i}` : '메인'} · ${amountText(p.amount)}`)));
+    box.append(detail);
+    if (hadFocus) detail.querySelector('summary').focus({preventScroll:true});
   }
-  pots.forEach((pot, i) => {
-    const item = el('span', 'pot-item', i === 0 ? '메인 팟' : '사이드팟');
-    item.append(el('span', 'pot-amount num', formatChip(pot.amount)));
-    box.append(item);
-  });
 }
 
 // 좌석은 스타디움 레일을 따라 앉는다. 지수 2/3의 초타원이 원형 배치보다
@@ -256,7 +312,7 @@ function ovalPoint(index, count, rx, ry) {
   const angle = (Math.PI * 2 * index) / count;
   const bulge = (v) => Math.sign(v) * Math.abs(v) ** (2 / 3);
   return {
-    x: 50 + rx * bulge(Math.sin(angle)),
+    x: 50 - rx * bulge(Math.sin(angle)),
     y: 52 + ry * bulge(Math.cos(angle)),
   };
 }
@@ -297,7 +353,7 @@ function seatCards(seat, view, revealed, mucks) {
     box.append(el('div', 'plate-tag', '머크'));
     return box;
   }
-  if (!seat.folded && view.street) {
+  if (seatPresentation(view, seat).showBacks) {
     box.append(
       cardNode(null, { faceDown: true, small: true }),
       cardNode(null, { faceDown: true, small: true }),
@@ -309,11 +365,11 @@ function seatCards(seat, view, revealed, mucks) {
 function paintSeats(view) {
   const seatRoot = $('seats');
   const betRoot = $('bets');
-  seatRoot.replaceChildren();
+  const previous = new Map([...seatRoot.children].map(node=>[node.dataset.playerId,node]));
   betRoot.replaceChildren();
   const seats = view?.seats ?? [];
   $('table').classList.toggle('is-crowded', seats.length >= 7);
-  if (!seats.length) return;
+  if (!seats.length) {seatRoot.replaceChildren();paintParticipants(view);return;}
 
   const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === 'user'));
   const { map: revealed, mucks } = revealedCards();
@@ -322,44 +378,60 @@ function paintSeats(view) {
   for (let i = 0; i < n; i += 1) {
     const seat = seats[(userIdx + i) % n];
     const isHero = seat.playerId === 'user';
-    const active = view.toAct === seat.playerId && !view.gameOver;
+    const state = seatPresentation(view, seat);
+    const active = state.active;
 
-    const node = el('div', 'seat');
+    const node = previous.get(seat.playerId) ?? el('div', 'seat');
+    node.dataset.playerId = seat.playerId;
+    node.className = 'seat';
     if (isHero) node.classList.add('is-hero');
-    if (seat.folded) node.classList.add('is-folded');
+    if (state.folded) node.classList.add('is-folded');
+    if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
     const at = ovalPoint(i, n, 38, 40);
     node.style.left = `${at.x}%`;
     node.style.top = `${at.y}%`;
+    const mobile = mobileSeatSlot(i,n);
+    node.style.setProperty('--seat-x', `${mobile.x}%`);
+    node.style.setProperty('--seat-y', `${mobile.y}%`);
 
-    const plate = el('div', 'plate');
-    const avatarWrap = el('div', 'avatar-wrap');
-    avatarWrap.append(el('div', 'avatar', (seat.name ?? '?').slice(0, 1)));
+    const plate = node.querySelector('.plate') ?? el('button', 'plate');
+    plate.type = 'button';
+    plate.setAttribute('aria-label', `${seat.name ?? seat.playerId}, ${state.status}, ${amountText(seat.stack)}. 좌석 상세`);
+    plate.onclick = () => openSeatDetails(seat.playerId);
+    plate.replaceChildren();
+    const avatarWrap = el('span', 'avatar-wrap');
+    avatarWrap.append(el('span', 'avatar', (seat.name ?? '?').slice(0, 1)));
     if (active) avatarWrap.append(avatarRing());
 
-    const info = el('div', 'plate-info');
+    const info = el('span', 'plate-info');
     info.append(
-      el('div', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)),
-      el('div', 'plate-stack', formatChip(seat.stack)),
+      el('span', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)),
+      amountNode(seat.stack, view.blinds?.[1], 'plate-stack'),
     );
     plate.append(avatarWrap, info);
 
-    if (seat.allIn) plate.append(el('div', 'plate-tag is-allin', '올인'));
-    else if (seat.folded) plate.append(el('div', 'plate-tag', '폴드'));
-    if (seat.isButton) plate.append(el('div', 'dealer-btn', 'D'));
+    plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    if (state.showButton) plate.append(el('span', 'dealer-btn', 'D'));
 
-    node.append(seatCards(seat, view, revealed, mucks), plate);
-    seatRoot.append(node);
+    const cards=seatCards(seat, view, revealed, mucks);
+    node.querySelector('.seat-cards')?.remove();
+    node.prepend(cards);
+    if(!plate.parentNode)node.append(plate);
+    if(!node.parentNode)seatRoot.append(node);
+    previous.delete(seat.playerId);
 
-    if (seat.bet > 0) {
+    if (state.showBet) {
       const spot = ovalPoint(i, n, 26, 26);
       const marker = el('div', 'bet-marker');
       marker.style.left = `${spot.x}%`;
       marker.style.top = `${spot.y}%`;
-      marker.append(svgUse('chip', 'bet-chip'), el('span', 'bet-amount', formatChip(seat.bet)));
+      marker.append(svgUse('chip', 'bet-chip'), el('span', 'bet-amount', amountText(seat.bet)));
       betRoot.append(marker);
     }
   }
+  for(const node of previous.values())node.remove();
+  paintParticipants(view);
 }
 
 function paintThinking(view) {
@@ -384,36 +456,40 @@ function paintThinking(view) {
 function writeAmountField(value) {
   const input = $('raise-amount');
   if (document.activeElement === input) return;
-  input.value = formatChip(value);
+  input.value = amountEditor.state.text;
 }
 
 function markAmountValid(valid) {
   $('raise-amount').closest('.amount-field').classList.toggle('is-invalid', !valid);
+  $('raise-amount').setAttribute('aria-invalid', String(!valid));
+  $('amount-error').textContent = !valid ? '칩 정수와 합법 범위를 확인해 주세요.' : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 ${amountEditor.state.value.toLocaleString('ko-KR')} 칩을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
 }
 
 function setRaiseTo(value, { fromInput = false } = {}) {
   const legal = ui.view?.legal;
-  if (!legal) return;
-  raiseTo = clampRaiseTo(value, legal);
+  if (!legal || pendingAction) return;
+  raiseTo = fromInput ? amountEditor.state.value : amountEditor.choose(value, legal).value;
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
-  if (!fromInput) writeAmountField(raiseTo);
+  if (!fromInput) $('raise-amount').value = amountEditor.state.text;
 }
 
 function commitAmount() {
   const legal = ui.view?.legal;
-  if (!legal) return;
+  if (!legal || pendingAction) return;
   const input = $('raise-amount');
-  const digits = input.value.replace(/[^0-9]/g, '');
-  setRaiseTo(digits === '' ? raiseTo : Number(digits));
-  input.value = formatChip(raiseTo);
-  markAmountValid(true);
+  const state = amountEditor.commit(legal);
+  raiseTo = state.value; input.value = state.text;
+  $('raise-slider').value = String(raiseTo);
+  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  markAmountValid(!state.invalid);
 }
 
 function adoptDecision(legal) {
   if (legal.decisionId !== lastDecisionId) {
     lastDecisionId = legal.decisionId;
-    raiseTo = legal.minRaiseTo > legal.maxRaiseTo ? legal.maxRaiseTo : legal.minRaiseTo;
+    raiseTo = amountEditor.adopt(legal).value;
+    $('raise-amount').value = amountEditor.state.text;
     markAmountValid(true);
     const intent = $('intent-note');
     if (intent) intent.value = '';
@@ -429,7 +505,7 @@ function syncRaisePanel(legal) {
   slider.value = String(raiseTo);
   setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
   writeAmountField(raiseTo);
-  $('raise-range').textContent = `이번 스트리트 총액 · ${formatChip(legal.minRaiseTo)} – ${formatChip(legal.maxRaiseTo)}`;
+  $('raise-range').textContent = `이번 스트리트 총액 · 최소 ${amountText(legal.minRaiseTo)} · 최대 ${amountText(legal.maxRaiseTo)}`;
 }
 
 function paintActionBar(view) {
@@ -438,6 +514,10 @@ function paintActionBar(view) {
   const mine = Boolean(legal) && !view?.gameOver;
   bar.hidden = !mine;
   if (!mine) return;
+  const hero=view.seats?.find(s=>s.playerId==='user');
+  const pot=aggregatePot(view);
+  const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
+  $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
   adoptDecision(legal);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
@@ -470,7 +550,7 @@ function paintActionBar(view) {
   if (!shortAllIn) syncRaisePanel(legal);
 }
 
-function logNode(item, verb) {
+function logNode(item, verb, bb) {
   switch (item.type) {
     case 'hand_start': {
       const row = el('div', 'log-divider');
@@ -513,8 +593,8 @@ function logNode(item, verb) {
         el('span', `log-act is-${verb}`, ACTION[verb] ?? verb),
       );
       if (item.allIn) row.append(el('span', 'log-act is-allin', '올인'));
-      if (item.action === 'raise' && item.amount != null) {
-        row.append(el('span', 'log-amount num', formatChip(item.amount)));
+      if ((item.action === 'raise' || item.action === 'call') && item.amount != null) {
+        row.append(el('span', 'log-amount num', amountText(item.amount, bb)));
       }
       return row;
     }
@@ -525,7 +605,7 @@ function logNode(item, verb) {
       return row;
     }
     case 'showdown': {
-      const box = document.createDocumentFragment();
+      const box = el('div','log-group');
       for (const reveal of item.reveals ?? []) {
         const row = el('div', 'log-row');
         row.append(el('span', 'log-name', playerName(reveal.playerId)));
@@ -544,7 +624,7 @@ function logNode(item, verb) {
       const row = el('div', 'log-row');
       const winners = (item.winners ?? []).map((w) => playerName(w.playerId)).join(', ') || '없음';
       row.append(
-        el('span', 'log-text', `팟 ${formatChip(item.amount)} → ${winners}`),
+        el('span', 'log-text', `팟 ${amountText(item.amount, bb)} → ${winners}`),
       );
       return row;
     }
@@ -574,20 +654,52 @@ function paintLog() {
   const list = $('log-list');
   if (!ui.log.length) {
     list.replaceChildren(el('div', 'log-empty', '아직 이벤트가 없습니다.'));
+    list._keys=[];list._unread=0;$('log-new').hidden=true;
     return;
   }
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+  const scroll=list.scrollTop;
+  const oldKeys=list._keys??[];
+  const focused=document.activeElement;
+  const focusedRow=focused?.closest('[data-log-index]');
+  const anchor=[...list.children].find(node=>node.getBoundingClientRect().bottom>list.getBoundingClientRect().top);
+  const anchorIndex=anchor?.dataset.logIndex;
+  const anchorOffset=anchor?.getBoundingClientRect().top-list.getBoundingClientRect().top;
+  const contexts=logBlindContexts(ui.log,ui.handReplays);
+  const keys=ui.log.map((item,i)=>{const replay=item.type==='hand_start'?ui.handReplays?.[item.handNo]:null;return JSON.stringify([item,contexts[i],displayUnit,replay?{unavailable:replay.unavailable??false,reason:replay.reason??null}:null]);});
+  if(JSON.stringify(oldKeys)===JSON.stringify(keys))return;
+  const appendOnly=oldKeys.length>0 && oldKeys.every((key,i)=>key===keys[i]);
   const verbs = actionVerbs(ui.log);
-  list.replaceChildren();
-  for (const item of ui.log) {
+  const previous=new Map([...list.children].map(node=>[Number(node.dataset.logIndex),node]));
+  const rows=[];
+  for (let i=appendOnly ? oldKeys.length : 0;i<ui.log.length;i++) {
+    const item=ui.log[i];
     if (item.type === 'talk') continue;
-    list.append(logNode(item, verbs.get(item)));
+    const node=oldKeys[i]===keys[i] ? previous.get(i) : null;
+    const row=node??logNode(item, verbs.get(item), contexts[i]);
+    row.dataset.logIndex=String(i);
+    if(appendOnly)list.append(row);else rows.push(row);
   }
-  if (stick) list.scrollTop = list.scrollHeight;
+  if(!appendOnly) {
+    list.replaceChildren(...rows);
+    if(focusedRow)list.querySelector(`[data-log-index="${focusedRow.dataset.logIndex}"] button`)?.focus({preventScroll:true});
+  }
+  list._keys=keys;
+  if (stick) {list.scrollTop = list.scrollHeight;list._unread=0;$('log-new').hidden=true;}
+  else {
+    list.scrollTop=scroll;
+    const restored=anchorIndex==null?null:list.querySelector(`[data-log-index="${anchorIndex}"]`);
+    if(restored)list.scrollTop+=restored.getBoundingClientRect().top-list.getBoundingClientRect().top-anchorOffset;
+    list._unread=(list._unread??0)+ui.log.slice(oldKeys.length).filter(item=>item.type!=='talk').length;
+    if(list._unread){$('log-new').hidden=false;$('log-new').textContent=`새 이벤트 ${list._unread}개 · 최신으로`;}
+  }
 }
 
 function paintCoach() {
   const list = $('coach-list');
+  const signature=JSON.stringify(ui.coach);
+  if(list._signature===signature)return;
+  list._signature=signature;
   if (!ui.coach.length) {
     list.replaceChildren(el('div', 'coach-empty', '핸드가 끝나면 코칭이 쌓입니다.'));
     return;
@@ -719,6 +831,11 @@ function paintReplay() {
   const title = $('replay-title');
   const disclaimer = $('replay-disclaimer');
   const body = $('replay-body');
+  const signature=JSON.stringify([view,displayUnit]);
+  if(body._signature===signature)return;
+  body._signature=signature;
+  const scroll=body.scrollTop;
+  const focusedStudy=body.contains(document.activeElement) ? document.activeElement.dataset.studyId : null;
   body.replaceChildren();
   if (view.kind === 'marker') {
     title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
@@ -747,8 +864,8 @@ function paintReplay() {
       const who = [row.name, row.position].filter(Boolean).join(' · ');
       line.append(el('span', 'replay-name', who));
       line.append(el('span', `replay-act is-${row.verb}`, row.verbLabel ?? row.verb));
-      if (row.amount != null) line.append(el('span', 'replay-amount num', formatChip(row.amount)));
-      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${formatChip(row.pot)}`));
+      if (row.amount != null) line.append(el('span', 'replay-amount num', amountText(row.amount,view.header.blinds?.[1]??null)));
+      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${amountText(row.pot,view.header.blinds?.[1]??null)}`));
       if (row.cards) {
         const cards = el('span', 'replay-cards');
         for (const code of row.cards) cards.append(miniCard(code));
@@ -768,12 +885,14 @@ function paintReplay() {
       if (row.study?.evaluationId) {
         const link = el('button', 'replay-study', '학습 카드');
         link.type = 'button';
+        link.dataset.studyId=row.study.evaluationId;
         link.addEventListener('click', () => {
           closeReplay();
           selectTab('training');
           const card = document.querySelector(`[data-evaluation-id="${row.study.evaluationId}"]`);
           if (card instanceof HTMLDetailsElement) card.open = true;
           card?.scrollIntoView({ block: 'nearest' });
+          card?.querySelector('summary')?.focus({preventScroll:true});
         });
         line.append(link);
       }
@@ -782,27 +901,31 @@ function paintReplay() {
     body.append(block);
   }
   if (view.coachSummary) body.append(el('p', 'replay-summary', view.coachSummary));
+  body.scrollTop=scroll;
+  if(focusedStudy)[...body.querySelectorAll('[data-study-id]')].find(node=>node.dataset.studyId===focusedStudy)?.focus({preventScroll:true});
 }
 
 function openReplay(handNo) {
   openReplayHandNo = handNo;
   paintReplay();
-  $('replay-close')?.focus();
+  dialogs.open($('replay-overlay'),closeReplay);
 }
 
 function closeReplay() {
   openReplayHandNo = null;
   const overlay = $('replay-overlay');
   if (overlay) overlay.hidden = true;
+  if(dialogs.active===overlay)dialogs.close();
 }
 
 function paintReview(view) {
   const overlay = $('review-overlay');
   $('review-reopen').hidden = !ui.review;
   const dismissed = overlay.dataset.dismissed === 'true';
-  const show = Boolean(view?.gameOver && ui.review) && !dismissed;
+  const show = Boolean(view?.gameOver && ui.review) && !dismissed && (!dialogs.active || dialogs.active===overlay);
   overlay.hidden = !show;
   if (!show) return;
+  if(dialogs.active!==overlay)dialogs.open(overlay,()=>{overlay.dataset.dismissed='true';dialogs.close();});
   const result = $('review-result');
   result.textContent = view.result === 'win' ? '우승'
     : view.result === 'lose' ? '패배'
@@ -874,6 +997,9 @@ function renderSnapshot(snap) {
 function render(m) {
   ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
+    const previous=new Map((ui.view?.seats??[]).map(s=>[s.playerId,s.out]));
+    const eliminated=m.view?.mode==='cash-training'?[]:(m.view?.seats??[]).filter(s=>s.out===true&&previous.get(s.playerId)===false);
+    if(eliminated.length)$('seat-announcement').textContent=eliminated.map(s=>`${s.name??s.playerId} 탈락`).join(', ');
     ui.view = m.view;
     actionController?.observe(ui.view, { revision: m.revision });
   }
@@ -926,11 +1052,18 @@ async function sendAction(action, amount) {
 $('btn-fold').addEventListener('click', () => sendAction('fold'));
 $('btn-check').addEventListener('click', () => sendAction('check'));
 $('btn-call').addEventListener('click', () => sendAction('call'));
-$('btn-raise').addEventListener('click', () => sendAction('raise', raiseTo));
+$('btn-raise').addEventListener('click', () => {
+  const legal=ui.view?.legal;if(!legal || pendingAction)return;
+  if($('raise-amount').value!==amountEditor.state.text)amountEditor.edit($('raise-amount').value,legal);
+  const amount=amountEditor.submit(legal,{locked:pendingAction});
+  const state=amountEditor.state;raiseTo=state.value;$('raise-amount').value=state.text;markAmountValid(!state.invalid);
+  setBtnLabel($('btn-raise'),'총액 레이즈',raiseTo);
+  if(amount!==null)void sendAction('raise',amount);
+});
 $('btn-allin-only').addEventListener('click', () => sendAction('raise', ui.view?.legal?.maxRaiseTo));
 
 $('raise-slider').addEventListener('input', (ev) => {
-  if (!ui.view?.legal) return;
+  if (!ui.view?.legal || pendingAction) return;
   setRaiseTo(ev.target.value);
   markAmountValid(true);
 });
@@ -938,7 +1071,7 @@ $('raise-slider').addEventListener('input', (ev) => {
 $('raise-panel').addEventListener('click', (ev) => {
   const preset = ev.target.closest('[data-preset]')?.dataset.preset;
   const legal = ui.view?.legal;
-  if (!preset || !legal || legal.minRaiseTo > legal.maxRaiseTo) return;
+  if (!preset || !legal || pendingAction || legal.minRaiseTo > legal.maxRaiseTo) return;
   const myBet = myBetOf(ui.view);
   if (preset === 'min') setRaiseTo(legal.minRaiseTo);
   else if (preset === 'half') setRaiseTo(potRaiseTo(legal, myBet, 0.5));
@@ -951,32 +1084,26 @@ $('raise-panel').addEventListener('click', (ev) => {
   markAmountValid(true);
 });
 
-// 직접 입력 — 편집 중에는 자릿수 구분 쉼표를 걷어내고, 확정할 때 다시 붙인다.
+// 직접 입력 — 유효 값은 전체 선택하고, 잘못된 원문과 보정 확인 상태는 보존한다.
 $('raise-amount').addEventListener('focus', (ev) => {
-  ev.target.value = String(raiseTo);
+  if(amountEditor.state.invalid || parseChipInput(ev.target.value)!==raiseTo)return;
+  ev.target.value = amountEditor.state.text;
   ev.target.select();
 });
 
 $('raise-amount').addEventListener('input', (ev) => {
-  const digits = ev.target.value.replace(/[^0-9]/g, '');
-  if (digits !== ev.target.value) ev.target.value = digits;
   const legal = ui.view?.legal;
-  if (!legal) return;
-  if (digits === '') {
-    markAmountValid(true);
-    return;
-  }
-  const next = Number(digits);
-  const inRange = next >= legal.minRaiseTo && next <= legal.maxRaiseTo;
-  markAmountValid(inRange);
-  if (inRange) setRaiseTo(next, { fromInput: true });
+  if (!legal || pendingAction) return;
+  const state=amountEditor.edit(ev.target.value,legal);
+  markAmountValid(!state.invalid);
+  if(!state.invalid)setRaiseTo(state.value,{fromInput:true});
 });
 
 $('raise-amount').addEventListener('blur', commitAmount);
 
 $('raise-amount').addEventListener('keydown', (ev) => {
   const legal = ui.view?.legal;
-  if (!legal) return;
+  if (!legal || pendingAction) return;
   if (ev.key === 'Enter') {
     ev.preventDefault();
     commitAmount();
@@ -985,9 +1112,8 @@ $('raise-amount').addEventListener('keydown', (ev) => {
   if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
   ev.preventDefault();
   const step = ui.view?.blinds?.[1] ?? 1;
-  const base = Number(ev.target.value.replace(/[^0-9]/g, '')) || raiseTo;
-  setRaiseTo(base + (ev.key === 'ArrowUp' ? step : -step), { fromInput: true });
-  ev.target.value = String(raiseTo);
+  const base = parseChipInput(ev.target.value) ?? raiseTo;
+  setRaiseTo(base + (ev.key === 'ArrowUp' ? step : -step));
   markAmountValid(true);
 });
 
@@ -1003,10 +1129,11 @@ function selectTab(which) {
   selectedTab = which;
   if (which in unread) unread[which] = 0;
   paintUnread();
-  for (const name of ['log', 'coach', 'training']) {
+  for (const name of ['log', 'coach', 'training', 'participants']) {
     const on = name === which;
     $(`tab-${name}`)?.classList.toggle('on', on);
     $(`tab-${name}`)?.setAttribute('aria-selected', String(on));
+    if($(`tab-${name}`))$(`tab-${name}`).tabIndex=on?0:-1;
     const panel = $(`panel-${name}`);
     if (panel) panel.hidden = !on;
   }
@@ -1015,11 +1142,25 @@ function selectTab(which) {
 $('tab-log').addEventListener('click', () => selectTab('log'));
 $('tab-coach').addEventListener('click', () => selectTab('coach'));
 $('tab-training')?.addEventListener('click', () => selectTab('training'));
+$('tab-participants').addEventListener('click',()=>selectTab('participants'));
+selectTab('log');
+document.querySelector('.tabs').addEventListener('keydown',ev=>{
+  const tabs=['log','coach','training','participants'];let index=tabs.indexOf(selectedTab);
+  if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
+  else if(ev.key==='ArrowLeft')index=(index+tabs.length-1)%tabs.length;
+  else if(ev.key==='Home')index=0;else if(ev.key==='End')index=tabs.length-1;else return;
+  ev.preventDefault();selectTab(tabs[index]);$(`tab-${tabs[index]}`).focus();
+});
+$('display-unit').value=displayUnit;
+$('display-unit').addEventListener('change',ev=>{
+  displayUnit=ev.target.value==='chips'?'chips':'bb';writePreference(displayUnit);
+  paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
+});
+$('seat-close').addEventListener('click',()=>dialogs.close());
+$('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list').scrollHeight;$('log-list')._unread=0;$('log-new').hidden=true;});
 
 $('replay-close')?.addEventListener('click', () => {
   closeReplay();
-  const last = document.querySelector('.replay-open:not([disabled])');
-  last?.focus();
 });
 $('replay-overlay')?.addEventListener('click', (ev) => {
   if (ev.target === $('replay-overlay')) closeReplay();
@@ -1027,10 +1168,11 @@ $('replay-overlay')?.addEventListener('click', (ev) => {
 $('review-close').addEventListener('click', () => {
   const overlay = $('review-overlay');
   overlay.dataset.dismissed = 'true';
-  overlay.hidden = true;
+  dialogs.close();
   $('review-reopen').focus();
 });
 $('review-reopen').addEventListener('click', () => {
+  if(dialogs.active)dialogs.dismiss();
   $('review-overlay').dataset.dismissed = 'false';
   paintReview(ui.view);
   $('review-close').focus();
@@ -1106,7 +1248,10 @@ else {
       const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data),hintGeneration:hintState.capture() };
       if (!booted) { buffer.push(msg); return; }
       applyMessage(msg);
-    } catch { setConn(false); actionController?.disconnect(); }
+    } catch (error) {
+      console.error('UI_RENDER_FAILED', error?.name, String(error?.stack??'').split('\n').slice(1).join('\n'));
+      setConn(false); actionController?.disconnect();
+    }
   };
   es.onopen = async () => {
     if (opening) return;

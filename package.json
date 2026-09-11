@@ -13,6 +13,7 @@
     "app": "node tools/app-service.js",
     "app:stop": "node tools/app-service.js stop",
     "test:lobby:browser": "node test/browser/lobby-session-journey.mjs",
+    "test:ui:browser": "node test/browser/ui-presentation-journey.mjs",
     "test:lobby:windows": "node --test --test-concurrency=1 --test-timeout=900000 test/app-service.test.js test/app-command-store.test.js test/app-server-security.test.js test/session-controls.test.js test/game-setup.test.js test/session-control-contract.test.js"
   }
 }

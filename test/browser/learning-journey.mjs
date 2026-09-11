@@ -27,6 +27,7 @@ export const journeyScenarioPlan = Object.freeze({
   'illegal-action-correction': { stage: 'action-recovery', viewports: ['1280x900'] },
   'training-detail-source': { stage: 'training', viewports: ['1280x900'] },
   'training-reading-context': { stage: 'training', viewports: ['1280x900'] },
+  'replay-reading-context': { stage: 'training', viewports: ['1280x900'] },
   'review-reopen-unread': { stage: 'training-and-review', viewports: ['390x844', '1280x900'] },
   'study-fragment-header-auth': { stage: 'study', viewports: ['390x844'] },
   'study-explicit-modes': { stage: 'study', viewports: ['390x844', '1280x900'] },
@@ -241,6 +242,22 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       return card.open && panel.scrollTop === ${Number(reading.scroll)}
         && card.contains(document.activeElement) && document.activeElement.dataset.focus === 'practice';
     })()`));
+    await browser(['click','#tab-log']);
+    await browser(['wait','#log-list .replay-open:not([disabled])']);
+    await browser(['focus','#log-list .replay-open:not([disabled])']);
+    assert.equal(await evaluate(`(()=>{const index=document.activeElement.closest('[data-log-index]').dataset.logIndex;const select=document.querySelector('#display-unit');select.value='chips';select.dispatchEvent(new Event('change'));return document.activeElement.closest('[data-log-index]')?.dataset.logIndex===index;})()`),true);
+    await browser(['press','Enter']);
+    await browser(['wait','#replay-body .replay-study']);
+    await browser(['focus','#replay-body .replay-study']);
+    const replayReading=await evaluate(`(()=>{const body=document.querySelector('#replay-body');body.scrollTop=30;return {id:document.activeElement.dataset.studyId,title:document.querySelector('#replay-title').textContent,scroll:body.scrollTop};})()`);
+    const coachFile=path.join(fixture.workspace,'ui-coach-update.json');
+    const handNo=Number(replayReading.title.match(/\d+/)[0]);
+    fs.writeFileSync(coachFile,JSON.stringify({coach:[{handNo,text:'UI reading continuity fixture update'}]}));
+    await fixture.publishEnvelopeFile(coachFile);
+    await waitForExpression("document.querySelector('#replay-body').textContent.includes('UI reading continuity fixture update')",'replay coach update');
+    check('replay-reading-context',await evaluate(`document.activeElement.dataset.studyId===${JSON.stringify(replayReading.id)} && document.querySelector('#replay-body').scrollTop===${replayReading.scroll}`));
+    await browser(['press','Enter']);
+    assert.equal(await evaluate(`document.querySelector('#replay-overlay').hidden && document.activeElement.matches('[data-evaluation-id] > summary') && document.activeElement.parentElement.dataset.evaluationId===${JSON.stringify(replayReading.id)}`),true);
     await recordBrowserErrors('primary-table');
 
     const shortFixture = registerFixture(await createLearningBrowserFixture({ stackChips: 175, hands: 12 }));
@@ -254,7 +271,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     const shortUi = await evaluate(`(() => ({
       normalHidden: document.querySelector('#btn-raise').hidden,
       allInHidden: document.querySelector('#btn-allin-only').hidden,
-      amount: Number(document.querySelector('#btn-allin-only .num').textContent.replaceAll(',', '')),
+      amount: Number(document.querySelector('#btn-allin-only .amount-secondary').textContent.replaceAll(',', '').replace(' 칩', '')),
     }))()`);
     check('short-all-in', shortLegal.minRaiseTo > shortLegal.maxRaiseTo && shortUi.normalHidden
       && !shortUi.allInHidden && shortUi.amount === shortLegal.maxRaiseTo);

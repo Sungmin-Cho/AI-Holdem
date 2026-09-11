@@ -1,4 +1,6 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
+import {normalizeSetup} from '../../shared/game-setup.js';
+import {formatAmount} from './chip-format.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -47,7 +49,7 @@ function render() {
   if (!snapshot) return;
   const s = snapshot.state;
   const paused = s === "paused";
-  $("table").inert = !viewingRecord && s !== "playing";
+  $("table").inert = (!viewingRecord && s !== "playing") || Boolean(document.querySelector('dialog[open]'));
   $("status").textContent = labels[s] ?? s;
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
   const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
@@ -63,6 +65,7 @@ function render() {
     !viewingRecord &&
     (selecting ||
       !["playing", "pausing", "paused", "stopping", "finalizing"].includes(s));
+  document.body.classList.toggle('has-game', !$("game").hidden);
   $("menu").hidden = !["playing", "pausing", "paused"].includes(s);
   $("menu").disabled = busy || s === "pausing";
   $("menu").textContent = paused ? "일시정지 메뉴" : "일시정지 · 메뉴";
@@ -144,7 +147,7 @@ const errorMessages = {
 };
 function showError(e) {
   $("error").textContent =
-    errorMessages[e.message] ??
+    errorMessages[e.code] ?? errorMessages[e.message] ??
     "요청을 완료하지 못했습니다. 연결과 현재 게임 상태를 확인해 주세요.";
 }
 const commands = createLobbyCommandClient({
@@ -228,9 +231,9 @@ form.onchange = () => {
   $("tournament-fields").hidden = mode !== "tournament";
   const count = Number($("ai-count").value);
   $("seats").textContent = `나 1명 + AI ${count}명 = 총 ${count + 1}명`;
+  updateSetupSummary();
 };
-form.onsubmit = (e) => {
-  e.preventDefault();
+function setupFromForm() {
   const data = new FormData(form),
     setup = Object.fromEntries(
       [
@@ -257,6 +260,24 @@ form.onsubmit = (e) => {
     setup.stack = Number(data.get("cashStack"));
   }
   for (const k of ["mirrorSelf", "exploitSelf"]) setup[k] = data.has(k);
+  return setup;
+}
+function updateSetupSummary() {
+  $('llm-settings').hidden=form.elements.opponentRuntime.value!=='llm';
+  $('llm-budget-help').textContent=`알림 ${Number(form.elements.playerSoftMs.value)/1000}초 · 호출 최대 ${Number(form.elements.playerHardMs.value)/60000}분`;
+  try {
+    const setup=normalizeSetup(setupFromForm());
+    const bb=Number(setup.blinds.split('/')[1]);
+    const amount=formatAmount(setup.stack??setup.stackBb*bb,bb);
+    $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
+    $('setup-assistance').textContent=[setup.dealBias!=='off'?'유리한 딜 · 평가 제외':null,setup.hints==='on'?'행동 전 힌트 켬':null,setup.showdownPolicy==='open'?'쇼다운 모두 공개':null,setup.replayReveal==='all'?'복기 카드 모두 공개':null].filter(Boolean).join(' · ');
+  } catch(e) {$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
+}
+form.addEventListener('input',updateSetupSummary);
+form.onsubmit = (e) => {
+  e.preventDefault();
+  const setup=setupFromForm();
+  try{normalizeSetup(setup);}catch(error){showError(error);form.querySelector('details').open=true;return;}
   if (snapshot.state === "paused")
     confirm(() => command("replace-current", setup));
   else command("start", setup);
@@ -265,6 +286,7 @@ $("review").onclick = () => {
   viewingRecord = true;
   $("table").inert = false;
   $("game").hidden = false;
+  document.body.classList.add('has-game');
   $("table").src =
     `/table?${new URLSearchParams({ appGame: snapshot.gameId, epoch: snapshot.gameEpoch, terminal: "1" })}`;
 };
@@ -281,6 +303,11 @@ $("study").onclick = async () => {
     showError(e);
   }
 };
+for(const dialog of document.querySelectorAll('dialog')) {
+  dialog.addEventListener('close',()=>{if(snapshot)$('table').inert=(!viewingRecord&&snapshot.state!=='playing')||Boolean(document.querySelector('dialog[open]'));});
+}
+new MutationObserver(()=>{if(snapshot)$('table').inert=(!viewingRecord&&snapshot.state!=='playing')||Boolean(document.querySelector('dialog[open]'));}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+form.onchange();
 await refresh().catch(showError);
 async function recoverCommand() {
   if (busy || !commands.pending) return;
