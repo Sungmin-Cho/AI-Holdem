@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 import * as journey from './browser/learning-journey.mjs';
 import { createBrowserWorkspace, runOwnedCommand, startResponseProxy, hashTree } from './helpers/learning-browser-fixture.mjs';
 import './helpers/owned-fixtures.mjs';
+import * as uiJourney from './browser/ui-presentation-journey.mjs';
+
+test('UI browser CLI is inert under node test and declares required checks',async()=>{
+  assert.equal(uiJourney.browserCliEnabled({NODE_TEST_CONTEXT:'child-v8'}),false);
+  assert.ok(uiJourney.requiredJourneyChecks.includes('invalid-input'));
+  const r=await runOwnedCommand(process.execPath,['test/browser/ui-presentation-journey.mjs'],{env:{NODE_TEST_CONTEXT:'child-v8'}});
+  assert.equal(r.exitCode,0);assert.equal(r.stdout.trim(),'BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT');
+});
 
 test('browser CLI is inert under NODE_TEST_CONTEXT without spawning a browser or fixture', async () => {
   const workspace = createBrowserWorkspace();

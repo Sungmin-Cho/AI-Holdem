@@ -83,6 +83,8 @@ export async function startAppServer({
             "preflop-key.js",
             "assistance.js",
             "deal-selection.js",
+            "game-setup.js",
+            "player-budget.js",
           ].includes(name)
         ) {
           json(res, 404, { code: "NOT_FOUND" });

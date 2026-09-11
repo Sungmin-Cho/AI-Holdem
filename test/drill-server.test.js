@@ -222,6 +222,9 @@ test('drill server uses its own token and game server does not serve drill.html'
     assert.equal((await started.json()).ok, true);
     const page = await fetch(`http://127.0.0.1:${drill.port}/drill.html`);
     assert.equal(page.status, 200);
+    const tokens=await fetch(`http://127.0.0.1:${drill.port}/design-tokens.css`);
+    assert.equal(tokens.status,200);assert.match(tokens.headers.get('content-type'),/css/);
+    for(const asset of ['app.js','table-design.css','lobby.js'])assert.equal((await fetch(`http://127.0.0.1:${drill.port}/${asset}`)).status,404);
     const missing = await fetch(`http://127.0.0.1:${game.port}/drill.html`);
     assert.equal(missing.status, 404);
   } finally {

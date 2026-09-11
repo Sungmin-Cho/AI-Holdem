@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>AI 홀덤 · 게임 로비</title>
+    <link rel="stylesheet" href="/design-tokens.css" />
     <link rel="stylesheet" href="/lobby.css" />
     <script type="module" src="/lobby.js"></script>
   </head>
@@ -14,7 +15,8 @@
       ><button id="study">학습 열기 ↗</button>
     </header>
     <main id="setup">
-      <h1>어떤 게임을 시작할까요?</h1>
+      <p class="eyebrow">YOUR NEXT BETTER DECISION</p>
+      <h1>한 핸드씩, 더 나은 선택.</h1>
       <p>
         모드와 AI 플레이어 수를 선택하세요. 실제 금전을 사용하지 않는 연습
         게임입니다.
@@ -45,6 +47,7 @@
           </select></label
         >
         <p id="seats">나 1명 + AI 5명 = 총 6명</p>
+        <section class="setup-summary" aria-label="선택한 게임 설정"><span class="eyebrow">SESSION PREVIEW</span><p id="setup-summary"></p><p id="setup-assistance"></p></section>
         <details>
           <summary>상세 설정</summary>
           <label
@@ -56,10 +59,11 @@
           >
           <label>연습용 유리한 딜<select name="dealBias"><option value="off">끔 — 일반 딜</option><option value="light">약하게</option><option value="strong">강하게</option></select></label>
           <p>유리한 딜은 독립 평가·성향 표본에서 제외됩니다. 승리나 좋은 보드를 보장하지 않습니다.</p>
-          <p>LLM 모드는 AI 응답을 기다리므로 진행이 더 느릴 수 있습니다.</p>
+          <div id="llm-settings" hidden><h2>AI 응답 대기</h2><p>LLM 모드는 AI 응답을 기다리므로 진행이 더 느릴 수 있습니다.</p>
           <label>오래 기다림 알림 (ms)<input name="playerSoftMs" type="number" min="1" value="25000" /></label>
           <label>LLM 호출 최대 대기 (ms)<input name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>
           <p>알림은 추론을 중단하지 않습니다. 최대 대기 초과 시 결정을 보존하고 재시도 또는 종료를 기다립니다.</p>
+          <p id="llm-budget-help"></p></div><h2>게임 규칙</h2>
           <label
             >블라인드
             <input name="blinds" value="25/50" required pattern="[0-9]+/[0-9]+"

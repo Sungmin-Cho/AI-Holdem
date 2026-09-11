@@ -1,7 +1,7 @@
-:root { color-scheme: dark; --bg: #101710; --panel: #172019; --gold: #d6b36a; --ink: #eeeee3; --muted: #a7b3a5; --line: #364034; }
+:root { color-scheme: dark; --bg: var(--ui-bg, #0b1118); --panel: var(--ui-panel, #131d29); --gold: var(--ui-accent, #5bdfb0); --ink: var(--ui-ink, #edf3f8); --muted: var(--ui-muted, #a9b8c8); --line: var(--ui-border, #61758b); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-body { margin: 0; background: var(--bg); color: var(--ink); font-family: 'IBM Plex Sans KR', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 14px; line-height: 1.65; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--ui-font, system-ui, sans-serif); font-size: 14px; line-height: 1.65; }
 button, select { font: inherit; }
 button, select { min-height: 44px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; background: #263027; color: var(--ink); }
 button { cursor: pointer; font-weight: 600; }
@@ -26,7 +26,7 @@ main { max-width: 1440px; margin: auto; padding: 34px 36px; display: grid; grid-
 .mode-help { margin: 12px 0 18px; }
 .status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 18px; }
 .status-row p { flex: 1 1 230px; margin: 0; color: #d6c8a8; font-size: 12px; }
-.quiet { min-height: 36px; padding: 6px 10px; background: transparent; font-size: 12px; }
+.quiet { min-height: 44px; padding: 6px 10px; background: transparent; font-size: 12px; }
 .question { border: 1px solid #526448; background: radial-gradient(ellipse at 50% 0, #253b27, var(--panel) 80%); border-radius: 18px; padding: 28px; min-height: 310px; }
 .question h2 { font-size: 28px; margin: 16px 0 6px; }
 .context { color: #c3cfbc; }

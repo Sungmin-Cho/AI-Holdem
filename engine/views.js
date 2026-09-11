@@ -38,6 +38,7 @@ function publicSeat(state, hand, seat) {
     playerId: seat.playerId,
     name: seat.name,
     stack: seat.stack,
+    out: Boolean(seat.out),
     bet: hand?.bets?.[seat.playerId] ?? 0,
     folded: Boolean(hand?.folded?.includes(seat.playerId)),
     allIn: Boolean(hand?.allIn?.includes(seat.playerId)),
@@ -50,6 +51,7 @@ export function viewFor(state, playerId) {
   const legal = state.hand ? legalFor(state) : null;
   const view = {
     handNo: state.handNo,
+    handInProgress: Boolean(state.hand && state.phase === 'in_hand'),
     level: state.level,
     levelEvery: state.config.levelEvery,
     blinds: state.hand
