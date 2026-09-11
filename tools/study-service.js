@@ -313,6 +313,10 @@ function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   return status;
 }
+function vanishedDir(file, before) {
+  const after = statOrNull(file);
+  return !after || !after.isDirectory() || after.isSymbolicLink() || (before && !sameInode(before, after));
+}
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
   assertContext(ctx);
@@ -320,10 +324,24 @@ function readLock(ctx, parent = false) {
   const file = path.join(parent ? ctx.root : ctx.training, parent ? 'loop.lock.d' : LOCK);
   const stat = statOrNull(file);
   if (!stat) return null;
-  const checked = directory(file);
+  let checked;
+  try { checked = directory(file); }
+  catch (error) {
+    // A lock being released is absent, not unproven. Windows delete-pending
+    // directories can fail the live ACL read after the listing already dropped
+    // them from the proved set.
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedDir(file, stat)) return null;
+    throw error;
+  }
   const exact = exactInode(file);
   const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
-  if (!sameInode(checked, directory(file))) fail();
+  let after;
+  try { after = directory(file); }
+  catch (error) {
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedDir(file, stat)) return null;
+    throw error;
+  }
+  if (!sameInode(checked, after)) fail();
   if (!pidFile) return { status: 'unknown', stat: checked, exact };
   const parsed = parseOwnedLockIdentity(pidFile.text);
   if (!parsed) return { status: 'unknown', stat: checked, exact };
