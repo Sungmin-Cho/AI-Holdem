@@ -384,7 +384,7 @@ function paintSeats(view) {
     if (active) node.classList.add('is-to-act');
     const at = ovalPoint(i, n, 38, 40);
     node.dataset.side = at.x < 50 ? 'left' : 'right';
-    node.dataset.betBand = at.y > 75 ? 'lower' : at.y > 16 && at.y < 40 ? 'upper' : 'middle';
+    node.dataset.betBand = at.y > 75 ? 'lower' : at.y < 16 ? 'top' : at.y < 40 ? 'upper' : 'middle';
     node.dataset.betEdge = at.y < 25 || at.y > 75 ? 'bottom' : at.x < 50 ? 'right' : 'left';
     node.style.left = `${at.x}%`;
     node.style.top = `${at.y}%`;
