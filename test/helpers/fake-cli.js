@@ -66,6 +66,7 @@ if (chosen.orphanMs) {
   const orphan = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${Number(chosen.orphanMs)})`], {
     stdio: ['ignore', 'inherit', 'inherit'],
     detached: true,
+    windowsHide: true,
   });
   orphan.unref();
   if (process.env.FAKE_CLI_LOG) {

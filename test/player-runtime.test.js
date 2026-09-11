@@ -410,7 +410,7 @@ test('decide 타임아웃은 SIGKILL 후 실제 close가 확인된 뒤에만 TIM
   try {
     const started = Date.now();
     await assert.rejects(
-      f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 150 }),
+      f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: process.platform === 'win32' ? 400 : 150 }),
       (error) => error.code === 'TIMEOUT',
     );
     const orphan = f.calls().find((entry) => Number.isInteger(entry.orphanPid));

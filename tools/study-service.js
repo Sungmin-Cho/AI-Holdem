@@ -274,22 +274,36 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
-  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) fail();
+  const missing = () => vanishedPath(file, before);
+  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) {
+    if (missing()) return null;
+    fail();
+  }
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
     const opened = fs.fstatSync(fd);
-    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) fail();
+    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) {
+      if (missing()) return null;
+      fail();
+    }
     assertContext(ctx);
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
     const after = fs.fstatSync(fd);
-    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) fail();
+    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) {
+      if (missing()) return null;
+      fail();
+    }
     assertContext(ctx);
     return { text: bytes.subarray(0, length).toString('utf8'), stat: opened };
   } catch (error) {
-    if (error.code === 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+    if (error.code === 'STUDY_DESCRIPTOR_CORRUPT') {
+      if (missing()) return null;
+      throw error;
+    }
+    if (missing()) return null;
     fail();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
@@ -313,9 +327,11 @@ function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   return status;
 }
-function vanishedDir(file, before) {
+function vanishedPath(file, before, { directory: asDir = false } = {}) {
   const after = statOrNull(file);
-  return !after || !after.isDirectory() || after.isSymbolicLink() || (before && !sameInode(before, after));
+  if (!after || after.isSymbolicLink()) return true;
+  if (asDir ? !after.isDirectory() : !after.isFile()) return true;
+  return Boolean(before && !sameInode(before, after));
 }
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
@@ -330,7 +346,7 @@ function readLock(ctx, parent = false) {
     // A lock being released is absent, not unproven. Windows delete-pending
     // directories can fail the live ACL read after the listing already dropped
     // them from the proved set.
-    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedDir(file, stat)) return null;
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedPath(file, stat, { directory: true })) return null;
     throw error;
   }
   const exact = exactInode(file);
@@ -338,7 +354,7 @@ function readLock(ctx, parent = false) {
   let after;
   try { after = directory(file); }
   catch (error) {
-    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedDir(file, stat)) return null;
+    if (error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && vanishedPath(file, stat, { directory: true })) return null;
     throw error;
   }
   if (!sameInode(checked, after)) fail();
