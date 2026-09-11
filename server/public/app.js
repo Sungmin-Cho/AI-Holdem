@@ -89,7 +89,7 @@ function formatChip(n) {
 
 function amountText(value, bb = ui.view?.blinds?.[1], signed = false) {
   const parts = signed ? formatSignedAmount(value, bb, displayUnit) : formatAmount(value, bb, displayUnit);
-  return [parts.primary, parts.secondary].filter(Boolean).join(' / ');
+  return [parts.primary, parts.secondary === 'BB 기준 없음' ? '' : parts.secondary].filter(Boolean).join(' / ');
 }
 function amountNode(value, bb = ui.view?.blinds?.[1], className = '') {
   const parts = formatAmount(value, bb, displayUnit);
@@ -287,6 +287,9 @@ function paintBoard(view) {
 
 function paintPots(view) {
   const box = $('pots');
+  const signature = JSON.stringify([view?.handNo,view?.handInProgress,view?.pots,view?.legal?.potTotal,view?.blinds,displayUnit]);
+  if(box._signature===signature)return;
+  box._signature=signature;
   const previous = box.querySelector('.pot-detail');
   const sameHand = box.dataset.handNo === String(view?.handNo);
   const wasOpen = sameHand && previous?.open;
@@ -924,7 +927,10 @@ function paintReview(view) {
   const dismissed = overlay.dataset.dismissed === 'true';
   const show = Boolean(view?.gameOver && ui.review) && !dismissed && (!dialogs.active || dialogs.active===overlay);
   overlay.hidden = !show;
-  if (!show) return;
+  if (!show) {
+    if(dialogs.active===overlay)dialogs.close();
+    return;
+  }
   if(dialogs.active!==overlay)dialogs.open(overlay,()=>{overlay.dataset.dismissed='true';dialogs.close();});
   const result = $('review-result');
   result.textContent = view.result === 'win' ? '우승'
@@ -1112,7 +1118,7 @@ $('raise-amount').addEventListener('keydown', (ev) => {
   if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
   ev.preventDefault();
   const step = ui.view?.blinds?.[1] ?? 1;
-  const base = parseChipInput(ev.target.value) ?? raiseTo;
+  const base = amountEditor.state.invalid ? raiseTo : (parseChipInput(ev.target.value) ?? raiseTo);
   setRaiseTo(base + (ev.key === 'ArrowUp' ? step : -step));
   markAmountValid(true);
 });

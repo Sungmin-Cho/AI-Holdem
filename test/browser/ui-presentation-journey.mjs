@@ -26,7 +26,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
   const evaluate=async(expr)=>{const value=await browser(['eval',expr]);return value?.result??value;};
   const publish=async(events=[],extra={})=>{
     const response=await fetch(`http://127.0.0.1:${relay.port}/api/publish`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,publishId:++publishId,view,events,...extra})});
-    assert.equal(response.status,200);return response.json();
+    const result=await response.json();
+    assert.equal(response.status,200,`publish ${publishId}: ${result.code??response.status}`);return result;
   };
   const ready=async()=>{
     for(let i=0;i<25;i++){if(await evaluate("document.querySelector('#btn-raise')?.disabled===false"))return;await new Promise(r=>setTimeout(r,100));}
@@ -62,6 +63,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
     await browser(['fill','#intent-note','fixture intention']);
+    await browser(['fill','#raise-amount',String(view.legal.minRaiseTo)]);
+    await browser(['fill','#raise-amount','9999999']);await browser(['press','ArrowUp']);
+    assert.equal(Number((await evaluate("document.querySelector('#raise-amount').value")).replaceAll(',','')),Math.min(view.legal.minRaiseTo+view.blinds[1],view.legal.maxRaiseTo));
     for(const invalid of ['-5','1e3','1,2','','１２３']) {
       await browser(['fill','#raise-amount',invalid]);await browser(['press','Enter']);await publish();
       assert.equal(await evaluate("document.querySelector('#raise-amount').value"),invalid);
@@ -134,7 +138,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
     await browser(['screenshot',path.join(outDir,'large-values-zoom.png')]);
     await evaluate("document.body.style.zoom='1'");checks.push('large-values');
-    let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;
+    let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;settlement.handNo=50;
     const prefix=['7s','2c','As','8s','3d','Ah','Ks','Kd','Kh','9c','6d'];
     const deal=startHand(settlement,{deck:[...prefix,...newDeck().filter(c=>!prefix.includes(c))]});settlement=deal.state;
     view=userView(settlement);await publish(deal.events);
@@ -160,7 +164,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#pots details').open && document.activeElement.matches('#pots summary')"),true);
     view={...view,handNo:view.handNo+1};await publish();
     assert.equal(await evaluate("document.querySelector('#pots details').open"),false);
-    let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:2});const cashDeal=startHand(cash,{deck:fixedDeck()});cash=cashDeal.state;view=userView(cash);await publish(cashDeal.events);
+    await publish([],{review:'UI review fixture'});
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    await publish([],{review:null});
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden && !document.querySelector('main').inert"),true);
+    // This synthetic scenario shares a relay; never reuse a retired decision ID.
+    let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:102});cash.handNo=100;
+    const cashDeal=startHand(cash,{deck:fixedDeck()});cash=cashDeal.state;view=userView(cash);await publish(cashDeal.events);
     while(!legalFor(cash).handOver){const legal=legalFor(cash);const step=applyAction(cash,legal.toAct,'fold');cash=step.state;view=userView(cash);await publish(step.events);}
     assert.equal(await evaluate("document.querySelector('#cash-reset-note').hidden"),false);
     assert.match(await evaluate("document.querySelector('#participants-summary').textContent"),/^참가자 3명$/);

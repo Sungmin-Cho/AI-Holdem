@@ -8,7 +8,7 @@ export function seatPresentation(view, seat) {
   const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === 'user' ? '내 차례' : '행동 중')
     : view?.mode !== 'cash-training' && typeof seat.out !== 'boolean' ? '상태 확인 불가' : '플레이 중';
   return {out, active, folded, allIn, status, showBacks: !out && playing && !folded && Boolean(view?.street),
-    showButton: !out && view?.handInProgress === true && Boolean(seat.isButton),
+    showButton: !out && playing && Boolean(seat.isButton),
     showBet: !out && playing && Number.isSafeInteger(seat.bet) && seat.bet > 0};
 }
 export function participantSummary(view) {

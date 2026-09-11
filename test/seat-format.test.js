@@ -8,6 +8,8 @@ test('elimination comes from explicit engine state, never a zero stack', () => {
   assert.equal(out.status,'탈락');assert.equal(out.active,false);assert.equal(out.showBacks,false);assert.equal(out.showButton,false);assert.equal(out.showBet,false);
   assert.equal(seatPresentation({...view,handInProgress:false},{out:false,folded:true,allIn:true}).status,'플레이 중');
   assert.equal(seatPresentation(view,{stack:0}).status,'상태 확인 불가');
+  assert.equal(seatPresentation({street:'preflop'},{isButton:true}).showButton,true);
+  assert.equal(seatPresentation({handInProgress:false},{isButton:true}).showButton,false);
 });
 test('cash and legacy participant counts do not guess tournament survival', () => {
   const seats=[{out:false},{out:true}];
