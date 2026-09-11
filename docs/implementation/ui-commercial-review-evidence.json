@@ -1,0 +1,488 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-09-11",
+  "scope": "Design and implementation planning only; no product implementation or release approval.",
+  "base_commit": "161cd7a8bdc65dccc6fc550cca6989104166d572",
+  "author_verdict": "READY_FOR_IMPLEMENTATION",
+  "router": {
+    "plugin": "deep-model-router",
+    "version": "1.14.0",
+    "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+    "author_families": [
+      "openai"
+    ],
+    "reviewer_families": [
+      "claude"
+    ],
+    "reviewers_are_cross_provider": false
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "target_files": [
+        "docs/implementation/ui-commercial-design.md",
+        "docs/implementation/ui-commercial-plan.md",
+        "docs/implementation/ui-commercial-preview.html"
+      ],
+      "target_sha256": "f9e628e1ef357e48dd3d2c01e01b14c6f4583ee0d8a19ab8fca26347de723722",
+      "decision_fingerprint": "9b199f2485fb8534b1e2b9c17289d2554857ecc24dca67ec566e4668fb02dce3",
+      "request_sha256": "7e845a94fa30970b95abcde8ff3e0865232cf15629673dd1cc47b86f3a8fc6c4",
+      "deadline_seconds": 600,
+      "source_packet": "Reviewer read-only repository exploration",
+      "receipt_verification": "Opus timeout excluded; Fable report available"
+    },
+    {
+      "round": 2,
+      "target_files": [
+        "docs/implementation/ui-commercial-design.md",
+        "docs/implementation/ui-commercial-plan.md",
+        "docs/implementation/ui-commercial-preview.html"
+      ],
+      "target_sha256": "aa4173f3ac15185ccf0fe89c939cea1ddaff969c1a2a885432362ca55fe65506",
+      "decision_fingerprint": "5c2cf8519c3776f199ba3f93c2f4cb84d657432c7f7f69b291d6f865bfd651c0",
+      "request_sha256": "166cc26b9ceedd35a78b3ae9d8ec9ae092caf71a92ce4a7d48f855bbd65b0687",
+      "deadline_seconds": 1200,
+      "source_packet": "Full documents and targeted source excerpts inline; reviewer tools disabled",
+      "receipt_verification": "Exact fingerprint, both requested models, count=2 and guarded receipts verified; exit 0"
+    },
+    {
+      "round": 3,
+      "target_files": [
+        "docs/implementation/ui-commercial-design.md",
+        "docs/implementation/ui-commercial-plan.md"
+      ],
+      "target_sha256": "e24e90d9b7c3004c6a3ba4141410091a417ace47f84b31547dc6a84d38ed2976",
+      "decision_fingerprint": "3a2c107814c8d29cba2d35623340c2367bcfeef259930d26ff6553e874ee5c80",
+      "request_sha256": "8a24622b4970217c1273f955ad21581388581bd82cd1e9f8f6750ab1c3c77d69",
+      "deadline_seconds": 1200,
+      "source_packet": "Full documents and targeted source excerpts inline; reviewer tools disabled",
+      "receipt_verification": "Exact fingerprint, both requested models, count=2 and guarded receipts verified; exit 0"
+    }
+  ],
+  "attempts": [
+    {
+      "attempt_id": "probe-claude-fable-5-1",
+      "seat": "reviewer-1",
+      "requested_model": "claude-fable-5-1",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": null,
+      "prompt_sha256": "f2f7a5b3548f868a65e0afddfc20dafb4d3ce504cf9e21361ade2cf6e1e8246e",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "0d88ba47165898c74438fd86dffbbbbed0ee4995682613b28cd19d39b064c01e",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T04:36:12Z",
+        "deadline_at": "2026-09-11T04:37:42Z",
+        "finished_at": "2026-09-11T04:36:16Z",
+        "launch_anchor_at": "2026-09-11T04:36:12Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": null,
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "9a09d40fc2575cdf8576fe88e8e9a2063a90f2aa89d8bf29c7440a4188bd2f5b",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "16577578-2b51-45d4-bfcf-9dc8a61d88c4",
+          "served_models": [
+            "claude-fable-5-1",
+            "claude-haiku-4-5-20251001"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 15390,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "probe-claude-opus-5",
+      "seat": "reviewer-1",
+      "requested_model": "claude-opus-5",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": null,
+      "prompt_sha256": "f2f7a5b3548f868a65e0afddfc20dafb4d3ce504cf9e21361ade2cf6e1e8246e",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "1d9ab0899ae1511ad407bc375ecb5ae660f244976749093bf5ec50a7cd54a992",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T04:36:12Z",
+        "deadline_at": "2026-09-11T04:37:42Z",
+        "finished_at": "2026-09-11T04:36:15Z",
+        "launch_anchor_at": "2026-09-11T04:36:12Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": null,
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "879d9b1969bdf25f4fb37cda17d3481d5bd6641f376e410835b1ce4a9aa2ea59",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "8f3b290c-13df-4c43-959a-1b39a28695fe",
+          "served_models": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 14918,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "r1-claude-fable-5-1",
+      "seat": "reviewer-2",
+      "requested_model": "claude-fable-5-1",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "9b199f2485fb8534b1e2b9c17289d2554857ecc24dca67ec566e4668fb02dce3",
+      "prompt_sha256": "492c32446654a055a3edbd5eb7cde515b00af123d21b27dbd814121547200c3f",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "6a03524b4206f4daf56823ea946d41f94c2f284377ddd032c4e806f1bb593140",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T04:45:34Z",
+        "deadline_at": "2026-09-11T04:55:34Z",
+        "finished_at": "2026-09-11T04:53:10Z",
+        "launch_anchor_at": "2026-09-11T04:45:34Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": "PASS_WITH_CHANGES",
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "eef39782d83639da1015c792b9fc7a238f20b82b90219473fc8f225f9dfbf952",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "7ccfa61a-c9fd-4cc6-ab91-2b6e44fd8588",
+          "served_models": [
+            "claude-fable-5-1",
+            "claude-haiku-4-5-20251001"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 514,
+            "cache_creation_input_tokens": 160194,
+            "cache_read_input_tokens": 2102539,
+            "output_tokens": 32555
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "r1-claude-opus-5",
+      "seat": "reviewer-1",
+      "requested_model": "claude-opus-5",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "9b199f2485fb8534b1e2b9c17289d2554857ecc24dca67ec566e4668fb02dce3",
+      "prompt_sha256": "492c32446654a055a3edbd5eb7cde515b00af123d21b27dbd814121547200c3f",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "50a96750442ab693b3a9a7756bd4b3e9696cadac18bea65a2d8309cebccf3461",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T04:45:34Z",
+        "deadline_at": "2026-09-11T04:55:34Z",
+        "finished_at": "2026-09-11T04:55:35Z",
+        "launch_anchor_at": "2026-09-11T04:45:34Z"
+      },
+      "result": {
+        "state": "TIMED_OUT",
+        "exit_status": null,
+        "verdict": null,
+        "schema_valid": null,
+        "termination_confirmed": true,
+        "output_sha256": null,
+        "envelope": {
+          "parse_ok": false,
+          "stop_reason": null,
+          "session_id": null,
+          "served_models": null,
+          "error_type": null,
+          "usage": null
+        }
+      }
+    },
+    {
+      "attempt_id": "r2-claude-fable-5-1",
+      "seat": "reviewer-2",
+      "requested_model": "claude-fable-5-1",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "5c2cf8519c3776f199ba3f93c2f4cb84d657432c7f7f69b291d6f865bfd651c0",
+      "prompt_sha256": "4c0286da73f1775d232c06afe929f2020193fc608a959e55fe891327dbd41fe1",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "96a388245c67e5920ba5db710022b1e3684ee90b42c4e5d963b102f0a5512920",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T05:00:36Z",
+        "deadline_at": "2026-09-11T05:20:36Z",
+        "finished_at": "2026-09-11T05:08:30Z",
+        "launch_anchor_at": "2026-09-11T05:00:36Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": "PASS_WITH_CHANGES",
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "74cea94787d2876b6ff0841eac2a4701b935e2f7cc95cf4f56d7ab849bd12892",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "3d44f436-2e13-4a1a-a637-07323c3c3aee",
+          "served_models": [
+            "claude-fable-5-1",
+            "claude-haiku-4-5-20251001"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 4,
+            "cache_creation_input_tokens": 53558,
+            "cache_read_input_tokens": 3944,
+            "output_tokens": 19047
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "r2-claude-opus-5",
+      "seat": "reviewer-1",
+      "requested_model": "claude-opus-5",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "5c2cf8519c3776f199ba3f93c2f4cb84d657432c7f7f69b291d6f865bfd651c0",
+      "prompt_sha256": "4c0286da73f1775d232c06afe929f2020193fc608a959e55fe891327dbd41fe1",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "3bcb36589feb51a4c62f24cc55c9e1dde6e0c01802014d97eb795194c3188abd",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T05:00:36Z",
+        "deadline_at": "2026-09-11T05:20:36Z",
+        "finished_at": "2026-09-11T05:07:39Z",
+        "launch_anchor_at": "2026-09-11T05:00:36Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": "PASS_WITH_CHANGES",
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "751c3dcb6c1f2be872029f3839785f4f6deb796a704f3d090cf687c94c274578",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "854707d8-f1fa-4c14-b5e0-f67bfc5b1a40",
+          "served_models": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 53489,
+            "cache_read_input_tokens": 3058,
+            "output_tokens": 28316
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "r3-claude-fable-5-1",
+      "seat": "reviewer-2",
+      "requested_model": "claude-fable-5-1",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "3a2c107814c8d29cba2d35623340c2367bcfeef259930d26ff6553e874ee5c80",
+      "prompt_sha256": "003e40d9bc6db417ba568ba46cb4a21c3f2603475cf1e1a3aa9baaafbe6adf92",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "fcedb5c91f92b045ac4e34b4ddce5dec4ccf2160f5a4d542b8f236cfdfbfb2e3",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T05:13:16Z",
+        "deadline_at": "2026-09-11T05:33:16Z",
+        "finished_at": "2026-09-11T05:15:44Z",
+        "launch_anchor_at": "2026-09-11T05:13:16Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": "PASS_WITH_CHANGES",
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "5b51887b39fa114b72a28af786bcbf828d89d247c9c482ddcb2ee18732b35855",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "4fc1fc69-05e9-45e5-b840-7ba734b72a05",
+          "served_models": [
+            "claude-fable-5-1",
+            "claude-haiku-4-5-20251001"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 38622,
+            "cache_read_input_tokens": 3944,
+            "output_tokens": 9592
+          }
+        }
+      }
+    },
+    {
+      "attempt_id": "r3-claude-opus-5",
+      "seat": "reviewer-1",
+      "requested_model": "claude-opus-5",
+      "effort": "high",
+      "permission_mode": "read-only",
+      "transport_id": "codex.to_claude",
+      "decision_fingerprint": "3a2c107814c8d29cba2d35623340c2367bcfeef259930d26ff6553e874ee5c80",
+      "prompt_sha256": "003e40d9bc6db417ba568ba46cb4a21c3f2603475cf1e1a3aa9baaafbe6adf92",
+      "receipt_guard": {
+        "mechanism": "darwin-sandbox-v1",
+        "profile_sha256": "686d95701dd86ca37067a7fe69a0a10218e27dd2963dede4e6ccb2120f0172b9",
+        "protected_root": "/private/tmp/holdem-ui-design-yi3JFY/receipts",
+        "phase": "launched"
+      },
+      "timing": {
+        "started_at": "2026-09-11T05:13:16Z",
+        "deadline_at": "2026-09-11T05:33:16Z",
+        "finished_at": "2026-09-11T05:15:37Z",
+        "launch_anchor_at": "2026-09-11T05:13:16Z"
+      },
+      "result": {
+        "state": "SUCCEEDED",
+        "exit_status": 0,
+        "verdict": "PASS_WITH_CHANGES",
+        "schema_valid": true,
+        "termination_confirmed": true,
+        "output_sha256": "e7c586a77129492e1c375ed71653bcea042b0c2d265e1c1937ebdbe5bab0c006",
+        "envelope": {
+          "parse_ok": true,
+          "stop_reason": "end_turn",
+          "session_id": "ea157230-f6e4-4f49-8ea4-a4d5b69284b9",
+          "served_models": [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5"
+          ],
+          "error_type": "success",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 39031,
+            "cache_read_input_tokens": 3058,
+            "output_tokens": 9261
+          }
+        }
+      }
+    }
+  ],
+  "final_artifact_sha256": [
+    {
+      "path": "docs/implementation/ui-commercial-design.md",
+      "sha256": "ce64c083a68b00718f8831d7d08a34abd454a8d71b3b6a1e3c97924f9361f070"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-plan.md",
+      "sha256": "0fb3549758fc673e6c19ced2f0562b41ea33aef88841fd863350e3e9a7bc78ae"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-preview.html",
+      "sha256": "60c86cca5cd4b074d306e51946c5bd0fd782ee9744237d5bea1bd3cd6be4ef21"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review-r1-fable.md",
+      "sha256": "9de504c3f038a7ed52a458c27136749b6c899e4cf1177e28211a31f67f448b3f"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review-r2-fable.md",
+      "sha256": "fbabffd5bb57a9549b7598c8e3366a4ac2fec7665ba3f85fb8aa0b6e1017518f"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review-r2-opus.md",
+      "sha256": "c3e637ca4bdbc934e972ce74b40048b9a48f3d3fab796daeb44eacad22350fd6"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review-r3-fable.md",
+      "sha256": "7b42ceebc7d6316074b32b448a48fd1e4690e0a11d820a9c5a88ce1d951553cb"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review-r3-opus.md",
+      "sha256": "faeb1083a3478b4cd5653fbd5eb2bf1f6bcf559b80fada5652256c9b56664a8a"
+    },
+    {
+      "path": "docs/implementation/ui-commercial-review.md",
+      "sha256": "6db30c8290911a7a5dd4b644e0d1fdb3fa05bc6a26df11b41b73ceaf2ce05fe2"
+    }
+  ],
+  "post_r3_author_refinements": {
+    "independently_rereviewed": false,
+    "changes": [
+      "pendingCorrection lifetime and first-click confirmation after blur clamp",
+      "Public table cards restricted to matching hand public showdown reveals/mucks and own cards; missing source is not muck",
+      "Missing or empty completed pots displays unavailable, not zero",
+      "Nine-seat explanatory text aligned with canonical slot mapping",
+      "Browser install failure stays failure; existing 0.36.0 pin verified",
+      "Additional input, compatibility, privacy and missing-pot assertions assigned to plan tests"
+    ],
+    "rationale": "No blocks_implementation=true findings in either R3 report; bounded clarifications adjudicated against source; implementation and code review remain outstanding."
+  },
+  "baseline_validation": {
+    "command": "node --test test/table-ux.test.js test/views.test.js test/replay-format.test.js",
+    "passed": 56,
+    "failed": 0,
+    "skipped": 0,
+    "new_feature_test_result": false
+  },
+  "limitations": [
+    "Final artifact hashes differ from reviewed R3 target; final refinements were author-adjudicated.",
+    "Review output modelUsage may include an auxiliary Haiku model as well as the requested primary model; served_models is retained without claiming exclusive execution.",
+    "Visual prototype checks are static fixture observations, not production app lifecycle validation.",
+    "Full raw CLI envelopes, prompts, frozen targets and route files are retained in a temporary local directory, not a durable repository archive. Human-readable successful reports are committed-ready alongside this evidence file."
+  ],
+  "local_raw_evidence_directory": "/tmp/holdem-ui-design-yi3JFY"
+}
