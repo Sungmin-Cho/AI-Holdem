@@ -1992,8 +1992,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let deadlineAt;
     let softDeadlineAt;
     const floor = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
-    const correctionSkip = () => stopRequested ? 'stop' : pauseRequested ? 'pause'
-      : deadlineAt - monotonicNow() < floor ? 'budget' : null;
+    const correctionSkip = () => {
+      if (stopRequested) return 'stop';
+      if (pauseRequested) return 'pause';
+      const remaining = deadlineAt - monotonicNow();
+      return remaining <= 0 || remaining < floor ? 'budget' : null;
+    };
     const logSkipped = reason => log('player-correction-skipped', {decisionId:next.decisionId,
       generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
     const rejectionContext = {generation:record.generation, decisionId:record.decisionId, gameEpoch:record.gameEpoch};
@@ -2063,7 +2067,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           callNo, detail:lastRejection.detail, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
         message = correctionMessage(next.message, lastRejection, rejectionContext);
         timeoutMs = Math.ceil(deadlineAt - monotonicNow());
-        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs < floor ? 'budget_after_commit' : null;
+        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
         if (finalSkip) {
           callNo -= 1; corrections = 0;
           commitPending({diagnostics:{...record.diagnostics, callNo, corrections}});
@@ -2077,7 +2081,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const softTimer = setTimeout(() => {
         if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
         if (record.proposedAction || record.softWait) return;
-        commitPending({softWait:true});
+        try { commitPending({softWait:true}); }
+        catch (error) {
+          // The awaited decision path reports stale identity. A timer must not
+          // turn that recoverable rejection into an uncaught process exception.
+          if (error.code === 'STALE_PLAYER_DECISION') return;
+          throw error;
+        }
         log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
