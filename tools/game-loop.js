@@ -265,6 +265,19 @@ export function unresolvedEvidenceGuidance(unresolved) {
   if (withEvidence.length > 0 && withEvidence.every((row) => row.evidence.attributable === false)) {
     return '게임 디렉터리가 이동했거나 경로를 확인할 수 없는 행입니다. halt.recovery.commands 실행 전에 게임 디렉터리 위치를 먼저 확인하세요.';
   }
+  // #192 O1/L1 부록 v3.2: judgment g가 legacy 행을 프로세스 스캔으로 판정했지만 여전히
+  // unresolved로 남은 두 경우 — 후보 프로세스가 있거나(fail-closed), 조회 자체가
+  // 불가능했던 경우 — 는 일반 "증거 없는 legacy" 문구보다 구체적인 안내가 필요하다.
+  // g는 sidecar가 absent인 행에만 적용되므로 이 두 reason은 항상 evidence를 동반한다.
+  if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT')) {
+    const pids = [...new Set(withEvidence.flatMap((row) => row.evidence?.legacyScanPids ?? []))];
+    return pids.length > 0
+      ? `legacy 행과 연결됐을 수 있는 coach CLI 프로세스(pid: ${pids.join(', ')})가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.`
+      : 'legacy 행과 연결됐을 수 있는 coach CLI 프로세스가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.';
+  }
+  if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_SCAN_UNAVAILABLE')) {
+    return 'legacy 행의 coach 런타임 프로세스 여부를 확인할 수 없습니다. halt.recovery.commands를 검토해 실행하세요.';
+  }
   // Genuinely evidence-free legacy: no handle was ever recorded, no new-protocol stamp, and
   // the sidecar has never been seen at all (not merely unreadable/invalid/moved).
   if (withEvidence.length > 0 && withEvidence.every((row) => (
@@ -278,6 +291,109 @@ export function unresolvedEvidenceGuidance(unresolved) {
   // authority/epoch/owner/deadline/adapter-disable failure, not a coach-row evidence
   // classification — neither wording applies, and claiming "legacy" would mislead.
   return null;
+}
+
+// #192 O1/L1 부록 v3.2: legacy 행 자동 복구용 프로세스 스캐너. player-runtime.js의
+// ensureCwd()는 코치 CLI 자식을 `realpath(os.tmpdir())/ai-holdem-<kind>-XXXXXX` 전용
+// cwd에서 띄운다 — 그 경로 관례를 `lsof -d cwd` 출력과 대조해 이 uid 아래 아직 남아
+// 있을 수 있는 코치 런타임 프로세스를 찾는다. 실제 판정(judgment g)은
+// createGameLoop 안 `terminatePersistedCoachAttempt`가 소유한다 — 아래 함수들은
+// 순수 파싱/매칭이라 픽스처 문자열만으로 단위 테스트할 수 있다.
+function aiHoldemCwdSegment(cwd) {
+  return String(cwd ?? '').split(/[\\/]+/).some((segment) => segment.startsWith('ai-holdem-'));
+}
+
+// `lsof -n -P -a -u <uid> -d cwd -Fpn`은 프로세스마다 `p<pid>` 레코드 하나, 그 식별
+// 대상 파일디스크립터를 밝히는 `f<fd>` 레코드 하나(`-F`가 지정한 필드와 무관하게
+// lsof가 항상 내보내는 필수 식별 필드 — 실측: 이 머신에서 `-Fpn` 출력도 예외 없이
+// `p`마다 `fcwd`가 끼어 있다), 그리고 그 파일의 이름(여기서는 cwd 경로)을 담은
+// `n<path>` 레코드 하나로 된 `(p, f, n)` 삼중항이 반복되는 구조다. 이 순서가 깨지거나
+// (짝이 맞지 않는 p/f/n, 알 수 없는 레코드 태그, 중간에 잘린 삼중항) 하면 전체 출력을
+// 신뢰할 수 없다는 뜻이므로 `null`을 반환한다 — 호출자는 이를 "조회 불가"로 취급해야
+// 하며, 절대 "매칭되는 후보 0개"로 착각해서는 안 된다. 빈 문자열만은 예외로, 프로세스가
+// 하나도 나열되지 않은 정상적인 빈 표를 뜻하므로 빈 배열을 반환한다.
+export function parseLsofCwdRecords(stdout) {
+  const text = String(stdout ?? '');
+  if (text.trim() === '') return [];
+  const lines = text.split(/\r?\n/).filter((line) => line !== '');
+  const records = [];
+  let i = 0;
+  while (i < lines.length) {
+    const pLine = lines[i];
+    if (pLine[0] !== 'p') return null;
+    const pid = Number(pLine.slice(1));
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    const fLine = lines[i + 1];
+    if (!fLine || fLine[0] !== 'f') return null;
+    const nLine = lines[i + 2];
+    if (!nLine || nLine[0] !== 'n') return null;
+    records.push({ pid, cwd: nLine.slice(1) });
+    i += 3;
+  }
+  return records;
+}
+
+// player-runtime.js가 코치 CLI를 띄우는 cwd 관례(`ai-holdem-<kind>-XXXXXX`)와 대조해
+// 후보 프로세스만 골라낸다. `excludePid`는 이 loop 프로세스 자신이다 — 스캔이 자기
+// 자신을 legacy 코치 런타임으로 오인해서는 안 된다.
+export function legacyCoachRuntimeCandidates(records, { excludePid = null } = {}) {
+  return records
+    .filter((record) => record.pid !== excludePid && aiHoldemCwdSegment(record.cwd))
+    .map((record) => ({ pid: record.pid, cwd: record.cwd }));
+}
+
+// 기본 스캐너 구현: POSIX에서 이 프로세스 uid 아래, cwd fd 하나만(`-d cwd`) 골라
+// `-Fpn`으로 pid/경로 쌍만 받는다. 서버 소유 확인과 달리 exit 1 + 빈 출력을 "매칭 없음"으로
+// 읽지 않는다: 이 uid 조회에는 스캔하는 프로세스 자신이 반드시 나와야 하므로, 자기 pid가
+// 없는 결과는 전부 조회 불가다(#192 구현 리뷰 전 오케스트레이터 검토).
+export function scanCoachRuntimeProcesses({
+  lsofPath, timeoutMs = 5_000, excludePid = process.pid, selfPid = process.pid, execFileFn = execFile,
+} = {}) {
+  if (process.platform === 'win32') {
+    return Promise.resolve({ status: 'unavailable', reason: 'WIN32_UNSUPPORTED' });
+  }
+  if (!lsofPath) return Promise.resolve({ status: 'unavailable', reason: 'LSOF_MISSING' });
+  let uid;
+  try {
+    uid = process.getuid?.();
+  } catch {
+    uid = undefined;
+  }
+  if (!Number.isInteger(uid)) return Promise.resolve({ status: 'unavailable', reason: 'UID_UNAVAILABLE' });
+  return new Promise((resolve) => {
+    execFileFn(lsofPath, [
+      '-n', '-P', '-a', '-u', String(uid), '-d', 'cwd', '-Fpn',
+    ], {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout) => {
+      // A scan of this uid always includes the scanning process itself, so "no output" is
+      // never proof of "no coach runtime process": lsof exits 1 with nothing when it could
+      // not observe anything at all. Only a parseable listing that contains our own pid is
+      // trusted; anything else is unavailable (fail-closed), never clean.
+      if (error && (error.killed || error.signal || Number(error.code) !== 1)) {
+        resolve({ status: 'unavailable', reason: error.killed ? 'LSOF_TIMEOUT' : 'LSOF_FAILED' });
+        return;
+      }
+      if (String(stdout ?? '').trim() === '') {
+        resolve({ status: 'unavailable', reason: 'LSOF_NO_OUTPUT' });
+        return;
+      }
+      const records = parseLsofCwdRecords(stdout);
+      if (records === null) {
+        resolve({ status: 'unavailable', reason: 'LSOF_OUTPUT_UNPARSEABLE' });
+        return;
+      }
+      if (!records.some((record) => record.pid === selfPid)) {
+        resolve({ status: 'unavailable', reason: 'SELF_NOT_OBSERVED' });
+        return;
+      }
+      const candidates = legacyCoachRuntimeCandidates(records, { excludePid });
+      resolve(candidates.length > 0 ? { status: 'candidates', candidates } : { status: 'clean' });
+    });
+  });
 }
 
 function readJsonOptional(filePath, label) {
@@ -658,6 +774,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     },
   });
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
+  // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
+  // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
+  const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
+    ?? (() => scanCoachRuntimeProcesses({ lsofPath, timeoutMs: osVerifyMs }));
   // #192 E2: test seam for the per-attempt spawn sidecar writes. Always synchronous, like
   // writeJsonAtomic itself — the spawn sequence relies on no `await` landing between steps.
   const writeSpawnEvidence = opts.writeSpawnEvidence ?? writeJsonAtomic;
@@ -1180,6 +1300,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   );
   const runCliBeforeResultCutoff = (args) => runCli(args, resultWaitSupervisor());
   const runCoachBeforeResultCutoff = (args) => runCoach(args, resultWaitSupervisor());
+  // #192 I4: test seam for wherever the loop spawns the publish CLI — defaults to the real
+  // tools/publish.js path.
+  const publishCliPath = opts.publishCliPath ?? PUBLISH_CLI;
   const runPublish = (args) => {
     // Replayed bodies and queued/fallback envelopes cross the same output boundary.
     const from = args.indexOf('--from');
@@ -1207,7 +1330,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ? [...args, '--deadline-monotonic-ns', String(publishDeadlineNs)]
       : args;
     opts.onPublishInvoke?.([...deadlined]);
-    return runJsonChild(PUBLISH_CLI, deadlined);
+    return runJsonChild(publishCliPath, deadlined);
   };
 
   const serverHealthy = async (port, { stopAware = false } = {}) => {
@@ -3558,6 +3681,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     identityDeadlineNs = deadlineNs,
     gameEpoch = null,
     closures = null,
+    getLegacyScan = null,
   } = {}) => {
     const sidecar = readCoachSpawnSidecar(attempt.exactResultPath);
     const attributable = coachEvidenceAttributable(attempt.exactResultPath);
@@ -3618,6 +3742,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const notSpawnedSidecar = sidecar.phase === 'absent' || sidecar.phase === 'aborted-before-spawn';
     if (handleIsNullish && attempt.spawnEvidence === 1 && attributable && notSpawnedSidecar) {
       return withEvidence({ confirmed: true, reason: 'NOT_SPAWNED', cleanupState: 'released' });
+    }
+
+    // g: #192 O1/L1 부록 v3.2 — legacy 행 자동 복구. identity는 이미 위에서 null로
+    // 확인됐다(핸들 없음, 파싱 불가 핸들, "pid:null" 포함 모두 여기 도달한다). 새
+    // 프로토콜 행(spawnEvidence===1)·acceptEvidence가 있는 행·sidecar가 한 번이라도
+    // 관측된 행(‘absent’가 아닌 모든 phase)·경로 귀속 안 되는 행은 절대 g를 타지
+    // 않는다. closure당 한 번만 lazy하게 스캔한다(`getLegacyScan`이 그 캐시를 쥔다).
+    const legacyEligible = attempt.spawnEvidence !== 1
+      && attempt.acceptEvidence == null
+      && sidecar.phase === 'absent'
+      && attributable;
+    if (legacyEligible && getLegacyScan) {
+      const scan = await getLegacyScan();
+      if (scan.status === 'clean') {
+        return withEvidence({ confirmed: true, reason: 'LEGACY_NO_RUNTIME_PROCESS', cleanupState: 'released' });
+      }
+      if (scan.status === 'candidates') {
+        evidence.legacyScanPids = scan.candidates.map((candidate) => candidate.pid);
+        return withEvidence({
+          confirmed: false, reason: 'LEGACY_RUNTIME_PROCESS_PRESENT', cleanupState: 'termination_unconfirmed',
+        });
+      }
+      return withEvidence({
+        confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
+      });
     }
 
     // e: everything else — intent-only, identity-unavailable, invalid/corrupt sidecar,
@@ -3755,12 +3904,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }],
       };
     }
+    // #192 O1/L1: the legacy-row scan runs at most once per closure, lazily — created only
+    // if some attempt actually turns out to need it (judgment g's own eligibility check),
+    // and only while this instance still owns the loop lock (never for an instance that has
+    // lost lock ownership mid-flight, e.g. after a lock-identity check like I5's).
+    let legacyScanPromise = null;
+    const getLegacyScan = () => {
+      if (!legacyScanPromise) {
+        legacyScanPromise = (lockHandle && verifyOwnedLock(lockHandle)
+          ? Promise.resolve().then(() => scanCoachRuntimeProcessesFn())
+          : Promise.resolve({ status: 'unavailable', reason: 'LOCK_NOT_OWNED' })
+        ).catch(() => ({ status: 'unavailable', reason: 'SCAN_THREW' })).then((scan) => {
+          log('coach-legacy-scan', {
+            status: scan.status,
+            candidateCount: scan.status === 'candidates' ? scan.candidates.length : 0,
+          });
+          return scan;
+        });
+      }
+      return legacyScanPromise;
+    };
     const outcomes = await Promise.all(attempts.map(async (attempt) => ({
       attempt,
       result: await terminatePersistedCoachAttempt(attempt, deadlineNs, {
         identityDeadlineNs,
         gameEpoch,
         closures,
+        getLegacyScan,
       }),
     })));
 
@@ -3831,6 +4001,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         reason: result.reason,
         cleanupAuthorized: result.cleanupAuthorized ?? attempt.cleanupAuthorized,
         evidence: result.evidence,
+        // #192 O1/L1: only used by `persistedCoachRecovery` to build a foreign row's
+        // operator-confirmed recovery command; never affects classification.
+        ownerSessionId: attempt.ownerSessionId,
       }));
     const confirmed = unresolved.length === 0;
     if (!confirmed) {
@@ -4931,19 +5104,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const persistedCoachRecovery = ({ owner, unresolved }) => {
-    const commands = unresolved
-      .filter((attempt) => attempt.cleanupAuthorized)
-      .map((attempt) => ({
-        program: process.execPath,
-        args: [
-          COACH_CLI, 'cleanup-result',
-          '--owner', owner,
-          '--hand', String(attempt.handNo),
-          '--generation', String(attempt.generation),
-          '--cleanup-state', 'released',
-          '--game-dir', root,
-        ],
-      }));
+    const commands = unresolved.flatMap((attempt) => {
+      if (attempt.handNo == null || attempt.generation == null) return [];
+      const base = [
+        COACH_CLI, 'cleanup-result',
+        '--owner', owner,
+        '--hand', String(attempt.handNo),
+        '--generation', String(attempt.generation),
+        '--cleanup-state', 'released',
+      ];
+      if (attempt.cleanupAuthorized) {
+        return [{ program: process.execPath, args: [...base, '--game-dir', root] }];
+      }
+      // #192 O1/L1: a genuinely foreign row (its own ownerSessionId differs from the
+      // current owner, and it is not cleanupEligible — e.g. a legacy row judgment g could
+      // not auto-recover) still gets an operator-confirmed recovery command naming its
+      // actual owner — mirrors coach-control.js's recordCleanup `--row-owner` +
+      // `--operator-confirmed 1` escape hatch, which the loop itself never runs on its
+      // own. `cleanupAuthorized` can also be false for a *same*-owner row whose write
+      // attempt itself failed for an unrelated reason (e.g. FENCE_CHILD_FAILED) — that is
+      // not a foreign-row case, and must not fabricate a `--row-owner` command for it.
+      if (
+        typeof attempt.ownerSessionId === 'string'
+        && attempt.ownerSessionId
+        && attempt.ownerSessionId !== owner
+      ) {
+        return [{
+          program: process.execPath,
+          args: [
+            ...base,
+            '--row-owner', attempt.ownerSessionId,
+            '--operator-confirmed', '1',
+            '--game-dir', root,
+          ],
+        }];
+      }
+      return [];
+    });
     return {
       code: 'COACH_HANDLE_UNRESOLVED',
       owner,

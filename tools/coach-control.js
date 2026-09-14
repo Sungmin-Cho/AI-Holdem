@@ -1111,7 +1111,15 @@ export function createCoachControl(deps = {}) {
     ));
   }
 
-  async function recordCleanup({ gameDir, owner, handNo, generation, cleanupState }) {
+  // #192 O1/L1: `rowOwner` lets the caller (who must still be the current active owner —
+  // `requireAuth` below already enforces that) reach a genuinely foreign retired row (its
+  // own `ownerSessionId` differs from the caller and it is not `cleanupEligible`) for
+  // manual operator recovery — e.g. a legacy row judgment g could not auto-recover on its
+  // own. It is honoured only together with `operatorConfirmed === true`; the CLI itself
+  // refuses `--row-owner` without `--operator-confirmed 1` before ever calling this.
+  async function recordCleanup({
+    gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false,
+  }) {
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
       const allowed = new Set(['cancelled', 'released', 'termination_unconfirmed', 'release_failed', 'pending']);
@@ -1119,7 +1127,11 @@ export function createCoachControl(deps = {}) {
       const row = [...auth.retiredAttempts].reverse().find((entry) => (
         entry.handNo === handNo
         && (generation == null || entry.generation === generation)
-        && (entry.ownerSessionId === owner || entry.cleanupEligible)
+        && (
+          entry.ownerSessionId === owner
+          || entry.cleanupEligible
+          || (operatorConfirmed && rowOwner != null && entry.ownerSessionId === rowOwner)
+        )
       ));
       if (!row) fail('NO_RETIRED', '회수 대상 retired entry가 없습니다.');
       row.cleanupState = cleanupState;
@@ -1538,12 +1550,22 @@ async function cliMain() {
       snapshotFile: opts['snapshot-file'],
     });
   } else if (command === 'cleanup-result') {
+    // #192 O1/L1: --row-owner is an operator-only escape hatch for a genuinely foreign
+    // retired row (e.g. a legacy row automatic recovery could not resolve on its own) —
+    // it is honoured only alongside --operator-confirmed 1; without that flag it is USAGE
+    // and nothing is written.
+    const operatorConfirmed = opts['operator-confirmed'] === '1';
+    if (opts['row-owner'] != null && !operatorConfirmed) {
+      fail('USAGE', '--row-owner에는 --operator-confirmed 1이 함께 필요합니다.');
+    }
     result = await cc.recordCleanup({
       gameDir,
       owner: opts.owner,
       handNo: Number(opts.hand),
       generation: opts.generation == null ? undefined : Number(opts.generation),
       cleanupState: opts['cleanup-state'] ?? opts.reason,
+      rowOwner: opts['row-owner'] ?? null,
+      operatorConfirmed,
     });
   } else if (command === 'rollback-guard') {
     result = await cc.assertRollbackAllowed(gameDir);

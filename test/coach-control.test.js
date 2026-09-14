@@ -1008,3 +1008,72 @@ test('#192 S3: accept CLI는 --accept-evidence 값을 authority retired row에 �
   const row = cc.loadAuthority(dir).retiredAttempts.find((entry) => entry.handNo === 1);
   assert.equal(row.acceptEvidence, 'no-spawn');
 });
+
+// #192 O1/L1: operator fallback for a foreign retired row (e.g. a legacy row automatic
+// recovery — game-loop.js's judgment g — could not resolve on its own).
+async function seedForeignRetiredRow() {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  await cc.fence({ gameDir: dir, owner, handNo: 1, generation: reserved.generation, reason: 'test-fence' });
+  const newOwner = '22222222-2222-4222-8222-222222222222';
+  await cc.beginOwner({ gameDir: dir, owner: newOwner, completed: 0, statsFile, snapshotFile });
+  return { dir, cc, oldOwner: owner, newOwner, generation: reserved.generation };
+}
+
+test('#192 L1: cleanup-result CLI는 --operator-confirmed 1 없이 --row-owner를 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, newOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--owner', newOwner,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, '--operator-confirmed 없이 --row-owner가 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'USAGE');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 L1: cleanup-result CLI --row-owner + --operator-confirmed 1은 foreign 행만 released로 만든다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, cc, oldOwner, newOwner, generation } = await seedForeignRetiredRow();
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    path.resolve('tools/coach-control.js'),
+    'cleanup-result',
+    '--game-dir', dir,
+    '--owner', newOwner,
+    '--hand', '1',
+    '--generation', String(generation),
+    '--cleanup-state', 'released',
+    '--row-owner', oldOwner,
+    '--operator-confirmed', '1',
+  ], { encoding: 'utf8', timeout: 10000 });
+  const json = JSON.parse(stdout.trim());
+  assert.equal(json.ok, true, JSON.stringify(json));
+  assert.equal(json.cleanupState, 'released');
+  const row = cc.loadAuthority(dir).retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.equal(row?.ownerSessionId, oldOwner, 'released된 행이 foreign owner의 행이 아니다');
+});
