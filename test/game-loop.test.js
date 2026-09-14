@@ -9344,3 +9344,28 @@ test('#194 generation changed during correction cannot apply a stale reply', {ti
   await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
   assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
 });
+
+test('#194 BB option bet needs correction while legacy unopened bet retries without it', {timeout:30000 * WIN32_SCALE},async t=>{
+  for(const legacy of [false,true]) await t.test(legacy?'legacy':'BB option',async st=>{
+    const adapter=makeAdapter({onDecide:async({message},n)=>({raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:n===1?'bet':'raise',amount:Number(/minRaiseTo=(\d+)/.exec(message)[1])})})});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,stack:5000,loopOpts:{monotonicNow:()=>0}});
+    if(!legacy) putUserOnTheButton(gameDir);
+    await cliJson(gameDir,['step','--new-hand']);
+    if(legacy) {await cliJson(gameDir,['apply','p1','call']);await cliJson(gameDir,['apply','user','check']);
+      if((await cliJson(gameDir,['step'])).next.toAct==='user') await cliJson(gameDir,['apply','user','check']);}
+    else await cliJson(gameDir,['apply','user','call']);
+    const next=(await cliJson(gameDir,['step'])).next;
+    assert.equal(next.toAct,'p1');
+    if(legacy) {
+      const filename=path.join(gameDir,'loop-state.json'),state=readJson(filename);
+      const version=(await cliJson(gameDir,['step'])).stateVersion;
+      writeJsonAtomic(filename,{...state,pendingDecision:{schemaVersion:1,gameEpoch:state.gameEpoch,decisionId:next.decisionId,stateVersion:version,playerId:'p1',generation:1,status:'recovery_required',closeConfirmed:true,code:'INVALID_DECISION'}});
+      await loop.retryDecision(next.decisionId);
+    }
+    await runUntilUserBoundary(loop,gameDir);
+    const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0];
+    assert.equal(adapter.decideCalls.length,legacy?1:2);
+    assert.equal(metric.outcome,'retried_accepted'); assert.equal(metric.corrected,legacy?undefined:true);
+    if(!legacy) assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-rejected'&&x.detail==='bet_ambiguous'));
+  });
+});

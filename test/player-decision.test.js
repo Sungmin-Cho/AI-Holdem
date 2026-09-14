@@ -67,3 +67,13 @@ test('#194 correction preserves original bytes and appends only validated diagno
   assert.throws(()=>d.correctionMessage(next.message,record({raw:'SECRET'}),ctx),TypeError);
   assert.doesNotMatch(d.correctionMessage('decisionId: d-15-flop-8',record(),ctx),/이 차례의 합법 액션/);
 });
+test('#194 settled rejections are valid at the current call but future calls are rejected',()=>{
+  const p=pending({generation:1,status:'recovery_required',code:'INVALID_DECISION'});
+  assert.equal(d.validateDiagnostics(p.diagnostics,p).ok,true);
+  p.diagnostics.lastRejection.callNo=2;
+  assert.equal(d.validateDiagnostics(p.diagnostics,p).reason,'rejection_callNo');
+  p.diagnostics.lastRejection.callNo=1;p.code='TIMEOUT';
+  assert.equal(d.retryWillCorrect(p),true);
+  p.diagnostics.detail='bet_ambiguous';assert.equal(d.validateDiagnostics(p.diagnostics,p).reason,'status_detail');
+  delete p.diagnostics.detail;delete p.diagnostics.lastRejection;assert.equal(d.retryWillCorrect(p),false);
+});
