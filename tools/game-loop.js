@@ -169,6 +169,83 @@ function codedError(code, message, extra = {}) {
   return error;
 }
 
+// #192 D5 (design memo §4 D5, G11): top-level error `code` values the three coach/publish/
+// engine CLI children can legitimately print on their own stdout — every `fail(...)`/
+// `bail(...)` (CoachError/ToolError) call and every literal top-level `code:` field in
+// tools/coach-control.js and tools/publish.js, plus engine/cli.js's FAIL_MESSAGES keys, its
+// own `fail(...)` call sites, and its uncaught-error fallback ('ERROR'). Deliberately
+// excludes the lowercase `reasons[].code` tags nested inside coach-control's
+// ROLLBACK_REFUSED response body — those are a separate, non-top-level vocabulary. A
+// BAD_CHILD_OUTPUT diagnostic never reports a `code` outside this set; anything else
+// (including a well-formed but unrecognized string) becomes 'UNLISTED' so a crafted or
+// buggy child can never smuggle private text through this field.
+const KNOWN_CHILD_ERROR_CODES = new Set([
+  // tools/coach-control.js
+  'STALE_GAME_EPOCH', 'STALE_GENERATION', 'INVALID_COACH_OUTPUT', 'USAGE', 'NO_RETIRED',
+  'STALE_OWNER', 'COMPLETED_MISMATCH', 'BAD_FORBIDDEN_FILE', 'SPAWN_PROTOCOL_REQUIRED',
+  'NO_LOCK', 'UNSUPPORTED_COACH_AUTHORITY', 'UNSAFE_PATH', 'MISSING_PATH', 'SYMLINK_PATH',
+  'NOT_FILE', 'MULTI_LINK_PATH', 'GENERATION_REQUIRED', 'NO_AUTHORITY', 'NO_ENVELOPE',
+  'ADAPTER_DISABLED', 'ATTEMPT_TIMEOUT', 'FINALIZATION_ABORTED', 'HAND_ALREADY_PUBLISHED',
+  'HAND_DEFERRED', 'HAND_SNAPSHOT_OCCUPIED', 'NO_RESULT', 'PUBLISH_FAILED',
+  'QUEUE_ALREADY_SEALED', 'ROLLBACK_REFUSED', 'SUPERSEDED', 'INTERNAL',
+  // tools/publish.js
+  'BAD_ENVELOPE', 'BAD_AUTHORITY', 'BAD_TRAINING_AUTHORITY', 'STALE_TRAINING_AUTHORITY',
+  'UNSUPPORTED_TRAINING_AUTHORITY', 'STALE_ANNOTATION_AUTHORITY', 'PUBLISH_REJECTED',
+  'DEADLINE_EXPIRED', 'NO_ATTEMPT', 'ATTEMPT_PENDING', 'BAD_ATTEMPT',
+  'PLAYTIME_PUBLISH_STOPPED', 'PUBLISH_ID_OVERFLOW', 'BAD_HAND_REPLAY', 'BAD_ACTION_ACK',
+  'PAYLOAD_TOO_LARGE', 'PUBLISH_ID_REUSED', 'LOCK_TIMEOUT',
+  // engine/cli.js
+  'ILLEGAL_ACTION', 'GAME_OVER', 'LOCKED', 'VERSION_MISMATCH', 'NO_GAME', 'ACTIVE_GAME',
+  'ARCHIVE_FAILED', 'SERVER_ALIVE', 'HAND_NOT_FOUND', 'SNAPSHOT_INVALID', 'BAD_CONFIG',
+  'LOOP_ALIVE', 'OPERATION_CONFLICT', 'ERROR',
+]);
+
+function classifyChildOutputCode(rawCode) {
+  return typeof rawCode === 'string' && KNOWN_CHILD_ERROR_CODES.has(rawCode) ? rawCode : 'UNLISTED';
+}
+
+// Pure by design so it can be unit-tested without spawning any child process: given the raw
+// bytes a child printed (and how it exited), build the redacted diagnostic `details` object
+// for a BAD_CHILD_OUTPUT error. `code` is included only when stdout parsed as JSON at all
+// (regardless of shape) — a non-string, an object, an over-long string, or any string
+// outside `KNOWN_CHILD_ERROR_CODES` all collapse to 'UNLISTED'. Raw stdout/stderr text is
+// never included, only their byte lengths.
+export function buildBadChildOutputDetails({ script, exitCode, signal, stdout, stderr }) {
+  const stdoutText = String(stdout ?? '');
+  const stderrText = String(stderr ?? '');
+  let parsed;
+  let parsedOk = true;
+  try { parsed = JSON.parse(stdoutText.trim()); } catch { parsedOk = false; }
+  const rawCode = parsedOk && parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed.code
+    : undefined;
+  return {
+    script: path.basename(script),
+    exitCode,
+    signal,
+    stdoutBytes: Buffer.byteLength(stdoutText, 'utf8'),
+    stderrBytes: Buffer.byteLength(stderrText, 'utf8'),
+    ...(parsedOk ? { code: classifyChildOutputCode(rawCode) } : {}),
+  };
+}
+
+// #192 D5: distinguishes, for an operator halted on unresolved coach rows, whether any row
+// still carries a spawn-intent sidecar (a spawn may genuinely have happened — verify no
+// leftover coach CLI child) from a set of rows that never carried any evidence at all
+// (a legacy pre-stamp row, or a synthetic authority-level failure row) — manual, from-
+// scratch verification. Returns null when neither category applies, leaving the base
+// message unchanged.
+function unresolvedEvidenceGuidance(unresolved) {
+  const withEvidence = unresolved.filter((row) => row?.evidence);
+  if (withEvidence.some((row) => row.evidence.sidecar === 'intent')) {
+    return 'spawn이 실제로 시작됐을 수 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 halt.recovery.commands를 실행하세요.';
+  }
+  if (withEvidence.length === 0 || withEvidence.every((row) => row.evidence.sidecar === 'absent')) {
+    return '증거가 없는 legacy 행입니다. 수동으로 이 게임의 coach CLI 자식 부재를 확인한 뒤 halt.recovery.commands를 검토하세요.';
+  }
+  return null;
+}
+
 function readJsonOptional(filePath, label) {
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -1026,7 +1103,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           return;
         }
         if (!envelope || envelope.ok !== true) {
-          reject(codedError('BAD_CHILD_OUTPUT', `${path.basename(script)} 출력이 JSON 성공 envelope가 아닙니다.`));
+          reject(codedError(
+            'BAD_CHILD_OUTPUT',
+            `${path.basename(script)} 출력이 JSON 성공 envelope가 아닙니다.`,
+            { details: buildBadChildOutputDetails({ script, exitCode: child.exitCode, signal: child.signalCode, stdout, stderr }) },
+          ));
           return;
         }
         if (deadlineNs !== null && remainingMsUntil(deadlineNs) <= 0) {
@@ -2262,7 +2343,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         executePublish,
       });
     } catch (error) {
-      log('training-publish-error', { code: error.code ?? 'ERROR' });
+      log('training-publish-error', {
+        code: error.code ?? 'ERROR',
+        ...(error.details ? { details: error.details } : {}),
+      });
       if (error.code === 'TRAINING_MARK_FAILED'
         || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
         machinePublishHalt = error.code;
@@ -2284,7 +2368,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         onNotice: appendNotice,
       });
     } catch (error) {
-      log('training-annotation-publish-error', { code: error.code ?? 'ERROR' });
+      log('training-annotation-publish-error', {
+        code: error.code ?? 'ERROR',
+        ...(error.details ? { details: error.details } : {}),
+      });
       if (error.code === 'TRAINING_MARK_FAILED'
         || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
         annotationPublishHalt = error.code;
@@ -3253,11 +3340,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // tools/coach-control.js) straight onto the attempt object, and any such stamp closes the
   // row regardless of which value it is. When a row carries both kinds of evidence, c wins
   // (checked first) — either is a legitimate close, so which reason string is reported does
-  // not change the outcome. This must stay a pure, side-effect-free read so consulting it
-  // twice for the same attempt (the H2 fast path below, and the post-poll fallback) is
-  // always safe. Returns `{ reason }` when evidence closes the row, otherwise `null`.
-  const consultCoachCloseEvidence = (attempt) => {
-    const closures = readLoopState()?.coachRuntimeClosures;
+  // not change the outcome. This must stay a pure function of its two inputs — no disk
+  // reads of its own — so consulting it twice for the same attempt (the H2 fast path below,
+  // and the post-poll fallback) is always safe. `closures` is `loop-state.coachRuntimeClosures`
+  // read once per closure by the caller (#192 D4) and threaded down through
+  // `terminatePersistedCoachAttempt`'s options, never re-read here even across every
+  // attempt row a single closure judges. Returns `{ reason }` when evidence closes the row,
+  // otherwise `null`.
+  const consultCoachCloseEvidence = (attempt, closures) => {
     if (Array.isArray(closures) && closures.some((entry) => (
       entry && typeof entry === 'object' && entry.ownerSessionId === attempt?.ownerSessionId
     ))) {
@@ -3275,11 +3365,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // the poll budget — if it closes the row, begin-owner never waits out a dead identity poll
   // for nothing. The same consultation runs again if polling itself never resolves, since c/f
   // evidence can arrive while this attempt was busy waiting.
-  const resolvePersistedCoachIdentity = async (identity, deadlineNs, identityDeadlineNs, attempt) => {
+  const resolvePersistedCoachIdentity = async (identity, deadlineNs, identityDeadlineNs, attempt, closures) => {
     const initial = persistedCoachIdentityState(identity);
     let state;
     if (initial === 'unknown') {
-      const hook = consultCoachCloseEvidence(attempt);
+      const hook = consultCoachCloseEvidence(attempt, closures);
       if (hook) return { outcome: 'released', reason: hook.reason };
       state = await waitForPersistedCoachIdentity(identity, identityDeadlineNs);
     } else {
@@ -3290,7 +3380,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // signal the replacement pid; close the stale record as released instead.
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     if (state !== 'alive') {
-      const hook = consultCoachCloseEvidence(attempt);
+      const hook = consultCoachCloseEvidence(attempt, closures);
       if (hook) return { outcome: 'released', reason: hook.reason };
       return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
     }
@@ -3329,6 +3419,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const terminatePersistedCoachAttempt = async (attempt, deadlineNs, {
     identityDeadlineNs = deadlineNs,
     gameEpoch = null,
+    closures = null,
   } = {}) => {
     const sidecar = readCoachSpawnSidecar(attempt.exactResultPath);
     const attributable = coachEvidenceAttributable(attempt.exactResultPath);
@@ -3371,14 +3462,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // already passed) sidecar identity does — resolve through the same path either way.
     const identity = authorityIdentity ?? sidecarIdentity;
     if (identity) {
-      const outcome = await resolvePersistedCoachIdentity(identity, deadlineNs, identityDeadlineNs, attempt);
+      const outcome = await resolvePersistedCoachIdentity(identity, deadlineNs, identityDeadlineNs, attempt, closures);
       return withEvidence(outcome.outcome === 'released'
         ? { confirmed: true, ...(outcome.reason ? { reason: outcome.reason } : {}), cleanupState: 'released' }
         : { confirmed: false, reason: outcome.reason, cleanupState: 'termination_unconfirmed' });
     }
 
     // Neither a nor b: c/f evidence can still close this row without any identity at all.
-    const hook = consultCoachCloseEvidence(attempt);
+    const hook = consultCoachCloseEvidence(attempt, closures);
     if (hook) return withEvidence({ confirmed: true, reason: hook.reason, cleanupState: 'released' });
 
     // d: no handle was ever recorded (a malformed string handle does not count — only a
@@ -3474,7 +3565,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         cleanupAuthorized,
       });
     }
-    return { owner, attempts, authorityPresent: true, gameEpoch: canonicalEpoch };
+    return {
+      owner, attempts, authorityPresent: true, gameEpoch: canonicalEpoch, adapterState: auth.adapterState,
+    };
   };
 
   const closePersistedCoachWorkersCore = async ({
@@ -3483,7 +3576,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     deadlineError,
     reasonPrefix,
   }) => {
-    const { owner, attempts, authorityError, authorityPresent = true, gameEpoch = null } = persistedCoachAttempts();
+    const {
+      owner, attempts, authorityError, authorityPresent = true, gameEpoch = null, adapterState = null,
+    } = persistedCoachAttempts();
+    // #192 D4: read the owner-runtime-closure receipt list exactly once, at the very start of
+    // this closure, before any of this closure's own writes (cleanup-result can flip
+    // `auth.adapterState` to 'disabled' as a side effect — see coach-control.js's
+    // `recordCleanup` — so reading `adapterState` here, before that happens, captures the
+    // closure-start value D4 needs, not a value this same closure just produced). Every
+    // attempt row's classification below consults this same array — never re-reading
+    // loop-state.json per row or per consultation.
+    const closures = readLoopState()?.coachRuntimeClosures;
     if (authorityError) {
       return {
         confirmed: false,
@@ -3518,6 +3621,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       result: await terminatePersistedCoachAttempt(attempt, deadlineNs, {
         identityDeadlineNs,
         gameEpoch,
+        closures,
       }),
     })));
 
@@ -3541,7 +3645,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
         }
       }
-      if (attempt.cleanupAuthorized && childFailure === null) {
+      // #192 D4: a retired row's `attempt.status` is its `cleanupState` as captured by
+      // `persistedCoachAttempts()` at this closure's very start (an active row was never
+      // retired yet, so it has no prior cleanupState to compare against and always writes
+      // its first transition). Writing the identical state again on a later resume would
+      // only add a redundant trace entry with no semantic change — skip it. A row whose
+      // judgment changed (e.g. termination_unconfirmed → released once identity dies) is
+      // unaffected and still writes.
+      const cleanupStateUnchanged = attempt.source === 'retired' && attempt.status === result.cleanupState;
+      if (attempt.cleanupAuthorized && childFailure === null && !cleanupStateUnchanged) {
         try {
           await runCoach([
             'cleanup-result', '--owner', owner,
@@ -3583,20 +3695,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }));
     const confirmed = unresolved.length === 0;
     if (!confirmed) {
-      try {
-        await runCoach([
-          'adapter-disable', '--owner', owner,
-          '--reason', `${reasonPrefix}-termination-unconfirmed`,
-        ], { deadlineNs, deadlineError });
+      // #192 D4: call adapter-disable only when the authority's `adapterState` captured at
+      // this closure's very start was not already 'disabled'. The very first unresolved
+      // closure always sees a non-disabled start state and calls this exactly once; every
+      // later closure over the same still-unresolved row(s) sees 'disabled' already and
+      // skips the redundant child call and trace entry, while still reflecting the disabled
+      // state in this process's own in-memory flag.
+      if (adapterState === 'disabled') {
         coachAdapterDisabled = true;
-      } catch (error) {
-        if (error.code === deadlineError().code) throw error;
-        unresolved.push({
-          handNo: null,
-          generation: null,
-          reason: 'ADAPTER_DISABLE_CHILD_FAILED',
-          cleanupAuthorized: false,
-        });
+      } else {
+        try {
+          await runCoach([
+            'adapter-disable', '--owner', owner,
+            '--reason', `${reasonPrefix}-termination-unconfirmed`,
+          ], { deadlineNs, deadlineError });
+          coachAdapterDisabled = true;
+        } catch (error) {
+          if (error.code === deadlineError().code) throw error;
+          unresolved.push({
+            handNo: null,
+            generation: null,
+            reason: 'ADAPTER_DISABLE_CHILD_FAILED',
+            cleanupAuthorized: false,
+          });
+        }
       }
     }
     return { confirmed: unresolved.length === 0, owner, unresolved, authorityPresent };
@@ -4671,9 +4793,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const haltForPersistedCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
     const commands = recovery.commands;
-    const message = commands.length > 0
+    const base = commands.length > 0
       ? 'persisted 코치 handle identity를 확인할 수 없어 owner 교대를 중단합니다. 같은 sessionToken의 인증 server lock을 복구하고 halt.recovery.commands를 검토·실행한 뒤 resume하세요.'
       : 'persisted 코치 handle identity와 cleanup owner를 확인할 수 없어 owner 교대를 중단합니다. authority 수동 복구가 필요합니다.';
+    // #192 D5: append operator guidance that distinguishes a row whose spawn sidecar shows
+    // `intent` (a spawn may genuinely have happened) from a row with no evidence at all
+    // (legacy pre-stamp, or a synthetic authority-level failure row) — each needs a
+    // different manual check before resuming.
+    const guidance = unresolvedEvidenceGuidance(unresolved);
+    const message = guidance ? `${base} ${guidance}` : base;
     appendNotice(message);
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
@@ -4696,9 +4824,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const haltForPlayingCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
-    const message = recovery.commands.length > 0
+    const base = recovery.commands.length > 0
       ? 'persisted 코치 handle identity를 확인할 수 없어 playing owner 교대를 중단합니다. 인증 server lock 아래 cleanup-result를 검토·실행한 뒤 resume하세요.'
       : 'persisted 코치 authority 또는 handle을 확인할 수 없어 playing owner 교대를 중단합니다. 수동 복구가 필요합니다.';
+    // #192 D5: same intent-vs-no-evidence guidance as haltForPersistedCoachRecovery.
+    const guidance = unresolvedEvidenceGuidance(unresolved);
+    const message = guidance ? `${base} ${guidance}` : base;
     appendNotice(message);
     writeLoopState({ halt: { code: 'COACH_HANDLE_UNRESOLVED', message, recovery } });
     log('resume-halt', { code: 'COACH_HANDLE_UNRESOLVED' });

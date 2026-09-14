@@ -21,6 +21,7 @@ import {
   parseGameLoopArgs,
   engineInitFlags,
   applyModeDefaults,
+  buildBadChildOutputDetails,
 } from '../tools/game-loop.js';
 import { RUNTIME_TABLE, createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -11288,4 +11289,249 @@ test('#192 S5: 영수증 없는 crash store는 명시적으로 멈추고 증거 
     'repeated resume duplicated cleanup-result/adapter-disable transitions',
   );
   await secondResumed.requestStop().catch(() => {});
+});
+
+// ── #192 S6: 반복 재개 멱등성과 진단 (design memo §4 D4·D5, §7 S6) ──────────────
+
+test('#192 S6: BAD_CHILD_OUTPUT details는 allowlist에 있는 code만 통과시키고 그 외는 UNLISTED로 가린다', () => {
+  const base = { script: COACH_CLI, exitCode: 0, signal: null };
+  const sentinel = 'PRIVATE_SENTINEL_XYZ';
+
+  const known = buildBadChildOutputDetails({
+    ...base, stdout: JSON.stringify({ code: 'DEADLINE_EXPIRED' }), stderr: '',
+  });
+  assert.equal(known.code, 'DEADLINE_EXPIRED', '알려진 code는 그대로 통과해야 한다');
+  assert.equal(known.script, path.basename(COACH_CLI));
+  assert.equal(known.exitCode, 0);
+  assert.equal(known.signal, null);
+  assert.equal(known.stdoutBytes, Buffer.byteLength(JSON.stringify({ code: 'DEADLINE_EXPIRED' }), 'utf8'));
+  assert.equal(known.stderrBytes, 0);
+
+  const sentinelString = buildBadChildOutputDetails({
+    ...base, stdout: JSON.stringify({ code: sentinel }), stderr: '',
+  });
+  assert.equal(sentinelString.code, 'UNLISTED', 'allowlist에 없는 문자열 code는 UNLISTED여야 한다');
+  assert.ok(!JSON.stringify(sentinelString).includes(sentinel));
+
+  const nestedObject = buildBadChildOutputDetails({
+    ...base, stdout: JSON.stringify({ code: { nested: sentinel } }), stderr: '',
+  });
+  assert.equal(nestedObject.code, 'UNLISTED', '객체 code는 UNLISTED여야 한다');
+  assert.ok(!JSON.stringify(nestedObject).includes(sentinel));
+
+  const oversizedCode = 'X'.repeat(10 * 1024);
+  const oversized = buildBadChildOutputDetails({
+    ...base, stdout: JSON.stringify({ code: oversizedCode }), stderr: '',
+  });
+  assert.equal(oversized.code, 'UNLISTED', '10KB 문자열 code는 UNLISTED여야 한다');
+  assert.ok(!JSON.stringify(oversized).includes(oversizedCode));
+
+  const nonJsonStdout = `이건 JSON이 아닙니다 ${sentinel}`;
+  const nonJson = buildBadChildOutputDetails({ ...base, stdout: nonJsonStdout, stderr: '' });
+  assert.equal('code' in nonJson, false, 'stdout이 JSON이 아니면 code 필드를 아예 싣지 않아야 한다');
+  assert.ok(!JSON.stringify(nonJson).includes(sentinel));
+  assert.equal(nonJson.stdoutBytes, Buffer.byteLength(nonJsonStdout, 'utf8'));
+
+  const missingCode = buildBadChildOutputDetails({ ...base, stdout: JSON.stringify({ ok: false }), stderr: '' });
+  assert.equal(missingCode.code, 'UNLISTED', 'JSON이지만 code 필드가 없으면 UNLISTED여야 한다');
+});
+
+test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cleanup-result·adapter-disable은 첫 closure에서만 호출된다', { timeout: 20_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+
+  const loopOpts = {
+    finalizeBudgetMs: 2_200,
+    finalizeCutoffLeadMs: 1_100,
+    processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
+    signalProcess: (pid, signal) => { if (pid !== orphan.pid) process.kill(pid, signal); },
+  };
+
+  const { loop: loop1, calls: calls1 } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts,
+  });
+  await assert.rejects(loop1.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(coachInvocations(calls1, 'cleanup-result').length, 1, '첫 closure는 cleanup-result를 정확히 한 번 호출해야 한다');
+  assert.equal(coachInvocations(calls1, 'adapter-disable').length, 1, '첫 closure는 adapter-disable을 정확히 한 번 호출해야 한다');
+  await loop1.requestStop().catch(() => {});
+
+  const authorityAfterFirst = fs.readFileSync(path.join(gameDir, '.coach-authority.json'));
+
+  const calls2 = [];
+  const loop2 = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: { port: 0, waitMs: 0, ...loopOpts, onCoachInvoke: (args) => calls2.push({ kind: 'coach', args }) },
+  });
+  t.after(() => loop2.requestStop().catch(() => {}));
+  await assert.rejects(loop2.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(coachInvocations(calls2, 'cleanup-result').length, 0, '두 번째 재개는 cleanup-result를 다시 호출하면 안 된다');
+  assert.equal(coachInvocations(calls2, 'adapter-disable').length, 0, '두 번째 재개는 adapter-disable을 다시 호출하면 안 된다');
+  await loop2.requestStop().catch(() => {});
+
+  assert.equal(
+    fs.readFileSync(path.join(gameDir, '.coach-authority.json')).equals(authorityAfterFirst),
+    true,
+    '두 번째 재개 뒤 .coach-authority.json 바이트가 바뀌었다',
+  );
+
+  const calls3 = [];
+  const loop3 = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: { port: 0, waitMs: 0, ...loopOpts, onCoachInvoke: (args) => calls3.push({ kind: 'coach', args }) },
+  });
+  t.after(() => loop3.requestStop().catch(() => {}));
+  await assert.rejects(loop3.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(coachInvocations(calls3, 'cleanup-result').length, 0, '세 번째 재개는 cleanup-result를 다시 호출하면 안 된다');
+  assert.equal(coachInvocations(calls3, 'adapter-disable').length, 0, '세 번째 재개는 adapter-disable을 다시 호출하면 안 된다');
+});
+
+test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 이미 disabled여도 cleanup-result released를 기록한다', { timeout: 20_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  let orphanAlive = true;
+  t.after(() => { if (orphanAlive) terminateIfAlive(orphan); });
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+
+  const loopOpts = {
+    finalizeBudgetMs: 2_200,
+    finalizeCutoffLeadMs: 1_100,
+    processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
+    signalProcess: (pid, signal) => { if (pid !== orphan.pid) process.kill(pid, signal); },
+  };
+
+  const { loop: loop1, calls: calls1 } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts,
+  });
+  await assert.rejects(loop1.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(coachInvocations(calls1, 'cleanup-result').length, 1);
+  assert.equal(coachInvocations(calls1, 'adapter-disable').length, 1);
+  await loop1.requestStop().catch(() => {});
+
+  const authorityAfterFirst = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(authorityAfterFirst.adapterState, 'disabled', 'precondition: 첫 closure 뒤 adapter가 disabled여야 한다');
+  assert.equal(
+    authorityAfterFirst.retiredAttempts.find((row) => row.handNo === 1)?.cleanupState,
+    'termination_unconfirmed',
+    'precondition: hand 1이 termination_unconfirmed로 남아 있어야 한다',
+  );
+
+  // Kill the orphan for real: processAlive()가 이제 실제로 죽었다고 보게 되어, 여전히
+  // 고장난 processStartTime override가 참조되기도 전에 persistedCoachIdentityState()가
+  // 'dead'로 단락시킨다 — 이 다음 재개에서 행이 해소 가능해진다.
+  await terminateIfAlive(orphan);
+  orphanAlive = false;
+
+  const calls2 = [];
+  const loop2 = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: { port: 0, waitMs: 0, ...loopOpts, onCoachInvoke: (args) => calls2.push({ kind: 'coach', args }) },
+  });
+  t.after(() => loop2.requestStop().catch(() => {}));
+
+  await loop2.resume().catch(() => {});
+
+  const cleanupCalls = coachInvocations(calls2, 'cleanup-result');
+  assert.equal(cleanupCalls.length, 1, '해소된 행은 cleanup-result를 한 번 기록해야 한다');
+  assert.equal(flagValue(cleanupCalls[0], '--cleanup-state'), 'released');
+  assert.equal(
+    coachInvocations(calls2, 'adapter-disable').length,
+    0,
+    '더 이상 unresolved 행이 없으므로 adapter-disable을 다시 호출하면 안 된다',
+  );
+
+  const authorityAfterSecond = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.equal(
+    authorityAfterSecond.retiredAttempts.find((row) => row.handNo === 1)?.cleanupState,
+    'released',
+  );
+});
+
+test('#192 S6: 판정 대상 행이 늘어도 owner-runtime-closure 영수증은 closure당 한 번만 읽는다', { timeout: 20_000, concurrency: false }, async (t) => {
+  const countLoopStateReadsDuringResume = async (handCount) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    if (handCount > 1) expandFinishedGameToTwoHands(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    for (let handNo = 1; handNo <= handCount; handNo += 1) {
+      // Legacy no-stamp reservations: no handle, no sidecar, no identity to resolve — each
+      // falls straight through to the single "neither a nor b" consultCoachCloseEvidence
+      // call inside terminatePersistedCoachAttempt, with no polling delay.
+      await seedReservedCoach(gameDir, 'old-owner', handNo);
+    }
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper: makeCoachAdapter(),
+      stateOverrides: { port: external.lock.port },
+    });
+    const loopStatePath = path.join(gameDir, 'loop-state.json');
+    let reads = 0;
+    const originalReadFile = fs.readFileSync;
+    fs.readFileSync = function countingReadFileSync(filePath, ...args) {
+      if (path.resolve(String(filePath)) === loopStatePath) reads += 1;
+      return originalReadFile.call(this, filePath, ...args);
+    };
+    try {
+      await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+    } finally {
+      fs.readFileSync = originalReadFile;
+    }
+    return reads;
+  };
+
+  const oneRowReads = await countLoopStateReadsDuringResume(1);
+  const twoRowReads = await countLoopStateReadsDuringResume(2);
+  assert.equal(
+    twoRowReads,
+    oneRowReads,
+    `loop-state.json 읽기 횟수가 행 수에 비례해 늘었다 (1행 ${oneRowReads}회, 2행 ${twoRowReads}회) — `
+      + '영수증을 closure당 한 번이 아니라 행마다 다시 읽고 있다',
+  );
+});
+
+test('#192 S6: recovery 메시지가 sidecar intent 행과 증거 없는 legacy 행을 구분한다', { timeout: 20_000, concurrency: false }, async (t) => {
+  const gameDirLegacy = tmpGame();
+  const initLegacy = await seedFinishedGame(gameDirLegacy);
+  const externalLegacy = await startExternalServer(gameDirLegacy, initLegacy.sessionToken);
+  t.after(() => terminateIfAlive(externalLegacy.child));
+  await seedReservedCoach(gameDirLegacy, 'old-owner', 1);
+  const { loop: legacyLoop } = finalizingLoop(t, gameDirLegacy, initLegacy.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: externalLegacy.lock.port },
+  });
+  await assert.rejects(legacyLoop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  const legacyMessage = readJson(path.join(gameDirLegacy, 'loop-state.json')).halt?.message;
+  assert.ok(legacyMessage, 'legacy 시나리오에 halt.message가 없다');
+
+  const gameDirIntent = tmpGame();
+  const initIntent = await seedFinishedGame(gameDirIntent);
+  const externalIntent = await startExternalServer(gameDirIntent, initIntent.sessionToken);
+  t.after(() => terminateIfAlive(externalIntent.child));
+  const reserved = await seedReservedCoachStamped(gameDirIntent, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDirIntent, initIntent.sessionToken, 'old-owner', reserved, { phase: 'intent' });
+  const { loop: intentLoop } = finalizingLoop(t, gameDirIntent, initIntent.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: externalIntent.lock.port },
+  });
+  await assert.rejects(intentLoop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  const intentMessage = readJson(path.join(gameDirIntent, 'loop-state.json')).halt?.message;
+  assert.ok(intentMessage, 'intent 시나리오에 halt.message가 없다');
+
+  assert.notEqual(legacyMessage, intentMessage, '두 시나리오의 recovery 메시지가 동일하다');
+  assert.match(intentMessage, /coach CLI 자식/, 'intent-only 메시지에 자식 프로세스 확인 안내가 없다');
+  assert.match(legacyMessage, /legacy/, 'no-evidence 메시지에 legacy 안내가 없다');
 });
