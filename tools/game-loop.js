@@ -2799,6 +2799,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const coachAuthorityPath = path.join(root, '.coach-authority.json');
   const coachAttemptKey = (handNo, generation) => `${handNo}:${generation}`;
 
+  // D2/FO-1: the single transition every coach-attempt termination site must go
+  // through. A record leaves coachAttempts only on confirmed close evidence (or when
+  // it never had a handle); a rejected/unconfirmed terminate() leaves it in place so a
+  // later terminate attempt (heartbeat remediation, finalize cutoff, persisted
+  // reclaim) can still confirm it. `finally` blocks must not delete unconditionally.
+  const settleCoachAttemptRecord = (record, termination) => {
+    if (!record) return record;
+    const confirmed = !record.handle || termination?.confirmed === true;
+    if (confirmed) {
+      const key = coachAttemptKey(record.handNo, record.generation);
+      if (coachAttempts.get(key) === record) coachAttempts.delete(key);
+    }
+    return record;
+  };
+
   const semanticChildPayload = (envelope) => {
     const payload = { ...envelope };
     delete payload.ok;
@@ -3569,6 +3584,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--consider-overfold',
     '--stats-file', statsPath,
     '--snapshot-file', coachSnapshotPath,
+    '--spawn-evidence', '1',
   ]);
 
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
@@ -3657,6 +3673,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         retry: attempt === 2,
       });
       let handle = null;
+      let record = null;
       let accepted = false;
       let heartbeatTimedOut = false;
       try {
@@ -3670,6 +3687,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           prompt,
           timeoutMs: COACH_GENERATION_MS,
         });
+        let interrupt;
+        const interrupted = new Promise((_, reject) => {
+          interrupt = (code = 'COACH_HEARTBEAT_TIMEOUT') => reject(codedError(
+            code,
+            code === 'COACH_RESULT_ACCEPTED'
+              ? '코치 heartbeat가 준비된 결과를 승격했습니다.'
+              : '코치 heartbeat deadline이 만료됐습니다.',
+          ));
+        });
+        // bind-handle is awaited before Promise.race below. Observe the interrupt Promise
+        // immediately so a cutoff/heartbeat rejection during that child cannot be unhandled.
+        interrupted.catch(() => {});
+        // D2/FO-1: register the attempt record immediately after the child exists, before
+        // any later step (including the null-identity branch below and bind-handle) can
+        // throw and lose track of a live handle.
+        record = { handNo, generation: currentDescriptor.generation, attempt, handle, interrupt };
+        coachAttempts.set(coachAttemptKey(handNo, currentDescriptor.generation), record);
         if (handle.pid == null || handle.startTime == null) {
           // FO-2: a runtime can report a live child without a resolvable pid/startTime.
           // Binding "<pid>:null" would let parsePersistedCoachHandle accept it as a
@@ -3680,6 +3714,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const termination = handle && typeof handle.terminate === 'function'
             ? await handle.terminate()
             : { confirmed: false };
+          settleCoachAttemptRecord(record, termination);
           const confirmed = termination?.confirmed === true;
           log('coach-identity-unavailable', {
             handNo,
@@ -3732,26 +3767,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           });
           return;
         }
-        let interrupt;
-        const interrupted = new Promise((_, reject) => {
-          interrupt = (code = 'COACH_HEARTBEAT_TIMEOUT') => reject(codedError(
-            code,
-            code === 'COACH_RESULT_ACCEPTED'
-              ? '코치 heartbeat가 준비된 결과를 승격했습니다.'
-              : '코치 heartbeat deadline이 만료됐습니다.',
-          ));
-        });
-        // bind-handle is awaited before Promise.race below. Observe the interrupt Promise
-        // immediately so a cutoff/heartbeat rejection during that child cannot be unhandled.
-        interrupted.catch(() => {});
-        const record = { handNo, generation: currentDescriptor.generation, attempt, handle, interrupt };
-        coachAttempts.set(coachAttemptKey(handNo, currentDescriptor.generation), record);
         await runCoachBeforeResultCutoff([
           'bind-handle',
           '--owner', owner,
           '--hand', String(handNo),
           '--generation', String(currentDescriptor.generation),
           '--handle', `${handle.pid}:${handle.startTime}`,
+          '--spawn-evidence', '1',
         ]);
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
@@ -3770,6 +3792,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           '--forbidden-file', deny.path,
         ]);
         accepted = true;
+        // The child's own result was read after `done` resolved (closed-child evidence);
+        // treat the attempt as settled regardless of whether anyone calls terminate().
+        settleCoachAttemptRecord(record, { confirmed: true });
         // A cutoff between accept and publish leaves this hand in the authority Q; the
         // post-cutoff residual drain owns it from there.
         if (!coachPublicationDeferred()) await executeCoachPublish(handNo, currentDescriptor.exactEnvelopePath);
@@ -3785,17 +3810,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             '--note-file', currentDescriptor.exactResultPath,
           ]);
           if (handle && typeof handle.terminate === 'function') {
-            await handle.terminate();
+            const termination = await handle.terminate();
+            settleCoachAttemptRecord(record, termination);
           }
           return;
         }
         if (error.code === 'COACH_RESULT_ACCEPTED') return;
+        // COACH_FINALIZE_CUTOFF is only raised by terminateLiveCoachGenerations, which
+        // already awaited handle.terminate() and settled this record before interrupting
+        // this race. Terminating again here would call terminate() twice for the same
+        // cutoff.
+        if (error.code === 'COACH_FINALIZE_CUTOFF') return;
         heartbeatTimedOut = error.code === 'COACH_HEARTBEAT_TIMEOUT';
         if (accepted) throw error;
-        if (coachWorkSuspended()) return;
         const termination = handle && typeof handle.terminate === 'function'
           ? await handle.terminate()
           : { confirmed: false };
+        settleCoachAttemptRecord(record, termination);
+        if (coachWorkSuspended()) return;
         // Only the boolean confirmation authorizes replacement. `reason` is diagnostic,
         // never a hidden success signal.
         if (termination?.confirmed !== true) {
@@ -3883,12 +3915,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
         });
         return;
-      } finally {
-        const key = coachAttemptKey(handNo, currentDescriptor.generation);
-        if (coachAttempts.get(key)?.handle === handle) {
-          coachAttempts.delete(key);
-        }
       }
+      // No `finally` here: every return/throw/continue path above already routed its
+      // termination result (if any) through settleCoachAttemptRecord. A record survives
+      // this attempt exactly when its last known termination was unconfirmed, so a later
+      // terminate (heartbeat remediation, finalize cutoff, persisted reclaim) can still
+      // confirm and remove it.
     }
   };
 
@@ -3983,6 +4015,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '--completed', String(completed),
       '--stats-file', stats.path,
       '--snapshot-file', coachSnapshotPath,
+      '--spawn-evidence', '1',
     ]);
     if (begun.adapterState === 'disabled' || begun.adapterState === 'unavailable') {
       coachAdapterDisabled = true;
@@ -4091,6 +4124,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (!record) throw error;
       const termination = await record.handle.terminate();
+      settleCoachAttemptRecord(record, termination);
       if (accepted) {
         if (termination?.confirmed !== true) {
           await runCoachBeforeResultCutoff([
@@ -4124,6 +4158,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
     if (record) {
       const termination = await record.handle.terminate();
+      settleCoachAttemptRecord(record, termination);
       if (termination?.confirmed !== true) {
         await runCoachBeforeResultCutoff([
           'adapter-disable',
@@ -4259,10 +4294,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           code: settled.error.code ?? 'ERROR',
         });
       }
-      return {
-        record,
-        confirmed: settled.settled && !settled.error && settled.value?.confirmed === true,
-      };
+      const confirmed = settled.settled && !settled.error && settled.value?.confirmed === true;
+      settleCoachAttemptRecord(record, { confirmed });
+      return { record, confirmed };
     }));
 
     let confirmed = true;

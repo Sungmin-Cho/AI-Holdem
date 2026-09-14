@@ -31,6 +31,7 @@ import { createTrainingControl } from '../tools/training-control.js';
 import { createProfileStore } from '../tools/training-stores.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
+import { createCoachControl } from '../tools/coach-control.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -92,17 +93,35 @@ async function runCoachCli(gameDir, args) {
   return JSON.parse(stdout.trim());
 }
 
+// #192 S2a E3: the CLI now exits non-zero for reserve/begin-owner/bind-handle without
+// --spawn-evidence 1. execFile's promisified form rejects on a non-zero exit but still
+// attaches the child's stdout/stderr to the error, so the failure envelope is read there.
+async function runCoachCliFailure(gameDir, args) {
+  let caught = null;
+  try {
+    await runCoachCli(gameDir, args);
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, `coach CLI was expected to fail for ${JSON.stringify(args)}`);
+  assert.equal(typeof caught.stdout, 'string', 'coach CLI failure did not carry a stdout envelope');
+  return JSON.parse(caught.stdout.trim());
+}
+
+// #192 S2a §6: the CLI now refuses reserve/begin-owner/bind-handle without
+// --spawn-evidence. These fixtures seed legacy (pre-protocol) rows on purpose, so they
+// go through the in-process API — with `spawnEvidence` left at its default `false` — to
+// keep the resulting authority rows exactly as before.
 async function seedQueuedCoach(gameDir, owner, handNo = 1) {
   const stats = JSON.parse((await execFileAsync(process.execPath, [
     CLI, 'stats', '--game-dir', gameDir,
   ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
   const statsPath = path.join(gameDir, `.seed-coach-stats-${handNo}.json`);
   fs.writeFileSync(statsPath, JSON.stringify(stats));
-  const reserved = await runCoachCli(gameDir, [
-    'reserve', '--owner', owner, '--hand', String(handNo), '--attempt', '1',
-    '--consider-overfold', '--stats-file', statsPath,
-    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
-  ]);
+  const reserved = await createCoachControl().reserve({
+    gameDir, owner, handNo, attempt: 1, considerOverfold: true,
+    statsFile: statsPath, snapshotFile: path.join(gameDir, 'ui-snapshot.json'),
+  });
   fs.writeFileSync(reserved.exactResultPath, JSON.stringify({
     handNo,
     text: `resume queued coach ${handNo}`,
@@ -122,19 +141,18 @@ async function seedRunningCoach(gameDir, owner, handNo, child) {
   ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
   const statsPath = path.join(gameDir, `.seed-running-coach-stats-${handNo}.json`);
   fs.writeFileSync(statsPath, JSON.stringify(stats));
-  const reserved = await runCoachCli(gameDir, [
-    'reserve', '--owner', owner, '--hand', String(handNo), '--attempt', '1',
-    '--stats-file', statsPath,
-    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
-  ]);
+  const cc = createCoachControl();
+  const reserved = await cc.reserve({
+    gameDir, owner, handNo, attempt: 1,
+    statsFile: statsPath, snapshotFile: path.join(gameDir, 'ui-snapshot.json'),
+  });
   const startTime = await waitFor(
     () => processStartTime(child.pid),
     `coach orphan ${child.pid} start identity was not observable`,
   );
-  await runCoachCli(gameDir, [
-    'bind-handle', '--owner', owner, '--hand', String(handNo),
-    '--generation', String(reserved.generation), '--handle', `${child.pid}:${startTime}`,
-  ]);
+  await cc.bindHandle({
+    gameDir, owner, handNo, generation: reserved.generation, handle: `${child.pid}:${startTime}`,
+  });
   return { ...reserved, startTime };
 }
 
@@ -144,11 +162,10 @@ async function seedReservedCoach(gameDir, owner, handNo = 1) {
   ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
   const statsPath = path.join(gameDir, `.seed-reserved-coach-stats-${handNo}.json`);
   fs.writeFileSync(statsPath, JSON.stringify(stats));
-  return runCoachCli(gameDir, [
-    'reserve', '--owner', owner, '--hand', String(handNo), '--attempt', '1',
-    '--stats-file', statsPath,
-    '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
-  ]);
+  return createCoachControl().reserve({
+    gameDir, owner, handNo, attempt: 1,
+    statsFile: statsPath, snapshotFile: path.join(gameDir, 'ui-snapshot.json'),
+  });
 }
 
 async function seedEmptyCoachAuthority(gameDir, owner) {
@@ -161,6 +178,7 @@ async function seedEmptyCoachAuthority(gameDir, owner) {
     'begin-owner', '--owner', owner, '--completed', '0',
     '--stats-file', statsPath,
     '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+    '--spawn-evidence', '1',
   ]);
 }
 
@@ -5089,6 +5107,7 @@ test('handOver heartbeat 중 stop이 요청되면 coach task를 launch하지 않
   await runCoachCli(setup.gameDir, [
     'begin-owner', '--owner', owner, '--completed', '0', '--stats-file', statsPath,
     '--snapshot-file', path.join(setup.gameDir, 'ui-snapshot.json'),
+    '--spawn-evidence', '1',
   ]);
   const running = startRun(setup.loop);
 
@@ -5371,6 +5390,7 @@ test('capture 중 adapter가 disabled되어 reserve가 ADAPTER_DISABLED면 gener
   await runCoachCli(gameDir, [
     'begin-owner', '--owner', owner, '--completed', '0', '--stats-file', statsPath,
     '--snapshot-file', path.join(gameDir, 'ui-snapshot.json'),
+    '--spawn-evidence', '1',
   ]);
   coachCalls.length = 0;
   const running = startRun(setup.loop);
@@ -9208,10 +9228,10 @@ test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니
   const orphan = await startCoachOrphan();
   t.after(() => terminateIfAlive(orphan));
   const reserved = await seedReservedCoach(gameDir, 'old-owner', 1);
-  await runCoachCli(gameDir, [
-    'bind-handle', '--owner', 'old-owner', '--hand', '1',
-    '--generation', String(reserved.generation), '--handle', `${orphan.pid}:null`,
-  ]);
+  await createCoachControl().bindHandle({
+    gameDir, owner: 'old-owner', handNo: 1,
+    generation: reserved.generation, handle: `${orphan.pid}:null`,
+  });
   const signals = [];
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper: makeCoachAdapter(),
@@ -9253,10 +9273,10 @@ test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"�
     const orphan = await startCoachOrphan();
     t.after(() => terminateIfAlive(orphan));
     const reserved = await seedReservedCoach(gameDir, 'old-owner', 1);
-    await runCoachCli(gameDir, [
-      'bind-handle', '--owner', 'old-owner', '--hand', '1',
-      '--generation', String(reserved.generation), '--handle', `${orphan.pid}:${sentinelStartTime}`,
-    ]);
+    await createCoachControl().bindHandle({
+      gameDir, owner: 'old-owner', handNo: 1,
+      generation: reserved.generation, handle: `${orphan.pid}:${sentinelStartTime}`,
+    });
     const signals = [];
     const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
       upper: makeCoachAdapter(),
@@ -9291,4 +9311,241 @@ test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"�
       `a signal was sent to a pid whose "${sentinelStartTime}" startTime identity was never verified`,
     );
   }
+});
+test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize가 NOT_SPAWNED로 닫지 않는다', { timeout: 45_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let held = null;
+  t.after(async () => {
+    if (!held) return;
+    held.release();
+    await held.done;
+  });
+  let spawnEntered;
+  const entered = new Promise((resolve) => { spawnEntered = resolve; });
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: new Promise(() => {}),
+      terminate: { confirmed: false, reason: 'STILL_ALIVE' },
+      raw: JSON.stringify({ handNo: 1, text: '종료되지 않는 worker' }),
+    }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      childTimeoutMs: 1_500,
+      coachSpawnCheckpoint: async () => {
+        // bind-handle이 coach-control 락에서 막히도록 spawn 직전에 락을 잡는다.
+        held = await holdNamedLock(gameDir, 'publish.lock.d');
+        spawnEntered();
+      },
+    },
+  });
+
+  await loop.resume();
+  await entered;
+  await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'coach-error'),
+    'bind-handle failure did not end the coach attempt',
+    15_000,
+  );
+  held.release();
+  await held.done;
+  held = null;
+
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 1, 'precondition: the spawned worker reached bind-handle');
+  assert.equal(
+    upper.terminations.some(({ result }) => result.confirmed === false),
+    true,
+    'precondition: the spawned worker termination was unconfirmed',
+  );
+
+  const outcome = await loop.run().catch((error) => error);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.notEqual(
+    state.finalization?.cutoff?.terminationConfirmed,
+    true,
+    `an unconfirmed spawned worker was closed as NOT_SPAWNED (outcome ${outcome?.phase ?? outcome?.code})`,
+  );
+});
+
+// ── #192 S2a: E3 CLI 프로토콜 강제 + record 생명주기 ──────────────────────────
+
+test('#192 S2a: reserve/begin-owner/bind-handle CLI는 --spawn-evidence 1 없이 SPAWN_PROTOCOL_REQUIRED로 거부되고 authority를 바꾸지 않는다', { timeout: 20_000 }, async (t) => {
+  const { gameDir } = await setupUserFirst(t);
+  const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, '.spawn-protocol-stats.json');
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+
+  assert.equal(fs.existsSync(authorityPath), false, 'precondition: no authority file yet');
+  const reserveFail = await runCoachCliFailure(gameDir, [
+    'reserve', '--owner', owner, '--hand', '1', '--attempt', '1',
+    '--stats-file', statsPath, '--snapshot-file', snapshotFile,
+  ]);
+  assert.equal(reserveFail.ok, false);
+  assert.equal(reserveFail.code, 'SPAWN_PROTOCOL_REQUIRED');
+  assert.equal(fs.existsSync(authorityPath), false, 'reserve without --spawn-evidence created an authority file');
+
+  const reserveOk = await runCoachCli(gameDir, [
+    'reserve', '--owner', owner, '--hand', '1', '--attempt', '1',
+    '--stats-file', statsPath, '--snapshot-file', snapshotFile,
+    '--spawn-evidence', '1',
+  ]);
+  assert.equal(reserveOk.ok, true);
+  let authority = readJson(authorityPath);
+  assert.equal(authority.hands['1'].spawnEvidence, 1);
+  const bytesAfterReserve = fs.readFileSync(authorityPath);
+
+  const bindFail = await runCoachCliFailure(gameDir, [
+    'bind-handle', '--owner', owner, '--hand', '1',
+    '--generation', String(reserveOk.generation), '--handle', '4242:coach-start',
+  ]);
+  assert.equal(bindFail.code, 'SPAWN_PROTOCOL_REQUIRED');
+  assert.equal(
+    fs.readFileSync(authorityPath).equals(bytesAfterReserve),
+    true,
+    'bind-handle without --spawn-evidence changed authority bytes',
+  );
+
+  const bindOk = await runCoachCli(gameDir, [
+    'bind-handle', '--owner', owner, '--hand', '1',
+    '--generation', String(reserveOk.generation), '--handle', '4242:coach-start',
+    '--spawn-evidence', '1',
+  ]);
+  assert.equal(bindOk.ok, true);
+  authority = readJson(authorityPath);
+  assert.equal(authority.hands['1'].agentHandle, '4242:coach-start');
+  const bytesBeforeBeginOwner = fs.readFileSync(authorityPath);
+
+  const secondOwner = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const beginFail = await runCoachCliFailure(gameDir, [
+    'begin-owner', '--owner', secondOwner, '--completed', '0',
+    '--stats-file', statsPath, '--snapshot-file', snapshotFile,
+  ]);
+  assert.equal(beginFail.code, 'SPAWN_PROTOCOL_REQUIRED');
+  assert.equal(
+    fs.readFileSync(authorityPath).equals(bytesBeforeBeginOwner),
+    true,
+    'begin-owner without --spawn-evidence changed authority bytes',
+  );
+
+  const beginOk = await runCoachCli(gameDir, [
+    'begin-owner', '--owner', secondOwner, '--completed', '0',
+    '--stats-file', statsPath, '--snapshot-file', snapshotFile,
+    '--spawn-evidence', '1',
+  ]);
+  assert.equal(beginOk.ok, true);
+});
+
+test('#192 S2a: 정상 코치 attempt는 bind-handle에 --spawn-evidence 1을 보내고 authority 행에 spawnEvidence:1을 남긴다', { timeout: 15_000 }, async (t) => {
+  const bindArgs = [];
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '정상 코치 응답' }) }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] === 'bind-handle') bindArgs.push(args);
+      },
+    },
+  });
+  const running = startRun(loop);
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(bindArgs.length, 1);
+  assert.equal(flagValue(bindArgs[0], '--spawn-evidence'), '1');
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const retired = (authority.retiredAttempts ?? []).find((entry) => entry.handNo === 1);
+  assert.equal(retired?.spawnEvidence, 1);
+});
+
+test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 terminateLiveCoachGenerations가 confirmed:true를 받으면 지워진다', { timeout: 45_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let held = null;
+  t.after(async () => {
+    if (!held) return;
+    held.release();
+    await held.done;
+  });
+  let spawnEntered;
+  const entered = new Promise((resolve) => { spawnEntered = resolve; });
+  let terminateCalls = 0;
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: new Promise(() => {}),
+      // §D2: the first terminate (during the resume-time bind-handle failure) is
+      // unconfirmed; the second (finalize's own terminateLiveCoachGenerations, since the
+      // record survived) confirms it.
+      terminate: () => {
+        terminateCalls += 1;
+        return terminateCalls === 1
+          ? { confirmed: false, reason: 'STILL_ALIVE' }
+          : { confirmed: true };
+      },
+      raw: JSON.stringify({ handNo: 1, text: '결국 종료되는 worker' }),
+    }],
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      childTimeoutMs: 1_500,
+      coachSpawnCheckpoint: async () => {
+        held = await holdNamedLock(gameDir, 'publish.lock.d');
+        spawnEntered();
+      },
+    },
+  });
+
+  await loop.resume();
+  await entered;
+  await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'coach-error'),
+    'bind-handle failure did not end the coach attempt',
+    15_000,
+  );
+  held.release();
+  await held.done;
+  held = null;
+
+  assert.equal(coachInvocations(calls, 'bind-handle').length, 1, 'precondition: the spawned worker reached bind-handle');
+  assert.equal(terminateCalls, 1, 'precondition: only the first (unconfirmed) terminate has run so far');
+
+  await loop.run().catch(() => {});
+  assert.equal(terminateCalls, 2, 'finalize did not re-attempt terminate on the still-tracked record');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.finalization?.cutoff?.terminationConfirmed, true);
+});
+
+test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 record가 남아 finalize terminationConfirmed를 false로 만든다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    rounds: [{
+      startTime: null,
+      terminate: { confirmed: false, reason: 'STILL_ALIVE' },
+      raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+    }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+
+  await loop.resume();
+  const outcome = await loop.run().catch((error) => error);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.notEqual(
+    state.finalization?.cutoff?.terminationConfirmed,
+    true,
+    `identity 없는 worker의 미확인 종료가 confirmed로 처리됐다 (outcome ${outcome?.phase ?? outcome?.code})`,
+  );
+  assert.equal(upper.terminations.length, 2, '최초 null-identity 종료와 finalize 재확인이 각각 한 번씩 호출돼야 한다');
 });

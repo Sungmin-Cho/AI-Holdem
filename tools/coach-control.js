@@ -213,7 +213,7 @@ function nextGeneration(auth, handNo) {
 function retireActive(auth, handNo, fields) {
   const hand = auth.hands[keyOf(handNo)];
   if (!hand) return;
-  auth.retiredAttempts.push({
+  const retired = {
     ownerSessionId: hand.ownerSessionId,
     handNo,
     generation: hand.generation,
@@ -225,7 +225,9 @@ function retireActive(auth, handNo, fields) {
     cleanupEligible: Boolean(fields.cleanupEligible),
     replacementGeneration: fields.replacementGeneration ?? null,
     cleanupState: fields.cleanupState ?? 'pending',
-  });
+  };
+  if (hand.spawnEvidence !== undefined) retired.spawnEvidence = hand.spawnEvidence;
+  auth.retiredAttempts.push(retired);
   delete auth.hands[keyOf(handNo)];
 }
 
@@ -355,11 +357,11 @@ function queueItem({
 }
 
 function insertReservation(auth, {
-  gameDir, epoch, owner, handNo, attempt, deadlineMs, now,
+  gameDir, epoch, owner, handNo, attempt, deadlineMs, now, spawnEvidence = false,
 }) {
   const generation = nextGeneration(auth, handNo);
   const paths = coachPaths(gameDir, epoch, owner, handNo, generation, attempt);
-  auth.hands[keyOf(handNo)] = {
+  const hand = {
     generation,
     attempt,
     ownerSessionId: owner,
@@ -373,6 +375,8 @@ function insertReservation(auth, {
     cleanupEligible: false,
     replacementGeneration: null,
   };
+  if (spawnEvidence) hand.spawnEvidence = 1;
+  auth.hands[keyOf(handNo)] = hand;
   return {
     handNo,
     generation,
@@ -680,7 +684,7 @@ export function createCoachControl(deps = {}) {
     return completenessOf(loadAuthority(gameDir), sample);
   }
 
-  async function beginOwner({ gameDir, owner, completed, statsFile, snapshotFile }) {
+  async function beginOwner({ gameDir, owner, completed, statsFile, snapshotFile, spawnEvidence = false }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
       migrateLocked(gameDir, auth, snapshotFile);
@@ -716,6 +720,7 @@ export function createCoachControl(deps = {}) {
           attempt: 1,
           deadlineMs: DEFAULT_ATTEMPT_MS,
           now: nowNs(),
+          spawnEvidence,
         });
         if (transfer) {
           descriptor.overfoldReserved = true;
@@ -774,7 +779,7 @@ export function createCoachControl(deps = {}) {
 
   async function reserve({
     gameDir, owner, handNo, attempt = 1, deadlineMs = DEFAULT_ATTEMPT_MS,
-    considerOverfold = false, statsFile, snapshotFile,
+    considerOverfold = false, statsFile, snapshotFile, spawnEvidence = false,
   }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
@@ -794,7 +799,7 @@ export function createCoachControl(deps = {}) {
         });
       }
       const descriptor = insertReservation(auth, {
-        gameDir, epoch, owner, handNo, attempt, deadlineMs, now: nowNs(),
+        gameDir, epoch, owner, handNo, attempt, deadlineMs, now: nowNs(), spawnEvidence,
       });
       if (considerOverfold) {
         const stats = readStats(statsFile);
@@ -1391,6 +1396,15 @@ function parseCli(argv) {
   return out;
 }
 
+// E3: a loop that cannot prove it wrote the spawn-protocol flag never gets a reservation
+// or a bound handle. This is what makes a pre-protocol loop process fail-closed against
+// the new CLI instead of persisting an authority row nothing else can attribute.
+function requireSpawnEvidence(opts) {
+  if (opts['spawn-evidence'] !== '1') {
+    fail('SPAWN_PROTOCOL_REQUIRED', '--spawn-evidence 1이 필요합니다.');
+  }
+}
+
 async function cliMain() {
   const command = process.argv[2];
   const opts = parseCli(process.argv.slice(3));
@@ -1398,14 +1412,17 @@ async function cliMain() {
   const gameDir = path.resolve(opts['game-dir'] ?? 'game');
   let result;
   if (command === 'begin-owner') {
+    requireSpawnEvidence(opts);
     result = await cc.beginOwner({
       gameDir,
       owner: opts.owner,
       completed: Number(opts.completed),
       statsFile: opts['stats-file'],
       snapshotFile: opts['snapshot-file'],
+      spawnEvidence: true,
     });
   } else if (command === 'reserve') {
+    requireSpawnEvidence(opts);
     result = await cc.reserve({
       gameDir,
       owner: opts.owner,
@@ -1415,8 +1432,10 @@ async function cliMain() {
       considerOverfold: Boolean(opts['consider-overfold']),
       statsFile: opts['stats-file'],
       snapshotFile: opts['snapshot-file'],
+      spawnEvidence: true,
     });
   } else if (command === 'bind-handle') {
+    requireSpawnEvidence(opts);
     result = await cc.bindHandle({
       gameDir,
       owner: opts.owner,

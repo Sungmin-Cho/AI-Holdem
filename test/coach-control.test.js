@@ -861,3 +861,66 @@ test('unavailable 노트는 고정 문구이며 overfold가 없다', async () =>
   assert.equal(envelope.coach[0].unavailable, true);
   assert.equal(envelope.coach[0].overfold, undefined);
 });
+
+// ── #192 S2a: E3 예약 표식 (spawnEvidence) ────────────────────────────────────
+
+test('#192 S2a: reserve는 spawnEvidence 옵션이 없으면 행에 필드를 남기지 않고, true면 spawnEvidence:1을 남긴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 0, vpip: 0 } } }));
+
+  const legacy = await cc.reserve({
+    gameDir: dir, owner, handNo: 1, statsFile, snapshotFile,
+  });
+  assert.equal(cc.loadAuthority(dir).hands['1'].spawnEvidence, undefined);
+
+  const withEvidence = await cc.reserve({
+    gameDir: dir, owner, handNo: 2, statsFile, snapshotFile, spawnEvidence: true,
+  });
+  assert.equal(cc.loadAuthority(dir).hands['2'].spawnEvidence, 1);
+
+  // retireActive (via fence) must copy the stamp onto the retired row when present, and
+  // must not invent one for a legacy row that never had it.
+  await cc.fence({
+    gameDir: dir, owner, handNo: 2, generation: withEvidence.generation, reason: 'test',
+  });
+  const retiredWithEvidence = cc.loadAuthority(dir).retiredAttempts.find(
+    (row) => row.handNo === 2 && row.generation === withEvidence.generation,
+  );
+  assert.equal(retiredWithEvidence.spawnEvidence, 1);
+
+  await cc.fence({
+    gameDir: dir, owner, handNo: 1, generation: legacy.generation, reason: 'test',
+  });
+  const retiredLegacy = cc.loadAuthority(dir).retiredAttempts.find(
+    (row) => row.handNo === 1 && row.generation === legacy.generation,
+  );
+  assert.equal(retiredLegacy.spawnEvidence, undefined);
+});
+
+test('#192 S2a: beginOwner는 spawnEvidence 옵션에 따라 예약한 행의 필드 유무를 정확히 남긴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+
+  const legacyStarted = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  assert.equal(legacyStarted.descriptors.length, 1);
+  assert.equal(
+    cc.loadAuthority(dir).hands[String(legacyStarted.descriptors[0].handNo)].spawnEvidence,
+    undefined,
+  );
+  await cc.fence({
+    gameDir: dir, owner, handNo: legacyStarted.descriptors[0].handNo,
+    generation: legacyStarted.descriptors[0].generation, reason: 'reset-for-second-case',
+  });
+
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const evidenceStarted = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile, spawnEvidence: true,
+  });
+  assert.equal(evidenceStarted.descriptors.length, 1);
+  assert.equal(
+    cc.loadAuthority(dir).hands[String(evidenceStarted.descriptors[0].handNo)].spawnEvidence,
+    1,
+  );
+});
