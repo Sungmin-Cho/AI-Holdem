@@ -77,3 +77,9 @@ test('#194 settled rejections are valid at the current call but future calls are
   p.diagnostics.detail='bet_ambiguous';assert.equal(d.validateDiagnostics(p.diagnostics,p).reason,'status_detail');
   delete p.diagnostics.detail;delete p.diagnostics.lastRejection;assert.equal(d.retryWillCorrect(p),false);
 });
+test('#194 rejection sink canonicalizes parseable timestamp comments',()=>{
+  const r=record({at:'2026-09-14 (PRIVATE_SENTINEL)'});
+  const safe=d.projectRejectionForSink(r,ctx);
+  assert.equal(safe.at,'2026-09-14T00:00:00.000Z');
+  assert.equal(JSON.stringify(safe).includes('PRIVATE_SENTINEL'),false);
+});

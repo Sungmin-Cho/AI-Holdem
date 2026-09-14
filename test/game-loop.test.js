@@ -9369,3 +9369,22 @@ test('#194 BB option bet needs correction while legacy unopened bet retries with
     if(!legacy) assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-rejected'&&x.detail==='bet_ambiguous'));
   });
 });
+
+test('#194 repair bookkeeping cannot dispatch after the shared deadline', {timeout:20000 * WIN32_SCALE},async t=>{
+  const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter(),loopOpts:{playerBudget:{softMs:10,hardMs:40}}});
+  await loop.requestStop();
+  let clock=0,armed=false;
+  const adapter=makeAdapter({onWarmup:()=>{armed=true;clock=15;},onDecide:async(_,n)=>{
+    if(n===1) throw Object.assign(new Error('SESSION_EXPIRED'),{code:'SESSION_EXPIRED'});
+    return {raw:'invalid'};
+  }});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,monotonicNow:()=>{
+    if(armed&&readJson(path.join(gameDir,'loop-state.json')).pendingDecision?.diagnostics?.callNo===2) clock=40;
+    return clock;
+  }}});
+  t.after(()=>restored.requestStop());await restored.resume();
+  await assert.rejects(restored.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(adapter.decideCalls.length,1);
+  assert.equal(restored.pendingDecision.diagnostics.callNo,1);
+  assert.equal(restored.pendingDecision.code,'TIMEOUT');
+});
