@@ -9162,3 +9162,32 @@ test('P3: synthesizer replay budget strips reason then actions; evaluator prompt
     assert.ok(trimmed[0].positions);
   }
 });
+
+test('#194 unopened flop bet applies once without correction', {timeout:20000 * WIN32_SCALE}, async t => {
+  const adapter=makeAdapter({onDecide:async ({message})=>({raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'bet',amount:Number(/minRaiseTo=(\d+)/.exec(message)[1])})})});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,stack:5000});
+  await cliJson(gameDir,['step','--new-hand']);
+  await cliJson(gameDir,['apply','p1','call']); await cliJson(gameDir,['apply','user','check']);
+  if ((await cliJson(gameDir,['step'])).next.toAct==='user') await cliJson(gameDir,['apply','user','check']);
+  assert.equal(readJson(path.join(gameDir,'state.json')).hand.currentBet,0);
+  await runUntilUserBoundary(loop,gameDir);
+  const actions=readJson(path.join(gameDir,'state.json')).hand.actions.filter(x=>x.street==='flop'&&x.playerId==='p1');
+  assert.equal(actions.length,1); assert.equal(actions[0].action,'raise');
+  assert.equal(adapter.decideCalls.length,1);
+  assert.equal(readLoopLog(gameDir).filter(x=>x.event==='player-decision-normalized').length,1);
+  assert.equal(loop.pendingDecision,null);
+});
+
+test('#194 rejection diagnostics never persist raw reply or damaged call number', {timeout:20000 * WIN32_SCALE}, async t => {
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async()=>{
+    const p=path.join(gameDir,'loop-state.json'); const s=readJson(p);
+    if(s.pendingDecision.diagnostics) s.pendingDecision.diagnostics.callNo='PRIVATE_SENTINEL';
+    writeJsonAtomic(p,s); return {raw:'As Ad PRIVATE_SENTINEL'};
+  }});
+  const setup=await setupAiFirst(t,{adapter}); gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(setup.loop.pendingDecision.diagnostics.detail,'no_json');
+  for(const filename of ['loop.log','loop-state.json']) assert.doesNotMatch(fs.readFileSync(path.join(gameDir,filename),'utf8'),/As Ad|PRIVATE_SENTINEL/);
+  assert.ok(readLoopLog(gameDir).filter(x=>x.event==='player-call').every(x=>Number.isInteger(x.callNo)));
+});
