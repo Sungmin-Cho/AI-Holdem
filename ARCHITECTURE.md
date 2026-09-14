@@ -55,6 +55,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/session-control.js` | loop와 relay의 공통 액션 게이트 락. pause ACK 전에 접수 행동·진행 중 작업을 drain한다. |
 | `tools/session-launcher.js`, `tools/session-preparation.js` | 기존 CLI와 앱이 공유하는 store launcher 및 초기화 완료 증거. |
 | `tools/game-loop.js` | 사이드카 본체 — 부트스트랩(loop 락 → `init` → 서버 기동), 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스를 한 detached 프로세스에서 오케스트레이션. |
+| `tools/player-decision.js` | LLM 결정 분류·미개봉 스트리트 bet 정규화·안전 진단 투영·교정 메시지. game-loop는 남은 예산 안에서 교정 1회 후 미해결 결정을 보존한다. |
 | `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). |
 | `tools/coach-control.js` | 코치 authority 상태기계 — `gameEpoch`/`activeOwnerSessionId`/핸드별 `generation`으로 큐·재개·중복 요청을 판정. |
 | `tools/publish.js` | 게시 CLI — `engine/cli.js step` envelope의 공개분만 골라 서버에 POST하고 `publishId`를 관리. |

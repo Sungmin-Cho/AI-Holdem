@@ -29,7 +29,7 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 6�
 
 부수 효과가 더 크다. 사이드카는 detached라 **딜러 세션이 죽어도 게임은 계속 돈다.** 호스트 세션이 하는 일은 사전 점검 → 기동 → 보고 셋뿐이다.
 
-판정 근거는 지어내지 않는다. 사이드카가 모든 AI 결정을 선택된 session의 `loop-state.json` `metrics`에 `{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`로 남긴다. `outcome`이 `forced_default`(워치독 타임아웃)인 결정도 소요 시간 그대로 분포에 들어간다 — 타임아웃을 분포에서 숨기지 않는다.
+판정 근거는 지어내지 않는다. 사이드카는 선택된 session의 `loop-state.json` `metrics`에 결정별 시간을 남긴다. `outcome`은 `accepted`·`retried_accepted`·`policy_accepted`이며, `sessionRepaired`·`corrected` 플래그로 세션 복구와 교정 수락을 구분한다. 유효 결정이 없으면 액션 없이 `pendingDecision.status=recovery_required`로 보존되고 `code`(마지막 호출 실패)와 `diagnostics`(직전 회신의 안전 투영·교정 횟수)가 남는다. `loop.log`의 `player-call`(`callNo`)·`player-decision-normalized`·`player-decision-rejected`·`player-correction`·`player-correction-skipped`·`player-diagnostics-quarantined`·`player-recovery-required`로 원인을 확인한다. 거부된 원문 출력은 로그에 남기지 않는다. 자동 교정은 자식 종료 확인 후 남은 예산 안에서 1회이며, TIMEOUT만 발생한 결정은 자동 재질문하지 않는다.
 
 ## LLM은 어디에만 있나
 
