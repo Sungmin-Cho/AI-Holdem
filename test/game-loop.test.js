@@ -22,6 +22,7 @@ import {
   engineInitFlags,
   applyModeDefaults,
   buildBadChildOutputDetails,
+  unresolvedEvidenceGuidance,
 } from '../tools/game-loop.js';
 import { RUNTIME_TABLE, createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -4923,6 +4924,72 @@ test('playing resume은 완료 핸드가 있는데 coach authority가 없으면 
   assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
 });
 
+test('#192 R1: policy playing resume은 완료 핸드가 있고 coach authority가 없어도 AUTHORITY_MISSING 없이 진행한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 0, opponentRuntime: 'policy' },
+  });
+  await first.bootstrap({ ai: 1, stack: 100, opponentRuntime: 'policy' });
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  await first.requestStop();
+  assert.equal(fs.existsSync(path.join(gameDir, '.coach-authority.json')), false);
+
+  const calls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 0, opponentRuntime: 'policy',
+      onCoachInvoke: (args) => calls.push(args),
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  const state = await resumed.resume();
+  assert.equal(state.phase, 'playing');
+  assert.equal(Object.hasOwn(state, 'halt'), false);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
+});
+
+test('#192 R1: llm playing resume은 완료 핸드가 있는데 coach authority가 없으면 여전히 fail closed한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  const started = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'step', '--new-hand', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  await execFileAsync(process.execPath, [
+    CLI, 'step', 'p1', 'fold', '--expect-version', String(started.stateVersion),
+    '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 });
+  await first.requestStop();
+
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  await assert.rejects(resumed.resume(), (error) => error.code === 'COACH_HANDLE_UNRESOLVED');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.recovery.attempts.some((row) => row.reason === 'AUTHORITY_MISSING'), true);
+});
+
 test('pending coach retry 후 reconcile가 일시 불가능하면 새 publishId 없이 COACH_RECONCILE_PENDING으로 중단하고 다음 resume이 reconcile-only로 해소한다', { timeout: 30_000 }, async (t) => {
   const gameDir = tmpGame();
   const initialized = await initGame(gameDir, ['--stack', '100']);
@@ -9324,6 +9391,93 @@ test('#192 FO-2 RED: 코치 oneshot의 startTime이 null이면 "pid:null"을 bin
   );
 });
 
+test('#192 O6: 코치 oneshot의 startTime이 빈 문자열/공백뿐이면 identity-unavailable로 처리하고 bind-handle하지 않는다', { timeout: 15_000 }, async (t) => {
+  for (const sentinelStartTime of ['', '   ']) {
+    const handles = [];
+    const upper = makeCoachAdapter({
+      rounds: [{
+        gate: new Promise(() => {}),
+        startTime: sentinelStartTime,
+        terminate: { confirmed: true },
+        raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+      }],
+    });
+    const { loop } = await setupCoachHand(t, {
+      upper,
+      loopOpts: {
+        onCoachInvoke(args) {
+          if (args[0] === 'bind-handle') handles.push(args[args.indexOf('--handle') + 1]);
+        },
+      },
+    });
+    const running = startRun(loop);
+
+    await waitFor(() => upper.starts.length >= 1, 'coach worker was not started');
+    await waitFor(
+      () => handles.length >= 1 || upper.terminations.length >= 1,
+      'neither bind-handle nor terminate followed the spawn',
+    );
+    await stopRun(loop, running);
+
+    assert.equal(
+      handles.length,
+      0,
+      `a "${sentinelStartTime}" startTime identity was bound as a coach handle`,
+    );
+    assert.equal(
+      upper.terminations.length,
+      1,
+      `a "${sentinelStartTime}" startTime identity was not terminated as identity-unavailable`,
+    );
+  }
+});
+
+test('#192 O7: 이미 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않고 sidecar를 그대로 둔다', { timeout: 15_000 }, async (t) => {
+  let gameDir;
+  let sidecarPath;
+  let seededPayload;
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '기본 코치 응답' }) }],
+  });
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      // Simulates "a pipeline ran twice for the same attempt path": by the time this
+      // checkpoint fires, `reserve` has already recorded this exact attempt's tuple in
+      // `.coach-authority.json`, so the sidecar this seeds here carries the identical
+      // {gameEpoch, owner, handNo, generation, attempt} the real pipeline is about to
+      // compute for its own `intent` write.
+      coachSpawnCheckpoint: async ({ handNo, attempt }) => {
+        if (seededPayload) return;
+        const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+        const hand = authority.hands[String(handNo)];
+        const state = readJson(path.join(gameDir, 'loop-state.json'));
+        sidecarPath = coachSpawnSidecarPath(gameDir, hand.exactResultPath);
+        seededPayload = {
+          phase: 'identity',
+          gameEpoch: state.gameEpoch,
+          owner: state.ownerSessionId,
+          handNo,
+          generation: hand.generation,
+          attempt,
+          pid: 999_999,
+          startTime: 'sentinel-o7-start',
+        };
+        fs.writeFileSync(sidecarPath, JSON.stringify(seededPayload));
+      },
+    },
+  });
+  gameDir = setup.gameDir;
+  const { loop } = setup;
+
+  const running = startRun(loop);
+  await waitFor(() => seededPayload !== undefined, 'coachSpawnCheckpoint never fired');
+  await stopRun(loop, running);
+
+  assert.equal(upper.starts.length, 0, '이미 identity가 있는 attempt에 대해 두 번째 spawn을 시도했다');
+  assert.deepEqual(readJson(sidecarPath), seededPayload, '기존 identity sidecar가 다른 phase로 덮어써졌다');
+});
+
 test('#192 S3: identity-unavailable 분기에서 fence child가 실패해도 attempt 2를 예약하지 않는다', { timeout: 15_000 }, async (t) => {
   let gameDir;
   let originalOwner = null;
@@ -9816,6 +9970,100 @@ test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 recor
   assert.equal(upper.terminations.length, 2, '최초 null-identity 종료와 finalize 재확인이 각각 한 번씩 호출돼야 한다');
 });
 
+test('#192 O2: startTime null 코치 attempt의 종료가 confirmed면 handle 없이도 finalize가 released로 닫는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    rounds: [{
+      startTime: null,
+      terminate: { confirmed: true },
+      raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+    }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper });
+
+  await loop.resume();
+  const outcome = await loop.run().catch((error) => error);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(
+    state.finalization?.cutoff?.terminationConfirmed,
+    true,
+    // The child confirmed its own close in-process (this instance's terminate() call
+    // returned confirmed:true) — that confirmation must survive into the persisted
+    // classifier's later, independent scan of the retired row, not be lost the moment the
+    // in-memory record is removed from `coachAttempts`.
+    `identity 없는 worker의 in-process confirmed 종료가 persisted 증거 없이 unresolved로 판정됐다 (outcome ${outcome?.phase ?? outcome?.code})`,
+  );
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts?.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+});
+
+test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제 terminate()만 실행하고 결과를 공유한다', { timeout: 30_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let terminateCalls = 0;
+  let releaseTerminate;
+  const gate = new Promise((resolve) => { releaseTerminate = resolve; });
+  const upper = makeCoachAdapter({
+    rounds: [{
+      startTime: null,
+      raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+      // Counts real invocations and stays pending until released, so a still-in-flight
+      // termination is observable while a second, independent caller (finalize's
+      // terminateLiveCoachGenerations) reaches the exact same record.
+      terminate: async () => {
+        terminateCalls += 1;
+        await gate;
+        return { confirmed: true };
+      },
+    }],
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: { finalizeBudgetMs: 3_000, finalizeCutoffLeadMs: 1_500 },
+  });
+
+  // Safety net: `requestStop()` (registered by `finalizingLoop` via `t.after`) awaits
+  // `coachTasks` with no deadline of its own — if the assertions below throw before this
+  // test ever releases the gate, that cleanup would hang forever. The `finally` guarantees
+  // release happens before this test function returns or throws, i.e. before any `t.after`
+  // hook runs at all.
+  let running;
+  try {
+    // resume() only launches the coach pipeline as a background tracked task (it never
+    // awaits its completion) — the identity-unavailable branch reaches its own
+    // terminateCoachAttempt() call and calls terminate() once, then blocks on `gate`.
+    await loop.resume();
+    await waitFor(() => terminateCalls >= 1, 'identity-unavailable 분기가 terminate()를 호출하지 않았다');
+
+    running = loop.run();
+    running.catch(() => {});
+    // finalize's own settle-wait for coachTasks gives up at the result-wait cutoff (the
+    // pipeline task above is still blocked on `gate`) and proceeds to
+    // terminateLiveCoachGenerations, which looks up the same record by the same
+    // {handNo, generation} key and must reuse the in-flight termination instead of
+    // invoking a second, independent terminate() call.
+    await waitFor(
+      () => readLoopLog(gameDir).some((row) => row.event === 'finalize-coach-settled'),
+      'finalize가 coach settle 단계에 도달하지 않았다',
+      15_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(terminateCalls, 1, '두 번째 caller가 이미 진행 중인 termination을 공유하지 않고 다시 호출했다');
+  } finally {
+    releaseTerminate();
+  }
+
+  await running?.catch(() => {});
+
+  assert.equal(terminateCalls, 1, 'gate 해제 후에도 실제 terminate() 호출은 정확히 한 번이어야 한다');
+  assert.equal(upper.terminations.length, 1, '공유된 termination이 아니라 각 caller가 독립적으로 종료를 호출했다');
+});
+
 // ── #192 S2b: E2 spawn sidecar + evidence classifier ──────────────────────────
 
 test('#192 S2b: identity-unavailable 처리 중 fence가 실패해도 terminate는 한 번만 호출된다', { timeout: 15_000 }, async (t) => {
@@ -10203,6 +10451,69 @@ test('#192 S2b 분류자 8: stamp, .spawn.json이 symlink → aborted', { timeou
   const targetPath = path.join(gameDir, '.spawn-symlink-target.json');
   fs.writeFileSync(targetPath, JSON.stringify({ phase: 'intent' }));
   fs.symlinkSync(targetPath, sidecarPath);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'SPAWN_EVIDENCE_INVALID');
+  assert.equal(row?.evidence.sidecar, 'invalid');
+});
+
+test('#192 I2: sidecar가 hard link면(nlink>1) invalid로 판정하고 identity에 signal을 보내지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'hard link 의미론이 POSIX 전용이다')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const orphanStartTime = await waitFor(
+    () => processStartTime(orphan.pid),
+    `coach orphan ${orphan.pid} start identity was not observable`,
+  );
+  const sidecarPath = writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
+    phase: 'identity', pid: orphan.pid, startTime: orphanStartTime,
+  });
+  fs.linkSync(sidecarPath, `${sidecarPath}.hardlink`);
+  t.after(() => { try { fs.unlinkSync(`${sidecarPath}.hardlink`); } catch { /* best effort */ } });
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  assert.deepEqual(signals, [], 'hard-linked sidecar identity의 live orphan에 signal을 보냈다');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'SPAWN_EVIDENCE_INVALID');
+  assert.equal(row?.evidence.sidecar, 'invalid');
+});
+
+test('#192 I2: sidecar가 64KiB를 넘으면 invalid로 판정한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
+    phase: 'intent', padding: 'x'.repeat(64 * 1024 + 1),
+  });
   const upper = makeCoachAdapter();
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
@@ -10729,6 +11040,83 @@ test('#192 S4: 성공적인 stop은 발급한 owner마다 정확히 한 번, 중
   assert.deepEqual(owners, [owner1, owner2].sort());
 });
 
+test('#192 I1: oneshotStart는 있지만 dispose가 없는 adapter가 있으면 성공적인 stop도 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const logs = [];
+  // A coach-capable adapter (exposes `oneshotStart`) that never confirms its own children
+  // closed (no `dispose` at all) — `startAdapterDisposal` currently treats "no dispose" the
+  // same as "successfully disposed", which is exactly the gap #192 I1 closes.
+  const undisposableUpper = {
+    kind: 'coach-undisposable',
+    oneshotStart() {
+      return {
+        pid: 1,
+        startTime: 'sentinel-i1-start',
+        done: new Promise(() => {}),
+        async terminate() { return { confirmed: true }; },
+      };
+    },
+  };
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), undisposableUpper),
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1 });
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+
+  await loop.requestStop();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(typeof state.stoppedAt, 'string', 'precondition: stop 자체는 정상적으로 성공해야 한다');
+  assert.equal(
+    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === owner),
+    false,
+    'dispose를 확인하지 못한 coach adapter가 있는데도 closure entry가 기록됐다',
+  );
+  assert.ok(
+    logs.some((row) => row.event === 'coach-runtime-closure-skipped'),
+    'coach-runtime-closure-skipped 로그가 기록되지 않았다',
+  );
+});
+
+test('#192 I5: requestStop 직전 loop lock 디렉터리가 다른 inode/identity로 바뀌면 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1 });
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+
+  // Replace the loop lock directory this instance's in-memory `lockHandle` still points at
+  // with a brand-new, empty directory: a new inode, no pid file at all — the same identity
+  // loss `releaseOwnedLock` itself already tolerates (it silently no-ops), but the closure
+  // receipt currently only checks `lockHandle` is non-null, never that it is still this
+  // instance's own lock.
+  const lockDir = path.join(gameDir, 'loop.lock.d');
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  fs.mkdirSync(lockDir);
+
+  await loop.requestStop();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(typeof state.stoppedAt, 'string', 'precondition: stop 자체는 정상적으로 성공해야 한다');
+  assert.equal(
+    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === owner),
+    false,
+    '락 identity가 이 인스턴스의 것이 아닌데도 closure entry가 기록됐다',
+  );
+  assert.ok(
+    logs.some((row) => row.event === 'coach-runtime-closure-lock-lost'),
+    'coach-runtime-closure-lock-lost 로그가 기록되지 않았다',
+  );
+});
+
 test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11188,7 +11576,14 @@ test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize �
   if (fs.existsSync(hand1SidecarPath)) {
     assert.equal(readJson(hand1SidecarPath).phase, 'aborted-before-spawn');
   }
-  assert.equal(readJson(hand2SidecarPath).phase, 'identity');
+  // #192 O2: hand 2's bind-handle never completes (it times out on the held
+  // publish.lock.d), so the pipeline's own outer catch confirms termination in-process via
+  // the fixture's custom terminate() during the FIRST run itself — well before this second,
+  // receipt-less resume ever runs. Because that attempt never reached `bound: true`,
+  // terminateCoachAttempt() persists that confirmation as `closed-confirmed` right then, so
+  // this resume's classifier releases the row on that (still spawn-sidecar) evidence alone,
+  // never needing to poll the old identity's liveness at all.
+  assert.equal(readJson(hand2SidecarPath).phase, 'closed-confirmed');
 });
 
 // #192 S5 variant: no requestStop, no owner-runtime-closure receipt, and hand 1's sidecar
@@ -11334,6 +11729,21 @@ test('#192 S6: BAD_CHILD_OUTPUT details는 allowlist에 있는 code만 통과시
 
   const missingCode = buildBadChildOutputDetails({ ...base, stdout: JSON.stringify({ ok: false }), stderr: '' });
   assert.equal(missingCode.code, 'UNLISTED', 'JSON이지만 code 필드가 없으면 UNLISTED여야 한다');
+});
+
+test('#192 I6: allowlist는 publish.js·engine/cli.js가 실제로 방출하는 모든 code를 포함한다', () => {
+  const base = { script: COACH_CLI, exitCode: 0, signal: null };
+  // tools/publish.js: STALE_COACH_AUTHORITY (assertCoachQueue/staleAttemptReason 둘 다),
+  // BAD_ATTEMPT_VERSION·STALE_GAME_ATTEMPT(staleAttemptReason이 반환해 bail되는 코드),
+  // BAD_SNAPSHOT(readJson(ui-snapshot.json, 'BAD_SNAPSHOT', …)).
+  // engine/cli.js: HINT_SNAPSHOT_INVALID(throwCoded, catch-all이 top-level code로 방출).
+  for (const code of [
+    'STALE_COACH_AUTHORITY', 'BAD_ATTEMPT_VERSION', 'STALE_GAME_ATTEMPT',
+    'BAD_SNAPSHOT', 'HINT_SNAPSHOT_INVALID',
+  ]) {
+    const details = buildBadChildOutputDetails({ ...base, stdout: JSON.stringify({ code }), stderr: '' });
+    assert.equal(details.code, code, `${code}가 allowlist에 없어 UNLISTED로 가려졌다`);
+  }
 });
 
 test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cleanup-result·adapter-disable은 첫 closure에서만 호출된다', { timeout: 20_000, concurrency: false }, async (t) => {
@@ -11534,4 +11944,49 @@ test('#192 S6: recovery 메시지가 sidecar intent 행과 증거 없는 legacy 
   assert.notEqual(legacyMessage, intentMessage, '두 시나리오의 recovery 메시지가 동일하다');
   assert.match(intentMessage, /coach CLI 자식/, 'intent-only 메시지에 자식 프로세스 확인 안내가 없다');
   assert.match(legacyMessage, /legacy/, 'no-evidence 메시지에 legacy 안내가 없다');
+});
+
+test('#192 O5: 카테고리별 unresolvedEvidenceGuidance — legacy는 hasHandle/spawnEvidence/sidecar가 모두 증거 없음일 때만', () => {
+  // 진짜 legacy 무증거 행: handle 없음, spawnEvidence 없음, sidecar 자체가 absent.
+  assert.match(
+    unresolvedEvidenceGuidance([{
+      handNo: 1, generation: 1, reason: 'IDENTITY_UNAVAILABLE',
+      evidence: { hasHandle: false, spawnEvidence: false, sidecar: 'absent', attributable: true },
+    }]),
+    /legacy/,
+    'legacy 무증거 행에 legacy 안내가 없다',
+  );
+});
+
+test('#192 O5: NOT_ATTRIBUTABLE 행은 legacy가 아니라 경로 확인 불가 문구를 받는다', () => {
+  const guidance = unresolvedEvidenceGuidance([{
+    handNo: 1, generation: 1, reason: 'NOT_ATTRIBUTABLE',
+    evidence: { hasHandle: false, spawnEvidence: true, sidecar: 'absent', attributable: false },
+  }]);
+  assert.ok(guidance, 'NOT_ATTRIBUTABLE 행에 안내 문구가 없다');
+  assert.doesNotMatch(guidance, /legacy/, 'NOT_ATTRIBUTABLE 행이 legacy로 잘못 표시됐다');
+  assert.match(guidance, /디렉터리|경로/, 'NOT_ATTRIBUTABLE 행에 경로 확인 불가 안내가 없다');
+});
+
+test('#192 O5: authority/epoch/owner/deadline/adapter-disable 실패는 evidence guidance를 받지 않는다', () => {
+  for (const reason of [
+    'STALE_GAME_EPOCH', 'COACH_EPOCH_UNVERIFIABLE', 'NO_COACH_OWNER',
+    'RESUME_RECLAIM_DEADLINE_EXCEEDED', 'ADAPTER_DISABLE_CHILD_FAILED', 'AUTHORITY_MISSING',
+  ]) {
+    // These rows never carry an `evidence` field at all (they are synthetic
+    // authority-level failures, not coach-row evidence classifications) — the previous
+    // code treated "no evidence field" the same as "legacy row", which is exactly the
+    // mislabel #192 O5 fixes.
+    const guidance = unresolvedEvidenceGuidance([{ handNo: null, generation: null, reason }]);
+    assert.equal(guidance, null, `${reason}가 legacy/다른 evidence guidance로 잘못 표시됐다 (${guidance})`);
+  }
+});
+
+test('#192 O5: NOT_ATTRIBUTABLE 행이 legacy 조건도 함께 만족해도 경로 확인 불가 문구가 우선한다', () => {
+  const guidance = unresolvedEvidenceGuidance([{
+    handNo: 1, generation: 1, reason: 'NOT_ATTRIBUTABLE',
+    evidence: { hasHandle: false, spawnEvidence: false, sidecar: 'absent', attributable: false },
+  }]);
+  assert.doesNotMatch(guidance, /legacy/, '경로 확인 불가 행이 legacy로 잘못 표시됐다');
+  assert.match(guidance, /디렉터리|경로/);
 });
