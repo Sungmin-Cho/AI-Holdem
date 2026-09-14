@@ -51,3 +51,19 @@ test('#194 diagnostic validation distinguishes legacy, malformed and valid recor
   const p=pending({status:'recovery_required',code:'INVALID_DECISION'}); assert.equal(d.retryWillCorrect(p),true);
   p.diagnosticsQuarantined=true; assert.equal(d.retryWillCorrect(p),false);
 });
+test('#194 correction preserves original bytes and appends only validated diagnosis', () => {
+  assert.deepEqual(Object.keys(d.DETAIL_SENTENCES).sort(),[...d.REJECTION_DETAILS].sort());
+  for(const detail of d.REJECTION_DETAILS) {
+    const r=record({detail,code:detail==='engine_rejected'?'ILLEGAL_ACTION':'INVALID_DECISION'});
+    const message=d.correctionMessage(next.message,r,ctx);
+    assert.ok(message.startsWith(next.message+'\n\n[교정]'));
+    const block=message.slice(next.message.length);
+    assert.doesNotMatch(block,/As Ad|SECRET|A-high/);
+    assert.match(block,/이 차례의 합법 액션: fold \/ check \/ raise 200~4275/);
+    assert.equal(block.includes('amount는 raise-to 총액이다'),d.FORMAT_HINT_DETAILS.has(detail));
+    assert.match(block,/decisionId "d-15-flop-8"을 그대로 에코/);
+  }
+  assert.match(d.correctionMessage(next.message,record({projection:{action:'unknown',decisionIdMatches:false}}),ctx),/직전 회신은 거부됐다/);
+  assert.throws(()=>d.correctionMessage(next.message,record({raw:'SECRET'}),ctx),TypeError);
+  assert.doesNotMatch(d.correctionMessage('decisionId: d-15-flop-8',record(),ctx),/이 차례의 합법 액션/);
+});
