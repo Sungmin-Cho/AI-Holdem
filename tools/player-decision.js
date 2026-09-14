@@ -135,3 +135,34 @@ export function retryWillCorrect(pending) {
     && !pending.diagnosticsQuarantined && validateDiagnostics(pending.diagnostics, pending).ok
     && CORRECTABLE_DETAILS.has(pending.diagnostics?.lastRejection?.detail));
 }
+
+export const DETAIL_SENTENCES = Object.freeze({
+  legal_line_missing:'요약에 합법 액션 수치가 없다.',
+  no_json:'JSON 객체 한 줄을 읽을 수 없다.',
+  decision_id_mismatch:'decisionId가 현재 결정과 일치하지 않는다.',
+  unknown_action:'이 요약의 action 어휘에 없는 값이다.',
+  bet_unavailable:'이 요약에서는 bet의 의미를 확인할 수 없다.',
+  bet_ambiguous:'이미 베팅이 있어 bet의 금액 의미가 모호하다.',
+  check_not_allowed:'이 차례에는 check가 허용되지 않는다.',
+  call_not_allowed:'이 차례에는 call이 허용되지 않는다.',
+  raise_not_allowed:'이 차례에는 raise가 허용되지 않는다.',
+  amount_not_integer:'amount가 정수가 아니다.',
+  amount_out_of_range:'amount가 합법 레이즈 범위를 벗어났다.',
+  engine_rejected:'엔진이 그 액션을 거부했다.',
+});
+export const FORMAT_HINT_DETAILS = new Set(['bet_unavailable', 'bet_ambiguous', 'unknown_action',
+  'raise_not_allowed', 'amount_not_integer', 'amount_out_of_range']);
+
+export function correctionMessage(message, rejection, ctx) {
+  const safe = projectRejectionForSink(rejection, ctx);
+  if (!safe) throw new TypeError('Invalid rejection for correction');
+  const p = safe.projection;
+  const reply = p.action === 'unknown' ? '' : ` ${JSON.stringify({action:p.action, ...(Object.hasOwn(p, 'amount') ? {amount:p.amount} : {})})}`;
+  const lines = [`[교정] 직전 회신${reply}은 거부됐다: ${DETAIL_SENTENCES[safe.detail]}`];
+  const choices = /^가능한 액션: (.*)$/m.exec(message);
+  if (choices) lines.push(`이 차례의 합법 액션: ${choices[1]}`);
+  if (FORMAT_HINT_DETAILS.has(safe.detail)) lines.push('위 요약으로 액션을 다시 고르라. 레이즈(이 스트리트의 첫 베팅 포함)를 원하면 action은 "raise", amount는 raise-to 총액이다.');
+  const id = /decisionId: (\S+)/.exec(message)?.[1];
+  if (id) lines.push(`decisionId "${id}"을 그대로 에코해 JSON 한 줄만 다시 보내라. 다른 텍스트는 붙이지 마라.`);
+  return `${message}\n\n${lines.join('\n')}`;
+}
