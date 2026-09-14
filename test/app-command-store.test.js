@@ -127,13 +127,13 @@ test('managed command journal retries the displayed LLM decision once and preser
     assert.equal(snap.diagnostics,null); assert.equal(snap.diagnosticsQuarantined,true); assert.equal(snap.retryWillCorrect,false);
     assert.equal(JSON.stringify(manager.snapshot()).includes('PRIVATE_SENTINEL'),false);
   }
-  for(const patch of [{diagnostics:undefined},{code:'TIMEOUT',diagnostics:{v:1,callNo:1,corrections:0}}]) {
+  for(const patch of [{diagnostics:undefined},{schemaVersion:1,diagnostics:undefined},{code:'TIMEOUT',diagnostics:{v:1,callNo:1,corrections:0}}]) {
     const pending={...saved.pendingDecision,...patch};
     if(patch.diagnostics===undefined) delete pending.diagnostics;
     fs.writeFileSync(loopPath,JSON.stringify({...saved,pendingDecision:pending}));
     const snap=manager.snapshot().pendingDecision;
     assert.equal(snap.retryWillCorrect,false);
-    assert.equal(snap.diagnosticsQuarantined,patch.diagnostics===undefined);
+    assert.equal(snap.diagnosticsQuarantined,patch.diagnostics===undefined&&patch.schemaVersion!==1);
   }
   fs.writeFileSync(loopPath,JSON.stringify(saved));
   const end = payload(manager,'end');

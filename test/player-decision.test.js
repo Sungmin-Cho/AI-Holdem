@@ -80,6 +80,7 @@ test('#194 settled rejections are valid at the current call but future calls are
 test('#194 rejection sink canonicalizes parseable timestamp comments',()=>{
   const r=record({at:'2026-09-14 (PRIVATE_SENTINEL)'});
   const safe=d.projectRejectionForSink(r,ctx);
-  assert.match(safe.at,/^2026-09-\d{2}T\d{2}:00:00\.000Z$/);
+  assert.match(safe.at,/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(Date.parse(safe.at),Date.parse(r.at));
   assert.equal(JSON.stringify(safe).includes('PRIVATE_SENTINEL'),false);
 });
