@@ -301,8 +301,8 @@ function makeCoachAdapter({ rounds = [], evaluatorRounds = [], synthesizerRounds
       done.finally(() => pending.delete(entry)).catch(() => {});
       done.catch(() => {});
       return {
-        pid: 910_000 + handleIndex,
-        startTime: `coach-start-${handleIndex}`,
+        pid: round.pid !== undefined ? round.pid : 910_000 + handleIndex,
+        startTime: round.startTime !== undefined ? round.startTime : `coach-start-${handleIndex}`,
         done,
         async terminate() {
           const result = typeof round.terminate === 'function'
@@ -9160,5 +9160,135 @@ test('P3: synthesizer replay budget strips reason then actions; evaluator prompt
     assert.equal(trimmed.every((row) => !row.actions || row.actions.length === 0), true);
     assert.ok(trimmed[0].holes);
     assert.ok(trimmed[0].positions);
+  }
+});
+
+// ── #192 RED: HEAD fail-open 경로 (설계 docs/design 2026-09-13-issue-192 §1.3) ──────────
+
+test('#192 FO-2 RED: 코치 oneshot의 startTime이 null이면 "pid:null"을 bind-handle하지 않는다', { timeout: 15_000 }, async (t) => {
+  const handles = [];
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: new Promise(() => {}),
+      startTime: null,
+      terminate: { confirmed: true },
+      raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+    }],
+  });
+  const { loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] === 'bind-handle') handles.push(args[args.indexOf('--handle') + 1]);
+      },
+    },
+  });
+  const running = startRun(loop);
+
+  await waitFor(() => upper.starts.length >= 1, 'coach worker was not started');
+  await waitFor(
+    () => handles.length >= 1 || upper.terminations.length >= 1,
+    'neither bind-handle nor terminate followed the spawn',
+  );
+  await stopRun(loop, running);
+
+  assert.deepEqual(
+    handles.filter((handle) => /:null$/.test(handle)),
+    [],
+    'an unverified null startTime was persisted as a coach handle',
+  );
+});
+
+test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니므로 released로 닫지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const reserved = await seedReservedCoach(gameDir, 'old-owner', 1);
+  await runCoachCli(gameDir, [
+    'bind-handle', '--owner', 'old-owner', '--hand', '1',
+    '--generation', String(reserved.generation), '--handle', `${orphan.pid}:null`,
+  ]);
+  const signals = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 2_500,
+      finalizeCutoffLeadMs: 1_500,
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  let resumeError = null;
+  try {
+    await loop.resume();
+  } catch (error) {
+    resumeError = error;
+  }
+
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = (authority.retiredAttempts ?? []).find((entry) => entry.handNo === 1);
+  assert.notEqual(
+    row?.cleanupState,
+    'released',
+    `an unverified "pid:null" identity was closed as released (resume ${resumeError?.code ?? 'ok'})`,
+  );
+  assert.deepEqual(signals, [], 'a signal was sent to a pid whose identity was never verified');
+});
+
+test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"면 검증된 identity로 취급하지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  for (const sentinelStartTime of ['   ', 'undefined']) {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan();
+    t.after(() => terminateIfAlive(orphan));
+    const reserved = await seedReservedCoach(gameDir, 'old-owner', 1);
+    await runCoachCli(gameDir, [
+      'bind-handle', '--owner', 'old-owner', '--hand', '1',
+      '--generation', String(reserved.generation), '--handle', `${orphan.pid}:${sentinelStartTime}`,
+    ]);
+    const signals = [];
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper: makeCoachAdapter(),
+      stateOverrides: { port: external.lock.port },
+      loopOpts: {
+        finalizeBudgetMs: 2_500,
+        finalizeCutoffLeadMs: 1_500,
+        signalProcess: (pid, signal) => {
+          if (pid === orphan.pid) signals.push(signal);
+          process.kill(pid, signal);
+        },
+      },
+    });
+
+    let resumeError = null;
+    try {
+      await loop.resume();
+    } catch (error) {
+      resumeError = error;
+    }
+
+    const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+    const row = (authority.retiredAttempts ?? []).find((entry) => entry.handNo === 1);
+    assert.notEqual(
+      row?.cleanupState,
+      'released',
+      `a "${sentinelStartTime}" startTime identity was closed as released (resume ${resumeError?.code ?? 'ok'})`,
+    );
+    assert.deepEqual(
+      signals,
+      [],
+      `a signal was sent to a pid whose "${sentinelStartTime}" startTime identity was never verified`,
+    );
   }
 });

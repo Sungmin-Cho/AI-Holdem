@@ -3111,8 +3111,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const separator = raw.indexOf(':');
     if (separator <= 0 || separator === raw.length - 1) return null;
     const pid = Number(raw.slice(0, separator));
+    // Windows start times contain colons, so everything after the first separator is
+    // preserved verbatim for a valid value — only the literal sentinels a lost/unverifiable
+    // startTime would stringify to (`"null"`, `"undefined"`) or blank text are rejected.
     const startTime = raw.slice(separator + 1);
-    if (!Number.isSafeInteger(pid) || pid < 1 || startTime === '') return null;
+    if (!Number.isSafeInteger(pid) || pid < 1) return null;
+    const trimmed = startTime.trim();
+    if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') return null;
     return { pid, startTime };
   };
 
@@ -3665,6 +3670,68 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           prompt,
           timeoutMs: COACH_GENERATION_MS,
         });
+        if (handle.pid == null || handle.startTime == null) {
+          // FO-2: a runtime can report a live child without a resolvable pid/startTime.
+          // Binding "<pid>:null" would let parsePersistedCoachHandle accept it as a
+          // persisted identity; a later resume would then see the real startTime as a
+          // `mismatch` and close a possibly live child as IDENTITY_REPLACED/released
+          // without any termination evidence (fail-open). Never bind an unverifiable
+          // handle — settle this attempt here instead.
+          const termination = handle && typeof handle.terminate === 'function'
+            ? await handle.terminate()
+            : { confirmed: false };
+          const confirmed = termination?.confirmed === true;
+          log('coach-identity-unavailable', {
+            handNo,
+            generation: currentDescriptor.generation,
+            confirmed,
+          });
+          const fenceCurrentGeneration = async () => {
+            try {
+              await runCoachBeforeResultCutoff([
+                'fence',
+                '--owner', owner,
+                '--hand', String(handNo),
+                '--generation', String(currentDescriptor.generation),
+                '--reason', 'identity-unavailable',
+              ]);
+            } catch (fenceError) {
+              // heartbeat may retire this exact generation independently; STALE_GENERATION
+              // then means there is no live generation left to fence, not a failure.
+              if (fenceError.code !== 'STALE_GENERATION') throw fenceError;
+              log('coach-fence-already-retired', {
+                handNo,
+                generation: currentDescriptor.generation,
+              });
+            }
+          };
+          if (confirmed) {
+            await fenceCurrentGeneration();
+            await completeCoachUnavailable({
+              owner,
+              handNo,
+              generation: currentDescriptor.generation,
+              reason: 'identity-unavailable',
+              fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+            });
+            return;
+          }
+          await fenceCurrentGeneration();
+          await runCoachBeforeResultCutoff([
+            'adapter-disable',
+            '--owner', owner,
+            '--reason', 'identity-unavailable',
+          ]);
+          coachAdapterDisabled = true;
+          await completeCoachUnavailable({
+            owner,
+            handNo,
+            generation: currentDescriptor.generation,
+            reason: 'identity-unavailable',
+            fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+          });
+          return;
+        }
         let interrupt;
         const interrupted = new Promise((_, reject) => {
           interrupt = (code = 'COACH_HEARTBEAT_TIMEOUT') => reject(codedError(
