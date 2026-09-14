@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
@@ -443,45 +444,7 @@ function processAlive(pid) {
   }
 }
 
-function legalFromMessage(message) {
-  if (typeof message !== 'string') return null;
-  const match = /legal 수치: canCheck=(true|false) callAmount=(\d+) canRaise=(true|false) minRaiseTo=(\d+) maxRaiseTo=(\d+)/.exec(message);
-  if (!match) return null;
-  return {
-    canCheck: match[1] === 'true',
-    callAmount: Number(match[2]),
-    canRaise: match[3] === 'true',
-    minRaiseTo: Number(match[4]),
-    maxRaiseTo: Number(match[5]),
-  };
-}
-
-export function validatedDecision(raw, next) {
-  const parsed = extractJsonLine(raw);
-  const legal = legalFromMessage(next.message);
-  if (!parsed || !legal || parsed.decisionId !== next.decisionId) return null;
-  let action = null;
-  if (parsed.action === 'fold') action = { action: 'fold' };
-  else if (parsed.action === 'check') action = legal.canCheck ? { action: 'check' } : null;
-  else if (parsed.action === 'call') {
-    action = !legal.canCheck && legal.callAmount > 0 ? { action: 'call' } : null;
-  } else if (parsed.action === 'raise' && legal.canRaise && Number.isInteger(parsed.amount)) {
-    if (legal.minRaiseTo > legal.maxRaiseTo) {
-      action = parsed.amount === legal.maxRaiseTo ? { action: 'raise', amount: parsed.amount } : null;
-    } else {
-      action = parsed.amount >= legal.minRaiseTo && parsed.amount <= legal.maxRaiseTo
-        ? { action: 'raise', amount: parsed.amount }
-        : null;
-    }
-  }
-  if (!action) return null;
-  const reason = normalizeFreeText(parsed.reason, {
-    maxChars: REASON_MAX_CHARS,
-    maxBytes: REASON_MAX_BYTES,
-  });
-  if (reason) action.reason = reason;
-  return action;
-}
+export { validatedDecision, legalFromMessage };
 
 const USER_ACTIONS = new Set(['fold', 'check', 'call', 'raise']);
 
@@ -1897,7 +1860,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return unit;
   };
 
-  const decideOnce = async (input, timeoutMs) => {
+  const decideOnce = async (input, timeoutMs, { callNo }) => {
     const started = monotonicNow();
     let code = 'RESPONSE_RECEIVED';
     try {
@@ -1913,7 +1876,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('player-call', { purpose:'decision', decisionId: readLoopState()?.pendingDecision?.decisionId ?? null,
         generation: readLoopState()?.pendingDecision?.generation ?? null,
         runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
-        timeoutMs, elapsedMs: Math.max(0, monotonicNow() - started), code,
+        callNo, timeoutMs, elapsedMs: Math.max(0, monotonicNow() - started), code,
         category: code === 'RESPONSE_RECEIVED' ? 'response' : playerFailureCategory(code),
         censored: code === 'TIMEOUT' });
     }
@@ -1967,6 +1930,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const quarantineDiagnostics = (pending, reason) => {
+    const {diagnostics: _diagnostics, ...rest} = pending;
+    const cleaned = {...rest, diagnosticsQuarantined:true};
+    writeLoopState({pendingDecision:cleaned});
+    log('player-diagnostics-quarantined', {decisionId:pending.decisionId, generation:pending.generation, reason});
+    return cleaned;
+  };
+
   const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
@@ -1980,7 +1951,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('INVALID_SESSION_ID', `플레이어 ${next.toAct} 세션 id 형식이 안전하지 않습니다.`);
     }
     const watchdog = currentWatchdog();
-    const previous = readLoopState()?.pendingDecision;
+    let previous = readLoopState()?.pendingDecision;
+    if (previous) {
+      const check = validateDiagnostics(previous.diagnostics, previous);
+      if (!check.ok) previous = quarantineDiagnostics(previous, check.reason);
+    }
     if (previous && previous.status !== 'retry_authorized') {
       return { kind: 'recovery_required' };
     }
@@ -1988,13 +1963,58 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || previous.gameEpoch !== readLoopState().gameEpoch || previous.playerId !== next.toAct)) {
       throw codedError('STALE_PLAYER_DECISION', '저장된 미해결 결정과 현재 엔진 차례가 다릅니다.');
     }
-    const pending = { schemaVersion: 1, gameEpoch: readLoopState().gameEpoch,
+    const inherited = retryWillCorrect(previous)
+      ? projectRejectionForSink(previous.diagnostics.lastRejection, previous) : null;
+    const attemptMessage = inherited ? correctionMessage(next.message, inherited, previous) : next.message;
+    let record = { schemaVersion: 2, gameEpoch: readLoopState().gameEpoch,
       decisionId: next.decisionId, stateVersion, playerId: next.toAct,
       generation: (previous?.generation ?? 0) + 1, status: 'running',
-      budget: watchdog, startedAt: isoNow(now) };
-    writeLoopState({ pendingDecision: pending, playerBudget: watchdog });
-    ownedPlayerAttempt = pending;
-    const timeouts = [watchdog.hardMs];
+      budget: watchdog, startedAt: isoNow(now), diagnostics: { v:1, callNo:1, corrections:0, ...(inherited ? {lastRejection:inherited} : {}) } };
+    const beginPending = () => {
+      writeLoopState({ pendingDecision: record, playerBudget: watchdog });
+      ownedPlayerAttempt = record;
+    };
+    const commitPending = (patch, { drop = [] } = {}) => {
+      const current = readLoopState()?.pendingDecision;
+      if (!current || ['generation', 'decisionId', 'gameEpoch', 'stateVersion', 'playerId'].some(key => current[key] !== record[key])) {
+        throw codedError('STALE_PLAYER_DECISION', '이전 세대의 기록은 갱신하지 않습니다.');
+      }
+      record = { ...record, ...patch };
+      for (const key of drop) delete record[key];
+      writeLoopState({ pendingDecision: record });
+      return record;
+    };
+    beginPending();
+    let callNo = 1;
+    let lastRejection = inherited;
+    let candidate = null;
+    let corrections = 0;
+    let deadlineAt;
+    let softDeadlineAt;
+    const floor = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
+    const correctionSkip = () => {
+      if (stopRequested) return 'stop';
+      if (pauseRequested) return 'pause';
+      const remaining = deadlineAt - monotonicNow();
+      return remaining <= 0 || remaining < floor ? 'budget' : null;
+    };
+    const logSkipped = reason => log('player-correction-skipped', {decisionId:next.decisionId,
+      generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+    const rejectionContext = {generation:record.generation, decisionId:record.decisionId, gameEpoch:record.gameEpoch};
+    const rejectDecision = (rejection) => {
+      lastRejection = projectRejectionForSink({v:1, ...rejectionContext, callNo, code:rejection.code,
+        detail:rejection.detail, projection:rejection.projection, at:isoNow(now)}, rejectionContext);
+      if (!lastRejection) throw new TypeError('Invalid classified rejection');
+      log('player-decision-rejected', {...lastRejection,
+        ...(validateRawDiagnostics(rejection.raw).ok ? {raw:rejection.raw} : {})});
+      commitPending({diagnostics:{...record.diagnostics, lastRejection}});
+      failureCode = rejection.code;
+      if (corrections === 0 && CORRECTABLE_DETAILS.has(lastRejection.detail)) {
+        const skip = correctionSkip();
+        if (skip) logSkipped(skip);
+        else candidate = lastRejection;
+      }
+    };
     let failureCode = 'INVALID_DECISION';
     const startedAt = monotonicNow();
     let modelMs = 0;
@@ -2002,7 +2022,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let stepMs = 0;
     let sessionRepaired = false;
     const applyDecision = async (action) => {
-      if (readLoopState()?.pendingDecision?.generation !== pending.generation) {
+      if (readLoopState()?.pendingDecision?.generation !== record.generation) {
         throw codedError('STALE_PLAYER_DECISION', '이전 세대의 응답은 적용하지 않습니다.');
       }
       const stepArgs = ['step', next.toAct];
@@ -2016,9 +2036,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       }
       stepArgs.push('--expect-version', String(stateVersion));
-      writeLoopState({ pendingDecision: { ...pending,
-        closeConfirmed: true, proposedAction: { action: action.action,
-          ...(action.action === 'raise' ? { amount: action.amount } : {}) } } });
+      commitPending({ closeConfirmed:true, proposedAction:{ action:action.action,
+        ...(action.action === 'raise' ? {amount:action.amount} : {}) } });
       const stepStarted = monotonicNow();
       const atomicUnit = beginAtomicTransition();
       try {
@@ -2033,25 +2052,54 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         stepMs += Math.max(0, monotonicNow() - stepStarted);
       }
     };
-    for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
-      const attemptDeadlineAt = monotonicNow() + timeouts[attempt];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let timeoutMs = watchdog.hardMs;
+      let message = attemptMessage;
+      if (attempt > 0) {
+        if (!candidate) break;
+        const skip = correctionSkip();
+        if (skip) { logSkipped(skip); break; }
+        callNo += 1;
+        corrections = 1;
+        commitPending({status:'running', diagnostics:{v:1, callNo, corrections, lastRejection}},
+          {drop:['closeConfirmed', 'proposedAction']});
+        log('player-correction', {decisionId:next.decisionId, generation:record.generation,
+          callNo, detail:lastRejection.detail, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+        message = correctionMessage(next.message, lastRejection, rejectionContext);
+        timeoutMs = Math.ceil(deadlineAt - monotonicNow());
+        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
+        if (finalSkip) {
+          callNo -= 1; corrections = 0;
+          commitPending({diagnostics:{...record.diagnostics, callNo, corrections}});
+          logSkipped(finalSkip);
+          break;
+        }
+      } else {
+        deadlineAt = monotonicNow() + watchdog.hardMs;
+        softDeadlineAt = monotonicNow() + watchdog.softMs;
+      }
       const softTimer = setTimeout(() => {
-        if (stopRequested || readLoopState()?.pendingDecision?.generation !== pending.generation) return;
-        const currentPending=readLoopState()?.pendingDecision;
-        if(currentPending?.proposedAction) return;
-        writeLoopState({ pendingDecision: { ...currentPending, softWait: true } });
+        if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
+        if (record.proposedAction || record.softWait) return;
+        try { commitPending({softWait:true}); }
+        catch (error) {
+          // The awaited decision path reports stale identity. A timer must not
+          // turn that recoverable rejection into an uncaught process exception.
+          if (error.code === 'STALE_PLAYER_DECISION') return;
+          throw error;
+        }
         log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
-      }, watchdog.softMs);
+      }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
       round = await decideOnce({
         playerId: next.toAct,
         sessionId: session.sessionId,
-        message: next.message,
-      }, timeouts[attempt]);
+        message,
+      }, timeoutMs, { callNo });
       modelMs += round.modelMs;
       failureCode = round.error?.code ?? 'INVALID_DECISION';
-      log('player-attempt', { decisionId: next.decisionId, generation: pending.generation,
+      log('player-attempt', { callNo, decisionId: next.decisionId, generation: record.generation,
         runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
         budget: watchdog, elapsedMs: round.modelMs, code: round.ok ? 'RESPONSE_RECEIVED' : failureCode,
         category: round.ok ? 'response' : playerFailureCategory(failureCode),
@@ -2062,12 +2110,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && RESTORED_SESSION_REJECTION_CODES.has(round.error?.code)
         && restoredPlayerSessions.has(next.toAct)
       ) {
-        const minRepairMs = Math.min(minRepairFloorMs, Math.ceil(timeouts[attempt] / 8));
-        const remainingBeforeRepair = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+        const minRepairMs = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
+        const remainingBeforeRepair = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
         if (remainingBeforeRepair < minRepairMs) continue;
         let repaired = null;
         try {
-          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt: attemptDeadlineAt });
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
         } catch (error) {
           if (isFatalRepairFailure(error)) throw error;
           failureCode = error.code ?? 'REPAIR_FAILED';
@@ -2080,14 +2128,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (repaired) {
           session = repaired;
           sessionRepaired = true;
-          const remainingBeforeRetry = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+          const remainingBeforeRetry = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
           if (remainingBeforeRetry > 0) {
-            round = await decideOnce({
-              playerId: next.toAct,
-              sessionId: session.sessionId,
-              message: next.message,
-            }, remainingBeforeRetry);
-            modelMs += round.modelMs;
+            callNo += 1;
+            commitPending({diagnostics:{...record.diagnostics, callNo}});
+            // Persisting the call number consumes budget too. Recheck at the
+            // dispatch boundary, and count only calls that actually start.
+            const remainingForCall = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
+            if (remainingForCall > 0) {
+              round = await decideOnce({
+                playerId: next.toAct,
+                sessionId: session.sessionId,
+                message: attemptMessage,
+              }, remainingForCall, { callNo });
+              modelMs += round.modelMs;
+            } else {
+              callNo -= 1;
+              commitPending({diagnostics:{...record.diagnostics, callNo}});
+              round = { ok:false, error:codedError('TIMEOUT', 'session repair 기록 뒤 재결정 예산이 만료됐습니다.'), modelMs:0 };
+            }
           } else {
             round = { ok: false, error: codedError('TIMEOUT', 'session repair 뒤 재결정 예산이 만료됐습니다.'), modelMs: 0 };
           }
@@ -2100,20 +2159,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!round.ok) {
         failureCode = round.error?.code ?? 'CLI_FAILED';
         if (isFatalRuntimeFailure(round.error)) {
-          writeLoopState({ pendingDecision: { ...pending, status: 'unsafe', code: failureCode } });
+          commitPending({status:'unsafe', code:failureCode});
           throw round.error;
         }
         continue;
       }
       const parseStarted = monotonicNow();
-      const action = validatedDecision(round.raw, next);
+      const classified = classifyDecision(round.raw, next);
+      const action = classified.action;
       parseMs += Math.max(0, monotonicNow() - parseStarted);
       if (action) {
+        if (action.normalizedFrom) log('player-decision-normalized', {decisionId:next.decisionId, generation:record.generation, callNo, from:'bet', to:'raise', amount:action.amount});
         let applied;
         try {
           applied = await applyDecision(action);
         } catch (error) {
-          if (error.code === 'ILLEGAL_ACTION') { failureCode = error.code; continue; }
+          if (error.code === 'ILLEGAL_ACTION') {
+            rejectDecision({code:error.code, detail:'engine_rejected', projection:{action:action.action,
+              ...(Number.isSafeInteger(action.amount) ? {amount:action.amount} : {}), decisionIdMatches:true}});
+            continue;
+          }
           throw error;
         }
         return {
@@ -2121,21 +2186,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           atomicUnit: applied.atomicUnit,
           outcome: attempt === 0 && !sessionRepaired && !previous ? 'accepted' : 'retried_accepted',
           sessionRepaired,
+          corrected: Boolean(inherited) || corrections === 1,
           startedAt,
           modelMs,
           parseMs,
           stepMs,
         };
-      }
+      } else rejectDecision(classified.rejection);
       } finally { clearTimeout(softTimer); }
     }
     // The runtime contract settles failed calls only after positive child close;
     // termination/identity failures above are the fail-closed exception. This
     // also applies to repair warmup calls through the same runtime.runOnce.
-    writeLoopState({ pendingDecision: { ...pending, status: 'recovery_required', code: failureCode,
+    commitPending({ status: 'recovery_required', code: failureCode,
       category: playerFailureCategory(failureCode), elapsedMs: Math.max(0, monotonicNow() - startedAt),
-      closeConfirmed: true, sessionRepaired } });
-    log('player-recovery-required', { decisionId: next.decisionId, generation: pending.generation, code: failureCode });
+      closeConfirmed: true, sessionRepaired, diagnostics:{...record.diagnostics,
+        ...(lastRejection && ['INVALID_DECISION','ILLEGAL_ACTION'].includes(failureCode) ? {detail:lastRejection.detail} : {})} });
+    log('player-recovery-required', { decisionId: next.decisionId, generation: record.generation, code: failureCode,
+      detail:record.diagnostics.detail, corrections:record.diagnostics.corrections, callNo });
     return { kind: 'recovery_required' };
   };
 
@@ -5213,11 +5281,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
       throw codedError('INVALID_TRANSITION', '복구 대기 상태에서만 재시도할 수 있습니다.');
     }
-    const pending = readLoopState()?.pendingDecision;
-    if (!pending || pending.schemaVersion !== 1 || pending.status !== 'recovery_required'
+    let pending = readLoopState()?.pendingDecision;
+    if (!pending || ![1, 2].includes(pending.schemaVersion) || pending.status !== 'recovery_required'
       || !pending.closeConfirmed || pending.decisionId !== decisionId) {
       throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
     }
+    const check = validateDiagnostics(pending.diagnostics, pending);
+    if (!check.ok) pending = quarantineDiagnostics(pending, check.reason);
     const current = await runCli(['step']);
     if (current.next?.decisionId !== pending.decisionId || current.next?.toAct !== pending.playerId
       || current.stateVersion !== pending.stateVersion || readLoopState().gameEpoch !== pending.gameEpoch) {
@@ -5835,11 +5905,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       lifecycleStarted = true;
       if (state?.phase === 'done' && state.pendingDecision) state = writeLoopState({ pendingDecision: undefined });
       if (state?.pendingDecision) {
-        const p = state.pendingDecision;
-        if (p.schemaVersion !== 1 || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
+        let p = state.pendingDecision;
+        if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
           || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
+        const check = validateDiagnostics(p.diagnostics, p);
+        if (!check.ok) { p = quarantineDiagnostics(p, check.reason); state = readLoopState(); }
         const applied = [...(engineState.hand?.actions ?? []), ...(engineState.lastHand?.actions ?? [])]
           .find((action) => action.decisionId === p.decisionId && action.playerId === p.playerId);
         if (applied && p.proposedAction && p.closeConfirmed === true
@@ -6186,6 +6258,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         parseMs: decision.parseMs,
         stepMs: decision.stepMs,
         ...(decision.sessionRepaired ? { sessionRepaired: true } : {}),
+        ...(decision.corrected ? { corrected: true } : {}),
       };
       try {
         out = await publishEnvelope(decision.envelope, waitFlags());

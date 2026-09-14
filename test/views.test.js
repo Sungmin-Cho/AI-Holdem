@@ -391,3 +391,22 @@ test('open에서 사용자가 진 쇼다운 뒤 다음 핸드 turnSummary에 사
   for (const card of userCards) assert.equal(line.includes(card), false, `사용자 카드 유출: ${card}`);
   for (const card of [...p1Cards, ...p2Cards]) assert.ok(line.includes(card), `AI 공개 카드 부재: ${card}`);
 });
+
+test('#194 legal summary distinguishes unopened streets from the BB option', async () => {
+  const { legalFromMessage } = await import('../tools/game-loop.js');
+  let state = setup3(5000, 5000, 5000);
+  let sawBb = false;
+  while (state.hand.street === 'preflop') {
+    const legal = legalFor(state);
+    const message = turnSummary(state, legal.toAct);
+    assert.equal(legalFromMessage(message).currentBet, state.hand.currentBet);
+    assert.doesNotMatch(message, /이 스트리트 첫 베팅도 raise/);
+    if (legal.canCheck) { sawBb = true; assert.ok(state.hand.currentBet > 0); }
+    state = applyAction(state, legal.toAct, legal.canCheck ? 'check' : 'call').state;
+  }
+  assert.equal(sawBb, true);
+  const message = turnSummary(state, legalFor(state).toAct);
+  assert.equal(legalFromMessage(message).currentBet, 0);
+  assert.match(message, /raise \d+~\d+ \(이 스트리트 첫 베팅도 raise\)/);
+  assert.equal(legalFromMessage(message.replace(/ currentBet=0/, '')).currentBet, null);
+});

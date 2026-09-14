@@ -63,6 +63,16 @@ function render() {
     ? (snapshot.pendingDecision.status === 'unsafe'
       ? '자식 프로세스 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
       : `LLM 결정을 보존했습니다 (${snapshot.pendingDecision.code ?? '복구 대기'}). 재시도하거나 종료하세요.`) : '일시정지 중입니다.';
+  if (recovery) {
+    const pending = snapshot.pendingDecision;
+    const d = pending.diagnostics;
+    if (d?.lastRejection) {
+      const r = d.lastRejection;
+      $("pause-message").textContent += ` 직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회.`;
+    }
+    if (pending.retryWillCorrect) $("pause-message").textContent += ' 재시도하면 교정 안내를 함께 보냅니다.';
+    if (pending.diagnosticsQuarantined) $("pause-message").textContent += ' (진단 기록이 손상되어 격리됨)';
+  }
   $("retry-decision").hidden = !recovery;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("resume").hidden = !!recovery;
