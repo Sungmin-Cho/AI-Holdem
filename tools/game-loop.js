@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect } from './player-decision.js';
+import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
@@ -1963,10 +1963,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || previous.gameEpoch !== readLoopState().gameEpoch || previous.playerId !== next.toAct)) {
       throw codedError('STALE_PLAYER_DECISION', '저장된 미해결 결정과 현재 엔진 차례가 다릅니다.');
     }
+    const inherited = retryWillCorrect(previous)
+      ? projectRejectionForSink(previous.diagnostics.lastRejection, previous) : null;
+    const attemptMessage = inherited ? correctionMessage(next.message, inherited, previous) : next.message;
     let record = { schemaVersion: 2, gameEpoch: readLoopState().gameEpoch,
       decisionId: next.decisionId, stateVersion, playerId: next.toAct,
       generation: (previous?.generation ?? 0) + 1, status: 'running',
-      budget: watchdog, startedAt: isoNow(now), diagnostics: { v:1, callNo:1, corrections:0 } };
+      budget: watchdog, startedAt: isoNow(now), diagnostics: { v:1, callNo:1, corrections:0, ...(inherited ? {lastRejection:inherited} : {}) } };
     const beginPending = () => {
       writeLoopState({ pendingDecision: record, playerBudget: watchdog });
       ownedPlayerAttempt = record;
@@ -1983,7 +1986,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     };
     beginPending();
     let callNo = 1;
-    let lastRejection = null;
+    let lastRejection = inherited;
+    let candidate = null;
+    let corrections = 0;
+    let deadlineAt;
+    let softDeadlineAt;
+    const floor = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
+    const correctionSkip = () => stopRequested ? 'stop' : pauseRequested ? 'pause'
+      : deadlineAt - monotonicNow() < floor ? 'budget' : null;
+    const logSkipped = reason => log('player-correction-skipped', {decisionId:next.decisionId,
+      generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
     const rejectionContext = {generation:record.generation, decisionId:record.decisionId, gameEpoch:record.gameEpoch};
     const rejectDecision = (rejection) => {
       lastRejection = projectRejectionForSink({v:1, ...rejectionContext, callNo, code:rejection.code,
@@ -1993,8 +2005,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ...(validateRawDiagnostics(rejection.raw).ok ? {raw:rejection.raw} : {})});
       commitPending({diagnostics:{...record.diagnostics, lastRejection}});
       failureCode = rejection.code;
+      if (corrections === 0 && CORRECTABLE_DETAILS.has(lastRejection.detail)) {
+        const skip = correctionSkip();
+        if (skip) logSkipped(skip);
+        else candidate = lastRejection;
+      }
     };
-    const timeouts = [watchdog.hardMs];
     let failureCode = 'INVALID_DECISION';
     const startedAt = monotonicNow();
     let modelMs = 0;
@@ -2032,21 +2048,45 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         stepMs += Math.max(0, monotonicNow() - stepStarted);
       }
     };
-    for (let attempt = 0; attempt < timeouts.length; attempt += 1) {
-      const attemptDeadlineAt = monotonicNow() + timeouts[attempt];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let timeoutMs = watchdog.hardMs;
+      let message = attemptMessage;
+      if (attempt > 0) {
+        if (!candidate) break;
+        const skip = correctionSkip();
+        if (skip) { logSkipped(skip); break; }
+        callNo += 1;
+        corrections = 1;
+        commitPending({status:'running', diagnostics:{v:1, callNo, corrections, lastRejection}},
+          {drop:['closeConfirmed', 'proposedAction']});
+        log('player-correction', {decisionId:next.decisionId, generation:record.generation,
+          callNo, detail:lastRejection.detail, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+        message = correctionMessage(next.message, lastRejection, rejectionContext);
+        timeoutMs = Math.ceil(deadlineAt - monotonicNow());
+        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs < floor ? 'budget_after_commit' : null;
+        if (finalSkip) {
+          callNo -= 1; corrections = 0;
+          commitPending({diagnostics:{...record.diagnostics, callNo, corrections}});
+          logSkipped(finalSkip);
+          break;
+        }
+      } else {
+        deadlineAt = monotonicNow() + watchdog.hardMs;
+        softDeadlineAt = monotonicNow() + watchdog.softMs;
+      }
       const softTimer = setTimeout(() => {
         if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
-        if (record.proposedAction) return;
+        if (record.proposedAction || record.softWait) return;
         commitPending({softWait:true});
         log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
-      }, watchdog.softMs);
+      }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
       round = await decideOnce({
         playerId: next.toAct,
         sessionId: session.sessionId,
-        message: next.message,
-      }, timeouts[attempt], { callNo });
+        message,
+      }, timeoutMs, { callNo });
       modelMs += round.modelMs;
       failureCode = round.error?.code ?? 'INVALID_DECISION';
       log('player-attempt', { callNo, decisionId: next.decisionId, generation: record.generation,
@@ -2060,12 +2100,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && RESTORED_SESSION_REJECTION_CODES.has(round.error?.code)
         && restoredPlayerSessions.has(next.toAct)
       ) {
-        const minRepairMs = Math.min(minRepairFloorMs, Math.ceil(timeouts[attempt] / 8));
-        const remainingBeforeRepair = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+        const minRepairMs = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
+        const remainingBeforeRepair = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
         if (remainingBeforeRepair < minRepairMs) continue;
         let repaired = null;
         try {
-          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt: attemptDeadlineAt });
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt: deadlineAt });
         } catch (error) {
           if (isFatalRepairFailure(error)) throw error;
           failureCode = error.code ?? 'REPAIR_FAILED';
@@ -2078,14 +2118,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (repaired) {
           session = repaired;
           sessionRepaired = true;
-          const remainingBeforeRetry = Math.max(0, Math.ceil(attemptDeadlineAt - monotonicNow()));
+          const remainingBeforeRetry = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
           if (remainingBeforeRetry > 0) {
             callNo += 1;
             commitPending({diagnostics:{...record.diagnostics, callNo}});
             round = await decideOnce({
               playerId: next.toAct,
               sessionId: session.sessionId,
-              message: next.message,
+              message: attemptMessage,
             }, remainingBeforeRetry, { callNo });
             modelMs += round.modelMs;
           } else {
@@ -2127,6 +2167,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           atomicUnit: applied.atomicUnit,
           outcome: attempt === 0 && !sessionRepaired && !previous ? 'accepted' : 'retried_accepted',
           sessionRepaired,
+          corrected: Boolean(inherited) || corrections === 1,
           startedAt,
           modelMs,
           parseMs,
@@ -6198,6 +6239,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         parseMs: decision.parseMs,
         stepMs: decision.stepMs,
         ...(decision.sessionRepaired ? { sessionRepaired: true } : {}),
+        ...(decision.corrected ? { corrected: true } : {}),
       };
       try {
         out = await publishEnvelope(decision.envelope, waitFlags());

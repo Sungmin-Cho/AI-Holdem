@@ -2679,9 +2679,11 @@ test('malformed and stale responses preserve engine action history', { timeout: 
       const adapter = makeAdapter({ onDecide: async () => ({ raw }) });
       const { gameDir, loop } = await setupAiFirst(st, { adapter });
       await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
-      assert.equal(adapter.decideCalls.length, 1);
+      assert.equal(adapter.decideCalls.length, 2);
       assert.deepEqual(readJson(path.join(gameDir, 'state.json')).hand.actions, []);
       assert.equal(loop.pendingDecision.status, 'recovery_required');
+      assert.ok(adapter.decideCalls[1].message.startsWith(adapter.decideCalls[0].message+'\n\n[교정]'));
+      assert.equal(loop.pendingDecision.diagnostics.detail,raw==='not-json'?'no_json':'decision_id_mismatch');
     });
   }
 });
@@ -2690,12 +2692,13 @@ test('configured budget survives restart before the first player decision', {tim
   const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter(),loopOpts:{playerBudget:{softMs:5000,hardMs:60000}}});
   assert.deepEqual(readJson(path.join(gameDir,'loop-state.json')).playerBudget,{softMs:5000,hardMs:60000});
   await loop.requestStop();
-  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
-  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0}});
+  let clock=0;
+  const adapter=makeAdapter({onDecide:async()=>{clock+=15;return {raw:'invalid'};}});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,monotonicNow:()=>clock}});
   t.after(()=>restored.requestStop());
   await restored.resume();
   await assert.rejects(restored.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
-  assert.deepEqual(adapter.decideCalls.map(call=>call.timeoutMs),[60000]);
+  assert.deepEqual(adapter.decideCalls.map(call=>call.timeoutMs),[60000,59985]);
 });
 
 test('retry CLI validates partial persisted budget only after merging', () => {
@@ -2730,7 +2733,7 @@ test('stop during real in-flight child preserves closed recovery and no engine a
 
 test('explicit retry after invalid response applies exactly one decision', { timeout: 10000 }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({message}, attempt) => ({
-    raw: attempt === 1 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
+    raw: attempt <= 2 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
   }) });
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
   await assert.rejects(loop.run(), {code:'PLAYER_RECOVERY_REQUIRED'});
@@ -2738,7 +2741,8 @@ test('explicit retry after invalid response applies exactly one decision', { tim
   await loop.retryDecision(pending.decisionId);
   await assert.rejects(loop.retryDecision(pending.decisionId), {code:'PLAYER_RECOVERY_REQUIRED'});
   await runUntilUserBoundary(loop, gameDir);
-  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls.length, 3);
+  assert.match(adapter.decideCalls[2].message,/\[교정\]/);
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
@@ -2759,6 +2763,7 @@ test('legacy restart retains unresolved decision until explicit retry', { timeou
   await restored.retryDecision(pending.decisionId);
   await runUntilUserBoundary(restored, gameDir);
   assert.equal(repaired.decideCalls.length, 1);
+  assert.match(repaired.decideCalls[0].message,/\[교정\]/);
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
@@ -2804,12 +2809,12 @@ test('failed resume cleanup cannot certify a foreign pending attempt', {timeout:
 
 test('managed recovery parks without action, rejects ordinary resume and duplicate retry, then ends', { timeout: 20000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({message}, attempt) => ({
-    raw: attempt === 1 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
+    raw: attempt <= 2 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
   }) });
   const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: {controlProtocolVersion: 1} });
   const running = startRun(loop);
   await waitFor(() => loop.playState === 'paused', 'recovery did not park', 10000 * WIN32_SCALE);
-  assert.equal(adapter.decideCalls.length, 1);
+  assert.equal(adapter.decideCalls.length, 2);
   assert.deepEqual(readJson(path.join(gameDir, 'state.json')).hand.actions, []);
   await assert.rejects(loop.resumePlay(), {code:'PLAYER_RECOVERY_REQUIRED'});
   const decisionId = loop.pendingDecision.decisionId;
@@ -2817,7 +2822,7 @@ test('managed recovery parks without action, rejects ordinary resume and duplica
   assert.equal(retries.filter(row => row.status === 'fulfilled').length, 1);
   await waitForUserSnapshot(gameDir);
   await loop.pause();
-  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls.length, 3);
   await loop.endGame('recovery-end');
   await running;
   assert.equal(readJson(path.join(gameDir, 'state.json')).result, 'abort');
@@ -2846,11 +2851,13 @@ test('real 26-second CLI response survives soft wait and applies exactly once', 
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
-test('new default LLM hard budget reaches the runtime once', { timeout: 10000 }, async (t) => {
+test('new default LLM hard budget reaches the runtime first', { timeout: 10000 }, async (t) => {
   const adapter = makeAdapter({kind:'codex', onDecide: async () => ({raw:'invalid'})});
   const {loop} = await setupAiFirst(t, {adapter});
   await assert.rejects(loop.run(), {code:'PLAYER_RECOVERY_REQUIRED'});
-  assert.deepEqual(adapter.decideCalls.map(call => call.timeoutMs), [300000]);
+  assert.equal(adapter.decideCalls.length,2);
+  assert.equal(adapter.decideCalls[0].timeoutMs,300000);
+  assert.ok(adapter.decideCalls[1].timeoutMs<=300000);
 });
 
 test('zero-delay AI metrics include every timing field and keep non-model overhead under one second', { timeout: 10_000 }, async (t) => {
@@ -9291,4 +9298,49 @@ test('#194 engine rejection corrects once and drops the rejected proposed action
   await runUntilUserBoundary(setup.loop,gameDir);
   assert.ok(plainSteps>0); assert.equal(adapter.decideCalls.length,2);
   assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
+});
+
+test('#194 pause and stop during a rejected call prevent automatic correction', {timeout:30000 * WIN32_SCALE},async t=>{
+  for(const stop of [false,true]) await t.test(stop?'stop':'pause',async st=>{
+    let release,entered=false;
+    const gate=new Promise(r=>{release=r;});
+    const adapter=makeAdapter({onDecide:async()=>{entered=true;await gate;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{controlProtocolVersion:1,playerBudget:{softMs:500,hardMs:5000}}});
+    const running=startRun(loop); await waitFor(()=>entered,'no decision',5000*WIN32_SCALE);
+    const request=stop?loop.requestStop():loop.pause(); release(); await request;
+    assert.equal(adapter.decideCalls.length,1);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(stop?'stop':'pause')));
+    assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    if(stop) await running;
+    else {await loop.endGame('correction-pause-end'); await running;}
+  });
+});
+
+test('#194 correction timeout retains context across restart and restored-session repair', {timeout:30000 * WIN32_SCALE},async t=>{
+  const adapter=makeAdapter({onDecide:async(_,n)=>{if(n===1)return {raw:'invalid'};throw Object.assign(new Error('TIMEOUT'),{code:'TIMEOUT'});}});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:500,hardMs:5000}}});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(loop.pendingDecision.code,'TIMEOUT'); assert.equal(loop.pendingDecision.diagnostics.lastRejection.detail,'no_json');
+  const id=loop.pendingDecision.decisionId; await loop.requestStop();
+  const repaired=makeAdapter({onDecide:async({message},n)=>{
+    assert.match(message,/\[교정\]/);
+    if(n===1) throw Object.assign(new Error('SESSION_EXPIRED'),{code:'SESSION_EXPIRED'});
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(repaired),opts:{port:0,waitMs:0}});
+  t.after(()=>restored.requestStop()); await restored.resume(); await restored.retryDecision(id); await runUntilUserBoundary(restored,gameDir);
+  assert.equal(repaired.decideCalls.length,2);
+  const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0]; assert.equal(metric.corrected,true); assert.equal(metric.sessionRepaired,true);
+});
+
+test('#194 generation changed during correction cannot apply a stale reply', {timeout:15000 * WIN32_SCALE},async t=>{
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async({message},n)=>{
+    if(n===1) return {raw:'invalid'};
+    const filename=path.join(gameDir,'loop-state.json'),state=readJson(filename); state.pendingDecision.generation++; writeJsonAtomic(filename,state);
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0}});gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
 });

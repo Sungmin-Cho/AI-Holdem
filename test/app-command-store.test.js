@@ -112,7 +112,10 @@ test('managed command journal retries the displayed LLM decision once and preser
   manager.command(retry);
   assert.equal((await settle(manager,retry.requestId)).status,'succeeded');
   await waitPaused();
-  assert.deepEqual(calls.map(call=>call.timeoutMs),[1000,1000]);
+  assert.equal(calls.length,4);
+  assert.equal(calls[0].timeoutMs,1000); assert.equal(calls[2].timeoutMs,1000);
+  assert.ok(calls[1].timeoutMs<=1000); assert.ok(calls[3].timeoutMs<=1000);
+  assert.deepEqual(calls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,1,1]);
   const end = payload(manager,'end');
   manager.command(end);
   assert.equal((await settle(manager,end.requestId)).status,'succeeded');
