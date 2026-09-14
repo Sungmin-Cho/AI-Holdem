@@ -171,9 +171,49 @@ function codedError(code, message, extra = {}) {
 }
 
 // #192 I2: undefined (not 0) on a platform that has no O_NOFOLLOW (e.g. Windows) so callers
-// can tell "no such flag exists" apart from "flag value is 0" and fall back to a pre-open
-// lstat symlink check there instead of silently opening with no protection at all.
+// can tell "no such flag exists" apart from "flag value is 0" and use
+// `readSidecarFileWithoutNoFollow` there instead of opening with no protection at all.
 const SIDECAR_NOFOLLOW = fs.constants.O_NOFOLLOW;
+
+// #192 oK1: sidecar read for a platform without O_NOFOLLOW. `lstat` first rejects anything
+// that is not a regular file, then the file is opened without the flag and `fstat` on that
+// fd must report the same dev and ino. A path swapped to a symlink or another file between
+// the two calls therefore reads as `invalid`, never as evidence, which closes the TOCTOU
+// window without refusing every sidecar (refusing them all disabled the O7 spawn guard and
+// the sidecar judgments on Windows). A file that disappears after `lstat` is `invalid`, not
+// `absent`, because absence was not observed atomically. `fsImpl` is a test seam.
+export function readSidecarFileWithoutNoFollow(filePath, { maxBytes, fsImpl = fs } = {}) {
+  let before;
+  try {
+    before = fsImpl.lstatSync(filePath, { bigint: true });
+  } catch (error) {
+    return { status: error?.code === 'ENOENT' ? 'absent' : 'invalid' };
+  }
+  if (before.isSymbolicLink() || !before.isFile()) return { status: 'invalid' };
+  let fd;
+  try {
+    fd = fsImpl.openSync(filePath, 'r');
+  } catch {
+    return { status: 'invalid' };
+  }
+  try {
+    const after = fsImpl.fstatSync(fd, { bigint: true });
+    if (
+      !after.isFile()
+      || after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.nlink !== 1n
+      || after.size > BigInt(maxBytes)
+    ) {
+      return { status: 'invalid' };
+    }
+    return { status: 'ok', text: fsImpl.readFileSync(fd, 'utf8') };
+  } catch {
+    return { status: 'invalid' };
+  } finally {
+    try { fsImpl.closeSync(fd); } catch { /* best effort */ }
+  }
+}
 
 // #192 D5 (design memo §4 D5, G11): top-level error `code` values the three coach/publish/
 // engine CLI children can legitimately print on their own stdout — every `fail(...)`/
@@ -3584,19 +3624,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return invalid();
       }
     };
-    if (sidecarNoFollowFlag === undefined) {
-      // #192 sJ5: without `O_NOFOLLOW` there is no atomic way to open-refusing-a-symlink, so
-      // a separate `lstat` followed by `open` leaves a TOCTOU window a race can use to swap
-      // the path into a symlink between the two calls. Never open at all on such a
-      // platform: a missing sidecar (`lstat` ENOENT with the root directory itself still
-      // stat-able) is still `absent`, but any sidecar that is present — symlink or not — is
-      // `invalid` without ever being opened.
+    const classify = (text) => {
+      let data;
       try {
-        fs.lstatSync(sidecarPath);
-      } catch (error) {
-        return error.code === 'ENOENT' ? absentOrInvalid() : invalid();
+        data = JSON.parse(text);
+      } catch {
+        return invalid();
       }
-      return invalid();
+      const phase = typeof data?.phase === 'string' ? data.phase : null;
+      if (!['intent', 'aborted-before-spawn', 'identity', 'identity-unavailable', 'closed-confirmed'].includes(phase)) {
+        return { phase: 'invalid', data, path: sidecarPath };
+      }
+      return { phase, data, path: sidecarPath };
+    };
+    if (sidecarNoFollowFlag === undefined) {
+      // #192 sJ5/oK1: no atomic open-refusing-a-symlink exists here. The fallback reader
+      // pins the opened fd to the inode `lstat` saw, so a swap between the two calls is
+      // `invalid` while an untouched regular file is still readable evidence.
+      const read = readSidecarFileWithoutNoFollow(sidecarPath, { maxBytes: SIDECAR_MAX_BYTES });
+      if (read.status === 'absent') return absentOrInvalid();
+      if (read.status !== 'ok') return invalid();
+      return classify(read.text);
     }
     let fd;
     try {
@@ -3607,17 +3655,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > SIDECAR_MAX_BYTES) return invalid();
-      let data;
+      let text;
       try {
-        data = JSON.parse(fs.readFileSync(fd, 'utf8'));
+        text = fs.readFileSync(fd, 'utf8');
       } catch {
         return invalid();
       }
-      const phase = typeof data?.phase === 'string' ? data.phase : null;
-      if (!['intent', 'aborted-before-spawn', 'identity', 'identity-unavailable', 'closed-confirmed'].includes(phase)) {
-        return { phase: 'invalid', data, path: sidecarPath };
-      }
-      return { phase, data, path: sidecarPath };
+      return classify(text);
     } finally {
       fs.closeSync(fd);
     }
@@ -3817,8 +3861,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // the first re-check (immediately after the scan settled, inside `getLegacyScan`
       // itself) catches loss during the scan; this one catches loss in the time between the
       // scan settling and this specific row's own release decision.
-      if (!lockHandle || !verifyOwnedLock(lockHandle)) {
+      if (!ownedLockStillVerified()) {
         evidence.legacyScanDetail = 'LOCK_LOST_DURING_SCAN';
+        return withEvidence({
+          confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
+        });
+      }
+      if (settled.error) {
+        // #192 oK5: the scan chain itself rejected after the scanner settled.
+        evidence.legacyScanDetail = 'SCAN_THREW';
         return withEvidence({
           confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
         });
@@ -3981,7 +4032,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let legacyScanPromise = null;
     const getLegacyScan = () => {
       if (!legacyScanPromise) {
-        legacyScanPromise = (lockHandle && verifyOwnedLock(lockHandle)
+        legacyScanPromise = (ownedLockStillVerified()
           ? Promise.resolve().then(() => scanCoachRuntimeProcessesFn())
           : Promise.resolve({ status: 'unavailable', reason: 'LOCK_NOT_OWNED' })
         ).catch(() => ({ status: 'unavailable', reason: 'SCAN_THREW' })).then((scan) => {
@@ -3993,7 +4044,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           // an asynchronous lsof exec that can outlive this instance's ownership of the lock
           // (reclaimed by another instance mid-flight). Re-verify immediately once the scan
           // settles; a lost lock discards the result no matter what it says.
-          if (!lockHandle || !verifyOwnedLock(lockHandle)) {
+          if (!ownedLockStillVerified()) {
             return { status: 'unavailable', reason: 'LOCK_LOST_DURING_SCAN' };
           }
           return scan;
@@ -6406,6 +6457,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }));
   };
 
+  // #192 oK2: `verifyOwnedLock` rethrows non-ENOENT errors (EACCES, EMFILE, win32 EPERM).
+  // Every caller needs a yes/no answer and must keep cleaning up, so an unverifiable lock
+  // counts as not owned: nothing is written on its behalf and nothing is released by scan.
+  const ownedLockStillVerified = () => {
+    if (!lockHandle) return false;
+    try {
+      return verifyOwnedLock(lockHandle);
+    } catch (error) {
+      log('loop-lock-verify-failed', { code: error?.code ?? null });
+      return false;
+    }
+  };
+
   // #192 L2 (design memo §11, appendix v3.3): best-effort `loop-lock-lost-on-stop` log,
   // mirroring persistCleanupFailure's own openLog/log/closeSync handling below — the normal
   // log descriptor may already be closed by the time either caller reaches this point.
@@ -6434,7 +6498,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // `lockHandle` must not let this instance overwrite another owner's loop-state. Also
     // trusts the sticky `lockLostPermanently` flag so a retried `requestStop()` (lockHandle
     // already nulled by the first attempt's own `releaseLock()`) still fails closed.
-    if (lockLostPermanently || (lockHandle && !verifyOwnedLock(lockHandle))) {
+    if (lockLostPermanently || (lockHandle && !ownedLockStillVerified())) {
       lockLostPermanently = true;
       logLoopLockLostOnStop();
       return loopLockLostError(error?.code ?? null);
@@ -6475,7 +6539,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // #192 L2: even the "stopping" marker is a write into loop-state. An instance whose
       // loop lock was removed or replaced must not stamp it onto the state of whichever
       // instance owns the game now. Remember the loss so the final block below refuses too.
-      if (lockLostPermanently || (lockHandle && !verifyOwnedLock(lockHandle))) {
+      if (lockLostPermanently || (lockHandle && !ownedLockStillVerified())) {
         lockLostPermanently = true;
       } else {
         try {
@@ -6584,7 +6648,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 K2: decided before and independently of whether loop-state exists. A missing
         // file only means there is nothing to write; it must never turn a lock-lost stop
         // into a success.
-        const lockStillOwned = Boolean(lockHandle) && verifyOwnedLock(lockHandle);
+        const lockStillOwned = ownedLockStillVerified();
         lockLostOnStop = lockLostPermanently || (Boolean(lockHandle) && !lockStillOwned);
         if (lockLostOnStop) {
           lockLostPermanently = true;
@@ -6844,7 +6908,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 L2: same rule as resume — a lost loop lock must not hide why bootstrap
         // failed; other cleanup failures keep surfacing as before.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('bootstrap-cleanup-lock-lost', {});
+        log('bootstrap-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
       }
       throw error;
     }
@@ -7183,7 +7247,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // resume (for example FINALIZATION_ABORTED) stays the reported error. Any other
         // cleanup failure keeps surfacing exactly as before this slice.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('resume-cleanup-lock-lost', {});
+        log('resume-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
       }
       throw translated;
     }

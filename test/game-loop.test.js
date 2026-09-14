@@ -25,6 +25,7 @@ import {
   buildBadChildOutputDetails,
   unresolvedEvidenceGuidance,
   consultCoachCloseEvidence,
+  readSidecarFileWithoutNoFollow,
   parseLsofCwdRecords,
   legacyCoachRuntimeCandidates,
   scanCoachRuntimeProcesses,
@@ -10949,8 +10950,8 @@ test('#192 I2: sidecar가 64KiB를 넘으면 invalid로 판정한다', { timeout
   assert.equal(row?.evidence.sidecar, 'invalid');
 });
 
-test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서는 존재하는 sidecar를 열지 않고 invalid로 판정한다', { timeout: 20_000, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'symlink 의미론이 POSIX 전용이다')) return;
+test('#192 sJ5/oK1: O_NOFOLLOW가 없는 플랫폼에서는 symlink sidecar를 따라가지 않고 invalid로 판정한다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'symlink 생성은 win32에서 권한이 필요하다')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -10962,12 +10963,15 @@ test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서는 존재하는 sidecar를 
     () => processStartTime(orphan.pid),
     `coach orphan ${orphan.pid} start identity was not observable`,
   );
-  // A valid, tuple-matched `identity` sidecar — on a platform that does have `O_NOFOLLOW`
-  // this alone would resolve through judgment a/b. The seam below forces the no-flag
-  // fallback path regardless of what this OS actually supports.
-  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
+  // A valid, tuple-matched `identity` payload that would resolve through judgment b if read.
+  // It is written to a separate file and the sidecar path is a symlink to it, so the
+  // no-flag fallback reader (forced by the seam below) must refuse it at `lstat`.
+  const realPayloadPath = writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
     phase: 'identity', pid: orphan.pid, startTime: orphanStartTime,
   });
+  const symlinkTarget = `${realPayloadPath}.target`;
+  fs.renameSync(realPayloadPath, symlinkTarget);
+  fs.symlinkSync(symlinkTarget, realPayloadPath);
   const signals = [];
   const upper = makeCoachAdapter();
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
@@ -10984,7 +10988,7 @@ test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서는 존재하는 sidecar를 
 
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
 
-  assert.deepEqual(signals, [], 'O_NOFOLLOW 없는 플랫폼에서 열지 않았어야 할 sidecar identity의 live orphan에 signal을 보냈다');
+  assert.deepEqual(signals, [], 'O_NOFOLLOW 없는 플랫폼에서 symlink sidecar의 identity를 믿고 live orphan에 signal을 보냈다');
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
   assert.equal(row?.reason, 'SPAWN_EVIDENCE_INVALID');
@@ -13335,4 +13339,171 @@ test('#192 K3: consultCoachCloseEvidence는 설계 순서 c → closed-confirmed
   assert.deepEqual(consultCoachCloseEvidence(attempt, [], { phase: 'identity' }), { reason: 'ACCEPT_EVIDENCE' });
   assert.deepEqual(consultCoachCloseEvidence(attempt, []), { reason: 'ACCEPT_EVIDENCE' });
   assert.equal(consultCoachCloseEvidence({ ownerSessionId: 'owner-k3' }, [{ ownerSessionId: 'other' }], { phase: 'intent' }), null);
+});
+
+test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않는다', { timeout: 15_000 }, async (t) => {
+  let gameDir;
+  let sidecarPath;
+  let seededPayload;
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '기본 코치 응답' }) }],
+  });
+  const setup = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      sidecarNoFollowFlag: undefined,
+      coachSpawnCheckpoint: async ({ handNo, attempt }) => {
+        if (seededPayload) return;
+        const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+        const hand = authority.hands[String(handNo)];
+        const state = readJson(path.join(gameDir, 'loop-state.json'));
+        sidecarPath = coachSpawnSidecarPath(gameDir, hand.exactResultPath);
+        seededPayload = {
+          phase: 'identity',
+          gameEpoch: state.gameEpoch,
+          owner: state.ownerSessionId,
+          handNo,
+          generation: hand.generation,
+          attempt,
+          pid: 999_998,
+          startTime: 'sentinel-ok1-start',
+        };
+        fs.writeFileSync(sidecarPath, JSON.stringify(seededPayload));
+      },
+    },
+  });
+  gameDir = setup.gameDir;
+  const { loop } = setup;
+
+  const running = startRun(loop);
+  await waitFor(() => seededPayload !== undefined, 'coachSpawnCheckpoint never fired');
+  await stopRun(loop, running);
+
+  assert.equal(upper.starts.length, 0, 'O_NOFOLLOW 없는 플랫폼에서 이미 identity가 있는 attempt에 두 번째 spawn을 시도했다');
+  assert.deepEqual(readJson(sidecarPath), seededPayload, 'O_NOFOLLOW 없는 플랫폼에서 기존 identity sidecar가 덮어써졌다');
+});
+
+test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-confirmed sidecar로 행을 닫는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, { phase: 'closed-confirmed' });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: { sidecarNoFollowFlag: undefined },
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+});
+
+test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 LOOP_LOCK_LOST로 거부한다', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'directory permission bits do not deny reads on win32')) return;
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('root ignores directory permission bits');
+    return;
+  }
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  const lockDir = path.join(gameDir, 'loop.lock.d');
+  t.after(() => {
+    try { fs.chmodSync(lockDir, 0o755); } catch { /* already gone */ }
+    return loop.requestStop().catch(() => {});
+  });
+  await loop.bootstrap({ ai: 1 });
+  const loopStatePath = path.join(gameDir, 'loop-state.json');
+  const beforeRaw = fs.readFileSync(loopStatePath, 'utf8');
+
+  fs.chmodSync(lockDir, 0o000);
+  let caught = null;
+  try {
+    await loop.requestStop();
+  } catch (error) {
+    caught = error;
+  } finally {
+    fs.chmodSync(lockDir, 0o755);
+  }
+
+  assert.ok(caught, 'lock 검증이 불가능한 stop이 성공으로 끝났다');
+  assert.equal(caught.code, 'LOOP_LOCK_LOST', `원래 예외가 그대로 새어 나왔다: ${caught.code}`);
+  assert.ok(adapter.disposed >= 1, 'lock 검증 예외 때문에 adapter disposal을 건너뛰었다');
+  assert.equal(fs.readFileSync(loopStatePath, 'utf8'), beforeRaw, '검증할 수 없는 lock으로 loop-state를 썼다');
+});
+
+test('#192 oK5: legacy 스캔 체인이 reject되면 일반 오류가 아니라 LEGACY_SCAN_UNAVAILABLE(SCAN_THREW)로 halt한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      scanCoachRuntimeProcesses: () => Promise.resolve({ status: 'clean' }),
+      // The scan chain logs once the scanner settles; throwing there rejects the chain
+      // after the scanner's own catch, the path judgment g must still classify.
+      log: (record) => {
+        if (record.event === 'coach-legacy-scan') throw new Error('log sink failed in scan chain');
+      },
+    },
+  });
+
+  let caught = null;
+  try {
+    await loop.resume();
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught?.code, 'FINALIZATION_ABORTED', `예상 밖 오류: ${caught?.code} ${caught?.message}`);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'LEGACY_SCAN_UNAVAILABLE');
+  assert.equal(row?.evidence.legacyScanDetail, 'SCAN_THREW');
+});
+
+test('#192 oK1: readSidecarFileWithoutNoFollow는 lstat와 fstat의 inode가 같은 일반 파일만 읽는다', () => {
+  const stat = ({ file = true, link = false, dev = 1n, ino = 7n, nlink = 1n, size = 10n } = {}) => ({
+    isFile: () => file, isSymbolicLink: () => link, dev, ino, nlink, size,
+  });
+  const fakeFs = ({ lstat, fstat, openError = null, text = '{"phase":"intent"}' }) => {
+    const closed = [];
+    return {
+      closed,
+      lstatSync: () => { if (lstat instanceof Error) throw lstat; return lstat; },
+      openSync: () => { if (openError) throw openError; return 42; },
+      fstatSync: () => fstat,
+      readFileSync: () => text,
+      closeSync: (fd) => closed.push(fd),
+    };
+  };
+  const enoent = Object.assign(new Error('missing'), { code: 'ENOENT' });
+  const read = (impl) => readSidecarFileWithoutNoFollow('/x/.spawn.json', { maxBytes: 64, fsImpl: impl });
+
+  const same = fakeFs({ lstat: stat(), fstat: stat() });
+  assert.deepEqual(read(same), { status: 'ok', text: '{"phase":"intent"}' });
+  assert.deepEqual(same.closed, [42]);
+  assert.deepEqual(read(fakeFs({ lstat: enoent })), { status: 'absent' });
+  assert.deepEqual(read(fakeFs({ lstat: Object.assign(new Error('denied'), { code: 'EACCES' }) })), { status: 'invalid' });
+  assert.deepEqual(read(fakeFs({ lstat: stat({ link: true, file: false }), fstat: stat() })), { status: 'invalid' });
+  assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ ino: 8n }) })), { status: 'invalid' }, 'lstat 뒤 다른 파일로 바뀐 경로를 읽었다');
+  assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ dev: 2n }) })), { status: 'invalid' });
+  assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ nlink: 2n }) })), { status: 'invalid' }, '하드링크 sidecar를 읽었다');
+  assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ size: 65n }) })), { status: 'invalid' });
+  assert.deepEqual(read(fakeFs({ lstat: stat(), openError: enoent })), { status: 'invalid' }, 'lstat 뒤 사라진 파일을 absent로 판정했다');
 });
