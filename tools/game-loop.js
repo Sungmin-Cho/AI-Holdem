@@ -867,6 +867,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const issuedOwners = new Set();
 
   let lockHandle = initialLockHandle;
+  // #192 L2: sticky across a retried `requestStop()` — the first attempt to detect a lost
+  // lock nulls `lockHandle` via its own (unconditional, unchanged) `releaseLock()` call
+  // before rejecting, so a caller that retries `requestStop()` after that rejection (e.g.
+  // session-manager's `observeRun` cleanup catch) would otherwise look exactly like an
+  // instance that never held the lock at all (item 2, design memo §11) and be let through.
+  // This flag remembers "this instance already lost its lock" independent of `lockHandle`.
+  let lockLostPermanently = false;
   let serverChild = null;
   let serverPid = null;
   let serverIdentity = null;
@@ -6406,7 +6413,39 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }));
   };
 
+  // #192 L2 (design memo §11, appendix v3.3): best-effort `loop-lock-lost-on-stop` log,
+  // mirroring persistCleanupFailure's own openLog/log/closeSync handling below — the normal
+  // log descriptor may already be closed by the time either caller reaches this point.
+  const logLoopLockLostOnStop = () => {
+    try {
+      openLog();
+      log('loop-lock-lost-on-stop', {});
+      fs.closeSync(logFd);
+      logFd = null;
+    } catch { /* best-effort, mirrors persistCleanupFailure's log handling */ }
+  };
+
+  // #192 L2: `cause` carries the original stop error's code only when there was one (the
+  // pure success-path caller has none — `stopError` is already null by the time it checks
+  // lock ownership, since an earlier stopError would have exited through the
+  // `persistCleanupFailure(stopError)` branch first).
+  const loopLockLostError = (cause) => codedError(
+    'LOOP_LOCK_LOST',
+    'loop 락을 잃어 stop 결과를 기록하지 않았습니다.',
+    cause ? { details: { cause } } : {},
+  );
+
   const persistCleanupFailure = (error) => {
+    // #192 L2: re-validate lock ownership right before writing a cleanupError, exactly like
+    // the success path does before its own final writeLoopState (design memo §11) — a stale
+    // `lockHandle` must not let this instance overwrite another owner's loop-state. Also
+    // trusts the sticky `lockLostPermanently` flag so a retried `requestStop()` (lockHandle
+    // already nulled by the first attempt's own `releaseLock()`) still fails closed.
+    if (lockLostPermanently || (lockHandle && !verifyOwnedLock(lockHandle))) {
+      lockLostPermanently = true;
+      logLoopLockLostOnStop();
+      return loopLockLostError(error?.code ?? null);
+    }
     const cleanupError = {
       code: error.code ?? 'ERROR',
       message: error.message ?? String(error),
@@ -6420,7 +6459,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       logFd = null;
     } catch { /* Persist state even when the log is unavailable. */ }
     try {
-      if (!fs.existsSync(loopStatePath)) return;
+      if (!fs.existsSync(loopStatePath)) return null;
       writeLoopState({
         stopping: true,
         stoppedAt: undefined,
@@ -6428,6 +6467,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         cleanupError,
       });
     } catch { /* 원래 cleanup failure와 lock ownership을 보존한다 */ }
+    return null;
   };
 
   const requestStop = ({ finalStatePatch = null } = {}) => {
@@ -6439,12 +6479,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     resolvePause?.({state:"stopped"});
     const attempt = (async () => {
       let stopError = null;
-      try {
-        if (fs.existsSync(loopStatePath)) {
-          writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
+      // #192 L2: even the "stopping" marker is a write into loop-state. An instance whose
+      // loop lock was removed or replaced must not stamp it onto the state of whichever
+      // instance owns the game now. Remember the loss so the final block below refuses too.
+      if (lockLostPermanently || (lockHandle && !verifyOwnedLock(lockHandle))) {
+        lockLostPermanently = true;
+      } else {
+        try {
+          if (fs.existsSync(loopStatePath)) {
+            writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
+          }
+        } catch (error) {
+          stopError = error;
         }
-      } catch (error) {
-        stopError = error;
       }
       const inFlight = atomicTransition;
       if (inFlight) {
@@ -6526,72 +6573,90 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       }
       if (stopError) {
-        persistCleanupFailure(stopError);
-        throw stopError;
+        throw persistCleanupFailure(stopError) ?? stopError;
       }
 
+      // #192 L2: computed inside the try block below (its own re-check needs
+      // `fs.existsSync(loopStatePath)` first) but read again after the try/catch settles, to
+      // decide whether this attempt must still reject even though nothing threw.
+      let lockLostOnStop = false;
       try {
         if (fs.existsSync(loopStatePath)) {
-          const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
-            ? pendingFinalStatePatch()
-            : (pendingFinalStatePatch ?? {});
-          // #192 S4 E1: reaching this line already proves every disposal, coach/training
-          // task settle, terminateActiveChildren, and stopServer step above succeeded (the
-          // `stopError` branch a few lines up throws before this point otherwise). The only
-          // remaining gate is this instance's own in-memory lock ownership — `lockHandle` is
-          // still set here, one line before `releaseLock()` nulls it — and whether this
-          // instance ever actually issued an owner at all. A lock-failed instance, or a
-          // resume that failed before owner issuance, has an empty `issuedOwners` and writes
-          // nothing. Existing entries (from earlier instances, preserved by `writeLoopState`'s
-          // merge) are kept verbatim and never duplicated for an owner already listed.
-          const existingClosures = Array.isArray(readLoopState()?.coachRuntimeClosures)
-            ? readLoopState().coachRuntimeClosures
-            : [];
-          const alreadyClosed = new Set(existingClosures.map((entry) => entry?.ownerSessionId));
           // #192 I5: `lockHandle` being non-null only proves this instance acquired the loop
           // lock at SOME point in the past — not that it still owns it now. Re-validate the
           // exact identity `releaseOwnedLock` itself checks (same inode, pid file pid and
-          // startTime) right before trusting it for a receipt as consequential as "every
-          // coach child this owner spawned is confirmed gone".
+          // startTime) right before trusting it for anything as consequential as a
+          // coach-runtime-closure receipt or the stop's own success write (#192 L2).
           const lockStillOwned = Boolean(lockHandle) && verifyOwnedLock(lockHandle);
-          if (lockHandle && !lockStillOwned) {
+          // #192 L2: `lockLostPermanently` keeps a retried `requestStop()` (its `lockHandle`
+          // already nulled by the first attempt's own `releaseLock()`) failing closed instead
+          // of looking like an instance that never held the lock at all.
+          lockLostOnStop = lockLostPermanently || (Boolean(lockHandle) && !lockStillOwned);
+          if (lockLostOnStop) {
+            lockLostPermanently = true;
             log('coach-runtime-closure-lock-lost', {});
-          }
-          // #192 I1/sJ4: an unconfirmed coach adapter disposal means this instance cannot
-          // attest that every coach child it may have spawned is actually gone — skip the
-          // receipt entirely rather than write one that overclaims. Stop itself still
-          // succeeds.
-          if (lockStillOwned && undisposableCoachAdapter) {
-            log('coach-runtime-closure-skipped', {
-              reason: hasCoachAdapterWithoutDispose ? 'ADAPTER_DISPOSE_UNCONFIRMED' : 'DISPOSE_CONFIRMATION_UNDECLARED',
+          } else {
+            const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
+              ? pendingFinalStatePatch()
+              : (pendingFinalStatePatch ?? {});
+            // #192 S4 E1: reaching this line already proves every disposal, coach/training
+            // task settle, terminateActiveChildren, and stopServer step above succeeded (the
+            // `stopError` branch a few lines up throws before this point otherwise). The only
+            // remaining gate is this instance's own in-memory lock ownership — `lockHandle` is
+            // still set here, one line before `releaseLock()` nulls it — and whether this
+            // instance ever actually issued an owner at all. A lock-failed instance, or a
+            // resume that failed before owner issuance, has an empty `issuedOwners` and writes
+            // nothing. Existing entries (from earlier instances, preserved by `writeLoopState`'s
+            // merge) are kept verbatim and never duplicated for an owner already listed.
+            const existingClosures = Array.isArray(readLoopState()?.coachRuntimeClosures)
+              ? readLoopState().coachRuntimeClosures
+              : [];
+            const alreadyClosed = new Set(existingClosures.map((entry) => entry?.ownerSessionId));
+            // #192 I1/sJ4: an unconfirmed coach adapter disposal means this instance cannot
+            // attest that every coach child it may have spawned is actually gone — skip the
+            // receipt entirely rather than write one that overclaims. Stop itself still
+            // succeeds.
+            if (undisposableCoachAdapter) {
+              log('coach-runtime-closure-skipped', {
+                reason: hasCoachAdapterWithoutDispose ? 'ADAPTER_DISPOSE_UNCONFIRMED' : 'DISPOSE_CONFIRMATION_UNDECLARED',
+              });
+            }
+            const newClosures = !undisposableCoachAdapter
+              ? [...issuedOwners]
+                .filter((ownerSessionId) => !alreadyClosed.has(ownerSessionId))
+                .map((ownerSessionId) => ({ ownerSessionId, confirmedAt: isoNow(now) }))
+              : [];
+            writeLoopState({
+              stopping: true,
+              stoppedAt: isoNow(now),
+              cleanupFailedAt: undefined,
+              cleanupError: undefined,
+              ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
+                && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
+                readLoopState().pendingDecision.status === 'running'
+                || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
+              ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
+                code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
+              ...(newClosures.length > 0
+                ? { coachRuntimeClosures: [...existingClosures, ...newClosures] }
+                : {}),
+              ...resolvedFinalStatePatch,
             });
           }
-          const newClosures = (lockStillOwned && !undisposableCoachAdapter)
-            ? [...issuedOwners]
-              .filter((ownerSessionId) => !alreadyClosed.has(ownerSessionId))
-              .map((ownerSessionId) => ({ ownerSessionId, confirmedAt: isoNow(now) }))
-            : [];
-          writeLoopState({
-            stopping: true,
-            stoppedAt: isoNow(now),
-            cleanupFailedAt: undefined,
-            cleanupError: undefined,
-            ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
-              && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
-              readLoopState().pendingDecision.status === 'running'
-              || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
-            ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
-              code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
-            ...(newClosures.length > 0
-              ? { coachRuntimeClosures: [...existingClosures, ...newClosures] }
-              : {}),
-            ...resolvedFinalStatePatch,
-          });
         }
+        // #192 L2: kept unconditional exactly as before — releaseOwnedLock() already no-ops
+        // silently when the on-disk identity no longer matches this handle, so calling it
+        // here even when `lockLostOnStop` is true is harmless.
         releaseLock();
       } catch (error) {
-        persistCleanupFailure(error);
-        throw error;
+        throw persistCleanupFailure(error) ?? error;
+      }
+      if (lockLostOnStop) {
+        // #192 L2: thrown *outside* the try/catch above so this never routes back through
+        // persistCleanupFailure — that would try to write a cleanupError, which is exactly
+        // what "do not write loop-state when the lock is lost" forbids.
+        logLoopLockLostOnStop();
+        throw loopLockLostError(null);
       }
     })();
     stopPromise = attempt;
@@ -6780,7 +6845,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('bootstrap-playing', { port });
       return state;
     } catch (error) {
-      await requestStop();
+      try {
+        await requestStop();
+      } catch (stopError) {
+        // #192 L2: same rule as resume — a lost loop lock must not hide why bootstrap
+        // failed; other cleanup failures keep surfacing as before.
+        if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
+        log('bootstrap-cleanup-lock-lost', {});
+      }
       throw error;
     }
   };
@@ -7107,8 +7179,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return resumed;
     } catch (error) {
       const translated = translateFinalizationDeadline(error);
-      if (lifecycleStarted) await requestStop();
-      else releaseLock();
+      // #192 L2: this cleanup stop is best-effort — a failure here (e.g. `LOOP_LOCK_LOST`,
+      // surfaced once `requestStop` itself started re-checking lock ownership) must not mask
+      // the original halt/finalization reason `translated` already carries.
+      try {
+        if (lifecycleStarted) await requestStop();
+        else releaseLock();
+      } catch (stopError) {
+        // #192 L2: only a lost loop lock is swallowed here, so the halt that ended this
+        // resume (for example FINALIZATION_ABORTED) stays the reported error. Any other
+        // cleanup failure keeps surfacing exactly as before this slice.
+        if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
+        log('resume-cleanup-lock-lost', {});
+      }
       throw translated;
     }
   };

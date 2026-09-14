@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ChildProcess, execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,6 +39,7 @@ import { inspectStudyService, stopStudyService } from '../tools/study-service.js
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { createCoachControl } from '../tools/coach-control.js';
 import { defaultEvaluate } from '../tools/training-pipeline.js';
+import { createSessionManager } from '../tools/session-manager.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -11617,7 +11618,7 @@ test('#192 sJ4: dispose가 resolve해도 disposeConfirmsChildren을 선언하지
   assert.equal(skipped.reason, 'DISPOSE_CONFIRMATION_UNDECLARED');
 });
 
-test('#192 I5: requestStop 직전 loop lock 디렉터리가 다른 inode/identity로 바뀌면 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 I5/L2: requestStop 직전 loop lock 디렉터리가 다른 inode/identity로 바뀌면 LOOP_LOCK_LOST로 거부되고 loop-state를 쓰지 않는다', { timeout: 15_000 }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
@@ -11627,30 +11628,143 @@ test('#192 I5: requestStop 직전 loop lock 디렉터리가 다른 inode/identit
   });
   t.after(() => loop.requestStop().catch(() => {}));
   await loop.bootstrap({ ai: 1 });
-  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const loopStatePath = path.join(gameDir, 'loop-state.json');
+  const before = readJson(loopStatePath);
+  const beforeRaw = fs.readFileSync(loopStatePath, 'utf8');
 
   // Replace the loop lock directory this instance's in-memory `lockHandle` still points at
   // with a brand-new, empty directory: a new inode, no pid file at all — the same identity
-  // loss `releaseOwnedLock` itself already tolerates (it silently no-ops), but the closure
-  // receipt currently only checks `lockHandle` is non-null, never that it is still this
-  // instance's own lock.
+  // loss `releaseOwnedLock` itself already tolerates (it silently no-ops). Before #192 L2
+  // this only suppressed the closure receipt; the success-path write itself still went
+  // through and reported a false success. L2 makes the whole stop attempt fail closed.
   const lockDir = path.join(gameDir, 'loop.lock.d');
   fs.rmSync(lockDir, { recursive: true, force: true });
   fs.mkdirSync(lockDir);
 
-  await loop.requestStop();
+  let caught = null;
+  try {
+    await loop.requestStop();
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, 'lock을 잃은 stop이 거부되지 않았다');
+  assert.equal(caught.code, 'LOOP_LOCK_LOST');
 
-  const state = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(typeof state.stoppedAt, 'string', 'precondition: stop 자체는 정상적으로 성공해야 한다');
-  assert.equal(
-    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === owner),
-    false,
-    '락 identity가 이 인스턴스의 것이 아닌데도 closure entry가 기록됐다',
+  // The stopping marker written at stop entry is guarded too, so a lock-lost instance
+  // leaves loop-state byte-for-byte untouched.
+  assert.equal(fs.readFileSync(loopStatePath, 'utf8'), beforeRaw, 'loop-state가 바뀌었다');
+  assert.equal(before.stoppedAt, undefined);
+  assert.ok(
+    logs.some((row) => row.event === 'loop-lock-lost-on-stop'),
+    'loop-lock-lost-on-stop 로그가 기록되지 않았다',
   );
   assert.ok(
     logs.some((row) => row.event === 'coach-runtime-closure-lock-lost'),
     'coach-runtime-closure-lock-lost 로그가 기록되지 않았다',
   );
+});
+
+test('#192 L2: adapter disposal 실패와 락 상실이 겹치면 cleanupError 대신 LOOP_LOCK_LOST로 거부되고 원인 코드를 details.cause에 담는다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const logs = [];
+  const disposeError = Object.assign(new Error('dispose boom'), { code: 'DISPOSE_BOOM' });
+  const adapter = makeAdapter();
+  adapter.dispose = async () => { throw disposeError; };
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1 });
+  const loopStatePath = path.join(gameDir, 'loop-state.json');
+  const before = readJson(loopStatePath);
+
+  const lockDir = path.join(gameDir, 'loop.lock.d');
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  fs.mkdirSync(lockDir);
+
+  let caught = null;
+  try {
+    await loop.requestStop();
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, 'disposal 실패 + lock 상실 stop이 거부되지 않았다');
+  assert.equal(caught.code, 'LOOP_LOCK_LOST');
+  assert.equal(caught.details?.cause, 'DISPOSE_BOOM', '원래 disposal 오류 코드가 details.cause에 없다');
+
+  // requestStop 시작 시점의 `stopping`/`stopRequestedAt` 마커 외에는 아무것도 바뀌지
+  // 않아야 한다 — 특히 cleanupError가 전혀 기록되지 않아야 한다(lock을 잃었으므로
+  // persistCleanupFailure도 자신의 writeLoopState를 건너뛴다).
+  const { stopping: _stopping, stopRequestedAt: _stopRequestedAt, ...restAfter } = readJson(loopStatePath);
+  assert.deepEqual(restAfter, before, 'stopping 마커 외 다른 loop-state 필드가 바뀌었다');
+  assert.equal(readJson(loopStatePath).cleanupError, undefined, 'cleanupError가 기록됐다');
+  assert.ok(
+    logs.some((row) => row.event === 'loop-lock-lost-on-stop'),
+    'loop-lock-lost-on-stop 로그가 기록되지 않았다',
+  );
+  assert.equal(
+    logs.some((row) => row.event === 'cleanup-failed'),
+    false,
+    'lock을 잃었는데도 cleanup-failed 로그가 기록됐다',
+  );
+});
+
+test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우지 않고 오류를 남긴다', { timeout: 20_000 }, async (t) => {
+  const root = tmpGame();
+  const manager = createSessionManager({
+    storeDir: root,
+    resolver: resolverFor(makeAdapter()),
+  });
+  t.after(() => manager.close().catch(() => {}));
+  await manager.initialize();
+
+  const payload = (kind) => {
+    const s = manager.snapshot();
+    return {
+      requestId: randomUUID(),
+      expectedInstanceId: s.instanceId,
+      expectedAppRevision: s.appRevision,
+      expectedGameId: s.gameId,
+      expectedSelectionVersion: s.selectionVersion,
+      kind,
+    };
+  };
+  const settle = async (id) => {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const row = manager.receipt(id);
+      if (row.status !== 'accepted') return row;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('receipt timeout');
+  };
+
+  const start = { ...payload('start'), setup: { aiCount: 1, mode: 'cash-training' } };
+  manager.command(start);
+  assert.equal((await settle(start.requestId)).status, 'succeeded');
+  assert.ok(manager.session, 'precondition: session이 등록돼야 한다');
+
+  // `end`는 `paused` 상태에서만 허용된다(ALLOWED_COMMANDS) — `playing`에서 바로 보내면
+  // INVALID_TRANSITION으로 거부된다.
+  const pause = payload('pause');
+  manager.command(pause);
+  assert.equal((await settle(pause.requestId)).status, 'succeeded');
+
+  // session-manager의 loop lock은 세션 하위 디렉터리가 아니라 store root 바로 아래
+  // 있다(readOwnedLock(root, "loop.lock.d") — root는 storeDir다).
+  const lockDir = path.join(root, 'loop.lock.d');
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  fs.mkdirSync(lockDir);
+
+  const end = payload('end');
+  manager.command(end);
+  const row = await settle(end.requestId);
+
+  assert.equal(row.status, 'failed', 'lock을 잃은 stop이 성공으로 기록됐다');
+  assert.ok(manager.session, 'stop 실패인데도 session이 비워졌다');
+  assert.equal(manager.snapshot().error, row.error);
 });
 
 test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는다', { timeout: 20_000 }, async (t) => {
@@ -13130,4 +13244,22 @@ test('#192 J5: LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에는 --row-owner 복�
   assert.equal(row?.reason, 'LEGACY_RUNTIME_PROCESS_PRESENT', `precondition 불일치: ${JSON.stringify(row)}`);
   const command = state.halt.recovery.commands.find((cmd) => cmd.args.includes('--row-owner'));
   assert.equal(command, undefined, 'LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에 --row-owner 명령이 생겼다');
+});
+
+test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 bootstrap 오류로 거부된다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => {
+      const lockDir = path.join(gameDir, 'loop.lock.d');
+      fs.rmSync(lockDir, { recursive: true, force: true });
+      fs.mkdirSync(lockDir);
+      throw Object.assign(new Error('resolver failed after the lock was replaced'), { code: 'RESOLVER_BOOM_192' });
+    },
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await assert.rejects(loop.bootstrap({ ai: 1 }), (error) => error.code === 'RESOLVER_BOOM_192');
+  assert.ok(logs.some((row) => row.event === 'bootstrap-cleanup-lock-lost'), 'bootstrap-cleanup-lock-lost 로그가 없다');
 });
