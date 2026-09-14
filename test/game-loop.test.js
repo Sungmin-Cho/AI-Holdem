@@ -168,6 +168,42 @@ async function seedReservedCoach(gameDir, owner, handNo = 1) {
   });
 }
 
+// #192 S2b §6: the new-protocol variant of seedReservedCoach — stamps `spawnEvidence`
+// through the in-process API (never the CLI, which now requires --spawn-evidence 1 for
+// reserve; the module API keeps a plain boolean option instead).
+async function seedReservedCoachStamped(gameDir, owner, handNo = 1, { spawnEvidence = true } = {}) {
+  const stats = JSON.parse((await execFileAsync(process.execPath, [
+    CLI, 'stats', '--game-dir', gameDir,
+  ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
+  const statsPath = path.join(gameDir, `.seed-reserved-coach-stamped-stats-${handNo}.json`);
+  fs.writeFileSync(statsPath, JSON.stringify(stats));
+  return createCoachControl().reserve({
+    gameDir, owner, handNo, attempt: 1,
+    statsFile: statsPath, snapshotFile: path.join(gameDir, 'ui-snapshot.json'),
+    spawnEvidence,
+  });
+}
+
+// #192 S2b E2: the per-attempt spawn sidecar path a running loop would compute for
+// `reserved` — same basename swap (`.result.json` → `.spawn.json`), always rooted at the
+// current game dir regardless of the row's own stored exactResultPath.
+function coachSpawnSidecarPath(gameDir, exactResultPath) {
+  return path.join(gameDir, path.basename(exactResultPath).replace(/\.result\.json$/, '.spawn.json'));
+}
+
+function writeCoachSpawnSidecar(gameDir, sessionToken, owner, reserved, fields) {
+  const sidecarPath = coachSpawnSidecarPath(gameDir, reserved.exactResultPath);
+  fs.writeFileSync(sidecarPath, JSON.stringify({
+    gameEpoch: gameEpochOf(sessionToken),
+    owner,
+    handNo: reserved.handNo,
+    generation: reserved.generation,
+    attempt: reserved.attempt ?? 1,
+    ...fields,
+  }));
+  return sidecarPath;
+}
+
 async function seedEmptyCoachAuthority(gameDir, owner) {
   const stats = JSON.parse((await execFileAsync(process.execPath, [
     CLI, 'stats', '--game-dir', gameDir,
@@ -9548,4 +9584,471 @@ test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 recor
     `identity 없는 worker의 미확인 종료가 confirmed로 처리됐다 (outcome ${outcome?.phase ?? outcome?.code})`,
   );
   assert.equal(upper.terminations.length, 2, '최초 null-identity 종료와 finalize 재확인이 각각 한 번씩 호출돼야 한다');
+});
+
+// ── #192 S2b: E2 spawn sidecar + evidence classifier ──────────────────────────
+
+test('#192 S2b: identity-unavailable 처리 중 fence가 실패해도 terminate는 한 번만 호출된다', { timeout: 15_000 }, async (t) => {
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate: new Promise(() => {}),
+      startTime: null,
+      terminate: { confirmed: true },
+      raw: JSON.stringify({ handNo: 1, text: 'identity 없는 worker' }),
+    }],
+  });
+  let fenceThrown = false;
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] === 'fence' && !fenceThrown) {
+          fenceThrown = true;
+          throw new Error('injected fence failure');
+        }
+      },
+    },
+  });
+  const running = startRun(loop);
+  await waitFor(() => upper.starts.length >= 1, 'coach worker was not started');
+  await waitFor(() => upper.terminations.length >= 1, 'null-identity termination이 호출되지 않았다');
+  // fence 실패는 outer catch로 빠져 attempt 2(기본 응답)로 재시도한다; 그 결과를 기다린다.
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(fenceThrown, true, 'precondition: fence가 실제로 injected 실패를 겪었다');
+  assert.equal(upper.terminations.length, 1, 'fence 실패 처리 중 terminate가 두 번 호출됐다');
+});
+
+test('#192 S2b: 정상 attempt는 bind-handle 전에 .spawn.json phase:identity를 pid/startTime과 함께 남긴다', { timeout: 15_000 }, async (t) => {
+  const upper = makeCoachAdapter({
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '정상 코치 응답' }) }],
+  });
+  let sidecarAtBind = null;
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      onCoachInvoke(args) {
+        if (args[0] !== 'bind-handle' || sidecarAtBind) return;
+        const dir = flagValue(args, '--game-dir');
+        const authority = readJson(path.join(dir, '.coach-authority.json'));
+        const exactResultPath = authority.hands['1']?.exactResultPath;
+        const sidecarPath = coachSpawnSidecarPath(dir, exactResultPath);
+        sidecarAtBind = fs.existsSync(sidecarPath) ? readJson(sidecarPath) : { missing: true };
+      },
+    },
+  });
+  const running = startRun(loop);
+  await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.ok(sidecarAtBind && !sidecarAtBind.missing, 'bind-handle 시점에 spawn sidecar가 존재하지 않았다');
+  assert.equal(sidecarAtBind.phase, 'identity');
+  assert.equal(typeof sidecarAtBind.pid, 'number');
+  assert.equal(typeof sidecarAtBind.startTime, 'string');
+});
+
+test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let releaseSpawn;
+  const spawnGate = new Promise((resolve) => { releaseSpawn = resolve; });
+  t.after(() => releaseSpawn());
+  let spawnEntered;
+  const entered = new Promise((resolve) => { spawnEntered = resolve; });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      coachSpawnCheckpoint: async () => {
+        spawnEntered();
+        await spawnGate;
+      },
+    },
+  });
+
+  await loop.resume();
+  await entered;
+  const running = startRun(loop);
+  await waitFor(
+    () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
+    'spawn stayed blocked without reaching the result-wait cutoff',
+    15_000,
+  );
+  releaseSpawn();
+  assert.equal((await running).phase, 'done');
+
+  assert.equal(upper.starts.length, 0, 'cutoff 뒤에도 handle 없는 worker를 시작했다');
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const exactResultPath = authority.retiredAttempts?.find((row) => row.handNo === 1)?.exactResultPath
+    ?? authority.hands?.['1']?.exactResultPath;
+  assert.ok(exactResultPath, 'precondition: reserve가 exactResultPath를 남겼다');
+  const sidecarPath = coachSpawnSidecarPath(gameDir, exactResultPath);
+  assert.equal(fs.existsSync(sidecarPath), false, 'cutoff 뒤 coachSpawnCheckpoint가 sidecar를 남겼다');
+});
+
+test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar는 aborted-before-spawn으로 끝나고 finalize는 NOT_SPAWNED로 닫는다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter();
+  let blockedOnce = false;
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      finalizeBudgetMs: 3_500,
+      finalizeCutoffLeadMs: 2_000,
+      writeSpawnEvidence: (filePath, data) => {
+        if (data.phase === 'intent' && !blockedOnce) {
+          blockedOnce = true;
+          const sab = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(sab, 0, 0, 1_700);
+        }
+        writeJsonAtomic(filePath, data);
+      },
+    },
+  });
+
+  await loop.resume();
+  const outcome = await loop.run().catch((error) => error);
+
+  assert.equal(blockedOnce, true, 'precondition: intent 기록이 실제로 블록됐다');
+  assert.equal(upper.starts.length, 0, 'cutoff를 넘긴 뒤에도 worker를 시작했다');
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const retired = authority.retiredAttempts.find((row) => row.handNo === 1);
+  assert.equal(retired?.cleanupState, 'released', `outcome ${outcome?.phase ?? outcome?.code}`);
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(
+    state.finalization?.cutoff?.terminationConfirmed,
+    true,
+    `outcome ${outcome?.phase ?? outcome?.code}`,
+  );
+});
+
+test('#192 S2b: writeSpawnEvidence가 intent에서 던지면 spawn 없이 코치를 unavailable로 봉인한다', { timeout: 15_000 }, async (t) => {
+  const upper = makeCoachAdapter({
+    rounds: [{ gate: new Promise(() => {}), raw: JSON.stringify({ handNo: 1, text: '시작하면 안 되는 worker' }) }],
+  });
+  const { gameDir, loop } = await setupCoachHand(t, {
+    upper,
+    loopOpts: {
+      writeSpawnEvidence: (filePath, data) => {
+        if (data.phase === 'intent') throw new Error('injected intent write failure');
+        writeJsonAtomic(filePath, data);
+      },
+    },
+  });
+  const running = startRun(loop);
+  const note = await waitForCoachNote(gameDir, 1);
+  await stopRun(loop, running);
+
+  assert.equal(upper.starts.length, 0, 'intent 기록 실패 뒤에도 worker를 시작했다');
+  assert.equal(note.unavailable, true);
+});
+
+test('#192 S2b: writeSpawnEvidence가 identity에서 던지면 bind-handle 없이 fail-closed 처리되고 record는 실패 전에 등록돼 있다', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const upper = makeCoachAdapter({
+    rounds: [{
+      terminate: { confirmed: false, reason: 'STILL_ALIVE' },
+      raw: JSON.stringify({ handNo: 1, text: 'identity 기록 실패' }),
+    }],
+  });
+  const bindArgs = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    loopOpts: {
+      writeSpawnEvidence: (filePath, data) => {
+        if (data.phase === 'identity') throw new Error('injected identity write failure');
+        writeJsonAtomic(filePath, data);
+      },
+      onCoachInvoke(args) {
+        if (args[0] === 'bind-handle') bindArgs.push(args);
+      },
+    },
+  });
+
+  await loop.resume();
+  const outcome = await loop.run().catch((error) => error);
+
+  assert.equal(bindArgs.length, 0, 'identity write 실패에도 bind-handle을 호출했다');
+  assert.equal(
+    upper.terminations.length,
+    2,
+    `record가 등록되지 않았으면 finalize 재확인이 다시 terminate를 부르지 않는다 (outcome ${outcome?.phase ?? outcome?.code})`,
+  );
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.notEqual(
+    state.finalization?.cutoff?.terminationConfirmed,
+    true,
+    `outcome ${outcome?.phase ?? outcome?.code}`,
+  );
+});
+
+// ── #192 S2b: 판정 순서 분류자 매트릭스 (finalizing resume) ──────────────────────
+
+test('#192 S2b 분류자 1: stamp, handle 없음, sidecar 없음 → released NOT_SPAWNED, resume이 begin-owner에 도달한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 1);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.equal(row?.spawnEvidence, 1);
+});
+
+test('#192 S2b 분류자 2: 표식 없음, handle 없음, sidecar 없음 → FINALIZATION_ABORTED, evidence.spawnEvidence는 false (기존 Task 7A 계약)', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.ok(row, 'recovery attempts에 hand 1이 없다');
+  assert.equal(row.evidence.spawnEvidence, false);
+  assert.equal(row.evidence.hasHandle, false);
+  assert.equal(row.evidence.sidecar, 'absent');
+});
+
+test('#192 S2b 분류자 3: stamp, sidecar intent만 → aborted', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, { phase: 'intent' });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'SPAWN_INTENT_ONLY');
+  assert.equal(row?.evidence.sidecar, 'intent');
+});
+
+test('#192 S2b 분류자 4: stamp, sidecar aborted-before-spawn(튜플 일치) → released', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, { phase: 'aborted-before-spawn' });
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 1);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+});
+
+test('#192 S2b 분류자 5: stamp, sidecar identity(live orphan), handle 없음 → orphan 종료 후 released', { timeout: 20_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const orphanStartTime = await waitFor(
+    () => processStartTime(orphan.pid),
+    `coach orphan ${orphan.pid} start identity was not observable`,
+  );
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
+    phase: 'identity', pid: orphan.pid, startTime: orphanStartTime,
+  });
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
+  assert.equal(signals.includes('SIGTERM'), true, 'sidecar identity의 live orphan에 SIGTERM을 보내지 않았다');
+  await waitUntilDead(orphan.pid);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+});
+
+test('#192 S2b 분류자 6: stamp, sidecar generation 불일치 → aborted SPAWN_EVIDENCE_MISMATCH', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, {
+    phase: 'intent', generation: reserved.generation + 1,
+  });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'SPAWN_EVIDENCE_MISMATCH');
+});
+
+test('#192 S2b 분류자 7: stamp, exactResultPath가 다른 디렉터리로 재작성, sidecar 없음 → aborted (귀속 불가)', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const foreignDir = tmpGame();
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].exactResultPath = path.join(foreignDir, path.basename(authority.hands['1'].exactResultPath));
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'NOT_ATTRIBUTABLE');
+  assert.equal(row?.evidence.attributable, false);
+});
+
+test('#192 S2b 분류자 8: stamp, .spawn.json이 symlink → aborted', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const sidecarPath = coachSpawnSidecarPath(gameDir, reserved.exactResultPath);
+  const targetPath = path.join(gameDir, '.spawn-symlink-target.json');
+  fs.writeFileSync(targetPath, JSON.stringify({ phase: 'intent' }));
+  fs.symlinkSync(targetPath, sidecarPath);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'SPAWN_EVIDENCE_INVALID');
+  assert.equal(row?.evidence.sidecar, 'invalid');
+});
+
+test('#192 S2b 분류자 9: stamp, 잘못된 handle 문자열 "abc", sidecar 없음 → aborted (d 아님)', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].agentHandle = 'abc';
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.notEqual(row?.reason, 'NOT_SPAWNED', 'malformed handle을 d(NOT_SPAWNED)로 잘못 판정했다');
+  assert.equal(row?.evidence.hasHandle, true);
+});
+
+test('#192 S2b 분류자 10: stamp, live orphan의 authority handle이지만 processStartTime이 강제로 unknown, sidecar 없음 → aborted IDENTITY_UNKNOWN, signal 없음', { timeout: 15_000, concurrency: false }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
+  const realStartTime = await waitFor(
+    () => processStartTime(orphan.pid),
+    `coach orphan ${orphan.pid} start identity was not observable`,
+  );
+  await createCoachControl().bindHandle({
+    gameDir, owner: 'old-owner', handNo: 1, generation: reserved.generation,
+    handle: `${orphan.pid}:${realStartTime}`,
+  });
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 2_200,
+      finalizeCutoffLeadMs: 1_100,
+      processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  assert.deepEqual(signals, [], '해소되지 않는 identity의 orphan에 signal을 보냈다');
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'IDENTITY_UNKNOWN');
+  assert.equal(row?.evidence.spawnEvidence, true);
+  assert.equal(row?.evidence.hasHandle, true);
 });

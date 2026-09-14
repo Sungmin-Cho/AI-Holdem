@@ -547,6 +547,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     },
   });
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
+  // #192 E2: test seam for the per-attempt spawn sidecar writes. Always synchronous, like
+  // writeJsonAtomic itself — the spawn sequence relies on no `await` landing between steps.
+  const writeSpawnEvidence = opts.writeSpawnEvidence ?? writeJsonAtomic;
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
@@ -2799,6 +2802,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const coachAuthorityPath = path.join(root, '.coach-authority.json');
   const coachAttemptKey = (handNo, generation) => `${handNo}:${generation}`;
 
+  // #192 E2: the spawn sidecar for one attempt's exact result path. Always resolved
+  // against the CURRENT game root by basename alone — the row's own stored absolute
+  // directory is never trusted, so an archived/relocated game or a legacy `--game-dir`
+  // row can never resolve someone else's sidecar by accident.
+  const coachSpawnEvidencePath = (exactResultPath) => {
+    if (typeof exactResultPath !== 'string') return null;
+    const base = path.basename(exactResultPath);
+    if (!base.endsWith('.result.json')) return null;
+    return path.join(root, base.replace(/\.result\.json$/, '.spawn.json'));
+  };
+
   // D2/FO-1: the single transition every coach-attempt termination site must go
   // through. A record leaves coachAttempts only on confirmed close evidence (or when
   // it never had a handle); a rejected/unconfirmed terminate() leaves it in place so a
@@ -3165,69 +3179,204 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const terminatePersistedCoachAttempt = async (attempt, deadlineNs, {
-    allowCurrentReservedWithoutHandle = false,
-    identityDeadlineNs = deadlineNs,
-  } = {}) => {
-    if (
-      allowCurrentReservedWithoutHandle
-      && attempt.source === 'active'
-      && attempt.status === 'reserved'
-      && !attempt.agentHandle
-    ) {
-      return { confirmed: true, reason: 'NOT_SPAWNED', cleanupState: 'released' };
+  // #192 E2/S2b: read the per-attempt spawn sidecar. `lstat` first so a symlink (or any
+  // non-regular file) never gets trusted as a plain JSON record. Missing is only ever
+  // classified `absent` — the strongest "we would have seen it" claim — when ENOENT AND the
+  // root directory itself still stats; an unmounted/relocated root must never masquerade as
+  // "confirmed no spawn happened".
+  const readCoachSpawnSidecar = (exactResultPath) => {
+    const sidecarPath = coachSpawnEvidencePath(exactResultPath);
+    if (!sidecarPath) return { phase: 'invalid', data: null, path: null };
+    let stat;
+    try {
+      stat = fs.lstatSync(sidecarPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') return { phase: 'invalid', data: null, path: sidecarPath };
+      try {
+        fs.statSync(root);
+        return { phase: 'absent', data: null, path: sidecarPath };
+      } catch {
+        return { phase: 'invalid', data: null, path: sidecarPath };
+      }
     }
-    const identity = parsePersistedCoachHandle(attempt.agentHandle);
-    if (!identity) {
-      return { confirmed: false, reason: 'IDENTITY_UNAVAILABLE', cleanupState: 'termination_unconfirmed' };
+    if (!stat.isFile()) return { phase: 'invalid', data: null, path: sidecarPath };
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(sidecarPath, 'utf8'));
+    } catch {
+      return { phase: 'invalid', data: null, path: sidecarPath };
     }
-    let state = await waitForPersistedCoachIdentity(identity, identityDeadlineNs);
-    if (state === 'dead') return { confirmed: true, cleanupState: 'released' };
+    const phase = typeof data?.phase === 'string' ? data.phase : null;
+    if (!['intent', 'aborted-before-spawn', 'identity', 'identity-unavailable'].includes(phase)) {
+      return { phase: 'invalid', data, path: sidecarPath };
+    }
+    return { phase, data, path: sidecarPath };
+  };
+
+  // E2: a row's stored exactResultPath is only trusted for identity/NOT_SPAWNED purposes
+  // when its directory still resolves to the current root. Any error (missing, moved,
+  // permission) means not attributable.
+  const coachEvidenceAttributable = (exactResultPath) => {
+    if (typeof exactResultPath !== 'string' || exactResultPath === '') return false;
+    try {
+      return fs.realpathSync(path.dirname(exactResultPath)) === fs.realpathSync(root);
+    } catch {
+      return false;
+    }
+  };
+
+  // §D1-equivalent validation for the sidecar's own {pid, startTime} pair: a positive
+  // integer pid and a non-empty startTime that is not the literal "null"/"undefined".
+  const validSidecarIdentity = (data) => {
+    const pid = data?.pid;
+    const startTime = data?.startTime;
+    if (!Number.isSafeInteger(pid) || pid < 1) return null;
+    if (typeof startTime !== 'string') return null;
+    const trimmed = startTime.trim();
+    if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') return null;
+    return { pid, startTime };
+  };
+
+  // §3/§4 D2, c/f: owner-runtime-closure receipts (E1) and accept evidence (f) both close a
+  // row without ever needing a live identity check. Neither exists yet in this slice — later
+  // slices wire real evidence into this single seam. It must stay a pure, side-effect-free
+  // read so consulting it twice for the same attempt (the H2 fast path below, and the
+  // post-poll fallback) is always safe. Returns `{ reason }` when evidence closes the row,
+  // otherwise `null`.
+  // eslint-disable-next-line no-unused-vars
+  const consultCoachCloseEvidence = (attempt) => null;
+
+  // a/b: resolve one already-parsed identity (from the authority handle or, absent that, a
+  // tuple-matched sidecar) through the same poll/signal/poll sequence either source uses.
+  // H2: when the very first lookup is `unknown`, consult c/f evidence before spending any of
+  // the poll budget — if it closes the row, begin-owner never waits out a dead identity poll
+  // for nothing. The same consultation runs again if polling itself never resolves, since c/f
+  // evidence can arrive while this attempt was busy waiting.
+  const resolvePersistedCoachIdentity = async (identity, deadlineNs, identityDeadlineNs, attempt) => {
+    const initial = persistedCoachIdentityState(identity);
+    let state;
+    if (initial === 'unknown') {
+      const hook = consultCoachCloseEvidence(attempt);
+      if (hook) return { outcome: 'released', reason: hook.reason };
+      state = await waitForPersistedCoachIdentity(identity, identityDeadlineNs);
+    } else {
+      state = initial;
+    }
+    if (state === 'dead') return { outcome: 'released' };
     // A different startTime proves that the recorded process identity is gone. Never
     // signal the replacement pid; close the stale record as released instead.
-    if (state === 'mismatch') {
-      return { confirmed: true, reason: 'IDENTITY_REPLACED', cleanupState: 'released' };
-    }
+    if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     if (state !== 'alive') {
-      return { confirmed: false, reason: 'IDENTITY_UNKNOWN', cleanupState: 'termination_unconfirmed' };
+      const hook = consultCoachCloseEvidence(attempt);
+      if (hook) return { outcome: 'released', reason: hook.reason };
+      return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
     }
 
+    // Once alive is confirmed, any failure to prove termination is final here — it never
+    // falls through to c/f/d below.
     try {
       signalProcess(identity.pid, 'SIGTERM');
     } catch (error) {
-      if (error.code !== 'ESRCH') {
-        return { confirmed: false, reason: 'SIGNAL_FAILED', cleanupState: 'termination_unconfirmed' };
-      }
+      if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateGraceMs, deadlineNs);
-    if (state === 'dead') return { confirmed: true, cleanupState: 'released' };
-    if (state === 'mismatch') {
-      return { confirmed: true, reason: 'IDENTITY_REPLACED', cleanupState: 'released' };
-    }
-    if (state !== 'alive') {
-      return { confirmed: false, reason: 'IDENTITY_UNKNOWN', cleanupState: 'termination_unconfirmed' };
-    }
-    if (remainingMsUntil(deadlineNs) <= 0) {
-      return { confirmed: false, reason: 'DEADLINE_EXCEEDED', cleanupState: 'termination_unconfirmed' };
-    }
+    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+    if (state !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
+    if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
 
     try {
       signalProcess(identity.pid, 'SIGKILL');
     } catch (error) {
-      if (error.code !== 'ESRCH') {
-        return { confirmed: false, reason: 'SIGNAL_FAILED', cleanupState: 'termination_unconfirmed' };
-      }
+      if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateKillWaitMs, deadlineNs);
-    if (state === 'dead') return { confirmed: true, cleanupState: 'released' };
-    if (state === 'mismatch') {
-      return { confirmed: true, reason: 'IDENTITY_REPLACED', cleanupState: 'released' };
-    }
+    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     return {
-      confirmed: false,
+      outcome: 'unconfirmed',
       reason: state === 'alive' ? 'STILL_ALIVE' : 'IDENTITY_UNKNOWN',
-      cleanupState: 'termination_unconfirmed',
     };
+  };
+
+  // #192 E2/E3 evidence classifier (design docs/design/2026-09-13-issue-192-…, §3 판정 순서).
+  // Replaces the removed in-memory `allowCurrentReservedWithoutHandle` shortcut: whether a
+  // handle-less row may be released now depends only on durable evidence (the spawn sidecar,
+  // the `spawnEvidence` stamp, and path attribution), never on which call site is asking.
+  const terminatePersistedCoachAttempt = async (attempt, deadlineNs, {
+    identityDeadlineNs = deadlineNs,
+    gameEpoch = null,
+  } = {}) => {
+    const sidecar = readCoachSpawnSidecar(attempt.exactResultPath);
+    const attributable = coachEvidenceAttributable(attempt.exactResultPath);
+    const evidence = {
+      hasHandle: typeof attempt.agentHandle === 'string' && attempt.agentHandle.length > 0,
+      spawnEvidence: attempt.spawnEvidence === 1,
+      sidecar: sidecar.phase,
+      attributable,
+    };
+    const withEvidence = (result) => ({ ...result, evidence });
+
+    const authorityIdentity = parsePersistedCoachHandle(attempt.agentHandle);
+    const sidecarIdentity = sidecar.phase === 'identity' ? validSidecarIdentity(sidecar.data) : null;
+
+    // Step 0: any sidecar carrying a tuple must match this exact row/epoch before it can be
+    // trusted for anything below. A stale or replayed tuple can never resolve to a/b/c/d/f;
+    // fail closed instead of trusting foreign evidence.
+    if (sidecar.data && typeof sidecar.data === 'object') {
+      const tuple = sidecar.data;
+      const tupleMismatch = tuple.gameEpoch !== gameEpoch
+        || tuple.owner !== attempt.ownerSessionId
+        || tuple.handNo !== attempt.handNo
+        || tuple.generation !== attempt.generation
+        || tuple.attempt !== attempt.attempt;
+      if (tupleMismatch) {
+        return withEvidence({
+          confirmed: false, reason: 'SPAWN_EVIDENCE_MISMATCH', cleanupState: 'termination_unconfirmed',
+        });
+      }
+    }
+    if (authorityIdentity && sidecarIdentity && (
+      authorityIdentity.pid !== sidecarIdentity.pid || authorityIdentity.startTime !== sidecarIdentity.startTime
+    )) {
+      return withEvidence({
+        confirmed: false, reason: 'IDENTITY_CONFLICT', cleanupState: 'termination_unconfirmed',
+      });
+    }
+
+    // a: the authority handle itself parses. b: it does not, but a tuple-matched (step 0
+    // already passed) sidecar identity does — resolve through the same path either way.
+    const identity = authorityIdentity ?? sidecarIdentity;
+    if (identity) {
+      const outcome = await resolvePersistedCoachIdentity(identity, deadlineNs, identityDeadlineNs, attempt);
+      return withEvidence(outcome.outcome === 'released'
+        ? { confirmed: true, ...(outcome.reason ? { reason: outcome.reason } : {}), cleanupState: 'released' }
+        : { confirmed: false, reason: outcome.reason, cleanupState: 'termination_unconfirmed' });
+    }
+
+    // Neither a nor b: c/f evidence can still close this row without any identity at all.
+    const hook = consultCoachCloseEvidence(attempt);
+    if (hook) return withEvidence({ confirmed: true, reason: hook.reason, cleanupState: 'released' });
+
+    // d: no handle was ever recorded (a malformed string handle does not count — only a
+    // genuinely absent one), the new-protocol stamp is present, the row is attributable to
+    // this root, and the sidecar proves the spawn step itself was never reached.
+    const handleIsNullish = attempt.agentHandle === null || attempt.agentHandle === undefined;
+    const notSpawnedSidecar = sidecar.phase === 'absent' || sidecar.phase === 'aborted-before-spawn';
+    if (handleIsNullish && attempt.spawnEvidence === 1 && attributable && notSpawnedSidecar) {
+      return withEvidence({ confirmed: true, reason: 'NOT_SPAWNED', cleanupState: 'released' });
+    }
+
+    // e: everything else — intent-only, identity-unavailable, invalid/corrupt sidecar,
+    // unattributable path, or a legacy row with no stamp at all.
+    const fallbackReason = !attributable
+      ? 'NOT_ATTRIBUTABLE'
+      : sidecar.phase === 'invalid'
+        ? 'SPAWN_EVIDENCE_INVALID'
+        : sidecar.phase === 'intent'
+          ? 'SPAWN_INTENT_ONLY'
+          : 'IDENTITY_UNAVAILABLE';
+    return withEvidence({ confirmed: false, reason: fallbackReason, cleanupState: 'termination_unconfirmed' });
   };
 
   const persistedCoachAttempts = () => {
@@ -3269,6 +3418,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         generation: hand.generation,
         status: hand.status,
         agentHandle: hand.agentHandle,
+        exactResultPath: hand.exactResultPath,
+        attempt: hand.attempt,
+        spawnEvidence: hand.spawnEvidence,
+        ownerSessionId: hand.ownerSessionId,
         cleanupAuthorized: true,
       });
     }
@@ -3285,10 +3438,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         generation: row.generation,
         status: row.cleanupState,
         agentHandle: row.agentHandle,
+        exactResultPath: row.exactResultPath,
+        attempt: row.attempt,
+        spawnEvidence: row.spawnEvidence,
+        ownerSessionId: row.ownerSessionId,
         cleanupAuthorized: reclaimable,
       });
     }
-    return { owner, attempts, authorityPresent: true };
+    return { owner, attempts, authorityPresent: true, gameEpoch: canonicalEpoch };
   };
 
   const closePersistedCoachWorkersCore = async ({
@@ -3296,9 +3453,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     identityDeadlineNs,
     deadlineError,
     reasonPrefix,
-    allowCurrentReservedWithoutHandle,
   }) => {
-    const { owner, attempts, authorityError, authorityPresent = true } = persistedCoachAttempts();
+    const { owner, attempts, authorityError, authorityPresent = true, gameEpoch = null } = persistedCoachAttempts();
     if (authorityError) {
       return {
         confirmed: false,
@@ -3331,8 +3487,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const outcomes = await Promise.all(attempts.map(async (attempt) => ({
       attempt,
       result: await terminatePersistedCoachAttempt(attempt, deadlineNs, {
-        allowCurrentReservedWithoutHandle,
         identityDeadlineNs,
+        gameEpoch,
       }),
     })));
 
@@ -3376,6 +3532,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             reason: childFailure.reason,
             cleanupState: 'termination_unconfirmed',
             cleanupAuthorized: childFailure.cleanupAuthorized,
+            evidence: result.evidence,
           };
       if (effectiveResult.confirmed !== true) {
         log(`${reasonPrefix}-unconfirmed`, {
@@ -3393,6 +3550,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         generation: attempt.generation,
         reason: result.reason,
         cleanupAuthorized: result.cleanupAuthorized ?? attempt.cleanupAuthorized,
+        evidence: result.evidence,
       }));
     const confirmed = unresolved.length === 0;
     if (!confirmed) {
@@ -3415,14 +3573,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return { confirmed: unresolved.length === 0, owner, unresolved, authorityPresent };
   };
 
-  const closePersistedCoachWorkers = async ({ allowCurrentReservedWithoutHandle = false } = {}) => {
+  const closePersistedCoachWorkers = async () => {
     const deadlineNs = ensureFinalizationDeadline();
     return closePersistedCoachWorkersCore({
       deadlineNs,
       identityDeadlineNs: finalizeResultWaitCutoffNs ?? deadlineNs,
       deadlineError: finalizationDeadlineError,
       reasonPrefix: 'finalize-persisted',
-      allowCurrentReservedWithoutHandle,
     });
   };
 
@@ -3442,7 +3599,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         identityDeadlineNs,
         deadlineError: resumeReclaimDeadlineError,
         reasonPrefix: 'resume-persisted',
-        allowCurrentReservedWithoutHandle: false,
       });
     } catch (error) {
       if (error.code !== 'RESUME_RECLAIM_DEADLINE_EXCEEDED') throw error;
@@ -3676,12 +3832,70 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       let record = null;
       let accepted = false;
       let heartbeatTimedOut = false;
+      // #192 S2b: once a failure inside the spawn sequence below has already resolved this
+      // attempt's termination (e.g. the null-identity branch's own handle.terminate()), the
+      // outer catch must reuse that result instead of invoking terminate() a second time for
+      // the same failure.
+      let terminationOutcome = null;
       try {
         if (coachWorkSuspended()) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
           await opts.coachSpawnCheckpoint({ handNo, attempt });
         }
+        // E2 §3a: re-validate synchronously the instant the checkpoint releases. A
+        // pause/stop that arrived while it was awaited must never spawn and must never
+        // write even the `intent` sidecar — treat it exactly like the pre-checkpoint
+        // suspension check above. An owner handoff during the checkpoint is the same:
+        // do not spawn on behalf of an owner this loop instance no longer holds.
+        if (coachWorkSuspended()) return;
         assertBeforeResultWaitCutoff();
+        const spawnLoopState = readLoopState();
+        if (spawnLoopState?.ownerSessionId !== owner) return;
+
+        const spawnTuple = {
+          gameEpoch: spawnLoopState?.gameEpoch,
+          owner,
+          handNo,
+          generation: currentDescriptor.generation,
+          attempt,
+        };
+        const sidecarPath = coachSpawnEvidencePath(currentDescriptor.exactResultPath);
+        // E2 §3b: record intent synchronously before ever spawning. An unwritable sidecar
+        // can never later prove NOT_SPAWNED, so fail exactly as a pre-spawn cutoff would.
+        if (sidecarPath) {
+          try {
+            writeSpawnEvidence(sidecarPath, { phase: 'intent', ...spawnTuple });
+          } catch {
+            await completeCoachUnavailable({
+              owner,
+              handNo,
+              generation: currentDescriptor.generation,
+              reason: 'spawn-evidence-unwritable',
+              fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+            });
+            return;
+          }
+        }
+        // E2 §3c: the intent write can itself spend real time (commitTmp's rename
+        // retries). Re-check the cutoff/suspension boundary before ever calling
+        // oneshotStart, and record the abort so a later reader never mistakes a
+        // crash-during-write for "never attempted".
+        let crossedCutoff = null;
+        try {
+          assertBeforeResultWaitCutoff();
+        } catch (cutoffError) {
+          crossedCutoff = cutoffError;
+        }
+        if (crossedCutoff || coachWorkSuspended()) {
+          if (sidecarPath) {
+            try {
+              writeSpawnEvidence(sidecarPath, { phase: 'aborted-before-spawn', ...spawnTuple });
+            } catch { /* the intent record already on disk still proves no spawn happened */ }
+          }
+          if (crossedCutoff) throw crossedCutoff;
+          return;
+        }
+
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
           prompt,
@@ -3704,22 +3918,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // throw and lose track of a live handle.
         record = { handNo, generation: currentDescriptor.generation, attempt, handle, interrupt };
         coachAttempts.set(coachAttemptKey(handNo, currentDescriptor.generation), record);
-        if (handle.pid == null || handle.startTime == null) {
-          // FO-2: a runtime can report a live child without a resolvable pid/startTime.
-          // Binding "<pid>:null" would let parsePersistedCoachHandle accept it as a
-          // persisted identity; a later resume would then see the real startTime as a
-          // `mismatch` and close a possibly live child as IDENTITY_REPLACED/released
-          // without any termination evidence (fail-open). Never bind an unverifiable
-          // handle — settle this attempt here instead.
+
+        // E2 §3e: identity must be durably provable before bind-handle ever attempts to
+        // persist it.
+        const validIdentity = handle.pid != null && handle.startTime != null;
+        let identityWriteFailed = false;
+        if (validIdentity && sidecarPath) {
+          try {
+            writeSpawnEvidence(sidecarPath, {
+              phase: 'identity', ...spawnTuple, pid: handle.pid, startTime: String(handle.startTime),
+            });
+          } catch {
+            identityWriteFailed = true;
+          }
+        }
+        if (!validIdentity || identityWriteFailed) {
+          if (sidecarPath) {
+            try {
+              writeSpawnEvidence(sidecarPath, { phase: 'identity-unavailable', ...spawnTuple });
+            } catch { /* best effort; the fail-closed branch below does not depend on it */ }
+          }
+          // FO-2: a runtime can report a live child without a resolvable pid/startTime, or
+          // the identity write itself can fail after a genuinely valid identity. Either way,
+          // binding "<pid>:null" (or an identity nobody durably recorded) would let a later
+          // resume trust an identity it never actually confirmed (fail-open). Never bind an
+          // unverifiable handle — settle this attempt here instead.
+          const identityFailureReason = identityWriteFailed ? 'spawn-evidence-unwritable' : 'identity-unavailable';
           const termination = handle && typeof handle.terminate === 'function'
             ? await handle.terminate()
             : { confirmed: false };
           settleCoachAttemptRecord(record, termination);
+          terminationOutcome = termination;
           const confirmed = termination?.confirmed === true;
           log('coach-identity-unavailable', {
             handNo,
             generation: currentDescriptor.generation,
             confirmed,
+            reason: identityFailureReason,
           });
           const fenceCurrentGeneration = async () => {
             try {
@@ -3728,7 +3963,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
                 '--owner', owner,
                 '--hand', String(handNo),
                 '--generation', String(currentDescriptor.generation),
-                '--reason', 'identity-unavailable',
+                '--reason', identityFailureReason,
               ]);
             } catch (fenceError) {
               // heartbeat may retire this exact generation independently; STALE_GENERATION
@@ -3746,7 +3981,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
               owner,
               handNo,
               generation: currentDescriptor.generation,
-              reason: 'identity-unavailable',
+              reason: identityFailureReason,
               fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
             });
             return;
@@ -3755,14 +3990,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           await runCoachBeforeResultCutoff([
             'adapter-disable',
             '--owner', owner,
-            '--reason', 'identity-unavailable',
+            '--reason', identityFailureReason,
           ]);
           coachAdapterDisabled = true;
           await completeCoachUnavailable({
             owner,
             handNo,
             generation: currentDescriptor.generation,
-            reason: 'identity-unavailable',
+            reason: identityFailureReason,
             fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
           });
           return;
@@ -3823,9 +4058,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (error.code === 'COACH_FINALIZE_CUTOFF') return;
         heartbeatTimedOut = error.code === 'COACH_HEARTBEAT_TIMEOUT';
         if (accepted) throw error;
-        const termination = handle && typeof handle.terminate === 'function'
-          ? await handle.terminate()
-          : { confirmed: false };
+        // #192 S2b: the null-identity branch above already resolved this attempt's
+        // termination when a later step in it threw (e.g. fenceCurrentGeneration()
+        // rejecting with a non-STALE_GENERATION error). Reuse that result instead of
+        // invoking terminate() a second time for the same failure.
+        const termination = terminationOutcome ?? (
+          handle && typeof handle.terminate === 'function'
+            ? await handle.terminate()
+            : { confirmed: false }
+        );
         settleCoachAttemptRecord(record, termination);
         if (coachWorkSuspended()) return;
         // Only the boolean confirmation authorizes replacement. `reason` is diagnostic,
@@ -5135,7 +5376,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     const trackedTerminationConfirmed = await terminateLiveCoachGenerations(owner, finalDeadlineNs);
     const postCutoffPersisted = remainingMsUntil(finalDeadlineNs) > 0
-      ? await closePersistedCoachWorkers({ allowCurrentReservedWithoutHandle: true })
+      ? await closePersistedCoachWorkers()
       : { confirmed: false, unresolved: [] };
     const terminationConfirmed = finalizationPriorTerminationConfirmed
       && trackedTerminationConfirmed
