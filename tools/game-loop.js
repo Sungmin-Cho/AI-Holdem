@@ -242,6 +242,35 @@ export function buildBadChildOutputDetails({ script, exitCode, signal, stdout, s
   };
 }
 
+// #192 §3/§4 D2: evidence that closes a persisted coach row without any live identity check.
+// Order follows the design memo: c → closed-confirmed → f. Every hit releases the row, so
+// the order only decides which reason string is reported.
+// - c: `closures` is `loop-state.coachRuntimeClosures`, `requestStop`'s success-path receipt
+//   (§3 E1). It lists every owner some loop instance durably confirmed fully stopped, so a
+//   row whose `ownerSessionId` appears there closes regardless of any other evidence.
+// - closed-confirmed (#192 O2): the caller (`terminatePersistedCoachAttempt` Step 0) already
+//   rejected any sidecar whose tuple does not match this exact row and epoch, so the phase is
+//   trusted at face value. `sidecar` is optional for callers that have none.
+// - f: `acceptEvidence` (`closed-child` or `no-spawn`, written by `accept` in
+//   tools/coach-control.js) is copied onto the attempt by `persistedCoachAttempts()`.
+// Pure function of its inputs with no disk reads, so consulting it twice for the same attempt
+// (the H2 fast path and the post-poll fallback) is always safe. Returns `{ reason }` when
+// evidence closes the row, otherwise `null`.
+export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
+  if (Array.isArray(closures) && closures.some((entry) => (
+    entry && typeof entry === 'object' && entry.ownerSessionId === attempt?.ownerSessionId
+  ))) {
+    return { reason: 'OWNER_RUNTIME_CLOSED' };
+  }
+  if (sidecar?.phase === 'closed-confirmed') {
+    return { reason: 'CLOSED_CONFIRMED' };
+  }
+  if (attempt?.acceptEvidence === 'closed-child' || attempt?.acceptEvidence === 'no-spawn') {
+    return { reason: 'ACCEPT_EVIDENCE' };
+  }
+  return null;
+}
+
 // #192 D5/O5: distinguishes, for an operator halted on unresolved coach rows, whether any
 // row still carries a spawn-intent sidecar (a spawn may genuinely have happened — verify no
 // leftover coach CLI child) from a genuinely evidence-free legacy row, from a row whose path
@@ -3639,43 +3668,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       && data.attempt === tuple.attempt;
   };
 
-  // §3/§4 D2, c/f: owner-runtime-closure receipts (E1) and accept evidence (f) both close a
-  // row without ever needing a live identity check. c: `loop-state.coachRuntimeClosures`
-  // (`requestStop`'s success-path receipt, §3 E1) lists every owner some loop instance has
-  // durably confirmed fully stopped — every coach child that owner ever spawned is gone. If
-  // the row's own `ownerSessionId` appears there, it closes regardless of any other evidence
-  // on the row. f is wired here too: `persistedCoachAttempts()` copies a retired row's
-  // `acceptEvidence` stamp (`closed-child` or `no-spawn`, written by `accept` — see
-  // tools/coach-control.js) straight onto the attempt object, and any such stamp closes the
-  // row regardless of which value it is. When a row carries both kinds of evidence, c wins
-  // (checked first) — either is a legitimate close, so which reason string is reported does
-  // not change the outcome. This must stay a pure function of its two inputs — no disk
-  // reads of its own — so consulting it twice for the same attempt (the H2 fast path below,
-  // and the post-poll fallback) is always safe. `closures` is `loop-state.coachRuntimeClosures`
-  // read once per closure by the caller (#192 D4) and threaded down through
-  // `terminatePersistedCoachAttempt`'s options, never re-read here even across every
-  // attempt row a single closure judges. Returns `{ reason }` when evidence closes the row,
-  // otherwise `null`.
-  // #192 O2: `sidecar` is optional — every existing caller that has no sidecar to consult
-  // (or does not need this evidence) may omit it. When passed, it is trusted at face value:
-  // the caller (`terminatePersistedCoachAttempt`'s Step 0) has already rejected any sidecar
-  // whose tuple does not match this exact row/epoch before ever reaching this function, so a
-  // `closed-confirmed` phase reaching here is already tuple-verified — no separate check.
-  const consultCoachCloseEvidence = (attempt, closures, sidecar = null) => {
-    if (Array.isArray(closures) && closures.some((entry) => (
-      entry && typeof entry === 'object' && entry.ownerSessionId === attempt?.ownerSessionId
-    ))) {
-      return { reason: 'OWNER_RUNTIME_CLOSED' };
-    }
-    if (attempt?.acceptEvidence === 'closed-child' || attempt?.acceptEvidence === 'no-spawn') {
-      return { reason: 'ACCEPT_EVIDENCE' };
-    }
-    if (sidecar?.phase === 'closed-confirmed') {
-      return { reason: 'CLOSED_CONFIRMED' };
-    }
-    return null;
-  };
-
   // a/b: resolve one already-parsed identity (from the authority handle or, absent that, a
   // tuple-matched sidecar) through the same poll/signal/poll sequence either source uses.
   // H2: when the very first lookup is `unknown`, consult c/f evidence before spending any of
@@ -5214,6 +5206,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--generation', String(attempt.generation),
         '--cleanup-state', 'released',
       ];
+      // #192 J5/K1: a `LEGACY_RUNTIME_PROCESS_PRESENT` row already named its candidate pids
+      // (see `unresolvedEvidenceGuidance`). The correct recovery action there is to stop
+      // those processes and resume, never a `cleanup-result` command. This holds for a
+      // write-authorized row too, so the check runs before the authorized branch and no
+      // command is emitted at all.
+      if (attempt.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT') return [];
       if (attempt.cleanupAuthorized) {
         return [{ program: process.execPath, args: [...base, '--game-dir', root] }];
       }
@@ -5230,11 +5228,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && attempt.ownerSessionId
         && attempt.ownerSessionId !== owner
       ) {
-        // #192 J5: a `LEGACY_RUNTIME_PROCESS_PRESENT` row already named its candidate pids
-        // (see `unresolvedEvidenceGuidance`) — the correct recovery action there is to stop
-        // those processes and resume, never a `cleanup-result` command, so no command is
-        // emitted at all for it.
-        if (attempt.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT') return [];
         // #192 J5: never pre-fill `--operator-confirmed 1` — that would let an operator run
         // the emitted command verbatim without ever having verified that no coach CLI
         // process of this game remains. `requiresOperatorConfirmation` flags the command so
@@ -6576,73 +6569,73 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw persistCleanupFailure(stopError) ?? stopError;
       }
 
-      // #192 L2: computed inside the try block below (its own re-check needs
-      // `fs.existsSync(loopStatePath)` first) but read again after the try/catch settles, to
-      // decide whether this attempt must still reject even though nothing threw.
+      // #192 L2: read again after the try/catch settles, to decide whether this attempt must
+      // still reject even though nothing threw.
       let lockLostOnStop = false;
       try {
-        if (fs.existsSync(loopStatePath)) {
-          // #192 I5: `lockHandle` being non-null only proves this instance acquired the loop
-          // lock at SOME point in the past — not that it still owns it now. Re-validate the
-          // exact identity `releaseOwnedLock` itself checks (same inode, pid file pid and
-          // startTime) right before trusting it for anything as consequential as a
-          // coach-runtime-closure receipt or the stop's own success write (#192 L2).
-          const lockStillOwned = Boolean(lockHandle) && verifyOwnedLock(lockHandle);
-          // #192 L2: `lockLostPermanently` keeps a retried `requestStop()` (its `lockHandle`
-          // already nulled by the first attempt's own `releaseLock()`) failing closed instead
-          // of looking like an instance that never held the lock at all.
-          lockLostOnStop = lockLostPermanently || (Boolean(lockHandle) && !lockStillOwned);
-          if (lockLostOnStop) {
-            lockLostPermanently = true;
-            log('coach-runtime-closure-lock-lost', {});
-          } else {
-            const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
-              ? pendingFinalStatePatch()
-              : (pendingFinalStatePatch ?? {});
-            // #192 S4 E1: reaching this line already proves every disposal, coach/training
-            // task settle, terminateActiveChildren, and stopServer step above succeeded (the
-            // `stopError` branch a few lines up throws before this point otherwise). The only
-            // remaining gate is this instance's own in-memory lock ownership — `lockHandle` is
-            // still set here, one line before `releaseLock()` nulls it — and whether this
-            // instance ever actually issued an owner at all. A lock-failed instance, or a
-            // resume that failed before owner issuance, has an empty `issuedOwners` and writes
-            // nothing. Existing entries (from earlier instances, preserved by `writeLoopState`'s
-            // merge) are kept verbatim and never duplicated for an owner already listed.
-            const existingClosures = Array.isArray(readLoopState()?.coachRuntimeClosures)
-              ? readLoopState().coachRuntimeClosures
-              : [];
-            const alreadyClosed = new Set(existingClosures.map((entry) => entry?.ownerSessionId));
-            // #192 I1/sJ4: an unconfirmed coach adapter disposal means this instance cannot
-            // attest that every coach child it may have spawned is actually gone — skip the
-            // receipt entirely rather than write one that overclaims. Stop itself still
-            // succeeds.
-            if (undisposableCoachAdapter) {
-              log('coach-runtime-closure-skipped', {
-                reason: hasCoachAdapterWithoutDispose ? 'ADAPTER_DISPOSE_UNCONFIRMED' : 'DISPOSE_CONFIRMATION_UNDECLARED',
-              });
-            }
-            const newClosures = !undisposableCoachAdapter
-              ? [...issuedOwners]
-                .filter((ownerSessionId) => !alreadyClosed.has(ownerSessionId))
-                .map((ownerSessionId) => ({ ownerSessionId, confirmedAt: isoNow(now) }))
-              : [];
-            writeLoopState({
-              stopping: true,
-              stoppedAt: isoNow(now),
-              cleanupFailedAt: undefined,
-              cleanupError: undefined,
-              ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
-                && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
-                readLoopState().pendingDecision.status === 'running'
-                || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
-              ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
-                code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
-              ...(newClosures.length > 0
-                ? { coachRuntimeClosures: [...existingClosures, ...newClosures] }
-                : {}),
-              ...resolvedFinalStatePatch,
+        // #192 I5: `lockHandle` being non-null only proves this instance acquired the loop
+        // lock at SOME point in the past — not that it still owns it now. Re-validate the
+        // exact identity `releaseOwnedLock` itself checks (same inode, pid file pid and
+        // startTime) right before trusting it for anything as consequential as a
+        // coach-runtime-closure receipt or the stop's own success write (#192 L2).
+        // #192 L2: `lockLostPermanently` keeps a retried `requestStop()` (its `lockHandle`
+        // already nulled by the first attempt's own `releaseLock()`) failing closed instead
+        // of looking like an instance that never held the lock at all.
+        // #192 K2: decided before and independently of whether loop-state exists. A missing
+        // file only means there is nothing to write; it must never turn a lock-lost stop
+        // into a success.
+        const lockStillOwned = Boolean(lockHandle) && verifyOwnedLock(lockHandle);
+        lockLostOnStop = lockLostPermanently || (Boolean(lockHandle) && !lockStillOwned);
+        if (lockLostOnStop) {
+          lockLostPermanently = true;
+          log('coach-runtime-closure-lock-lost', {});
+        } else if (fs.existsSync(loopStatePath)) {
+          const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
+            ? pendingFinalStatePatch()
+            : (pendingFinalStatePatch ?? {});
+          // #192 S4 E1: reaching this line already proves every disposal, coach/training
+          // task settle, terminateActiveChildren, and stopServer step above succeeded (the
+          // `stopError` branch a few lines up throws before this point otherwise). The only
+          // remaining gate is this instance's own in-memory lock ownership — `lockHandle` is
+          // still set here, one line before `releaseLock()` nulls it — and whether this
+          // instance ever actually issued an owner at all. A lock-failed instance, or a
+          // resume that failed before owner issuance, has an empty `issuedOwners` and writes
+          // nothing. Existing entries (from earlier instances, preserved by `writeLoopState`'s
+          // merge) are kept verbatim and never duplicated for an owner already listed.
+          const existingClosures = Array.isArray(readLoopState()?.coachRuntimeClosures)
+            ? readLoopState().coachRuntimeClosures
+            : [];
+          const alreadyClosed = new Set(existingClosures.map((entry) => entry?.ownerSessionId));
+          // #192 I1/sJ4: an unconfirmed coach adapter disposal means this instance cannot
+          // attest that every coach child it may have spawned is actually gone — skip the
+          // receipt entirely rather than write one that overclaims. Stop itself still
+          // succeeds.
+          if (undisposableCoachAdapter) {
+            log('coach-runtime-closure-skipped', {
+              reason: hasCoachAdapterWithoutDispose ? 'ADAPTER_DISPOSE_UNCONFIRMED' : 'DISPOSE_CONFIRMATION_UNDECLARED',
             });
           }
+          const newClosures = !undisposableCoachAdapter
+            ? [...issuedOwners]
+              .filter((ownerSessionId) => !alreadyClosed.has(ownerSessionId))
+              .map((ownerSessionId) => ({ ownerSessionId, confirmedAt: isoNow(now) }))
+            : [];
+          writeLoopState({
+            stopping: true,
+            stoppedAt: isoNow(now),
+            cleanupFailedAt: undefined,
+            cleanupError: undefined,
+            ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
+              && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
+              readLoopState().pendingDecision.status === 'running'
+              || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
+            ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
+              code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
+            ...(newClosures.length > 0
+              ? { coachRuntimeClosures: [...existingClosures, ...newClosures] }
+              : {}),
+            ...resolvedFinalStatePatch,
+          });
         }
         // #192 L2: kept unconditional exactly as before — releaseOwnedLock() already no-ops
         // silently when the on-disk identity no longer matches this handle, so calling it

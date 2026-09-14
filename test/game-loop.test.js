@@ -24,6 +24,7 @@ import {
   applyModeDefaults,
   buildBadChildOutputDetails,
   unresolvedEvidenceGuidance,
+  consultCoachCloseEvidence,
   parseLsofCwdRecords,
   legacyCoachRuntimeCandidates,
   scanCoachRuntimeProcesses,
@@ -13262,4 +13263,76 @@ test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 b
   t.after(() => loop.requestStop().catch(() => {}));
   await assert.rejects(loop.bootstrap({ ai: 1 }), (error) => error.code === 'RESOLVER_BOOM_192');
   assert.ok(logs.some((row) => row.event === 'bootstrap-cleanup-lock-lost'), 'bootstrap-cleanup-lock-lost 로그가 없다');
+});
+
+test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT면 복구 명령을 하나도 만들지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      scanCoachRuntimeProcesses: () => Promise.resolve({
+        status: 'candidates', candidates: [{ pid: 999_996, cwd: '/tmp/ai-holdem-codex-K1' }],
+      }),
+    },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.reason, 'LEGACY_RUNTIME_PROCESS_PRESENT', `precondition 불일치: ${JSON.stringify(row)}`);
+  assert.equal(row?.cleanupAuthorized, true, `precondition 불일치(권한 있는 행이어야 한다): ${JSON.stringify(row)}`);
+  assert.deepEqual(state.halt.recovery.commands, [], '코치 런타임 프로세스가 남은 행에 released 복구 명령이 생겼다');
+  assert.equal(state.halt.recovery.requiresOperatorConfirmation, undefined);
+});
+
+test('#192 K2: 락을 잃은 뒤 loop-state 파일이 사라져도 requestStop은 LOOP_LOCK_LOST로 거부되고 파일을 다시 만들지 않는다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1 });
+  const loopStatePath = path.join(gameDir, 'loop-state.json');
+  assert.ok(fs.existsSync(loopStatePath), 'precondition: bootstrap이 loop-state를 만들지 않았다');
+
+  const lockDir = path.join(gameDir, 'loop.lock.d');
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  fs.mkdirSync(lockDir);
+  fs.rmSync(loopStatePath, { force: true });
+
+  let caught = null;
+  try {
+    await loop.requestStop();
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, 'loop-state가 없다는 이유로 lock을 잃은 stop이 성공했다');
+  assert.equal(caught.code, 'LOOP_LOCK_LOST');
+  assert.equal(fs.existsSync(loopStatePath), false, 'lock을 잃은 stop이 loop-state를 다시 만들었다');
+  assert.ok(logs.some((row) => row.event === 'loop-lock-lost-on-stop'), 'loop-lock-lost-on-stop 로그가 없다');
+
+  // 재시도도 sticky하게 거부된다.
+  await assert.rejects(loop.requestStop(), (error) => error.code === 'LOOP_LOCK_LOST');
+});
+
+test('#192 K3: consultCoachCloseEvidence는 설계 순서 c → closed-confirmed → f로 reason을 고른다', () => {
+  const attempt = { ownerSessionId: 'owner-k3', acceptEvidence: 'closed-child' };
+  const closedSidecar = { phase: 'closed-confirmed' };
+  const receipts = [{ ownerSessionId: 'owner-k3', confirmedAt: '2026-09-14T00:00:00.000Z' }];
+
+  assert.deepEqual(consultCoachCloseEvidence(attempt, receipts, closedSidecar), { reason: 'OWNER_RUNTIME_CLOSED' });
+  assert.deepEqual(consultCoachCloseEvidence(attempt, [], closedSidecar), { reason: 'CLOSED_CONFIRMED' });
+  assert.deepEqual(consultCoachCloseEvidence(attempt, [], { phase: 'identity' }), { reason: 'ACCEPT_EVIDENCE' });
+  assert.deepEqual(consultCoachCloseEvidence(attempt, []), { reason: 'ACCEPT_EVIDENCE' });
+  assert.equal(consultCoachCloseEvidence({ ownerSessionId: 'owner-k3' }, [{ ownerSessionId: 'other' }], { phase: 'intent' }), null);
 });

@@ -12,6 +12,7 @@
 // CLI layer to begin with — only its own `--accept-evidence` field) is delegated to the real
 // CLI as a genuine subprocess, with the two protocol flags simply stripped from argv first —
 // mirroring how an old CLI's ordinary argv parsing never even looks at a flag it doesn't know.
+// `node --test` also walks test/helpers/*.mjs, so stay inert under the runner.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -91,8 +92,12 @@ async function main() {
   fs.writeSync(1, `${JSON.stringify(result)}\n`);
 }
 
-main().catch((error) => {
-  const code = error?.code ?? 'INTERNAL';
-  fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error?.message ?? String(error) })}\n`);
-  process.exit(1);
-});
+if (process.execArgv.some((arg) => arg === '--test' || arg.startsWith('--test-'))) {
+  /* collected as a test file; game-loop tests spawn this as a coach CLI child */
+} else {
+  main().catch((error) => {
+    const code = error?.code ?? 'INTERNAL';
+    fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error?.message ?? String(error) })}\n`);
+    process.exit(1);
+  });
+}
