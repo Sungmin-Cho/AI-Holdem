@@ -9232,3 +9232,63 @@ test('#194 pending apply boundary preserves diagnostics and crash reconciliation
   assert.equal(restored.pendingDecision,null);
   assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-reconciled'));
 });
+
+test('#194 correction consumes one remaining-budget call and preserves soft wait', {timeout:20000 * WIN32_SCALE}, async t=>{
+  let clock=0,gameDir,inFlight=0,maxInFlight=0;
+  const adapter=makeAdapter({onDecide:async({message},attempt)=>{
+    maxInFlight=Math.max(maxInFlight,++inFlight);
+    try {
+      if(attempt===1) {await new Promise(r=>setTimeout(r,25)); clock+=15; return {raw:'invalid'};}
+      const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+      assert.equal(p.diagnostics.callNo,2); assert.equal(p.diagnostics.corrections,1); assert.equal(p.softWait,true);
+      assert.equal(Object.hasOwn(p,'closeConfirmed'),false); assert.equal(Object.hasOwn(p,'proposedAction'),false);
+      return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+    } finally {inFlight--;}
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},monotonicNow:()=>clock,minRepairFloorMs:100}}); gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.deepEqual(adapter.decideCalls.map(x=>x.timeoutMs),[40,25]);
+  assert.ok(adapter.decideCalls[1].message.startsWith(adapter.decideCalls[0].message+'\n\n[교정]'));
+  assert.equal(maxInFlight,1);
+  const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0]; assert.equal(metric.corrected,true); assert.equal(metric.outcome,'retried_accepted');
+});
+
+test('#194 correction budget admission rolls counters back after logging', {timeout:30000 * WIN32_SCALE}, async t=>{
+  for(const afterCommit of [false,true]) await t.test(String(afterCommit),async st=>{
+    let clock=0;
+    const adapter=makeAdapter({onDecide:async()=>{clock+=afterCommit?30:38;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},monotonicNow:()=>clock,minRepairFloorMs:100,log:r=>{if(r.event==='player-correction') clock+=8;}}});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    assert.equal(adapter.decideCalls.length,1); assert.equal(loop.pendingDecision.diagnostics.callNo,1); assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(afterCommit?'budget_after_commit':'budget')));
+  });
+});
+
+test('#194 repeated invalid responses inherit exactly one correction block in a new generation', {timeout:15000 * WIN32_SCALE},async t=>{
+  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0}});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(adapter.decideCalls.length,2);
+  const p=loop.pendingDecision; assert.equal(p.diagnostics.lastRejection.callNo,2);
+  await loop.retryDecision(p.decisionId); await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(loop.pendingDecision.generation,p.generation+1);
+  assert.equal(adapter.decideCalls.length,4);
+  assert.deepEqual(adapter.decideCalls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,1,1]);
+  assert.deepEqual(readLoopLog(gameDir).filter(x=>x.event==='player-call').map(x=>x.callNo),[1,2,1,2]);
+});
+
+test('#194 engine rejection corrects once and drops the rejected proposed action', {timeout:20000 * WIN32_SCALE},async t=>{
+  let armed=false,gameDir,plainSteps=0;
+  const adapter=makeAdapter({onDecide:async({message},attempt)=>{
+    if(attempt===1) armed=true;
+    else { const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision; assert.equal(p.diagnostics.lastRejection.detail,'engine_rejected'); assert.equal(p.proposedAction,undefined); assert.equal(p.closeConfirmed,undefined); }
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0,onEngineInvoke:args=>{
+    if(args[0]==='step'&&!args.includes('--expect-version')) plainSteps++;
+    if(armed&&args[0]==='step'&&args[1]==='p1'&&args.includes('--expect-version')) {armed=false;throw Object.assign(new Error('ILLEGAL_ACTION'),{code:'ILLEGAL_ACTION'});}
+  }}});gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.ok(plainSteps>0); assert.equal(adapter.decideCalls.length,2);
+  assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
+});
