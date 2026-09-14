@@ -443,9 +443,9 @@ function processAlive(pid) {
   }
 }
 
-function legalFromMessage(message) {
+export function legalFromMessage(message) {
   if (typeof message !== 'string') return null;
-  const match = /legal 수치: canCheck=(true|false) callAmount=(\d+) canRaise=(true|false) minRaiseTo=(\d+) maxRaiseTo=(\d+)/.exec(message);
+  const match = /legal 수치: canCheck=(true|false) callAmount=(\d+) canRaise=(true|false) minRaiseTo=(\d+) maxRaiseTo=(\d+)(?: currentBet=(\d+))?/.exec(message);
   if (!match) return null;
   return {
     canCheck: match[1] === 'true',
@@ -453,6 +453,7 @@ function legalFromMessage(message) {
     canRaise: match[3] === 'true',
     minRaiseTo: Number(match[4]),
     maxRaiseTo: Number(match[5]),
+    currentBet: match[6] === undefined ? null : Number(match[6]),
   };
 }
 
