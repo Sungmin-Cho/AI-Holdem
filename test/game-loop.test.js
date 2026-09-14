@@ -32,6 +32,7 @@ import { createProfileStore } from '../tools/training-stores.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { createCoachControl } from '../tools/coach-control.js';
+import { defaultEvaluate } from '../tools/training-pipeline.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -10798,4 +10799,493 @@ test('#192 S4: resume은 이전 인스턴스가 남긴 coachRuntimeClosures 항�
   assert.deepEqual(resumed.coachRuntimeClosures, [priorClosure]);
   const onDisk = readJson(path.join(gameDir, 'loop-state.json'));
   assert.deepEqual(onDisk.coachRuntimeClosures, [priorClosure]);
+});
+
+// ── #192 S5: 이슈 재현 통합 (design memo §7 S5) ──────────────────────────────
+//
+// finalizeBudgetMs/finalizeCutoffLeadMs are deliberately tight: with S1–S4 applied, both
+// coach rows are resolvable purely from spawn evidence, so a generous budget lets the very
+// same first run reach `done` on its own. Keeping the budget this small forces the run to
+// hit the common finalization deadline before it can finish draining (finalize-cutoff,
+// residual publish, review generation) — matching the issue's own budgetMs/resultWaitMs
+// exhaustion — while still leaving enough room for hand 2's real, lock-contended
+// bind-handle/publish attempts (each bounded by childTimeoutMs) to fail on their own.
+const ISSUE_192_FINALIZE_BUDGET_MS = 4_200;
+const ISSUE_192_FINALIZE_CUTOFF_LEAD_MS = 1_200;
+const ISSUE_192_RESULT_WAIT_MS = ISSUE_192_FINALIZE_BUDGET_MS - ISSUE_192_FINALIZE_CUTOFF_LEAD_MS;
+const ISSUE_192_CHILD_TIMEOUT_MS = 900;
+
+// Builds the issue's first-run failure store through the real loop (no hand-written
+// authority rows): a finished two-hand game with training enabled, hand 1's coach
+// reservation that never spawns (evidence judgment d), hand 2's coach reservation that
+// spawns and then fails bind-handle with a confirmed terminate (evidence judgment b), one
+// training evaluation pending past the shared result-wait cutoff, and a real
+// training-publish-error contending on the same lock hand 2's bind-handle is stuck on.
+// `crashHandOneIntent` swaps hand 1's mechanism for the crash-variant test: hand 1's
+// checkpoint still blocks, but it is released only after hand 2's own bind-handle cascade
+// has already failed on its own (observed via the `coach-error` log), so jumping a fake
+// monotonic clock forward at that point to cross hand 1's cutoff can never race hand 2's
+// still-in-flight early cutoff checks. Once released, the intent sidecar write succeeds
+// normally, the jump lands, and the immediately following aborted-before-spawn write is
+// made to fail — the same #192 S2b commitTmp-retry technique in spirit (real time passing
+// between the two writes), except the "time" is a clock jump instead of a blocking sleep
+// so hand 2's own concurrent processing is never stalled by it, and the follow-up write is
+// made to fail like an actual crash would leave it, so the sidecar is left at exactly
+// `phase: 'intent'`.
+async function buildIssue192FirstRunFailure(t, { crashHandOneIntent = false } = {}) {
+  const finalizeBudgetMs = ISSUE_192_FINALIZE_BUDGET_MS;
+  const finalizeCutoffLeadMs = ISSUE_192_FINALIZE_CUTOFF_LEAD_MS;
+  const resultWaitMs = ISSUE_192_RESULT_WAIT_MS;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+
+  let held = null;
+  const releaseHeldLock = async () => {
+    if (!held) return;
+    const current = held;
+    held = null;
+    current.release();
+    await current.done;
+  };
+  t.after(releaseHeldLock);
+
+  let releaseHandOneCheckpoint = () => {};
+  const handOneCheckpointGate = new Promise((resolve) => { releaseHandOneCheckpoint = resolve; });
+
+  const hand2Terminations = [];
+  const upper = makeCoachAdapter({
+    rounds: [
+      { raw: JSON.stringify({ handNo: 1, text: '핸드 1 코치 (도달하지 않음)' }) },
+      {
+        pid: 4_242_424,
+        startTime: 'issue-192-hand2-identity',
+        raw: JSON.stringify({ handNo: 2, text: '핸드 2 코치 (도달하지 않음)' }),
+        terminate: () => {
+          hand2Terminations.push(Date.now());
+          return { confirmed: true };
+        },
+      },
+    ],
+  });
+
+  // A monotonic clock this test can jump forward instantly instead of blocking the whole
+  // JS thread with a synchronous sleep (which would also stall hand 2's own timeline,
+  // since Atomics.wait halts every other pending callback along with it).
+  let monotonicOffsetNs = 0n;
+  const monotonicNs = () => process.hrtime.bigint() + monotonicOffsetNs;
+
+  let hand1IntentWritten = false;
+  const writeSpawnEvidence = (filePath, data) => {
+    if (!crashHandOneIntent || data.handNo !== 1) {
+      writeJsonAtomic(filePath, data);
+      return;
+    }
+    if (data.phase === 'intent' && !hand1IntentWritten) {
+      hand1IntentWritten = true;
+      writeJsonAtomic(filePath, data);
+      // Jump the clock past the shared result-wait cutoff so the very next
+      // assertBeforeResultWaitCutoff() call genuinely fails, without blocking the thread
+      // hand 2's own concurrent bind-handle attempt depends on.
+      monotonicOffsetNs += BigInt(resultWaitMs + 700) * 1_000_000n;
+      return;
+    }
+    if (data.phase === 'aborted-before-spawn') {
+      // Simulate a crash between "the cutoff was exceeded" and "that fact was durably
+      // recorded": the sidecar must never move past `intent`.
+      throw new Error('issue-192 simulated crash before aborted-before-spawn landed');
+    }
+    writeJsonAtomic(filePath, data);
+  };
+
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper, notices: [] };
+    },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      trainingEnabled: true,
+      training: {
+        // Hand 1's evaluation hangs past the cutoff (`training-settle-return
+        // timeout=true pending=1`); hand 2's real evaluation is left to run so its
+        // machine publish attempt genuinely contends on the held publish.lock.d. Like a
+        // real evaluate handle, terminate() actually settles the promise (a cancelled
+        // evaluation) instead of leaving it dangling — finalize's own
+        // terminateTrainingChildren() calls terminate() once the cutoff is confirmed, and
+        // an unresolvable promise here would make requestStop()'s unbounded
+        // `Promise.allSettled([...trainingTasks])` hang forever.
+        evaluate: (sessionDir, handNo, options) => {
+          if (handNo === 1) {
+            let settle;
+            const promise = new Promise((resolve) => { settle = resolve; });
+            return {
+              promise,
+              terminate: async () => {
+                settle({ ok: false, code: 'ISSUE_192_HAND1_EVALUATE_TERMINATED' });
+                return { confirmed: true };
+              },
+            };
+          }
+          return defaultEvaluate(sessionDir, handNo, options);
+        },
+      },
+      childTimeoutMs: ISSUE_192_CHILD_TIMEOUT_MS,
+      finalizeBudgetMs,
+      finalizeCutoffLeadMs,
+      monotonicNs,
+      writeSpawnEvidence,
+      coachSpawnCheckpoint: async ({ handNo }) => {
+        if (handNo === 1) {
+          await handOneCheckpointGate;
+          return;
+        }
+        // Hand 2: hold the coach-control lock so bind-handle (and every later
+        // coach-control/publish attempt while it is held) times out via childTimeoutMs.
+        held = await holdNamedLock(gameDir, 'publish.lock.d');
+      },
+    },
+  });
+  // The crash variant must never reach a successful requestStop (that is what would mint
+  // the owner-runtime-closure receipt this variant exists to go without), so its cleanup
+  // only clears the OS-level loop lock directory instead of running the loop's own
+  // graceful shutdown.
+  if (!crashHandOneIntent) {
+    t.after(() => loop.requestStop().catch(() => {}));
+  } else {
+    t.after(() => { try { fs.rmSync(path.join(gameDir, 'loop.lock.d'), { recursive: true, force: true }); } catch { /* already gone */ } });
+  }
+
+  const state = await loop.resume();
+  assert.equal(state.phase, 'finalizing');
+
+  const running = startRun(loop);
+  if (!crashHandOneIntent) {
+    // Release hand 1's spawn checkpoint only once the shared result-wait cutoff has
+    // certainly elapsed, matching #192 S2b's `coachSpawnCheckpoint 대기 중 cutoff가
+    // 걸리면...` test.
+    await new Promise((resolve) => setTimeout(resolve, resultWaitMs + 500));
+    releaseHandOneCheckpoint();
+  } else {
+    // Let hand 2's own bind-handle cascade fail on its own first (real time, real lock
+    // contention, unaffected by any clock trick) before crossing hand 1's cutoff — jumping
+    // the clock any earlier could also cross hand 2's own still-in-flight early cutoff
+    // check and short-circuit it before it ever reaches bind-handle.
+    await waitFor(
+      () => readLoopLog(gameDir).find((row) => row.event === 'coach-error'),
+      'hand 2 bind-handle failure did not surface as a coach-error before crossing hand 1\'s cutoff',
+      20_000,
+    );
+    releaseHandOneCheckpoint();
+  }
+
+  // Keep publish.lock.d held for the whole run, not just through hand 2's bind-handle
+  // failure: closePersistedCoachWorkers() runs inside this same finalize() call, and if
+  // the lock were freed early it could successfully write cleanup-result for both rows
+  // before the run ever aborts, leaving nothing unresolved for the resumes below to prove
+  // anything about. Releasing only after the run settles keeps both rows genuinely
+  // unresolved through the abort, matching the issue's own observation.
+  const outcome = await running.catch((error) => error);
+  await releaseHeldLock();
+  assert.equal(
+    outcome?.code,
+    'FINALIZATION_ABORTED',
+    `first run was expected to abort (got ${outcome?.phase ?? outcome?.code})`,
+  );
+  assert.ok(
+    readLoopLog(gameDir).some((row) => row.event === 'training-publish-error'),
+    'training publish did not fail while publish.lock.d was held',
+  );
+  assert.ok(
+    readLoopLog(gameDir).some((row) => row.event === 'coach-error'),
+    'hand 2 bind-handle failure did not surface as a coach-error',
+  );
+
+  if (!crashHandOneIntent) {
+    // This is what the app does after a failed run: wait for requestStop to resolve.
+    await loop.requestStop();
+  } else {
+    // Simulate a crash: no requestStop, no owner-runtime-closure receipt, no graceful
+    // adapter/coach/training teardown. Only the OS-level lock is cleared — mirroring an
+    // operator confirming the crashed process is gone and clearing its stale lock
+    // directory — so a fresh resume can proceed in this same test process.
+    fs.rmSync(path.join(gameDir, 'loop.lock.d'), { recursive: true, force: true });
+  }
+
+  return { gameDir, init, loop, upper, hand2Terminations };
+}
+
+// An unresolved coach reservation lives in `auth.hands[handNo]` (status reserved/running)
+// until cleanup-result actually writes; only then does it move into `retiredAttempts`
+// with a `cleanupState`. Tests need to read whichever shape currently holds a hand.
+function coachAuthorityRow(authority, handNo) {
+  const retired = (authority.retiredAttempts ?? []).find((row) => row.handNo === handNo);
+  if (retired) return { ...retired, handNo, released: retired.cleanupState === 'released' };
+  const active = authority.hands?.[String(handNo)];
+  if (!active) return null;
+  return { ...active, handNo, released: false };
+}
+
+test('#192 S5: 이슈 재현 — 1차 finalize 실패 store를 수정 없이 두 번 재개하면 done과 리뷰 게시에 도달한다', { timeout: 60_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const { gameDir, init } = await buildIssue192FirstRunFailure(t);
+
+  const loopLog = readLoopLog(gameDir);
+  assert.ok(
+    loopLog.some((row) => row.event === 'finalize-halt' && row.code === 'FINALIZATION_ABORTED'),
+    'first run did not log finalize-halt FINALIZATION_ABORTED',
+  );
+  const publishError = loopLog.find((row) => row.event === 'training-publish-error');
+  assert.ok(publishError, 'first run did not log a training-publish-error row');
+
+  const authorityBefore = readJson(path.join(gameDir, '.coach-authority.json'));
+  const rowsBefore = [1, 2].map((handNo) => coachAuthorityRow(authorityBefore, handNo));
+  assert.ok(rowsBefore[0] && rowsBefore[1], 'precondition: both coach hands left an unresolved row');
+  for (const row of rowsBefore) {
+    assert.equal(row.agentHandle, null, `hand ${row.handNo} unexpectedly has an agentHandle`);
+    assert.equal(row.released, false, `hand ${row.handNo} was already released before resume`);
+  }
+
+  const stateBefore = readJson(path.join(gameDir, 'state.json'));
+  const handsDirBefore = fs.readdirSync(path.join(gameDir, 'hands')).sort();
+  const sealsBefore = { ...authorityBefore.publishedSeals };
+  assert.deepEqual(sealsBefore, {}, 'precondition: no hand was sealed yet');
+
+  // ── first fresh resume: must reach done and publish the review ──────────────────
+  const firstResumeCalls = [];
+  const firstResumed = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return {
+        player: null,
+        upper: makeCoachAdapter({ synthesizerRounds: [{ raw: VALID_REVIEW }] }),
+        notices: [],
+      };
+    },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => firstResumeCalls.push(args),
+    },
+  });
+  t.after(() => firstResumed.requestStop().catch(() => {}));
+
+  const firstState = await firstResumed.resume();
+  assert.equal(firstState.phase, 'finalizing');
+  const firstCompleted = await firstResumed.run();
+  assert.equal(firstCompleted.phase, 'done', `first fresh resume did not reach done (halt ${JSON.stringify(firstCompleted.halt)})`);
+  assert.equal(fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8'), VALID_REVIEW);
+  assert.deepEqual(readJson(path.join(gameDir, '.review.json')), { review: VALID_REVIEW });
+
+  const stateAfterFirstResume = readJson(path.join(gameDir, 'state.json'));
+  assert.deepEqual(stateAfterFirstResume.lastHand?.handNo, stateBefore.lastHand?.handNo);
+  assert.deepEqual(stateAfterFirstResume.result, stateBefore.result);
+  assert.deepEqual(fs.readdirSync(path.join(gameDir, 'hands')).sort(), handsDirBefore);
+
+  const authorityAfterFirstResume = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.ok(authorityAfterFirstResume.publishedSeals['1'], 'hand 1 was not sealed after done');
+  assert.ok(authorityAfterFirstResume.publishedSeals['2'], 'hand 2 was not sealed after done');
+
+  await firstResumed.requestStop();
+
+  // ── second fresh resume on the done game: must be a pure no-op ──────────────────
+  const secondResumeCalls = [];
+  const authorityBytesBeforeSecond = fs.readFileSync(path.join(gameDir, '.coach-authority.json'));
+  const secondResumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => secondResumeCalls.push(args),
+    },
+  });
+  t.after(() => secondResumed.requestStop().catch(() => {}));
+
+  const secondState = await secondResumed.resume();
+  assert.equal(secondState.phase, 'done');
+  assert.equal((await secondResumed.run()).phase, 'done');
+
+  assert.equal(
+    secondResumeCalls.some((args) => args[0] === 'cleanup-result' || args[0] === 'adapter-disable'),
+    false,
+    'second resume on a done game issued cleanup-result/adapter-disable calls',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(gameDir, '.coach-authority.json')).equals(authorityBytesBeforeSecond),
+    true,
+    'second resume on a done game changed .coach-authority.json bytes',
+  );
+});
+
+// #192 S5 (team-lead addendum): after the app-style requestStop() succeeds, judgment c
+// (OWNER_RUNTIME_CLOSED) releases every row of that owner first, which can hide whether
+// the spawn sidecar evidence (b/d) alone would have been enough. Remove the owner closure
+// receipt between runs — the only allowed edit — so the fresh resume must close both rows
+// on spawn evidence alone.
+test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize 실패 store가 done에 도달한다', { timeout: 60_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const { gameDir } = await buildIssue192FirstRunFailure(t);
+
+  const loopStateBefore = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.ok(
+    Array.isArray(loopStateBefore.coachRuntimeClosures) && loopStateBefore.coachRuntimeClosures.length > 0,
+    'precondition: the clean requestStop did not leave a coachRuntimeClosures receipt',
+  );
+
+  const authorityBefore = readJson(path.join(gameDir, '.coach-authority.json'));
+  const rowsBefore = [1, 2].map((handNo) => coachAuthorityRow(authorityBefore, handNo));
+  assert.ok(rowsBefore[0] && rowsBefore[1], 'precondition: both coach hands left an unresolved row');
+  for (const row of rowsBefore) {
+    assert.equal(row.released, false, `hand ${row.handNo} was already released before removing the receipt`);
+    assert.equal(row.acceptEvidence ?? null, null, `hand ${row.handNo} unexpectedly carries acceptEvidence`);
+  }
+
+  delete loopStateBefore.coachRuntimeClosures;
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify(loopStateBefore));
+
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return {
+        player: null,
+        upper: makeCoachAdapter({ synthesizerRounds: [{ raw: VALID_REVIEW }] }),
+        notices: [],
+      };
+    },
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  const state = await resumed.resume();
+  assert.equal(state.phase, 'finalizing');
+  const completed = await resumed.run();
+  assert.equal(
+    completed.phase,
+    'done',
+    `resume without a closure receipt did not reach done (halt ${JSON.stringify(completed.halt)})`,
+  );
+  assert.equal(fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8'), VALID_REVIEW);
+
+  const authorityAfter = readJson(path.join(gameDir, '.coach-authority.json'));
+  const rowsAfter = [1, 2].map((handNo) => coachAuthorityRow(authorityAfter, handNo));
+  assert.ok(rowsAfter[0] && rowsAfter[1]);
+  for (const row of rowsAfter) {
+    assert.equal(row.released, true, `hand ${row.handNo} was not released`);
+  }
+
+  const hand1Row = rowsAfter.find((row) => row.handNo === 1);
+  const hand2Row = rowsAfter.find((row) => row.handNo === 2);
+  const hand1SidecarPath = coachSpawnSidecarPath(gameDir, hand1Row.exactResultPath);
+  const hand2SidecarPath = coachSpawnSidecarPath(gameDir, hand2Row.exactResultPath);
+  // hand 1's checkpoint blocked before any write; a sidecar surviving as
+  // aborted-before-spawn is also acceptable, matching the plan's own allowance.
+  if (fs.existsSync(hand1SidecarPath)) {
+    assert.equal(readJson(hand1SidecarPath).phase, 'aborted-before-spawn');
+  }
+  assert.equal(readJson(hand2SidecarPath).phase, 'identity');
+});
+
+// #192 S5 variant: no requestStop, no owner-runtime-closure receipt, and hand 1's sidecar
+// left at exactly `phase: 'intent'` (evidence judgment e) — a fresh resume must halt
+// explicitly rather than silently release it, and must not duplicate coach-control
+// transitions on a second resume attempt.
+test('#192 S5: 영수증 없는 crash store는 명시적으로 멈추고 증거 요약을 남긴다', { timeout: 60_000, concurrency: false }, async (t) => {
+  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  const { gameDir } = await buildIssue192FirstRunFailure(t, { crashHandOneIntent: true });
+
+  const loopStateBefore = readJson(path.join(gameDir, 'loop-state.json'));
+  if (Array.isArray(loopStateBefore.coachRuntimeClosures) && loopStateBefore.coachRuntimeClosures.length > 0) {
+    delete loopStateBefore.coachRuntimeClosures;
+    fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify(loopStateBefore));
+  }
+  assert.equal(
+    (readJson(path.join(gameDir, 'loop-state.json')).coachRuntimeClosures ?? []).length,
+    0,
+    'precondition: no owner-runtime-closure receipt exists for this crash store',
+  );
+
+  const authorityBefore = readJson(path.join(gameDir, '.coach-authority.json'));
+  const hand1RowBefore = coachAuthorityRow(authorityBefore, 1);
+  assert.ok(hand1RowBefore && hand1RowBefore.released === false, 'precondition: hand 1 left an unresolved row');
+  const hand1SidecarPath = coachSpawnSidecarPath(gameDir, hand1RowBefore.exactResultPath);
+  assert.equal(
+    readJson(hand1SidecarPath).phase,
+    'intent',
+    'precondition: hand 1 sidecar did not stay at intent',
+  );
+
+  const firstResumeCalls = [];
+  const firstResumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => firstResumeCalls.push(args),
+    },
+  });
+  t.after(() => firstResumed.requestStop().catch(() => {}));
+
+  // closePersistedCoachWorkers() runs inside resume()'s own finalizing branch, before
+  // beginCoachOwner, so an unconfirmable row is expected to reject resume() itself; only
+  // fall through to run() if resume() unexpectedly succeeded.
+  const firstOutcome = await firstResumed.resume().catch((error) => error);
+  const firstHalted = firstOutcome instanceof Error
+    ? firstOutcome
+    : await firstResumed.run().catch((error) => error);
+  assert.equal(
+    firstHalted?.code,
+    'FINALIZATION_ABORTED',
+    `resume of an unconfirmable crash store was expected to halt explicitly (got ${JSON.stringify(firstHalted)})`,
+  );
+
+  const loopStateAfterFirst = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopStateAfterFirst.halt?.code, 'FINALIZATION_ABORTED');
+  const attempts = loopStateAfterFirst.halt?.recovery?.attempts ?? [];
+  const hand1Attempt = attempts.find((attempt) => attempt.handNo === 1);
+  assert.ok(hand1Attempt, 'halt.recovery.attempts did not include hand 1');
+  assert.ok(hand1Attempt.evidence, 'hand 1 unresolved attempt did not carry an evidence summary');
+
+  const firstMutatingCalls = firstResumeCalls.filter((args) => (
+    args[0] === 'cleanup-result' || args[0] === 'adapter-disable'
+  ));
+
+  await firstResumed.requestStop().catch(() => {});
+
+  // Repeated resume must not duplicate cleanup-result/adapter-disable transitions.
+  const secondResumeCalls = [];
+  const secondResumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: makeCoachAdapter(), notices: [] }),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => secondResumeCalls.push(args),
+    },
+  });
+  t.after(() => secondResumed.requestStop().catch(() => {}));
+
+  const secondOutcome = await secondResumed.resume().catch((error) => error);
+  const secondHalted = secondOutcome instanceof Error
+    ? secondOutcome
+    : await secondResumed.run().catch((error) => error);
+  assert.equal(secondHalted?.code, 'FINALIZATION_ABORTED');
+  const secondMutatingCalls = secondResumeCalls.filter((args) => (
+    args[0] === 'cleanup-result' || args[0] === 'adapter-disable'
+  ));
+  // hand 2's row was already released on the first resume (evidence alone, independent of
+  // hand 1's unresolved status) and its retiredAttempts entry is skipped on every later
+  // scan, so the second resume only re-examines hand 1 — its own cleanup-result/
+  // adapter-disable count must not grow past what the first resume already did.
+  assert.equal(
+    secondMutatingCalls.length <= firstMutatingCalls.length,
+    true,
+    'repeated resume duplicated cleanup-result/adapter-disable transitions',
+  );
+  await secondResumed.requestStop().catch(() => {});
 });
