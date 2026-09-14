@@ -107,6 +107,9 @@ test('managed command journal retries the displayed LLM decision once and preser
   };
   await waitPaused();
   assert.equal(manager.snapshot().allowedCommands.includes('resume'),false);
+  assert.deepEqual(manager.snapshot().pendingDecision.diagnostics,{detail:'no_json',corrections:1,lastRejection:{action:'unknown',amount:null,detail:'no_json'}});
+  assert.equal(manager.snapshot().pendingDecision.retryWillCorrect,true);
+  assert.equal(JSON.stringify(manager.snapshot()).includes('invalid'),false);
   const retry = {...payload(manager,'retry-decision'), decisionId:manager.snapshot().pendingDecision.decisionId};
   manager.command(retry);
   manager.command(retry);
@@ -116,6 +119,15 @@ test('managed command journal retries the displayed LLM decision once and preser
   assert.equal(calls[0].timeoutMs,1000); assert.equal(calls[2].timeoutMs,1000);
   assert.ok(calls[1].timeoutMs<=1000); assert.ok(calls[3].timeoutMs<=1000);
   assert.deepEqual(calls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,1,1]);
+  const loopPath=path.join(manager.current.sessionDir,'loop-state.json');
+  const saved=JSON.parse(fs.readFileSync(loopPath));
+  for(const diagnostics of [null,{...saved.pendingDecision.diagnostics,lastRejection:{...saved.pendingDecision.diagnostics.lastRejection,projection:{action:'PRIVATE_SENTINEL',decisionIdMatches:true}}}]) {
+    fs.writeFileSync(loopPath,JSON.stringify({...saved,pendingDecision:{...saved.pendingDecision,diagnostics}}));
+    const snap=manager.snapshot().pendingDecision;
+    assert.equal(snap.diagnostics,null); assert.equal(snap.diagnosticsQuarantined,true); assert.equal(snap.retryWillCorrect,false);
+    assert.equal(JSON.stringify(manager.snapshot()).includes('PRIVATE_SENTINEL'),false);
+  }
+  fs.writeFileSync(loopPath,JSON.stringify(saved));
   const end = payload(manager,'end');
   manager.command(end);
   assert.equal((await settle(manager,end.requestId)).status,'succeeded');
