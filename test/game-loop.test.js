@@ -9434,3 +9434,29 @@ test('#194 crash during correction remains unsafe with its diagnostic bundle', {
   await assert.rejects(restored.retryDecision(captured.decisionId),{code:'PLAYER_RECOVERY_REQUIRED'});
   assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
 });
+
+test('#194 zero floor never permits a nonpositive correction timeout', {timeout:20000 * WIN32_SCALE},async t=>{
+  for(const atCommit of [false,true]) await t.test(String(atCommit),async st=>{
+    let clock=0;
+    const adapter=makeAdapter({onDecide:async()=>{clock=atCommit?30:40;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},minRepairFloorMs:0,monotonicNow:()=>clock,
+      log:r=>{if(r.event==='player-correction') clock=40;}}});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    assert.equal(adapter.decideCalls.length,1);assert.equal(loop.pendingDecision.diagnostics.callNo,1);
+    assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(atCommit?'budget_after_commit':'budget')));
+  });
+});
+
+test('#194 stale identity at soft deadline does not escape the async decision', {timeout:20000 * WIN32_SCALE},async t=>{
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async({message})=>{
+    const filename=path.join(gameDir,'loop-state.json'),s=readJson(filename);s.pendingDecision.stateVersion++;writeJsonAtomic(filename,s);
+    await new Promise(r=>setTimeout(r,35));
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:5,hardMs:500}}});gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
+  assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-soft-wait'),false);
+});
