@@ -135,6 +135,10 @@ test('managed command journal retries the displayed LLM decision once and preser
     assert.equal(snap.retryWillCorrect,false);
     assert.equal(snap.diagnosticsQuarantined,patch.diagnostics===undefined&&patch.schemaVersion!==1);
   }
+  const retained={...saved.pendingDecision.diagnostics};delete retained.detail;
+  fs.writeFileSync(loopPath,JSON.stringify({...saved,pendingDecision:{...saved.pendingDecision,code:'TIMEOUT',diagnostics:retained}}));
+  assert.equal(manager.snapshot().pendingDecision.retryWillCorrect,true);
+  assert.equal(manager.snapshot().pendingDecision.diagnosticsQuarantined,false);
   fs.writeFileSync(loopPath,JSON.stringify(saved));
   const end = payload(manager,'end');
   manager.command(end);
