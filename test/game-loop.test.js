@@ -9191,3 +9191,44 @@ test('#194 rejection diagnostics never persist raw reply or damaged call number'
   for(const filename of ['loop.log','loop-state.json']) assert.doesNotMatch(fs.readFileSync(path.join(gameDir,filename),'utf8'),/As Ad|PRIVATE_SENTINEL/);
   assert.ok(readLoopLog(gameDir).filter(x=>x.event==='player-call').every(x=>Number.isInteger(x.callNo)));
 });
+
+test('#194 quarantined bundles stay removed across resume and retry authorization', {timeout:60000 * WIN32_SCALE}, async t => {
+  for (const status of ['running','retry_authorized','recovery_required','unsafe']) await t.test(status,async st=>{
+    const {gameDir,loop}=await setupAiFirst(st,{adapter:makeAdapter({onDecide:async()=>({raw:'invalid'})})});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    const p=loop.pendingDecision;
+    await loop.requestStop();
+    const filename=path.join(gameDir,'loop-state.json');
+    writeJsonAtomic(filename,{...readJson(filename),pendingDecision:{...p,status,closeConfirmed:true,diagnostics:{...p.diagnostics,extra:'PRIVATE_SENTINEL'}}});
+    const before=readJson(path.join(gameDir,'state.json'));
+    const restored=createGameLoop({gameDir,resolver:resolverFor(makeAdapter()),opts:{port:0,waitMs:0}});
+    st.after(()=>restored.requestStop()); await restored.resume();
+    assert.equal(restored.pendingDecision.diagnosticsQuarantined,true);
+    assert.equal(Object.hasOwn(restored.pendingDecision,'diagnostics'),false);
+    assert.deepEqual(readJson(path.join(gameDir,'state.json')),before);
+    if(status!=='unsafe') {
+      await restored.retryDecision(p.decisionId);
+      assert.equal(Object.hasOwn(restored.pendingDecision,'diagnostics'),false);
+      await runUntilUserBoundary(restored,gameDir);
+      assert.equal(restored.pendingDecision,null);
+    }
+  });
+});
+
+test('#194 pending apply boundary preserves diagnostics and crash reconciliation', {timeout:30000 * WIN32_SCALE}, async t => {
+  let gameDir,captured;
+  const setup=await setupAiFirst(t,{adapter:makeAdapter(),ai:2,loopOpts:{onEngineInvoke:args=>{
+    if(args[0]==='step'&&args.includes('--expect-version')&&args[1]==='p1') captured=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  }}}); gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.ok(captured); assert.equal(captured.schemaVersion,2);
+  assert.equal(captured.diagnostics.callNo,1); assert.equal(captured.closeConfirmed,true);
+  assert.deepEqual(captured.proposedAction,{action:'fold'});
+  await setup.loop.requestStop();
+  const filename=path.join(gameDir,'loop-state.json');
+  writeJsonAtomic(filename,{...readJson(filename),pendingDecision:captured});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(makeAdapter()),opts:{port:0,waitMs:0}});
+  t.after(()=>restored.requestStop()); await restored.resume();
+  assert.equal(restored.pendingDecision,null);
+  assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-reconciled'));
+});
