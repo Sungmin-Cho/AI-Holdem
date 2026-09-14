@@ -3238,13 +3238,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   // §3/§4 D2, c/f: owner-runtime-closure receipts (E1) and accept evidence (f) both close a
-  // row without ever needing a live identity check. Neither exists yet in this slice — later
-  // slices wire real evidence into this single seam. It must stay a pure, side-effect-free
-  // read so consulting it twice for the same attempt (the H2 fast path below, and the
-  // post-poll fallback) is always safe. Returns `{ reason }` when evidence closes the row,
-  // otherwise `null`.
-  // eslint-disable-next-line no-unused-vars
-  const consultCoachCloseEvidence = (attempt) => null;
+  // row without ever needing a live identity check. E1 (c) does not exist yet — that is
+  // wired in a later slice. f is wired here: `persistedCoachAttempts()` copies a retired
+  // row's `acceptEvidence` stamp (`closed-child` or `no-spawn`, written by `accept` — see
+  // tools/coach-control.js) straight onto the attempt object, and any such stamp closes the
+  // row regardless of which value it is. This must stay a pure, side-effect-free read so
+  // consulting it twice for the same attempt (the H2 fast path below, and the post-poll
+  // fallback) is always safe. Returns `{ reason }` when evidence closes the row, otherwise
+  // `null`.
+  const consultCoachCloseEvidence = (attempt) => {
+    if (attempt?.acceptEvidence === 'closed-child' || attempt?.acceptEvidence === 'no-spawn') {
+      return { reason: 'ACCEPT_EVIDENCE' };
+    }
+    return null;
+  };
 
   // a/b: resolve one already-parsed identity (from the authority handle or, absent that, a
   // tuple-matched sidecar) through the same poll/signal/poll sequence either source uses.
@@ -3421,17 +3428,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         exactResultPath: hand.exactResultPath,
         attempt: hand.attempt,
         spawnEvidence: hand.spawnEvidence,
+        acceptEvidence: hand.acceptEvidence,
         ownerSessionId: hand.ownerSessionId,
         cleanupAuthorized: true,
       });
     }
+    // #192 D3 (G5): every retired row that isn't already `released` gets judged, with no
+    // filtering on handle presence or reclaimability first — a foreign row this owner can't
+    // write to can still be closed by evidence (c/f), or halt unresolved (e), instead of
+    // being silently skipped as it was before. `cleanupAuthorized` is the *write* permission
+    // only, and must mirror `recordCleanup`'s own row-match predicate exactly (see
+    // `recordCleanup` in tools/coach-control.js: `entry.ownerSessionId === owner
+    // || entry.cleanupEligible`) — a row failing it is still classified below, it just never
+    // gets a `cleanup-result` call (`closePersistedCoachWorkersCore` gates that separately).
     for (const row of auth.retiredAttempts ?? []) {
       if (row?.cleanupState === 'released') continue;
-      const reclaimable = row?.ownerSessionId === owner
-        || (row?.cleanupEligible === true && row?.replacementGeneration != null);
-      const unresolved = ['termination_unconfirmed', 'release_failed'].includes(row?.cleanupState);
-      if (!reclaimable && !unresolved) continue;
-      if (typeof row?.agentHandle !== 'string' && !unresolved) continue;
+      const cleanupAuthorized = row?.ownerSessionId === owner || row?.cleanupEligible === true;
       attempts.push({
         source: 'retired',
         handNo: row.handNo,
@@ -3441,8 +3453,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         exactResultPath: row.exactResultPath,
         attempt: row.attempt,
         spawnEvidence: row.spawnEvidence,
+        acceptEvidence: row.acceptEvidence,
         ownerSessionId: row.ownerSessionId,
-        cleanupAuthorized: reclaimable,
+        cleanupAuthorized,
       });
     }
     return { owner, attempts, authorityPresent: true, gameEpoch: canonicalEpoch };
@@ -3837,6 +3850,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // outer catch must reuse that result instead of invoking terminate() a second time for
       // the same failure.
       let terminationOutcome = null;
+      // #192 S3: set alongside `terminationOutcome` the instant the null-identity branch
+      // settles this attempt, so the outer catch can tell "this failure originated inside
+      // the identity-unavailable branch" apart from an ordinary confirmed-termination
+      // failure elsewhere in the try. The two must not be treated the same: a confirmed
+      // identity-unavailable termination never earns a replacement attempt, even when a
+      // later step in that same branch (e.g. fenceCurrentGeneration()) throws.
+      let identityUnavailableReason = null;
       try {
         if (coachWorkSuspended()) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
@@ -3949,6 +3969,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             : { confirmed: false };
           settleCoachAttemptRecord(record, termination);
           terminationOutcome = termination;
+          identityUnavailableReason = identityFailureReason;
           const confirmed = termination?.confirmed === true;
           log('coach-identity-unavailable', {
             handNo,
@@ -4019,12 +4040,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const unavailableNotice = unavailableProcessNotice(processInput);
         if (unavailableNotice) note.text += `\n${unavailableNotice}`;
         writeJsonAtomic(currentDescriptor.exactResultPath, note);
+        // #192 E3 f: the result was read only after `Promise.race([handle.done, …])`
+        // resolved via `done` — the child's own close was observed before this accept.
         await runCoachBeforeResultCutoff([
           'accept',
           '--owner', owner,
           '--hand', String(handNo),
           '--generation', String(currentDescriptor.generation),
           '--forbidden-file', deny.path,
+          '--accept-evidence', 'closed-child',
         ]);
         accepted = true;
         // The child's own result was read after `done` resolved (closed-child evidence);
@@ -4103,6 +4127,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             handNo,
             generation: currentDescriptor.generation,
             reason: 'termination-unconfirmed',
+            fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
+          });
+          return;
+        }
+        // #192 S3: a confirmed termination that originated inside the null-identity branch
+        // (fenceCurrentGeneration() or a later step in that branch threw) is not an ordinary
+        // confirmed failure — it is the exact same identity-unavailable condition the branch
+        // itself would have sealed as unavailable had its own fence call succeeded. It must
+        // never fall through to the attempt===1 replacement below; seal it here instead.
+        if (identityUnavailableReason !== null) {
+          await completeCoachUnavailable({
+            owner,
+            handNo,
+            generation: currentDescriptor.generation,
+            reason: identityUnavailableReason,
             fallbackEnvelopePath: currentDescriptor.exactEnvelopePath,
           });
           return;
@@ -4342,12 +4381,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         forbiddenDetailed: coachForbiddenDetailed(action.handNo),
         replay: parseCapturedHand(replayRaw),
       });
+      // #192 E3 f: a `result-ready` heartbeat action only ever targets a result file the
+      // pipeline itself wrote after `handle.done` resolved — same closed-child evidence.
       await runCoachBeforeResultCutoff([
         'accept',
         '--owner', owner,
         '--hand', String(action.handNo),
         '--generation', String(action.generation),
         '--forbidden-file', deny.path,
+        '--accept-evidence', 'closed-child',
       ]);
       accepted = true;
       await publishQueuedCoachHand(action.handNo);
@@ -4457,12 +4499,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       let generation = entry.generation ?? live?.generation;
       let resultPath = entry.exactResultPath ?? live?.exactResultPath;
       let envelopePath = entry.exactEnvelopePath ?? live?.exactEnvelopePath;
+      // #192 E3 f: a deferred note is always the record of an already-closed child. If the
+      // live generation still matches, this accept reuses that same closed-child evidence;
+      // if it doesn't (the generation below was reserved fresh, with no child spawned for
+      // it), the evidence is `no-spawn` instead.
+      let acceptEvidence = 'closed-child';
       if (!live || live.generation !== generation) {
         const stats = await captureCoachStats(handNo, { beforeResultCutoff: true });
         const reserved = await reserveCoach(owner, handNo, 1, stats.path);
         generation = reserved.generation;
         resultPath = reserved.exactResultPath;
         envelopePath = reserved.exactEnvelopePath;
+        acceptEvidence = 'no-spawn';
       }
       writeJsonAtomic(resultPath, note);
       const deny = writeCoachDeny(handNo);
@@ -4472,6 +4520,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--hand', String(handNo),
         '--generation', String(generation),
         '--forbidden-file', deny.path,
+        '--accept-evidence', acceptEvidence,
       ]);
       if (!coachPublicationDeferred()) await executeCoachPublish(handNo, envelopePath);
     }
@@ -6065,7 +6114,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const resolveForPhase = async (phase, engineState, existingState, {
-    beforePlayerRestore = null,
+    beforePlayingResume = null,
   } = {}) => {
     if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState);
     if (FINAL_PHASES.has(phase)) {
@@ -6130,12 +6179,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : requestedPort;
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
+    // #192 D6 (FO-3): persisted-coach reclaim is a playing-resume step, not a player-restore
+    // step — it must run once here for policy and llm resumes alike, after the server is up
+    // and before either policy stamping or player restore, and always before `resume()`'s
+    // later `beginCoachOwner` call. Skipping it for policy games (the old bug) let a policy
+    // resume start a replacement coach owner while an old game's coach child was still alive.
+    if (phase === 'playing' && typeof beforePlayingResume === 'function') await beforePlayingResume();
     if (policyMode) {
       const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
       assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
     } else {
-      if (typeof beforePlayerRestore === 'function') await beforePlayerRestore();
       await restorePlayers();
     }
     return writeLoopState({ phase: 'playing' });
@@ -6316,7 +6370,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const priorPlayingRecoveryHalt = state.halt?.code === 'COACH_HANDLE_UNRESOLVED';
       let resumed = await resolveForPhase(phase, engineState, state, {
-        beforePlayerRestore: phase === 'playing'
+        beforePlayingResume: phase === 'playing'
           ? async () => {
             const persisted = await reclaimPersistedCoachWorkersForResume(
               Number(engineState.lastHand?.handNo ?? 0),

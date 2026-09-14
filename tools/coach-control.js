@@ -227,6 +227,9 @@ function retireActive(auth, handNo, fields) {
     cleanupState: fields.cleanupState ?? 'pending',
   };
   if (hand.spawnEvidence !== undefined) retired.spawnEvidence = hand.spawnEvidence;
+  // #192 E3 f: acceptEvidence is supplied by the caller at accept time (unlike
+  // spawnEvidence, which lives on the reserved hand itself), so it comes from `fields`.
+  if (fields.acceptEvidence !== undefined) retired.acceptEvidence = fields.acceptEvidence;
   auth.retiredAttempts.push(retired);
   delete auth.hands[keyOf(handNo)];
 }
@@ -846,9 +849,22 @@ export function createCoachControl(deps = {}) {
     });
   }
 
-  async function accept({ gameDir, owner, handNo, generation, forbiddenLiterals = [] }) {
+  async function accept({
+    gameDir, owner, handNo, generation, forbiddenLiterals = [], acceptEvidence,
+  }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = requireAuth(gameDir, { owner });
+      // #192 E3 f: an accept can optionally carry the caller's own close evidence
+      // (`closed-child` — the result was read only after the child's own close was
+      // observed — or `no-spawn` — no child exists for this generation at all). Any
+      // other non-undefined value is a caller bug, not a runtime state to tolerate.
+      if (
+        acceptEvidence !== undefined
+        && acceptEvidence !== 'closed-child'
+        && acceptEvidence !== 'no-spawn'
+      ) {
+        fail('USAGE', `알 수 없는 acceptEvidence: ${acceptEvidence}`);
+      }
       const key = keyOf(handNo);
       if (auth.publishQueue[key]) {
         const result = occupiedReject(auth, handNo, owner, generation, 'QUEUE_ALREADY_SEALED');
@@ -924,7 +940,7 @@ export function createCoachControl(deps = {}) {
       } else if (auth.overfoldLease?.handNo === handNo && auth.overfoldLease.state === 'active') {
         auth.overfoldLease = null;
       }
-      retireActive(auth, handNo, { resultState: 'consumed', cleanupEligible: false });
+      retireActive(auth, handNo, { resultState: 'consumed', cleanupEligible: false, acceptEvidence });
       if (auth.deferred) delete auth.deferred[key];
       persist(gameDir, auth);
       return { ok: true, queueId };
@@ -1450,6 +1466,7 @@ async function cliMain() {
       handNo: Number(opts.hand),
       generation: Number(opts.generation),
       forbiddenLiterals: readForbiddenFile(opts['forbidden-file']),
+      acceptEvidence: opts['accept-evidence'],
     });
   } else if (command === 'watch-accept') {
     result = await cc.watchAccept({
