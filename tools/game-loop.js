@@ -323,11 +323,25 @@ export function parseLsofCwdRecords(stdout) {
     if (pLine[0] !== 'p') return null;
     const pid = Number(pLine.slice(1));
     if (!Number.isInteger(pid) || pid <= 0) return null;
+    // #192 J2: a cwd query only ever emits `fcwd` — a numeric fd, a blank tag, or anything
+    // else means this triple is not the cwd fd we asked for and the whole listing can no
+    // longer be trusted as "exactly the p/fcwd/n triple" the design requires.
     const fLine = lines[i + 1];
-    if (!fLine || fLine[0] !== 'f') return null;
+    if (fLine !== 'fcwd') return null;
     const nLine = lines[i + 2];
     if (!nLine || nLine[0] !== 'n') return null;
-    records.push({ pid, cwd: nLine.slice(1) });
+    let cwd = nLine.slice(1);
+    // A process whose cwd was itself deleted from disk still has a real, trustworthy path —
+    // lsof only appends `(deleted)`. Strip it before matching so a legacy `ai-holdem-*` cwd
+    // that has since been removed is still a candidate below.
+    const deletedSuffix = ' (deleted)';
+    if (cwd.endsWith(deletedSuffix)) cwd = cwd.slice(0, -deletedSuffix.length);
+    // #192 J2: an empty name, a relative name, or an lsof annotation such as
+    // `(readlink: Permission denied)` / `(stat: ...)` (seen on Linux when this uid's own
+    // process cannot have its cwd read) means lsof could not actually verify this process's
+    // cwd — never let that read as "no candidate here". Fail the whole listing instead.
+    if (cwd === '' || !cwd.startsWith('/') || cwd.includes('(readlink:') || cwd.includes('(stat:')) return null;
+    records.push({ pid, cwd });
     i += 3;
   }
   return records;
@@ -336,6 +350,19 @@ export function parseLsofCwdRecords(stdout) {
 // player-runtime.js가 코치 CLI를 띄우는 cwd 관례(`ai-holdem-<kind>-XXXXXX`)와 대조해
 // 후보 프로세스만 골라낸다. `excludePid`는 이 loop 프로세스 자신이다 — 스캔이 자기
 // 자신을 legacy 코치 런타임으로 오인해서는 안 된다.
+// #192 sJ2: 이 cwd-구성요소 규칙은 지원 코치 CLI(claude·codex·grok)가 자신의 프로세스
+// 트리 전체(래퍼·네이티브 바이너리·자식 프로세스 모두)에서 런타임 cwd를 계속 유지한다는
+// 전제에 의존한다. 오케스트레이터가 2026-09-14 이 머신에서
+// `createPlayerRuntime(kind).oneshotStart({ tier: 'upper' })` 실제 경로로 세 CLI를 띄워
+// 250ms 간격으로 `ps`+`lsof -d cwd`로 프로세스 트리를 표본 조사했다: codex(codex-cli
+// 0.154.0, model gpt-5.6-sol, node 래퍼 → 네이티브 codex 바이너리 → node_repl 자식),
+// claude(2.1.270, model opus, 단일 프로세스), grok(1.0.25, model grok-4.6, 사용자 훅 스크립트·lsof·
+// awk·sort 자식 포함 11개 프로세스) 전부 — cwd를 관측할 수 있었던 모든 프로세스가
+// `ai-holdem-<kind>-*` cwd를 유지했다. chdir, 다른 cwd로의 재실행, 데몬화된 helper는
+// 어느 CLI에서도 관측되지 않았다(grok의 세 단명 자식은 cwd 없는 종료된 `(bash)`/`(git)`
+// 항목으로만 나타났다). CLI가 업데이트되면 이 전제는 달라질 수 있다 — 그래서 (J2가 이미
+// 보장하듯) 목록에 있는 어떤 프로세스든 cwd를 관측할 수 없으면 전체 스캔을 clean이
+// 아니라 unavailable로 처리한다(`parseLsofCwdRecords`의 `CWD_UNVERIFIABLE`).
 export function legacyCoachRuntimeCandidates(records, { excludePid = null } = {}) {
   return records
     .filter((record) => record.pid !== excludePid && aiHoldemCwdSegment(record.cwd))
@@ -371,19 +398,21 @@ export function scanCoachRuntimeProcesses({
     }, (error, stdout) => {
       // A scan of this uid always includes the scanning process itself, so "no output" is
       // never proof of "no coach runtime process": lsof exits 1 with nothing when it could
-      // not observe anything at all. Only a parseable listing that contains our own pid is
-      // trusted; anything else is unavailable (fail-closed), never clean.
-      if (error && (error.killed || error.signal || Number(error.code) !== 1)) {
-        resolve({ status: 'unavailable', reason: error.killed ? 'LSOF_TIMEOUT' : 'LSOF_FAILED' });
+      // not observe anything at all. #192 J2: trust only a clean exit (status 0) — a
+      // parseable listing on a non-zero exit (including exit 1 with a candidate-looking
+      // record) is never trusted either, since a partial/erroring listing can silently omit
+      // processes it failed to enumerate.
+      if (String(stdout ?? '').trim() === '') {
+        resolve({ status: 'unavailable', reason: error?.killed ? 'LSOF_TIMEOUT' : 'LSOF_NO_OUTPUT' });
         return;
       }
-      if (String(stdout ?? '').trim() === '') {
-        resolve({ status: 'unavailable', reason: 'LSOF_NO_OUTPUT' });
+      if (error) {
+        resolve({ status: 'unavailable', reason: error.killed ? 'LSOF_TIMEOUT' : 'LSOF_FAILED' });
         return;
       }
       const records = parseLsofCwdRecords(stdout);
       if (records === null) {
-        resolve({ status: 'unavailable', reason: 'LSOF_OUTPUT_UNPARSEABLE' });
+        resolve({ status: 'unavailable', reason: 'CWD_UNVERIFIABLE' });
         return;
       }
       if (!records.some((record) => record.pid === selfPid)) {
@@ -778,9 +807,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
     ?? (() => scanCoachRuntimeProcesses({ lsofPath, timeoutMs: osVerifyMs }));
+  // #192 sJ5: test seam so a platform that does have `O_NOFOLLOW` can still exercise the
+  // no-flag fallback path deterministically, instead of depending on which OS the test suite
+  // happens to run on.
+  const sidecarNoFollowFlag = 'sidecarNoFollowFlag' in opts ? opts.sidecarNoFollowFlag : SIDECAR_NOFOLLOW;
   // #192 E2: test seam for the per-attempt spawn sidecar writes. Always synchronous, like
   // writeJsonAtomic itself — the spawn sequence relies on no `await` landing between steps.
   const writeSpawnEvidence = opts.writeSpawnEvidence ?? writeJsonAtomic;
+  // #192 O4-rest 4: test seam for the sidecar classifier's "is the game root itself still
+  // there" check (`absentOrInvalid` below) — genuinely reproducing an unmounted/relocated
+  // root's `stat` failure (as opposed to the sidecar file's own missing-ness) needs real
+  // filesystem/mount manipulation a test cannot do portably.
+  const statGameRoot = opts.statGameRoot ?? fs.statSync;
+  // #192 O4-rest 6: test seam for the coach CLI child path (§5 "새 loop·구 CLI") — defaults
+  // to the real tools/coach-control.js. A test can point this at a shim script that strips
+  // E3's protocol flags (`--spawn-evidence`/`--accept-evidence`) before delegating to the
+  // real CLI, reproducing "this loop is new but the coach CLI on disk predates E3" without
+  // needing a second checked-out worktree.
+  const coachCliPath = opts.coachCliPath ?? COACH_CLI;
   const forceStopMs = opts.forceStopMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
@@ -1231,7 +1275,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const childArgs = [...args, '--game-dir', root];
       const argv = [script, ...childArgs];
       if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
-      if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
+      if (script === coachCliPath) opts.onCoachInvoke?.([...childArgs]);
       const child = execFile(process.execPath, argv, childSpawnOptions({
         encoding: 'utf8',
         timeout,
@@ -1289,7 +1333,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || (args[0]==='init' && args.includes('--hints'))) await assertHintEngine(supervisor);
     return runJsonChild(ENGINE_CLI,args[0]==='resume-check' && lockRoot!==root ? [...args,'--lock-dir',lockRoot] : args,supervisor);
   };
-  const runCoach = (args, supervisor) => runJsonChild(COACH_CLI, args, supervisor);
+  const runCoach = (args, supervisor) => runJsonChild(coachCliPath, args, supervisor);
   const resultWaitSupervisor = () => (
     finalizeResultWaitCutoffNs === null
       ? undefined
@@ -3498,24 +3542,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const invalid = () => ({ phase: 'invalid', data: null, path: sidecarPath });
     const absentOrInvalid = () => {
       try {
-        fs.statSync(root);
+        statGameRoot(root);
         return { phase: 'absent', data: null, path: sidecarPath };
       } catch {
         return invalid();
       }
     };
-    if (SIDECAR_NOFOLLOW === undefined) {
-      let lstat;
+    if (sidecarNoFollowFlag === undefined) {
+      // #192 sJ5: without `O_NOFOLLOW` there is no atomic way to open-refusing-a-symlink, so
+      // a separate `lstat` followed by `open` leaves a TOCTOU window a race can use to swap
+      // the path into a symlink between the two calls. Never open at all on such a
+      // platform: a missing sidecar (`lstat` ENOENT with the root directory itself still
+      // stat-able) is still `absent`, but any sidecar that is present — symlink or not — is
+      // `invalid` without ever being opened.
       try {
-        lstat = fs.lstatSync(sidecarPath);
+        fs.lstatSync(sidecarPath);
       } catch (error) {
         return error.code === 'ENOENT' ? absentOrInvalid() : invalid();
       }
-      if (lstat.isSymbolicLink()) return invalid();
+      return invalid();
     }
     let fd;
     try {
-      fd = fs.openSync(sidecarPath, fs.constants.O_RDONLY | (SIDECAR_NOFOLLOW ?? 0));
+      fd = fs.openSync(sidecarPath, fs.constants.O_RDONLY | sidecarNoFollowFlag);
     } catch (error) {
       return error.code === 'ENOENT' ? absentOrInvalid() : invalid();
     }
@@ -3754,7 +3803,28 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       && sidecar.phase === 'absent'
       && attributable;
     if (legacyEligible && getLegacyScan) {
-      const scan = await getLegacyScan();
+      // #192 J4: bound the scan by the same identity deadline the classifier already uses
+      // elsewhere in this function — an unbounded `await` here can otherwise push a
+      // following `cleanup-result` past the closure's own deadline, surfacing a generic
+      // deadline-exceeded halt instead of this row's actual scan evidence.
+      const settled = await settleValueBeforeDeadline(getLegacyScan(), identityDeadlineNs);
+      if (!settled.settled) {
+        evidence.legacyScanDetail = 'SCAN_DEADLINE';
+        return withEvidence({
+          confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
+        });
+      }
+      // #192 sJ3: verify the lock again right before trusting the scan to release a row —
+      // the first re-check (immediately after the scan settled, inside `getLegacyScan`
+      // itself) catches loss during the scan; this one catches loss in the time between the
+      // scan settling and this specific row's own release decision.
+      if (!lockHandle || !verifyOwnedLock(lockHandle)) {
+        evidence.legacyScanDetail = 'LOCK_LOST_DURING_SCAN';
+        return withEvidence({
+          confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
+        });
+      }
+      const scan = settled.value;
       if (scan.status === 'clean') {
         return withEvidence({ confirmed: true, reason: 'LEGACY_NO_RUNTIME_PROCESS', cleanupState: 'released' });
       }
@@ -3764,6 +3834,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           confirmed: false, reason: 'LEGACY_RUNTIME_PROCESS_PRESENT', cleanupState: 'termination_unconfirmed',
         });
       }
+      evidence.legacyScanDetail = scan.reason ?? null;
       return withEvidence({
         confirmed: false, reason: 'LEGACY_SCAN_UNAVAILABLE', cleanupState: 'termination_unconfirmed',
       });
@@ -3919,6 +3990,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             status: scan.status,
             candidateCount: scan.status === 'candidates' ? scan.candidates.length : 0,
           });
+          // #192 sJ3: the lock was only checked before the scan started — the scan itself is
+          // an asynchronous lsof exec that can outlive this instance's ownership of the lock
+          // (reclaimed by another instance mid-flight). Re-verify immediately once the scan
+          // settles; a lost lock discards the result no matter what it says.
+          if (!lockHandle || !verifyOwnedLock(lockHandle)) {
+            return { status: 'unavailable', reason: 'LOCK_LOST_DURING_SCAN' };
+          }
           return scan;
         });
       }
@@ -4315,7 +4393,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         if (coachWorkSuspended()) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
-          await opts.coachSpawnCheckpoint({ handNo, attempt });
+          const checkpointResult = await opts.coachSpawnCheckpoint({ handNo, attempt });
+          // #192 O4: narrow test seam — a real `pause()` winning the race while this
+          // checkpoint was awaited flips this same internal flag before its own await
+          // resolves; driving the full managed control protocol synchronously inside a test
+          // is impractical (`pause()` requires `managed` mode and the `playing` phase, which
+          // this coach-only finalize fixture is never in). A checkpoint resolving to
+          // `{ pauseRequested: true }` exercises the exact same `coachWorkSuspended()` branch
+          // below a real pause would.
+          if (checkpointResult?.pauseRequested) pauseRequested = true;
+          // #192 O4: narrow test seam — genuinely reproducing "loop-state still names this
+          // owner, but this instance never actually issued it" needs a second real loop
+          // instance racing this one (every real `resume()`/`bootstrap()` immediately adds
+          // its own freshly-minted owner to `issuedOwners`). A checkpoint resolving to
+          // `{ retractIssuedOwner: true }` removes the just-captured `owner` from
+          // `issuedOwners` in-process, exercising the `issuedOwners.has(owner)` half of the
+          // re-check below in isolation from the `ownerSessionId !== owner` half.
+          if (checkpointResult?.retractIssuedOwner) issuedOwners.delete(owner);
         }
         // E2 §3a: re-validate synchronously the instant the checkpoint releases. A
         // pause/stop that arrived while it was awaited must never spawn and must never
@@ -5116,27 +5210,36 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (attempt.cleanupAuthorized) {
         return [{ program: process.execPath, args: [...base, '--game-dir', root] }];
       }
-      // #192 O1/L1: a genuinely foreign row (its own ownerSessionId differs from the
+      // #192 O1/L1/J5: a genuinely foreign row (its own ownerSessionId differs from the
       // current owner, and it is not cleanupEligible — e.g. a legacy row judgment g could
-      // not auto-recover) still gets an operator-confirmed recovery command naming its
-      // actual owner — mirrors coach-control.js's recordCleanup `--row-owner` +
-      // `--operator-confirmed 1` escape hatch, which the loop itself never runs on its
-      // own. `cleanupAuthorized` can also be false for a *same*-owner row whose write
-      // attempt itself failed for an unrelated reason (e.g. FENCE_CHILD_FAILED) — that is
-      // not a foreign-row case, and must not fabricate a `--row-owner` command for it.
+      // not auto-recover) gets a recovery command naming its actual owner — mirrors
+      // coach-control.js's recordCleanup `--row-owner` escape hatch, which the loop itself
+      // never runs on its own. `cleanupAuthorized` can also be false for a *same*-owner row
+      // whose write attempt itself failed for an unrelated reason (e.g. FENCE_CHILD_FAILED)
+      // — that is not a foreign-row case, and must not fabricate a `--row-owner` command
+      // for it.
       if (
         typeof attempt.ownerSessionId === 'string'
         && attempt.ownerSessionId
         && attempt.ownerSessionId !== owner
       ) {
+        // #192 J5: a `LEGACY_RUNTIME_PROCESS_PRESENT` row already named its candidate pids
+        // (see `unresolvedEvidenceGuidance`) — the correct recovery action there is to stop
+        // those processes and resume, never a `cleanup-result` command, so no command is
+        // emitted at all for it.
+        if (attempt.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT') return [];
+        // #192 J5: never pre-fill `--operator-confirmed 1` — that would let an operator run
+        // the emitted command verbatim without ever having verified that no coach CLI
+        // process of this game remains. `requiresOperatorConfirmation` flags the command so
+        // the halt message can say so; the operator must append the flag themselves.
         return [{
           program: process.execPath,
           args: [
             ...base,
             '--row-owner', attempt.ownerSessionId,
-            '--operator-confirmed', '1',
             '--game-dir', root,
           ],
+          requiresOperatorConfirmation: true,
         }];
       }
       return [];
@@ -5150,6 +5253,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         sessionToken: readLoopState()?.sessionToken ?? null,
       },
       commands,
+      ...(commands.some((cmd) => cmd.requiresOperatorConfirmation === true)
+        ? { requiresOperatorConfirmation: true }
+        : {}),
     };
   };
 
@@ -5164,7 +5270,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // (legacy pre-stamp, or a synthetic authority-level failure row) — each needs a
     // different manual check before resuming.
     const guidance = unresolvedEvidenceGuidance(unresolved);
-    const message = guidance ? `${base} ${guidance}` : base;
+    // #192 J5: when at least one emitted command still needs `--operator-confirmed 1`
+    // appended by hand, say so explicitly — the command itself deliberately no longer
+    // carries that flag pre-filled.
+    const confirmationNote = recovery.requiresOperatorConfirmation
+      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
+      : null;
+    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
     appendNotice(message);
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
@@ -5192,7 +5304,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : 'persisted 코치 authority 또는 handle을 확인할 수 없어 playing owner 교대를 중단합니다. 수동 복구가 필요합니다.';
     // #192 D5: same intent-vs-no-evidence guidance as haltForPersistedCoachRecovery.
     const guidance = unresolvedEvidenceGuidance(unresolved);
-    const message = guidance ? `${base} ${guidance}` : base;
+    // #192 J5: same operator-confirmation note as haltForPersistedCoachRecovery.
+    const confirmationNote = recovery.requiresOperatorConfirmation
+      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
+      : null;
+    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
     appendNotice(message);
     writeLoopState({ halt: { code: 'COACH_HANDLE_UNRESOLVED', message, recovery } });
     log('resume-halt', { code: 'COACH_HANDLE_UNRESOLVED' });
@@ -6351,14 +6467,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // resolver settlement 뒤에는 더 이상 새 adapter가 생기지 않는다. 전부 settle한
       // 뒤에만 loop lock을 풀어 probe child가 ownership 밖으로 탈출하지 못하게 한다.
       for (const adapter of adapters) startAdapterDisposal(adapter);
-      // #192 I1: `startAdapterDisposal` treats an adapter with no `dispose` at all the same
-      // as one that disposed successfully — but a coach-capable adapter (`oneshotStart`)
-      // with no `dispose` never actually confirms its spawned children are closed. Snapshot
-      // this now, before `adapters.clear()` below empties the set, so a coach-runtime-closure
-      // receipt is only ever written when every such adapter's disposal was truly confirmed.
-      const undisposableCoachAdapter = [...adapters].some((adapter) => (
-        adapter && typeof adapter.oneshotStart === 'function' && typeof adapter.dispose !== 'function'
+      // #192 I1/sJ4: `startAdapterDisposal` treats an adapter with no `dispose` at all the
+      // same as one that disposed successfully — but a coach-capable adapter (`oneshotStart`)
+      // with no `dispose` never actually confirms its spawned children are closed. `dispose`
+      // merely *existing* is not enough either (sJ4): a `dispose()` that resolves without ever
+      // actually confirming its registry's children closed would let this receipt overclaim
+      // just as badly, so a coach-capable adapter is only trusted when it explicitly declares
+      // `disposeConfirmsChildren === true`. Snapshot both checks now, before `adapters.clear()`
+      // below empties the set, so a coach-runtime-closure receipt is only ever written when
+      // every such adapter's disposal was truly confirmed.
+      const coachCapableAdapters = [...adapters].filter((adapter) => (
+        adapter && typeof adapter.oneshotStart === 'function'
       ));
+      const hasCoachAdapterWithoutDispose = coachCapableAdapters.some((adapter) => (
+        typeof adapter.dispose !== 'function'
+      ));
+      const hasCoachAdapterWithUndeclaredConfirmation = coachCapableAdapters.some((adapter) => (
+        typeof adapter.dispose === 'function' && adapter.disposeConfirmsChildren !== true
+      ));
+      const undisposableCoachAdapter = hasCoachAdapterWithoutDispose || hasCoachAdapterWithUndeclaredConfirmation;
       const disposalResults = await Promise.allSettled([...adapterDisposals.values()]);
       const disposalFailure = disposalResults.find((result) => result.status === 'rejected');
       if (disposalFailure) stopError ??= disposalFailure.reason;
@@ -6430,11 +6557,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (lockHandle && !lockStillOwned) {
             log('coach-runtime-closure-lock-lost', {});
           }
-          // #192 I1: an unconfirmed coach adapter disposal means this instance cannot attest
-          // that every coach child it may have spawned is actually gone — skip the receipt
-          // entirely rather than write one that overclaims. Stop itself still succeeds.
+          // #192 I1/sJ4: an unconfirmed coach adapter disposal means this instance cannot
+          // attest that every coach child it may have spawned is actually gone — skip the
+          // receipt entirely rather than write one that overclaims. Stop itself still
+          // succeeds.
           if (lockStillOwned && undisposableCoachAdapter) {
-            log('coach-runtime-closure-skipped', { reason: 'ADAPTER_DISPOSE_UNCONFIRMED' });
+            log('coach-runtime-closure-skipped', {
+              reason: hasCoachAdapterWithoutDispose ? 'ADAPTER_DISPOSE_UNCONFIRMED' : 'DISPOSE_CONFIRMATION_UNDECLARED',
+            });
           }
           const newClosures = (lockStillOwned && !undisposableCoachAdapter)
             ? [...issuedOwners]

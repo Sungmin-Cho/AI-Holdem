@@ -639,6 +639,12 @@ export function createPlayerRuntime(kind, opts = {}) {
     kind,
     watchdog: { ...table.watchdog },
     models: { player: table.player, upper: table.upper },
+    // #192 sJ4: `dispose()` below kills every pending registry child
+    // (`killAndConfirmClose(entry, 'SIGKILL')`) and rejects with `CHILD_CLOSE_UNCONFIRMED`
+    // unless `activeHandles` is empty afterward — it genuinely confirms every child this
+    // adapter ever spawned is closed, never just that a `dispose` method happened to exist.
+    // game-loop.js's owner-runtime-closure receipt (§3 E1) trusts this flag for that proof.
+    disposeConfirmsChildren: true,
 
     /**
      * `upper: true`면 상위 티어 왕복(②)과 fresh 카나리 컨테인먼트를 돈다. 그 외에는

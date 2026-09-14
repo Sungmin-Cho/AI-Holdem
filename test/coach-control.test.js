@@ -1053,6 +1053,97 @@ test('#192 L1: cleanup-result CLI는 --operator-confirmed 1 없이 --row-owner�
   );
 });
 
+test('#192 J1: cleanup-result CLI는 --owner 없이 --row-owner/--operator-confirmed 1을 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+      '--operator-confirmed', '1',
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, '--owner 없이 --row-owner가 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'USAGE');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    '--owner 없는 USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 J1: cleanup-result CLI --row-owner + --operator-confirmed 1은 --owner가 active owner가 아니면 STALE_OWNER이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+  const notActiveOwner = '33333333-3333-4333-8333-333333333333';
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--owner', notActiveOwner,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+      '--operator-confirmed', '1',
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, 'active owner가 아닌 --owner로 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'STALE_OWNER');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'STALE_OWNER 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 J1: recordCleanup API도 --owner 없이 rowOwner를 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { dir, cc, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  await assert.rejects(
+    cc.recordCleanup({
+      gameDir: dir,
+      owner: undefined,
+      handNo: 1,
+      generation,
+      cleanupState: 'released',
+      rowOwner: oldOwner,
+      operatorConfirmed: true,
+    }),
+    (error) => error.code === 'USAGE',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'API의 USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
 test('#192 L1: cleanup-result CLI --row-owner + --operator-confirmed 1은 foreign 행만 released로 만든다', async () => {
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');

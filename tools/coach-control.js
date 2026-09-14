@@ -1120,6 +1120,13 @@ export function createCoachControl(deps = {}) {
   async function recordCleanup({
     gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false,
   }) {
+    // #192 J1: `requireAuth`'s STALE_OWNER check only runs when `owner` is truthy
+    // (`requireActiveOwner && owner && …`), so a `rowOwner` request made without `owner` would
+    // otherwise skip it entirely and could release a foreign row without ever confirming who
+    // the active owner is. Refuse before touching the lock or the authority file.
+    if (rowOwner != null && (typeof owner !== 'string' || owner === '')) {
+      fail('USAGE', '--row-owner에는 --owner가 함께 필요합니다.');
+    }
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
       const allowed = new Set(['cancelled', 'released', 'termination_unconfirmed', 'release_failed', 'pending']);
