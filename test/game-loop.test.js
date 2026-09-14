@@ -4728,6 +4728,11 @@ test('playing resume은 기존 coach Q를 descriptor·turn 전에 exact path로 
   }
 });
 
+// #192 S4 E1 계약 변경: 첫 loop의 requestStop이 성공하면 그 owner에 대한
+// owner-runtime-closure 영수증(coachRuntimeClosures)이 loop-state에 남는다. 표식 없는
+// legacy 예약이라도 그 owner 아래라면 c(OWNER_RUNTIME_CLOSED)만으로 released되어 halt
+// 없이 진행한다. halt 의도 자체는 영수증이 전혀 없는 owner를 쓰는
+// `#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 halt한다`로 옮겼다.
 test('playing resume은 handle 없는 persisted coach reservation을 replacement 전에 halt한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
@@ -4739,6 +4744,62 @@ test('playing resume은 handle 없는 persisted coach reservation을 replacement
   const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
   await seedReservedCoach(gameDir, oldOwner, 1);
   await first.requestStop();
+
+  assert.equal(
+    readJson(path.join(gameDir, 'loop-state.json')).coachRuntimeClosures
+      .some((entry) => entry.ownerSessionId === oldOwner),
+    true,
+    'first loop의 성공적인 requestStop이 owner closure entry를 남기지 않았다',
+  );
+
+  const player = makeAdapter();
+  const upper = makeCoachAdapter();
+  const calls = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(player, upper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => calls.push(args),
+      resumeReclaimResidualMs: 50,
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+
+  const state = await resumed.resume();
+
+  assert.equal(state.phase, 'playing');
+  assert.equal(Object.hasOwn(state, 'halt'), false);
+  assert.equal(calls.filter((args) => args[0] === 'begin-owner').length, 1);
+  assert.equal(
+    readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+      .find((row) => row.handNo === 1)?.cleanupState,
+    'released',
+  );
+});
+
+test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 halt한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  // 이 loop 인스턴스가 실제로 발급하거나 stop한 owner가 아니라, 아무도 issuedOwners에
+  // 넣은 적 없는 owner 아래 예약을 심어 coachRuntimeClosures에 영수증이 전혀 남지 않게
+  // 한다 (원래 halt 계약의 fixture 의도를 보존).
+  const neverIssuedOwner = 'owner-never-issued-or-stopped';
+  await seedReservedCoach(gameDir, neverIssuedOwner, 1);
+  await first.requestStop();
+
+  assert.equal(
+    (readJson(path.join(gameDir, 'loop-state.json')).coachRuntimeClosures ?? [])
+      .some((entry) => entry.ownerSessionId === neverIssuedOwner),
+    false,
+    'never-issued owner에 대해 closure entry가 생겼다',
+  );
 
   const player = makeAdapter();
   const upper = makeCoachAdapter();
@@ -10556,4 +10617,185 @@ test('#192 S3 D3: heartbeat timeout-fence로 만들어진 handle 없는 foreign 
   assert.equal(row.cleanupAuthorized, false, '소유하지 않은 pending 행을 write-authorized로 잘못 판정했다');
   const cleanupCalls = coachInvocations(calls, 'cleanup-result').filter((args) => flagValue(args, '--hand') === '1');
   assert.equal(cleanupCalls.length, 0, '권한 없는 행에 cleanup-result를 호출했다');
+});
+
+// ── #192 S4 E1: owner runtime closure receipt ──────────────────────────────
+
+test('#192 S4: 락 획득에 실패한 두번째 loop가 requestStop을 불러도 첫 loop owner의 closure entry를 쓰지 않는다', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
+  t.after(() => first.requestStop());
+  await first.bootstrap({ ai: 1 });
+  const firstOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+
+  const second = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  await assert.rejects(second.bootstrap({ ai: 1 }), (error) => error.code === 'ACTIVE_GAME');
+  await assert.rejects(second.resume(), (error) => error.code === 'LOCKED');
+  await second.requestStop();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.ownerSessionId, firstOwner, 'first loop이 여전히 자신의 owner를 소유해야 한다');
+  assert.equal(
+    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === firstOwner),
+    false,
+    '락을 획득하지 못한 두번째 인스턴스가 첫 owner의 closure entry를 기록했다',
+  );
+});
+
+test('#192 S4: owner 발급 전에 실패하는 resume은 requestStop에서 이전 owner의 closure entry를 기록하지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const initialized = await initGame(gameDir, ['--stack', '100']);
+  const staleOwner = 'stale-owner-before-issue';
+  // schemaVersion !== 1은 resume()이 lifecycleStarted = true를 지난 직후,
+  // ownerSessionId = randomUUID()에 도달하기 한참 전에 BAD_PLAYER_RECOVERY로 던지게 한다.
+  writeLoopStateFixture(gameDir, initialized.sessionToken, {
+    ownerSessionId: staleOwner,
+    pendingDecision: { schemaVersion: 999 },
+  });
+
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0 },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'BAD_PLAYER_RECOVERY');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.ownerSessionId, staleOwner, '이 인스턴스는 새 owner를 발급하지 못했어야 한다');
+  assert.equal(
+    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === staleOwner),
+    false,
+    'owner 발급 전 실패한 resume의 requestStop이 이전 owner를 closure entry로 기록했다',
+  );
+});
+
+test('#192 S4: adapter dispose 실패는 owner closure entry를 기록하지 않는다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  adapter.dispose = async () => {
+    throw Object.assign(new Error('dispose failed for test'), { code: 'ADAPTER_DISPOSE_TEST_FAILURE' });
+  };
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1 });
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+
+  await assert.rejects(loop.requestStop(), (error) => error.code === 'ADAPTER_DISPOSE_TEST_FAILURE');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(Object.hasOwn(state, 'stoppedAt'), false, 'disposal 실패인데도 stoppedAt이 기록됐다');
+  assert.equal(state.cleanupError.code, 'ADAPTER_DISPOSE_TEST_FAILURE');
+  assert.equal(
+    (state.coachRuntimeClosures ?? []).some((entry) => entry.ownerSessionId === owner),
+    false,
+    'adapter dispose 실패에도 closure entry가 기록됐다',
+  );
+});
+
+test('#192 S4: 성공적인 stop은 발급한 owner마다 정확히 한 번, 중복 없이 closure entry를 남기고 이전 인스턴스의 항목도 보존한다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
+  t.after(() => first.requestStop().catch(() => {}));
+  await first.bootstrap({ ai: 1 });
+  const owner1 = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+
+  await first.requestStop();
+  let state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.coachRuntimeClosures.length, 1);
+  assert.equal(state.coachRuntimeClosures[0].ownerSessionId, owner1);
+  assert.equal(typeof state.coachRuntimeClosures[0].confirmedAt, 'string');
+
+  // 같은 인스턴스에 대한 두번째 requestStop 호출은 캐시된 stopPromise를 재사용할 뿐,
+  // 중복 기록을 만들지 않는다.
+  await first.requestStop();
+  state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.coachRuntimeClosures.length, 1);
+
+  const second = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  t.after(() => second.requestStop().catch(() => {}));
+  const resumedState = await second.resume();
+  const owner2 = resumedState.ownerSessionId;
+  assert.notEqual(owner2, owner1);
+
+  await second.requestStop();
+  state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.coachRuntimeClosures.length, 2, '이전 인스턴스의 항목이 보존되지 않았거나 중복됐다');
+  const owners = state.coachRuntimeClosures.map((entry) => entry.ownerSessionId).sort();
+  assert.deepEqual(owners, [owner1, owner2].sort());
+});
+
+test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: {
+      port: external.lock.port,
+      coachRuntimeClosures: [{ ownerSessionId: 'unrelated-owner', confirmedAt: '2026-09-14T00:00:00.000Z' }],
+    },
+  });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  const row = state.halt.recovery.attempts.find((entry) => entry.handNo === 1);
+  assert.ok(row, 'recovery attempts에 hand 1이 없다');
+  assert.notEqual(row.reason, 'OWNER_RUNTIME_CLOSED', '다른 owner의 closure entry로 released 판정했다');
+});
+
+test('#192 S4 분류자 c: 표식 없는 legacy 행도 owner closure entry가 있으면 OWNER_RUNTIME_CLOSED로 released되고 d·f를 거치지 않는다', { timeout: 20_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  // spawnEvidence도 acceptEvidence도 sidecar도 없는 legacy fixture — 이 owner에
+  // closure entry가 없으면 (형제 테스트 "#192 S2b 분류자 2") FINALIZATION_ABORTED로
+  // halt한다. 유일한 차이는 아래 coachRuntimeClosures뿐이므로, released로 바뀐다면
+  // 그것은 오직 c 때문이지 d(NOT_SPAWNED)나 f(ACCEPT_EVIDENCE)일 수 없다.
+  await seedReservedCoach(gameDir, 'old-owner', 1);
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: {
+      port: external.lock.port,
+      coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-09-14T00:00:00.000Z' }],
+    },
+  });
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
+  assert.equal(coachInvocations(calls, 'begin-owner').length, 1);
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.notEqual(row?.spawnEvidence, 1, 'legacy 행에는 spawnEvidence stamp가 없어야 한다(d 배제 확인)');
+});
+
+test('#192 S4: resume은 이전 인스턴스가 남긴 coachRuntimeClosures 항목을 유지한다', { timeout: 15_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  const priorOwner = 'owner-closed-before-crash';
+  const priorClosure = { ownerSessionId: priorOwner, confirmedAt: '2026-09-01T00:00:00.000Z' };
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'playing',
+    coachRuntimeClosures: [priorClosure],
+  });
+  const adapter = makeAdapter();
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop().catch(() => {}));
+
+  const resumed = await loop.resume();
+
+  assert.equal(resumed.phase, 'playing');
+  assert.deepEqual(resumed.coachRuntimeClosures, [priorClosure]);
+  const onDisk = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.deepEqual(onDisk.coachRuntimeClosures, [priorClosure]);
 });

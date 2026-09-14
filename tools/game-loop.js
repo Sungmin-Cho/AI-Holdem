@@ -584,6 +584,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let trainingProducerOpen = false;
   const archiveCheckedHands = new Set();
   const restoredPlayerSessions = new Set();
+  // #192 S4 E1: owners this exact loop instance minted with randomUUID() and durably
+  // wrote to loop-state — bootstrap and resume are the only two writers. Never populated
+  // from anything read off disk (a stale/foreign ownerSessionId never counts), so a lock
+  // this instance never acquired, or a resume that fails before reaching the owner write,
+  // leaves this empty.
+  const issuedOwners = new Set();
 
   let lockHandle = initialLockHandle;
   let serverChild = null;
@@ -3238,15 +3244,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   // §3/§4 D2, c/f: owner-runtime-closure receipts (E1) and accept evidence (f) both close a
-  // row without ever needing a live identity check. E1 (c) does not exist yet — that is
-  // wired in a later slice. f is wired here: `persistedCoachAttempts()` copies a retired
-  // row's `acceptEvidence` stamp (`closed-child` or `no-spawn`, written by `accept` — see
+  // row without ever needing a live identity check. c: `loop-state.coachRuntimeClosures`
+  // (`requestStop`'s success-path receipt, §3 E1) lists every owner some loop instance has
+  // durably confirmed fully stopped — every coach child that owner ever spawned is gone. If
+  // the row's own `ownerSessionId` appears there, it closes regardless of any other evidence
+  // on the row. f is wired here too: `persistedCoachAttempts()` copies a retired row's
+  // `acceptEvidence` stamp (`closed-child` or `no-spawn`, written by `accept` — see
   // tools/coach-control.js) straight onto the attempt object, and any such stamp closes the
-  // row regardless of which value it is. This must stay a pure, side-effect-free read so
-  // consulting it twice for the same attempt (the H2 fast path below, and the post-poll
-  // fallback) is always safe. Returns `{ reason }` when evidence closes the row, otherwise
-  // `null`.
+  // row regardless of which value it is. When a row carries both kinds of evidence, c wins
+  // (checked first) — either is a legitimate close, so which reason string is reported does
+  // not change the outcome. This must stay a pure, side-effect-free read so consulting it
+  // twice for the same attempt (the H2 fast path below, and the post-poll fallback) is
+  // always safe. Returns `{ reason }` when evidence closes the row, otherwise `null`.
   const consultCoachCloseEvidence = (attempt) => {
+    const closures = readLoopState()?.coachRuntimeClosures;
+    if (Array.isArray(closures) && closures.some((entry) => (
+      entry && typeof entry === 'object' && entry.ownerSessionId === attempt?.ownerSessionId
+    ))) {
+      return { reason: 'OWNER_RUNTIME_CLOSED' };
+    }
     if (attempt?.acceptEvidence === 'closed-child' || attempt?.acceptEvidence === 'no-spawn') {
       return { reason: 'ACCEPT_EVIDENCE' };
     }
@@ -3867,10 +3883,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // write even the `intent` sidecar — treat it exactly like the pre-checkpoint
         // suspension check above. An owner handoff during the checkpoint is the same:
         // do not spawn on behalf of an owner this loop instance no longer holds.
+        // #192 S4 E1: also require that this exact instance is the one that minted
+        // `owner` (`issuedOwners`), not merely that loop-state's `ownerSessionId` still
+        // reads back the same string this coachPipeline call started with.
         if (coachWorkSuspended()) return;
         assertBeforeResultWaitCutoff();
         const spawnLoopState = readLoopState();
-        if (spawnLoopState?.ownerSessionId !== owner) return;
+        if (spawnLoopState?.ownerSessionId !== owner || !issuedOwners.has(owner)) return;
 
         const spawnTuple = {
           gameEpoch: spawnLoopState?.gameEpoch,
@@ -5887,6 +5906,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
             ? pendingFinalStatePatch()
             : (pendingFinalStatePatch ?? {});
+          // #192 S4 E1: reaching this line already proves every disposal, coach/training
+          // task settle, terminateActiveChildren, and stopServer step above succeeded (the
+          // `stopError` branch a few lines up throws before this point otherwise). The only
+          // remaining gate is this instance's own in-memory lock ownership — `lockHandle` is
+          // still set here, one line before `releaseLock()` nulls it — and whether this
+          // instance ever actually issued an owner at all. A lock-failed instance, or a
+          // resume that failed before owner issuance, has an empty `issuedOwners` and writes
+          // nothing. Existing entries (from earlier instances, preserved by `writeLoopState`'s
+          // merge) are kept verbatim and never duplicated for an owner already listed.
+          const existingClosures = Array.isArray(readLoopState()?.coachRuntimeClosures)
+            ? readLoopState().coachRuntimeClosures
+            : [];
+          const alreadyClosed = new Set(existingClosures.map((entry) => entry?.ownerSessionId));
+          const newClosures = lockHandle
+            ? [...issuedOwners]
+              .filter((ownerSessionId) => !alreadyClosed.has(ownerSessionId))
+              .map((ownerSessionId) => ({ ownerSessionId, confirmedAt: isoNow(now) }))
+            : [];
           writeLoopState({
             stopping: true,
             stoppedAt: isoNow(now),
@@ -5898,6 +5935,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
               || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
             ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
               code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
+            ...(newClosures.length > 0
+              ? { coachRuntimeClosures: [...existingClosures, ...newClosures] }
+              : {}),
             ...resolvedFinalStatePatch,
           });
         }
@@ -5985,6 +6025,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       openLog();
       for (const { event, ...detail } of sweepDetails) log(event, detail);
       const startedAt = isoNow(now);
+      const bootstrapOwnerSessionId = randomUUID();
       writeLoopState({
         phase: 'bootstrap',
         handNo: 0,
@@ -5992,7 +6033,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         sessionToken: initialized.sessionToken,
         gameEpoch: gameEpochOf(initialized.sessionToken),
         opponentRuntime: opponentRuntimeOf(),
-        ownerSessionId: randomUUID(),
+        ownerSessionId: bootstrapOwnerSessionId,
         lastPublishId: null,
         playerRuntime: null,
         upperRuntime: null,
@@ -6002,6 +6043,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         metrics: [],
         playerBudget: undefined,
       });
+      // #192 S4 E1: only an owner this instance itself just durably wrote counts —
+      // writeLoopState throwing above (e.g. a write failure) leaves this line unreached.
+      issuedOwners.add(bootstrapOwnerSessionId);
       if(opponentRuntimeOf() !== 'policy') writeLoopState({playerBudget:currentWatchdog()});
       log('bootstrap-initialized', { sessionToken: initialized.sessionToken });
       if (sweepFailed > 0) log('profile-sweep-consume-failed', { failed: sweepFailed });
@@ -6322,6 +6366,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else {
         state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
       }
+      // #192 S4 E1: same rule as bootstrap — only after the write above has actually
+      // succeeded does this instance count `ownerSessionId` as its own issued owner. A
+      // throw from either `writeLoopState` call leaves this line unreached, and everything
+      // in `resume()` before this point (training migration, `pendingDecision` validation,
+      // `lifecycleStarted`) runs before any owner is issued at all.
+      issuedOwners.add(ownerSessionId);
 
       if (state.halt?.source === 'training-migration') {
         state = writeLoopState({ halt: undefined });
