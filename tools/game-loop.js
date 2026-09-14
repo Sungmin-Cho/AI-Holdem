@@ -2105,7 +2105,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (remainingBeforeRepair < minRepairMs) continue;
         let repaired = null;
         try {
-          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt: deadlineAt });
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
         } catch (error) {
           if (isFatalRepairFailure(error)) throw error;
           failureCode = error.code ?? 'REPAIR_FAILED';
@@ -2122,12 +2122,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (remainingBeforeRetry > 0) {
             callNo += 1;
             commitPending({diagnostics:{...record.diagnostics, callNo}});
-            round = await decideOnce({
-              playerId: next.toAct,
-              sessionId: session.sessionId,
-              message: attemptMessage,
-            }, remainingBeforeRetry, { callNo });
-            modelMs += round.modelMs;
+            // Persisting the call number consumes budget too. Recheck at the
+            // dispatch boundary, and count only calls that actually start.
+            const remainingForCall = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
+            if (remainingForCall > 0) {
+              round = await decideOnce({
+                playerId: next.toAct,
+                sessionId: session.sessionId,
+                message: attemptMessage,
+              }, remainingForCall, { callNo });
+              modelMs += round.modelMs;
+            } else {
+              callNo -= 1;
+              commitPending({diagnostics:{...record.diagnostics, callNo}});
+              round = { ok:false, error:codedError('TIMEOUT', 'session repair 기록 뒤 재결정 예산이 만료됐습니다.'), modelMs:0 };
+            }
           } else {
             round = { ok: false, error: codedError('TIMEOUT', 'session repair 뒤 재결정 예산이 만료됐습니다.'), modelMs: 0 };
           }

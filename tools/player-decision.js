@@ -104,7 +104,7 @@ export function projectRejectionForSink(record, ctx) {
   const {v, generation, callNo, code, detail, decisionId, gameEpoch, at} = record;
   const p = record.projection;
   const projection = Object.freeze({action:p.action, ...(Object.hasOwn(p, 'amount') ? {amount:p.amount} : {}), decisionIdMatches:p.decisionIdMatches});
-  return Object.freeze({v, generation, callNo, code, detail, decisionId, gameEpoch, projection, at});
+  return Object.freeze({v, generation, callNo, code, detail, decisionId, gameEpoch, projection, at:new Date(at).toISOString()});
 }
 
 export function validateDiagnostics(d, pending) {
