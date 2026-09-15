@@ -1944,6 +1944,49 @@ test('#195 S2: grokInspectAudit 항목별 부정과 layers 두 형태', (t) => {
   assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { configSources: { layers: [] } })), { home }).code, 'GROK_HOME_NOT_ISOLATED (config)');
 });
 
+test('#195 S1: 존재하지 않는 중첩 앵커 부모도 0700으로 만든다', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const lockRoot = shortTmp('lock-nested');
+  const nested = path.join(shortTmp('root'), 'missing', 'anchor');
+  const first = provisionRuntimeHome({ anchorRoot: nested, lockRoot, kind: 'grok' });
+  assert.equal(fs.lstatSync(nested).mode & 0o777, 0o700);
+  assert.equal(fs.existsSync(path.join(first.home, '.ai-holdem-home.json')), true);
+});
+
+test('#195 S2: 바이너리를 해석하지 못하면 inspect가 탈락한다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({}, { resolveCommandPath: () => null });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    assert.equal(res.notice.includes('GROK_BINARY_CHANGED'), true);
+    assert.equal(f.calls().filter((c) => !c.argv.includes('inspect')).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S2: resume-probe가 비정상 종료면 player 게이트가 열리지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [{ argvIncludes: '--resume', reply: '', exitCode: 1, grokSession: {} }],
+    default: { reply: '거부합니다', grokSession: {} },
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false);
+    assert.equal(res.ok, false);
+    await assert.rejects(
+      f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_NOT_VERIFIED',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('#195 S2: 게이트는 warmup/decide/oneshotStart에만 있고 probe 없이 거부', async (t) => {
   if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
   const f = verifiedGrokRuntime();

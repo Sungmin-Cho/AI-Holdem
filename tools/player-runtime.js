@@ -961,8 +961,11 @@ export function createPlayerRuntime(kind, opts = {}) {
     const audit = grokInspectAudit(result.stdout, { home: grokHome });
     if (!audit.ok) return audit;
     const resolved = resolveCommandPath();
-    if (resolved) {
-      try { grokBinary = statIdentity(resolved); } catch { grokBinary = null; }
+    if (!resolved) return { ok: false, code: 'GROK_BINARY_CHANGED' };
+    try {
+      grokBinary = statIdentity(resolved);
+    } catch {
+      return { ok: false, code: 'GROK_BINARY_CHANGED' };
     }
     verification.inspect = true;
     return { ok: true, grokVersion: audit.grokVersion };
@@ -1146,6 +1149,14 @@ export function createPlayerRuntime(kind, opts = {}) {
           notice: error.code && String(error.code).startsWith('GROK_')
             ? grokIsolationNotice(kind, model, error.code)
             : `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
+        };
+      }
+      const resumeOk = resume.code === 0 && Boolean(parseResponse(resume.format, resume.stdout));
+      if (!resumeOk) {
+        verification.player = false;
+        return {
+          ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`,
         };
       }
       const resumeAudit = auditGrokSession(spawnedId, 2);

@@ -60,7 +60,11 @@ function lstatFile0600(target, uid) {
 }
 
 function mkdirComponent(target, uid) {
-  if (!fs.existsSync(target)) fs.mkdirSync(target, { mode: 0o700 });
+  if (!fs.existsSync(target)) {
+    const parent = path.dirname(target);
+    if (parent !== target && !fs.existsSync(parent)) mkdirComponent(parent, uid);
+    fs.mkdirSync(target, { mode: 0o700 });
+  }
   lstatDirStrict(target, uid);
 }
 
