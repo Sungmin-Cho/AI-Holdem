@@ -45,10 +45,10 @@ function assertParkedFreshGame(manager,oldGameId) {
   assert.equal(loop.pendingDecision,undefined,'parked recovery must not create a decision');
   assert.deepEqual(loop.metrics??[],[],'parked recovery must not record a decision metric');
 }
-async function damagedStore(t,{phase='playing',gameOver=false}={}) {
+async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=null}={}) {
   const root=createOwnedTempDir('app-recovery-exit');
   let calls=0;
-  const resolver=async()=>{calls++;return {player:null,upper:null,notices:[]};};
+  const resolver=resolverOverride??(async()=>{calls++;return {player:null,upper:null,notices:[]};});
   let manager=createSessionManager({storeDir:root,resolver});
   t.after(()=>manager.close());
   await manager.initialize();
@@ -201,4 +201,32 @@ test('#197 an accepted recovery row whose selector is actually committed elsewhe
   const receipt=restored.receipt(request.requestId);
   assert.equal(receipt.status,'failed');assert.equal(receipt.error,'CURRENT_CHANGED');
   names.forEach((name,index)=>assert.deepEqual(fs.readFileSync(path.join(replacement.sessionDir,name)),bytes[index],name));
+});
+test('#197 an unverified same-PID loop owner keeps startingLoop recovery exits fail-closed after finalize resolver cleanup fails',{timeout:TIMEOUT},async t=>{
+  let root=null,armed=false;
+  const resolver=async()=>{
+    if(!armed)return {player:null,upper:null,notices:[]};
+    // Preserve the directory/inode but replace the canonical owner identity with
+    // a same-PID legacy record. releaseOwnedLock cannot prove this is its lock;
+    // readOwnedLock likewise reports unknown, never dead.
+    fs.writeFileSync(path.join(root,'loop.lock.d','pid'),`${process.pid}\nlegacy-unverified-owner`);
+    throw Object.assign(new Error('finalize resolver cut'),{code:'FINALIZE_RESOLVER_CUT'});
+  };
+  const f=await damagedStore(t,{phase:'finalizing',gameOver:true,resolverOverride:resolver});
+  root=f.root;armed=true;
+  const request=body(f.manager,'end');
+  try {
+    f.manager.command(request);
+    const receipt=await settle(f.manager,request.requestId);
+    assert.equal(receipt.status,'failed');assert.equal(receipt.error,'FINALIZE_RESOLVER_CUT');
+    const snapshot=f.manager.snapshot();
+    assert.equal(snapshot.state,'error');assert.equal(snapshot.error,'FINALIZE_RESOLVER_CUT');
+    assert.equal(snapshot.recoveryExit,null,'unverified owner leaves startingLoop in the recovery gate');
+    assert.deepEqual(snapshot.allowedCommands,['resume']);
+    assert.equal(fs.existsSync(path.join(root,'loop.lock.d')),true);
+  } finally {
+    // Exact owned temporary fixture only. The failed loop already tried and
+    // declined release; remove the deliberately forged owner before global cleanup.
+    fs.rmSync(path.join(root,'loop.lock.d'),{recursive:true,force:true});
+  }
 });

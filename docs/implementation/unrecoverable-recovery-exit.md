@@ -19,6 +19,8 @@ Do not downgrade while any `pendingDecision` exists, any command row is `accepte
 
 The historical baseline is `ddcabe22f82b2fb5fc6d9a2d423b754f33b627ff`. The checked-in compatibility fixture records isolated calls to that revision's legacy loop API and app initializer, not paid-model play or an interactive production run.
 
+Reproduce with `HOLDEM_BASELINE=/absolute/detached-ddcabe2 node --test tools/capture-recovery-compatibility.mjs`. The capture verifies the checkout SHA and uses only owned temporary stores. `test/fixtures/recovery-compatibility-ddcabe2.json` binds the observed matrix to the capture script and retained log digests; current lifecycle and app-journal behavior are exercised by separate integration tests.
+
 | Stored boundary | Old legacy behavior | Old app behavior |
 |---|---|---|
 | Unverified snapshot only | Snapshot ignored | Snapshot ignored |
