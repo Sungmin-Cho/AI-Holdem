@@ -80,6 +80,32 @@ test('#197 recovery exit gate follows engine/loop phases and exposes the wired e
   });
 });
 
+test('#197 selector replacement at terminal lock release never marks the replacement ended',{timeout:TIMEOUT},async t=>{
+  const f=await damagedStore(t);
+  await engineEnd(f.gameDir,'old-terminal');
+  const request=body(f.manager,'resume'), setup=f.manager.snapshot().setup;
+  const prepared=await stagePreparedRestart(f.root,{setup,reservation:{gameId:randomUUID(),selectionVersion:2}});
+  const replacementEngine=read(path.join(prepared.stagingDir,'state.json'));
+  write(path.join(prepared.stagingDir,'loop-state.json'),{phase:'playing',sessionToken:replacementEngine.sessionToken,
+    gameEpoch:createHash('sha256').update(replacementEngine.sessionToken).digest('hex')});
+  const before=fs.readFileSync(path.join(prepared.stagingDir,'state.json'));
+  const originalRmdir=fs.rmdirSync;
+  let replacement;
+  fs.rmdirSync=function(target,...args){
+    const result=originalRmdir.call(this,target,...args);
+    if(target===path.join(f.root,'loop.lock.d')&&!replacement)replacement=commitSession(f.root,prepared);
+    return result;
+  };
+  let row;
+  try {f.manager.command(request);row=await settle(f.manager,request.requestId);}
+  finally {fs.rmdirSync=originalRmdir;}
+  assert.ok(replacement,'selector swap must occur at the released terminal lock');
+  assert.equal(row.status,'failed');assert.equal(row.error,'CURRENT_CHANGED');
+  assert.equal(f.manager.snapshot().gameId,replacement.gameId);
+  assert.notEqual(f.manager.snapshot().state,'ended');
+  assert.deepEqual(fs.readFileSync(path.join(replacement.sessionDir,'state.json')),before);
+});
+
 test('#197 post-engine publication or relay failure remains recoverable across manager restart',{timeout:TIMEOUT},async t=>{
   for(const fault of ['terminal-write','relay-identity'])await t.test(fault,async st=>{
     const f=await damagedStore(st), file=path.join(f.gameDir,'loop-state.json');

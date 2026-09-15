@@ -162,6 +162,30 @@ test('#197 a conflicting sidecar is never overwritten',{timeout:TIMEOUT},async t
   assert.deepEqual(fs.readFileSync(f.file),f.raw);
 });
 
+test('#197 terminal checkpoint requires the same engine operation and a closed audit record',{timeout:TIMEOUT},async t=>{
+  for(const kind of ['operation-conflict','event','at','pending','timestamp'])await t.test(kind,async st=>{
+    const f=await fixture(st);
+    await assert.rejects(f.loop({abortUnrecoverable:{operationId:'operation-a'},onEngineInvoke:args=>{
+      if(args[0]==='end')throw Object.assign(new Error('checkpoint cut'),{code:'CHECKPOINT_CUT'});
+    }}).resume(),{code:'CHECKPOINT_CUT'});
+    if(kind==='operation-conflict')await engine(f.root,['end','--result','abort','--operation-id','operation-b']);
+    else {
+      const state=read(f.file);
+      if(kind==='pending')state.pendingDecision={schemaVersion:1,generation:1,status:'running'};
+      else if(kind==='timestamp')state.abandonedPendingDecision.abandonedAt='not-a-time';
+      else state.abandonedPendingDecision[kind]='forged';
+      fs.writeFileSync(f.file,JSON.stringify(state));
+    }
+    const before=fs.readFileSync(f.file),engineBefore=fs.readFileSync(path.join(f.root,'state.json'));
+    const sidecar=read(f.file).abandonedPendingDecision.sidecar,sidecarBefore=fs.readFileSync(path.join(f.root,sidecar));
+    await assert.rejects(f.loop().resume(),{code:'BAD_ABORT_CHECKPOINT'});
+    assert.deepEqual(fs.readFileSync(f.file),before);
+    assert.deepEqual(fs.readFileSync(path.join(f.root,'state.json')),engineBefore);
+    assert.deepEqual(fs.readFileSync(path.join(f.root,sidecar)),sidecarBefore);
+    assert.equal(f.calls(),0);
+  });
+});
+
 test('#197 checkpoint re-entry repairs a missing abandonment audit event',{timeout:TIMEOUT},async t=>{
   const f=await fixture(t), originalWrite=fs.writeSync;
   let injected=false;
