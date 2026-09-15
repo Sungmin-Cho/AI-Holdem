@@ -4543,6 +4543,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const runReviewStage = async ({ stage, prompt, requireHeadings = false }) => {
+    // Only static instructions cross attempts; rejected output and error messages
+    // remain private diagnostics and can never become a subsequent model input.
+    const corrections = new Map([
+      ['EMPTY_REVIEW_OUTPUT', '빈 출력이 거절되었습니다. 요청한 한국어 평가 본문을 작성하세요.'],
+      ['REVIEW_CLAIM_REJECTED', '근거 범위를 벗어난 주장이 감지되었습니다. 최적·정답·GTO·확정 누수·EV 주장을 피하고 관측 사실과 정성적 과정 평가만 작성하세요. 한계는 "공개 정보에 근거한 정성적 과정 평가입니다."처럼 표현하세요.'],
+      ['REVIEW_HEADINGS_MISSING', '필수 제목이 누락되었습니다. 원래 요청에 명시된 한국어 제목 네 개를 모두 포함하세요.'],
+    ]);
+    let correctionCode = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       let handle = null;
       let failure = null;
@@ -4550,7 +4558,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         handle = upperAdapter.oneshotStart({
           tier: 'upper',
-          prompt,
+          prompt: correctionCode
+            ? `${prompt}\n\n교정 안내 (${correctionCode}): ${corrections.get(correctionCode)}`
+            : prompt,
           timeoutMs: REVIEW_GENERATION_MS,
         });
         if (!handle || !handle.done || typeof handle.done.then !== 'function') {
@@ -4570,12 +4580,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // A second child may start only after the first child has positively terminated.
       const termination = await terminateReviewAttempt(handle);
       const secrets = [readLoopState()?.sessionToken];
+      correctionCode = corrections.has(failure?.code) ? failure.code : null;
       log('review-attempt-failed', {
         stage,
         attempt,
         code: failure?.code ?? 'ERROR',
         message: sanitizeReviewDiagnostic(failure?.message, secrets, 512),
         terminationConfirmed: termination.confirmed === true,
+        retryCorrectionCode: attempt === 1 && termination.confirmed === true ? correctionCode : null,
         ...preserveReviewFailure(root, { stage, attempt, raw, secrets }),
       });
       if (termination.confirmed !== true) {
