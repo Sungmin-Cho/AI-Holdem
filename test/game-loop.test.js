@@ -305,6 +305,7 @@ function makeAdapter({
   const decideCalls = [];
   const adapter = {
     kind,
+    runtimeHomeId: null,
     calls,
     decideCalls,
     get maxInFlight() { return maxInFlight; },
@@ -317,7 +318,7 @@ function makeAdapter({
       await onWarmup?.(input);
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       inFlight -= 1;
-      return { sessionId: sessionIdFor(input, callNo), raw: 'ready' };
+      return { sessionId: sessionIdFor(input, callNo), raw: 'ready', runtimeHomeId: adapter.runtimeHomeId ?? null };
     },
     async decide(input) {
       decideCalls.push(input);
@@ -2033,6 +2034,47 @@ async function runUntilUserBoundary(loop, gameDir) {
   await stopRun(loop, running);
 }
 
+test('#195 S4: resolver receives lockRoot for store and legacy game dirs', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const seen = [];
+  const adapter = makeAdapter();
+  const resolver = resolverFor(adapter, (input) => { seen.push(input.lockRoot); });
+  const loop = createGameLoop({ gameDir, resolver, opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  assert.ok(seen.length >= 1);
+  assert.ok(seen.every((root) => root === path.resolve(gameDir)));
+});
+
+test('#195 S4: player-sessions bind runtimeHomeId on create and reuse', { timeout: 10_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const adapter = makeAdapter();
+  adapter.runtimeHomeId = 'home-A';
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  const created = readJson(path.join(gameDir, '.player-sessions.json'));
+  assert.equal(created.p1.runtimeHomeId, 'home-A');
+  await loop.requestStop();
+
+  const same = makeAdapter();
+  same.runtimeHomeId = 'home-A';
+  const resumeSame = createGameLoop({ gameDir, resolver: resolverFor(same), opts: { port: 0, waitMs: 0 } });
+  t.after(() => resumeSame.requestStop());
+  await resumeSame.resume();
+  assert.equal(same.calls.length, 0, 'matching runtimeHomeId should reuse');
+  assert.equal(readJson(path.join(gameDir, '.player-sessions.json')).p1.runtimeHomeId, 'home-A');
+  await resumeSame.requestStop();
+
+  const other = makeAdapter();
+  other.runtimeHomeId = 'home-B';
+  const resumeOther = createGameLoop({ gameDir, resolver: resolverFor(other), opts: { port: 0, waitMs: 0 } });
+  t.after(() => resumeOther.requestStop());
+  await resumeOther.resume();
+  assert.equal(other.calls.length, 1, 'changed runtimeHomeId should recreate');
+  assert.equal(readJson(path.join(gameDir, '.player-sessions.json')).p1.runtimeHomeId, 'home-B');
+});
+
 test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const focusSource = path.join(os.tmpdir(), `holdem-focus-${process.pid}-${Date.now()}.json`);
@@ -2099,9 +2141,9 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
     .map((persona) => [persona.playerId, persona]));
   assert.equal(adapter.calls.every((call) => call.prompt.includes(personas.get(call.playerId).name)), true);
   assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), {
-    p1: { runtime: 'fake', sessionId: 'session-p1', createdAt: state.startedAt },
-    p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt },
-    p3: { runtime: 'fake', sessionId: 'session-p3', createdAt: state.startedAt },
+    p1: { runtime: 'fake', sessionId: 'session-p1', createdAt: state.startedAt, runtimeHomeId: null },
+    p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt, runtimeHomeId: null },
+    p3: { runtime: 'fake', sessionId: 'session-p3', createdAt: state.startedAt, runtimeHomeId: null },
   });
   await runUntilUserBoundary(loop, gameDir);
 
@@ -2699,7 +2741,10 @@ test('playing resume reuses every valid matching player session without warmup',
 
   assert.equal(resumed.phase, 'playing');
   assert.equal(adapter.calls.length, 0, 'valid sessions were unnecessarily recreated');
-  assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), sessions);
+  assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), {
+    p1: { ...sessions.p1, runtimeHomeId: null },
+    p2: { ...sessions.p2, runtimeHomeId: null },
+  });
   await runUntilUserBoundary(loop, gameDir);
   assert.equal(adapter.decideCalls[0].sessionId, 'persisted-p1');
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).startedAt, state.startedAt);
@@ -2722,8 +2767,8 @@ test('playing resume recreates only missing, corrupt, runtime-mismatched, or arg
 
   assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p2']);
   assert.deepEqual(readJson(path.join(gameDir, '.player-sessions.json')), {
-    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
-    p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt },
+    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z', runtimeHomeId: null },
+    p2: { runtime: 'fake', sessionId: 'session-p2', createdAt: state.startedAt, runtimeHomeId: null },
   });
 });
 
@@ -2778,7 +2823,7 @@ test('a remotely rejected restored session recreates only that player once, pers
   assert.equal(sessions.p1.runtime, 'fake');
   assert.equal(sessions.p1.sessionId, 'session-p1');
   assert.notEqual(sessions.p1.createdAt, oldCreatedAt);
-  assert.deepEqual(sessions.p2, { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt });
+  assert.deepEqual(sessions.p2, { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt, runtimeHomeId: null });
   const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics
     .find((entry) => entry.playerId === 'p1');
   assert.equal(metric.outcome, 'retried_accepted');

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { skipOnWin32 } from './helpers/platform.js';
+import crypto from 'node:crypto';
 import {
   RUNTIME_TABLE,
   SESSION_ID_MAX_LENGTH,
@@ -13,8 +14,15 @@ import {
   extractJsonLine,
   buildPlayerPrompt,
   createPlayerRuntime,
+  createProductionResolver,
   resolveRuntimes,
   spawnCli,
+  GROK_DISALLOWED_TOOLS,
+  GROK_TAIL,
+  grokInspectAudit,
+  grokSessionAudit,
+  provisionRuntimeHome,
+  verifyRuntimeHome,
 } from '../tools/player-runtime.js';
 
 const FAKE_CLI = fileURLToPath(new URL('./helpers/fake-cli.js', import.meta.url));
@@ -41,6 +49,62 @@ function jsonl(...events) {
 
 // 가짜 CLI를 띄우는 어댑터. 주입 exec은 모듈의 기본 exec(`spawnCli`)에 command만
 // 바꿔 위임한다 — spawn·stdin·수집·kill의 실제 구현이 그대로 테스트를 탄다.
+const CLEAN_INSPECT = {
+  grokVersion: '1.0.30',
+  channel: 'stable',
+  cwd: '/tmp',
+  projectRoot: null,
+  projectTrusted: false,
+  projectInstructions: [],
+  permissions: { sources: [], loaded: 0, skipped: [] },
+  loginPolicy: {},
+  hooks: [],
+  skills: [],
+  agents: [],
+  plugins: [],
+  marketplaces: [],
+  mcpServers: [],
+  lspServers: [],
+  configSources: { layers: [{ role: 'user', path: '$HOME/.grok/config.toml' }] },
+  externalCompat: { remoteSettingsLoaded: false, cells: [] },
+};
+
+const GROK_CREATE_PREFIX = ['--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL('grok-4.6')];
+
+function shortTmp(tag) {
+  return fs.mkdtempSync(path.join('/tmp', `hh-${tag}-`));
+}
+
+function grokAuthAndBin(dir) {
+  const authFile = path.join(dir, 'auth.json');
+  const bin = path.join(dir, 'grok-bin');
+  fs.writeFileSync(authFile, '{}');
+  fs.writeFileSync(bin, 'x');
+  fs.chmodSync(bin, 0o755);
+  return { authFile, bin };
+}
+
+function verifiedGrokRuntime(script = {}, optOverrides = {}) {
+  const lockRoot = optOverrides.lockRoot ?? shortTmp('lock');
+  const anchor = optOverrides.runtimeHomeAnchor ?? shortTmp('a');
+  const files = grokAuthAndBin(tmpDir('auth'));
+  const merged = {
+    logEnvValues: ['HOME', 'GROK_AUTH_PATH'],
+    default: { reply: script.default?.reply ?? 'ready', grokSession: script.default?.grokSession ?? {}, ...script.default },
+    matchers: [
+      { argvIncludes: 'inspect', inspectJson: script.inspectJson ?? CLEAN_INSPECT },
+      ...(script.matchers ?? []),
+    ],
+  };
+  return fakeRuntime('grok', merged, {
+    runtimeHome: { lockRoot },
+    runtimeHomeAnchor: anchor,
+    grokAuthPath: optOverrides.grokAuthPath ?? files.authFile,
+    resolveCommandPath: optOverrides.resolveCommandPath ?? (() => files.bin),
+    ...optOverrides,
+  });
+}
+
 function fakeRuntime(kind = 'claude', script = {}, opts = {}) {
   const dir = tmpDir('fake');
   const scriptPath = path.join(dir, 'script.json');
@@ -293,26 +357,40 @@ test('claude argv 핀: 생성·재개·1회성 모두 --restricted --strict-mcp-
     const one = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok 한 단어만 출력', timeoutMs: 5000 });
     await one.done;
     assert.deepEqual(f.last().argv, ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', '']);
+    assert.equal(f.last().argv.includes('--output-format'), false);
+    assert.equal(f.last().argv.includes('--include-hook-events'), false);
   } finally {
     f.cleanup();
   }
 });
 
-test('grok argv 핀: --prompt-file /dev/stdin·--tools 빈문자열·--deny MCPTool·--no-subagents', async () => {
-  const f = fakeRuntime('grok');
+test('grok argv 핀: --no-auto-update + GROK_TAIL, create/resume/oneshot 명시 배열', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime();
   try {
+    await f.rt.probe({ canaryAbsPath: file });
+    await f.rt.probe({ upper: true, canaryAbsPath: file });
     const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
-    const create = f.last();
-    assert.deepEqual(create.argv, [
-      '--prompt-file', '/dev/stdin', '-m', 'grok-4.6', '--tools', '', '--deny', 'MCPTool',
-      '--disable-web-search', '--sandbox', 'read-only', '--no-subagents', '--session-id', sessionId,
-    ]);
+    const create = f.calls().find((c) => c.stdin === '페르소나');
+    assert.deepEqual(create.argv, [...GROK_CREATE_PREFIX, '--session-id', sessionId]);
+    assert.equal(create.argv.includes(GROK_DISALLOWED_TOOLS), true);
     assert.equal(create.stdin, '페르소나');
     await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     assert.deepEqual(f.last().argv, [
-      '--prompt-file', '/dev/stdin', '--resume', sessionId, '-m', 'grok-4.6', '--tools', '', '--deny', 'MCPTool',
-      '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
+      '--no-auto-update', '--prompt-file', '/dev/stdin', '--resume', sessionId, ...GROK_TAIL('grok-4.6'),
     ]);
+    const firstOne = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 5000 });
+    await firstOne.done;
+    const oneA = f.last().argv;
+    const secondOne = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 5000 });
+    await secondOne.done;
+    const oneB = f.last().argv;
+    assert.equal(oneA[0], '--no-auto-update');
+    assert.deepEqual(oneA.slice(0, -2), GROK_CREATE_PREFIX);
+    assert.equal(oneA.at(-2), '--session-id');
+    assert.notEqual(oneA.at(-1), oneB.at(-1));
+    assert.notEqual(oneA.at(-1), sessionId);
   } finally {
     f.cleanup();
   }
@@ -346,14 +424,14 @@ test('codex: no-tool prefix + --json, thread.started에서 세션 캡처, 최종
       '--disable', 'view_image', '--disable', 'hooks', '--disable', 'code_mode_host',
     ];
     assert.deepEqual(create.argv.slice(0, prefix.length), prefix);
-    assert.deepEqual(create.argv.slice(prefix.length), ['exec', '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-']);
+    assert.deepEqual(create.argv.slice(prefix.length), ['exec', '--ignore-user-config', '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-']);
 
     const out = await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     assert.equal(out.raw, '{"decisionId":"d1","action":"call"}');
     const resume = f.last();
     assert.deepEqual(resume.argv.slice(0, prefix.length), prefix);
     assert.deepEqual(resume.argv.slice(prefix.length), [
-      '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', 'exec', 'resume', '--json', '--skip-git-repo-check', 'th-abc-123', '-',
+      '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', 'exec', 'resume', '--ignore-user-config', '--json', '--skip-git-repo-check', 'th-abc-123', '-',
     ]);
   } finally {
     f.cleanup();
@@ -495,7 +573,7 @@ test('probe(codex): --json JSONL fail-closed — 최종 agent_message가 없거�
     assert.equal(res.ok, false, 'plain 산문 스트림은 JSONL fail-closed에서 정상 응답이 아니다');
     assert.equal(res.containment, false);
     assert.deepEqual(plain.last().argv, [
-      ...prefix, 'exec', '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-',
+      ...prefix, 'exec', '--ignore-user-config', '-m', 'gpt-5.6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-',
     ], '컨테인먼트 probe argv는 생성과 같은 --json 형이다');
   } finally {
     plain.cleanup();
@@ -576,7 +654,7 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
   const good = fakeRuntime('claude', {
     default: {
       reply: jsonl(
-        { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
         { type: 'assistant', message: { content: [{ type: 'text', text: '거부합니다' }] } },
         { type: 'result', subtype: 'success', result: '거부합니다' },
       ),
@@ -586,7 +664,7 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
     const res = await good.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, true);
     assert.equal(res.containment, true);
-    assert.deepEqual(good.last().argv.slice(-3), ['--output-format', 'stream-json', '--verbose']);
+    assert.deepEqual(good.last().argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
   } finally {
     good.cleanup();
   }
@@ -594,7 +672,7 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
   const mcp = fakeRuntime('claude', {
     default: {
       reply: jsonl(
-        { type: 'system', subtype: 'init', tools: [], mcp_servers: [{ name: 'some-mcp' }] },
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [{ name: 'some-mcp' }], plugins: [] },
         { type: 'result', subtype: 'success', result: '거부합니다' },
       ),
     },
@@ -608,7 +686,7 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
   const toolUse = fakeRuntime('claude', {
     default: {
       reply: jsonl(
-        { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
         { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: {} }] } },
         { type: 'result', subtype: 'success', result: '읽었습니다' },
       ),
@@ -621,17 +699,17 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
   }
 });
 
-test('probe(grok): 핀 시작 argv(세션 플래그 없음)로 돌고, 센티널 유출이면 containment false — 동적 거부', async () => {
+test('probe(grok): 유효 홈·inspect·기록에서 센티널 유출이면 containment false — 동적 거부', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
   const { file, sentinel } = canary();
-  const f = fakeRuntime('grok', { default: { reply: `읽었습니다: ${sentinel}` } });
+  const f = verifiedGrokRuntime({ default: { reply: `읽었습니다: ${sentinel}` } });
   try {
     const res = await f.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, true);
-    assert.equal(res.containment, false, '이 핀 버전의 grok은 probe가 탈락시켜야 한다');
-    assert.deepEqual(f.last().argv, [
-      '--prompt-file', '/dev/stdin', '-m', 'grok-4.6', '--tools', '', '--deny', 'MCPTool',
-      '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
-    ]);
+    assert.equal(res.containment, false, '센티널 유출이면 탈락해야 한다');
+    const modelCalls = f.calls().filter((c) => !c.argv.includes('inspect'));
+    assert.equal(modelCalls[0].argv.includes('--session-id'), true);
+    assert.deepEqual(modelCalls[0].argv.slice(0, GROK_CREATE_PREFIX.length), GROK_CREATE_PREFIX);
   } finally {
     f.cleanup();
   }
@@ -640,10 +718,17 @@ test('probe(grok): 핀 시작 argv(세션 플래그 없음)로 돌고, 센티널
 test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한 상위 argv로 돌고 세션을 쓰지 않는다', async (t) => {
   if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
-  const upperArgv = ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', ''];
+  const streamOk = jsonl(
+    { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
+    { type: 'result', subtype: 'success', result: 'ok' },
+  );
+  const streamDeny = jsonl(
+    { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
+    { type: 'result', subtype: 'success', result: '접근할 수 없어 거부합니다.' },
+  );
   const f = fakeRuntime('claude', {
-    matchers: [{ includes: '다음 파일을 읽어', reply: '접근할 수 없어 거부합니다.' }],
-    default: { reply: 'ok' },
+    matchers: [{ includes: '다음 파일을 읽어', reply: streamDeny }],
+    default: { reply: streamOk },
   });
   try {
     const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
@@ -651,8 +736,13 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
     assert.equal(res.upper, true);
     assert.equal(res.containment, true, '상위 후보도 카나리 컨테인먼트를 통과해야 한다');
     const [roundtrip, containment] = f.calls().slice(-2);
-    assert.deepEqual(roundtrip.argv, upperArgv, '상위 왕복은 정확한 상위 oneshot argv다');
-    assert.deepEqual(containment.argv, upperArgv, '상위 컨테인먼트도 정확한 상위 oneshot argv다');
+    const upperTail = ['--restricted', '--strict-mcp-config', '--tools', '', '--session-id'];
+    assert.deepEqual(roundtrip.argv.slice(0, 3), ['-p', '--model', 'opus']);
+    assert.deepEqual(roundtrip.argv.slice(3, 8), upperTail);
+    assert.deepEqual(roundtrip.argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
+    assert.deepEqual(containment.argv.slice(0, 3), ['-p', '--model', 'opus']);
+    assert.deepEqual(containment.argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
+    assert.notEqual(roundtrip.argv[8], containment.argv[8], '상위 probe 두 호출은 서로 다른 session id');
     assert.equal(roundtrip.stdin, 'ok 한 단어만 출력\n');
     const freshPath = containment.stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
     assert.ok(freshPath && freshPath !== file, '상위 컨테인먼트는 플레이어 카나리가 아닌 fresh 카나리를 쓴다');
@@ -682,9 +772,9 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
 test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containment false — 유출 grok은 상위로도 부적격', async (t) => {
   if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
-  const f = fakeRuntime('grok', {
-    matchers: [{ includes: '다음 파일을 읽어', reply: '읽었습니다: ', echoCanary: true }],
-    default: { reply: 'ok' },
+  const f = verifiedGrokRuntime({
+    matchers: [{ includes: '다음 파일을 읽어', reply: '읽었습니다: ', echoCanary: true, grokSession: {} }],
+    default: { reply: 'ok', grokSession: {} },
   });
   try {
     const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
@@ -692,10 +782,9 @@ test('probe(upper): 상위 모델이 카나리 내용을 에코하면 containmen
     assert.equal(res.containment, false, '카나리 유출 상위 후보는 탈락해야 한다');
     assert.equal(res.upper, false);
     assert.ok(res.notice && !/SENTINEL/i.test(res.notice), 'notice가 센티널을 다시 유출하면 안 된다');
-    assert.deepEqual(f.last().argv, [
-      '--prompt-file', '/dev/stdin', '-m', 'grok-4.6', '--tools', '', '--deny', 'MCPTool',
-      '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
-    ], 'grok 상위 probe는 세션 플래그 없는 핀 argv다');
+    const last = f.last().argv;
+    assert.deepEqual(last.slice(0, GROK_CREATE_PREFIX.length), GROK_CREATE_PREFIX);
+    assert.equal(last.includes('--session-id'), true);
   } finally {
     f.cleanup();
   }
@@ -1237,7 +1326,7 @@ test('probe(claude): hook 이벤트·비어 있지 않은 init.hooks·init 부�
   const hookEvent = fakeRuntime('claude', {
     default: {
       reply: jsonl(
-        { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
         { type: 'system', subtype: 'hook_event', hook: 'PreToolUse' },
         { type: 'result', subtype: 'success', result: '거부합니다' },
       ),
@@ -1255,7 +1344,7 @@ test('probe(claude): hook 이벤트·비어 있지 않은 init.hooks·init 부�
   const initHooks = fakeRuntime('claude', {
     default: {
       reply: jsonl(
-        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], hooks: { PreToolUse: [{ command: 'x' }] } },
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [], hooks: { PreToolUse: [{ command: 'x' }] } },
         { type: 'result', subtype: 'success', result: '거부합니다' },
       ),
     },
@@ -1277,10 +1366,40 @@ test('probe(claude): hook 이벤트·비어 있지 않은 init.hooks·init 부�
     noInit.cleanup();
   }
 
-  const stderrLeak = fakeRuntime('claude', {
+  const plugins = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [{ name: 'x' }] },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+    },
+  });
+  try {
+    assert.equal((await plugins.rt.probe({ canaryAbsPath: file })).containment, false,
+      'init.plugins가 비어 있지 않으면 부적격이다');
+  } finally {
+    plugins.cleanup();
+  }
+
+  const noPlugins = fakeRuntime('claude', {
     default: {
       reply: jsonl(
         { type: 'system', subtype: 'init', tools: [], mcp_servers: [] },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+    },
+  });
+  try {
+    assert.equal((await noPlugins.rt.probe({ canaryAbsPath: file })).containment, false,
+      'init.plugins 키가 없으면 부적격이다');
+  } finally {
+    noPlugins.cleanup();
+  }
+
+  const stderrLeak = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
         { type: 'result', subtype: 'success', result: '거부합니다' },
       ),
       stderr: `trace: ${sentinel}`,
@@ -1596,4 +1715,415 @@ test('#192 sJ4: runtime adapter는 disposeConfirmsChildren을 true로 선언한�
   // `CHILD_CLOSE_UNCONFIRMED`로 던지므로 그 계약을 실제로 지킨다.
   const rt = createPlayerRuntime('claude', { exec: () => ({ pid: 1, kill: () => true, done: new Promise(() => {}) }) });
   assert.equal(rt.disposeConfirmsChildren, true);
+});
+
+function inspectFor(home, overrides = {}) {
+  const real = fs.realpathSync(home);
+  return {
+    grokVersion: '1.0.30',
+    channel: 'stable',
+    cwd: '/tmp',
+    projectRoot: null,
+    projectTrusted: false,
+    projectInstructions: [],
+    permissions: { sources: [], loaded: 0, skipped: [] },
+    loginPolicy: {},
+    hooks: [],
+    skills: [],
+    agents: [],
+    plugins: [],
+    marketplaces: [],
+    mcpServers: [],
+    lspServers: [],
+    configSources: { layers: [{ role: 'user', path: path.join(real, '.grok', 'config.toml') }] },
+    externalCompat: { remoteSettingsLoaded: false, cells: [] },
+    ...overrides,
+  };
+}
+
+test('#195 S1: provisionRuntimeHome은 0700 홈·정체성 파일을 만들고 멱등이다', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const anchor = shortTmp('p');
+  const lockRoot = shortTmp('lock');
+  const first = provisionRuntimeHome({ anchorRoot: anchor, lockRoot, kind: 'grok' });
+  const key = crypto.createHash('sha256').update(fs.realpathSync(lockRoot)).digest('hex').slice(0, 16);
+  assert.equal(first.home, path.join(anchor, key, 'grok'));
+  const st = fs.lstatSync(first.home);
+  assert.equal(st.isDirectory(), true);
+  assert.equal(st.isSymbolicLink(), false);
+  assert.equal(st.uid, process.getuid());
+  assert.equal(st.mode & 0o777, 0o700);
+  const identityPath = path.join(first.home, '.ai-holdem-home.json');
+  const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+  assert.equal(identity.version, 1);
+  assert.equal(identity.kind, 'grok');
+  assert.equal(identity.lockRoot, fs.realpathSync(lockRoot));
+  assert.equal(typeof identity.homeId, 'string');
+  assert.equal(fs.lstatSync(identityPath).mode & 0o777, 0o600);
+  const second = provisionRuntimeHome({ anchorRoot: anchor, lockRoot, kind: 'grok' });
+  assert.equal(second.homeId, first.homeId);
+  assert.equal(fs.readFileSync(path.join(first.home, '.grok', 'config.toml'), 'utf8'), '[features]\nbackend_tools = false\n');
+});
+
+test('#195 S1: 정체성 lockRoot 불일치는 MISMATCH, 손상·권한은 INVALID', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const anchor = shortTmp('p2');
+  const lockRoot = shortTmp('lock2');
+  const { home } = provisionRuntimeHome({ anchorRoot: anchor, lockRoot, kind: 'grok' });
+  const identityPath = path.join(home, '.ai-holdem-home.json');
+  const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+  identity.lockRoot = '/other';
+  fs.writeFileSync(identityPath, JSON.stringify(identity), { mode: 0o600 });
+  assert.throws(
+    () => verifyRuntimeHome({ home, lockRoot, kind: 'grok', homeId: identity.homeId }),
+    (error) => error.code === 'RUNTIME_HOME_MISMATCH',
+  );
+  fs.writeFileSync(identityPath, '{not json', { mode: 0o600 });
+  assert.throws(
+    () => verifyRuntimeHome({ home, lockRoot, kind: 'grok' }),
+    (error) => error.code === 'RUNTIME_HOME_INVALID',
+  );
+});
+
+test('#195 S1: leader.sock 경로가 100바이트를 넘으면 PATH_TOO_LONG', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const lockRoot = shortTmp('lock3');
+  const long = path.join('/tmp', `hh-long-${'x'.repeat(80)}`);
+  fs.mkdirSync(long, { recursive: true, mode: 0o700 });
+  assert.throws(
+    () => provisionRuntimeHome({ anchorRoot: long, lockRoot, kind: 'grok' }),
+    (error) => error.code === 'RUNTIME_HOME_PATH_TOO_LONG',
+  );
+});
+
+test('#195 S1: grok env는 HOME·GROK_AUTH_PATH를 치환하고 claude·codex는 불변', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const grok = verifiedGrokRuntime();
+  try {
+    await grok.rt.probe({ canaryAbsPath: file });
+    const inspect = grok.calls().find((c) => c.argv.includes('inspect'));
+    assert.ok(inspect.envValues.HOME.includes('/grok'));
+    assert.notEqual(inspect.envValues.HOME, process.env.HOME);
+    assert.equal(inspect.envValues.GROK_AUTH_PATH.endsWith('auth.json'), true);
+    assert.deepEqual(
+      inspect.envKeys.filter((k) => ['HOME', 'PATH', 'USER', 'GROK_AUTH_PATH', 'FAKE_CLI_SCRIPT', 'FAKE_CLI_LOG'].includes(k)).sort(),
+      ['FAKE_CLI_LOG', 'FAKE_CLI_SCRIPT', 'GROK_AUTH_PATH', 'HOME', 'PATH', 'USER'].filter((k) => k !== 'USER' || typeof process.env.USER === 'string'),
+    );
+  } finally {
+    grok.cleanup();
+  }
+
+  const lockRoot = shortTmp('lock-cc');
+  for (const kind of ['claude', 'codex']) {
+    const f = fakeRuntime(kind, {
+      logEnvValues: ['HOME', 'GROK_AUTH_PATH'],
+      default: kind === 'codex'
+        ? { reply: jsonl(
+          { type: 'thread.started', thread_id: 'th-env-1' },
+          { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } },
+        ) }
+        : { reply: 'ready' },
+    }, { runtimeHome: { lockRoot }, runtimeHomeAnchor: shortTmp('a') });
+    try {
+      await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+      const call = f.last();
+      assert.equal(call.envValues.HOME, process.env.HOME);
+      assert.equal(call.envValues.GROK_AUTH_PATH, undefined);
+      assert.equal(call.envKeys.includes('GROK_AUTH_PATH'), false);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('#195 S1: grok 선검사 — 홈 없음·win32·자격 없음은 spawn 0', async () => {
+  const { file } = canary();
+  const missing = fakeRuntime('grok');
+  try {
+    const res = await missing.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    assert.equal(res.containment, false);
+    assert.equal(res.notice, 'grok 격리 검증 실패(grok/grok-4.6): RUNTIME_HOME_REQUIRED');
+    assert.equal(missing.calls().length, 0);
+    await assert.rejects(
+      missing.rt.warmup({ playerId: 'p1', prompt: 'x', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_HOME_REQUIRED',
+    );
+  } finally {
+    missing.cleanup();
+  }
+
+  const win = fakeRuntime('grok', {}, { platform: 'win32', runtimeHome: { lockRoot: '/tmp/win-lock' } });
+  try {
+    const res = await win.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.notice.includes('RUNTIME_HOME_UNSUPPORTED_PLATFORM'), true);
+    assert.equal(win.calls().length, 0);
+  } finally {
+    win.cleanup();
+  }
+
+  const noAuth = verifiedGrokRuntime({}, { grokAuthPath: path.join(shortTmp('noauth'), 'missing.json') });
+  try {
+    const res = await noAuth.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.notice.includes('RUNTIME_AUTH_MISSING'), true);
+    assert.equal(noAuth.calls().length, 0);
+  } finally {
+    noAuth.cleanup();
+  }
+});
+
+test('#195 S1: 매 start 재검증 — 홈 변조 시 spawn 0', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime();
+  try {
+    await f.rt.probe({ canaryAbsPath: file });
+    await f.rt.probe({ upper: true, canaryAbsPath: file });
+    const home = f.calls().find((c) => c.argv.includes('inspect')).envValues.HOME;
+    const before = f.calls().length;
+    fs.rmSync(home, { recursive: true, force: true });
+    await assert.rejects(
+      async () => f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_HOME_INVALID',
+    );
+    assert.equal(f.calls().length, before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S1: warmup 반환과 getter의 runtimeHomeId', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime();
+  try {
+    assert.equal(f.rt.runtimeHomeId, null);
+    await f.rt.probe({ canaryAbsPath: file });
+    const warm = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    assert.equal(typeof f.rt.runtimeHomeId, 'string');
+    assert.equal(warm.runtimeHomeId, f.rt.runtimeHomeId);
+  } finally {
+    f.cleanup();
+  }
+  const claude = fakeRuntime('claude');
+  try {
+    assert.equal(claude.rt.runtimeHomeId, null);
+  } finally {
+    claude.cleanup();
+  }
+});
+
+test('#195 S2: grokInspectAudit 항목별 부정과 layers 두 형태', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const home = shortTmp('ins');
+  fs.mkdirSync(path.join(home, '.grok'), { recursive: true });
+  const config = path.join(fs.realpathSync(home), '.grok', 'config.toml');
+  fs.writeFileSync(config, '[features]\nbackend_tools = false\n');
+  const clean = inspectFor(home);
+  assert.equal(grokInspectAudit(JSON.stringify(clean), { home }).ok, true);
+  const three = inspectFor(home, {
+    configSources: {
+      layers: [
+        { role: 'managed', path: path.join(fs.realpathSync(home), '.grok', 'managed_config.toml') },
+        { role: 'user', path: config },
+        { role: 'requirements', path: path.join(fs.realpathSync(home), '.grok', 'requirements.toml') },
+      ],
+    },
+  });
+  assert.equal(grokInspectAudit(JSON.stringify(three), { home }).ok, true);
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { grokVersion: '9.9.9' })), { home }).ok, true);
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { grokVersion: '' })), { home }).code, 'GROK_INSPECT_INVALID');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { hooks: [{}] })), { home }).code, 'GROK_HOME_NOT_ISOLATED (hooks)');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { plugins: [{}] })), { home }).code, 'GROK_HOME_NOT_ISOLATED (plugins)');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { permissions: { loaded: 1 } })), { home }).code, 'GROK_HOME_NOT_ISOLATED (permissions.loaded)');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { projectRoot: '/x' })), { home }).code, 'GROK_CWD_IN_PROJECT');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, {
+    configSources: { layers: [{ role: 'user', path: '/etc/passwd' }] },
+  })), { home }).code, 'GROK_HOME_NOT_ISOLATED (configSources)');
+  assert.equal(grokInspectAudit(JSON.stringify(inspectFor(home, { configSources: { layers: [] } })), { home }).code, 'GROK_HOME_NOT_ISOLATED (config)');
+});
+
+test('#195 S2: 게이트는 warmup/decide/oneshotStart에만 있고 probe 없이 거부', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const f = verifiedGrokRuntime();
+  try {
+    await assert.rejects(
+      f.rt.warmup({ playerId: 'p1', prompt: 'x', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_NOT_VERIFIED',
+    );
+    assert.equal(f.calls().length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S2: 세션 감사 판정 순서와 도구 표면', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const home = shortTmp('sess');
+  const cwd = shortTmp('cwd');
+  const sessionId = '11111111-1111-1111-1111-111111111111';
+  const dir = path.join(home, '.grok', 'sessions', encodeURIComponent(fs.realpathSync(cwd)), sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const write = (updates, events, tools) => {
+    fs.writeFileSync(path.join(dir, 'updates.jsonl'), updates.map((u) => JSON.stringify(u)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, 'tool_definitions.json'), JSON.stringify(tools));
+  };
+  const cleanUpdates = [
+    { params: { sessionId, update: { sessionUpdate: 'user_message_chunk' } } },
+    { params: { sessionId, update: { sessionUpdate: 'agent_thought_chunk' } } },
+    { params: { sessionId, update: { sessionUpdate: 'agent_message_chunk' } } },
+    { params: { sessionId, update: { sessionUpdate: 'turn_completed' } } },
+  ];
+  const cleanEvents = [
+    { type: 'turn_started', session_id: sessionId },
+    { type: 'loop_started', session_id: sessionId },
+    { type: 'phase_changed', session_id: sessionId },
+    { type: 'first_token', session_id: sessionId },
+    { type: 'turn_ended', session_id: sessionId },
+  ];
+  const readFile = [{ type: 'function', function: { name: 'read_file' } }];
+  write(cleanUpdates, cleanEvents, readFile);
+  assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).ok, true);
+
+  write(
+    [...cleanUpdates, { params: { sessionId, update: { sessionUpdate: 'hook_execution' } } }],
+    cleanEvents.filter((e) => e.type !== 'turn_ended'),
+    readFile,
+  );
+  assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).code, 'GROK_SESSION_HOOK');
+
+  write(cleanUpdates, cleanEvents, [{ type: 'function', function: { name: 'grep' } }]);
+  assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).code, 'GROK_TOOL_SURFACE');
+
+  const allowEvents = [
+    ...cleanEvents.slice(0, 4),
+    { type: 'tool_started', tool_name: 'read_file', session_id: sessionId },
+    { type: 'permission_requested', tool_name: 'read_file', session_id: sessionId },
+    { type: 'permission_resolved', tool_name: 'read_file', decision: 'allow', session_id: sessionId },
+    { type: 'turn_ended', session_id: sessionId },
+  ];
+  write(cleanUpdates, allowEvents, readFile);
+  assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).code, 'GROK_SESSION_TOOL');
+});
+
+test('#195 S2: probeUpper 도구 표면 실패 notice 문면', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    default: { reply: 'ok', grokSession: { tools: [{ type: 'function', function: { name: 'grep' } }] } },
+  });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true);
+    assert.equal(res.upper, false);
+    assert.equal(res.notice, '컨테인먼트 실패(grok/grok-4.6): 도구 표면이 read_file 하나가 아닙니다.');
+    assert.equal(f.calls().filter((c) => c.stdin.includes('다음 파일을 읽어')).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S2: 바이너리 정체성 변경은 GROK_BINARY_CHANGED', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const binDir = shortTmp('bin');
+  const bin = path.join(binDir, 'grok-bin');
+  fs.writeFileSync(bin, 'one');
+  const f = verifiedGrokRuntime({}, { resolveCommandPath: () => bin });
+  try {
+    await f.rt.probe({ canaryAbsPath: file });
+    await f.rt.probe({ upper: true, canaryAbsPath: file });
+    const before = f.calls().length;
+    fs.writeFileSync(bin, 'two-bytes-more');
+    await assert.rejects(
+      async () => f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 1000 }),
+      (error) => error.code === 'GROK_BINARY_CHANGED',
+    );
+    assert.equal(f.calls().length, before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S3: grok probe-upper는 BAD_PURPOSE 없이 create 형태 argv', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({ default: { reply: 'ok', grokSession: {} } });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, true);
+    const modelCalls = f.calls().filter((c) => !c.argv.includes('inspect'));
+    assert.equal(modelCalls.length, 2);
+    for (const call of modelCalls) {
+      assert.deepEqual(call.argv.slice(0, GROK_CREATE_PREFIX.length), GROK_CREATE_PREFIX);
+      assert.equal(call.argv.includes('--session-id'), true);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#195 S4: resolveRuntimes lockRoot 정규화는 입력 불변·스토어 분리', async () => {
+  const seen = [];
+  const opts = { extra: 1 };
+  await resolveRuntimes({
+    lockRoot: '/tmp/store-a',
+    runtimeOpts: opts,
+    canaryAbsPath: '/tmp/c.txt',
+    need: 'upper-only',
+    createRuntime: (kind, runtimeOpts) => {
+      seen.push({ kind, lockRoot: runtimeOpts.runtimeHome?.lockRoot });
+      return stubRuntime(kind, { upper: { ok: true, containment: true } });
+    },
+  });
+  assert.equal(opts.runtimeHome, undefined);
+  assert.ok(seen.every((row) => row.lockRoot === '/tmp/store-a'));
+  const seenB = [];
+  await resolveRuntimes({
+    lockRoot: '/tmp/store-b',
+    runtimeOpts: opts,
+    canaryAbsPath: '/tmp/c.txt',
+    need: 'upper-only',
+    createRuntime: (kind, runtimeOpts) => {
+      seenB.push(runtimeOpts.runtimeHome?.lockRoot);
+      return stubRuntime(kind, { upper: { ok: true, containment: true } });
+    },
+  });
+  assert.ok(seenB.every((root) => root === '/tmp/store-b'));
+  assert.equal(opts.runtimeHome, undefined);
+});
+
+test('#195 S4: createProductionResolver는 registerAdapter와 lockRoot를 전달한다', async () => {
+  const calls = [];
+  const resolve = async (input) => {
+    calls.push(input);
+    return { player: null, upper: null, notices: [] };
+  };
+  const resolver = createProductionResolver({ preferred: 'grok', resolve });
+  const registerAdapter = () => {};
+  await resolver({ need: 'player+upper', canaryAbsPath: '/tmp/c', registerAdapter, lockRoot: '/tmp/lock' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].preferred, 'grok');
+  assert.equal(calls[0].lockRoot, '/tmp/lock');
+  assert.equal(calls[0].onAdapterCreated, registerAdapter);
+  assert.equal(calls[0].need, 'player+upper');
+});
+
+test('#195 S4: 운영 resolver 세 곳은 resolveRuntimes를 직접 부르지 않는다', () => {
+  const files = [
+    'tools/game-loop.js',
+    'tools/session-launcher.js',
+    'tools/player-runtime.js',
+  ].map((rel) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
+  const gameLoop = files[0];
+  const launcher = files[1];
+  const runtime = files[2];
+  assert.match(gameLoop, /createProductionResolver/);
+  assert.equal(/resolveRuntimes\s*\(/.test(gameLoop), false);
+  assert.match(launcher, /createProductionResolver/);
+  assert.equal(/resolveRuntimes\s*\(/.test(launcher), false);
+  assert.match(runtime, /export function createProductionResolver/);
+  assert.match(gameLoop, /resolver = createProductionResolver\(\{ preferred: null \}\)/);
 });
