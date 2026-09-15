@@ -18,6 +18,8 @@ import {
 import { createStartTimeProbe, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
+  defaultReclaimBudgets,
+  platformBudgetScale,
   exitCodeFor,
   parseGameLoopArgs,
   prepareGameSession,
@@ -5705,7 +5707,7 @@ test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 hal
   assert.equal(secondCalls.filter((args) => args[0] === 'begin-owner').length, 1);
 });
 
-test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 }, async (t) => {
+test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -5727,9 +5729,9 @@ test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 beg
       port: 0,
       waitMs: 0,
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => calls.push(args),
     },
   });
@@ -10532,9 +10534,9 @@ test('#192 FO-3 RED: policy playing resume도 살아 있는 persisted coach를 �
       waitMs: 0,
       opponentRuntime: 'policy',
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => calls.push(args),
     },
   });
@@ -10578,9 +10580,9 @@ test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServe
       waitMs: 0,
       opponentRuntime: 'policy',
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => {
         if (calls.length === 0) {
           // D6: the reclaim's own coach CLI calls (fence/cleanup-result) must fire only
@@ -13970,9 +13972,9 @@ test('#192 J4: playing resume의 legacy 스캔이 identity deadline 안에 해�
       // enough out that the real child-process calls after the scan (adapter-disable, fence)
       // have room to finish, so it is specifically the scan bound (J4) being exercised here —
       // not the pre-existing closure deadline racing a subprocess spawn.
-      orphanTerminateGraceMs: 5,
-      orphanTerminateKillWaitMs: 5,
-      resumeReclaimResidualMs: 8_000,
+      orphanTerminateGraceMs: 5 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 5 * WIN32_SCALE,
+      resumeReclaimResidualMs: 8_000 * WIN32_SCALE,
       scanCoachRuntimeProcesses: () => new Promise(() => {}),
     },
   });
@@ -14653,4 +14655,53 @@ test('#207 resume cleanup lock loss preserves the resolver error without a cause
   const row = logs.find((entry) => entry.event === 'resume-cleanup-lock-lost');
   assert.ok(row);
   assert.equal('cause' in row, false);
+});
+
+
+test('#204 default reclaim budgets scale all four defaults only on win32', () => {
+  const expected = { finalizeBudgetMs: 20_000, orphanTerminateGraceMs: 5_000, orphanTerminateKillWaitMs: 2_000, resumeReclaimResidualMs: 5_000 };
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const scale = platform === 'win32' ? 10 : 1;
+    assert.equal(platformBudgetScale(platform), scale);
+    assert.deepEqual(defaultReclaimBudgets(platform), Object.fromEntries(Object.entries(expected).map(([key, value]) => [key, value * scale])));
+  }
+});
+
+for (const budgetPlatform of ['win32', undefined]) {
+  test(`#204 playing resume wires default budgets (${budgetPlatform ?? 'native'})`, { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+    await first.bootstrap({ ai: 1 });
+    const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+    const orphan = await startCoachOrphan({ ignoreTerm: false });
+    t.after(() => terminateIfAlive(orphan));
+    await seedRunningCoach(gameDir, oldOwner, 1, orphan);
+    await first.requestStop();
+    const logs = [];
+    const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: { port: 0, waitMs: 0, budgetPlatform, log: (row) => logs.push(row) } });
+    t.after(() => loop.requestStop().catch(() => {}));
+    assert.equal((await loop.resume()).phase, 'playing');
+    await waitUntilDead(orphan.pid);
+    const row = logs.find((entry) => entry.event === 'resume-reclaim-budget');
+    assert.ok(row);
+    const defaults = defaultReclaimBudgets(budgetPlatform);
+    assert.deepEqual([row.graceMs, row.killWaitMs, row.residualMs, row.scale], [defaults.orphanTerminateGraceMs, defaults.orphanTerminateKillWaitMs, defaults.resumeReclaimResidualMs, platformBudgetScale(budgetPlatform)]);
+  });
+}
+
+test('#204 explicit reclaim budgets are not scaled again', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  await first.bootstrap({ ai: 1 });
+  await first.requestStop();
+  const logs = [];
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0, waitMs: 0, budgetPlatform: 'win32', orphanTerminateGraceMs: 5,
+    orphanTerminateKillWaitMs: 5, resumeReclaimResidualMs: 8_000, log: (row) => logs.push(row),
+  } });
+  t.after(() => loop.requestStop().catch(() => {}));
+  assert.equal((await loop.resume()).phase, 'playing');
+  const row = logs.find((entry) => entry.event === 'resume-reclaim-budget');
+  assert.ok(row);
+  assert.deepEqual([row.graceMs, row.killWaitMs, row.residualMs, row.scale], [5, 5, 8_000, 10]);
 });

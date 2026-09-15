@@ -108,7 +108,19 @@ const REVIEW_HEADING_PATTERNS = Object.freeze([
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
 // Win32 ACL proofs spent ~72s in a 20-hand session under that POSIX ceiling.
-const FINALIZE_BUDGET_MS = process.platform === 'win32' ? 200_000 : 20_000;
+export function platformBudgetScale(platform = process.platform) {
+  return platform === 'win32' ? 10 : 1;
+}
+
+export function defaultReclaimBudgets(platform = process.platform) {
+  const scale = platformBudgetScale(platform);
+  return {
+    finalizeBudgetMs: 20_000 * scale,
+    orphanTerminateGraceMs: 5_000 * scale,
+    orphanTerminateKillWaitMs: 2_000 * scale,
+    resumeReclaimResidualMs: 5_000 * scale,
+  };
+}
 const FINALIZE_CUTOFF_LEAD_MS = 10_000;
 // A finalization halt is a retryable operator condition: the next --resume re-enters the
 // same checkpoint. repair_failed/NO_PLAYER_RUNTIME keep their own play-time boundaries.
@@ -828,14 +840,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // publish.js compares --deadline-monotonic-ns against its own process.hrtime.bigint(),
   // which is the system monotonic clock: the two processes share the origin.
   const monotonicNs = opts.monotonicNs ?? (() => process.hrtime.bigint());
-  const finalizeBudgetMs = opts.finalizeBudgetMs ?? FINALIZE_BUDGET_MS;
+  const budgetPlatform = opts.budgetPlatform ?? process.platform;
+  const budgetDefaults = defaultReclaimBudgets(budgetPlatform);
+  const finalizeBudgetMs = opts.finalizeBudgetMs ?? budgetDefaults.finalizeBudgetMs;
   const finalizeCutoffLeadMs = Math.min(
     opts.finalizeCutoffLeadMs ?? FINALIZE_CUTOFF_LEAD_MS,
     finalizeBudgetMs,
   );
-  const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? 5_000;
-  const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? 2_000;
-  const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? 5_000;
+  const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? budgetDefaults.orphanTerminateGraceMs;
+  const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? budgetDefaults.orphanTerminateKillWaitMs;
+  const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? budgetDefaults.resumeReclaimResidualMs;
   const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
@@ -4365,6 +4379,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   );
 
   const reclaimPersistedCoachWorkersForResume = async (completedHands, { policyMode = false } = {}) => {
+    log('resume-reclaim-budget', {
+      graceMs: orphanTerminateGraceMs,
+      killWaitMs: orphanTerminateKillWaitMs,
+      residualMs: resumeReclaimResidualMs,
+      scale: platformBudgetScale(budgetPlatform),
+    });
     const budgetMs = orphanTerminateGraceMs + orphanTerminateKillWaitMs + resumeReclaimResidualMs;
     const deadlineNs = monotonicNs() + BigInt(budgetMs) * 1_000_000n;
     const identityDeadlineNs = deadlineNs - BigInt(resumeReclaimResidualMs) * 1_000_000n;
