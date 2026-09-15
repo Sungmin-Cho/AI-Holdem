@@ -10,4 +10,6 @@ test('fresh retry has a separate confirmation explaining seat memory loss',()=>{
   assert.match(js,/freshSession:\s*true/);
   assert.match(js,/freshSessionAvailable/);
   assert.match(js,/freshSessionAuthorized/);
+  assert.match(js,/RETRY_NOT_APPLIED:/);
+  assert.match(js,/재시도를 다시 선택/);
 });

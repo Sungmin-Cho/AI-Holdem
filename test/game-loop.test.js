@@ -355,7 +355,7 @@ test('#196 legacy run forwards an explicit fresh-session grant after resume', {t
   const decisionId=loop.pendingDecision.decisionId;
   await loop.requestStop();
   const adapter=makeAdapter({sessionIdFor:()=> 'legacy-fresh-session',onDecide:async({sessionId,message})=>({raw:sessionId==='legacy-fresh-session'?JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'}):'invalid'})});
-  const args=parseGameLoopArgs(['--game-dir',gameDir,'--port','0','--resume','--retry-decision',decisionId,'--fresh-session']);
+  const args=applyModeDefaults(parseGameLoopArgs(['--game-dir',gameDir,'--port','0','--resume','--retry-decision',decisionId,'--fresh-session']));
   const {loop:restored}=await prepareGameSession(args,{resolver:resolverFor(adapter),loopOptions:{waitMs:0}});
   t.after(()=>restored.requestStop());
   await restored.resume();
@@ -989,6 +989,8 @@ test('#196 retry rejects each stale pending identity for ordinary and fresh auth
 });
 
 test('#196 a managed pause waits for fresh warmup to make exactly one decision', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  // Existing warmup-entry coverage is complemented by the restored run-entry
+  // authorization/pause boundary below.
   let releaseWarmup;
   let freshWarmupEntered = false;
   const freshWarmup = new Promise((resolve) => { releaseWarmup = resolve; });
@@ -1048,6 +1050,52 @@ test('#196 overlapping fresh and ordinary retries reject the delayed stale autho
   await assert.rejects(delayedFresh, { code: 'INVALID_TRANSITION' });
   assert.equal(loop.pendingDecision.generation, original.generation + 1);
   assert.equal(Object.hasOwn(loop.pendingDecision, 'freshAuthorization'), false);
+});
+
+test('#196 pause after restored retry authorization waits until the decision is consumed', {timeout:40000*WIN32_SCALE},async t=>{
+  for(const fresh of [false,true])await t.test(fresh?'fresh':'ordinary',async st=>{
+    const original=await setupAiFirst(st,{adapter:makeAdapter({onDecide:async()=>({raw:'invalid'})}),loopOpts:{controlProtocolVersion:1}});
+    const originalRun=startRun(original.loop);
+    await waitFor(()=>original.loop.playState==='paused','original did not park');
+    await original.loop.requestStop();
+    await originalRun.catch(error=>{if(error.code!=='CHILD_FAILED'||!error.cause?.killed)throw error;});
+    let release,enter,authorizedSteps=0;
+    const entered=new Promise(r=>enter=r),gate=new Promise(r=>release=r);
+    const adapter=makeAdapter({onDecide:async({message})=>({raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})})});
+    const loop=createGameLoop({gameDir:original.gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,startPaused:true,
+      controlProtocolVersion:1,onEngineInvoke:async args=>{
+        if(args[0]==='step'&&!args.includes('--expect-version')&&loop.pendingDecision?.status==='retry_authorized'&&++authorizedSteps===3){enter();await gate;}
+      }}});
+    st.after(()=>{release();return loop.requestStop();});
+    await loop.resume();const running=startRun(loop);
+    await waitFor(()=>loop.playState==='paused','restored run did not park');
+    const warmups=adapter.calls.length;
+    await loop.retryDecision(loop.pendingDecision.decisionId,{freshAuthorization:fresh?{source:'app',requestId:'pre-warmup-pause'}:null});
+    await Promise.race([entered,new Promise((_,reject)=>setTimeout(()=>reject(new Error('run-entry gate not reached')),5000*WIN32_SCALE))]);
+    const pausing=loop.pause();release();await pausing;
+    assert.equal(loop.playState,'paused');
+    assert.equal(adapter.decideCalls.length,1,'the authorized decision must run before pause');
+    assert.equal(adapter.calls.length,warmups+Number(fresh));
+    assert.equal(loop.pendingDecision,null);
+    await loop.endGame('post-authorization-pause-end');await running;
+  });
+});
+
+test('#196 a failed resume publication rolls back fresh authorization without warming a seat',{timeout:20000*WIN32_SCALE},async t=>{
+  let armed=false,gameDir;
+  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
+  const f=await setupAiFirst(t,{adapter,loopOpts:{controlProtocolVersion:1,onEngineInvoke:args=>{
+    if(armed&&args[0]==='step'&&readJson(path.join(gameDir,'loop-state.json')).pendingDecision?.status==='retry_authorized'){
+      throw Object.assign(new Error('view preflight failed'),{code:'RESUME_VIEW_REJECTED'});
+    }
+  }}});gameDir=f.gameDir;
+  const running=startRun(f.loop);await waitFor(()=>f.loop.playState==='paused','initial recovery did not park');
+  const pending=f.loop.pendingDecision,warmups=adapter.calls.length;armed=true;
+  await assert.rejects(f.loop.retryDecision(pending.decisionId,{freshAuthorization:{source:'app',requestId:'rollback-fresh'}}),{code:'RESUME_VIEW_REJECTED'});
+  assert.equal(f.loop.pendingDecision.status,'recovery_required');
+  assert.equal(Object.hasOwn(f.loop.pendingDecision,'freshAuthorization'),false);
+  assert.equal(adapter.calls.length,warmups);
+  await f.loop.requestStop();await running.catch(error=>{if(error.code!=='CHILD_FAILED'||!error.cause?.killed)throw error;});
 });
 
 async function waitFor(predicate, message, timeoutMs = 3_000 * WIN32_SCALE) {
