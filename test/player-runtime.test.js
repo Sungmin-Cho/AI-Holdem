@@ -249,6 +249,22 @@ test('세션 지속: 워밍업 1회 후 결정마다 같은 sessionId로 resume'
   }
 });
 
+test('같은 seat의 두 real-child warmup은 close 뒤 각각 새 sessionId를 반환한다', async () => {
+  const f = fakeRuntime('claude');
+  try {
+    const first = await f.rt.warmup({ playerId: 'p1', prompt: '첫 페르소나', timeoutMs: 5000 });
+    const firstCall = f.last();
+    assert.equal(isAlive(firstCall.pid), false, '첫 warmup 반환은 child close 뒤여야 한다');
+    const second = await f.rt.warmup({ playerId: 'p1', prompt: '새 페르소나', timeoutMs: 5000 });
+    const secondCall = f.last();
+    assert.equal(isAlive(secondCall.pid), false, '둘째 warmup 반환은 child close 뒤여야 한다');
+    assert.notEqual(first.sessionId, second.sessionId, 'fresh warmup은 같은 seat에도 새 세션을 만들어야 한다');
+    assert.equal(f.calls().filter((call) => call.argv.includes('--session-id')).length, 2);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('세션 격리: 두 플레이어의 sessionId가 다르고 각 decide의 stdin은 그 플레이어 것만 담는다', async () => {
   const f = fakeRuntime('claude');
   try {
