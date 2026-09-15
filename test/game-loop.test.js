@@ -212,12 +212,13 @@ function makeAdapter({
     get disposed() { return disposed; },
     async warmup(input) {
       calls.push(input);
+      const callNo = calls.length;
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await onWarmup?.(input);
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       inFlight -= 1;
-      return { sessionId: sessionIdFor(input, calls.length), raw: 'ready' };
+      return { sessionId: sessionIdFor(input, callNo), raw: 'ready' };
     },
     async decide(input) {
       decideCalls.push(input);
@@ -355,7 +356,7 @@ test('#196 legacy run forwards an explicit fresh-session grant after resume', {t
   await loop.requestStop();
   const adapter=makeAdapter({sessionIdFor:()=> 'legacy-fresh-session',onDecide:async({sessionId,message})=>({raw:sessionId==='legacy-fresh-session'?JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'}):'invalid'})});
   const args=parseGameLoopArgs(['--game-dir',gameDir,'--port','0','--resume','--retry-decision',decisionId,'--fresh-session']);
-  const {loop:restored}=await prepareGameSession(args,{resolver:resolverFor(adapter)});
+  const {loop:restored}=await prepareGameSession(args,{resolver:resolverFor(adapter),loopOptions:{waitMs:0}});
   t.after(()=>restored.requestStop());
   await restored.resume();
   await runUntilUserBoundary(restored,gameDir);
@@ -399,6 +400,7 @@ test('#196 fresh-session authorization rejects non-boolean close receipts and a 
     const statePath = path.join(gameDir, 'loop-state.json');
     const state = readJson(statePath);
     writeJsonAtomic(statePath, { ...state, pendingDecision: { ...state.pendingDecision, closeConfirmed } });
+    await assert.rejects(loop.retryDecision(state.pendingDecision.decisionId), { code: 'PLAYER_RECOVERY_REQUIRED' });
     await assert.rejects(loop.retryDecision(state.pendingDecision.decisionId, {
       freshAuthorization: { source: 'app', requestId: `bad-close-${String(closeConfirmed)}` },
     }), { code: 'PLAYER_RECOVERY_REQUIRED' });
@@ -570,6 +572,48 @@ test('#196 fresh authorization is removed across resume and fresh budget expiry 
   assert.equal(setup.loop.pendingDecision.closeConfirmed, true);
 });
 
+test('#196 resume strips a hand-injected fresh grant from recovery_required and unsafe records', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  for (const status of ['recovery_required', 'unsafe']) await t.test(status, async (st) => {
+    const { gameDir, loop } = await setupAiFirst(st, { adapter: makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) }) });
+    await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    await loop.requestStop();
+    const filename = path.join(gameDir, 'loop-state.json');
+    const state = readJson(filename);
+    writeJsonAtomic(filename, {
+      ...state,
+      pendingDecision: {
+        ...state.pendingDecision,
+        status,
+        freshAuthorization: { source: 'app', requestId: `injected-${status}` },
+      },
+    });
+    const restored = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+    st.after(() => restored.requestStop().catch(() => {}));
+    await restored.resume();
+    assert.equal(restored.pendingDecision.status, status);
+    assert.equal(Object.hasOwn(restored.pendingDecision, 'freshAuthorization'), false);
+  });
+});
+
+test('#196 a fresh grant lost to recovery leaves an ordinary retry with no warmup and byte-identical sessions', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) }) });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  const decisionId = loop.pendingDecision.decisionId;
+  await loop.retryDecision(decisionId, { freshAuthorization: { source: 'app', requestId: 'lost-before-run' } });
+  const before = fs.readFileSync(path.join(gameDir, '.player-sessions.json'));
+  await loop.requestStop();
+  const adapter = makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) });
+  const restored = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => restored.requestStop().catch(() => {}));
+  await restored.resume();
+  assert.equal(restored.pendingDecision.status, 'recovery_required');
+  assert.equal(Object.hasOwn(restored.pendingDecision, 'freshAuthorization'), false);
+  await restored.retryDecision(decisionId);
+  await assert.rejects(restored.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(adapter.calls.length, 0);
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), before);
+});
+
 test('#196 fresh retry records the warmup, recreation, retry outcome, and exact remaining decision budget', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   let clock = 0;
   const adapter = makeAdapter({
@@ -671,6 +715,69 @@ test('#196 a crash after the fresh session file write but before its decision is
   assert.equal(restored.pendingDecision.status, 'unsafe');
   assert.equal(restored.pendingDecision.code, 'CHILD_CLOSE_UNCONFIRMED');
   assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), capturedSessions);
+});
+
+test('#196 a crash after fresh marker readiness and session-file write but before close receipt drop is retryable', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  let gameDir;
+  let capturedState = null;
+  let capturedSessions = null;
+  const adapter = makeAdapter({
+    sessionIdFor: (_input, n) => `marker-session-${n}`,
+    onDecide: async ({ sessionId, message }) => ({
+      raw: sessionId === 'marker-session-1'
+        ? 'invalid'
+        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+    }),
+  });
+  const setup = await setupAiFirst(t, {
+    adapter,
+    loopOpts: { log: (entry) => {
+      if (entry.event !== 'player-session-recreated' || entry.reason !== 'user_fresh_session' || capturedState) return;
+      capturedState = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
+      capturedSessions = fs.readFileSync(path.join(gameDir, '.player-sessions.json'));
+    } },
+  });
+  gameDir = setup.gameDir;
+  await assert.rejects(setup.loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  await setup.loop.retryDecision(setup.loop.pendingDecision.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'marker-file-before-drop' },
+  });
+  await runUntilUserBoundary(setup.loop, gameDir);
+  assert.ok(capturedState);
+  const capturedPending = JSON.parse(capturedState).pendingDecision;
+  assert.equal(capturedPending.status, 'running');
+  assert.equal(capturedPending.closeConfirmed, true);
+  assert.equal(capturedPending.freshSessionReady, true);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), capturedState);
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), capturedSessions);
+  const restored = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  t.after(() => restored.requestStop().catch(() => {}));
+  await restored.resume();
+  assert.equal(restored.pendingDecision.status, 'recovery_required');
+  assert.equal(restored.pendingDecision.code, 'INTERRUPTED');
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), capturedSessions);
+});
+
+test('#196 fresh retry recreates only the parked seat in a multi-AI game', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const adapter = makeAdapter({
+    sessionIdFor: (input, n) => `${input.playerId}-session-${n}`,
+    onDecide: async ({ sessionId, message }) => ({
+      raw: sessionId === 'p1-session-1'
+        ? 'invalid'
+        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter, ai: 2 });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  const before = readJson(path.join(gameDir, '.player-sessions.json'));
+  await loop.retryDecision(loop.pendingDecision.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'only-p1-recreated' },
+  });
+  await runUntilUserBoundary(loop, gameDir);
+  const after = readJson(path.join(gameDir, '.player-sessions.json'));
+  assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1', 'p2', 'p1']);
+  assert.notEqual(after.p1.sessionId, before.p1.sessionId);
+  assert.deepEqual(after.p2, before.p2);
 });
 
 test('#196 immediate stop strips fresh authorization from every nonterminal retry status', { timeout: 30_000 * WIN32_SCALE }, async (t) => {

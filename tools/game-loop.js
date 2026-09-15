@@ -5687,8 +5687,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             const {freshAuthorization: _freshAuthorization, ...pending} = currentPending;
             const interrupted = ownedPlayerAttempt
               && ['gameEpoch','decisionId','generation'].every(key => pending[key] === ownedPlayerAttempt[key])
-              && (pending.status === 'running'
-                || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(pending.code));
+              && pending.status === 'running';
             pendingPatch = {pendingDecision: interrupted
               ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false}
               : pending};
