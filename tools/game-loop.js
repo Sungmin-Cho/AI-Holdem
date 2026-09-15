@@ -5406,8 +5406,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('INVALID_TRANSITION', '정지 또는 상태 전환 뒤에는 재시도를 인가하지 않습니다.');
     }
     const latest = readLoopState()?.pendingDecision;
-    if (!latest || latest.status !== 'recovery_required' || latest.generation !== pending.generation) {
+    const samePendingIdentity = (candidate) => candidate &&
+      ['schemaVersion', 'gameEpoch', 'decisionId', 'playerId', 'stateVersion', 'generation']
+        .every(key => candidate[key] === pending[key]);
+    if (!samePendingIdentity(latest) || latest.status !== 'recovery_required') {
       throw codedError('INVALID_TRANSITION', '이미 재시도 중입니다.');
+    }
+    if (latest.closeConfirmed !== true) {
+      throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
     }
     const {freshAuthorization: _staleAuthorization, ...base} = pending;
     const authorized = {
@@ -5424,7 +5430,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try { await resumePlay(); }
       catch (error) {
         const authorizedRecord = readLoopState()?.pendingDecision;
-        if (authorizedRecord?.status === 'retry_authorized' && authorizedRecord.generation === pending.generation) {
+        if (authorizedRecord?.status === 'retry_authorized' && samePendingIdentity(authorizedRecord)) {
           writeLoopState({ pendingDecision: { ...base, softWait: false } });
         }
         throw error;
