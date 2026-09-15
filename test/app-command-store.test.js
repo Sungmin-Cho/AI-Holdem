@@ -197,6 +197,18 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(manager.snapshot().state, 'paused');
+  const loopFilename=path.join(manager.current.sessionDir,'loop-state.json');
+  const parkedBytes=fs.readFileSync(loopFilename);
+  const parked=JSON.parse(parkedBytes);
+  fs.writeFileSync(loopFilename,JSON.stringify({...parked,pendingDecision:{...parked.pendingDecision,
+    status:'retry_authorized',freshAuthorization:{source:'app',requestId:'projection-only'}}}));
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAuthorized,true);
+  fs.writeFileSync(loopFilename,parkedBytes);
+  const setupFilename=path.join(manager.current.sessionDir,'.app-setup.json');
+  const setupBytes=fs.readFileSync(setupFilename);
+  fs.writeFileSync(setupFilename,JSON.stringify({...JSON.parse(setupBytes),opponentRuntime:'policy'}));
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAvailable,false);
+  fs.writeFileSync(setupFilename,setupBytes);
   const originalRetry = manager.session.loop.retryDecision;
   let forwarded;
   manager.session.loop.retryDecision = async (decisionId, options) => {
@@ -212,6 +224,7 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
   while (!freshWarmup && Date.now() < warmupDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(freshWarmup, true);
   assert.equal(calls.length, 2);
+  assert.throws(()=>manager.command({...payload(manager,'retry-decision'),decisionId:retry.decisionId,freshSession:true}),{code:'INVALID_TRANSITION'});
   releaseWarmup();
   while (manager.snapshot().state !== 'paused' && Date.now() < warmupDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));

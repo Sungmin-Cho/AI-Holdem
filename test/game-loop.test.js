@@ -19,6 +19,7 @@ import {
   createGameLoop,
   exitCodeFor,
   parseGameLoopArgs,
+  prepareGameSession,
   engineInitFlags,
   applyModeDefaults,
 } from '../tools/game-loop.js';
@@ -353,7 +354,8 @@ test('#196 legacy run forwards an explicit fresh-session grant after resume', {t
   const decisionId=loop.pendingDecision.decisionId;
   await loop.requestStop();
   const adapter=makeAdapter({sessionIdFor:()=> 'legacy-fresh-session',onDecide:async({sessionId,message})=>({raw:sessionId==='legacy-fresh-session'?JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'}):'invalid'})});
-  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,retryDecisionId:decisionId,freshAuthorization:{source:'legacy',requestId:null}}});
+  const args=parseGameLoopArgs(['--game-dir',gameDir,'--port','0','--resume','--retry-decision',decisionId,'--fresh-session']);
+  const {loop:restored}=await prepareGameSession(args,{resolver:resolverFor(adapter)});
   t.after(()=>restored.requestStop());
   await restored.resume();
   await runUntilUserBoundary(restored,gameDir);
@@ -524,6 +526,18 @@ test('#196 fresh warmup failures remain retryable unless the runtime failure is 
     assert.equal(pending.code, code);
     assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), before);
     if (!fatal) assert.ok(readLoopLog(gameDir).some((entry) => entry.event === 'player-session-recreate-failed' && entry.code === code));
+    if (fatal) {
+      const unsafeDecisionId = pending.decisionId;
+      await loop.requestStop();
+      assert.equal(readJson(path.join(gameDir, 'loop-state.json')).pendingDecision.status, 'unsafe');
+      const restored = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+      st.after(() => restored.requestStop().catch(() => {}));
+      await restored.resume();
+      assert.equal(restored.pendingDecision.status, 'unsafe');
+      await assert.rejects(restored.retryDecision(unsafeDecisionId, {
+        freshAuthorization: { source: 'app', requestId: `fatal-retry-${code}` },
+      }), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    }
   });
 });
 
