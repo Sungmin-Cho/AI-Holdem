@@ -554,6 +554,93 @@ test('#196 fresh authorization is removed across resume and fresh budget expiry 
   assert.equal(setup.loop.pendingDecision.closeConfirmed, true);
 });
 
+test('#196 retry rejects each stale pending identity for ordinary and fresh authorization', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const variants = [
+    ['decisionId', (pending) => `${pending.decisionId}-other`],
+    ['playerId', () => 'user'],
+    ['stateVersion', (pending) => pending.stateVersion + 1],
+    ['gameEpoch', () => 'different-game-epoch'],
+  ];
+  for (const [fresh, label] of [[false, 'ordinary'], [true, 'fresh']]) {
+    for (const [field, mutate] of variants) await t.test(`${label}:${field}`, async (st) => {
+      const { gameDir, loop } = await setupAiFirst(st, { adapter: makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) }) });
+      await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+      const filename = path.join(gameDir, 'loop-state.json');
+      const state = readJson(filename);
+      const pending = { ...state.pendingDecision, [field]: mutate(state.pendingDecision) };
+      writeJsonAtomic(filename, { ...state, pendingDecision: pending });
+      await assert.rejects(loop.retryDecision(pending.decisionId, fresh ? {
+        freshAuthorization: { source: 'app', requestId: `${label}-${field}` },
+      } : undefined), { code: 'STALE_PLAYER_DECISION' });
+      const retained = readJson(filename).pendingDecision;
+      assert.equal(retained.status, 'recovery_required');
+      assert.equal(Object.hasOwn(retained, 'freshAuthorization'), false);
+    });
+  }
+});
+
+test('#196 a managed pause waits for fresh warmup to make exactly one decision', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  let releaseWarmup;
+  let freshWarmupEntered = false;
+  const freshWarmup = new Promise((resolve) => { releaseWarmup = resolve; });
+  const adapter = makeAdapter({
+    onWarmup: async () => {
+      if (adapter.calls.length === 2) {
+        freshWarmupEntered = true;
+        await freshWarmup;
+      }
+    },
+    onDecide: async ({ message }, callNo) => ({
+      raw: callNo < 3 ? 'invalid' : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+    }),
+  });
+  const { loop } = await setupAiFirst(t, { adapter, loopOpts: { controlProtocolVersion: 1, playerBudget: { softMs: 500, hardMs: 5000 } } });
+  const running = startRun(loop);
+  await waitFor(() => loop.playState === 'paused', 'initial recovery did not park', 5_000 * WIN32_SCALE);
+  await loop.retryDecision(loop.pendingDecision.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'pause-through-fresh-warmup' },
+  });
+  await waitFor(() => freshWarmupEntered, 'fresh warmup did not start', 5_000 * WIN32_SCALE);
+  const pausing = loop.pause();
+  releaseWarmup();
+  await waitFor(() => adapter.decideCalls.length === 3, 'fresh decision did not run once', 5_000 * WIN32_SCALE);
+  await pausing;
+  assert.equal(loop.playState, 'paused');
+  assert.equal(adapter.decideCalls.length, 3);
+  await loop.endGame('fresh-warmup-pause-end');
+  await running;
+});
+
+test('#196 overlapping fresh and ordinary retries reject the delayed stale authorization after a real re-park', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  let releaseFirstStep;
+  let firstStepEntered = false;
+  let armRace = false;
+  const firstStep = new Promise((resolve) => { releaseFirstStep = resolve; });
+  const adapter = makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) });
+  const { loop } = await setupAiFirst(t, { adapter, loopOpts: { onEngineInvoke: async (args) => {
+    if (armRace && !firstStepEntered && args[0] === 'step' && !args.includes('--expect-version')) {
+      firstStepEntered = true;
+      await firstStep;
+    }
+  } } });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  const original = loop.pendingDecision;
+  armRace = true;
+  const delayedFresh = loop.retryDecision(original.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'delayed-fresh' },
+  });
+  delayedFresh.catch(() => {});
+  await waitFor(() => firstStepEntered, 'first retry did not reach validation step', 5_000 * WIN32_SCALE);
+  await loop.retryDecision(original.decisionId);
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(loop.pendingDecision.status, 'recovery_required');
+  assert.equal(loop.pendingDecision.generation, original.generation + 1);
+  releaseFirstStep();
+  await assert.rejects(delayedFresh, { code: 'INVALID_TRANSITION' });
+  assert.equal(loop.pendingDecision.generation, original.generation + 1);
+  assert.equal(Object.hasOwn(loop.pendingDecision, 'freshAuthorization'), false);
+});
+
 async function waitFor(predicate, message, timeoutMs = 3_000 * WIN32_SCALE) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
