@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const read = name => fs.readFileSync(new URL(`../server/public/${name}`,import.meta.url),'utf8');
+test('unverifiable recovery exposes a guarded end action and confirms error restart',()=>{
+  const html=read('lobby.html'),js=read('lobby.js');
+  assert.match(html,/id="result-end" hidden/);
+  assert.match(js,/BAD_PLAYER_RECOVERY:/);
+  assert.match(js,/recoveryExit\?\.mode === 'finalize'/);
+  assert.match(js,/\$\("result-end"\)\.disabled = busy/);
+  assert.match(js,/\$\("result-restart"\)\.onclick = \(\) => snapshot\.state === 'error' \? confirm/);
+});
 test('fresh retry has a separate confirmation explaining seat memory loss',()=>{
   const html=read('lobby.html'),js=read('lobby.js');
   for(const id of ['retry-fresh-session','fresh-session-dialog','fresh-session-yes','fresh-session-no']) assert.match(html,new RegExp(`id="${id}"`));
