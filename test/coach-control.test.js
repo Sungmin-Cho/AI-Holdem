@@ -861,3 +861,310 @@ test('unavailable 노트는 고정 문구이며 overfold가 없다', async () =>
   assert.equal(envelope.coach[0].unavailable, true);
   assert.equal(envelope.coach[0].overfold, undefined);
 });
+
+// ── #192 S2a: E3 예약 표식 (spawnEvidence) ────────────────────────────────────
+
+test('#192 S2a: reserve는 spawnEvidence 옵션이 없으면 행에 필드를 남기지 않고, true면 spawnEvidence:1을 남긴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 0, vpip: 0 } } }));
+
+  const legacy = await cc.reserve({
+    gameDir: dir, owner, handNo: 1, statsFile, snapshotFile,
+  });
+  assert.equal(cc.loadAuthority(dir).hands['1'].spawnEvidence, undefined);
+
+  const withEvidence = await cc.reserve({
+    gameDir: dir, owner, handNo: 2, statsFile, snapshotFile, spawnEvidence: true,
+  });
+  assert.equal(cc.loadAuthority(dir).hands['2'].spawnEvidence, 1);
+
+  // retireActive (via fence) must copy the stamp onto the retired row when present, and
+  // must not invent one for a legacy row that never had it.
+  await cc.fence({
+    gameDir: dir, owner, handNo: 2, generation: withEvidence.generation, reason: 'test',
+  });
+  const retiredWithEvidence = cc.loadAuthority(dir).retiredAttempts.find(
+    (row) => row.handNo === 2 && row.generation === withEvidence.generation,
+  );
+  assert.equal(retiredWithEvidence.spawnEvidence, 1);
+
+  await cc.fence({
+    gameDir: dir, owner, handNo: 1, generation: legacy.generation, reason: 'test',
+  });
+  const retiredLegacy = cc.loadAuthority(dir).retiredAttempts.find(
+    (row) => row.handNo === 1 && row.generation === legacy.generation,
+  );
+  assert.equal(retiredLegacy.spawnEvidence, undefined);
+});
+
+test('#192 S2a: beginOwner는 spawnEvidence 옵션에 따라 예약한 행의 필드 유무를 정확히 남긴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+
+  const legacyStarted = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile,
+  });
+  assert.equal(legacyStarted.descriptors.length, 1);
+  assert.equal(
+    cc.loadAuthority(dir).hands[String(legacyStarted.descriptors[0].handNo)].spawnEvidence,
+    undefined,
+  );
+  await cc.fence({
+    gameDir: dir, owner, handNo: legacyStarted.descriptors[0].handNo,
+    generation: legacyStarted.descriptors[0].generation, reason: 'reset-for-second-case',
+  });
+
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const evidenceStarted = await cc.beginOwner({
+    gameDir: dir, owner, completed: 1, statsFile, snapshotFile, spawnEvidence: true,
+  });
+  assert.equal(evidenceStarted.descriptors.length, 1);
+  assert.equal(
+    cc.loadAuthority(dir).hands[String(evidenceStarted.descriptors[0].handNo)].spawnEvidence,
+    1,
+  );
+});
+
+// ── #192 S3: E3 close 표식 (acceptEvidence) ───────────────────────────────
+
+test('#192 S3: accept는 acceptEvidence 옵션이 없으면 행에 필드를 남기지 않고, closed-child/no-spawn이면 그 값을 남긴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+
+  const legacy = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  writeResult(legacy.exactResultPath, { handNo: 1, text: '증거 없는 accept' });
+  const legacyAccepted = await cc.accept({
+    gameDir: dir, owner, handNo: 1, generation: legacy.generation,
+  });
+  assert.equal(legacyAccepted.ok, true, JSON.stringify(legacyAccepted));
+  assert.equal(
+    cc.loadAuthority(dir).retiredAttempts.find((row) => row.handNo === 1).acceptEvidence,
+    undefined,
+  );
+
+  const closedChild = await cc.reserve({ gameDir: dir, owner, handNo: 2, statsFile, snapshotFile });
+  writeResult(closedChild.exactResultPath, { handNo: 2, text: 'closed-child accept' });
+  const closedChildAccepted = await cc.accept({
+    gameDir: dir, owner, handNo: 2, generation: closedChild.generation, acceptEvidence: 'closed-child',
+  });
+  assert.equal(closedChildAccepted.ok, true, JSON.stringify(closedChildAccepted));
+  assert.equal(
+    cc.loadAuthority(dir).retiredAttempts.find((row) => row.handNo === 2).acceptEvidence,
+    'closed-child',
+  );
+
+  const noSpawn = await cc.reserve({ gameDir: dir, owner, handNo: 3, statsFile, snapshotFile });
+  writeResult(noSpawn.exactResultPath, { handNo: 3, text: 'no-spawn accept' });
+  const noSpawnAccepted = await cc.accept({
+    gameDir: dir, owner, handNo: 3, generation: noSpawn.generation, acceptEvidence: 'no-spawn',
+  });
+  assert.equal(noSpawnAccepted.ok, true, JSON.stringify(noSpawnAccepted));
+  assert.equal(
+    cc.loadAuthority(dir).retiredAttempts.find((row) => row.handNo === 3).acceptEvidence,
+    'no-spawn',
+  );
+});
+
+test('#192 S3: accept는 알 수 없는 acceptEvidence를 USAGE로 거부하고 행을 손대지 않는다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  writeResult(reserved.exactResultPath, { handNo: 1, text: '잘못된 evidence' });
+  await assert.rejects(
+    cc.accept({
+      gameDir: dir, owner, handNo: 1, generation: reserved.generation, acceptEvidence: 'bogus-value',
+    }),
+    (error) => error.code === 'USAGE',
+  );
+  assert.ok(cc.loadAuthority(dir).hands['1'], 'USAGE 거부가 살아 있는 행을 retire했다');
+});
+
+test('#192 S3: accept CLI는 --accept-evidence 값을 authority retired row에 남긴다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const dir = tmpGame();
+  writeLock(dir, 'tok-accept-evidence');
+  const owner = '11111111-1111-4111-8111-111111111111';
+  const cc = createCoachControl();
+  const snapshotFile = writeSnapshot(dir, []);
+  const statsFile = writeStats(dir, { sample: 1, vpip: 0.2 });
+  const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  const deny = path.join(dir, '.coach-deny.json');
+  fs.writeFileSync(deny, JSON.stringify([]));
+  writeResult(reserved.exactResultPath, { handNo: 1, text: 'CLI accept-evidence' });
+  const { stdout } = await execFileAsync(process.execPath, [
+    path.resolve('tools/coach-control.js'),
+    'accept',
+    '--game-dir', dir,
+    '--owner', owner,
+    '--hand', '1',
+    '--generation', String(reserved.generation),
+    '--forbidden-file', deny,
+    '--accept-evidence', 'no-spawn',
+  ], { encoding: 'utf8', timeout: 10000 });
+  const json = JSON.parse(stdout.trim());
+  assert.equal(json.ok, true, JSON.stringify(json));
+  const row = cc.loadAuthority(dir).retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row.acceptEvidence, 'no-spawn');
+});
+
+// #192 O1/L1: operator fallback for a foreign retired row (e.g. a legacy row automatic
+// recovery — game-loop.js's judgment g — could not resolve on its own).
+async function seedForeignRetiredRow() {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  await cc.fence({ gameDir: dir, owner, handNo: 1, generation: reserved.generation, reason: 'test-fence' });
+  const newOwner = '22222222-2222-4222-8222-222222222222';
+  await cc.beginOwner({ gameDir: dir, owner: newOwner, completed: 0, statsFile, snapshotFile });
+  return { dir, cc, oldOwner: owner, newOwner, generation: reserved.generation };
+}
+
+test('#192 L1: cleanup-result CLI는 --operator-confirmed 1 없이 --row-owner를 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, newOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--owner', newOwner,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, '--operator-confirmed 없이 --row-owner가 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'USAGE');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 J1: cleanup-result CLI는 --owner 없이 --row-owner/--operator-confirmed 1을 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+      '--operator-confirmed', '1',
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, '--owner 없이 --row-owner가 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'USAGE');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    '--owner 없는 USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 J1: cleanup-result CLI --row-owner + --operator-confirmed 1은 --owner가 active owner가 아니면 STALE_OWNER이고 authority를 바꾸지 않는다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+  const notActiveOwner = '33333333-3333-4333-8333-333333333333';
+
+  let caught = null;
+  try {
+    await execFileAsync(process.execPath, [
+      path.resolve('tools/coach-control.js'),
+      'cleanup-result',
+      '--game-dir', dir,
+      '--owner', notActiveOwner,
+      '--hand', '1',
+      '--generation', String(generation),
+      '--cleanup-state', 'released',
+      '--row-owner', oldOwner,
+      '--operator-confirmed', '1',
+    ], { encoding: 'utf8', timeout: 10000 });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, 'active owner가 아닌 --owner로 성공하면 안 된다');
+  const json = JSON.parse(String(caught.stdout ?? '').trim());
+  assert.equal(json.ok, false);
+  assert.equal(json.code, 'STALE_OWNER');
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'STALE_OWNER 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 J1: recordCleanup API도 --owner 없이 rowOwner를 쓰면 USAGE이고 authority를 바꾸지 않는다', async () => {
+  const { dir, cc, oldOwner, generation } = await seedForeignRetiredRow();
+  const authorityBefore = fs.readFileSync(path.join(dir, '.coach-authority.json'));
+
+  await assert.rejects(
+    cc.recordCleanup({
+      gameDir: dir,
+      owner: undefined,
+      handNo: 1,
+      generation,
+      cleanupState: 'released',
+      rowOwner: oldOwner,
+      operatorConfirmed: true,
+    }),
+    (error) => error.code === 'USAGE',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.coach-authority.json')).equals(authorityBefore),
+    true,
+    'API의 USAGE 거부인데 .coach-authority.json 바이트가 바뀌었다',
+  );
+});
+
+test('#192 L1: cleanup-result CLI --row-owner + --operator-confirmed 1은 foreign 행만 released로 만든다', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const { dir, cc, oldOwner, newOwner, generation } = await seedForeignRetiredRow();
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    path.resolve('tools/coach-control.js'),
+    'cleanup-result',
+    '--game-dir', dir,
+    '--owner', newOwner,
+    '--hand', '1',
+    '--generation', String(generation),
+    '--cleanup-state', 'released',
+    '--row-owner', oldOwner,
+    '--operator-confirmed', '1',
+  ], { encoding: 'utf8', timeout: 10000 });
+  const json = JSON.parse(stdout.trim());
+  assert.equal(json.ok, true, JSON.stringify(json));
+  assert.equal(json.cleanupState, 'released');
+  const row = cc.loadAuthority(dir).retiredAttempts.find((entry) => entry.handNo === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.equal(row?.ownerSessionId, oldOwner, 'released된 행이 foreign owner의 행이 아니다');
+});

@@ -213,7 +213,7 @@ function nextGeneration(auth, handNo) {
 function retireActive(auth, handNo, fields) {
   const hand = auth.hands[keyOf(handNo)];
   if (!hand) return;
-  auth.retiredAttempts.push({
+  const retired = {
     ownerSessionId: hand.ownerSessionId,
     handNo,
     generation: hand.generation,
@@ -225,7 +225,12 @@ function retireActive(auth, handNo, fields) {
     cleanupEligible: Boolean(fields.cleanupEligible),
     replacementGeneration: fields.replacementGeneration ?? null,
     cleanupState: fields.cleanupState ?? 'pending',
-  });
+  };
+  if (hand.spawnEvidence !== undefined) retired.spawnEvidence = hand.spawnEvidence;
+  // #192 E3 f: acceptEvidence is supplied by the caller at accept time (unlike
+  // spawnEvidence, which lives on the reserved hand itself), so it comes from `fields`.
+  if (fields.acceptEvidence !== undefined) retired.acceptEvidence = fields.acceptEvidence;
+  auth.retiredAttempts.push(retired);
   delete auth.hands[keyOf(handNo)];
 }
 
@@ -355,11 +360,11 @@ function queueItem({
 }
 
 function insertReservation(auth, {
-  gameDir, epoch, owner, handNo, attempt, deadlineMs, now,
+  gameDir, epoch, owner, handNo, attempt, deadlineMs, now, spawnEvidence = false,
 }) {
   const generation = nextGeneration(auth, handNo);
   const paths = coachPaths(gameDir, epoch, owner, handNo, generation, attempt);
-  auth.hands[keyOf(handNo)] = {
+  const hand = {
     generation,
     attempt,
     ownerSessionId: owner,
@@ -373,6 +378,8 @@ function insertReservation(auth, {
     cleanupEligible: false,
     replacementGeneration: null,
   };
+  if (spawnEvidence) hand.spawnEvidence = 1;
+  auth.hands[keyOf(handNo)] = hand;
   return {
     handNo,
     generation,
@@ -680,7 +687,7 @@ export function createCoachControl(deps = {}) {
     return completenessOf(loadAuthority(gameDir), sample);
   }
 
-  async function beginOwner({ gameDir, owner, completed, statsFile, snapshotFile }) {
+  async function beginOwner({ gameDir, owner, completed, statsFile, snapshotFile, spawnEvidence = false }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
       migrateLocked(gameDir, auth, snapshotFile);
@@ -716,6 +723,7 @@ export function createCoachControl(deps = {}) {
           attempt: 1,
           deadlineMs: DEFAULT_ATTEMPT_MS,
           now: nowNs(),
+          spawnEvidence,
         });
         if (transfer) {
           descriptor.overfoldReserved = true;
@@ -774,7 +782,7 @@ export function createCoachControl(deps = {}) {
 
   async function reserve({
     gameDir, owner, handNo, attempt = 1, deadlineMs = DEFAULT_ATTEMPT_MS,
-    considerOverfold = false, statsFile, snapshotFile,
+    considerOverfold = false, statsFile, snapshotFile, spawnEvidence = false,
   }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = loadOrInit(gameDir, owner);
@@ -794,7 +802,7 @@ export function createCoachControl(deps = {}) {
         });
       }
       const descriptor = insertReservation(auth, {
-        gameDir, epoch, owner, handNo, attempt, deadlineMs, now: nowNs(),
+        gameDir, epoch, owner, handNo, attempt, deadlineMs, now: nowNs(), spawnEvidence,
       });
       if (considerOverfold) {
         const stats = readStats(statsFile);
@@ -841,9 +849,22 @@ export function createCoachControl(deps = {}) {
     });
   }
 
-  async function accept({ gameDir, owner, handNo, generation, forbiddenLiterals = [] }) {
+  async function accept({
+    gameDir, owner, handNo, generation, forbiddenLiterals = [], acceptEvidence,
+  }) {
     return withLock(gameDir, () => {
       const { epoch, auth } = requireAuth(gameDir, { owner });
+      // #192 E3 f: an accept can optionally carry the caller's own close evidence
+      // (`closed-child` — the result was read only after the child's own close was
+      // observed — or `no-spawn` — no child exists for this generation at all). Any
+      // other non-undefined value is a caller bug, not a runtime state to tolerate.
+      if (
+        acceptEvidence !== undefined
+        && acceptEvidence !== 'closed-child'
+        && acceptEvidence !== 'no-spawn'
+      ) {
+        fail('USAGE', `알 수 없는 acceptEvidence: ${acceptEvidence}`);
+      }
       const key = keyOf(handNo);
       if (auth.publishQueue[key]) {
         const result = occupiedReject(auth, handNo, owner, generation, 'QUEUE_ALREADY_SEALED');
@@ -919,7 +940,7 @@ export function createCoachControl(deps = {}) {
       } else if (auth.overfoldLease?.handNo === handNo && auth.overfoldLease.state === 'active') {
         auth.overfoldLease = null;
       }
-      retireActive(auth, handNo, { resultState: 'consumed', cleanupEligible: false });
+      retireActive(auth, handNo, { resultState: 'consumed', cleanupEligible: false, acceptEvidence });
       if (auth.deferred) delete auth.deferred[key];
       persist(gameDir, auth);
       return { ok: true, queueId };
@@ -1090,7 +1111,22 @@ export function createCoachControl(deps = {}) {
     ));
   }
 
-  async function recordCleanup({ gameDir, owner, handNo, generation, cleanupState }) {
+  // #192 O1/L1: `rowOwner` lets the caller (who must still be the current active owner —
+  // `requireAuth` below already enforces that) reach a genuinely foreign retired row (its
+  // own `ownerSessionId` differs from the caller and it is not `cleanupEligible`) for
+  // manual operator recovery — e.g. a legacy row judgment g could not auto-recover on its
+  // own. It is honoured only together with `operatorConfirmed === true`; the CLI itself
+  // refuses `--row-owner` without `--operator-confirmed 1` before ever calling this.
+  async function recordCleanup({
+    gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false,
+  }) {
+    // #192 J1: `requireAuth`'s STALE_OWNER check only runs when `owner` is truthy
+    // (`requireActiveOwner && owner && …`), so a `rowOwner` request made without `owner` would
+    // otherwise skip it entirely and could release a foreign row without ever confirming who
+    // the active owner is. Refuse before touching the lock or the authority file.
+    if (rowOwner != null && (typeof owner !== 'string' || owner === '')) {
+      fail('USAGE', '--row-owner에는 --owner가 함께 필요합니다.');
+    }
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
       const allowed = new Set(['cancelled', 'released', 'termination_unconfirmed', 'release_failed', 'pending']);
@@ -1098,7 +1134,11 @@ export function createCoachControl(deps = {}) {
       const row = [...auth.retiredAttempts].reverse().find((entry) => (
         entry.handNo === handNo
         && (generation == null || entry.generation === generation)
-        && (entry.ownerSessionId === owner || entry.cleanupEligible)
+        && (
+          entry.ownerSessionId === owner
+          || entry.cleanupEligible
+          || (operatorConfirmed && rowOwner != null && entry.ownerSessionId === rowOwner)
+        )
       ));
       if (!row) fail('NO_RETIRED', '회수 대상 retired entry가 없습니다.');
       row.cleanupState = cleanupState;
@@ -1391,6 +1431,15 @@ function parseCli(argv) {
   return out;
 }
 
+// E3: a loop that cannot prove it wrote the spawn-protocol flag never gets a reservation
+// or a bound handle. This is what makes a pre-protocol loop process fail-closed against
+// the new CLI instead of persisting an authority row nothing else can attribute.
+function requireSpawnEvidence(opts) {
+  if (opts['spawn-evidence'] !== '1') {
+    fail('SPAWN_PROTOCOL_REQUIRED', '--spawn-evidence 1이 필요합니다.');
+  }
+}
+
 async function cliMain() {
   const command = process.argv[2];
   const opts = parseCli(process.argv.slice(3));
@@ -1398,14 +1447,17 @@ async function cliMain() {
   const gameDir = path.resolve(opts['game-dir'] ?? 'game');
   let result;
   if (command === 'begin-owner') {
+    requireSpawnEvidence(opts);
     result = await cc.beginOwner({
       gameDir,
       owner: opts.owner,
       completed: Number(opts.completed),
       statsFile: opts['stats-file'],
       snapshotFile: opts['snapshot-file'],
+      spawnEvidence: true,
     });
   } else if (command === 'reserve') {
+    requireSpawnEvidence(opts);
     result = await cc.reserve({
       gameDir,
       owner: opts.owner,
@@ -1415,8 +1467,10 @@ async function cliMain() {
       considerOverfold: Boolean(opts['consider-overfold']),
       statsFile: opts['stats-file'],
       snapshotFile: opts['snapshot-file'],
+      spawnEvidence: true,
     });
   } else if (command === 'bind-handle') {
+    requireSpawnEvidence(opts);
     result = await cc.bindHandle({
       gameDir,
       owner: opts.owner,
@@ -1431,6 +1485,7 @@ async function cliMain() {
       handNo: Number(opts.hand),
       generation: Number(opts.generation),
       forbiddenLiterals: readForbiddenFile(opts['forbidden-file']),
+      acceptEvidence: opts['accept-evidence'],
     });
   } else if (command === 'watch-accept') {
     result = await cc.watchAccept({
@@ -1502,12 +1557,22 @@ async function cliMain() {
       snapshotFile: opts['snapshot-file'],
     });
   } else if (command === 'cleanup-result') {
+    // #192 O1/L1: --row-owner is an operator-only escape hatch for a genuinely foreign
+    // retired row (e.g. a legacy row automatic recovery could not resolve on its own) —
+    // it is honoured only alongside --operator-confirmed 1; without that flag it is USAGE
+    // and nothing is written.
+    const operatorConfirmed = opts['operator-confirmed'] === '1';
+    if (opts['row-owner'] != null && !operatorConfirmed) {
+      fail('USAGE', '--row-owner에는 --operator-confirmed 1이 함께 필요합니다.');
+    }
     result = await cc.recordCleanup({
       gameDir,
       owner: opts.owner,
       handNo: Number(opts.hand),
       generation: opts.generation == null ? undefined : Number(opts.generation),
       cleanupState: opts['cleanup-state'] ?? opts.reason,
+      rowOwner: opts['row-owner'] ?? null,
+      operatorConfirmed,
     });
   } else if (command === 'rollback-guard') {
     result = await cc.assertRollbackAllowed(gameDir);

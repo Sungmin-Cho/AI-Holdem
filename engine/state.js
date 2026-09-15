@@ -763,6 +763,23 @@ export function acquireOwnedLock(gameDir, name, { processStartTime: startTimeOf 
   }
 }
 
+// #192 I5: exactly the identity checks `releaseOwnedLock` itself performs (same inode, pid
+// file pid and startTime match), exposed as a pure boolean so a caller can re-validate that
+// a long-held `handle` is still this process's own lock before trusting it for something
+// consequential (e.g. game-loop.js's `requestStop` writing a coach-runtime-closure receipt)
+// — without releasing anything.
+export function verifyOwnedLock(handle) {
+  if (!handle) return false;
+  const current = mutexIdentity(handle.dir);
+  const pidFile = current?.pidFile;
+  return Boolean(
+    sameInode(handle, current)
+    && pidFile
+    && pidFile.pid === handle.pid
+    && pidFile.startTime === handle.startTime,
+  );
+}
+
 export function releaseOwnedLock(handle) {
   const current = mutexIdentity(handle.dir);
   const pidFile = current?.pidFile;

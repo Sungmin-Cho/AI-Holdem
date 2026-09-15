@@ -1587,3 +1587,13 @@ test('dispose: 종료 확인 실패 뒤에도 runtime은 영구 closed이고 두
     await assert.rejects(decision);
   }
 });
+
+test('#192 sJ4: runtime adapter는 disposeConfirmsChildren을 true로 선언한다', () => {
+  // game-loop.js의 owner-runtime-closure receipt(§3 E1)는 coach-capable adapter가 이
+  // 플래그를 true로 선언할 때만 `dispose()` 성공을 "이 adapter가 띄운 모든 child가
+  // 실제로 닫혔다"는 증거로 신뢰한다 — 이 adapter의 `dispose()`는 registry의 모든
+  // pending child를 `killAndConfirmClose`로 종료·확인하고, 하나라도 남으면
+  // `CHILD_CLOSE_UNCONFIRMED`로 던지므로 그 계약을 실제로 지킨다.
+  const rt = createPlayerRuntime('claude', { exec: () => ({ pid: 1, kill: () => true, done: new Promise(() => {}) }) });
+  assert.equal(rt.disposeConfirmsChildren, true);
+});

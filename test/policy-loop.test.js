@@ -261,7 +261,7 @@ test('policy mode reaches done without an LLM player runtime', { timeout: 40_000
   assert.equal(review.includes(readJson(path.join(gameDir, 'state.json')).policySeed), false);
 });
 
-test('self-opponent policy game assigns seats, reviews them, and keeps identity private until done', { timeout: 120_000 }, async (t) => {
+test('self-opponent policy game assigns seats, reviews them, and keeps identity private until done', { timeout: 120_000 * WIN32_SCALE }, async (t) => {
   const { collectStoreTendency } = await import('../tools/self-opponents.js');
   const { readGeneratedRecord } = await import('./helpers/gen-hh-fixtures.js');
   const storeDir = tmp();

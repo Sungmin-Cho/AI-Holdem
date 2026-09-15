@@ -190,7 +190,10 @@ export function createSessionManager({
         try {
           await launched.loop.requestStop();
         } catch (cleanup) {
-          err = cleanup;
+          // #192 L2 x #197: a lost or unverifiable loop lock means this instance could not
+          // record the cleanup, not that the lock is the failure worth reporting. Keep the
+          // original run error in that case; every other cleanup failure still replaces it.
+          if (cleanup?.code !== 'LOOP_LOCK_LOST') err = cleanup;
           cleanupConfirmed = false;
         }
         if (session === launched) {
@@ -557,18 +560,27 @@ export function createSessionManager({
     revision++;
     const deadline =
       Date.now() + (process.platform === "win32" ? 300000 : 120000);
+    // #192 L2 x #197: shutting down releases this process's own resources. A loop whose lock
+    // can no longer be verified refuses to record its stop (LOOP_LOCK_LOST) — that lock is
+    // not ours to release, and it must not turn an ordinary close into a failure. Every other
+    // stop failure still surfaces.
+    const stopQuietly = async (loop) => {
+      if (!loop) return;
+      try {
+        await loop.requestStop();
+      } catch (error) {
+        if (error?.code !== 'LOOP_LOCK_LOST') throw error;
+      }
+    };
     // Stop first: this cancels waits, resolves pending pauses and interrupts bootstrap.
-    await Promise.all([
-      session?.loop.requestStop(),
-      startingLoop?.requestStop(),
-    ]);
+    await Promise.all([stopQuietly(session?.loop), stopQuietly(startingLoop)]);
     while (pending) {
       if (Date.now() >= deadline) throw controlError("APP_STOP_UNCONFIRMED");
       await new Promise((r) => setTimeout(r, 20));
     }
-    await startingLoop?.requestStop();
+    await stopQuietly(startingLoop);
     if (session) {
-      await session.loop.requestStop();
+      await stopQuietly(session.loop);
       await runPromise.catch(() => {});
     }
   }

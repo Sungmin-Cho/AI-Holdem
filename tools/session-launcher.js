@@ -35,7 +35,10 @@ export async function launchSession(
     try {
       await loop.requestStop();
     } catch (cleanup) {
-      throw cleanup;
+      // #192 L2 x #197: a lost or unverifiable loop lock only means the cleanup could not be
+      // recorded. The launch failure that actually happened stays the reported error; every
+      // other cleanup failure still replaces it.
+      if (cleanup?.code !== 'LOOP_LOCK_LOST') throw cleanup;
     }
     throw error;
   }
