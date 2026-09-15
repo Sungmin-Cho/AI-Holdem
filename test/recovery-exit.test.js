@@ -137,6 +137,23 @@ test('#197 a conflicting sidecar is never overwritten',{timeout:TIMEOUT},async t
   assert.deepEqual(fs.readFileSync(f.file),f.raw);
 });
 
+test('#197 checkpoint re-entry repairs a missing abandonment audit event',{timeout:TIMEOUT},async t=>{
+  const f=await fixture(t), originalWrite=fs.writeSync;
+  let injected=false;
+  fs.writeSync=function(fd,data,...args){
+    if(!injected&&typeof data==='string'&&data.includes('"event":"player-recovery-abandoned"')){
+      injected=true;throw Object.assign(new Error('audit publication cut'),{code:'AUDIT_WRITE_CUT'});
+    }
+    return originalWrite.call(this,fd,data,...args);
+  };
+  try {await assert.rejects(f.loop({abortUnrecoverable:{operationId:'audit-cut'}}).resume(),{code:'AUDIT_WRITE_CUT'});}
+  finally {fs.writeSync=originalWrite;}
+  assert.equal(read(f.file).aborting.operationId,'audit-cut');
+  assert.equal((await f.loop().resume()).code,'GAME_ENDED');
+  const events=fs.readFileSync(path.join(f.root,'loop.log'),'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(events.some(event=>event.event==='player-recovery-abandoned'&&event.operationId==='audit-cut'));
+});
+
 test('#197 stop during an owned engine end waits for the terminal checkpoint and lock release',{timeout:TIMEOUT},async t=>{
   const f=await fixture(t);
   let enter,release;

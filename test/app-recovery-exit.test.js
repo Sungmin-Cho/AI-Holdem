@@ -80,6 +80,44 @@ test('#197 recovery exit gate follows engine/loop phases and exposes the wired e
   });
 });
 
+test('#197 post-engine publication or relay failure remains recoverable across manager restart',{timeout:TIMEOUT},async t=>{
+  for(const fault of ['terminal-write','relay-identity'])await t.test(fault,async st=>{
+    const f=await damagedStore(st), file=path.join(f.gameDir,'loop-state.json');
+    const lock=path.join(f.gameDir,'lock.json');
+    st.after(()=>{if(fault==='relay-identity'&&fs.existsSync(lock)&&read(lock).sessionToken==='deliberately-foreign-owned-fixture')fs.unlinkSync(lock);});
+    const rename=fs.renameSync;
+    let injected=false;
+    if(fault==='terminal-write')fs.renameSync=function(from,to){
+      if(to===file&&!injected&&read(from).phase==='aborted'){
+        injected=true;throw Object.assign(new Error('terminal publication cut'),{code:'TERMINAL_WRITE_CUT'});
+      }
+      return rename.apply(this,arguments);
+    };
+    else write(lock,{serverPid:process.pid,port:1,sessionToken:'deliberately-foreign-owned-fixture'});
+    let row;
+    try {
+      const request=body(f.manager,'end');f.manager.command(request);row=await settle(f.manager,request.requestId);
+    } finally {fs.renameSync=rename;}
+    assert.equal(row.status,'failed');
+    assert.equal(read(path.join(f.gameDir,'state.json')).result,'abort');
+    assert.equal(f.manager.snapshot().state,'error','engine abort alone is not proof of cleanup');
+    assert.deepEqual(f.manager.snapshot().recoveryExit,{mode:'abort'});
+    assert.ok(read(file).aborting,'retain the checkpoint until publication and adoption succeed');
+    await f.manager.close();
+    const restored=createSessionManager({storeDir:f.root,resolver:f.resolver});st.after(()=>restored.close());
+    await restored.initialize();
+    assert.equal(restored.snapshot().state,'error');
+    assert.deepEqual(restored.snapshot().recoveryExit,{mode:'abort'});
+    if(fault==='relay-identity')fs.unlinkSync(lock); // Only the fake lock created above; never signal its PID.
+    const before=fs.readFileSync(path.join(f.gameDir,'state.json'));
+    const retry=body(restored,'end');restored.command(retry);
+    assert.equal((await settle(restored,retry.requestId)).status,'succeeded');
+    assert.equal(restored.snapshot().state,'ended');
+    assert.equal(read(file).aborting,undefined);
+    assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
+  });
+});
+
 test('#197 explicit end and restart use a pinned recovery journal and preserve the old game',{timeout:TIMEOUT},async t=>{
   for(const kind of ['end','restart'])await t.test(kind,async st=>{
     const f=await damagedStore(st), manager=f.manager;
