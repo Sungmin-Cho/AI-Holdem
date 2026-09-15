@@ -319,11 +319,16 @@ export function createSessionManager({
       }
       const engine = read(path.join(current.sessionDir, "state.json"));
       const loopFile = path.join(current.sessionDir, "loop-state.json");
+      const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
+      if (engine.result === "abort" && loop?.aborting) {
+        emit("error", code);
+        return;
+      }
       if (engine.result === "abort") {
         emit("ended", code);
         return;
       }
-      if (fs.existsSync(loopFile) && read(loopFile).phase === "done") {
+      if (loop?.phase === "done") {
         emit("completed", code);
         return;
       }
@@ -529,15 +534,19 @@ export function createSessionManager({
         return snapshot();
       }
       const engine = read(path.join(current.sessionDir, "state.json"));
-      if (engine.result === "abort") {
-        emit("ended");
-        return snapshot();
-      }
       const loopState = fs.existsSync(
         path.join(current.sessionDir, "loop-state.json"),
       )
         ? read(path.join(current.sessionDir, "loop-state.json"))
         : null;
+      if (engine.result === "abort" && loopState?.aborting) {
+        emit("error", "SESSION_RECOVERABLE");
+        return snapshot();
+      }
+      if (engine.result === "abort") {
+        emit("ended");
+        return snapshot();
+      }
       if (loopState?.phase === "done") {
         emit("completed");
         return snapshot();

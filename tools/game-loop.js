@@ -5953,11 +5953,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     } finally {closeServerLockPin(pin);}
   };
-  const finishAbortedLifecycle = async (engineState) => {
+  const finishAbortedLifecycle = async (engineState, state = readLoopState()) => {
+    let checkpoint = null;
+    if (state?.aborting) {
+      checkpoint = validateAbortingCheckpoint(root, engineState, state);
+      if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
+    }
     lifecycleStarted = true;
     assertNotStopping();
     const unit=beginAtomicTransition();
     try {
+      if (checkpoint) {
+        openLog();
+        log('player-recovery-abandoned', state.abandonedPendingDecision);
+      }
       await adoptAbortedRelay(engineState);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
     } finally {unit.finish();}
@@ -5973,6 +5982,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       checkpoint=validateAbortingCheckpoint(root,engineState,state);
       if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
       preserveLoopState=false;
+      log('player-recovery-abandoned',state.abandonedPendingDecision);
     } else {
       // Until the raw evidence is durably published, cleanup must not serialize it.
       preserveLoopState=true;
@@ -6003,8 +6013,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       if (checkpoint.mode==='abort') {
         await runCli(['end','--result','abort','--operation-id',checkpoint.operationId]);
-        writeLoopState({phase:'aborted',result:'abort',endedAt:isoNow(now),aborting:undefined});
         await adoptAbortedRelay(engineState);
+        writeLoopState({phase:'aborted',result:'abort',endedAt:isoNow(now),aborting:undefined});
       } else writeLoopState({aborting:undefined});
     } finally {unit.finish();}
     if (checkpoint.mode==='abort') {
@@ -6017,7 +6027,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const resolveForPhase = async (phase, engineState, existingState, {
     beforePlayerRestore = null,
   } = {}) => {
-    if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState);
+    if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState, existingState);
     if (FINAL_PHASES.has(phase)) {
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
@@ -6118,7 +6128,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         );
       }
       if (state?.phase === 'aborted' && engineState.result !== 'abort') throw codedError('LOOP_STATE_IDENTITY_MISMATCH','종료 상태가 엔진과 일치하지 않습니다.');
-      if (engineState.result === 'abort') return finishAbortedLifecycle(engineState);
+      if (engineState.result === 'abort') return finishAbortedLifecycle(engineState, state);
       openLog();
       lifecycleStarted = true;
       if (opts.abortUnrecoverable || state?.aborting) {
@@ -6362,7 +6372,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (engineForPending) unionReplayPending(completedReplayHandNos(engineForPending));
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
-    if (state.phase === 'aborted' || engineForPending?.result === 'abort') { await finishAbortedLifecycle(engineForPending); return readLoopState(); }
+    if (state.phase === 'aborted' || engineForPending?.result === 'abort') { await finishAbortedLifecycle(engineForPending, state); return readLoopState(); }
     if (FINAL_PHASES.has(state.phase)) return runFinalization();
     if (state.phase === 'done') return finishDoneLifecycle();
     if (state.phase !== 'playing') {
