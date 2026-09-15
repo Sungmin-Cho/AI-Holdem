@@ -35,6 +35,7 @@ export function validateCommand(body) {
     "kind",
     "setup",
     "decisionId",
+    "freshSession",
   ];
   if (
     Object.keys(body).some((k) => !keys.includes(k)) ||
@@ -54,5 +55,6 @@ export function validateCommand(body) {
     throw controlError("BAD_COMMAND");
   if (body.kind === 'retry-decision' && (typeof body.decisionId !== 'string' || !/^d-\d+-(preflop|flop|turn|river)-\d+$/.test(body.decisionId))) throw controlError('BAD_COMMAND');
   if ('decisionId' in body && body.kind !== 'retry-decision') throw controlError('BAD_COMMAND');
+  if ('freshSession' in body && (body.kind !== 'retry-decision' || typeof body.freshSession !== 'boolean')) throw controlError('BAD_COMMAND');
   return body;
 }
