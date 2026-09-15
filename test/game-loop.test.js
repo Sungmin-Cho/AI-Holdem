@@ -12440,7 +12440,7 @@ test('#192 I5/L2: requestStop 직전 loop lock 디렉터리가 다른 inode/iden
   );
 });
 
-test('#192 L2: adapter disposal 실패와 락 상실이 겹치면 cleanupError 대신 LOOP_LOCK_LOST로 거부되고 원인 코드를 details.cause에 담는다', { timeout: 15_000 }, async (t) => {
+test('#192 L2/#197: adapter disposal 실패와 락 상실이 겹치면 loop-state를 쓰지 않고 원래 정리 오류를 그대로 올린다', { timeout: 15_000 }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const disposeError = Object.assign(new Error('dispose boom'), { code: 'DISPOSE_BOOM' });
@@ -12467,8 +12467,9 @@ test('#192 L2: adapter disposal 실패와 락 상실이 겹치면 cleanupError �
     caught = error;
   }
   assert.ok(caught, 'disposal 실패 + lock 상실 stop이 거부되지 않았다');
-  assert.equal(caught.code, 'LOOP_LOCK_LOST');
-  assert.equal(caught.details?.cause, 'DISPOSE_BOOM', '원래 disposal 오류 코드가 details.cause에 없다');
+  // #197: 락을 잃었다는 이유로 원래 정리 오류를 가리지 않는다. 자식이 살아 있을 수
+  // 있다는 신호가 그대로 호출자에게 전달돼야 한다.
+  assert.equal(caught.code, 'DISPOSE_BOOM', `원래 정리 오류가 가려졌다: ${caught.code}`);
 
   // requestStop 시작 시점의 `stopping`/`stopRequestedAt` 마커 외에는 아무것도 바뀌지
   // 않아야 한다 — 특히 cleanupError가 전혀 기록되지 않아야 한다(lock을 잃었으므로
@@ -12480,10 +12481,9 @@ test('#192 L2: adapter disposal 실패와 락 상실이 겹치면 cleanupError �
     logs.some((row) => row.event === 'loop-lock-lost-on-stop'),
     'loop-lock-lost-on-stop 로그가 기록되지 않았다',
   );
-  assert.equal(
-    logs.some((row) => row.event === 'cleanup-failed'),
-    false,
-    'lock을 잃었는데도 cleanup-failed 로그가 기록됐다',
+  assert.ok(
+    logs.some((row) => row.event === 'cleanup-failed' && row.code === 'DISPOSE_BOOM'),
+    'cleanup-failed 로그가 원래 정리 오류 코드로 남지 않았다',
   );
 });
 
@@ -14213,7 +14213,7 @@ test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 LOOP_LOCK_LOST로 거부한다', { timeout: 15_000 }, async (t) => {
+test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 loop-state를 쓰지 않는다', { timeout: 15_000 }, async (t) => {
   if (skipOnWin32(t, 'directory permission bits do not deny reads on win32')) return;
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     t.skip('root ignores directory permission bits');
@@ -14247,8 +14247,10 @@ test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계�
   }
 
   assert.ok(caught, 'lock 검증이 불가능한 stop이 성공으로 끝났다');
-  assert.equal(caught.code, 'LOOP_LOCK_LOST', `원래 예외가 그대로 새어 나왔다: ${caught.code}`);
+  // 검증 예외는 락 상실로 취급하되(기록 금지), 실패 자체는 그 원인 그대로 보고한다.
+  assert.equal(caught.code, 'EACCES', `예상 밖 오류: ${caught.code}`);
   assert.ok(adapter.disposed >= 1, 'lock 검증 예외 때문에 adapter disposal을 건너뛰었다');
+  assert.ok(logs.some((row) => row.event === 'loop-lock-verify-failed'), 'loop-lock-verify-failed 로그가 없다');
   assert.equal(fs.readFileSync(loopStatePath, 'utf8'), beforeRaw, '검증할 수 없는 lock으로 loop-state를 썼다');
 });
 

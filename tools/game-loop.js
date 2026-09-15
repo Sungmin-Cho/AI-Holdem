@@ -6728,15 +6728,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const persistCleanupFailure = (error) => {
     if (!lifecycleStarted) return null;
-    // #192 L2: re-validate lock ownership right before writing a cleanupError, exactly like
-    // the success path does before its own final writeLoopState (design memo §11) — a stale
-    // `lockHandle` must not let this instance overwrite another owner's loop-state. Also
-    // trusts the sticky `lockLostPermanently` flag so a retried `requestStop()` (lockHandle
-    // already nulled by the first attempt's own `releaseLock()`) still fails closed.
-    if (lockLostPermanently || (lockHandle && !ownedLockStillVerified())) {
+    // #192 L2: re-validate lock ownership before writing a cleanupError, exactly like the
+    // success path does before its own final writeLoopState (design memo §11) — a stale
+    // `lockHandle` must not let this instance overwrite another owner's loop-state. The
+    // sticky `lockLostPermanently` flag keeps a retried `requestStop()` (its `lockHandle`
+    // already nulled by the first attempt's own `releaseLock()`) on this same path.
+    // #197: losing the lock suppresses the *write*, never the error. The cleanup failure
+    // that actually happened is still logged and still returned to the caller (`null` here
+    // means "no replacement error"), so a recovery exit keeps reporting its own cause. Only
+    // the success path, which has no other error to report, fails with LOOP_LOCK_LOST.
+    const lockLost = Boolean(lockLostPermanently || (lockHandle && !ownedLockStillVerified()));
+    if (lockLost) {
       lockLostPermanently = true;
       logLoopLockLostOnStop();
-      return loopLockLostError(error?.code ?? null);
     }
     const cleanupError = {
       code: error.code ?? 'ERROR',
@@ -6750,8 +6754,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       fs.closeSync(logFd);
       logFd = null;
     } catch { /* Persist state even when the log is unavailable. */ }
+    if (lockLost) return null;
     try {
-      if (!lifecycleStarted || preserveLoopState || !fs.existsSync(loopStatePath)) return null;
+      if (preserveLoopState || !fs.existsSync(loopStatePath)) return null;
       writeLoopState({
         stopping: true,
         stoppedAt: undefined,
