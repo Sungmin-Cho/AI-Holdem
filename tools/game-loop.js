@@ -5446,6 +5446,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
   const pauseBarrier = async (out) => {
     if (!managed || !pauseRequested || stopRequested) return out;
+    const pending = readLoopState()?.pendingDecision;
+    // An accepted retry is one decision unit, even across the restored run-entry
+    // publishes. Park after consuming that grant, never between grant and warmup.
+    if (pending?.status === 'retry_authorized' && pending.closeConfirmed === true
+      && out?.next?.kind === 'ai' && pending.decisionId === out.next.decisionId
+      && pending.playerId === out.next.toAct && pending.stateVersion === out.stateVersion
+      && pending.gameEpoch === readLoopState()?.gameEpoch) return out;
     // Gate is durable before draining a receipt. Delivered replies may be read again.
     if (out?.next?.kind === 'user') {
       let drained;

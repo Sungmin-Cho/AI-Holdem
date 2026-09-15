@@ -151,6 +151,7 @@ async function refresh() {
   render();
 }
 const errorMessages = {
+  RETRY_NOT_APPLIED: '재시도 인가가 실행되기 전에 앱이 중단됐습니다. 필요하면 재시도를 다시 선택하세요.',
   INVALID_SETUP: "설정이 서로 맞지 않습니다. 인원, 스택, 핸드 수를 확인하세요.",
   TENDENCY_INSUFFICIENT:
     "내 성향 상대를 사용하려면 적격 기록 60핸드 이상이 필요합니다.",
