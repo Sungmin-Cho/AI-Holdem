@@ -159,6 +159,7 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
   let freshWarmup = false;
   const warmupGate = new Promise((resolve) => { releaseWarmup = resolve; });
   const calls = [];
+  const decisions = [];
   const adapter = {
     kind: 'fake',
     async warmup({ playerId }) {
@@ -169,14 +170,14 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
       }
       return { sessionId: `fresh-session-${calls.length}`, raw: 'ready' };
     },
-    async decide() { return { raw: 'invalid' }; },
+    async decide(input) { decisions.push(input); return { raw: 'invalid' }; },
     async dispose() {},
   };
   let manager = createSessionManager({ storeDir: root,
     resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
   t.after(() => manager.close());
   await manager.initialize();
-  const start = { ...payload(manager), setup: { aiCount: 1, opponentRuntime: 'llm', playerSoftMs: 100, playerHardMs: 1000 } };
+  const start = { ...payload(manager), setup: { aiCount: 1, opponentRuntime: 'llm', playerSoftMs: 1000, playerHardMs: 10000 } };
   manager.command(start);
   assert.equal((await settle(manager, start.requestId)).status, 'succeeded');
   const deadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
@@ -231,11 +232,15 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
   }
   assert.equal(manager.snapshot().state, 'paused');
   // A restored accepted retry cannot certify an authorization that never ran.
+  assert.deepEqual(decisions.map(({ message }) => Number(message.includes('[교정]'))), [0, 1, 0, 1]);
   for (const freshSession of [false, true]) {
     const abandoned = { ...payload(manager, 'retry-decision'),
       decisionId: manager.snapshot().pendingDecision.decisionId, freshSession };
     const beforeWarmups = calls.length;
+    const beforeDecisions = decisions.length;
     await manager.close();
+    const engineFilename = path.join(manager.current.sessionDir, 'state.json');
+    const engineBefore = fs.readFileSync(engineFilename);
     fs.writeFileSync(path.join(root, '.app', 'commands', `${abandoned.requestId}.json`),
       JSON.stringify({ ...abandoned, payload: JSON.stringify(abandoned), status: 'accepted' }));
     manager = createSessionManager({ storeDir: root,
@@ -245,6 +250,8 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     assert.equal(manager.receipt(abandoned.requestId).status, 'failed');
     assert.equal(manager.receipt(abandoned.requestId).error, 'RETRY_NOT_APPLIED');
     assert.equal(calls.length, beforeWarmups);
+    assert.equal(decisions.length, beforeDecisions);
+    assert.deepEqual(fs.readFileSync(engineFilename), engineBefore);
   }
   const end = payload(manager, 'end');
   manager.command(end);

@@ -452,6 +452,85 @@ test('#196 fresh-session authorization rejects non-boolean close receipts and a 
   assert.equal(Object.hasOwn(readJson(path.join(stoppedSetup.gameDir, 'loop-state.json')).pendingDecision, 'freshAuthorization'), false);
 });
 
+test('#196 retry preflight rejects a same-generation ABA identity replacement without overwriting its bytes', { timeout: 50_000 * WIN32_SCALE }, async (t) => {
+  const replacements = [
+    ['decisionId', (pending) => `${pending.decisionId}-aba`],
+    ['playerId', () => 'user'],
+    ['stateVersion', (pending) => pending.stateVersion + 1],
+    ['schemaVersion', () => 1],
+    ['gameEpoch', () => 'aba-game-epoch'],
+  ];
+  for (const [field, mutate] of replacements) await t.test(field, async (st) => {
+    let armed = false;
+    let gameDir;
+    let replacementBytes = null;
+    const adapter = makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) });
+    const setup = await setupAiFirst(st, { adapter, loopOpts: { onEngineInvoke: async (args) => {
+      if (!armed || args[0] !== 'step' || args.includes('--expect-version')) return;
+      armed = false;
+      const filename = path.join(gameDir, 'loop-state.json');
+      const state = readJson(filename);
+      writeJsonAtomic(filename, {
+        ...state,
+        pendingDecision: { ...state.pendingDecision, [field]: mutate(state.pendingDecision) },
+      });
+      replacementBytes = fs.readFileSync(filename);
+    } } });
+    gameDir = setup.gameDir;
+    await assert.rejects(setup.loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    const original = setup.loop.pendingDecision;
+    armed = true;
+    await assert.rejects(setup.loop.retryDecision(original.decisionId, {
+      freshAuthorization: { source: 'app', requestId: `aba-${field}` },
+    }), { code: 'INVALID_TRANSITION' });
+    const filename = path.join(gameDir, 'loop-state.json');
+    assert.ok(replacementBytes);
+    assert.deepEqual(fs.readFileSync(filename), replacementBytes);
+    assert.equal(readJson(filename).pendingDecision[field], mutate(original));
+  });
+});
+
+test('#196 retry rechecks strict close receipt after engine preflight before granting fresh authority', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let armed = false;
+  let gameDir;
+  let replacementBytes = null;
+  const setup = await setupAiFirst(t, { adapter: makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) }), loopOpts: {
+    onEngineInvoke: async (args) => {
+      if (!armed || args[0] !== 'step' || args.includes('--expect-version')) return;
+      armed = false;
+      const filename = path.join(gameDir, 'loop-state.json');
+      const state = readJson(filename);
+      writeJsonAtomic(filename, { ...state, pendingDecision: { ...state.pendingDecision, closeConfirmed: false } });
+      replacementBytes = fs.readFileSync(filename);
+    },
+  } });
+  gameDir = setup.gameDir;
+  await assert.rejects(setup.loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  armed = true;
+  await assert.rejects(setup.loop.retryDecision(setup.loop.pendingDecision.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'close-aba' },
+  }), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'loop-state.json')), replacementBytes);
+});
+
+test('#196 retry rejects malformed fresh authorization without changing the parked record', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const malformed = [
+    { source: 'unknown', requestId: 'x' },
+    { source: 'app', requestId: 1 },
+    [],
+  ];
+  for (const authorization of malformed) await t.test(JSON.stringify(authorization), async (st) => {
+    const { gameDir, loop } = await setupAiFirst(st, { adapter: makeAdapter({ onDecide: async () => ({ raw: 'invalid' }) }) });
+    await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    const filename = path.join(gameDir, 'loop-state.json');
+    const before = fs.readFileSync(filename);
+    await assert.rejects(loop.retryDecision(loop.pendingDecision.decisionId, {
+      freshAuthorization: authorization,
+    }), { code: 'BAD_FRESH_AUTHORIZATION' });
+    assert.deepEqual(fs.readFileSync(filename), before);
+  });
+});
+
 test('#196 fresh warmup stop and crash windows preserve an ordinary retry path', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
   let releaseWarmup;
   let warmupEntered = false;
