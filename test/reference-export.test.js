@@ -98,6 +98,14 @@ test('#200: coordinated caveats and optimum judgments keep negation local', () =
     '최적·정답이다. 확정된 누수는 아니다.',
     '최적·\n정답은 아니다.',
   ]) assert.equal(referenceClaimAllowed(text), false, text);
+  for (const boundary of ['\r', '\n', '\u2028', '\u2029']) {
+    for (const text of [
+      `최적·${boundary}정답은 아니다.`,
+      `최적${boundary}·정답은 아니다.`,
+      `최적해${boundary}판정이 아니라 공개 정보에 근거한 정성적 과정 평가다.`,
+      `not ${boundary}optimal`,
+    ]) assert.equal(referenceClaimAllowed(text), false, JSON.stringify(text));
+  }
 });
 
 test('legacy display drops invalid explanation and unqualified reference labels', () => {

@@ -208,15 +208,15 @@ export function referenceClaimAllowed(value) {
   const allowed = [];
   const claimAllowed = (claim, index) => {
     const prior = normalized.slice(0, claim.index);
-    const before = prior.slice(Math.max(prior.lastIndexOf('.'), prior.lastIndexOf('!'), prior.lastIndexOf('?'), prior.lastIndexOf('\n')) + 1);
+    const before = prior.slice(Math.max(...['.', '!', '?', '\r', '\n', '\u2028', '\u2029'].map((boundary) => prior.lastIndexOf(boundary))) + 1);
     const tail = normalized.slice(claim.index + claim[0].length, claims[index + 1]?.index);
     // Negation must describe this claim directly, never a different proposition later
     // in a compound sentence ("optimal and not a bad choice" is still an optimum claim).
-    const after = tail.split(/[.!?\n]/, 1)[0];
+    const after = tail.split(/[.!?\r\n\u2028\u2029]/, 1)[0];
     if (/(?:\bEV\b|기대(?:값|수익)|expected\s+value)/i.test(claim[0]) && /[+−-]?\d+(?:\.\d+)?/.test(before + after)) return false;
     // A coordinated noun phrase shares the following predicate, but only when
     // there is no intervening proposition or sentence boundary.
-    if (claims[index + 1] && /^[^\S\r\n]*(?:이나|나|와|과|또는|·)[^\S\r\n]*$/.test(tail)) {
+    if (claims[index + 1] && /^[^\S\r\n\u2028\u2029]*(?:이나|나|와|과|또는|·)[^\S\r\n\u2028\u2029]*$/.test(tail)) {
       return allowed[index + 1];
     }
     // A complete contrastive meta predicate, not a blanket exception for 아니라.
