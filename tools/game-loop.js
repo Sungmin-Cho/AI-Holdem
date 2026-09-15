@@ -6140,14 +6140,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (ended) return ended;
         state=readLoopState();
       }
-      opts.hints=checkHintResume(engineState.config, opts.hints);
-      opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
-      if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
-      openLog();
-      lifecycleStarted = true;
-      if (state?.phase === 'done' && state.pendingDecision) state = writeLoopState({ pendingDecision: undefined });
-      if (state?.pendingDecision) {
-        let p = state.pendingDecision;
+      // Preserve an invalid pending record before configuration checks or the
+      // first hint capability await can enter shutdown and serialize its bytes.
+      if (state?.phase !== 'done' && state?.pendingDecision) {
+        const p = state.pendingDecision;
         if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
           || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
           try {
@@ -6160,6 +6156,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
+      }
+      opts.hints=checkHintResume(engineState.config, opts.hints);
+      opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
+      if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
+      openLog();
+      lifecycleStarted = true;
+      if (state?.phase === 'done' && state.pendingDecision) state = writeLoopState({ pendingDecision: undefined });
+      if (state?.pendingDecision) {
+        let p = state.pendingDecision;
         // A fresh-session grant only authorizes the immediately following in-process
         // retry. Resume never inherits it, regardless of the persisted status.
         if (Object.hasOwn(p, 'freshAuthorization')) {

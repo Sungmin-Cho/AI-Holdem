@@ -8,10 +8,12 @@ An explicit End/Restart after `BAD_PLAYER_RECOVERY` abandons the pending decisio
 
 1. The first validation failure snapshots the exact disk bytes to create-only `loop-state.unverified.json`, before cleanup can serialize values such as `1e400`.
 2. An explicit operation publishes create-only `loop-state.abandoned.<operationId>.json`, verifies its SHA-256, and writes an `aborting` checkpoint without the damaged pending subtree.
-3. Engine `end`, the terminal checkpoint and relay adoption share one atomic transition. The engine preserves the unfinished hand in `.aborted-hand.json` and keeps chip balances, completed hands and configuration unchanged.
+3. Engine `end`, relay adoption and terminal publication share one atomic transition, in that order. The checkpoint is cleared only after relay adoption succeeds; this deliberately strengthens the original design ordering so adoption failure remains retryable. The engine preserves the unfinished hand in `.aborted-hand.json` and keeps chip balances, completed hands and configuration unchanged.
 4. Resume validates a remaining checkpoint and completes that operation idempotently. `GAME_ENDED` consumes the lifecycle: neither managed resume nor legacy main runs again after lock release.
 
 The command journal records the original game ID, selection version and epoch. Restart recovery checks a committed reservation before the old recovery marker and parks the new game. An accepted retry command cannot certify execution: it fails `RETRY_NOT_APPLIED` and needs another explicit request.
+
+`BAD_ABORT_CHECKPOINT` remains fail-closed even when the engine already reports abort. Keep the game stopped and preserve its engine, loop state, sidecar and logs. If an original backup of the matching sidecar/checkpoint exists, restore only that original evidence and retry with this compatible version; operation ID and digest must match the engine. Do not invent a sidecar, alter a digest/operation ID, or delete the checkpoint to force completion. If matching originals are unavailable, retain the files for diagnosis; neither the app nor `--abort-unrecoverable` bypasses this check. Invalid pending records in hint-enabled games are snapshotted before any capability child can run.
 
 ## Rollback boundary
 
