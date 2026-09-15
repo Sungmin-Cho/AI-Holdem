@@ -277,3 +277,9 @@ test('#194 recovery documentation matches outcomes and correction events',()=>{
   assert.ok(readme.includes('corrected'));
   assert.match(read('tools/player-prompt.md'),/첫 베팅도 "bet"이 아니라 "raise"/);
 });
+
+test('fresh retry documentation distinguishes authorization, memory loss and execution',()=>{
+  for(const doc of [read(SKILL),read('README.md')]) {
+    for(const word of ['--fresh-session','대화 기억','player-session-recreate-failed','freshSession','인가']) assert.ok(doc.includes(word),word);
+  }
+});
