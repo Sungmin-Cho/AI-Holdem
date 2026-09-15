@@ -12806,7 +12806,7 @@ test('#192 L1: 스캐너는 자기 pid가 없는 결과나 exit 1 빈 출력을 
     return { pid: 1 };
   };
   const exit1 = Object.assign(new Error('lsof exit 1'), { code: 1 });
-  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin' };
+  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin', uid: 501 };
 
   const emptyExit1 = await scanCoachRuntimeProcesses({ ...base, execFileFn: fakeExec({ error: exit1, stdout: '' }) });
   assert.deepEqual(emptyExit1, { status: 'unavailable', reason: 'LSOF_NO_OUTPUT' });
@@ -12845,6 +12845,18 @@ test('#192 L1: 스캐너는 자기 pid가 없는 결과나 exit 1 빈 출력을 
   assert.deepEqual(killed, { status: 'unavailable', reason: 'LSOF_TIMEOUT' });
 });
 
+test('#192 CI: uid를 구할 수 없으면 조회하지 않고 UID_UNAVAILABLE로 답한다', async () => {
+  let called = 0;
+  const scan = await scanCoachRuntimeProcesses({
+    lsofPath: '/usr/sbin/lsof',
+    platform: 'darwin',
+    uid: null,
+    execFileFn: () => { called += 1; return { pid: 1 }; },
+  });
+  assert.deepEqual(scan, { status: 'unavailable', reason: 'UID_UNAVAILABLE' });
+  assert.equal(called, 0, 'uid 없이 lsof를 실행했다');
+});
+
 test('#192 CI: 스캐너는 win32에서 조회를 시도하지 않고 WIN32_UNSUPPORTED로 답한다', async () => {
   let called = 0;
   const scan = await scanCoachRuntimeProcesses({
@@ -12861,7 +12873,7 @@ test('#192 J2: 스캐너는 완전한 절대 경로 cwd만 신뢰한다 — read
     setImmediate(() => callback(outcome.error ?? null, outcome.stdout ?? '', outcome.stderr ?? ''));
     return { pid: 1 };
   };
-  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin' };
+  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin', uid: 501 };
   const selfRecord = 'p500\nfcwd\nn/Users/someone/repo\n';
 
   // Linux에서 같은 uid의 cwd를 읽을 수 없으면 `n/proc/<pid>/cwd (readlink: Permission denied)`
