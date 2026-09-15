@@ -311,6 +311,7 @@ export function parseGameLoopArgs(argv) {
     ['--player-soft-ms', 'playerSoftMs'],
     ['--player-hard-ms', 'playerHardMs'],
     ['--retry-decision', 'retryDecisionId'],
+    ['--abort-unrecoverable', 'abortUnrecoverableId'],
   ]);
   let sawGameDir = false;
 
@@ -360,6 +361,9 @@ export function parseGameLoopArgs(argv) {
   if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   if (parsed.retryDecisionId !== undefined && !parsed.resume) throw codedError('USAGE', '--retry-decision은 --resume과 함께 사용하세요.');
   if (parsed.freshSession && !parsed.retryDecisionId) throw codedError('USAGE', '--fresh-session은 --retry-decision과 함께 사용하세요.');
+  if (parsed.abortUnrecoverableId !== undefined && (!parsed.resume || parsed.retryDecisionId !== undefined || !validRecoveryOperation(parsed.abortUnrecoverableId))) {
+    throw codedError('USAGE','--abort-unrecoverable은 안전한 operationId와 --resume이 필요하며 --retry-decision과 함께 쓸 수 없습니다.');
+  }
   const budgetOverrides = { ...(parsed.playerSoftMs !== undefined ? { softMs: parsed.playerSoftMs } : {}),
     ...(parsed.playerHardMs !== undefined ? { hardMs: parsed.playerHardMs } : {}) };
   if (parsed.resume && Object.keys(budgetOverrides).length && !parsed.retryDecisionId) {
@@ -6566,6 +6570,7 @@ export async function initializePreparedSession(gameDir, args) {
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+    ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) },
@@ -6709,7 +6714,8 @@ async function main() {
         signalStopError = error;
       });
     });
-    if (args.resume) {const resumed = await loop.resume({ skipLock: args.storeDir !== undefined });if(resumed?.code==='GAME_ENDED')fs.writeSync(1,JSON.stringify(resumed)+'\n');}
+    let resumed;
+    if (args.resume) {resumed = await loop.resume({ skipLock: args.storeDir !== undefined });if(resumed?.code==='GAME_ENDED')fs.writeSync(1,JSON.stringify(resumed)+'\n');}
     else await loop.bootstrap({
       ai: args.ai,
       stack: args.stack,
@@ -6728,7 +6734,7 @@ async function main() {
       hints: args.hints,
       dealBias: args.dealBias,
     });
-    await loop.run();
+    if (resumed?.code!=='GAME_ENDED') await loop.run();
   } catch (error) {
     // 정상 SIGTERM 처리 중의 STOPPING은 실패가 아니다. 다른 runtime/cleanup
     // 실패는 그대로 보고하고 비정상 종료한다.
