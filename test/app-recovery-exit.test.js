@@ -158,6 +158,44 @@ test('#197 post-engine publication or relay failure remains recoverable across m
   });
 });
 
+test('#197 every terminal consumer fences a replacement at lock release',{timeout:TIMEOUT},async t=>{
+  for(const consumer of ['journal-resume','recovery-end','recovery-restart'])await t.test(consumer,async st=>{
+    const f=await damagedStore(st),setup=f.manager.snapshot().setup;
+    const kind=consumer==='journal-resume'?'resume':consumer==='recovery-end'?'end':'restart';
+    if(consumer==='journal-resume')await engineEnd(f.gameDir,'journal-terminal');
+    const request=body(f.manager,kind);
+    let manager=f.manager;
+    if(consumer==='journal-resume'){
+      await manager.close();
+      write(path.join(f.root,'.app','commands',request.requestId+'.json'),{...request,setup,payload:JSON.stringify(request),status:'accepted'});
+      manager=createSessionManager({storeDir:f.root,resolver:f.resolver});st.after(()=>manager.close());
+    }
+    const prepared=await stagePreparedRestart(f.root,{setup,reservation:{gameId:randomUUID(),selectionVersion:2}});
+    const engine=read(path.join(prepared.stagingDir,'state.json'));
+    write(path.join(prepared.stagingDir,'loop-state.json'),{phase:'playing',sessionToken:engine.sessionToken,
+      gameEpoch:createHash('sha256').update(engine.sessionToken).digest('hex')});
+    write(path.join(prepared.stagingDir,'.app-setup.json'),setup);
+    const files=['state.json','loop-state.json','.app-setup.json'];
+    const before=files.map(name=>fs.readFileSync(path.join(prepared.stagingDir,name)));
+    const originalRmdir=fs.rmdirSync;let replacement,row;
+    fs.rmdirSync=function(target,...args){
+      const result=originalRmdir.call(this,target,...args);
+      if(target===path.join(f.root,'loop.lock.d')&&!replacement)replacement=commitSession(f.root,prepared);
+      return result;
+    };
+    try {
+      if(consumer==='journal-resume')await manager.initialize();
+      else manager.command(request);
+      row=await settle(manager,request.requestId);
+    } finally {fs.rmdirSync=originalRmdir;}
+    assert.ok(replacement);
+    assert.equal(row.status,'failed');assert.equal(row.error,'CURRENT_CHANGED');
+    assert.equal(manager.snapshot().gameId,replacement.gameId);
+    assert.notEqual(manager.snapshot().state,'ended');
+    for(let i=0;i<files.length;i++)assert.deepEqual(fs.readFileSync(path.join(replacement.sessionDir,files[i])),before[i]);
+  });
+});
+
 test('#197 explicit end and restart use a pinned recovery journal and preserve the old game',{timeout:TIMEOUT},async t=>{
   for(const kind of ['end','restart'])await t.test(kind,async st=>{
     const f=await damagedStore(st), manager=f.manager;
