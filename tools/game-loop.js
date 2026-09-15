@@ -445,8 +445,11 @@ export function legacyCoachRuntimeCandidates(records, { excludePid = null } = {}
 // 없는 결과는 전부 조회 불가다(#192 구현 리뷰 전 오케스트레이터 검토).
 export function scanCoachRuntimeProcesses({
   lsofPath, timeoutMs = 5_000, excludePid = process.pid, selfPid = process.pid, execFileFn = execFile,
+  // #192 CI: the platform is a parameter so the POSIX branch below can be exercised from a
+  // win32 runner, where `process.platform` would otherwise short-circuit every scanner test.
+  platform = process.platform,
 } = {}) {
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     return Promise.resolve({ status: 'unavailable', reason: 'WIN32_UNSUPPORTED' });
   }
   if (!lsofPath) return Promise.resolve({ status: 'unavailable', reason: 'LSOF_MISSING' });

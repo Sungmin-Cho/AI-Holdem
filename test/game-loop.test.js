@@ -11302,7 +11302,7 @@ test('#192 S3 분류자 f: consumed 행이 acceptEvidence를 가지면 handle �
   }
 });
 
-test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown identity를 result-wait cutoff까지 기다리지 않고 즉시 released로 닫는다', { timeout: 15_000, concurrency: false }, async (t) => {
+test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown identity를 result-wait cutoff까지 기다리지 않고 즉시 released로 닫는다', { timeout: 15_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11328,8 +11328,8 @@ test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown i
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 4_000,
-      finalizeCutoffLeadMs: 1_000,
+      finalizeBudgetMs: 4_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 1_000 * WIN32_SCALE,
       processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
       signalProcess: (pid, signal) => {
         if (pid === orphan.pid) signals.push(signal);
@@ -11344,7 +11344,7 @@ test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown i
 
   assert.equal(resumed.halt, undefined, `resume이 halt됐다: ${JSON.stringify(resumed.halt)}`);
   assert.deepEqual(signals, [], 'evidence로 released되기 전에 identity에 signal을 보냈다');
-  assert.equal(elapsedMs < 1_500, true, `evidence 있는 행이 result-wait cutoff 근처까지 대기했다 (${elapsedMs}ms)`);
+  assert.equal(elapsedMs < 1_500 * WIN32_SCALE, true, `evidence 있는 행이 result-wait cutoff 근처까지 대기했다 (${elapsedMs}ms)`);
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
   assert.equal(row?.cleanupState, 'released');
@@ -11723,7 +11723,7 @@ test('#192 L2: adapter disposal 실패와 락 상실이 겹치면 cleanupError �
   );
 });
 
-test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우지 않고 오류를 남긴다', { timeout: 20_000 }, async (t) => {
+test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우지 않고 오류를 남긴다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const root = tmpGame();
   const manager = createSessionManager({
     storeDir: root,
@@ -11744,7 +11744,7 @@ test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우�
     };
   };
   const settle = async (id) => {
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 15_000 * WIN32_SCALE;
     while (Date.now() < deadline) {
       const row = manager.receipt(id);
       if (row.status !== 'accepted') return row;
@@ -12798,13 +12798,15 @@ test('#192 L1: legacyCoachRuntimeCandidates — ai-holdem- 경로 구성요소�
   );
 });
 
+// #192 CI: these two pure fake-exec tests pin `platform` to a POSIX value so they also run
+// on the Windows CI shard, where `process.platform` short-circuits before the fake is used.
 test('#192 L1: 스캐너는 자기 pid가 없는 결과나 exit 1 빈 출력을 clean이 아니라 unavailable로 본다', async () => {
   const fakeExec = (outcome) => (file, args, options, callback) => {
     setImmediate(() => callback(outcome.error ?? null, outcome.stdout ?? '', outcome.stderr ?? ''));
     return { pid: 1 };
   };
   const exit1 = Object.assign(new Error('lsof exit 1'), { code: 1 });
-  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500 };
+  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin' };
 
   const emptyExit1 = await scanCoachRuntimeProcesses({ ...base, execFileFn: fakeExec({ error: exit1, stdout: '' }) });
   assert.deepEqual(emptyExit1, { status: 'unavailable', reason: 'LSOF_NO_OUTPUT' });
@@ -12843,12 +12845,23 @@ test('#192 L1: 스캐너는 자기 pid가 없는 결과나 exit 1 빈 출력을 
   assert.deepEqual(killed, { status: 'unavailable', reason: 'LSOF_TIMEOUT' });
 });
 
+test('#192 CI: 스캐너는 win32에서 조회를 시도하지 않고 WIN32_UNSUPPORTED로 답한다', async () => {
+  let called = 0;
+  const scan = await scanCoachRuntimeProcesses({
+    lsofPath: '/usr/sbin/lsof',
+    platform: 'win32',
+    execFileFn: () => { called += 1; return { pid: 1 }; },
+  });
+  assert.deepEqual(scan, { status: 'unavailable', reason: 'WIN32_UNSUPPORTED' });
+  assert.equal(called, 0, 'win32에서 lsof를 실행했다');
+});
+
 test('#192 J2: 스캐너는 완전한 절대 경로 cwd만 신뢰한다 — readlink 주석, 빈 이름, 상대 경로, deleted 접미사', async () => {
   const fakeExec = (outcome) => (file, args, options, callback) => {
     setImmediate(() => callback(outcome.error ?? null, outcome.stdout ?? '', outcome.stderr ?? ''));
     return { pid: 1 };
   };
-  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500 };
+  const base = { lsofPath: '/usr/sbin/lsof', excludePid: 500, selfPid: 500, platform: 'darwin' };
   const selfRecord = 'p500\nfcwd\nn/Users/someone/repo\n';
 
   // Linux에서 같은 uid의 cwd를 읽을 수 없으면 `n/proc/<pid>/cwd (readlink: Permission denied)`
@@ -12889,6 +12902,12 @@ test('#192 J2: 스캐너는 완전한 절대 경로 cwd만 신뢰한다 — read
 test('#192 L1: 기본 스캐너가 ai-holdem- cwd의 실제 프로세스를 candidate로, 종료 후에는 clean으로 본다', { timeout: 15_000 }, async (t) => {
   if (skipOnWin32(t, 'lsof 기반 스캐너는 POSIX 전용이다')) return;
   if (!REAL_LSOF) { t.skip('이 머신에 lsof가 없다'); return; }
+  // #192 CI: some Linux images ship an lsof that exits non-zero (warnings about unreadable
+  // mounts), and the scanner deliberately trusts a clean exit only. There the scan can never
+  // report candidates, so this test has nothing to assert — skip it with the observed reason
+  // instead of failing, and keep the scanner's fail-closed rule unchanged.
+  const probe = await scanCoachRuntimeProcesses({ lsofPath: REAL_LSOF, timeoutMs: 5_000 });
+  if (probe.status === 'unavailable') { t.skip(`이 머신의 lsof는 신뢰할 수 없다: ${probe.reason}`); return; }
   const tagDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-holdem-codex-'));
   t.after(() => { try { fs.rmSync(tagDir, { recursive: true, force: true }); } catch { /* gone */ } });
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
@@ -12899,14 +12918,20 @@ test('#192 L1: 기본 스캐너가 ai-holdem- cwd의 실제 프로세스를 cand
   // outlive the test: a leftover ai-holdem-* cwd process would make later real scans report
   // candidates on this machine.
   t.after(() => terminateIfAlive(child));
-  await waitFor(
-    async () => {
-      const scan = await scanCoachRuntimeProcesses({ lsofPath: REAL_LSOF, timeoutMs: 5_000 });
-      return scan.status === 'candidates' && scan.candidates.some((c) => c.pid === child.pid);
-    },
-    `실제 lsof 스캔이 pid ${child.pid}를 candidate로 보지 않았다`,
-    8_000,
-  );
+  let lastScan = null;
+  try {
+    await waitFor(
+      async () => {
+        lastScan = await scanCoachRuntimeProcesses({ lsofPath: REAL_LSOF, timeoutMs: 5_000 });
+        return lastScan.status === 'candidates' && lastScan.candidates.some((c) => c.pid === child.pid);
+      },
+      `실제 lsof 스캔이 pid ${child.pid}를 candidate로 보지 않았다`,
+      8_000,
+    );
+  } catch (error) {
+    error.message = `${error.message} (마지막 스캔: ${JSON.stringify(lastScan)})`;
+    throw error;
+  }
   await terminateIfAlive(child);
   await waitFor(
     async () => {
