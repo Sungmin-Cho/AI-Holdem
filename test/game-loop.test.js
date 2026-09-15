@@ -509,7 +509,7 @@ test('#196 fresh warmup stop and crash windows preserve an ordinary retry path',
 });
 
 test('#196 fresh warmup failures remain retryable unless the runtime failure is fatal', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
-  for (const [code, fatal] of [['CLI_FAILED', false], ['RUNTIME_CLOSED', true]]) await t.test(code, async (st) => {
+  for (const [code, fatal] of [['CLI_FAILED', false], ['RUNTIME_CLOSED', true], ['CHILD_CLOSE_UNCONFIRMED', true]]) await t.test(code, async (st) => {
     const adapter = makeAdapter({
       onWarmup: async () => {
         if (adapter.calls.length === 2) throw Object.assign(new Error(code), { code });
@@ -541,6 +541,89 @@ test('#196 fresh warmup failures remain retryable unless the runtime failure is 
       }), { code: 'PLAYER_RECOVERY_REQUIRED' });
     }
   });
+});
+
+test('stop turns an in-flight ordinary RUNTIME_CLOSED decision into durable INTERRUPTED recovery', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let releaseDecision;
+  let decisionEntered = false;
+  let decisionSettled;
+  const decisionGate = new Promise((resolve) => { releaseDecision = resolve; });
+  const settled = new Promise((resolve) => { decisionSettled = resolve; });
+  const adapter = makeAdapter({ onDecide: async () => {
+    decisionEntered = true;
+    try {
+      await decisionGate;
+      throw Object.assign(new Error('disposed while deciding'), { code: 'RUNTIME_CLOSED' });
+    } finally {
+      decisionSettled();
+    }
+  } });
+  adapter.dispose = async () => {
+    releaseDecision();
+    await settled;
+  };
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  const running = startRun(loop);
+  await waitFor(() => decisionEntered, 'ordinary decision did not enter', 5_000 * WIN32_SCALE);
+  await loop.requestStop();
+  await running;
+  const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+  assert.equal(pending.status, 'recovery_required');
+  assert.equal(pending.code, 'INTERRUPTED');
+  assert.notEqual(pending.status, 'unsafe');
+});
+
+test('stop during restored-session repair warmup preserves sessions and records INTERRUPTED instead of STOPPING', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const original = makeAdapter();
+  const { gameDir, loop } = await setupAiFirst(t, { adapter: original });
+  await loop.requestStop();
+  const before = fs.readFileSync(path.join(gameDir, '.player-sessions.json'));
+  let releaseWarmup;
+  let warmupEntered = false;
+  const warmupGate = new Promise((resolve) => { releaseWarmup = resolve; });
+  const adapter = makeAdapter({
+    onWarmup: async () => { warmupEntered = true; await warmupGate; },
+    onDecide: async () => { throw Object.assign(new Error('persisted session rejected'), { code: 'CLI_FAILED' }); },
+  });
+  const restored = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0, waitMs: 0 } });
+  t.after(() => restored.requestStop().catch(() => {}));
+  await restored.resume();
+  const running = startRun(restored);
+  await waitFor(() => warmupEntered, 'repair warmup did not enter', 5_000 * WIN32_SCALE);
+  const stopping = restored.requestStop();
+  releaseWarmup();
+  await stopping;
+  await running;
+  const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+  assert.equal(pending.status, 'recovery_required');
+  assert.equal(pending.code, 'INTERRUPTED');
+  assert.notEqual(pending.code, 'STOPPING');
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), before);
+});
+
+test('#196 a nonfatal fresh warmup failure permits a later fresh retry to recreate and decide', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const adapter = makeAdapter({
+    sessionIdFor: (_input, n) => `retry-session-${n}`,
+    onWarmup: async () => {
+      if (adapter.calls.length === 2) throw Object.assign(new Error('first fresh warmup failed'), { code: 'CLI_FAILED' });
+    },
+    onDecide: async ({ sessionId, message }) => ({
+      raw: sessionId === 'retry-session-1'
+        ? 'invalid'
+        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+    }),
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  const decisionId = loop.pendingDecision.decisionId;
+  await loop.retryDecision(decisionId, { freshAuthorization: { source: 'app', requestId: 'fresh-failure-one' } });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(loop.pendingDecision.code, 'CLI_FAILED');
+  await loop.retryDecision(decisionId, { freshAuthorization: { source: 'app', requestId: 'fresh-failure-two' } });
+  await runUntilUserBoundary(loop, gameDir);
+  assert.equal(adapter.calls.length, 3);
+  assert.equal(readJson(path.join(gameDir, '.player-sessions.json')).p1.sessionId, 'retry-session-3');
+  assert.ok(readLoopLog(gameDir).some((entry) => entry.event === 'player-session-recreate-failed' && entry.code === 'CLI_FAILED'));
 });
 
 test('#196 fresh authorization is removed across resume and fresh budget expiry never dispatches a child', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
