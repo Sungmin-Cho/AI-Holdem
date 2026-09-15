@@ -172,7 +172,7 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     async decide() { return { raw: 'invalid' }; },
     async dispose() {},
   };
-  const manager = createSessionManager({ storeDir: root,
+  let manager = createSessionManager({ storeDir: root,
     resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
   t.after(() => manager.close());
   await manager.initialize();
@@ -205,6 +205,7 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
   };
   const retry = { ...payload(manager, 'retry-decision'), decisionId: manager.snapshot().pendingDecision.decisionId, freshSession: true };
   manager.command(retry);
+  assert.equal(manager.command(retry).requestId, retry.requestId);
   assert.equal((await settle(manager, retry.requestId)).status, 'succeeded');
   assert.deepEqual(forwarded, { decisionId: retry.decisionId, options: { freshAuthorization: { source: 'app', requestId: retry.requestId } } });
   const warmupDeadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
@@ -216,6 +217,22 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(manager.snapshot().state, 'paused');
+  // A restored accepted retry cannot certify an authorization that never ran.
+  for (const freshSession of [false, true]) {
+    const abandoned = { ...payload(manager, 'retry-decision'),
+      decisionId: manager.snapshot().pendingDecision.decisionId, freshSession };
+    const beforeWarmups = calls.length;
+    await manager.close();
+    fs.writeFileSync(path.join(root, '.app', 'commands', `${abandoned.requestId}.json`),
+      JSON.stringify({ ...abandoned, payload: JSON.stringify(abandoned), status: 'accepted' }));
+    manager = createSessionManager({ storeDir: root,
+      resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
+    await manager.initialize();
+    assert.equal(manager.snapshot().state, 'paused');
+    assert.equal(manager.receipt(abandoned.requestId).status, 'failed');
+    assert.equal(manager.receipt(abandoned.requestId).error, 'RETRY_NOT_APPLIED');
+    assert.equal(calls.length, beforeWarmups);
+  }
   const end = payload(manager, 'end');
   manager.command(end);
   assert.equal((await settle(manager, end.requestId)).status, 'succeeded');
