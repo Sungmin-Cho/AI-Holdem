@@ -6573,6 +6573,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) }) };
   let loop = null;
   let preparedInitialization = null;
+  let resolvedCurrent = null;
     if (args.storeDir !== undefined) {
       if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
       // Process entrypoints restrict umask; the shared launcher never changes
@@ -6594,7 +6595,16 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
         if (args.resume) {
           const current = resolveCurrentSession(args.storeDir);
           if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
-          const storedConfig=JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024})).config;
+          const storedEngine=JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024}));
+          if (args.expectedCurrent) {
+            const expected=args.expectedCurrent;
+            if (current.gameId!==expected.gameId || current.selectionVersion!==expected.selectionVersion
+              || typeof storedEngine.sessionToken!=='string' || gameEpochOf(storedEngine.sessionToken)!==expected.gameEpoch) {
+              throw codedError('CURRENT_CHANGED','복구 종료 대상 게임이 변경됐습니다.');
+            }
+          }
+          resolvedCurrent=current;
+          const storedConfig=storedEngine.config;
           checkHintResume(storedConfig,args.hints);
           checkDealBiasResume(storedConfig,args.dealBias);
           resolveSessionReference(current.sessionDir);
@@ -6670,7 +6680,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
               ...loopOptions, port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
-  return { loop, preparedInitialization };
+  return { loop, preparedInitialization, current: resolvedCurrent };
 }
 
 async function main() {
