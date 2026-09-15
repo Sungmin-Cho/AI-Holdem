@@ -347,6 +347,21 @@ async function waitUntilDead(pid, timeoutMs = 2_000) {
 // a PowerShell child, so the same wait needs an order of magnitude more.
 const WIN32_SCALE = process.platform === 'win32' ? 10 : 1;
 
+test('#196 legacy run forwards an explicit fresh-session grant after resume', {timeout:20000*WIN32_SCALE},async t=>{
+  const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter({onDecide:async()=>({raw:'invalid'})})});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  const decisionId=loop.pendingDecision.decisionId;
+  await loop.requestStop();
+  const adapter=makeAdapter({sessionIdFor:()=> 'legacy-fresh-session',onDecide:async({sessionId,message})=>({raw:sessionId==='legacy-fresh-session'?JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'}):'invalid'})});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,retryDecisionId:decisionId,freshAuthorization:{source:'legacy',requestId:null}}});
+  t.after(()=>restored.requestStop());
+  await restored.resume();
+  await runUntilUserBoundary(restored,gameDir);
+  assert.equal(adapter.calls.length,1);
+  assert.equal(adapter.decideCalls.length,1);
+  assert.equal(readJson(path.join(gameDir,'loop-state.json')).metrics.filter(x=>x.decisionId===decisionId).length,1);
+});
+
 test('#196 fresh-session retry recreates only the parked seat before retrying its original decision', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({
     sessionIdFor: (_input, n) => `seat-session-${n}`,
