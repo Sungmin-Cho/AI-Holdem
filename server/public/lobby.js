@@ -104,6 +104,10 @@ function render() {
   $("recover").hidden = !snapshot.allowedCommands.includes("resume");
   $("review").hidden = !["completed", "ended"].includes(s);
   $("result-restart").hidden = !snapshot.allowedCommands.includes("restart");
+  $("result-end").hidden = !snapshot.allowedCommands.includes("end");
+  $("result-end").disabled = busy || !snapshot.allowedCommands.includes("end");
+  $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
+  $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
   $("result-modes").hidden = !snapshot.allowedCommands.includes("start");
   $("back").hidden = !(selecting && paused);
   $("start").disabled =
@@ -151,6 +155,7 @@ async function refresh() {
   render();
 }
 const errorMessages = {
+  BAD_PLAYER_RECOVERY: '저장된 LLM 결정 기록을 검증할 수 없어 이어서 할 수 없습니다. 기록은 보존한 채 게임을 종료하거나 같은 설정으로 새 게임을 시작할 수 있습니다.',
   RETRY_NOT_APPLIED: '재시도 인가가 실행되기 전에 앱이 중단됐습니다. 필요하면 재시도를 다시 선택하세요.',
   INVALID_SETUP: "설정이 서로 맞지 않습니다. 인원, 스택, 핸드 수를 확인하세요.",
   TENDENCY_INSUFFICIENT:
@@ -246,7 +251,8 @@ $("restart").onclick = () => confirm(() => command("restart"));
 $("end").onclick = () => confirm(() => command("end"));
 $("modes").onclick = chooseMode;
 $("result-modes").onclick = chooseMode;
-$("result-restart").onclick = () => command("restart");
+$("result-restart").onclick = () => snapshot.state === 'error' ? confirm(() => command('restart')) : command('restart');
+$("result-end").onclick = () => confirm(() => command('end'));
 $("close-menu").onclick = () => $("pause-dialog").close();
 $("back").onclick = () => {
   selecting = false;
