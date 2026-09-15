@@ -64,6 +64,8 @@ async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=n
   manager=createSessionManager({storeDir:root,resolver});
   await manager.initialize();
   assert.equal(manager.snapshot().error,'SESSION_RECOVERABLE');
+  assert.equal(manager.snapshot().recoveryExit,null);
+  assert.deepEqual(manager.snapshot().allowedCommands,['resume']);
   const resume=body(manager,'resume');manager.command(resume);
   assert.equal((await settle(manager,resume.requestId)).error,'BAD_PLAYER_RECOVERY');
   return {manager,root,gameDir,resolver,calls:()=>calls};
@@ -77,6 +79,18 @@ test('#197 recovery exit gate follows engine/loop phases and exposes the wired e
     assert.equal(manager.snapshot().state,'error');
     assert.deepEqual(manager.snapshot().recoveryExit,{mode});
     assert.deepEqual(manager.snapshot().allowedCommands,['resume','end','restart']);
+  });
+});
+
+test('#197 identity mismatch and oversized app records keep recovery exits closed',{timeout:TIMEOUT},async t=>{
+  for(const kind of ['identity','size'])await t.test(kind,async st=>{
+    const f=await damagedStore(st),file=path.join(f.gameDir,'loop-state.json');
+    if(kind==='identity')write(file,{...read(file),sessionToken:'foreign'});
+    else fs.appendFileSync(file,' '.repeat(2*1024*1024));
+    const before=fs.readFileSync(file),snapshot=f.manager.snapshot();
+    assert.equal(snapshot.recoveryExit,null);
+    assert.deepEqual(snapshot.allowedCommands,['resume']);
+    assert.deepEqual(fs.readFileSync(file),before);
   });
 });
 

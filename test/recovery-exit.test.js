@@ -139,6 +139,22 @@ test('#197 snapshot failure keeps raw bytes but records a later owned cleanup fa
   assert.ok(events.some(event=>event.event==='cleanup-failed'&&event.code==='FIXTURE_RMDIR_FAIL'));
   if(fs.existsSync(lockDir))fs.rmdirSync(lockDir);
 });
+
+test('#197 invalid hint-game pending is snapshotted before a capabilities stop can serialize it',{timeout:TIMEOUT},async t=>{
+  const f=await fixture(t),engineFile=path.join(f.root,'state.json');
+  const state=read(engineFile);state.config={...state.config,hintContractVersion:1,hints:'on'};
+  fs.writeFileSync(engineFile,JSON.stringify(state));
+  let loop,capabilities=0;
+  loop=f.loop({onEngineInvoke:args=>{
+    if(args[0]==='capabilities'){capabilities++;return loop.requestStop();}
+  }});
+  const failure=await loop.resume().catch(error=>error);
+  const snapshot=path.join(f.root,'loop-state.unverified.json');
+  assert.equal(fs.existsSync(snapshot),true,'raw evidence must precede any hint child/stop boundary');
+  assert.deepEqual(fs.readFileSync(snapshot),f.raw);
+  assert.equal(failure.code,'BAD_PLAYER_RECOVERY');
+  assert.equal(capabilities,0,'invalid pending needs no capabilities child');
+});
 test('#197 failed engine end leaves a verifiable checkpoint and resumed abort is idempotent',{timeout:TIMEOUT},async t=>{
   const f=await fixture(t);
   await assert.rejects(f.loop({abortUnrecoverable:{operationId:'crash-end'},onEngineInvoke:args=>{
