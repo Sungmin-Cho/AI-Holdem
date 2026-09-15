@@ -72,6 +72,42 @@ test('#169: Korean negative and meta claims stay local to their predicates', () 
   ]) assert.equal(referenceClaimAllowed(text), false, text);
 });
 
+test('#200: coordinated caveats and optimum judgments keep negation local', () => {
+  const safe = [
+    '최적·정답 또는 확정된 누수로 판정할 수는 없다.',
+    '최적 또는 정답 또는 확정된 누수로 판정할 수는 없다.',
+    '최적해 판정이 아니라 공개 정보에 근거한 정성적 과정 평가다.',
+    '최적이라고 단정할 수 없습니다.',
+    '최적해 · 정답은 아니다.',
+  ];
+  for (const text of safe) {
+    assert.equal(referenceClaimAllowed(text), true, text);
+    for (const claim of ['최적·정답이다.', '최적해입니다.', 'GTO 전략입니다.', 'EV +3bb입니다.']) {
+      assert.equal(referenceClaimAllowed(`${text} ${claim}`), false);
+      assert.equal(referenceClaimAllowed(`${claim} ${text}`), false);
+      assert.equal(referenceClaimAllowed(`${text.replace(/\.$/, '')}, ${claim}`), false);
+    }
+  }
+  for (const text of [
+    '최적·정답이다.', '최적해입니다.',
+    '최적·정답이며 나쁜 선택은 아니다.',
+    '최적·정답은 판정할 수 없다는 말은 틀렸다.',
+    '최적해 판정이 아니라는 말은 틀렸다.',
+    '최적해 판정이 아니라고 할 수 없다.',
+    '최적해 판정이 아니라 할 수 없다.',
+    '최적·정답이다. 확정된 누수는 아니다.',
+    '최적·\n정답은 아니다.',
+  ]) assert.equal(referenceClaimAllowed(text), false, text);
+  for (const boundary of ['\r', '\n', '\u2028', '\u2029']) {
+    for (const text of [
+      `최적·${boundary}정답은 아니다.`,
+      `최적${boundary}·정답은 아니다.`,
+      `최적해${boundary}판정이 아니라 공개 정보에 근거한 정성적 과정 평가다.`,
+      `not ${boundary}optimal`,
+    ]) assert.equal(referenceClaimAllowed(text), false, JSON.stringify(text));
+  }
+});
+
 test('legacy display drops invalid explanation and unqualified reference labels', () => {
   const card = formatTrainingCard({
     handNo: 1,
