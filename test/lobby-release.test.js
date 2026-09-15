@@ -9,7 +9,9 @@ test('release wires real browser and Windows lifecycle checks',()=>{
  assert.match(pkg.scripts['test:lobby:browser'],/lobby-session-journey/);
  for(const name of ['app-service','app-command-store','app-server-security','session-controls'])assert.ok(pkg.scripts['test:lobby:windows'].includes(`test/${name}.test.js`));
  const rest=shardFiles('rest',fileURLToPath(new URL('.',import.meta.url)));
- for(const name of ['app-service','app-command-store','app-server-security','session-controls'])assert.ok(rest.some(file=>file.endsWith(`${name}.test.js`)));
+ for(const name of ['app-service','app-server-security','session-controls'])assert.ok(rest.some(file=>file.endsWith(`${name}.test.js`)));
+ const studyA=shardFiles('study-a',fileURLToPath(new URL('.',import.meta.url)));
+ assert.ok(studyA.some(file=>file.endsWith('app-command-store.test.js')));
  assert.match(fs.readFileSync(new URL('../.github/workflows/test.yml',import.meta.url),'utf8'),/run: npm run test:ci:windows -- \$\{\{ matrix.shard \}\}/);
  for(const name of ['pause-resume','restart-new-id','abort-summary','completed-review-reload','owned-cleanup'])assert.ok(requiredJourneyChecks.includes(name));
 });

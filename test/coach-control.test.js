@@ -1168,3 +1168,82 @@ test('#192 L1: cleanup-result CLI --row-owner + --operator-confirmed 1은 foreig
   assert.equal(row?.cleanupState, 'released');
   assert.equal(row?.ownerSessionId, oldOwner, 'released된 행이 foreign owner의 행이 아니다');
 });
+
+async function cleanup205Fixture() {
+  const fixture = setup();
+  const { dir, owner, cc, snapshotFile, statsFile } = fixture;
+  const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  await cc.fence({ gameDir: dir, owner, handNo: 1, generation: reserved.generation, reason: 'test' });
+  return { ...fixture, generation: reserved.generation };
+}
+
+async function cleanup205Cli(fixture, cleanupState, flags = []) {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const args = [path.resolve('tools/coach-control.js'), 'cleanup-result', '--game-dir', fixture.dir,
+    '--owner', fixture.owner, '--hand', '1', '--generation', String(fixture.generation), '--cleanup-state', cleanupState, ...flags];
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, args, { encoding: 'utf8', timeout: 10_000 });
+    return JSON.parse(stdout.trim());
+  } catch (error) {
+    if (!error.stdout) throw error;
+    return JSON.parse(error.stdout.trim());
+  }
+}
+
+for (const flags of [[], ['--evidence', 'IDENTITY_DEAD', '--operator-confirmed', '1'], ['--evidence', 'NOT_A_REASON']]) {
+  test(`#205 released CLI rejects invalid declaration ${JSON.stringify(flags)} without writes`, async () => {
+    const f = await cleanup205Fixture();
+    const authority = fs.readFileSync(path.join(f.dir, '.coach-authority.json'));
+    const tracePath = path.join(f.dir, '.coach-adapter-trace.jsonl');
+    const trace = fs.existsSync(tracePath) ? fs.readFileSync(tracePath) : null;
+    const result = await cleanup205Cli(f, 'released', flags);
+    assert.equal(result.code, 'USAGE');
+    assert.match(result.message, /--operator-confirmed 1/);
+    assert.deepEqual(fs.readFileSync(path.join(f.dir, '.coach-authority.json')), authority);
+    assert.deepEqual(fs.existsSync(tracePath) ? fs.readFileSync(tracePath) : null, trace);
+  });
+}
+
+for (const declaration of [{ evidence: 'IDENTITY_DEAD' }, { operatorConfirmed: true }]) {
+  test(`#205 released CLI records declaration ${JSON.stringify(declaration)}`, async () => {
+    const f = await cleanup205Fixture();
+    const flags = declaration.evidence ? ['--evidence', declaration.evidence] : ['--operator-confirmed', '1'];
+    assert.equal((await cleanup205Cli(f, 'released', flags)).cleanupState, 'released');
+    const trace = fs.readFileSync(path.join(f.dir, '.coach-adapter-trace.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(trace.evidence, declaration.evidence);
+    assert.equal(trace.operatorConfirmed, declaration.operatorConfirmed);
+  });
+}
+
+for (const cleanupState of ['termination_unconfirmed', 'release_failed', 'cancelled', 'pending']) {
+  test(`#205 ${cleanupState} needs no release declaration in API or CLI`, async () => {
+    const f = await cleanup205Fixture();
+    assert.equal((await cleanup205Cli(f, cleanupState)).cleanupState, cleanupState);
+    assert.equal((await f.cc.recordCleanup({ gameDir: f.dir, owner: f.owner, handNo: 1, generation: f.generation, cleanupState })).cleanupState, cleanupState);
+  });
+}
+
+test('#205 recordCleanup rejects invalid declarations before lock acquisition', async () => {
+  const f = await cleanup205Fixture();
+  const before = fs.readFileSync(path.join(f.dir, '.coach-authority.json'));
+  // A missing directory proves invalid input is rejected before any filesystem/lock work.
+  const absent = path.join(f.dir, 'absent');
+  for (const declaration of [{}, { evidence: 'IDENTITY_DEAD', operatorConfirmed: true }, { evidence: 'NOT_A_REASON' },
+    { operatorConfirmed: 'true' }, { operatorConfirmed: 1 }, { operatorConfirmed: {} }]) {
+    for (const gameDir of [absent, f.dir]) {
+      await assert.rejects(f.cc.recordCleanup({ gameDir, owner: f.owner, handNo: 1, generation: f.generation, cleanupState: 'released', ...declaration }), { code: 'USAGE' });
+    }
+    assert.deepEqual(fs.readFileSync(path.join(f.dir, '.coach-authority.json')), before);
+    assert.equal(fs.existsSync(absent), false);
+  }
+  assert.equal((await f.cc.recordCleanup({ gameDir: f.dir, owner: f.owner, handNo: 1, generation: f.generation, cleanupState: 'released', operatorConfirmed: true })).cleanupState, 'released');
+});
+
+test('#205 CLI and loop release reason sets agree with the contract', async () => {
+  const { RELEASE_EVIDENCE_REASONS } = await import('../tools/coach-control.js');
+  const { LOOP_RELEASE_REASONS } = await import('../tools/game-loop.js');
+  const expected = new Set(['IDENTITY_DEAD', 'IDENTITY_REPLACED', 'NOT_SPAWNED', 'OWNER_RUNTIME_CLOSED', 'CLOSED_CONFIRMED', 'ACCEPT_EVIDENCE', 'LEGACY_NO_RUNTIME_PROCESS']);
+  assert.deepEqual(new Set(RELEASE_EVIDENCE_REASONS), expected);
+  assert.deepEqual(new Set(LOOP_RELEASE_REASONS), expected);
+});

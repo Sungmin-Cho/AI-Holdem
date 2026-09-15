@@ -18,6 +18,8 @@ import {
 import { createStartTimeProbe, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
+  defaultReclaimBudgets,
+  platformBudgetScale,
   exitCodeFor,
   parseGameLoopArgs,
   prepareGameSession,
@@ -2167,7 +2169,7 @@ test('bootstrap summarizes historical skips once and logs identities on repeated
   }
 });
 
-test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 }, async (t) => {
+test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const storeDir = tmpGame();
   const terminalDir = path.join(
     storeDir,
@@ -3285,7 +3287,7 @@ test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 1
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
-test('resume derives a missing loop state from engine state, but an entirely absent game releases the lock and fails', { timeout: 10_000 }, async (t) => {
+test('resume derives a missing loop state from engine state, but an entirely absent game releases the lock and fails', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const emptyDir = tmpGame();
   const absent = createGameLoop({
     gameDir: emptyDir,
@@ -5678,7 +5680,8 @@ test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 hal
   assert.equal(upper.starts.length, 0, 'replacement coach started before persisted reservation was settled');
 
   const recovery = state.halt.recovery.commands[0];
-  const released = JSON.parse((await execFileAsync(recovery.program, recovery.args, {
+  await assert205UnconfirmedCommand(gameDir, recovery);
+  const released = JSON.parse((await execFileAsync(recovery.program, [...recovery.args, '--operator-confirmed', '1'], {
     encoding: 'utf8', timeout: 5_000,
   })).stdout.trim());
   assert.equal(released.cleanupState, 'released');
@@ -5705,7 +5708,7 @@ test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 hal
   assert.equal(secondCalls.filter((args) => args[0] === 'begin-owner').length, 1);
 });
 
-test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 }, async (t) => {
+test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -5727,9 +5730,9 @@ test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 beg
       port: 0,
       waitMs: 0,
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => calls.push(args),
     },
   });
@@ -5742,6 +5745,7 @@ test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 beg
   const cleanupIndex = calls.findIndex((args) => args[0] === 'cleanup-result');
   const beginIndex = calls.findIndex((args) => args[0] === 'begin-owner');
   assert.equal(cleanupIndex >= 0, true);
+  assert205Evidence(calls, 'IDENTITY_DEAD');
   assert.equal(beginIndex > cleanupIndex, true, 'begin-owner ran before persisted cleanup completed');
   assert.equal(
     readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts[0].cleanupState,
@@ -7100,9 +7104,10 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
   } catch (error) {
     if (error.code !== 'COACH_HANDLE_UNRESOLVED') throw error;
     const halted = readJson(path.join(gameDir, 'loop-state.json'));
-    assert.equal(halted.halt.recovery.commands.length > 0, true);
+    if (halted.halt.recovery.commands.length === 0) assert.match(halted.halt.message, /pid:/);
     for (const command of halted.halt.recovery.commands) {
-      await execFileAsync(command.program, command.args, { encoding: 'utf8', timeout: 5_000 });
+      await assert205UnconfirmedCommand(gameDir, command);
+      await execFileAsync(command.program, [...command.args, '--operator-confirmed', '1'], { encoding: 'utf8', timeout: 5_000 });
     }
     recoveredLoop = createGameLoop({
       gameDir,
@@ -8269,7 +8274,8 @@ test('Task 7A full review: handle-less persisted generation은 owner 교대 전�
   const recoveryServer = await startExternalServer(gameDir, init.sessionToken);
   t.after(() => terminateIfAlive(recoveryServer.child));
   const recovery = halted.halt.recovery.commands[0];
-  const recovered = JSON.parse((await execFileAsync(recovery.program, recovery.args, {
+  await assert205UnconfirmedCommand(gameDir, recovery);
+  const recovered = JSON.parse((await execFileAsync(recovery.program, [...recovery.args, '--operator-confirmed', '1'], {
     encoding: 'utf8', timeout: 5_000,
   })).stdout.trim());
   assert.equal(recovered.cleanupState, 'released');
@@ -10532,9 +10538,9 @@ test('#192 FO-3 RED: policy playing resume도 살아 있는 persisted coach를 �
       waitMs: 0,
       opponentRuntime: 'policy',
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => calls.push(args),
     },
   });
@@ -10578,9 +10584,9 @@ test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServe
       waitMs: 0,
       opponentRuntime: 'policy',
       pollMs: 10,
-      orphanTerminateGraceMs: 500,
-      orphanTerminateKillWaitMs: 200,
-      resumeReclaimResidualMs: 200,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
       onCoachInvoke: (args) => {
         if (calls.length === 0) {
           // D6: the reclaim's own coach CLI calls (fence/cleanup-result) must fire only
@@ -11391,6 +11397,8 @@ test('#192 S2b 분류자 1: stamp, handle 없음, sidecar 없음 → released NO
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
   assert.equal(row?.cleanupState, 'released');
+        assert205Evidence(coachInvocations(calls, 'cleanup-result'), 'NOT_SPAWNED');
+        assert205Trace(gameDir, 'NOT_SPAWNED');
   assert.equal(row?.spawnEvidence, 1);
 });
 
@@ -12038,7 +12046,7 @@ test('#192 S3 분류자 f: consumed 행이 acceptEvidence를 가지면 handle �
       st.after(() => terminateIfAlive(external.child));
       await seedQueuedCoach(gameDir, 'old-owner', 1, { acceptEvidence });
       const upper = makeCoachAdapter();
-      const { loop } = finalizingLoop(st, gameDir, init.sessionToken, {
+      const { loop, calls } = finalizingLoop(st, gameDir, init.sessionToken, {
         upper,
         stateOverrides: { port: external.lock.port },
         // #192 O1/L1: the `null` branch is exactly the pre-S3 legacy shape (no
@@ -12055,6 +12063,8 @@ test('#192 S3 분류자 f: consumed 행이 acceptEvidence를 가지면 handle �
         const authority = readJson(path.join(gameDir, '.coach-authority.json'));
         const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
         assert.equal(row?.cleanupState, 'released');
+        assert205Evidence(coachInvocations(calls, 'cleanup-result'), 'ACCEPT_EVIDENCE');
+        assert205Trace(gameDir, 'ACCEPT_EVIDENCE');
       } else {
         await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
         const state = readJson(path.join(gameDir, 'loop-state.json'));
@@ -12596,6 +12606,8 @@ test('#192 S4 분류자 c: 표식 없는 legacy 행도 owner closure entry가 �
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
   assert.equal(row?.cleanupState, 'released');
+        assert205Evidence(coachInvocations(calls, 'cleanup-result'), 'OWNER_RUNTIME_CLOSED');
+        assert205Trace(gameDir, 'OWNER_RUNTIME_CLOSED');
   assert.notEqual(row?.spawnEvidence, 1, 'legacy 행에는 spawnEvidence stamp가 없어야 한다(d 배제 확인)');
 });
 
@@ -13378,6 +13390,7 @@ test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 �
   const cleanupCalls = coachInvocations(calls2, 'cleanup-result');
   assert.equal(cleanupCalls.length, 1, '해소된 행은 cleanup-result를 한 번 기록해야 한다');
   assert.equal(flagValue(cleanupCalls[0], '--cleanup-state'), 'released');
+  assert.equal(flagValue(cleanupCalls[0], '--evidence'), 'IDENTITY_DEAD');
   assert.equal(
     coachInvocations(calls2, 'adapter-disable').length,
     0,
@@ -13759,6 +13772,7 @@ test('#192 L1: 스캐너가 clean이면 evidence 없는 legacy 행이 자동 복
   ));
   assert.equal(cleanupCalls.length, 1);
   assert.equal(flagValue(cleanupCalls[0], '--cleanup-state'), 'released');
+  assert.equal(flagValue(cleanupCalls[0], '--evidence'), 'LEGACY_NO_RUNTIME_PROCESS');
 });
 
 test('#192 L1: 스캐너가 clean이어도 foreign legacy 행은 released 판정만 되고 온디스크에는 쓰이지 않은 채 resume이 진행된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
@@ -13970,9 +13984,9 @@ test('#192 J4: playing resume의 legacy 스캔이 identity deadline 안에 해�
       // enough out that the real child-process calls after the scan (adapter-disable, fence)
       // have room to finish, so it is specifically the scan bound (J4) being exercised here —
       // not the pre-existing closure deadline racing a subprocess spawn.
-      orphanTerminateGraceMs: 5,
-      orphanTerminateKillWaitMs: 5,
-      resumeReclaimResidualMs: 8_000,
+      orphanTerminateGraceMs: 5 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 5 * WIN32_SCALE,
+      resumeReclaimResidualMs: 8_000 * WIN32_SCALE,
       scanCoachRuntimeProcesses: () => new Promise(() => {}),
     },
   });
@@ -14075,6 +14089,7 @@ test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 b
   t.after(() => loop.requestStop().catch(() => {}));
   await assert.rejects(loop.bootstrap({ ai: 1 }), (error) => error.code === 'RESOLVER_BOOM_192');
   assert.ok(logs.some((row) => row.event === 'bootstrap-cleanup-lock-lost'), 'bootstrap-cleanup-lock-lost 로그가 없다');
+  assert.equal('cause' in logs.find((row) => row.event === 'bootstrap-cleanup-lock-lost'), false);
 });
 
 test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT면 복구 명령을 하나도 만들지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
@@ -14199,7 +14214,7 @@ test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-
   const reserved = await seedReservedCoachStamped(gameDir, 'old-owner', 1);
   writeCoachSpawnSidecar(gameDir, init.sessionToken, 'old-owner', reserved, { phase: 'closed-confirmed' });
   const upper = makeCoachAdapter();
-  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: { sidecarNoFollowFlag: undefined },
@@ -14211,6 +14226,8 @@ test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   const row = authority.retiredAttempts.find((entry) => entry.handNo === 1);
   assert.equal(row?.cleanupState, 'released');
+  assert205Evidence(coachInvocations(calls, 'cleanup-result'), 'CLOSED_CONFIRMED');
+  assert205Trace(gameDir, 'CLOSED_CONFIRMED');
 });
 
 test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 loop-state를 쓰지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
@@ -14629,3 +14646,247 @@ test('#194 stale identity at soft deadline does not escape the async decision', 
   assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
   assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-soft-wait'),false);
 });
+
+
+test('#207 resume cleanup lock loss preserves the resolver error without a cause field', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  await first.bootstrap({ ai: 1 });
+  await first.requestStop();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => {
+      const lockDir = path.join(gameDir, 'loop.lock.d');
+      fs.rmSync(lockDir, { recursive: true, force: true });
+      fs.mkdirSync(lockDir);
+      throw Object.assign(new Error('resolver failed after lock replacement'), { code: 'RESOLVER_BOOM_207' });
+    },
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await assert.rejects(loop.resume(), (error) => error.code === 'RESOLVER_BOOM_207');
+  const row = logs.find((entry) => entry.event === 'resume-cleanup-lock-lost');
+  assert.ok(row);
+  assert.equal('cause' in row, false);
+});
+
+
+test('#204 default reclaim budgets scale all four defaults only on win32', () => {
+  const expected = { finalizeBudgetMs: 20_000, orphanTerminateGraceMs: 5_000, orphanTerminateKillWaitMs: 2_000, resumeReclaimResidualMs: 5_000 };
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const scale = platform === 'win32' ? 10 : 1;
+    assert.equal(platformBudgetScale(platform), scale);
+    assert.deepEqual(defaultReclaimBudgets(platform), Object.fromEntries(Object.entries(expected).map(([key, value]) => [key, value * scale])));
+  }
+});
+
+for (const budgetPlatform of ['win32', undefined]) {
+  test(`#204 playing resume wires default budgets (${budgetPlatform ?? 'native'})`, { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+    await first.bootstrap({ ai: 1 });
+    const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+    const orphan = await startCoachOrphan({ ignoreTerm: false });
+    t.after(() => terminateIfAlive(orphan));
+    await seedRunningCoach(gameDir, oldOwner, 1, orphan);
+    await first.requestStop();
+    const logs = [];
+    const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: { port: 0, waitMs: 0, budgetPlatform, log: (row) => logs.push(row) } });
+    t.after(() => loop.requestStop().catch(() => {}));
+    assert.equal((await loop.resume()).phase, 'playing');
+    await waitUntilDead(orphan.pid);
+    const row = logs.find((entry) => entry.event === 'resume-reclaim-budget');
+    assert.ok(row);
+    const defaults = defaultReclaimBudgets(budgetPlatform);
+    assert.deepEqual([row.graceMs, row.killWaitMs, row.residualMs, row.scale], [defaults.orphanTerminateGraceMs, defaults.orphanTerminateKillWaitMs, defaults.resumeReclaimResidualMs, platformBudgetScale(budgetPlatform)]);
+  });
+}
+
+test('#204 explicit reclaim budgets are not scaled again', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  await first.bootstrap({ ai: 1 });
+  await first.requestStop();
+  const logs = [];
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0, waitMs: 0, budgetPlatform: 'win32', orphanTerminateGraceMs: 5,
+    orphanTerminateKillWaitMs: 5, resumeReclaimResidualMs: 8_000, log: (row) => logs.push(row),
+  } });
+  t.after(() => loop.requestStop().catch(() => {}));
+  assert.equal((await loop.resume()).phase, 'playing');
+  const row = logs.find((entry) => entry.event === 'resume-reclaim-budget');
+  assert.ok(row);
+  assert.deepEqual([row.graceMs, row.killWaitMs, row.residualMs, row.scale], [5, 5, 8_000, 10]);
+});
+
+// #205: real persisted rows and real coach CLI children; only the orphan identity and
+// signals are controlled, so server cleanup always retains its normal behavior.
+async function recovery205Fixture(t, { foreign = false, mixed = false, identity = 'alive', jump = false, coachCliPath } = {}) {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  await first.bootstrap({ ai: 1 });
+  await first.requestStop();
+  const owner = 'old-owner-205'; // No runtime-closed receipt for this owner.
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, owner, 1, orphan);
+  const startTime = processStartTime(orphan.pid);
+  if (foreign) {
+    const authorityPath = path.join(gameDir, '.coach-authority.json');
+    const authority = readJson(authorityPath);
+    authority.hands['1'].deadlineMono = '0';
+    writeJsonAtomic(authorityPath, authority);
+    await runCoachCli(gameDir, ['heartbeat', '--owner', owner]);
+    await seedEmptyCoachAuthority(gameDir, 'intermediate-owner-205');
+    const row = readJson(authorityPath).retiredAttempts[0];
+    assert.equal(row.ownerSessionId, owner);
+    assert.equal(row.cleanupEligible, false);
+    assert.ok(row.agentHandle);
+  }
+  if (mixed) await seedReservedCoach(gameDir, owner, 2);
+  const calls = [];
+  const signals = [];
+  let armed = false;
+  const base = process.hrtime.bigint();
+  const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: {
+    port: 0, waitMs: 0, pollMs: 10, coachCliPath,
+    ...(jump ? {} : { orphanTerminateGraceMs: 100 * WIN32_SCALE, orphanTerminateKillWaitMs: 100 * WIN32_SCALE, resumeReclaimResidualMs: 5_000 * WIN32_SCALE }),
+    monotonicNs: () => armed ? base + 1_000_000_000_000n : process.hrtime.bigint(),
+    processStartTime: (pid) => {
+      if (pid !== orphan.pid) return processStartTime(pid);
+      if (jump) armed = true;
+      return identity === 'unknown' ? null : identity === 'replaced' ? `${startTime}0` : startTime;
+    },
+    signalProcess: (pid, signal) => {
+      if (pid === orphan.pid) signals.push(signal);
+      if (jump || pid !== orphan.pid) process.kill(pid, signal);
+    },
+    scanCoachRuntimeProcesses: () => Promise.resolve({ status: 'unavailable', reason: 'LSOF_MISSING' }),
+    onCoachInvoke: (args) => calls.push(args),
+  } });
+  t.after(() => loop.requestStop().catch(() => {}));
+  return { gameDir, loop, orphan, calls, signals, disarm: () => { armed = false; } };
+}
+
+function assert205Evidence(calls, reason) {
+  const call = calls.find((args) => args[0] === 'cleanup-result' && args[args.indexOf('--cleanup-state') + 1] === 'released');
+  assert.ok(call, `no released cleanup for ${reason}`);
+  assert.equal(call[call.indexOf('--evidence') + 1], reason);
+}
+
+function assert205Trace(gameDir, reason) {
+  const rows = fs.readFileSync(path.join(gameDir, '.coach-adapter-trace.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(rows.filter((row) => row.operation === 'cleanup-result').at(-1).evidence, reason);
+}
+
+test('#205 UNVERIFIED command needs an explicit operator declaration', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { identity: 'unknown' });
+  await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts[0].reason, 'IDENTITY_UNKNOWN');
+  assert.equal(halt.recovery.commands[0].requiresOperatorConfirmation, true);
+  assert.equal(halt.recovery.requiresOperatorConfirmation, true);
+  assert.equal(halt.recovery.commands[0].args.includes('--operator-confirmed'), false);
+  assert.match(halt.message, /직접 확인/);
+  assert.match(halt.message, /reasons: IDENTITY_UNKNOWN/);
+});
+
+for (const foreign of [false, true]) {
+  test(`#205 LIVE ${foreign ? 'foreign retired' : 'authorized'} row has no command and resumes after confirmed release`, { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+    const f = await recovery205Fixture(t, { foreign });
+    await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+    const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+    const row = halt.recovery.attempts[0];
+    assert.equal(row.reason, 'STILL_ALIVE');
+    assert.equal(row.cleanupAuthorized, !foreign);
+    assert.equal(row.evidence.identity.pid, f.orphan.pid);
+    assert.deepEqual(halt.recovery.commands, []);
+    assert.match(halt.message, new RegExp(`pid: ${f.orphan.pid}`));
+    assert.match(halt.message, /종료되지 않아/);
+    assert.doesNotMatch(halt.message, /authority 수동 복구|확인할 수 없어/);
+    await terminateIfAlive(f.orphan);
+    await waitUntilDead(f.orphan.pid);
+    if (foreign) {
+      assert.match(halt.message, /--row-owner.*--operator-confirmed 1/);
+      const args = ['cleanup-result', '--owner', 'intermediate-owner-205', '--hand', '1', '--generation', String(row.generation), '--cleanup-state', 'released', '--row-owner', 'old-owner-205'];
+      assert.equal((await runCoachCliFailure(f.gameDir, args)).code, 'USAGE');
+      assert.equal((await runCoachCli(f.gameDir, [...args, '--operator-confirmed', '1'])).cleanupState, 'released');
+      const trace = fs.readFileSync(path.join(f.gameDir, '.coach-adapter-trace.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+      assert.equal(trace.operatorConfirmed, true);
+    }
+    const calls = [];
+    const next = createGameLoop({ gameDir: f.gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: { port: 0, waitMs: 0, onCoachInvoke: (args) => calls.push(args) } });
+    t.after(() => next.requestStop().catch(() => {}));
+    assert.equal((await next.resume()).phase, 'playing');
+    if (!foreign) {
+      assert205Evidence(calls, 'IDENTITY_DEAD');
+      assert205Trace(f.gameDir, 'IDENTITY_DEAD');
+    }
+  });
+}
+
+test('#205 mixed LIVE and UNVERIFIED rows retain pid and confirmation guidance', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { mixed: true });
+  await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts.find((row) => row.handNo === 2).reason, 'LEGACY_SCAN_UNAVAILABLE');
+  assert.equal(halt.recovery.commands.length, 1);
+  assert.match(halt.message, new RegExp(`pid: ${f.orphan.pid}`));
+  assert.match(halt.message, /--operator-confirmed 1/);
+  assert.match(halt.message, /reasons:.*STILL_ALIVE.*LEGACY_SCAN_UNAVAILABLE/);
+});
+
+test('#205 replaced identity releases with evidence without signaling the replacement', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { identity: 'replaced' });
+  assert.equal((await f.loop.resume()).phase, 'playing');
+  assert.deepEqual(f.signals, []);
+  assert205Evidence(f.calls, 'IDENTITY_REPLACED');
+  assert205Trace(f.gameDir, 'IDENTITY_REPLACED');
+});
+
+test('#205 closure deadline before fence has a rowless retry diagnostic', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { jump: true });
+  try { await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' }); } finally { f.disarm(); }
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts[0].handNo, null);
+  assert.equal(halt.recovery.attempts[0].reason, 'RESUME_RECLAIM_DEADLINE_EXCEEDED');
+  assert.equal(f.calls.some((args) => ['fence', 'cleanup-result'].includes(args[0])), false);
+  assert.match(halt.message, /다시 resume/);
+  assert.match(halt.message, /reasons: RESUME_RECLAIM_DEADLINE_EXCEEDED/);
+  assert.doesNotMatch(halt.message, /authority 수동 복구|확인할 수 없어/);
+});
+
+test('#205 FENCE_CHILD_FAILED is distinct from closure deadline', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { identity: 'replaced', coachCliPath: path.resolve('test/helpers/fence-failure-cli-shim.mjs') });
+  await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts[0].handNo, 1);
+  assert.equal(halt.recovery.attempts[0].reason, 'FENCE_CHILD_FAILED');
+  assert.equal(halt.recovery.attempts[0].cleanupAuthorized, false);
+  assert.deepEqual(halt.recovery.commands, []);
+  assert.match(halt.message, /reasons: FENCE_CHILD_FAILED/);
+  assert.doesNotMatch(halt.message, /다시 resume/);
+});
+
+test('#205 recovery classification defaults to unverified and LIVE guidance wins over intent', async () => {
+  const { persistedRecoveryClass } = await import('../tools/game-loop.js');
+  for (const reason of ['STILL_ALIVE', 'DEADLINE_EXCEEDED', 'LEGACY_RUNTIME_PROCESS_PRESENT']) assert.equal(persistedRecoveryClass(reason), 'live');
+  for (const reason of ['IDENTITY_UNKNOWN', 'SIGNAL_FAILED', 'LEGACY_SCAN_UNAVAILABLE', 'IDENTITY_UNAVAILABLE', 'SPAWN_INTENT_ONLY', 'SPAWN_EVIDENCE_INVALID', 'SPAWN_EVIDENCE_MISMATCH', 'IDENTITY_CONFLICT', 'NOT_ATTRIBUTABLE', 'CLEANUP_CHILD_FAILED', 'SOMETHING_NEW', undefined]) assert.equal(persistedRecoveryClass(reason), 'unverified');
+  const guidance = unresolvedEvidenceGuidance([
+    { reason: 'SPAWN_INTENT_ONLY', evidence: { sidecar: 'intent' } },
+    { reason: 'STILL_ALIVE', evidence: { identity: { pid: 123 } } },
+    { reason: 'LEGACY_RUNTIME_PROCESS_PRESENT', evidence: { legacyScanPids: [456] } },
+  ]);
+  assert.match(guidance, /pid: 123, 456/);
+  assert.doesNotMatch(guidance, /spawn이 실제로/);
+  assert.match(unresolvedEvidenceGuidance([{ reason: 'SPAWN_INTENT_ONLY', evidence: { sidecar: 'intent' } }]), /--operator-confirmed 1/);
+});
+
+
+async function assert205UnconfirmedCommand(gameDir, command) {
+  assert.equal(command.args.includes('--operator-confirmed'), false);
+  const before = fs.readFileSync(path.join(gameDir, '.coach-authority.json'));
+  await assert.rejects(execFileAsync(command.program, command.args, { encoding: 'utf8', timeout: 5_000 }), (error) => JSON.parse(error.stdout.trim()).code === 'USAGE');
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, '.coach-authority.json')), before);
+}
