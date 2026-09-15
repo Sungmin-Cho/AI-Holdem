@@ -1,13 +1,69 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {execFile,spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
+import {isDeepStrictEqual,promisify} from 'node:util';
+import {createOwnedTempDir,registerOwnedProcess} from './helpers/owned-fixtures.mjs';
 import {createGameLoop,initializePreparedSession} from '../tools/game-loop.js';
-const TIMEOUT=process.platform==='win32'?120000:20000;
+const WIN32_SCALE=process.platform==='win32'?6:1;
+const TIMEOUT=20_000*WIN32_SCALE;
+const ENGINE=path.resolve('engine/cli.js');
+const SERVER=path.resolve('server/server.js');
+const execFileAsync=promisify(execFile);
 const read=file=>JSON.parse(fs.readFileSync(file));
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+async function engine(root,args) {
+  const {stdout}=await execFileAsync(process.execPath,[ENGINE,...args,'--game-dir',root],{encoding:'utf8',timeout:5_000});
+  return JSON.parse(stdout.trim());
+}
+async function seedCompletedAndActiveHand(root) {
+  // The first hand is completed by legal check/call actions, rather than a
+  // hand-shaped JSON fixture.  The second remains active after one actual action.
+  let remaining=128;
+  while(!read(path.join(root,'state.json')).lastHand) {
+    assert.ok(remaining-->0,'check/call hand seed did not complete');
+    const legal=await engine(root,['legal']);
+    if(legal.handOver) await engine(root,['step','--new-hand']);
+    else {
+      assert.equal(typeof legal.toAct,'string','legal actor is required while hand remains live');
+      await engine(root,['step',legal.toAct,legal.canCheck?'check':'call','--expect-version',String(legal.stateVersion)]);
+    }
+  }
+  await engine(root,['step','--new-hand']);
+  const legal=await engine(root,['legal']);
+  await engine(root,['step',legal.toAct,legal.canCheck?'check':'call','--expect-version',String(legal.stateVersion)]);
+  const seeded=read(path.join(root,'state.json'));
+  assert.ok(seeded.lastHand?.actions?.length>0,'a real completed hand is required');
+  assert.ok(seeded.hand?.actions?.length>0,'a real in-progress hand action is required');
+  return seeded;
+}
+async function startRelay(root,token) {
+  const child=registerOwnedProcess(spawn(process.execPath,[SERVER,'--game-dir',root,'--port','0','--token',token],{stdio:'ignore'}),'#197 recovery relay');
+  const deadline=Date.now()+5_000*WIN32_SCALE;
+  try {
+    while(Date.now()<deadline) {
+      if(child.exitCode!==null||child.signalCode!==null) throw new Error('relay exited before owning lock');
+      try {
+        const lock=read(path.join(root,'lock.json'));
+        const health=await fetch(`http://127.0.0.1:${lock.port}/api/health`);
+        if(lock.serverPid===child.pid&&health.ok&&(await health.json()).ok===true)return child;
+      } catch {/* relay is still starting */}
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    throw new Error('relay did not become healthy');
+  } catch(error) {
+    await stopChild(child);
+    throw error;
+  }
+}
+async function stopChild(child) {
+  if(child.exitCode!==null||child.signalCode!==null)return;
+  child.kill('SIGTERM');
+  await Promise.race([new Promise(resolve=>child.once('exit',resolve)),new Promise(resolve=>setTimeout(resolve,2_000*WIN32_SCALE))]);
+  if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');
+}
 async function fixture(t,{large=false}={}) {
   const root=createOwnedTempDir('unverified-exit');
   await initializePreparedSession(root,{ai:1,mode:'cash-training',hands:20,opponentRuntime:'policy'});
@@ -132,4 +188,58 @@ test('#197 finalize preserves terminal engine results and never asks for a playe
   assert.deepEqual(fs.readFileSync(engineFile),before);
   assert.ok(needs.every(need=>need==='upper-only'));
   assert.equal(read(f.file).abandonedPendingDecision.mode,'finalize');
+});
+test('#197 abort preserves a real completed hand and active action while changing only engine abort fields',{timeout:TIMEOUT},async t=>{
+  const f=await fixture(t);
+  const before=await seedCompletedAndActiveHand(f.root);
+  await assert.rejects(f.loop().resume(),{code:'BAD_PLAYER_RECOVERY'});
+  assert.equal((await f.loop({abortUnrecoverable:{operationId:'audit-real-hand'}}).resume()).code,'GAME_ENDED');
+  const after=read(path.join(f.root,'state.json'));
+  const changed=Object.keys({...before,...after}).filter(key=>!isDeepStrictEqual(before[key],after[key])).sort();
+  assert.deepEqual(changed,['abortOperationId','gameOver','hand','phase','result','stateVersion']);
+  for(const key of ['seats','lastHand','config','sessionToken','policySeed'])assert.deepEqual(after[key],before[key],key);
+  assert.equal(after.gameOver,true);assert.equal(after.result,'abort');assert.equal(after.phase,'idle');assert.equal(after.hand,null);
+  assert.equal(after.abortOperationId,'audit-real-hand');assert.equal(after.stateVersion,before.stateVersion+1);
+  const audit=read(path.join(f.root,'.aborted-hand.json'));
+  assert.equal(audit.operationId,'audit-real-hand');
+  assert.deepEqual(audit.hand,before.hand,'the audit carries every active-hand action');
+  assert.equal(audit.completedHands,before.lastHand.handNo);
+  assert.equal(audit.stateVersion,before.stateVersion);
+});
+test('#197 rejects tampered abort checkpoints and digests before an engine mutation',{timeout:TIMEOUT},async t=>{
+  for(const [label,tamper] of [
+    ['checkpoint-operation',state=>{state.aborting.operationId='different-operation';}],
+    ['audit-digest',state=>{state.abandonedPendingDecision.sha256='0'.repeat(64);}],
+  ])await t.test(label,async st=>{
+    const f=await fixture(st);
+    await assert.rejects(f.loop({abortUnrecoverable:{operationId:'checkpoint-source'},onEngineInvoke:args=>{
+      if(args[0]==='end')throw Object.assign(new Error('cut after checkpoint'),{code:'END_REJECTED'});
+    }}).resume(),{code:'END_REJECTED'});
+    const state=read(f.file);tamper(state);fs.writeFileSync(f.file,JSON.stringify(state));
+    const loopBytes=fs.readFileSync(f.file),engineBytes=fs.readFileSync(path.join(f.root,'state.json'));
+    await assert.rejects(f.loop().resume(),{code:'BAD_ABORT_CHECKPOINT'});
+    assert.deepEqual(fs.readFileSync(f.file),loopBytes);
+    assert.deepEqual(fs.readFileSync(path.join(f.root,'state.json')),engineBytes);
+    assert.equal(f.calls(),0);
+  });
+});
+test('#197 requestStop waits through real relay adoption before releasing the terminal lock',{timeout:TIMEOUT},async t=>{
+  const f=await fixture(t);
+  const relay=await startRelay(f.root,f.engine.sessionToken);
+  t.after(()=>stopChild(relay));
+  let entered,release,listenerCalls=0;
+  const adopted=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve);
+  const loop=f.loop({abortUnrecoverable:{operationId:'relay-stop'},listenerOwnedBy:async()=>{
+    if(++listenerCalls===1){entered();await gate;}
+    return true;
+  }});
+  const resuming=loop.resume();
+  await adopted;
+  const stopping=loop.requestStop();
+  assert.equal(fs.existsSync(path.join(f.root,'loop.lock.d')),true,'end/adoption unit still owns the loop lock');
+  release();
+  assert.equal((await resuming).code,'GAME_ENDED');
+  await stopping;
+  assert.equal(fs.existsSync(path.join(f.root,'loop.lock.d')),false);
+  assert.notEqual(listenerCalls,0);
 });
