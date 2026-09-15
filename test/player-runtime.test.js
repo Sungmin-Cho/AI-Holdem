@@ -69,7 +69,14 @@ const CLEAN_INSPECT = {
   externalCompat: { remoteSettingsLoaded: false, cells: [] },
 };
 
-const GROK_CREATE_PREFIX = ['--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL('grok-4.6')];
+const GROK_TAIL_LITERAL = [
+  '-m', 'grok-4.6', '--tools', '', '--disallowed-tools',
+  'run_terminal_cmd,run_terminal_command,search_replace,list_dir,grep,write,kill_command_or_subagent,todo_write,get_command_or_subagent_output,spawn_subagent,scheduler_create,scheduler_delete,scheduler_list,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,send_feedback,image_gen,image_edit,image_to_video,reference_to_video,web_search,web_fetch,Agent',
+  '--deny', 'Read', '--deny', 'Bash', '--deny', 'Grep', '--deny', 'Edit',
+  '--deny', 'Write', '--deny', 'WebFetch', '--deny', 'MCPTool',
+  '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
+];
+const GROK_CREATE_PREFIX = ['--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL_LITERAL];
 
 function shortTmp(tag) {
   return fs.mkdtempSync(path.join('/tmp', `hh-${tag}-`));
@@ -374,11 +381,12 @@ test('grok argv 핀: --no-auto-update + GROK_TAIL, create/resume/oneshot 명시 
     const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
     const create = f.calls().find((c) => c.stdin === '페르소나');
     assert.deepEqual(create.argv, [...GROK_CREATE_PREFIX, '--session-id', sessionId]);
-    assert.equal(create.argv.includes(GROK_DISALLOWED_TOOLS), true);
+    assert.deepEqual(GROK_TAIL('grok-4.6'), GROK_TAIL_LITERAL);
+    assert.equal(GROK_DISALLOWED_TOOLS, GROK_TAIL_LITERAL[5]);
     assert.equal(create.stdin, '페르소나');
     await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     assert.deepEqual(f.last().argv, [
-      '--no-auto-update', '--prompt-file', '/dev/stdin', '--resume', sessionId, ...GROK_TAIL('grok-4.6'),
+      '--no-auto-update', '--prompt-file', '/dev/stdin', '--resume', sessionId, ...GROK_TAIL_LITERAL,
     ]);
     const firstOne = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 5000 });
     await firstOne.done;
@@ -1837,6 +1845,25 @@ test('#195 S1: grok env는 HOME·GROK_AUTH_PATH를 치환하고 claude·codex는
   }
 });
 
+test('#195 S1: 사이드카 GROK_AUTH_PATH가 있으면 그 값을 쓴다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const custom = path.join(shortTmp('custom-auth'), 'custom-auth.json');
+  fs.writeFileSync(custom, '{}');
+  const previous = process.env.GROK_AUTH_PATH;
+  process.env.GROK_AUTH_PATH = custom;
+  const f = verifiedGrokRuntime({}, { grokAuthPath: undefined });
+  try {
+    await f.rt.probe({ canaryAbsPath: file });
+    const inspect = f.calls().find((c) => c.argv.includes('inspect'));
+    assert.equal(inspect.envValues.GROK_AUTH_PATH, custom);
+  } finally {
+    if (previous === undefined) delete process.env.GROK_AUTH_PATH;
+    else process.env.GROK_AUTH_PATH = previous;
+    f.cleanup();
+  }
+});
+
 test('#195 S1: grok 선검사 — 홈 없음·win32·자격 없음은 spawn 0', async () => {
   const { file } = canary();
   const missing = fakeRuntime('grok');
@@ -1995,6 +2022,18 @@ test('#195 S2: 게이트는 warmup/decide/oneshotStart에만 있고 probe 없이
       f.rt.warmup({ playerId: 'p1', prompt: 'x', timeoutMs: 1000 }),
       (error) => error.code === 'RUNTIME_NOT_VERIFIED',
     );
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: 's1', message: 'm', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_NOT_VERIFIED',
+    );
+    await assert.rejects(
+      async () => f.rt.oneshotStart({ tier: 'upper', prompt: 'ok', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_NOT_VERIFIED',
+    );
+    await assert.rejects(
+      async () => f.rt.oneshotStart({ tier: 'player', prompt: 'ok', timeoutMs: 1000 }),
+      (error) => error.code === 'RUNTIME_NOT_VERIFIED',
+    );
     assert.equal(f.calls().length, 0);
   } finally {
     f.cleanup();
@@ -2028,6 +2067,23 @@ test('#195 S2: 세션 감사 판정 순서와 도구 표면', (t) => {
   ];
   const readFile = [{ type: 'function', function: { name: 'read_file' } }];
   write(cleanUpdates, cleanEvents, readFile);
+  assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).ok, true);
+
+  const denyUpdates = [
+    ...cleanUpdates.slice(0, 3),
+    { params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'call-a-0', title: 'read_file' } } },
+    { params: { sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'call-a-0', kind: 'read' } } },
+    { params: { sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'call-a-0', status: 'failed' } } },
+    { params: { sessionId, update: { sessionUpdate: 'turn_completed' } } },
+  ];
+  const denyEvents = [
+    { type: 'turn_started', session_id: sessionId },
+    { type: 'tool_started', tool_name: 'read_file', session_id: sessionId },
+    { type: 'permission_requested', tool_name: 'read_file', session_id: sessionId },
+    { type: 'permission_resolved', tool_name: 'read_file', decision: 'deny', session_id: sessionId },
+    { type: 'turn_ended', session_id: sessionId },
+  ];
+  write(denyUpdates, denyEvents, readFile);
   assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).ok, true);
 
   write(

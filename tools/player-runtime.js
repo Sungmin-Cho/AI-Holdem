@@ -699,7 +699,10 @@ export function createPlayerRuntime(kind, opts = {}) {
   const platform = opts.platform ?? process.platform;
   const resolveCommandPath = opts.resolveCommandPath
     ?? (() => defaultResolveCommandPath(command));
-  const grokAuthPath = opts.grokAuthPath ?? path.join(os.homedir(), '.grok', 'auth.json');
+  const grokAuthPath = opts.grokAuthPath
+    ?? (typeof process.env.GROK_AUTH_PATH === 'string' && process.env.GROK_AUTH_PATH !== ''
+      ? process.env.GROK_AUTH_PATH
+      : path.join(os.homedir(), '.grok', 'auth.json'));
   const runtimeHomeAnchor = opts.runtimeHomeAnchor
     ?? path.join(os.homedir(), '.ai-holdem', 'runtime-home');
   const activeHandles = new Set();

@@ -2036,14 +2036,16 @@ async function runUntilUserBoundary(loop, gameDir) {
 
 test('#195 S4: resolver receives lockRoot for store and legacy game dirs', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
+  const lockDir = tmpGame();
   const seen = [];
   const adapter = makeAdapter();
   const resolver = resolverFor(adapter, (input) => { seen.push(input.lockRoot); });
-  const loop = createGameLoop({ gameDir, resolver, opts: { port: 0, waitMs: 0 } });
+  const loop = createGameLoop({ gameDir, lockDir, resolver, opts: { port: 0, waitMs: 0 } });
   t.after(() => loop.requestStop());
   await loop.bootstrap({ ai: 1, stack: 100 });
   assert.ok(seen.length >= 1);
-  assert.ok(seen.every((root) => root === path.resolve(gameDir)));
+  assert.ok(seen.every((root) => root === path.resolve(lockDir)));
+  assert.notEqual(path.resolve(lockDir), path.resolve(gameDir));
 });
 
 test('#195 S4: player-sessions bind runtimeHomeId on create and reuse', { timeout: 10_000 }, async (t) => {
