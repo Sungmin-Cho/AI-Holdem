@@ -200,7 +200,7 @@ export function referenceClaimAllowed(value) {
     String.raw`(?:verified\s+|검증된\s*)?GTO(?:[\s_-]*(?:based|기반(?:의)?|최적(?:의)?|optimal(?:ity)?|optimum|정답|전략|해법|정책|플레이|분석|결과|answer|strategy|solution|policy|play|move|analysis|result|correct(?:ness)?)){0,4}`,
     String.raw`solver[\s_-]*(?:verified|certified|proven)`,
     String.raw`(?:verified\s+)?(?:optimal(?:ity)?|optimum)(?:\s+(?:play|choice|move|result|strategy|answer))?`,
-    String.raw`(?:검증된\s*)?최적(?:성|의)?(?:\s*(?:플레이|선택|행동|전략|결과|답))?`,
+    String.raw`(?:검증된\s*)?최적(?:해|성|의)?(?:\s*(?:플레이|선택|행동|전략|결과|답))?`,
     String.raw`확정(?:된|적)?\s*누수|정답(?:표)?|포커\s*실수`,
     String.raw`기대(?:값|수익)|expected\s+value|\bEV\b(?:\s*(?:손실|loss))?`,
   ].join('|'), 'gi');
@@ -216,9 +216,12 @@ export function referenceClaimAllowed(value) {
     if (/(?:\bEV\b|기대(?:값|수익)|expected\s+value)/i.test(claim[0]) && /[+−-]?\d+(?:\.\d+)?/.test(before + after)) return false;
     // A coordinated noun phrase shares the following predicate, but only when
     // there is no intervening proposition or sentence boundary.
-    if (claims[index + 1] && /^\s*(?:이나|나|와|과|또는)\s*$/.test(tail)) {
+    if (claims[index + 1] && /^[^\S\r\n]*(?:이나|나|와|과|또는|·)[^\S\r\n]*$/.test(tail)) {
       return allowed[index + 1];
     }
+    // A complete contrastive meta predicate, not a blanket exception for 아니라.
+    // Requiring its ending rejects reported and double-negated judgments.
+    if (/^\s*판정이\s*아니라\s+(?:공개\s*정보에\s*근거한\s+)?정성적\s*과정\s*평가(?:다|입니다)\s*$/.test(after)) return true;
     // A comparison of what to inspect is not a declaration of a correct answer.
     // Keep the complete meta predicate, rather than allowing every '여부' noun.
     if (claim[0] === '정답' && /^\s*여부보다\s*(?:사전\s*)?계획을\s*점검(?:한다|합니다)\s*$/.test(after)) return true;
