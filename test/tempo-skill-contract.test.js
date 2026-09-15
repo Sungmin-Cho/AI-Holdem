@@ -280,6 +280,9 @@ test('#194 recovery documentation matches outcomes and correction events',()=>{
 
 test('fresh retry documentation distinguishes authorization, memory loss and execution',()=>{
   for(const doc of [read(SKILL),read('README.md')]) {
+    for(const word of ['BAD_PLAYER_RECOVERY','--abort-unrecoverable','loop-state.unverified.json','loop-state.abandoned.','player-recovery-abandoned']) assert.ok(doc.includes(word),word);
+  }
+  for(const doc of [read(SKILL),read('README.md')]) {
     for(const word of ['--fresh-session','대화 기억','player-session-recreate-failed','freshSession','인가']) assert.ok(doc.includes(word),word);
   }
 });
