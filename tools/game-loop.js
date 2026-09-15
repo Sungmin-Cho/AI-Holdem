@@ -28,10 +28,10 @@ import { createListenerOwnedBy } from './listener-ownership.js';
 import { createRelayRootOwner, writeRelayJsonAtomic } from '../server/action-receipts.js';
 import {
   buildPlayerPrompt,
+  createProductionResolver,
   extractJsonLine,
   isArgvSafeSessionId,
   RUNTIME_TABLE,
-  resolveRuntimes,
 } from './player-runtime.js';
 import {
   coachNoteStrings,
@@ -824,7 +824,7 @@ export function validatedUserAction(raw) {
   return action;
 }
 
-export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = resolveRuntimes, opts = {} }) {
+export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = createProductionResolver({ preferred: null }), opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
   const requestedOpponentRuntime = opts.opponentRuntime === 'policy' ? 'policy' : 'llm';
@@ -1981,6 +1981,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       need,
       canaryAbsPath,
       registerAdapter,
+      lockRoot,
     }));
     resolverPromise = invocation;
     try {
@@ -2047,6 +2048,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       runtime: playerAdapter.kind,
       sessionId: result.sessionId,
       createdAt,
+      runtimeHomeId: result.runtimeHomeId ?? playerAdapter.runtimeHomeId ?? null,
     };
     if (typeof onWarmupClosed === 'function') await onWarmupClosed(session.sessionId);
     return session;
@@ -2081,12 +2083,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && isArgvSafeSessionId(prior.sessionId)
         && typeof prior.createdAt === 'string'
         && prior.createdAt !== ''
+        && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null)
       ) {
         restoredPlayerSessions.add(persona.playerId);
         return [persona.playerId, {
           runtime: prior.runtime,
           sessionId: prior.sessionId,
           createdAt: prior.createdAt,
+          runtimeHomeId: prior.runtimeHomeId ?? null,
         }];
       }
       restoredPlayerSessions.delete(persona.playerId);
@@ -7983,12 +7987,7 @@ async function main() {
     const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
     validateSelfOpponentArgs(args);
     if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
-    const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
-      need,
-      canaryAbsPath,
-      preferred: args.playerRuntime ?? null,
-      onAdapterCreated: registerAdapter,
-    });
+    const resolver = createProductionResolver({ preferred: args.playerRuntime ?? null });
     ({ loop, preparedInitialization } = await prepareGameSession(args, { resolver }));
     process.once('SIGTERM', () => {
       if (handlingSignal) return;
