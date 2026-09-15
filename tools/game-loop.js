@@ -4,7 +4,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { resolveSessionReference } from './reference-source.js';
-import { openContained } from './training-store.js';
+import { openContained, writeContained } from './training-store.js';
+import { abortModeFor, validateAbortingCheckpoint, validRecoveryOperation } from './recovery-exit.js';
 import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
@@ -310,6 +311,7 @@ export function parseGameLoopArgs(argv) {
     ['--player-soft-ms', 'playerSoftMs'],
     ['--player-hard-ms', 'playerHardMs'],
     ['--retry-decision', 'retryDecisionId'],
+    ['--abort-unrecoverable', 'abortUnrecoverableId'],
   ]);
   let sawGameDir = false;
 
@@ -359,6 +361,9 @@ export function parseGameLoopArgs(argv) {
   if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   if (parsed.retryDecisionId !== undefined && !parsed.resume) throw codedError('USAGE', '--retry-decision은 --resume과 함께 사용하세요.');
   if (parsed.freshSession && !parsed.retryDecisionId) throw codedError('USAGE', '--fresh-session은 --retry-decision과 함께 사용하세요.');
+  if (parsed.abortUnrecoverableId !== undefined && (!parsed.resume || parsed.retryDecisionId !== undefined || !validRecoveryOperation(parsed.abortUnrecoverableId))) {
+    throw codedError('USAGE','--abort-unrecoverable은 안전한 operationId와 --resume이 필요하며 --retry-decision과 함께 쓸 수 없습니다.');
+  }
   const budgetOverrides = { ...(parsed.playerSoftMs !== undefined ? { softMs: parsed.playerSoftMs } : {}),
     ...(parsed.playerHardMs !== undefined ? { hardMs: parsed.playerHardMs } : {}) };
   if (parsed.resume && Object.keys(budgetOverrides).length && !parsed.retryDecisionId) {
@@ -562,6 +567,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let resumeEntryPending = false;
   let doneResumeNoTrainingWrite = false;
   let stopRequested = false;
+  let lifecycleStarted = false;
+  let preserveLoopState = false;
   const managed = opts.controlProtocolVersion === 1;
   let control = null;
   let recoveringControl = false;
@@ -5607,6 +5614,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const persistCleanupFailure = (error) => {
+    if (!lifecycleStarted) return;
     const cleanupError = {
       code: error.code ?? 'ERROR',
       message: error.message ?? String(error),
@@ -5620,7 +5628,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       logFd = null;
     } catch { /* Persist state even when the log is unavailable. */ }
     try {
-      if (!fs.existsSync(loopStatePath)) return;
+      if (!lifecycleStarted || preserveLoopState || !fs.existsSync(loopStatePath)) return;
       writeLoopState({
         stopping: true,
         stoppedAt: undefined,
@@ -5640,7 +5648,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const attempt = (async () => {
       let stopError = null;
       try {
-        if (fs.existsSync(loopStatePath)) {
+        if (lifecycleStarted && !preserveLoopState && fs.existsSync(loopStatePath)) {
           writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
         }
       } catch (error) {
@@ -5712,7 +5720,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
 
       try {
-        if (fs.existsSync(loopStatePath)) {
+        if (lifecycleStarted && !preserveLoopState && fs.existsSync(loopStatePath)) {
           const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
             ? pendingFinalStatePatch()
             : (pendingFinalStatePatch ?? {});
@@ -5819,6 +5827,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (storeDir) resolveSessionReference(root, { createNew: true });
       openLog();
       for (const { event, ...detail } of sweepDetails) log(event, detail);
+      lifecycleStarted = true;
       const startedAt = isoNow(now);
       writeLoopState({
         phase: 'bootstrap',
@@ -5929,7 +5938,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const finishAbortedLifecycle = async (engineState) => {
+  const adoptAbortedRelay = async (engineState) => {
     const pin = openServerLockPin();
     try {
       if (pin && processAlive(pin.lock.serverPid)) {
@@ -5943,15 +5952,86 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverAdopted = true;
       }
     } finally {closeServerLockPin(pin);}
-    writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
+  };
+  const logAbandonedRecovery = audit => log('player-recovery-abandoned', {
+    operationId:audit.operationId,mode:audit.mode,sidecar:audit.sidecar,sha256:audit.sha256,
+    reason:audit.reason,unverifiedSnapshot:audit.unverifiedSnapshot,abandonedAt:audit.abandonedAt,
+  });
+  const finishAbortedLifecycle = async (engineState, state = readLoopState()) => {
+    let checkpoint = null;
+    if (state?.aborting) {
+      checkpoint = validateAbortingCheckpoint(root, engineState, state);
+      if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
+    }
+    lifecycleStarted = true;
+    assertNotStopping();
+    const unit=beginAtomicTransition();
+    try {
+      if (checkpoint) {
+        openLog();
+        logAbandonedRecovery(state.abandonedPendingDecision);
+      }
+      await adoptAbortedRelay(engineState);
+      writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
+    } finally {unit.finish();}
     await requestStop();
     return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
+  };
+
+  const abandonUnverifiedRecovery = async (engineState, state) => {
+    let checkpoint;
+    // Rejected checkpoint bytes are evidence too; cleanup must not rewrite them.
+    preserveLoopState=true;
+    if (state?.aborting) {
+      checkpoint=validateAbortingCheckpoint(root,engineState,state);
+      if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
+      preserveLoopState=false;
+      logAbandonedRecovery(state.abandonedPendingDecision);
+    } else {
+      // Until the raw evidence is durably published, cleanup must not serialize it.
+      preserveLoopState=true;
+      const operationId=opts.abortUnrecoverable?.operationId;
+      const mode=abortModeFor(engineState,state);
+      if (!validRecoveryOperation(operationId)) throw codedError('BAD_OPERATION_ID','복구 종료 operationId가 올바르지 않습니다.');
+      if (!mode) throw codedError('BAD_LOOP_PHASE','복구 종료 대상 상태가 아닙니다.');
+      const snapshotPath=path.join(root,'loop-state.unverified.json');
+      const unverifiedSnapshot=fs.existsSync(snapshotPath);
+      const bytes=unverifiedSnapshot ? openContained(root,['loop-state.unverified.json'],{maxBytes:Number.MAX_SAFE_INTEGER}) : fs.readFileSync(loopStatePath);
+      const sha256=createHash('sha256').update(bytes).digest('hex');
+      const sidecar=`loop-state.abandoned.${operationId}.json`;
+      try {writeContained(root,[sidecar],bytes,{mode:'create'});}
+      catch(error) {
+        if (error.code!=='EXISTS') throw error;
+        let matches=false;
+        try {matches=createHash('sha256').update(openContained(root,[sidecar],{maxBytes:Number.MAX_SAFE_INTEGER})).digest('hex')===sha256;}catch{}
+        if (!matches) throw codedError('ABANDON_SIDECAR_CONFLICT','기존 감사 파일이 달라 덮어쓰지 않습니다.');
+      }
+      checkpoint={operationId,mode};
+      const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason:'BAD_PLAYER_RECOVERY'};
+      state=writeLoopState({pendingDecision:undefined,aborting:checkpoint,abandonedPendingDecision:audit});
+      preserveLoopState=false;
+      logAbandonedRecovery(audit);
+    }
+    assertNotStopping();
+    const unit=beginAtomicTransition();
+    try {
+      if (checkpoint.mode==='abort') {
+        await runCli(['end','--result','abort','--operation-id',checkpoint.operationId]);
+        await adoptAbortedRelay(engineState);
+        writeLoopState({phase:'aborted',result:'abort',endedAt:isoNow(now),aborting:undefined});
+      } else writeLoopState({aborting:undefined});
+    } finally {unit.finish();}
+    if (checkpoint.mode==='abort') {
+      await requestStop();
+      return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
+    }
+    return null;
   };
 
   const resolveForPhase = async (phase, engineState, existingState, {
     beforePlayerRestore = null,
   } = {}) => {
-    if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState);
+    if (phase === 'aborted' || engineState?.result === 'abort') return finishAbortedLifecycle(engineState, existingState);
     if (FINAL_PHASES.has(phase)) {
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
@@ -6032,7 +6112,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } else {
       await acquireLoopLock({ mode: 'resume' });
     }
-    let lifecycleStarted = false;
     let trainingMigrationNotices = [];
     let trainingMigrationError = null;
     try {
@@ -6053,7 +6132,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         );
       }
       if (state?.phase === 'aborted' && engineState.result !== 'abort') throw codedError('LOOP_STATE_IDENTITY_MISMATCH','종료 상태가 엔진과 일치하지 않습니다.');
-      if (engineState.result === 'abort') return finishAbortedLifecycle(engineState);
+      if (engineState.result === 'abort') return finishAbortedLifecycle(engineState, state);
+      openLog();
+      lifecycleStarted = true;
+      if (opts.abortUnrecoverable || state?.aborting) {
+        const ended=await abandonUnverifiedRecovery(engineState,state);
+        if (ended) return ended;
+        state=readLoopState();
+      }
+      // Preserve an invalid pending record before configuration checks or the
+      // first hint capability await can enter shutdown and serialize its bytes.
+      if (state?.phase !== 'done' && state?.pendingDecision) {
+        const p = state.pendingDecision;
+        if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
+          || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
+          try {
+            writeContained(root,['loop-state.unverified.json'],fs.readFileSync(loopStatePath),{mode:'create'});
+          } catch(error) {
+            if (error.code==='EXISTS') {
+              try {openContained(root,['loop-state.unverified.json'],{maxBytes:Number.MAX_SAFE_INTEGER});}
+              catch {preserveLoopState=true;}
+            } else preserveLoopState=true;
+          }
+          throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
+        }
+      }
       opts.hints=checkHintResume(engineState.config, opts.hints);
       opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
       if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
@@ -6068,10 +6171,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const {freshAuthorization: _freshAuthorization, ...withoutAuthorization} = p;
           p = withoutAuthorization;
           state = writeLoopState({pendingDecision:p});
-        }
-        if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
-          || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
-          throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
         const check = validateDiagnostics(p.diagnostics, p);
         if (!check.ok) { p = quarantineDiagnostics(p, check.reason); state = readLoopState(); }
@@ -6277,11 +6376,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const run = async () => {
     let state = readLoopState();
     if (!state) throw codedError('NOT_BOOTSTRAPPED', 'bootstrap 또는 resume이 필요합니다.');
+    if (state.aborting) throw codedError('BAD_LOOP_PHASE','복구 종료 체크포인트는 resume으로 마무리해야 합니다.');
     const engineForPending = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     if (engineForPending) unionReplayPending(completedReplayHandNos(engineForPending));
     const repairingOnResume = resumeEntryPending && state.halt?.code === 'repair_failed';
     if (state.halt?.code && !repairingOnResume) throw codedError(state.halt.code, state.halt.message);
-    if (state.phase === 'aborted' || engineForPending?.result === 'abort') { await finishAbortedLifecycle(engineForPending); return readLoopState(); }
+    if (state.phase === 'aborted' || engineForPending?.result === 'abort') { await finishAbortedLifecycle(engineForPending, state); return readLoopState(); }
     if (FINAL_PHASES.has(state.phase)) return runFinalization();
     if (state.phase === 'done') return finishDoneLifecycle();
     if (state.phase !== 'playing') {
@@ -6489,6 +6589,7 @@ export async function initializePreparedSession(gameDir, args) {
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+    ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) },
@@ -6496,6 +6597,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) }) };
   let loop = null;
   let preparedInitialization = null;
+  let resolvedCurrent = null;
     if (args.storeDir !== undefined) {
       if (args.force) throw codedError('FORCE_UNAVAILABLE', '--store-dir MVP에서는 --force를 지원하지 않습니다.');
       // Process entrypoints restrict umask; the shared launcher never changes
@@ -6517,7 +6619,16 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
         if (args.resume) {
           const current = resolveCurrentSession(args.storeDir);
           if (!current) throw codedError('NO_GAME', '재개할 current session이 없습니다.');
-          const storedConfig=JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024})).config;
+          const storedEngine=JSON.parse(openContained(current.sessionDir,['state.json'],{maxBytes:2*1024*1024}));
+          if (args.expectedCurrent) {
+            const expected=args.expectedCurrent;
+            if (current.gameId!==expected.gameId || current.selectionVersion!==expected.selectionVersion
+              || typeof storedEngine.sessionToken!=='string' || gameEpochOf(storedEngine.sessionToken)!==expected.gameEpoch) {
+              throw codedError('CURRENT_CHANGED','복구 종료 대상 게임이 변경됐습니다.');
+            }
+          }
+          resolvedCurrent=current;
+          const storedConfig=storedEngine.config;
           checkHintResume(storedConfig,args.hints);
           checkDealBiasResume(storedConfig,args.dealBias);
           resolveSessionReference(current.sessionDir);
@@ -6593,7 +6704,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
               ...loopOptions, port: args.port, opponentRuntime: args.opponentRuntime, solverAdapterId: args.solverAdapterId },
       });
     }
-  return { loop, preparedInitialization };
+  return { loop, preparedInitialization, current: resolvedCurrent };
 }
 
 async function main() {
@@ -6622,7 +6733,8 @@ async function main() {
         signalStopError = error;
       });
     });
-    if (args.resume) {const resumed = await loop.resume({ skipLock: args.storeDir !== undefined });if(resumed?.code==='GAME_ENDED')fs.writeSync(1,JSON.stringify(resumed)+'\n');}
+    let resumed;
+    if (args.resume) {resumed = await loop.resume({ skipLock: args.storeDir !== undefined });if(resumed?.code==='GAME_ENDED')fs.writeSync(1,JSON.stringify(resumed)+'\n');}
     else await loop.bootstrap({
       ai: args.ai,
       stack: args.stack,
@@ -6641,7 +6753,7 @@ async function main() {
       hints: args.hints,
       dealBias: args.dealBias,
     });
-    await loop.run();
+    if (resumed?.code!=='GAME_ENDED') await loop.run();
   } catch (error) {
     // 정상 SIGTERM 처리 중의 STOPPING은 실패가 아니다. 다른 runtime/cleanup
     // 실패는 그대로 보고하고 비정상 종료한다.

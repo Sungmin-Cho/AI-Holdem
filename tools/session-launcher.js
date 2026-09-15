@@ -14,22 +14,23 @@ export async function launchSession(
         preferred: args.playerRuntime ?? null,
         onAdapterCreated: registerAdapter,
       }));
-  const { loop, preparedInitialization } = await prepareGameSession(args, {
+  const { loop, preparedInitialization, current: targetCurrent } = await prepareGameSession(args, {
     resolver: runtimeResolver,
     loopOptions,
     onReserve,
   });
   try {
     await onLoop?.(loop);
-    if (args.resume) await loop.resume({ skipLock: true });
+    let resumed;
+    if (args.resume) resumed = await loop.resume({ skipLock: true });
     else
       await loop.bootstrap({
         ...args,
         preinitialized: preparedInitialization,
         skipLock: true,
       });
-    const current = resolveCurrentSession(args.storeDir);
-    return { loop, ...current };
+    const current = targetCurrent ?? resolveCurrentSession(args.storeDir);
+    return { loop, resumed, ...current };
   } catch (error) {
     try {
       await loop.requestStop();
