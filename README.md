@@ -33,6 +33,11 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 6�
 
 같은 무효 회신을 반복하는 LLM 좌석은 일시정지 메뉴의 **새 세션으로 재시도**를 명시적으로 선택할 수 있다. 대화 기억은 사라지지만 페르소나 카드·칩·핸드 기록은 유지된다. 새 세션에는 교정 문맥을 상속하지 않고 현재 결정을 처음부터 묻는다. 자동 재생성은 없으며, 같은 결정의 identity와 자식 종료 증거를 확인하고 저장된 한 세대 예산 안에서 워밍업과 결정을 수행한다. 명령 영수증의 `succeeded`는 인가 완료이며, 실제 재생성은 `player-call`의 `purpose:'fresh-warmup'`·`player-session-recreated` 또는 `player-session-recreate-failed`, 성공 결정은 `metrics.freshSession:true`·`outcome:'retried_accepted'`로 확인한다. legacy는 정지된 게임에 `node tools/game-loop.js --game-dir /absolute/game --resume --retry-decision <decisionId> --fresh-session`을 사용한다. 인가 후 프로세스가 중단되면 자동 재실행하지 않으며 다시 명령해야 한다.
 
+
+`BAD_PLAYER_RECOVERY`는 저장된 LLM 결정 기록을 검증할 수 없다는 뜻이다. 앱에서 불러오기 실패 후 **게임 종료** 또는 **같은 설정으로 새 게임**을 확인하면 원문을 보존하고 현재 게임을 닫는다. 최초 실패 전 바이트는 `loop-state.unverified.json`, 명시 종료에 사용한 바이트는 `loop-state.abandoned.<operationId>.json`에 create-only로 보존하며 `player-recovery-abandoned` 로그가 감사 기록을 가리킨다. 파일을 직접 삭제하거나 손상 결정을 재실행하지 않는다. 이미 엔진 결과가 확정된 게임은 **기록을 버리고 결과 정리**로 진행하며 엔진 결과는 바뀌지 않는다. 이 경로의 플레이어 호출은 0회지만 기존 코치·리뷰 정리는 실행되거나 halt할 수 있으므로 완료를 보장하지 않는다.
+
+legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /absolute/game --resume --abort-unrecoverable recovery-1`이다. operationId는 필수이며 `--retry-decision`과 함께 쓸 수 없다. `GAME_ENDED`이면 게임 실행을 다시 시작하지 않는다. `pendingDecision`, accepted 명령, 미완료 `aborting`/`abandonedPendingDecision` 체크포인트가 남아 있으면 구버전으로 내리지 말고 호환 버전에서 먼저 수렴시킨다. [복구 종료와 롤백 조건](docs/implementation/unrecoverable-recovery-exit.md)을 참고한다.
+
 ## LLM은 어디에만 있나
 
 플레이어 결정·코치 노트·종합 리뷰 셋뿐이다. 전부 `tools/player-runtime.js`가 부르는 **무도구 CLI 자식**이고, 이 파일이 LLM을 부르는 유일한 표면이다. 플레이어는 CLI 세션 resume으로 대화 하나를 게임 내내 이어 가서 자기 페르소나를 기억한다. 프롬프트 정본은 `tools/player-prompt.md` 한 곳이고, 회신 규약은 "JSON 한 줄을 최종 출력으로"다.
