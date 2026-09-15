@@ -648,7 +648,7 @@ test('#196 a crash after the fresh session file write but before its decision is
   const stopping = loop.requestStop();
   releaseDecision();
   await stopping;
-  await running;
+  await assert.rejects(running, { code: 'STOPPING' });
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), capturedState);
   fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), capturedSessions);
   const restored = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });

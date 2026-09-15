@@ -438,7 +438,8 @@ export function createSessionManager({
             }
             // A crash-restored resume is parked; opening the app never silently plays.
           }
-          row.status = "succeeded";
+          row.status = row.kind === "retry-decision" ? "failed" : "succeeded";
+          if (row.kind === "retry-decision") row.error = "RETRY_NOT_APPLIED";
           row.result = snapshot();
         } catch (err) {
           row.status = "failed";

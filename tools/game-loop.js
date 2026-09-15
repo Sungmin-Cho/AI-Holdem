@@ -5681,19 +5681,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
             ? pendingFinalStatePatch()
             : (pendingFinalStatePatch ?? {});
+          const currentPending = readLoopState()?.pendingDecision;
+          let pendingPatch = {};
+          if (currentPending) {
+            const {freshAuthorization: _freshAuthorization, ...pending} = currentPending;
+            const interrupted = ownedPlayerAttempt
+              && ['gameEpoch','decisionId','generation'].every(key => pending[key] === ownedPlayerAttempt[key])
+              && (pending.status === 'running'
+                || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(pending.code));
+            pendingPatch = {pendingDecision: interrupted
+              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false}
+              : pending};
+          }
           writeLoopState({
             stopping: true,
             stoppedAt: isoNow(now),
             cleanupFailedAt: undefined,
             cleanupError: undefined,
-            ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
-              && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
-              readLoopState().pendingDecision.status === 'running'
-              || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
-            ) ? { pendingDecision: (() => {
-              const {freshAuthorization: _freshAuthorization, ...pending} = readLoopState().pendingDecision;
-              return {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false};
-            })() } : {}),
+            ...pendingPatch,
             ...resolvedFinalStatePatch,
           });
         }
