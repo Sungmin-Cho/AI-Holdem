@@ -15,16 +15,21 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Windows shards (worst minutes on 925fbb2 attempts 1–3, Windows suite green):
-#   study-a    study-service                         15.2
-#   study-b    study-service-recovery                21.1
-#   learning-a learning-integration + mistake-bank + publish 17.9
-#   learning-b learning-integration-session + action-receipts + drill-* 20.4
-#   loop       game-loop + release-verifier + server-security-gates 27.0
-#   rest       remaining test files + step 6 GATE    29.6
-# G5 (file ≤ 20, shard ≤ 22) missed: keep file cap 45 min and job 60.
-# Rebalance only by moving NAMED's small files (mistake-bank, publish,
-# action-receipts, drill-*). Those cannot shrink rest/loop; do not split files.
+# Windows baseline: main 2456291, run 34954055586, Node 20.x.
+# Run-tests minutes: loop 38.6 (game-loop 32.0), rest 56.3 + gate 1.2;
+# rest job reached 58/60 minutes. Job overhead was about one minute.
+# New partition: estimated run-tests minutes (verify on PR CI, not guarantees):
+#   study-a    study-service + app-command-store + policy-loop 17.7
+#   study-b    study-service-recovery                         11.6
+#   learning-a learning-integration + mistake-bank + publish  11.0
+#   learning-b learning-integration-session + action-receipts + drill-* 12.9
+#   loop       game-loop                                     32.0
+#   recovery   app-recovery-exit + release-verifier + server-security-gates 28.6
+#   rest       remaining files + GATE                        26.1
+# Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
+# If game-loop.test.js exceeds 36 min on Windows, split by topic starting
+# with coach recovery/finalize. Track app-recovery-exit's 22.1 min separately.
+# Seven shards x Node 20/22 adds two jobs and their fixed overhead.
 jobs:
   ui-browser:
     name: UI browser
@@ -107,6 +112,7 @@ jobs:
           - learning-a
           - learning-b
           - loop
+          - recovery
           - rest
     steps:
       - name: Check out repository

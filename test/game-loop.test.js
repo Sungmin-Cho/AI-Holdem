@@ -2169,7 +2169,7 @@ test('bootstrap summarizes historical skips once and logs identities on repeated
   }
 });
 
-test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 }, async (t) => {
+test('bootstrap reports one aggregate notice and log event when terminal sweep consumers fail', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const storeDir = tmpGame();
   const terminalDir = path.join(
     storeDir,
@@ -3287,7 +3287,7 @@ test('TERM-resistant adopted server is KILLed and death-confirmed', { timeout: 1
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
-test('resume derives a missing loop state from engine state, but an entirely absent game releases the lock and fails', { timeout: 10_000 }, async (t) => {
+test('resume derives a missing loop state from engine state, but an entirely absent game releases the lock and fails', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const emptyDir = tmpGame();
   const absent = createGameLoop({
     gameDir: emptyDir,
