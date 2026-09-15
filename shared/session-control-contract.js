@@ -1,3 +1,4 @@
+export const ABORTABLE_ERROR_CODES = Object.freeze(['BAD_PLAYER_RECOVERY']);
 export const COMMANDS = Object.freeze([
   "start",
   "pause",

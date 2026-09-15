@@ -14,10 +14,12 @@ import {
 import { normalizeSetup, setupToArgs } from "../shared/game-setup.js";
 import {
   ALLOWED_COMMANDS,
+  ABORTABLE_ERROR_CODES,
   validateCommand,
   controlError,
 } from "../shared/session-control-contract.js";
 import { launchSession } from "./session-launcher.js";
+import { abortModeFor } from './recovery-exit.js';
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -66,6 +68,17 @@ export function createSessionManager({
     revision++;
     onChange(snapshot());
   };
+  function abortTarget() {
+    if (state !== 'error' || session || startingLoop || !current || !ABORTABLE_ERROR_CODES.includes(error)) return null;
+    try {
+      const engine=read(path.join(current.sessionDir,'state.json'));
+      const loop=read(path.join(current.sessionDir,'loop-state.json'));
+      const epoch=createHash('sha256').update(engine.sessionToken).digest('hex');
+      if (loop.sessionToken!==engine.sessionToken || loop.gameEpoch!==epoch) return null;
+      const mode=abortModeFor(engine,loop);
+      return mode ? {mode} : null;
+    } catch { return null; }
+  }
   function snapshot() {
     if (initialized && state === "external" && !pending) {
       const owner = readOwnedLock(root, "loop.lock.d");
@@ -126,6 +139,7 @@ export function createSessionManager({
             : kind === 'resume' && publicState === 'paused' ? !pendingDecision : true),
       pendingRequestId: pending?.requestId ?? null,
       error,
+      recoveryExit: abortTarget(),
     };
   }
   const save = (row) =>
@@ -138,6 +152,17 @@ export function createSessionManager({
     )
       throw controlError("CURRENT_CHANGED");
   };
+  async function launchTracked(args, options) {
+    let launched;
+    try { launched=await launchSession(args,options); return launched; }
+    finally {
+      if (launched) startingLoop=null;
+      else {
+        const lock=readOwnedLock(root,'loop.lock.d');
+        if (!lock || lock.status==='dead') startingLoop=null;
+      }
+    }
+  }
   function observeRun(launched) {
     session = launched;
     current = resolveCurrentSession(root);
@@ -170,7 +195,7 @@ export function createSessionManager({
   async function start(row, { recover = false } = {}) {
     const setup = row.setup;
     const args = { ...setupToArgs(setup, root), port: 0, playerRuntime };
-    const launched = await launchSession(args, {
+    const launched = await launchTracked(args, {
       resolver,
       onLoop: async (loop) => {
         startingLoop = loop;
@@ -207,7 +232,7 @@ export function createSessionManager({
     } else emit("playing");
   }
   async function recoverPaused() {
-    const launched = await launchSession(
+    const launched = await launchTracked(
       { storeDir: root, resume: true, port: 0, playerRuntime },
       {
         resolver,
