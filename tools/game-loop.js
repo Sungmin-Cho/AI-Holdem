@@ -6716,14 +6716,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } catch { /* best-effort, mirrors persistCleanupFailure's log handling */ }
   };
 
-  // #192 L2: `cause` carries the original stop error's code only when there was one (the
-  // pure success-path caller has none — `stopError` is already null by the time it checks
-  // lock ownership, since an earlier stopError would have exited through the
-  // `persistCleanupFailure(stopError)` branch first).
-  const loopLockLostError = (cause) => codedError(
+  const loopLockLostError = () => codedError(
     'LOOP_LOCK_LOST',
     'loop 락을 잃어 stop 결과를 기록하지 않았습니다.',
-    cause ? { details: { cause } } : {},
   );
 
   const persistCleanupFailure = (error) => {
@@ -6959,7 +6954,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // persistCleanupFailure — that would try to write a cleanupError, which is exactly
         // what "do not write loop-state when the lock is lost" forbids.
         logLoopLockLostOnStop();
-        throw loopLockLostError(null);
+        throw loopLockLostError();
       }
     })();
     stopPromise = attempt;
@@ -7155,7 +7150,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 L2: same rule as resume — a lost loop lock must not hide why bootstrap
         // failed; other cleanup failures keep surfacing as before.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('bootstrap-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
+        log('bootstrap-cleanup-lock-lost', {});
       }
       throw error;
     }
@@ -7593,7 +7588,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // resume (for example FINALIZATION_ABORTED) stays the reported error. Any other
         // cleanup failure keeps surfacing exactly as before this slice.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('resume-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
+        log('resume-cleanup-lock-lost', {});
       }
       throw translated;
     }

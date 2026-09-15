@@ -14075,6 +14075,7 @@ test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 b
   t.after(() => loop.requestStop().catch(() => {}));
   await assert.rejects(loop.bootstrap({ ai: 1 }), (error) => error.code === 'RESOLVER_BOOM_192');
   assert.ok(logs.some((row) => row.event === 'bootstrap-cleanup-lock-lost'), 'bootstrap-cleanup-lock-lost 로그가 없다');
+  assert.equal('cause' in logs.find((row) => row.event === 'bootstrap-cleanup-lock-lost'), false);
 });
 
 test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT면 복구 명령을 하나도 만들지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
@@ -14628,4 +14629,28 @@ test('#194 stale identity at soft deadline does not escape the async decision', 
   await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
   assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
   assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-soft-wait'),false);
+});
+
+
+test('#207 resume cleanup lock loss preserves the resolver error without a cause field', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+  await first.bootstrap({ ai: 1 });
+  await first.requestStop();
+  const logs = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => {
+      const lockDir = path.join(gameDir, 'loop.lock.d');
+      fs.rmSync(lockDir, { recursive: true, force: true });
+      fs.mkdirSync(lockDir);
+      throw Object.assign(new Error('resolver failed after lock replacement'), { code: 'RESOLVER_BOOM_207' });
+    },
+    opts: { port: 0, waitMs: 0, log: (record) => logs.push(record) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await assert.rejects(loop.resume(), (error) => error.code === 'RESOLVER_BOOM_207');
+  const row = logs.find((entry) => entry.event === 'resume-cleanup-lock-lost');
+  assert.ok(row);
+  assert.equal('cause' in row, false);
 });
