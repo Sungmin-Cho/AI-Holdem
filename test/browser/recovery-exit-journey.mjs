@@ -18,7 +18,7 @@ export async function runRecoveryExitJourney(outDir) {
     async decide(input){decisions.push(input);return {raw:'invalid'};},async dispose(){}},upper:null,notices:[]});
   const browser=async args=>{
     const r=await runOwnedCommand('npx',['--yes','agent-browser@0.36.0','--session',session,'--json',...args],{timeoutMs:45000});
-    assert.equal(r.exitCode,0,`${args[0]} browser command failed`);
+    assert.equal(r.exitCode,0,`${args[0]} browser command failed: ${r.stderr?.slice(-2000) ?? ''}`);
     const result=JSON.parse(r.stdout);assert.notEqual(result.success,false);return result.data;
   };
   const evaluate=async expr=>{const r=await browser(['eval',expr]);return r?.result??r;};
@@ -46,8 +46,9 @@ export async function runRecoveryExitJourney(outDir) {
       } else {
         await openAndVerify();
         await wait(()=>evaluate("!document.querySelector('#recover').hidden"));await click('#recover');
-        await wait(()=>app.manager.snapshot().state==='paused');
-        if(!app.manager.snapshot().pendingDecision)await click('#resume');
+        // Managed resume parks only while restoring, then resumes on its own
+        // unless a pending decision exists. The common loop below waits for
+        // that durable pending boundary instead of clicking through a transient pause.
       }
       await wait(async()=>{
         if(app.manager.snapshot().state==='paused'&&app.manager.snapshot().pendingDecision)return true;
