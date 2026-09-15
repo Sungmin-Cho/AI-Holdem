@@ -117,6 +117,8 @@ export function createSessionManager({
           lastRejection:rejection ? {action:rejection.projection.action, amount:rejection.projection.amount ?? null, detail:rejection.detail} : null} : null,
         diagnosticsQuarantined: pendingDecision.diagnosticsQuarantined === true || !diagnosticCheck.ok,
         retryWillCorrect: retryWillCorrect(pendingDecision),
+        freshSessionAvailable: !closed && initialized && publicState === 'paused' && pendingDecision.status === 'recovery_required' && pendingDecision.closeConfirmed === true && currentSetup()?.opponentRuntime === 'llm',
+        freshSessionAuthorized: !!pendingDecision.freshAuthorization && typeof pendingDecision.freshAuthorization === 'object',
       } : null,
       allowedCommands:
         closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []).filter((kind) =>
@@ -290,7 +292,7 @@ export function createSessionManager({
         emit(paused.state);
       } else if (row.kind === 'retry-decision') {
         if (!session) throw controlError('SESSION_STOPPED');
-        await session.loop.retryDecision(row.decisionId);
+        await session.loop.retryDecision(row.decisionId, {freshAuthorization: row.freshSession ? {source:'app',requestId:row.requestId} : null});
         emit('playing');
       } else if (row.kind === "resume") {
         if (!session) {
@@ -436,7 +438,8 @@ export function createSessionManager({
             }
             // A crash-restored resume is parked; opening the app never silently plays.
           }
-          row.status = "succeeded";
+          row.status = row.kind === "retry-decision" ? "failed" : "succeeded";
+          if (row.kind === "retry-decision") row.error = "RETRY_NOT_APPLIED";
           row.result = snapshot();
         } catch (err) {
           row.status = "failed";

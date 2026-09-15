@@ -126,6 +126,8 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 ---
 
+`freshSessionAvailable`이면 웹 메뉴의 **새 세션으로 재시도**가 가능하다. 대화 기억 소실 경고를 확인한 사용자 명령만 실행하며, 페르소나 카드·칩·핸드 기록은 보존하고 교정 문맥 없이 다시 묻는다. 자동 재생성하지 않는다. `freshSessionAuthorized`는 인가 상태일 뿐 실행 완료가 아니다. 실행은 `player-call`의 `purpose:'fresh-warmup'`, `player-session-recreated`·`player-session-recreate-failed`, 성공은 `metrics.freshSession:true`·`outcome:'retried_accepted'`로 구분한다. legacy 정지 게임은 `node tools/game-loop.js --game-dir /absolute/game --resume --retry-decision <decisionId> --fresh-session`이다. 인가 뒤 중단되면 사용자 명령을 다시 받아야 한다.
+
 ## 4. 종료 보고
 
 종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM을 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `$SESSION_DIR/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.

@@ -284,6 +284,7 @@ export function parseGameLoopArgs(argv) {
   const bools = new Map([
     ['--force', 'force'],
     ['--resume', 'resume'],
+    ['--fresh-session', 'freshSession'],
     ['--mirror-self', 'mirrorSelf'],
     ['--exploit-self', 'exploitSelf'],
   ]);
@@ -357,6 +358,7 @@ export function parseGameLoopArgs(argv) {
   if (parsed.dealBias !== undefined && !['off','light','strong'].includes(parsed.dealBias)) throw codedError('USAGE','--deal-bias는 off/light/strong입니다.');
   if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   if (parsed.retryDecisionId !== undefined && !parsed.resume) throw codedError('USAGE', '--retry-decision은 --resume과 함께 사용하세요.');
+  if (parsed.freshSession && !parsed.retryDecisionId) throw codedError('USAGE', '--fresh-session은 --retry-decision과 함께 사용하세요.');
   const budgetOverrides = { ...(parsed.playerSoftMs !== undefined ? { softMs: parsed.playerSoftMs } : {}),
     ...(parsed.playerHardMs !== undefined ? { hardMs: parsed.playerHardMs } : {}) };
   if (parsed.resume && Object.keys(budgetOverrides).length && !parsed.retryDecisionId) {
@@ -938,7 +940,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return Math.max(childTimeoutMs, boundedWait + waitNetworkMarginMs);
   };
 
-  const runJsonChild = (script, args, {
+  const runJsonChild = async (script, args, {
     deadlineNs: deadlineOverrideNs,
     deadlineError = finalizationDeadlineError,
   } = {}) => {
@@ -950,11 +952,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     const deadlineLimited = deadlineRemaining !== null && deadlineRemaining <= ordinaryTimeout;
     const timeout = deadlineLimited ? Math.max(1, deadlineRemaining) : ordinaryTimeout;
+    const childArgs = [...args, '--game-dir', root];
+    if (script === ENGINE_CLI) {
+      const gate = opts.onEngineInvoke?.([...childArgs]);
+      if (gate && typeof gate.then === 'function') {
+        await gate;
+        // A suspended preflight must not outlive shutdown. Already-owned atomic
+        // transitions, however, must finish their engine mutation and publication.
+        if (stopRequested && !atomicTransition) assertNotStopping();
+      }
+    }
+    if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
     return new Promise((resolve, reject) => {
-      const childArgs = [...args, '--game-dir', root];
       const argv = [script, ...childArgs];
-      if (script === ENGINE_CLI) opts.onEngineInvoke?.([...childArgs]);
-      if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
       const child = execFile(process.execPath, argv, childSpawnOptions({
         encoding: 'utf8',
         timeout,
@@ -1601,7 +1611,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
-  const createPlayerSession = async (persona, createdAt, { deadlineAt = null } = {}) => {
+  const createPlayerSession = async (persona, createdAt, {
+    deadlineAt = null,
+    purpose = 'repair-warmup',
+    onWarmupClosed = null,
+  } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
     const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
     if (timeoutMs !== null && timeoutMs <= 0) {
@@ -1613,7 +1627,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       playerId: persona.playerId, prompt, ...(timeoutMs === null ? {} : { timeoutMs }),
     }); } catch(error) {code=error.code??'CLI_FAILED';throw error;}
     finally {
-      if(deadlineAt!==null) log('player-call',{purpose:'repair-warmup',
+      if(deadlineAt!==null) log('player-call',{purpose,
         decisionId:readLoopState()?.pendingDecision?.decisionId??null,
         generation:readLoopState()?.pendingDecision?.generation??null,
         runtime:playerAdapter.kind,model:RUNTIME_TABLE[playerAdapter.kind]?.player??null,
@@ -1626,11 +1640,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!isArgvSafeSessionId(result.sessionId)) {
       throw codedError('INVALID_SESSION_ID', `플레이어 ${persona.playerId} 세션 id 형식이 안전하지 않습니다.`);
     }
-    return {
+    const session = {
       runtime: playerAdapter.kind,
       sessionId: result.sessionId,
       createdAt,
     };
+    if (typeof onWarmupClosed === 'function') await onWarmupClosed(session.sessionId);
+    return session;
   };
 
   const preparePlayerSessions = async ({ reuseExisting = false } = {}) => {
@@ -1684,21 +1700,42 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const warmPlayers = () => preparePlayerSessions({ reuseExisting: false });
   const restorePlayers = () => preparePlayerSessions({ reuseExisting: true });
 
-  const repairRestoredPlayerSession = async (playerId, { deadlineAt }) => {
-    if (!restoredPlayerSessions.has(playerId)) return null;
-    // consume-before-await prevents a rejected warmup or fresh-session call from recursively
-    // recreating the same player. A later process resume may try the still-persisted old entry.
-    restoredPlayerSessions.delete(playerId);
+  const recreatePlayerSession = async (playerId, {
+    deadlineAt,
+    reason,
+    onWarmupClosed = null,
+  }) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const persona = Array.isArray(players)
       ? players.find((player) => player?.playerId === playerId && playerId !== 'user')
       : null;
     if (!persona) throw codedError('BAD_PLAYERS', `복구할 플레이어 ${playerId} 페르소나가 없습니다.`);
-    const repaired = await createPlayerSession(persona, isoNow(now), { deadlineAt });
-    playerSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
-    writeJsonAtomic(sessionsPath, playerSessions);
-    log('player-session-recreated', { playerId, runtime: repaired.runtime });
+    const repaired = await createPlayerSession(persona, isoNow(now), {
+      deadlineAt,
+      purpose: reason === 'user_fresh_session' ? 'fresh-warmup' : 'repair-warmup',
+      onWarmupClosed,
+    });
+    if (stopRequested) throw codedError('STOPPING', '세션 기록 전에 loop 정지가 요청되었습니다.');
+    const nextSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
+    writeJsonAtomic(sessionsPath, nextSessions);
+    playerSessions = nextSessions;
+    restoredPlayerSessions.delete(playerId);
+    log('player-session-recreated', {
+      playerId,
+      runtime: repaired.runtime,
+      reason,
+      decisionId: readLoopState()?.pendingDecision?.decisionId ?? null,
+      generation: readLoopState()?.pendingDecision?.generation ?? null,
+    });
     return repaired;
+  };
+
+  const repairRestoredPlayerSession = async (playerId, { deadlineAt }) => {
+    if (!restoredPlayerSessions.has(playerId)) return null;
+    // Consume-before-await prevents a failed repair from recursively recreating the same
+    // persisted child. A later process resume may still retry the old on-disk entry.
+    restoredPlayerSessions.delete(playerId);
+    return recreatePlayerSession(playerId, { deadlineAt, reason: 'restored_session_repair' });
   };
 
   const clearDirectServerOwnership = () => {
@@ -1931,7 +1968,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const quarantineDiagnostics = (pending, reason) => {
-    const {diagnostics: _diagnostics, ...rest} = pending;
+    const {diagnostics: _diagnostics, freshAuthorization: _freshAuthorization, ...rest} = pending;
     const cleaned = {...rest, diagnosticsQuarantined:true};
     writeLoopState({pendingDecision:cleaned});
     log('player-diagnostics-quarantined', {decisionId:pending.decisionId, generation:pending.generation, reason});
@@ -1963,7 +2000,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || previous.gameEpoch !== readLoopState().gameEpoch || previous.playerId !== next.toAct)) {
       throw codedError('STALE_PLAYER_DECISION', '저장된 미해결 결정과 현재 엔진 차례가 다릅니다.');
     }
-    const inherited = retryWillCorrect(previous)
+    const freshRequested = previous?.status === 'retry_authorized'
+      && previous.freshAuthorization
+      && typeof previous.freshAuthorization === 'object'
+      && !Array.isArray(previous.freshAuthorization);
+    const inherited = !freshRequested && retryWillCorrect(previous)
       ? projectRejectionForSink(previous.diagnostics.lastRejection, previous) : null;
     const attemptMessage = inherited ? correctionMessage(next.message, inherited, previous) : next.message;
     let record = { schemaVersion: 2, gameEpoch: readLoopState().gameEpoch,
@@ -2021,6 +2062,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let parseMs = 0;
     let stepMs = 0;
     let sessionRepaired = false;
+    let freshSessionUsed = false;
     const applyDecision = async (action) => {
       if (readLoopState()?.pendingDecision?.generation !== record.generation) {
         throw codedError('STALE_PLAYER_DECISION', '이전 세대의 응답은 적용하지 않습니다.');
@@ -2092,12 +2134,68 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
-      round = await decideOnce({
-        playerId: next.toAct,
-        sessionId: session.sessionId,
-        message,
-      }, timeoutMs, { callNo });
+      if (stopRequested) return { kind: 'recovery_required' };
+      if (attempt === 0 && freshRequested && !freshSessionUsed) {
+        if (stopRequested) return { kind: 'recovery_required' };
+        try {
+          session = await recreatePlayerSession(next.toAct, {
+            deadlineAt,
+            reason: 'user_fresh_session',
+            onWarmupClosed: async (freshSessionId) => commitPending({
+              closeConfirmed: true,
+              freshSessionReady: true,
+              freshSessionId,
+            }),
+          });
+        } catch (error) {
+          if (error.code === 'STOPPING' || stopRequested) return { kind: 'recovery_required' };
+          if (isFatalRuntimeFailure(error) || isFatalRepairFailure(error)) {
+            commitPending({status:'unsafe', code:error.code ?? 'REPAIR_FAILED'});
+            throw error;
+          }
+          failureCode = error.code ?? 'REPAIR_FAILED';
+          log('player-session-recreate-failed', {
+            playerId: next.toAct,
+            code: failureCode,
+            reason: 'user_fresh_session',
+          });
+          break;
+        }
+        sessionRepaired = true;
+        freshSessionUsed = true;
+        if (stopRequested) return { kind: 'recovery_required' };
+        const remainingAfterWarmup = Math.ceil(deadlineAt - monotonicNow());
+        if (remainingAfterWarmup <= 0) {
+          round = {ok:false, error:codedError('TIMEOUT', '새 세션 생성 뒤 결정 예산이 만료됐습니다.'), modelMs:0};
+        } else {
+          // The close receipt was durably recorded before the child-session file. A
+          // fresh child decision must start with that marker removed; a crash after this
+          // point is intentionally unsafe rather than silently replayed.
+          commitPending({}, {drop:['closeConfirmed']});
+          timeoutMs = Math.ceil(deadlineAt - monotonicNow());
+          if (timeoutMs <= 0) {
+            round = {ok:false, error:codedError('TIMEOUT', '새 세션 기록 뒤 결정 예산이 만료됐습니다.'), modelMs:0};
+          } else {
+            round = await decideOnce({
+              playerId: next.toAct,
+              sessionId: session.sessionId,
+              message,
+            }, timeoutMs, { callNo });
+          }
+        }
+      } else {
+        round = await decideOnce({
+          playerId: next.toAct,
+          sessionId: session.sessionId,
+          message,
+        }, timeoutMs, { callNo });
+      }
       modelMs += round.modelMs;
+      // Disposal is part of an owned stop, not evidence that a live decision
+      // became unsafe. Leave the running record for the stop owner's final patch.
+      if (stopRequested && (!round.ok && ['STOPPING', 'RUNTIME_CLOSED'].includes(round.error?.code))) {
+        return { kind: 'recovery_required' };
+      }
       failureCode = round.error?.code ?? 'INVALID_DECISION';
       log('player-attempt', { callNo, decisionId: next.decisionId, generation: record.generation,
         runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
@@ -2117,7 +2215,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try {
           repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
         } catch (error) {
+          if (error.code === 'STOPPING') return { kind: 'recovery_required' };
           if (isFatalRepairFailure(error)) throw error;
+          if (stopRequested) return { kind: 'recovery_required' };
           failureCode = error.code ?? 'REPAIR_FAILED';
           log('player-session-repair-failed', {
             playerId: next.toAct,
@@ -2126,6 +2226,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           continue;
         }
         if (repaired) {
+          if (stopRequested) return { kind: 'recovery_required' };
           session = repaired;
           sessionRepaired = true;
           const remainingBeforeRetry = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
@@ -2158,6 +2259,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (!round.ok) {
         failureCode = round.error?.code ?? 'CLI_FAILED';
+        if (stopRequested && ['STOPPING', 'RUNTIME_CLOSED'].includes(failureCode)) return { kind: 'recovery_required' };
         if (isFatalRuntimeFailure(round.error)) {
           commitPending({status:'unsafe', code:failureCode});
           throw round.error;
@@ -2186,6 +2288,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           atomicUnit: applied.atomicUnit,
           outcome: attempt === 0 && !sessionRepaired && !previous ? 'accepted' : 'retried_accepted',
           sessionRepaired,
+          freshSession: freshSessionUsed,
           corrected: Boolean(inherited) || corrections === 1,
           startedAt,
           modelMs,
@@ -5289,15 +5392,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     pauseCompletion = null;
     parkWake?.();
   };
-  const retryDecision = async (decisionId) => {
+  const retryDecision = async (decisionId, { freshAuthorization = null } = {}) => {
     if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
       throw codedError('INVALID_TRANSITION', '복구 대기 상태에서만 재시도할 수 있습니다.');
     }
     let pending = readLoopState()?.pendingDecision;
     if (!pending || ![1, 2].includes(pending.schemaVersion) || pending.status !== 'recovery_required'
-      || !pending.closeConfirmed || pending.decisionId !== decisionId) {
+      || pending.closeConfirmed !== true || pending.decisionId !== decisionId) {
       throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
     }
+    if (freshAuthorization !== null && (
+      typeof freshAuthorization !== 'object'
+      || Array.isArray(freshAuthorization)
+      || !['app', 'legacy', 'api'].includes(freshAuthorization.source)
+      || !(typeof freshAuthorization.requestId === 'string' || freshAuthorization.requestId === null)
+    )) throw codedError('BAD_FRESH_AUTHORIZATION', '새 세션 재시도 권한이 올바르지 않습니다.');
     const check = validateDiagnostics(pending.diagnostics, pending);
     if (!check.ok) pending = quarantineDiagnostics(pending, check.reason);
     const current = await runCli(['step']);
@@ -5305,14 +5414,36 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       || current.stateVersion !== pending.stateVersion || readLoopState().gameEpoch !== pending.gameEpoch) {
       throw codedError('STALE_PLAYER_DECISION', '엔진 결정이 변경되어 재시도하지 않았습니다.');
     }
-    if (readLoopState()?.pendingDecision?.status !== 'recovery_required') throw codedError('INVALID_TRANSITION', '이미 재시도 중입니다.');
-    writeLoopState({ pendingDecision: { ...pending, status: 'retry_authorized' },
+    if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
+      throw codedError('INVALID_TRANSITION', '정지 또는 상태 전환 뒤에는 재시도를 인가하지 않습니다.');
+    }
+    const latest = readLoopState()?.pendingDecision;
+    const samePendingIdentity = (candidate) => candidate &&
+      ['schemaVersion', 'gameEpoch', 'decisionId', 'playerId', 'stateVersion', 'generation']
+        .every(key => candidate[key] === pending[key]);
+    if (!samePendingIdentity(latest) || latest.status !== 'recovery_required') {
+      throw codedError('INVALID_TRANSITION', '이미 재시도 중입니다.');
+    }
+    if (latest.closeConfirmed !== true) {
+      throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
+    }
+    const {freshAuthorization: _staleAuthorization, ...base} = pending;
+    const authorized = {
+      ...base,
+      status: 'retry_authorized',
+      ...(freshAuthorization === null ? {} : {freshAuthorization: {
+        source: freshAuthorization.source,
+        requestId: freshAuthorization.requestId,
+      }}),
+    };
+    writeLoopState({ pendingDecision: authorized,
       playerBudget: playerBudget({ ...(readLoopState().playerBudget ?? pending.budget), ...(opts.retryBudget ?? {}) }) });
     if (managed) {
       try { await resumePlay(); }
       catch (error) {
-        if (readLoopState()?.pendingDecision?.status === 'retry_authorized') {
-          writeLoopState({ pendingDecision: { ...pending, softWait: false } });
+        const authorizedRecord = readLoopState()?.pendingDecision;
+        if (authorizedRecord?.status === 'retry_authorized' && samePendingIdentity(authorizedRecord)) {
+          writeLoopState({ pendingDecision: { ...base, softWait: false } });
         }
         throw error;
       }
@@ -5327,6 +5458,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
   const pauseBarrier = async (out) => {
     if (!managed || !pauseRequested || stopRequested) return out;
+    const pending = readLoopState()?.pendingDecision;
+    // An accepted retry is one decision unit, even across the restored run-entry
+    // publishes. Park after consuming that grant, never between grant and warmup.
+    if (pending?.status === 'retry_authorized' && pending.closeConfirmed === true
+      && out?.next?.kind === 'ai' && pending.decisionId === out.next.decisionId
+      && pending.playerId === out.next.toAct && pending.stateVersion === out.stateVersion
+      && pending.gameEpoch === readLoopState()?.gameEpoch) return out;
     // Gate is durable before draining a receipt. Delivered replies may be read again.
     if (out?.next?.kind === 'user') {
       let drained;
@@ -5578,17 +5716,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           const resolvedFinalStatePatch = typeof pendingFinalStatePatch === 'function'
             ? pendingFinalStatePatch()
             : (pendingFinalStatePatch ?? {});
+          const currentPending = readLoopState()?.pendingDecision;
+          let pendingPatch = {};
+          if (currentPending) {
+            const {freshAuthorization: _freshAuthorization, ...pending} = currentPending;
+            const interrupted = ownedPlayerAttempt
+              && ['gameEpoch','decisionId','generation'].every(key => pending[key] === ownedPlayerAttempt[key])
+              && pending.status === 'running';
+            pendingPatch = {pendingDecision: interrupted
+              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false}
+              : pending};
+          }
           writeLoopState({
             stopping: true,
             stoppedAt: isoNow(now),
             cleanupFailedAt: undefined,
             cleanupError: undefined,
-            ...(readLoopState()?.pendingDecision && ownedPlayerAttempt
-              && ['gameEpoch','decisionId','generation'].every(key=>readLoopState().pendingDecision[key]===ownedPlayerAttempt[key]) && (
-              readLoopState().pendingDecision.status === 'running'
-              || ['RUNTIME_CLOSED', 'RUNTIME_DISPOSING'].includes(readLoopState().pendingDecision.code)
-            ) ? { pendingDecision: { ...readLoopState().pendingDecision, status: 'recovery_required',
-              code: 'INTERRUPTED', closeConfirmed: true, softWait: false } } : {}),
+            ...pendingPatch,
             ...resolvedFinalStatePatch,
           });
         }
@@ -5918,6 +6062,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (state?.phase === 'done' && state.pendingDecision) state = writeLoopState({ pendingDecision: undefined });
       if (state?.pendingDecision) {
         let p = state.pendingDecision;
+        // A fresh-session grant only authorizes the immediately following in-process
+        // retry. Resume never inherits it, regardless of the persisted status.
+        if (Object.hasOwn(p, 'freshAuthorization')) {
+          const {freshAuthorization: _freshAuthorization, ...withoutAuthorization} = p;
+          p = withoutAuthorization;
+          state = writeLoopState({pendingDecision:p});
+        }
         if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
           || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
@@ -6148,7 +6299,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if(opts.retryDecisionId && !state.pendingDecision) throw codedError('PLAYER_RECOVERY_REQUIRED','재시도할 미해결 결정이 없습니다.');
     if (state.pendingDecision && state.pendingDecision.status !== 'retry_authorized' && !managed) {
       if (!opts.retryDecisionId) throw codedError('PLAYER_RECOVERY_REQUIRED', '미해결 결정을 보존했습니다. --resume --retry-decision <decisionId>로 재시도하세요.');
-      await retryDecision(opts.retryDecisionId);
+      await retryDecision(opts.retryDecisionId, {freshAuthorization: opts.freshAuthorization ?? null});
     }
     if (managed && pauseRequested) { await pauseBarrier(await runCli(['step'])); if (stopRequested) return readLoopState(); }
     if (resumeEntryPending) {
@@ -6270,6 +6421,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         parseMs: decision.parseMs,
         stepMs: decision.stepMs,
         ...(decision.sessionRepaired ? { sessionRepaired: true } : {}),
+        ...(decision.freshSession ? { freshSession: true } : {}),
         ...(decision.corrected ? { corrected: true } : {}),
       };
       try {
@@ -6337,6 +6489,7 @@ export async function initializePreparedSession(gameDir, args) {
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+    ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) },
     playerBudget: args.resume ? undefined : playerBudget({ ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),

@@ -31,6 +31,8 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 6�
 
 판정 근거는 지어내지 않는다. 사이드카는 선택된 session의 `loop-state.json` `metrics`에 결정별 시간을 남긴다. `outcome`은 `accepted`·`retried_accepted`·`policy_accepted`이며, `sessionRepaired`·`corrected` 플래그로 세션 복구와 교정 수락을 구분한다. 유효 결정이 없으면 액션 없이 `pendingDecision.status=recovery_required`로 보존되고 `code`(마지막 호출 실패)와 `diagnostics`(직전 회신의 안전 투영·교정 횟수)가 남는다. `loop.log`의 `player-call`(`callNo`)·`player-decision-normalized`·`player-decision-rejected`·`player-correction`·`player-correction-skipped`·`player-diagnostics-quarantined`·`player-recovery-required`로 원인을 확인한다. 거부된 원문 출력은 로그에 남기지 않는다. 자동 교정은 자식 종료 확인 후 남은 예산 안에서 1회이며, TIMEOUT만 발생한 결정은 자동 재질문하지 않는다. `player-correction`은 호출 준비 이벤트이므로 뒤따르는 `player-correction-skipped`를 제외하고 실제 호출은 `player-call`로 센다. v2 pending이 남은 게임은 호환 버전으로 이어서 복구하며, 구버전으로 배포를 되돌리기 전 현재 버전에서 안전 종료한다.
 
+같은 무효 회신을 반복하는 LLM 좌석은 일시정지 메뉴의 **새 세션으로 재시도**를 명시적으로 선택할 수 있다. 대화 기억은 사라지지만 페르소나 카드·칩·핸드 기록은 유지된다. 새 세션에는 교정 문맥을 상속하지 않고 현재 결정을 처음부터 묻는다. 자동 재생성은 없으며, 같은 결정의 identity와 자식 종료 증거를 확인하고 저장된 한 세대 예산 안에서 워밍업과 결정을 수행한다. 명령 영수증의 `succeeded`는 인가 완료이며, 실제 재생성은 `player-call`의 `purpose:'fresh-warmup'`·`player-session-recreated` 또는 `player-session-recreate-failed`, 성공 결정은 `metrics.freshSession:true`·`outcome:'retried_accepted'`로 확인한다. legacy는 정지된 게임에 `node tools/game-loop.js --game-dir /absolute/game --resume --retry-decision <decisionId> --fresh-session`을 사용한다. 인가 후 프로세스가 중단되면 자동 재실행하지 않으며 다시 명령해야 한다.
+
 ## LLM은 어디에만 있나
 
 플레이어 결정·코치 노트·종합 리뷰 셋뿐이다. 전부 `tools/player-runtime.js`가 부르는 **무도구 CLI 자식**이고, 이 파일이 LLM을 부르는 유일한 표면이다. 플레이어는 CLI 세션 resume으로 대화 하나를 게임 내내 이어 가서 자기 페르소나를 기억한다. 프롬프트 정본은 `tools/player-prompt.md` 한 곳이고, 회신 규약은 "JSON 한 줄을 최종 출력으로"다.
