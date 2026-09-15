@@ -2134,6 +2134,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
+      if (stopRequested) return { kind: 'recovery_required' };
       if (attempt === 0 && freshRequested && !freshSessionUsed) {
         if (stopRequested) return { kind: 'recovery_required' };
         try {
@@ -2190,6 +2191,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }, timeoutMs, { callNo });
       }
       modelMs += round.modelMs;
+      // Disposal is part of an owned stop, not evidence that a live decision
+      // became unsafe. Leave the running record for the stop owner's final patch.
+      if (stopRequested && (!round.ok && ['STOPPING', 'RUNTIME_CLOSED'].includes(round.error?.code))) {
+        return { kind: 'recovery_required' };
+      }
       failureCode = round.error?.code ?? 'INVALID_DECISION';
       log('player-attempt', { callNo, decisionId: next.decisionId, generation: record.generation,
         runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
@@ -2209,7 +2215,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try {
           repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
         } catch (error) {
+          if (error.code === 'STOPPING') return { kind: 'recovery_required' };
           if (isFatalRepairFailure(error)) throw error;
+          if (stopRequested) return { kind: 'recovery_required' };
           failureCode = error.code ?? 'REPAIR_FAILED';
           log('player-session-repair-failed', {
             playerId: next.toAct,
@@ -2218,6 +2226,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           continue;
         }
         if (repaired) {
+          if (stopRequested) return { kind: 'recovery_required' };
           session = repaired;
           sessionRepaired = true;
           const remainingBeforeRetry = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
@@ -2250,6 +2259,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (!round.ok) {
         failureCode = round.error?.code ?? 'CLI_FAILED';
+        if (stopRequested && ['STOPPING', 'RUNTIME_CLOSED'].includes(failureCode)) return { kind: 'recovery_required' };
         if (isFatalRuntimeFailure(round.error)) {
           commitPending({status:'unsafe', code:failureCode});
           throw round.error;
