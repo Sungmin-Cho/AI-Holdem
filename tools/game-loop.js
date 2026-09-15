@@ -5610,6 +5610,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const persistCleanupFailure = (error) => {
+    if (!lifecycleStarted || preserveLoopState) return;
     const cleanupError = {
       code: error.code ?? 'ERROR',
       message: error.message ?? String(error),
@@ -5962,9 +5963,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const abandonUnverifiedRecovery = async (engineState, state) => {
     let checkpoint;
-    if (state.aborting) {
+    // Rejected checkpoint bytes are evidence too; cleanup must not rewrite them.
+    preserveLoopState=true;
+    if (state?.aborting) {
       checkpoint=validateAbortingCheckpoint(root,engineState,state);
       if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
+      preserveLoopState=false;
     } else {
       // Until the raw evidence is durably published, cleanup must not serialize it.
       preserveLoopState=true;
