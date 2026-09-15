@@ -2141,7 +2141,7 @@ test('bootstrap auto-select ignores a symlink practice-focus and records a notic
   );
 });
 
-test('bootstrap summarizes historical skips once and logs identities on repeated boots', { timeout: 15_000 }, async (t) => {
+test('bootstrap summarizes historical skips once and logs identities on repeated boots', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const storeDir = tmpGame();
   const histories = ['playing', 'review_generated', 'aborted'];
   const authorityBytes = JSON.stringify({ schemaVersion: 1, fixture: true });
@@ -4696,7 +4696,7 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
 // `spawnEvidence === 1`) and f (`ACCEPT_EVIDENCE`, gated on a recorded `acceptEvidence`) can
 // never apply to it — while the ordinary live-handle close (b/c/e's shared identity path, `a`)
 // is completely unaffected by either flag and still closes the hand normally end to end.
-test('#192 O4: 새 loop가 구 CLI shim을 쓰면 예약에 stamp가 남지 않아도 코치 처리는 정상 종료된다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: 새 loop가 구 CLI shim을 쓰면 예약에 stamp가 남지 않아도 코치 처리는 정상 종료된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const upper = makeCoachAdapter();
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
@@ -5627,7 +5627,7 @@ test('playing resume은 handle 없는 persisted coach reservation을 replacement
   );
 });
 
-test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 halt한다', { timeout: 20_000 }, async (t) => {
+test('#192 S4: 영수증 없는 handle 없는 예약은 playing resume에서 halt한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -5782,7 +5782,7 @@ test('playing resume은 완료 핸드가 있는데 coach authority가 없으면 
   assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
 });
 
-test('#192 R1: policy playing resume은 완료 핸드가 있고 coach authority가 없어도 AUTHORITY_MISSING 없이 진행한다', { timeout: 20_000 }, async (t) => {
+test('#192 R1: policy playing resume은 완료 핸드가 있고 coach authority가 없어도 AUTHORITY_MISSING 없이 진행한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -5818,7 +5818,7 @@ test('#192 R1: policy playing resume은 완료 핸드가 있고 coach authority�
   assert.equal(coachInvocations(calls, 'begin-owner').length, 0);
 });
 
-test('#192 R1: llm playing resume은 완료 핸드가 있는데 coach authority가 없으면 여전히 fail closed한다', { timeout: 20_000 }, async (t) => {
+test('#192 R1: llm playing resume은 완료 핸드가 있는데 coach authority가 없으면 여전히 fail closed한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -10230,7 +10230,7 @@ test('P3: synthesizer replay budget strips reason then actions; evaluator prompt
 
 // ── #192 RED: HEAD fail-open 경로 (설계 docs/design 2026-09-13-issue-192 §1.3) ──────────
 
-test('#192 FO-2 RED: 코치 oneshot의 startTime이 null이면 "pid:null"을 bind-handle하지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 FO-2 RED: 코치 oneshot의 startTime이 null이면 "pid:null"을 bind-handle하지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const handles = [];
   const upper = makeCoachAdapter({
     rounds: [{
@@ -10264,7 +10264,7 @@ test('#192 FO-2 RED: 코치 oneshot의 startTime이 null이면 "pid:null"을 bin
   );
 });
 
-test('#192 O6: 코치 oneshot의 startTime이 빈 문자열/공백뿐이면 identity-unavailable로 처리하고 bind-handle하지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 O6: 코치 oneshot의 startTime이 빈 문자열/공백뿐이면 identity-unavailable로 처리하고 bind-handle하지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   for (const sentinelStartTime of ['', '   ']) {
     const handles = [];
     const upper = makeCoachAdapter({
@@ -10305,7 +10305,7 @@ test('#192 O6: 코치 oneshot의 startTime이 빈 문자열/공백뿐이면 iden
   }
 });
 
-test('#192 O7: 이미 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않고 sidecar를 그대로 둔다', { timeout: 15_000 }, async (t) => {
+test('#192 O7: 이미 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않고 sidecar를 그대로 둔다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   let gameDir;
   let sidecarPath;
   let seededPayload;
@@ -10351,7 +10351,7 @@ test('#192 O7: 이미 identity sidecar가 있으면 pipeline이 재실행돼도 
   assert.deepEqual(readJson(sidecarPath), seededPayload, '기존 identity sidecar가 다른 phase로 덮어써졌다');
 });
 
-test('#192 S3: identity-unavailable 분기에서 fence child가 실패해도 attempt 2를 예약하지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 S3: identity-unavailable 분기에서 fence child가 실패해도 attempt 2를 예약하지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   let gameDir;
   let originalOwner = null;
   const upper = makeCoachAdapter({
@@ -10407,7 +10407,7 @@ test('#192 S3: identity-unavailable 분기에서 fence child가 실패해도 att
   assert.equal(reserves.length, 1, 'identity-unavailable 실패 뒤 attempt 2를 위해 다시 reserve했다');
 });
 
-test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니므로 released로 닫지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니므로 released로 닫지 않는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10455,7 +10455,7 @@ test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니
   assert.deepEqual(signals, [], 'a signal was sent to a pid whose identity was never verified');
 });
 
-test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"면 검증된 identity로 취급하지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"면 검증된 identity로 취급하지 않는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   for (const sentinelStartTime of ['   ', 'undefined']) {
     const gameDir = tmpGame();
@@ -10509,7 +10509,7 @@ test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"�
   }
 });
 
-test('#192 FO-3 RED: policy playing resume도 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 }, async (t) => {
+test('#192 FO-3 RED: policy playing resume도 살아 있는 persisted coach를 회수한 뒤에만 begin-owner를 호출한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -10550,7 +10550,7 @@ test('#192 FO-3 RED: policy playing resume도 살아 있는 persisted coach를 �
   await waitUntilDead(orphan.pid);
 });
 
-test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServer 뒤·beginCoachOwner 전에 실행되고 player adapter를 호출하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServer 뒤·beginCoachOwner 전에 실행되고 player adapter를 호출하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -10613,7 +10613,7 @@ test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServe
   await waitUntilDead(orphan.pid);
 });
 
-test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize가 NOT_SPAWNED로 닫지 않는다', { timeout: 45_000, concurrency: false }, async (t) => {
+test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize가 NOT_SPAWNED로 닫지 않는다', { timeout: 45_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10673,7 +10673,7 @@ test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize�
 
 // ── #192 S2a: E3 CLI 프로토콜 강제 + record 생명주기 ──────────────────────────
 
-test('#192 S2a: reserve/begin-owner/bind-handle CLI는 --spawn-evidence 1 없이 SPAWN_PROTOCOL_REQUIRED로 거부되고 authority를 바꾸지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S2a: reserve/begin-owner/bind-handle CLI는 --spawn-evidence 1 없이 SPAWN_PROTOCOL_REQUIRED로 거부되고 authority를 바꾸지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const { gameDir } = await setupUserFirst(t);
   const owner = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const stats = JSON.parse((await execFileAsync(process.execPath, [
@@ -10744,7 +10744,7 @@ test('#192 S2a: reserve/begin-owner/bind-handle CLI는 --spawn-evidence 1 없이
   assert.equal(beginOk.ok, true);
 });
 
-test('#192 S2a: 정상 코치 attempt는 bind-handle에 --spawn-evidence 1을 보내고 authority 행에 spawnEvidence:1을 남긴다', { timeout: 15_000 }, async (t) => {
+test('#192 S2a: 정상 코치 attempt는 bind-handle에 --spawn-evidence 1을 보내고 authority 행에 spawnEvidence:1을 남긴다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const bindArgs = [];
   const upper = makeCoachAdapter({
     rounds: [{ raw: JSON.stringify({ handNo: 1, text: '정상 코치 응답' }) }],
@@ -10768,7 +10768,7 @@ test('#192 S2a: 정상 코치 attempt는 bind-handle에 --spawn-evidence 1을 �
   assert.equal(retired?.spawnEvidence, 1);
 });
 
-test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 terminateLiveCoachGenerations가 confirmed:true를 받으면 지워진다', { timeout: 45_000, concurrency: false }, async (t) => {
+test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 terminateLiveCoachGenerations가 confirmed:true를 받으면 지워진다', { timeout: 45_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10827,7 +10827,7 @@ test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 te
   assert.equal(state.finalization?.cutoff?.terminationConfirmed, true);
 });
 
-test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 record가 남아 finalize terminationConfirmed를 false로 만든다', { timeout: 20_000 }, async (t) => {
+test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 record가 남아 finalize terminationConfirmed를 false로 만든다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10851,7 +10851,7 @@ test('#192 S2a: startTime null 코치 attempt의 종료가 미확인이면 recor
   assert.equal(upper.terminations.length, 2, '최초 null-identity 종료와 finalize 재확인이 각각 한 번씩 호출돼야 한다');
 });
 
-test('#192 O2: startTime null 코치 attempt의 종료가 confirmed면 handle 없이도 finalize가 released로 닫는다', { timeout: 20_000 }, async (t) => {
+test('#192 O2: startTime null 코치 attempt의 종료가 confirmed면 handle 없이도 finalize가 released로 닫는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10881,7 +10881,7 @@ test('#192 O2: startTime null 코치 attempt의 종료가 confirmed면 handle �
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제 terminate()만 실행하고 결과를 공유한다', { timeout: 30_000 }, async (t) => {
+test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제 terminate()만 실행하고 결과를 공유한다', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -10947,7 +10947,7 @@ test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제
 
 // ── #192 S2b: E2 spawn sidecar + evidence classifier ──────────────────────────
 
-test('#192 S2b: identity-unavailable 처리 중 fence가 실패해도 terminate는 한 번만 호출된다', { timeout: 15_000 }, async (t) => {
+test('#192 S2b: identity-unavailable 처리 중 fence가 실패해도 terminate는 한 번만 호출된다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const upper = makeCoachAdapter({
     rounds: [{
       gate: new Promise(() => {}),
@@ -10979,7 +10979,7 @@ test('#192 S2b: identity-unavailable 처리 중 fence가 실패해도 terminate�
   assert.equal(upper.terminations.length, 1, 'fence 실패 처리 중 terminate가 두 번 호출됐다');
 });
 
-test('#192 S2b: 정상 attempt는 bind-handle 전에 .spawn.json phase:identity를 pid/startTime과 함께 남긴다', { timeout: 15_000 }, async (t) => {
+test('#192 S2b: 정상 attempt는 bind-handle 전에 .spawn.json phase:identity를 pid/startTime과 함께 남긴다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const upper = makeCoachAdapter({
     rounds: [{ raw: JSON.stringify({ handNo: 1, text: '정상 코치 응답' }) }],
   });
@@ -11007,7 +11007,7 @@ test('#192 S2b: 정상 attempt는 bind-handle 전에 .spawn.json phase:identity�
   assert.equal(typeof sidecarAtBind.startTime, 'string');
 });
 
-test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11064,7 +11064,7 @@ test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 s
 // checkpoint in a test. Narrow seam: `coachSpawnCheckpoint` resolving to
 // `{ pauseRequested: true }` flips the exact same internal flag a real pause winning the race
 // would flip, before the same re-check the stop/cutoff variants already exercise.
-test('#192 O4: coachSpawnCheckpoint 대기 중 pause 요청이 오면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: coachSpawnCheckpoint 대기 중 pause 요청이 오면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -11087,7 +11087,7 @@ test('#192 O4: coachSpawnCheckpoint 대기 중 pause 요청이 오면 sidecar도
   assert.equal(fs.existsSync(sidecarPath), false, 'pause 요청 뒤 coachSpawnCheckpoint가 sidecar를 남겼다');
 });
 
-test('#192 O4: coachSpawnCheckpoint 대기 중 stop 요청이 오면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: coachSpawnCheckpoint 대기 중 stop 요청이 오면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseSpawn;
@@ -11130,7 +11130,7 @@ test('#192 O4: coachSpawnCheckpoint 대기 중 stop 요청이 오면 sidecar도 
 // production call site never awaits it, firing `requestStop()` from inside it (which flips
 // `stopRequested` synchronously before its own first await) reliably wins the race every time,
 // without any gate/promise choreography.
-test('#192 O4: intent 기록 뒤 spawn 직전에 suspension이 오면 sidecar가 aborted-before-spawn으로 끝나고 spawn하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: intent 기록 뒤 spawn 직전에 suspension이 오면 sidecar가 aborted-before-spawn으로 끝나고 spawn하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -11172,7 +11172,7 @@ test('#192 O4: intent 기록 뒤 spawn 직전에 suspension이 오면 sidecar가
 // classifier's step 0 tuple/identity check with a handle and a tuple-matched sidecar identity
 // that carry the exact same colon-bearing startTime, proving they compare equal instead of
 // raising IDENTITY_CONFLICT.
-test('#192 O4: 콜론을 포함한 win32 startTime은 handle과 sidecar identity가 동일하게 파싱돼 IDENTITY_CONFLICT를 내지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: 콜론을 포함한 win32 startTime은 handle과 sidecar identity가 동일하게 파싱돼 IDENTITY_CONFLICT를 내지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11215,7 +11215,7 @@ test('#192 O4: 콜론을 포함한 win32 startTime은 handle과 sidecar identity
 // one). Narrow seam: `coachSpawnCheckpoint` resolving to `{ retractIssuedOwner: true }`
 // removes the just-captured owner from `issuedOwners` in-process, leaving loop-state's
 // ownerSessionId untouched.
-test('#192 O4: 이 인스턴스가 발급하지 않은 owner는 loop-state가 여전히 가리켜도 spawn하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: 이 인스턴스가 발급하지 않은 owner는 loop-state가 여전히 가리켜도 spawn하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -11242,7 +11242,7 @@ test('#192 O4: 이 인스턴스가 발급하지 않은 owner는 loop-state가 �
   );
 });
 
-test('#192 O4: spawn 직전 loop-state의 ownerSessionId가 바뀌면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: spawn 직전 loop-state의 ownerSessionId가 바뀌면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
@@ -11270,7 +11270,7 @@ test('#192 O4: spawn 직전 loop-state의 ownerSessionId가 바뀌면 sidecar도
   assert.equal(fs.existsSync(sidecarPath), false, 'owner 변경 뒤 spawn 경계가 sidecar를 남겼다');
 });
 
-test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar는 aborted-before-spawn으로 끝나고 finalize는 NOT_SPAWNED로 닫는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar는 aborted-before-spawn으로 끝나고 finalize는 NOT_SPAWNED로 닫는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11308,7 +11308,7 @@ test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar�
   );
 });
 
-test('#192 S2b: writeSpawnEvidence가 intent에서 던지면 spawn 없이 코치를 unavailable로 봉인한다', { timeout: 15_000 }, async (t) => {
+test('#192 S2b: writeSpawnEvidence가 intent에서 던지면 spawn 없이 코치를 unavailable로 봉인한다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const upper = makeCoachAdapter({
     rounds: [{ gate: new Promise(() => {}), raw: JSON.stringify({ handNo: 1, text: '시작하면 안 되는 worker' }) }],
   });
@@ -11329,7 +11329,7 @@ test('#192 S2b: writeSpawnEvidence가 intent에서 던지면 spawn 없이 코치
   assert.equal(note.unavailable, true);
 });
 
-test('#192 S2b: writeSpawnEvidence가 identity에서 던지면 bind-handle 없이 fail-closed 처리되고 record는 실패 전에 등록돼 있다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S2b: writeSpawnEvidence가 identity에서 던지면 bind-handle 없이 fail-closed 처리되고 record는 실패 전에 등록돼 있다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11372,7 +11372,7 @@ test('#192 S2b: writeSpawnEvidence가 identity에서 던지면 bind-handle 없�
 
 // ── #192 S2b: 판정 순서 분류자 매트릭스 (finalizing resume) ──────────────────────
 
-test('#192 S2b 분류자 1: stamp, handle 없음, sidecar 없음 → released NOT_SPAWNED, resume이 begin-owner에 도달한다', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 1: stamp, handle 없음, sidecar 없음 → released NOT_SPAWNED, resume이 begin-owner에 도달한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11400,7 +11400,7 @@ test('#192 S2b 분류자 1: stamp, handle 없음, sidecar 없음 → released NO
 // happened" (judgment d, `NOT_SPAWNED`). Narrow seam: `opts.statGameRoot` stands in for
 // `fs.statSync(root)` so a test can force that specific failure without real filesystem/mount
 // manipulation.
-test('#192 O4: 게임 root 디렉터리 stat이 실패하면 없는 sidecar가 absent가 아니라 invalid로 판정된다', { timeout: 20_000 }, async (t) => {
+test('#192 O4: 게임 root 디렉터리 stat이 실패하면 없는 sidecar가 absent가 아니라 invalid로 판정된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11436,7 +11436,7 @@ test('#192 O4: 게임 root 디렉터리 stat이 실패하면 없는 sidecar가 a
 // that point), the launcher's own catch block calls `loop.requestStop()`. `issuedOwners` is
 // still empty at that point, so E1's receipt logic has nothing to write — no closure entry
 // ever appears for this loop instance.
-test('#192 O4: launcher 스타일 resume({skipLock:true})이 owner 발급 전에 실패하면 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 O4: launcher 스타일 resume({skipLock:true})이 owner 발급 전에 실패하면 closure entry를 남기지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const loopStatePath = path.join(gameDir, 'loop-state.json');
 
@@ -11479,7 +11479,7 @@ test('#192 O4: launcher 스타일 resume({skipLock:true})이 owner 발급 전에
   );
 });
 
-test('#192 S2b 분류자 2: 표식 없음, handle 없음, sidecar 없음 → FINALIZATION_ABORTED, evidence.spawnEvidence는 false (기존 Task 7A 계약)', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 2: 표식 없음, handle 없음, sidecar 없음 → FINALIZATION_ABORTED, evidence.spawnEvidence는 false (기존 Task 7A 계약)', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11505,7 +11505,7 @@ test('#192 S2b 분류자 2: 표식 없음, handle 없음, sidecar 없음 → FIN
   assert.equal(row.evidence.sidecar, 'absent');
 });
 
-test('#192 S2b 분류자 3: stamp, sidecar intent만 → aborted', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 3: stamp, sidecar intent만 → aborted', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11526,7 +11526,7 @@ test('#192 S2b 분류자 3: stamp, sidecar intent만 → aborted', { timeout: 20
   assert.equal(row?.evidence.sidecar, 'intent');
 });
 
-test('#192 S2b 분류자 4: stamp, sidecar aborted-before-spawn(튜플 일치) → released', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 4: stamp, sidecar aborted-before-spawn(튜플 일치) → released', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11548,7 +11548,7 @@ test('#192 S2b 분류자 4: stamp, sidecar aborted-before-spawn(튜플 일치) �
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 S2b 분류자 5: stamp, sidecar identity(live orphan), handle 없음 → orphan 종료 후 released', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S2b 분류자 5: stamp, sidecar identity(live orphan), handle 없음 → orphan 종료 후 released', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11587,7 +11587,7 @@ test('#192 S2b 분류자 5: stamp, sidecar identity(live orphan), handle 없음 
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 S2b 분류자 6: stamp, sidecar generation 불일치 → aborted SPAWN_EVIDENCE_MISMATCH', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 6: stamp, sidecar generation 불일치 → aborted SPAWN_EVIDENCE_MISMATCH', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11609,7 +11609,7 @@ test('#192 S2b 분류자 6: stamp, sidecar generation 불일치 → aborted SPAW
   assert.equal(row?.reason, 'SPAWN_EVIDENCE_MISMATCH');
 });
 
-test('#192 S2b 분류자 7: stamp, exactResultPath가 다른 디렉터리로 재작성, sidecar 없음 → aborted (귀속 불가)', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 7: stamp, exactResultPath가 다른 디렉터리로 재작성, sidecar 없음 → aborted (귀속 불가)', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11634,7 +11634,7 @@ test('#192 S2b 분류자 7: stamp, exactResultPath가 다른 디렉터리로 재
   assert.equal(row?.evidence.attributable, false);
 });
 
-test('#192 S2b 분류자 8: stamp, .spawn.json이 symlink → aborted', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 8: stamp, .spawn.json이 symlink → aborted', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11658,7 +11658,7 @@ test('#192 S2b 분류자 8: stamp, .spawn.json이 symlink → aborted', { timeou
   assert.equal(row?.evidence.sidecar, 'invalid');
 });
 
-test('#192 I2: sidecar가 hard link면(nlink>1) invalid로 판정하고 identity에 signal을 보내지 않는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 I2: sidecar가 hard link면(nlink>1) invalid로 판정하고 identity에 signal을 보내지 않는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'hard link 의미론이 POSIX 전용이다')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11698,7 +11698,7 @@ test('#192 I2: sidecar가 hard link면(nlink>1) invalid로 판정하고 identity
   assert.equal(row?.evidence.sidecar, 'invalid');
 });
 
-test('#192 I2: sidecar가 64KiB를 넘으면 invalid로 판정한다', { timeout: 20_000 }, async (t) => {
+test('#192 I2: sidecar가 64KiB를 넘으면 invalid로 판정한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11721,7 +11721,7 @@ test('#192 I2: sidecar가 64KiB를 넘으면 invalid로 판정한다', { timeout
   assert.equal(row?.evidence.sidecar, 'invalid');
 });
 
-test('#192 sJ5/oK1: O_NOFOLLOW가 없는 플랫폼에서는 symlink sidecar를 따라가지 않고 invalid로 판정한다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 sJ5/oK1: O_NOFOLLOW가 없는 플랫폼에서는 symlink sidecar를 따라가지 않고 invalid로 판정한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'symlink 생성은 win32에서 권한이 필요하다')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11766,7 +11766,7 @@ test('#192 sJ5/oK1: O_NOFOLLOW가 없는 플랫폼에서는 symlink sidecar를 �
   assert.equal(row?.evidence.sidecar, 'invalid');
 });
 
-test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서도 sidecar가 없으면 여전히 absent로 판정 d(NOT_SPAWNED)가 적용된다', { timeout: 20_000 }, async (t) => {
+test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서도 sidecar가 없으면 여전히 absent로 판정 d(NOT_SPAWNED)가 적용된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'symlink 의미론이 POSIX 전용이다')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -11790,7 +11790,7 @@ test('#192 sJ5: O_NOFOLLOW가 없는 플랫폼에서도 sidecar가 없으면 여
   assert.equal(row?.spawnEvidence, 1);
 });
 
-test('#192 S2b 분류자 9: stamp, 잘못된 handle 문자열 "abc", sidecar 없음 → aborted (d 아님)', { timeout: 20_000 }, async (t) => {
+test('#192 S2b 분류자 9: stamp, 잘못된 handle 문자열 "abc", sidecar 없음 → aborted (d 아님)', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11814,7 +11814,7 @@ test('#192 S2b 분류자 9: stamp, 잘못된 handle 문자열 "abc", sidecar 없
   assert.equal(row?.evidence.hasHandle, true);
 });
 
-test('#192 S2b 분류자 10: stamp, live orphan의 authority handle이지만 processStartTime이 강제로 unknown, sidecar 없음 → aborted IDENTITY_UNKNOWN, signal 없음', { timeout: 15_000, concurrency: false }, async (t) => {
+test('#192 S2b 분류자 10: stamp, live orphan의 authority handle이지만 processStartTime이 강제로 unknown, sidecar 없음 → aborted IDENTITY_UNKNOWN, signal 없음', { timeout: 15_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -11858,7 +11858,7 @@ test('#192 S2b 분류자 10: stamp, live orphan의 authority handle이지만 pro
 
 // ── #192 S3: E3 close 표식(f) 판정, D3 수집/권한 분리, D6(FO-3) 회수 선행 ────────
 
-test('#192 S3: 코치 pipeline accept는 --accept-evidence closed-child를 넘긴다', { timeout: 15_000 }, async (t) => {
+test('#192 S3: 코치 pipeline accept는 --accept-evidence closed-child를 넘긴다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const coachCalls = [];
   const upper = makeCoachAdapter({
     rounds: [{ raw: JSON.stringify({ handNo: 1, text: '기본 코치 응답' }) }],
@@ -11875,7 +11875,7 @@ test('#192 S3: 코치 pipeline accept는 --accept-evidence closed-child를 넘�
   assert.equal(flagValue(accepts[0], '--accept-evidence'), 'closed-child');
 });
 
-test('#192 S3: heartbeat result-ready accept는 --accept-evidence closed-child를 넘긴다', { timeout: 20_000 }, async (t) => {
+test('#192 S3: heartbeat result-ready accept는 --accept-evidence closed-child를 넘긴다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   let releaseGeneration;
   const generationGate = new Promise((resolve) => { releaseGeneration = resolve; });
   t.after(() => releaseGeneration());
@@ -11912,7 +11912,7 @@ test('#192 S3: heartbeat result-ready accept는 --accept-evidence closed-child�
   assert.equal(flagValue(accepts[0], '--accept-evidence'), 'closed-child');
 });
 
-test('#192 S3: deferred flush accept는 live generation이 그대로면 --accept-evidence closed-child를 넘긴다', { timeout: 40_000 }, async (t) => {
+test('#192 S3: deferred flush accept는 live generation이 그대로면 --accept-evidence closed-child를 넘긴다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   let overlapCard = null;
   let decisionId = 'd-1-preflop-0';
   const rounds = [{
@@ -11978,7 +11978,7 @@ test('#192 S3: deferred flush accept는 live generation이 그대로면 --accept
   assert.equal(flagValue(accepts[0], '--accept-evidence'), 'closed-child');
 });
 
-test('#192 S3: deferred flush accept는 live generation이 없으면 새로 reserve하고 --accept-evidence no-spawn을 넘긴다', { timeout: 40_000 }, async (t) => {
+test('#192 S3: deferred flush accept는 live generation이 없으면 새로 reserve하고 --accept-evidence no-spawn을 넘긴다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const state = readJson(path.join(gameDir, 'state.json'));
@@ -12029,7 +12029,7 @@ test('#192 S3: deferred flush accept는 live generation이 없으면 새로 rese
   assert.equal(reserves.length, 1, 'deferred flush without a live generation did not reserve a fresh one');
 });
 
-test('#192 S3 분류자 f: consumed 행이 acceptEvidence를 가지면 handle 없이도 released ACCEPT_EVIDENCE, 없으면 unresolved로 halt한다', { timeout: 20_000 }, async (t) => {
+test('#192 S3 분류자 f: consumed 행이 acceptEvidence를 가지면 handle 없이도 released ACCEPT_EVIDENCE, 없으면 unresolved로 halt한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   for (const acceptEvidence of ['no-spawn', null]) {
     await t.test(acceptEvidence ?? 'no evidence', async (st) => {
       const gameDir = tmpGame();
@@ -12114,7 +12114,7 @@ test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown i
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 S3 분류자 f: evidence가 있어도 identity가 alive로 확인된 뒤 signal이 실패하면 unconfirmed로 남는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S3 분류자 f: evidence가 있어도 identity가 alive로 확인된 뒤 signal이 실패하면 unconfirmed로 남는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -12156,7 +12156,7 @@ test('#192 S3 분류자 f: evidence가 있어도 identity가 alive로 확인된 
   assert.equal(row.reason, 'SIGNAL_FAILED');
 });
 
-test('#192 S3 D3: heartbeat timeout-fence로 만들어진 handle 없는 foreign pending 행은 evidence 없이는 unresolved로 halt하고 cleanup-result를 쓰지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S3 D3: heartbeat timeout-fence로 만들어진 handle 없는 foreign pending 행은 evidence 없이는 unresolved로 halt하고 cleanup-result를 쓰지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -12206,7 +12206,7 @@ test('#192 S3 D3: heartbeat timeout-fence로 만들어진 handle 없는 foreign 
 
 // ── #192 S4 E1: owner runtime closure receipt ──────────────────────────────
 
-test('#192 S4: 락 획득에 실패한 두번째 loop가 requestStop을 불러도 첫 loop owner의 closure entry를 쓰지 않는다', { timeout: 10_000 }, async (t) => {
+test('#192 S4: 락 획득에 실패한 두번째 loop가 requestStop을 불러도 첫 loop owner의 closure entry를 쓰지 않는다', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   const first = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
@@ -12228,7 +12228,7 @@ test('#192 S4: 락 획득에 실패한 두번째 loop가 requestStop을 불러�
   );
 });
 
-test('#192 S4: owner 발급 전에 실패하는 resume은 requestStop에서 이전 owner의 closure entry를 기록하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S4: owner 발급 전에 실패하는 resume은 requestStop에서 이전 owner의 closure entry를 기록하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const initialized = await initGame(gameDir, ['--stack', '100']);
   const staleOwner = 'stale-owner-before-issue';
@@ -12257,7 +12257,7 @@ test('#192 S4: owner 발급 전에 실패하는 resume은 requestStop에서 이�
   );
 });
 
-test('#192 S4: adapter dispose 실패는 owner closure entry를 기록하지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 S4: adapter dispose 실패는 owner closure entry를 기록하지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   adapter.dispose = async () => {
@@ -12280,7 +12280,7 @@ test('#192 S4: adapter dispose 실패는 owner closure entry를 기록하지 않
   );
 });
 
-test('#192 S4: 성공적인 stop은 발급한 owner마다 정확히 한 번, 중복 없이 closure entry를 남기고 이전 인스턴스의 항목도 보존한다', { timeout: 20_000 }, async (t) => {
+test('#192 S4: 성공적인 stop은 발급한 owner마다 정확히 한 번, 중복 없이 closure entry를 남기고 이전 인스턴스의 항목도 보존한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
   t.after(() => first.requestStop().catch(() => {}));
@@ -12312,7 +12312,7 @@ test('#192 S4: 성공적인 stop은 발급한 owner마다 정확히 한 번, 중
   assert.deepEqual(owners, [owner1, owner2].sort());
 });
 
-test('#192 I1: oneshotStart는 있지만 dispose가 없는 adapter가 있으면 성공적인 stop도 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 I1: oneshotStart는 있지만 dispose가 없는 adapter가 있으면 성공적인 stop도 closure entry를 남기지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   // A coach-capable adapter (exposes `oneshotStart`) that never confirms its own children
@@ -12353,7 +12353,7 @@ test('#192 I1: oneshotStart는 있지만 dispose가 없는 adapter가 있으면 
   );
 });
 
-test('#192 sJ4: dispose가 resolve해도 disposeConfirmsChildren을 선언하지 않은 coach adapter는 closure entry를 남기지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 sJ4: dispose가 resolve해도 disposeConfirmsChildren을 선언하지 않은 coach adapter는 closure entry를 남기지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   // dispose는 정상적으로 resolve하지만(예외 없음), 자신이 registry의 모든 child를
@@ -12394,7 +12394,7 @@ test('#192 sJ4: dispose가 resolve해도 disposeConfirmsChildren을 선언하지
   assert.equal(skipped.reason, 'DISPOSE_CONFIRMATION_UNDECLARED');
 });
 
-test('#192 I5/L2: requestStop 직전 loop lock 디렉터리가 다른 inode/identity로 바뀌면 LOOP_LOCK_LOST로 거부되고 loop-state를 쓰지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 I5/L2: requestStop 직전 loop lock 디렉터리가 다른 inode/identity로 바뀌면 LOOP_LOCK_LOST로 거부되고 loop-state를 쓰지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
@@ -12440,7 +12440,7 @@ test('#192 I5/L2: requestStop 직전 loop lock 디렉터리가 다른 inode/iden
   );
 });
 
-test('#192 L2/#197: adapter disposal 실패와 락 상실이 겹치면 loop-state를 쓰지 않고 원래 정리 오류를 그대로 올린다', { timeout: 15_000 }, async (t) => {
+test('#192 L2/#197: adapter disposal 실패와 락 상실이 겹치면 loop-state를 쓰지 않고 원래 정리 오류를 그대로 올린다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const disposeError = Object.assign(new Error('dispose boom'), { code: 'DISPOSE_BOOM' });
@@ -12543,7 +12543,7 @@ test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우�
   assert.equal(manager.snapshot().error, row.error);
 });
 
-test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -12570,7 +12570,7 @@ test('#192 S4: 다른 owner의 closure entry는 이 행을 release하지 않는�
   assert.notEqual(row.reason, 'OWNER_RUNTIME_CLOSED', '다른 owner의 closure entry로 released 판정했다');
 });
 
-test('#192 S4 분류자 c: 표식 없는 legacy 행도 owner closure entry가 있으면 OWNER_RUNTIME_CLOSED로 released되고 d·f를 거치지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 S4 분류자 c: 표식 없는 legacy 행도 owner closure entry가 있으면 OWNER_RUNTIME_CLOSED로 released되고 d·f를 거치지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -12599,7 +12599,7 @@ test('#192 S4 분류자 c: 표식 없는 legacy 행도 owner closure entry가 �
   assert.notEqual(row?.spawnEvidence, 1, 'legacy 행에는 spawnEvidence stamp가 없어야 한다(d 배제 확인)');
 });
 
-test('#192 S4: resume은 이전 인스턴스가 남긴 coachRuntimeClosures 항목을 유지한다', { timeout: 15_000 }, async (t) => {
+test('#192 S4: resume은 이전 인스턴스가 남긴 coachRuntimeClosures 항목을 유지한다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   const priorOwner = 'owner-closed-before-crash';
@@ -12852,7 +12852,7 @@ function coachAuthorityRow(authority, handNo) {
   return { ...active, handNo, released: false };
 }
 
-test('#192 S5: 이슈 재현 — 1차 finalize 실패 store를 수정 없이 두 번 재개하면 done과 리뷰 게시에 도달한다', { timeout: 60_000, concurrency: false }, async (t) => {
+test('#192 S5: 이슈 재현 — 1차 finalize 실패 store를 수정 없이 두 번 재개하면 done과 리뷰 게시에 도달한다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const { gameDir, init } = await buildIssue192FirstRunFailure(t);
 
@@ -12967,7 +12967,7 @@ test('#192 S5: 이슈 재현 — 1차 finalize 실패 store를 수정 없이 두
   );
 });
 
-test('#192 I4: publishCliPath 테스트 seam — 비envelope stdout은 training-publish-error에 BAD_CHILD_OUTPUT로 진단되고 sentinel 텍스트는 로그에 남지 않는다', { timeout: 30_000, concurrency: false }, async (t) => {
+test('#192 I4: publishCliPath 테스트 seam — 비envelope stdout은 training-publish-error에 BAD_CHILD_OUTPUT로 진단되고 sentinel 텍스트는 로그에 남지 않는다', { timeout: 30_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   await seedFinishedGame(gameDir);
@@ -13020,7 +13020,7 @@ test('#192 I4: publishCliPath 테스트 seam — 비envelope stdout은 training-
 // the spawn sidecar evidence (b/d) alone would have been enough. Remove the owner closure
 // receipt between runs — the only allowed edit — so the fresh resume must close both rows
 // on spawn evidence alone.
-test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize 실패 store가 done에 도달한다', { timeout: 60_000, concurrency: false }, async (t) => {
+test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize 실패 store가 done에 도달한다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const { gameDir } = await buildIssue192FirstRunFailure(t);
 
@@ -13095,7 +13095,7 @@ test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize �
 // left at exactly `phase: 'intent'` (evidence judgment e) — a fresh resume must halt
 // explicitly rather than silently release it, and must not duplicate coach-control
 // transitions on a second resume attempt.
-test('#192 S5: 영수증 없는 crash store는 명시적으로 멈추고 증거 요약을 남긴다', { timeout: 60_000, concurrency: false }, async (t) => {
+test('#192 S5: 영수증 없는 crash store는 명시적으로 멈추고 증거 요약을 남긴다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const { gameDir } = await buildIssue192FirstRunFailure(t, { crashHandOneIntent: true });
 
@@ -13266,7 +13266,7 @@ test('#192 I6: allowlist는 publish.js·engine/cli.js가 실제로 방출하는 
   }
 });
 
-test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cleanup-result·adapter-disable은 첫 closure에서만 호출된다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cleanup-result·adapter-disable은 첫 closure에서만 호출된다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13324,7 +13324,7 @@ test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cl
   assert.equal(coachInvocations(calls3, 'adapter-disable').length, 0, '세 번째 재개는 adapter-disable을 다시 호출하면 안 된다');
 });
 
-test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 이미 disabled여도 cleanup-result released를 기록한다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 이미 disabled여도 cleanup-result released를 기록한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13391,7 +13391,7 @@ test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 �
   );
 });
 
-test('#192 S6: 판정 대상 행이 늘어도 owner-runtime-closure 영수증은 closure당 한 번만 읽는다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S6: 판정 대상 행이 늘어도 owner-runtime-closure 영수증은 closure당 한 번만 읽는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const countLoopStateReadsDuringResume = async (handCount) => {
     const gameDir = tmpGame();
     const init = await seedFinishedGame(gameDir);
@@ -13437,7 +13437,7 @@ test('#192 S6: 판정 대상 행이 늘어도 owner-runtime-closure 영수증은
   );
 });
 
-test('#192 S6: recovery 메시지가 sidecar intent 행과 증거 없는 legacy 행을 구분한다', { timeout: 20_000, concurrency: false }, async (t) => {
+test('#192 S6: recovery 메시지가 sidecar intent 행과 증거 없는 legacy 행을 구분한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDirLegacy = tmpGame();
   const initLegacy = await seedFinishedGame(gameDirLegacy);
   const externalLegacy = await startExternalServer(gameDirLegacy, initLegacy.sessionToken);
@@ -13675,7 +13675,7 @@ test('#192 J2: 스캐너는 완전한 절대 경로 cwd만 신뢰한다 — read
   ]);
 });
 
-test('#192 L1: 기본 스캐너가 ai-holdem- cwd의 실제 프로세스를 candidate로, 종료 후에는 clean으로 본다', { timeout: 15_000 }, async (t) => {
+test('#192 L1: 기본 스캐너가 ai-holdem- cwd의 실제 프로세스를 candidate로, 종료 후에는 clean으로 본다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'lsof 기반 스캐너는 POSIX 전용이다')) return;
   if (!REAL_LSOF) { t.skip('이 머신에 lsof가 없다'); return; }
   // #192 CI: some Linux images ship an lsof that exits non-zero (warnings about unreadable
@@ -13720,7 +13720,7 @@ test('#192 L1: 기본 스캐너가 ai-holdem- cwd의 실제 프로세스를 cand
   );
 });
 
-test('#192 L1: 스캐너가 clean이면 evidence 없는 legacy 행이 자동 복구되고 resume이 done까지 진행한다', { timeout: 30_000, concurrency: false }, async (t) => {
+test('#192 L1: 스캐너가 clean이면 evidence 없는 legacy 행이 자동 복구되고 resume이 done까지 진행한다', { timeout: 30_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13761,7 +13761,7 @@ test('#192 L1: 스캐너가 clean이면 evidence 없는 legacy 행이 자동 복
   assert.equal(flagValue(cleanupCalls[0], '--cleanup-state'), 'released');
 });
 
-test('#192 L1: 스캐너가 clean이어도 foreign legacy 행은 released 판정만 되고 온디스크에는 쓰이지 않은 채 resume이 진행된다', { timeout: 20_000 }, async (t) => {
+test('#192 L1: 스캐너가 clean이어도 foreign legacy 행은 released 판정만 되고 온디스크에는 쓰이지 않은 채 resume이 진행된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13795,7 +13795,7 @@ test('#192 L1: 스캐너가 clean이어도 foreign legacy 행은 released 판정
   assert.equal(row?.cleanupState, 'pending', 'foreign 행의 온디스크 cleanupState가 released로 잘못 쓰였다');
 });
 
-test('#192 L1: 스캐너가 candidates면 pid를 담아 unresolved로 halt하고 안내 문구에 pid가 나타난다', { timeout: 20_000 }, async (t) => {
+test('#192 L1: 스캐너가 candidates면 pid를 담아 unresolved로 halt하고 안내 문구에 pid가 나타난다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13823,7 +13823,7 @@ test('#192 L1: 스캐너가 candidates면 pid를 담아 unresolved로 halt하고
   assert.match(state.halt.message, /999999/, 'halt 메시지에 candidate pid가 나타나지 않는다');
 });
 
-test('#192 J3: finalizingLoop 같은 공용 헬퍼는 loopOpts가 없어도 실제 lsof 대신 결정적 TEST_DEFAULT 스캐너를 쓴다', { timeout: 20_000 }, async (t) => {
+test('#192 J3: finalizingLoop 같은 공용 헬퍼는 loopOpts가 없어도 실제 lsof 대신 결정적 TEST_DEFAULT 스캐너를 쓴다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13851,7 +13851,7 @@ test('#192 J3: finalizingLoop 같은 공용 헬퍼는 loopOpts가 없어도 실�
   );
 });
 
-test('#192 L1: 스캐너가 unavailable이면 LEGACY_SCAN_UNAVAILABLE로 halt하고 조회 불가 안내를 남긴다', { timeout: 20_000 }, async (t) => {
+test('#192 L1: 스캐너가 unavailable이면 LEGACY_SCAN_UNAVAILABLE로 halt하고 조회 불가 안내를 남긴다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13874,7 +13874,7 @@ test('#192 L1: 스캐너가 unavailable이면 LEGACY_SCAN_UNAVAILABLE로 halt하
   assert.match(state.halt.message, /확인할 수 없습니다/, 'unavailable halt 메시지가 조회 불가 안내를 담지 않았다');
 });
 
-test('#192 L1: 살아있는 orphan handle이 있는 legacy 행은 스캐너를 부르지 않고 judgment a로 해소된다', { timeout: 20_000 }, async (t) => {
+test('#192 L1: 살아있는 orphan handle이 있는 legacy 행은 스캐너를 부르지 않고 judgment a로 해소된다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13897,7 +13897,7 @@ test('#192 L1: 살아있는 orphan handle이 있는 legacy 행은 스캐너를 �
   assert.equal(scanCalls, 0, '살아있는 identity가 있는 행(judgment a)은 스캐너를 호출하면 안 된다');
 });
 
-test('#192 sJ3: 스캔이 clean으로 해소되기 전에 loop lock identity가 바뀌면 legacy 행을 release하지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 sJ3: 스캔이 clean으로 해소되기 전에 loop lock identity가 바뀌면 legacy 행을 release하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -13938,7 +13938,7 @@ test('#192 sJ3: 스캔이 clean으로 해소되기 전에 loop lock identity가 
   assert.notEqual(authRow?.cleanupState, 'released', '락을 잃은 스캔 결과로 온디스크 행이 released로 쓰였다');
 });
 
-test('#192 J4: playing resume의 legacy 스캔이 identity deadline 안에 해소되지 않으면 RESUME_RECLAIM_DEADLINE_EXCEEDED 대신 LEGACY_SCAN_UNAVAILABLE로 halt한다', { timeout: 20_000 }, async (t) => {
+test('#192 J4: playing resume의 legacy 스캔이 identity deadline 안에 해소되지 않으면 RESUME_RECLAIM_DEADLINE_EXCEEDED 대신 LEGACY_SCAN_UNAVAILABLE로 halt한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -13990,7 +13990,7 @@ test('#192 J4: playing resume의 legacy 스캔이 identity deadline 안에 해�
   assert.equal(row?.evidence?.legacyScanDetail, 'SCAN_DEADLINE');
 });
 
-test('#192 L1: persistedCoachRecovery는 foreign 미해소 행에 --row-owner/--operator-confirmed 명령을 만든다', { timeout: 20_000 }, async (t) => {
+test('#192 L1: persistedCoachRecovery는 foreign 미해소 행에 --row-owner/--operator-confirmed 명령을 만든다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -14026,7 +14026,7 @@ test('#192 L1: persistedCoachRecovery는 foreign 미해소 행에 --row-owner/--
   assert.match(state.halt.message, /coach CLI/, '운영자 확인 안내가 halt 메시지에 없다');
 });
 
-test('#192 J5: LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에는 --row-owner 복구 명령을 만들지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 J5: LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에는 --row-owner 복구 명령을 만들지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -14059,7 +14059,7 @@ test('#192 J5: LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에는 --row-owner 복�
   assert.equal(command, undefined, 'LEGACY_RUNTIME_PROCESS_PRESENT foreign 행에 --row-owner 명령이 생겼다');
 });
 
-test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 bootstrap 오류로 거부된다', { timeout: 15_000 }, async (t) => {
+test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 bootstrap 오류로 거부된다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
@@ -14077,7 +14077,7 @@ test('#192 L2: bootstrap 실패 뒤 정리 stop이 LOOP_LOCK_LOST여도 원래 b
   assert.ok(logs.some((row) => row.event === 'bootstrap-cleanup-lock-lost'), 'bootstrap-cleanup-lock-lost 로그가 없다');
 });
 
-test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT면 복구 명령을 하나도 만들지 않는다', { timeout: 20_000 }, async (t) => {
+test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT면 복구 명령을 하나도 만들지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -14104,7 +14104,7 @@ test('#192 K1: 권한 있는 active 행이라도 LEGACY_RUNTIME_PROCESS_PRESENT�
   assert.equal(state.halt.recovery.requiresOperatorConfirmation, undefined);
 });
 
-test('#192 K2: 락을 잃은 뒤 loop-state 파일이 사라져도 requestStop은 LOOP_LOCK_LOST로 거부되고 파일을 다시 만들지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 K2: 락을 잃은 뒤 loop-state 파일이 사라져도 requestStop은 LOOP_LOCK_LOST로 거부되고 파일을 다시 만들지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const logs = [];
   const loop = createGameLoop({
@@ -14149,7 +14149,7 @@ test('#192 K3: consultCoachCloseEvidence는 설계 순서 c → closed-confirmed
   assert.equal(consultCoachCloseEvidence({ ownerSessionId: 'owner-k3' }, [{ ownerSessionId: 'other' }], { phase: 'intent' }), null);
 });
 
-test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 identity sidecar가 있으면 pipeline이 재실행돼도 spawn하지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   let gameDir;
   let sidecarPath;
   let seededPayload;
@@ -14191,7 +14191,7 @@ test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 identity sidecar가 있�
   assert.deepEqual(readJson(sidecarPath), seededPayload, 'O_NOFOLLOW 없는 플랫폼에서 기존 identity sidecar가 덮어써졌다');
 });
 
-test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-confirmed sidecar로 행을 닫는다', { timeout: 20_000 }, async (t) => {
+test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-confirmed sidecar로 행을 닫는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -14213,7 +14213,7 @@ test('#192 oK1: O_NOFOLLOW가 없는 플랫폼에서도 튜플이 맞는 closed-
   assert.equal(row?.cleanupState, 'released');
 });
 
-test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 loop-state를 쓰지 않는다', { timeout: 15_000 }, async (t) => {
+test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계속하고 loop-state를 쓰지 않는다', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   if (skipOnWin32(t, 'directory permission bits do not deny reads on win32')) return;
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     t.skip('root ignores directory permission bits');
@@ -14254,7 +14254,7 @@ test('#192 oK2: stop 중 loop lock 검증이 EACCES로 던져도 정리를 계�
   assert.equal(fs.readFileSync(loopStatePath, 'utf8'), beforeRaw, '검증할 수 없는 lock으로 loop-state를 썼다');
 });
 
-test('#192 oK5: legacy 스캔 체인이 reject되면 일반 오류가 아니라 LEGACY_SCAN_UNAVAILABLE(SCAN_THREW)로 halt한다', { timeout: 20_000 }, async (t) => {
+test('#192 oK5: legacy 스캔 체인이 reject되면 일반 오류가 아니라 LEGACY_SCAN_UNAVAILABLE(SCAN_THREW)로 halt한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
