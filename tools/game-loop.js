@@ -284,6 +284,7 @@ export function parseGameLoopArgs(argv) {
   const bools = new Map([
     ['--force', 'force'],
     ['--resume', 'resume'],
+    ['--fresh-session', 'freshSession'],
     ['--mirror-self', 'mirrorSelf'],
     ['--exploit-self', 'exploitSelf'],
   ]);
@@ -357,6 +358,7 @@ export function parseGameLoopArgs(argv) {
   if (parsed.dealBias !== undefined && !['off','light','strong'].includes(parsed.dealBias)) throw codedError('USAGE','--deal-bias는 off/light/strong입니다.');
   if (parsed.storeDir === undefined && parsed.hints === 'on') throw codedError('USAGE','--hints on은 --store-dir가 필요합니다.');
   if (parsed.retryDecisionId !== undefined && !parsed.resume) throw codedError('USAGE', '--retry-decision은 --resume과 함께 사용하세요.');
+  if (parsed.freshSession && !parsed.retryDecisionId) throw codedError('USAGE', '--fresh-session은 --retry-decision과 함께 사용하세요.');
   const budgetOverrides = { ...(parsed.playerSoftMs !== undefined ? { softMs: parsed.playerSoftMs } : {}),
     ...(parsed.playerHardMs !== undefined ? { hardMs: parsed.playerHardMs } : {}) };
   if (parsed.resume && Object.keys(budgetOverrides).length && !parsed.retryDecisionId) {
@@ -6251,7 +6253,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if(opts.retryDecisionId && !state.pendingDecision) throw codedError('PLAYER_RECOVERY_REQUIRED','재시도할 미해결 결정이 없습니다.');
     if (state.pendingDecision && state.pendingDecision.status !== 'retry_authorized' && !managed) {
       if (!opts.retryDecisionId) throw codedError('PLAYER_RECOVERY_REQUIRED', '미해결 결정을 보존했습니다. --resume --retry-decision <decisionId>로 재시도하세요.');
-      await retryDecision(opts.retryDecisionId);
+      await retryDecision(opts.retryDecisionId, {freshAuthorization: opts.freshAuthorization ?? null});
     }
     if (managed && pauseRequested) { await pauseBarrier(await runCli(['step'])); if (stopRequested) return readLoopState(); }
     if (resumeEntryPending) {
@@ -6441,6 +6443,7 @@ export async function initializePreparedSession(gameDir, args) {
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+    ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
       ...(args.playerHardMs !== undefined ? { hardMs: args.playerHardMs } : {}) },
     playerBudget: args.resume ? undefined : playerBudget({ ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
