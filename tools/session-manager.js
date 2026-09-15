@@ -490,20 +490,7 @@ export function createSessionManager({
             if (row.kind==='restart') await start(row,{recover:true});
           } else if (row.kind === "start") await start(row, { recover: true });
           else {
-            const engine = current
-              ? read(path.join(current.sessionDir, "state.json"))
-              : null;
-            if (engine?.result !== "abort") await recoverPaused();
-            else {
-              await launchSession(
-                { storeDir: root, resume: true, port: 0, playerRuntime },
-                {
-                  resolver,
-                  loopOptions: { controlProtocolVersion: 1, startPaused: true },
-                },
-              );
-              emit("ended");
-            }
+            await recoverPaused();
             if (["end", "restart", "replace-current"].includes(row.kind)) {
               if (session) {
                 emit("stopping");
