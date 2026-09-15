@@ -7,7 +7,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {createOwnedTempDir} from '../test/helpers/owned-fixtures.mjs';
 const baseline=fs.realpathSync(process.env.HOLDEM_BASELINE);
-const commit=execFileSync('git',['-C',baseline,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
+const commit=execFileSync('git',['-C',baseline,'rev-parse','HEAD'],{encoding:'utf8',windowsHide:true}).trim();
 assert.equal(commit,'ddcabe22f82b2fb5fc6d9a2d423b754f33b627ff');
 const load=rel=>import(pathToFileURL(path.join(baseline,rel)).href);
 const {createGameLoop,initializePreparedSession}=await load('tools/game-loop.js');
@@ -80,7 +80,7 @@ test('capture actual ddcabe2 legacy-loop and managed recovery compatibility',{ti
   });
   for(const scenario of ['checkpoint-playing','aborted-no-row','aborted-end','aborted-restart','restart-reservation','restart-staging','restart-committed'])await t.test('app-'+scenario,async st=>{
     const f=await seedStore(st);checkpoint(f.current.sessionDir);
-    if(scenario!=='checkpoint-playing')execFileSync(process.execPath,[path.join(baseline,'engine/cli.js'),'end','--result','abort','--operation-id','old-exit','--game-dir',f.current.sessionDir]);
+    if(scenario!=='checkpoint-playing')execFileSync(process.execPath,[path.join(baseline,'engine/cli.js'),'end','--result','abort','--operation-id','old-exit','--game-dir',f.current.sessionDir],{windowsHide:true});
     let row;
     if(scenario!=='aborted-no-row'){
       const kind=scenario==='checkpoint-playing'?'resume':scenario==='aborted-end'?'end':'restart';

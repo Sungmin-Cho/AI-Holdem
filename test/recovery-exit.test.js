@@ -114,6 +114,31 @@ test('#197 identity rejection and snapshot publication failure never rewrite loo
     else assert.deepEqual(fs.readFileSync(f.file),before);
   });
 });
+test('#197 snapshot failure keeps raw bytes but records a later owned cleanup failure',{timeout:TIMEOUT},async t=>{
+  const f=await fixture(t);
+  fs.mkdirSync(path.join(f.root,'loop-state.unverified.json'));
+  const loop=f.loop();
+  const before=fs.readFileSync(f.file), lockDir=path.join(f.root,'loop.lock.d');
+  const originalRmdir=fs.rmdirSync;
+  let injected=false;
+  fs.rmdirSync=function(target,...args){
+    if(!injected&&target===lockDir){
+      injected=true;
+      throw Object.assign(new Error('fixture cleanup rmdir failure'),{code:'FIXTURE_RMDIR_FAIL'});
+    }
+    return originalRmdir.call(this,target,...args);
+  };
+  try {
+    await assert.rejects(loop.resume(),{code:'FIXTURE_RMDIR_FAIL'});
+  } finally {
+    fs.rmdirSync=originalRmdir;
+  }
+  assert.equal(injected,true);
+  assert.deepEqual(fs.readFileSync(f.file),before);
+  const events=fs.readFileSync(path.join(f.root,'loop.log'),'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(events.some(event=>event.event==='cleanup-failed'&&event.code==='FIXTURE_RMDIR_FAIL'));
+  if(fs.existsSync(lockDir))fs.rmdirSync(lockDir);
+});
 test('#197 failed engine end leaves a verifiable checkpoint and resumed abort is idempotent',{timeout:TIMEOUT},async t=>{
   const f=await fixture(t);
   await assert.rejects(f.loop({abortUnrecoverable:{operationId:'crash-end'},onEngineInvoke:args=>{

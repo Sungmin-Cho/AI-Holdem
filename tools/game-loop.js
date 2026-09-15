@@ -5614,7 +5614,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const persistCleanupFailure = (error) => {
-    if (!lifecycleStarted || preserveLoopState) return;
+    if (!lifecycleStarted) return;
     const cleanupError = {
       code: error.code ?? 'ERROR',
       message: error.message ?? String(error),

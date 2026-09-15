@@ -89,6 +89,7 @@
       "actions": 0
     }
   ],
-  "captureLogSha256": "6ea8dec623c45a4d964ffa3ae4347d2980616a18cecbabe50405d34fb92bbb4f",
-  "captureScriptSha256": "f9fbb8300f7dd27356ee65915f2632ea2a4e6528972f76e74b21921b4ad44bc4"
+  "privateCaptureLogSha256": "56505b9925f9c425df6af966154ae981991120d476657fe616651e4653beec14",
+  "captureScriptSha256": "9a2dc1802a88b07eedf5f1e3ffe92e7cc04995fa871f2359346a53c4f662799a",
+  "captureMachineOutputSha256": "e94f82beb9249e8c4f10b730784fc7f275d8b31518cb3eebf7781cdfe24efae3"
 }
