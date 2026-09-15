@@ -8170,7 +8170,8 @@ test('#171: 종합자 heading 실패는 종료 확인 뒤 기계 리뷰로 원�
   assert.equal(upper.evaluatorStarts.length, 1);
   assert.equal(upper.synthesizerStarts.length, 2);
   assert.deepEqual(upper.synthesizerStarts.map((start) => start.timeoutMs), [300_000, 300_000]);
-  assert.equal(upper.synthesizerStarts[0].prompt, upper.synthesizerStarts[1].prompt);
+  assert.ok(upper.synthesizerStarts[1].prompt.startsWith(upper.synthesizerStarts[0].prompt));
+  assert.match(upper.synthesizerStarts[1].prompt, /교정 안내 \(REVIEW_HEADINGS_MISSING\)/);
   assert.deepEqual(
     upper.reviewTerminations.filter((entry) => entry.stage === 'synthesizer').map((entry) => entry.result.confirmed),
     [true, true],
@@ -8216,6 +8217,10 @@ test('#172: review failures classify empty, claims and headings without logging 
   assert.equal((await loop.run()).phase, 'done');
   const failures = readLoopLog(gameDir).filter((row) => row.event === 'review-attempt-failed');
   assert.deepEqual(failures.map((row) => row.code), ['EMPTY_REVIEW_OUTPUT', 'REVIEW_CLAIM_REJECTED', 'REVIEW_HEADINGS_MISSING']);
+  assert.deepEqual(failures.map((row) => row.retryCorrectionCode), ['EMPTY_REVIEW_OUTPUT', 'REVIEW_CLAIM_REJECTED', null]);
+  assert.match(upper.evaluatorStarts[1].prompt, /교정 안내 \(EMPTY_REVIEW_OUTPUT\)/);
+  assert.match(upper.synthesizerStarts[1].prompt, /교정 안내 \(REVIEW_CLAIM_REJECTED\)/);
+  assert.doesNotMatch(upper.synthesizerStarts[1].prompt, /확정 누수입니다/);
   for (const row of failures) {
     assert.equal(row.outputStatus, 'saved');
     assert.ok(row.message.length > 0);
@@ -8233,6 +8238,8 @@ test('#169: real Codex adapter completes first finalization with safe Korean cav
   const scriptPath = path.join(scriptDir, 'script.json');
   const logPath = path.join(scriptDir, 'calls.jsonl');
   const caveats = [
+    '최적·정답 또는 확정된 누수로 판정할 수는 없다.',
+    '최적해 판정이 아니라 공개 정보에 근거한 정성적 과정 평가다.',
     '최적성이나 확정적 누수는 판정할 수 없다.',
     '따라서 플레이의 최적성이나 확정적 누수를 판정할 근거는 없다.',
     '선택 자체의 정답 여부보다 사전 계획을 점검한다.',
@@ -9019,6 +9026,11 @@ test('S2 evaluator and synthesizer authority claims cannot cross retries or publ
   assert.equal(upper.evaluatorStarts.length, 2);
   assert.equal(upper.synthesizerStarts.length, 2);
   assert.equal(upper.synthesizerStarts.some((row) => row.prompt.includes('the optimal choice')), false);
+  for (const starts of [upper.evaluatorStarts, upper.synthesizerStarts]) {
+    assert.ok(starts[1].prompt.startsWith(starts[0].prompt));
+    assert.match(starts[1].prompt, /교정 안내 \(REVIEW_CLAIM_REJECTED\)/);
+    assert.doesNotMatch(starts[1].prompt, /the optimal choice|This move is solver certified/);
+  }
   assert.doesNotMatch(readJson(path.join(gameDir, 'ui-snapshot.json')).review, /the optimal choice|solver certified/);
 });
 
