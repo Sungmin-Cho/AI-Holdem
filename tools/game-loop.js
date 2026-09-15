@@ -953,9 +953,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const deadlineLimited = deadlineRemaining !== null && deadlineRemaining <= ordinaryTimeout;
     const timeout = deadlineLimited ? Math.max(1, deadlineRemaining) : ordinaryTimeout;
     const childArgs = [...args, '--game-dir', root];
-    if (script === ENGINE_CLI) await opts.onEngineInvoke?.([...childArgs]);
-    if (script === COACH_CLI) await opts.onCoachInvoke?.([...childArgs]);
-    assertNotStopping();
+    if (script === ENGINE_CLI) {
+      const gate = opts.onEngineInvoke?.([...childArgs]);
+      if (gate && typeof gate.then === 'function') {
+        await gate;
+        // A suspended preflight must not outlive shutdown. Already-owned atomic
+        // transitions, however, must finish their engine mutation and publication.
+        if (stopRequested && !atomicTransition) assertNotStopping();
+      }
+    }
+    if (script === COACH_CLI) opts.onCoachInvoke?.([...childArgs]);
     return new Promise((resolve, reject) => {
       const argv = [script, ...childArgs];
       const child = execFile(process.execPath, argv, childSpawnOptions({
