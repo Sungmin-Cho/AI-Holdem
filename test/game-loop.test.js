@@ -195,6 +195,7 @@ function makeAdapter({
   delayMs = 0,
   onWarmup = null,
   onDecide = null,
+  sessionIdFor = (input) => `session-${input.playerId}`,
   watchdog = { t1Ms: 25, t2Ms: 15 },
 } = {}) {
   let inFlight = 0;
@@ -212,10 +213,10 @@ function makeAdapter({
       calls.push(input);
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      onWarmup?.(input);
+      await onWarmup?.(input);
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       inFlight -= 1;
-      return { sessionId: `session-${input.playerId}`, raw: 'ready' };
+      return { sessionId: sessionIdFor(input, calls.length), raw: 'ready' };
     },
     async decide(input) {
       decideCalls.push(input);
@@ -228,6 +229,34 @@ function makeAdapter({
   if (watchdog) adapter.watchdog = { ...watchdog };
   return adapter;
 }
+
+test('#196 fresh-session retry recreates only the parked seat before retrying its original decision', { timeout: 15_000 }, async (t) => {
+  const adapter = makeAdapter({
+    sessionIdFor: (_input, n) => `seat-session-${n}`,
+    onDecide: async ({ sessionId, message }) => {
+      if (sessionId === 'seat-session-1') return { raw: 'invalid' };
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  const pending = loop.pendingDecision;
+
+  await loop.retryDecision(pending.decisionId, {
+    freshAuthorization: { source: 'app', requestId: 'fresh-session-red' },
+  });
+  await runUntilUserBoundary(loop, gameDir);
+
+  assert.equal(adapter.calls.length, 2);
+  assert.deepEqual(adapter.decideCalls.map(({ sessionId }) => sessionId), [
+    'seat-session-1', 'seat-session-1', 'seat-session-2',
+  ]);
+  assert.equal(adapter.decideCalls[2].message.includes('[교정]'), false);
+  assert.equal(readJson(path.join(gameDir, '.player-sessions.json')).p1.sessionId, 'seat-session-2');
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics[0];
+  assert.equal(metric.freshSession, true);
+  assert.equal(metric.sessionRepaired, true);
+});
 
 function resolverFor(adapter, inspect = null) {
   return async (input) => {
