@@ -212,7 +212,10 @@ test('S8 early: explicit LLM store launch still requires an eligible player runt
   assert.equal(result.code, 4, JSON.stringify(result));
   assert.equal(result.signal, null);
   const calls = fs.readFileSync(fake.log, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls.map((call) => call.kind), ['claude', 'codex', 'grok']);
+  assert.deepEqual(
+    calls.map((call) => call.kind),
+    process.platform === 'win32' ? ['claude', 'codex'] : ['claude', 'codex', 'grok'],
+  );
   for (const call of calls) assert.ok(call.argv.includes(RUNTIME_TABLE[call.kind].player));
   const selected = JSON.parse(fs.readFileSync(path.join(store, '.session-store/current.json')));
   const gameDir = path.join(store, '.session-store', selected.sessionRel);
