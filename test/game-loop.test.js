@@ -7068,7 +7068,7 @@ test('production SIGTERM reports cleanup failure and exits nonzero instead of ma
     const args = process.argv.slice(2);
     const input = fs.readFileSync(0, 'utf8');
     if (args.includes('stream-json')) {
-      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],hooks:[]}) + '\\n');
+      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],plugins:[],hooks:[]}) + '\\n');
       process.stdout.write(JSON.stringify({type:'result',result:'ok'}) + '\\n');
     } else {
       const decisionId = /decisionId:\\s*([^\\s]+)/.exec(input)?.[1];
@@ -9604,7 +9604,7 @@ test('production --store-dir creates permanent sessions and resume reuses curren
     const args = process.argv.slice(2);
     fs.readFileSync(0, 'utf8');
     if (args.includes('stream-json')) {
-      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],hooks:[]}) + '\\n');
+      process.stdout.write(JSON.stringify({type:'system',subtype:'init',tools:[],mcp_servers:[],plugins:[],hooks:[]}) + '\\n');
       process.stdout.write(JSON.stringify({type:'result',result:'ok'}) + '\\n');
     } else {
       process.stdout.write('ready\\n');
