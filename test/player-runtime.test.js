@@ -1864,18 +1864,21 @@ test('#195 S1: 사이드카 GROK_AUTH_PATH가 있으면 그 값을 쓴다', asyn
   }
 });
 
-test('#195 S1: grok 선검사 — 홈 없음·win32·자격 없음은 spawn 0', async () => {
+test('#195 S1: grok 선검사 — 홈 없음·win32·자격 없음은 spawn 0', async (t) => {
   const { file } = canary();
   const missing = fakeRuntime('grok');
   try {
     const res = await missing.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, false);
     assert.equal(res.containment, false);
-    assert.equal(res.notice, 'grok 격리 검증 실패(grok/grok-4.6): RUNTIME_HOME_REQUIRED');
     assert.equal(missing.calls().length, 0);
+    const expected = process.platform === 'win32'
+      ? 'RUNTIME_HOME_UNSUPPORTED_PLATFORM'
+      : 'RUNTIME_HOME_REQUIRED';
+    assert.equal(res.notice, `grok 격리 검증 실패(grok/grok-4.6): ${expected}`);
     await assert.rejects(
       missing.rt.warmup({ playerId: 'p1', prompt: 'x', timeoutMs: 1000 }),
-      (error) => error.code === 'RUNTIME_HOME_REQUIRED',
+      (error) => error.code === expected,
     );
   } finally {
     missing.cleanup();
@@ -1890,6 +1893,7 @@ test('#195 S1: grok 선검사 — 홈 없음·win32·자격 없음은 spawn 0', 
     win.cleanup();
   }
 
+  if (skipOnWin32(t, 'auth-missing fixture uses POSIX short tmp')) return;
   const noAuth = verifiedGrokRuntime({}, { grokAuthPath: path.join(shortTmp('noauth'), 'missing.json') });
   try {
     const res = await noAuth.rt.probe({ canaryAbsPath: file });
