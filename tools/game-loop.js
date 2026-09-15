@@ -325,6 +325,16 @@ export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
   return null;
 }
 
+export const LOOP_RELEASE_REASONS = Object.freeze([
+  'IDENTITY_DEAD', 'IDENTITY_REPLACED', 'NOT_SPAWNED', 'OWNER_RUNTIME_CLOSED',
+  'CLOSED_CONFIRMED', 'ACCEPT_EVIDENCE', 'LEGACY_NO_RUNTIME_PROCESS',
+]);
+
+export function persistedRecoveryClass(reason) {
+  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED'].includes(reason)
+    ? 'live' : 'unverified';
+}
+
 // #192 D5/O5: distinguishes, for an operator halted on unresolved coach rows, whether any
 // row still carries a spawn-intent sidecar (a spawn may genuinely have happened — verify no
 // leftover coach CLI child) from a genuinely evidence-free legacy row, from a row whose path
@@ -337,9 +347,17 @@ export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
 // nonexistent legacy row. Returns null when no category applies, leaving the base message
 // unchanged.
 export function unresolvedEvidenceGuidance(unresolved) {
+  const live = unresolved.filter((row) => persistedRecoveryClass(row?.reason) === 'live');
+  if (live.length > 0) {
+    const pids = [...new Set(live.flatMap((row) => [
+      ...(row.evidence?.identity?.pid != null ? [row.evidence.identity.pid] : []),
+      ...(row.evidence?.legacyScanPids ?? []),
+    ]))];
+    return `코치 프로세스${pids.length ? `(pid: ${pids.join(', ')})` : ''}의 종료를 확인한 뒤 resume하세요. 쓰기 권한이 있는 행(cleanupAuthorized)은 다음 resume이 자동으로 released 처리하고, 권한 없는 행은 종료 확인 뒤 --row-owner … --operator-confirmed 1로 닫습니다.`;
+  }
   const withEvidence = unresolved.filter((row) => row?.evidence);
   if (withEvidence.some((row) => row.evidence.sidecar === 'intent')) {
-    return 'spawn이 실제로 시작됐을 수 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 halt.recovery.commands를 실행하세요.';
+    return 'spawn이 실제로 시작됐을 수 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 halt.recovery.commands를 검토하고 --operator-confirmed 1을 붙여 실행하세요.';
   }
   // A row whose path could not be attributed to the current root is checked first: even a
   // row that also happens to have no handle/spawnEvidence/sidecar is not "legacy with no
@@ -348,18 +366,8 @@ export function unresolvedEvidenceGuidance(unresolved) {
   if (withEvidence.length > 0 && withEvidence.every((row) => row.evidence.attributable === false)) {
     return '게임 디렉터리가 이동했거나 경로를 확인할 수 없는 행입니다. halt.recovery.commands 실행 전에 게임 디렉터리 위치를 먼저 확인하세요.';
   }
-  // #192 O1/L1 부록 v3.2: judgment g가 legacy 행을 프로세스 스캔으로 판정했지만 여전히
-  // unresolved로 남은 두 경우 — 후보 프로세스가 있거나(fail-closed), 조회 자체가
-  // 불가능했던 경우 — 는 일반 "증거 없는 legacy" 문구보다 구체적인 안내가 필요하다.
-  // g는 sidecar가 absent인 행에만 적용되므로 이 두 reason은 항상 evidence를 동반한다.
-  if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT')) {
-    const pids = [...new Set(withEvidence.flatMap((row) => row.evidence?.legacyScanPids ?? []))];
-    return pids.length > 0
-      ? `legacy 행과 연결됐을 수 있는 coach CLI 프로세스(pid: ${pids.join(', ')})가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.`
-      : 'legacy 행과 연결됐을 수 있는 coach CLI 프로세스가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.';
-  }
   if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_SCAN_UNAVAILABLE')) {
-    return 'legacy 행의 coach 런타임 프로세스 여부를 확인할 수 없습니다. halt.recovery.commands를 검토해 실행하세요.';
+    return 'legacy 행의 coach 런타임 프로세스 여부를 확인할 수 없습니다. halt.recovery.commands를 검토하고 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행하세요.';
   }
   // Genuinely evidence-free legacy: no handle was ever recorded, no new-protocol stamp, and
   // the sidecar has never been seen at all (not merely unreadable/invalid/moved).
@@ -3927,7 +3935,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } else {
       state = initial;
     }
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     // A different startTime proves that the recorded process identity is gone. Never
     // signal the replacement pid; close the stale record as released instead.
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
@@ -3945,7 +3953,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateGraceMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     if (state !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
     if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
@@ -3956,7 +3964,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateKillWaitMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     return {
       outcome: 'unconfirmed',
@@ -4015,6 +4023,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // already passed) sidecar identity does — resolve through the same path either way.
     const identity = authorityIdentity ?? sidecarIdentity;
     if (identity) {
+      evidence.identity = { pid: identity.pid, startTime: identity.startTime };
       const outcome = await resolvePersistedCoachIdentity(identity, deadlineNs, identityDeadlineNs, attempt, closures, sidecar);
       return withEvidence(outcome.outcome === 'released'
         ? { confirmed: true, ...(outcome.reason ? { reason: outcome.reason } : {}), cleanupState: 'released' }
@@ -4296,6 +4305,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             '--hand', String(attempt.handNo),
             '--generation', String(attempt.generation),
             '--cleanup-state', result.cleanupState,
+            ...(result.cleanupState === 'released' ? ['--evidence', result.reason] : []),
           ], { deadlineNs, deadlineError });
         } catch (error) {
           if (error.code === deadlineError().code) throw error;
@@ -5462,14 +5472,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--generation', String(attempt.generation),
         '--cleanup-state', 'released',
       ];
-      // #192 J5/K1: a `LEGACY_RUNTIME_PROCESS_PRESENT` row already named its candidate pids
-      // (see `unresolvedEvidenceGuidance`). The correct recovery action there is to stop
-      // those processes and resume, never a `cleanup-result` command. This holds for a
-      // write-authorized row too, so the check runs before the authorized branch and no
-      // command is emitted at all.
-      if (attempt.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT') return [];
+      // LIVE takes precedence over both write authorization and foreign ownership.
+      if (persistedRecoveryClass(attempt.reason) === 'live') return [];
       if (attempt.cleanupAuthorized) {
-        return [{ program: process.execPath, args: [...base, '--game-dir', root] }];
+        return [{ program: process.execPath, args: [...base, '--game-dir', root], requiresOperatorConfirmation: true }];
       }
       // #192 O1/L1/J5: a genuinely foreign row (its own ownerSessionId differs from the
       // current owner, and it is not cleanupEligible — e.g. a legacy row judgment g could
@@ -5515,24 +5521,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     };
   };
 
+  const persistedCoachRecoveryMessage = (recovery, phase) => {
+    const unresolved = recovery.attempts;
+    let base;
+    if (unresolved.some((row) => persistedRecoveryClass(row.reason) === 'live')) {
+      base = `코치 프로세스가 아직 종료되지 않아 ${phase}를 중단합니다.`;
+    } else if (unresolved.length > 0 && unresolved.every((row) => (
+      row.handNo == null && row.reason === 'RESUME_RECLAIM_DEADLINE_EXCEEDED'
+    ))) {
+      base = `persisted coach 회수 deadline이 초과돼 ${phase}를 중단합니다. 다시 resume하세요.`;
+    } else if (recovery.commands.length > 0) {
+      base = `persisted 코치 handle identity를 확인할 수 없어 ${phase}를 중단합니다.`;
+    } else {
+      base = `persisted 코치 authority 또는 handle을 확인할 수 없어 ${phase}를 중단합니다. authority 수동 복구가 필요합니다.`;
+    }
+    const confirmationNote = recovery.requiresOperatorConfirmation
+      ? 'halt.recovery.commands를 검토하고, 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행한 뒤 resume하세요.'
+      : null;
+    const reasons = [...new Set(unresolved.map((row) => row.reason).filter(Boolean))];
+    return [base, unresolvedEvidenceGuidance(unresolved), confirmationNote, `reasons: ${reasons.join(', ')}`].filter(Boolean).join(' ');
+  };
+
   const haltForPersistedCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
-    const commands = recovery.commands;
-    const base = commands.length > 0
-      ? 'persisted 코치 handle identity를 확인할 수 없어 owner 교대를 중단합니다. 같은 sessionToken의 인증 server lock을 복구하고 halt.recovery.commands를 검토·실행한 뒤 resume하세요.'
-      : 'persisted 코치 handle identity와 cleanup owner를 확인할 수 없어 owner 교대를 중단합니다. authority 수동 복구가 필요합니다.';
-    // #192 D5: append operator guidance that distinguishes a row whose spawn sidecar shows
-    // `intent` (a spawn may genuinely have happened) from a row with no evidence at all
-    // (legacy pre-stamp, or a synthetic authority-level failure row) — each needs a
-    // different manual check before resuming.
-    const guidance = unresolvedEvidenceGuidance(unresolved);
-    // #192 J5: when at least one emitted command still needs `--operator-confirmed 1`
-    // appended by hand, say so explicitly — the command itself deliberately no longer
-    // carries that flag pre-filled.
-    const confirmationNote = recovery.requiresOperatorConfirmation
-      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
-      : null;
-    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
+    const message = persistedCoachRecoveryMessage(recovery, 'finalize');
     appendNotice(message);
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
@@ -5555,16 +5567,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const haltForPlayingCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
-    const base = recovery.commands.length > 0
-      ? 'persisted 코치 handle identity를 확인할 수 없어 playing owner 교대를 중단합니다. 인증 server lock 아래 cleanup-result를 검토·실행한 뒤 resume하세요.'
-      : 'persisted 코치 authority 또는 handle을 확인할 수 없어 playing owner 교대를 중단합니다. 수동 복구가 필요합니다.';
-    // #192 D5: same intent-vs-no-evidence guidance as haltForPersistedCoachRecovery.
-    const guidance = unresolvedEvidenceGuidance(unresolved);
-    // #192 J5: same operator-confirmation note as haltForPersistedCoachRecovery.
-    const confirmationNote = recovery.requiresOperatorConfirmation
-      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
-      : null;
-    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
+    const message = persistedCoachRecoveryMessage(recovery, 'playing owner 교대');
     appendNotice(message);
     writeLoopState({ halt: { code: 'COACH_HANDLE_UNRESOLVED', message, recovery } });
     log('resume-halt', { code: 'COACH_HANDLE_UNRESOLVED' });

@@ -19,6 +19,13 @@ import {
   validateCoachDecisions,
 } from '../publish-contract.js';
 
+// A caller declaration for accidental-command protection and audit, not authentication.
+export const RELEASE_EVIDENCE_REASONS = Object.freeze([
+  'IDENTITY_DEAD', 'IDENTITY_REPLACED', 'NOT_SPAWNED', 'OWNER_RUNTIME_CLOSED',
+  'CLOSED_CONFIRMED', 'ACCEPT_EVIDENCE', 'LEGACY_NO_RUNTIME_PROCESS',
+]);
+const RELEASE_DECLARATION_USAGE = 'released 전이에는 --evidence <REASON>(loop 판정) 또는 --operator-confirmed 1(운영자 확인) 중 하나가 필요합니다. halt.recovery.commands의 명령은 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행하세요.';
+
 export const UNAVAILABLE_TEXT = '이 핸드의 코치 응답을 생성하지 못했습니다. 종합 리뷰에서 해당 핸드를 다시 확인합니다.';
 export const LOCK_NAME = 'publish.lock.d';
 const AUTH_FILE = '.coach-authority.json';
@@ -1118,7 +1125,7 @@ export function createCoachControl(deps = {}) {
   // own. It is honoured only together with `operatorConfirmed === true`; the CLI itself
   // refuses `--row-owner` without `--operator-confirmed 1` before ever calling this.
   async function recordCleanup({
-    gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false,
+    gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false, evidence = null,
   }) {
     // #192 J1: `requireAuth`'s STALE_OWNER check only runs when `owner` is truthy
     // (`requireActiveOwner && owner && …`), so a `rowOwner` request made without `owner` would
@@ -1126,6 +1133,13 @@ export function createCoachControl(deps = {}) {
     // the active owner is. Refuse before touching the lock or the authority file.
     if (rowOwner != null && (typeof owner !== 'string' || owner === '')) {
       fail('USAGE', '--row-owner에는 --owner가 함께 필요합니다.');
+    }
+    if (cleanupState === 'released' && (
+      typeof operatorConfirmed !== 'boolean'
+      || ((evidence !== null) === (operatorConfirmed === true))
+      || (evidence !== null && !RELEASE_EVIDENCE_REASONS.includes(evidence))
+    )) {
+      fail('USAGE', RELEASE_DECLARATION_USAGE);
     }
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
@@ -1137,7 +1151,7 @@ export function createCoachControl(deps = {}) {
         && (
           entry.ownerSessionId === owner
           || entry.cleanupEligible
-          || (operatorConfirmed && rowOwner != null && entry.ownerSessionId === rowOwner)
+          || (operatorConfirmed === true && rowOwner != null && entry.ownerSessionId === rowOwner)
         )
       ));
       if (!row) fail('NO_RETIRED', '회수 대상 retired entry가 없습니다.');
@@ -1149,6 +1163,8 @@ export function createCoachControl(deps = {}) {
       appendTrace(gameDir, {
         gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'cleanup-result',
         handNo, generation, outcome: cleanupState,
+        ...(cleanupState === 'released' && evidence !== null ? { evidence } : {}),
+        ...(cleanupState === 'released' && operatorConfirmed === true ? { operatorConfirmed: true } : {}),
       });
       return { ok: true, cleanupState, adapterState: auth.adapterState };
     });
@@ -1573,6 +1589,7 @@ async function cliMain() {
       cleanupState: opts['cleanup-state'] ?? opts.reason,
       rowOwner: opts['row-owner'] ?? null,
       operatorConfirmed,
+      evidence: opts.evidence ?? null,
     });
   } else if (command === 'rollback-guard') {
     result = await cc.assertRollbackAllowed(gameDir);
