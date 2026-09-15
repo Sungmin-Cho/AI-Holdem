@@ -240,6 +240,16 @@ export function createSessionManager({
       emit(paused.state);
     } else emit("playing");
   }
+  function consumeEndedLaunch(launched) {
+    if (launched.resumed?.code!=='GAME_ENDED') return false;
+    // A terminal launch has released its lock. Never relabel a newly selected
+    // game with this launch's outcome; publication remains bound to its target.
+    sameCurrent({expectedGameId:launched.gameId,expectedSelectionVersion:launched.selectionVersion});
+    current={gameId:launched.gameId,selectionVersion:launched.selectionVersion,sessionDir:launched.sessionDir};
+    session=null;
+    emit('ended');
+    return true;
+  }
   async function recoverPaused() {
     const launched = await launchTracked(
       { storeDir: root, resume: true, port: 0, playerRuntime },
@@ -256,13 +266,9 @@ export function createSessionManager({
       },
     );
     startingLoop = null;
+    if (consumeEndedLaunch(launched)) return false;
     current = resolveCurrentSession(root);
     const phase = read(path.join(current.sessionDir, "loop-state.json")).phase;
-    if (launched.resumed?.code==='GAME_ENDED') {
-      session=null;
-      emit('ended');
-      return false;
-    }
     if (["aborted", "done"].includes(phase)) {
       await launched.loop.run();
       await launched.loop.requestStop();
@@ -293,7 +299,7 @@ export function createSessionManager({
       onLoop:async loop=>{startingLoop=loop;if(closed){await loop.requestStop();throw controlError('APP_STOPPING');}},
       loopOptions:{controlProtocolVersion:1,abortUnrecoverable:{operationId:row.requestId}},
     });
-    if (launched.resumed?.code==='GAME_ENDED') {session=null;emit('ended');return;}
+    if (consumeEndedLaunch(launched)) return;
     observeRun(launched);
     emit('finalizing');
     await runPromise;

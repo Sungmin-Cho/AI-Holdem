@@ -5953,6 +5953,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     } finally {closeServerLockPin(pin);}
   };
+  const logAbandonedRecovery = audit => log('player-recovery-abandoned', {
+    operationId:audit.operationId,mode:audit.mode,sidecar:audit.sidecar,sha256:audit.sha256,
+    reason:audit.reason,unverifiedSnapshot:audit.unverifiedSnapshot,abandonedAt:audit.abandonedAt,
+  });
   const finishAbortedLifecycle = async (engineState, state = readLoopState()) => {
     let checkpoint = null;
     if (state?.aborting) {
@@ -5965,7 +5969,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       if (checkpoint) {
         openLog();
-        log('player-recovery-abandoned', state.abandonedPendingDecision);
+        logAbandonedRecovery(state.abandonedPendingDecision);
       }
       await adoptAbortedRelay(engineState);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
@@ -5982,7 +5986,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       checkpoint=validateAbortingCheckpoint(root,engineState,state);
       if (!checkpoint) throw codedError('BAD_ABORT_CHECKPOINT','복구 종료 체크포인트를 검증할 수 없습니다.');
       preserveLoopState=false;
-      log('player-recovery-abandoned',state.abandonedPendingDecision);
+      logAbandonedRecovery(state.abandonedPendingDecision);
     } else {
       // Until the raw evidence is durably published, cleanup must not serialize it.
       preserveLoopState=true;
@@ -6006,7 +6010,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason:'BAD_PLAYER_RECOVERY'};
       state=writeLoopState({pendingDecision:undefined,aborting:checkpoint,abandonedPendingDecision:audit});
       preserveLoopState=false;
-      log('player-recovery-abandoned',audit);
+      logAbandonedRecovery(audit);
     }
     assertNotStopping();
     const unit=beginAtomicTransition();
