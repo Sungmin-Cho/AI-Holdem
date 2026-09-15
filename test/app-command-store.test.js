@@ -106,6 +106,11 @@ test('managed command journal retries the displayed LLM decision once and preser
     assert.equal(manager.snapshot().state,'paused');
   };
   await waitPaused();
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAvailable,true);
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAuthorized,false);
+  const originalRetry = manager.session.loop.retryDecision;
+  let forwarded;
+  manager.session.loop.retryDecision = async (id, options) => { forwarded=options; return originalRetry(id,options); };
   assert.equal(manager.snapshot().allowedCommands.includes('resume'),false);
   assert.deepEqual(manager.snapshot().pendingDecision.diagnostics,{detail:'no_json',corrections:1,lastRejection:{action:'unknown',amount:null,detail:'no_json'}});
   assert.equal(manager.snapshot().pendingDecision.retryWillCorrect,true);
@@ -114,6 +119,8 @@ test('managed command journal retries the displayed LLM decision once and preser
   manager.command(retry);
   manager.command(retry);
   assert.equal((await settle(manager,retry.requestId)).status,'succeeded');
+  assert.deepEqual(forwarded,{freshAuthorization:null});
+  assert.throws(()=>manager.command({...retry,freshSession:false}),{code:'REQUEST_ID_CONFLICT'});
   await waitPaused();
   assert.equal(calls.length,4);
   assert.equal(calls[0].timeoutMs,1000); assert.equal(calls[2].timeoutMs,1000);
@@ -144,6 +151,111 @@ test('managed command journal retries the displayed LLM decision once and preser
   manager.command(end);
   assert.equal((await settle(manager,end.requestId)).status,'succeeded');
   assert.equal(manager.snapshot().state,'ended');
+});
+
+test('fresh retry command forwards app authority and warms a new LLM seat session', { timeout: process.platform === 'win32' ? 300000 : 30000 }, async (t) => {
+  const root = createOwnedTempDir('lobby-fresh-llm-recovery');
+  let releaseWarmup;
+  let freshWarmup = false;
+  const warmupGate = new Promise((resolve) => { releaseWarmup = resolve; });
+  const calls = [];
+  const decisions = [];
+  const adapter = {
+    kind: 'fake',
+    async warmup({ playerId }) {
+      calls.push({ playerId });
+      if (calls.length === 2) {
+        freshWarmup = true;
+        await warmupGate;
+      }
+      return { sessionId: `fresh-session-${calls.length}`, raw: 'ready' };
+    },
+    async decide(input) { decisions.push(input); return { raw: 'invalid' }; },
+    async dispose() {},
+  };
+  let manager = createSessionManager({ storeDir: root,
+    resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const start = { ...payload(manager), setup: { aiCount: 1, opponentRuntime: 'llm', playerSoftMs: 1000, playerHardMs: 10000 } };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).status, 'succeeded');
+  const deadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
+  let submitted = false;
+  while (manager.snapshot().state !== 'paused' && Date.now() < deadline) {
+    if (!submitted) {
+      const lock = JSON.parse(fs.readFileSync(path.join(manager.current.sessionDir, 'lock.json')));
+      const snapshot = await (await fetch(`http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`)).json();
+      if (snapshot.view?.legal?.toAct === 'user') {
+        const response = await fetch(`http://127.0.0.1:${lock.port}/api/action?token=${lock.sessionToken}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ decisionId: snapshot.view.legal.decisionId, requestId: randomUUID(), action: 'fold' }),
+        });
+        assert.equal(response.ok, true);
+        submitted = true;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(manager.snapshot().state, 'paused');
+  const loopFilename=path.join(manager.current.sessionDir,'loop-state.json');
+  const parkedBytes=fs.readFileSync(loopFilename);
+  const parked=JSON.parse(parkedBytes);
+  fs.writeFileSync(loopFilename,JSON.stringify({...parked,pendingDecision:{...parked.pendingDecision,
+    status:'retry_authorized',freshAuthorization:{source:'app',requestId:'projection-only'}}}));
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAuthorized,true);
+  fs.writeFileSync(loopFilename,parkedBytes);
+  const setupFilename=path.join(manager.current.sessionDir,'.app-setup.json');
+  const setupBytes=fs.readFileSync(setupFilename);
+  fs.writeFileSync(setupFilename,JSON.stringify({...JSON.parse(setupBytes),opponentRuntime:'policy'}));
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAvailable,false);
+  fs.writeFileSync(setupFilename,setupBytes);
+  const originalRetry = manager.session.loop.retryDecision;
+  let forwarded;
+  manager.session.loop.retryDecision = async (decisionId, options) => {
+    forwarded = { decisionId, options };
+    return originalRetry(decisionId, options);
+  };
+  const retry = { ...payload(manager, 'retry-decision'), decisionId: manager.snapshot().pendingDecision.decisionId, freshSession: true };
+  manager.command(retry);
+  assert.equal(manager.command(retry).requestId, retry.requestId);
+  assert.equal((await settle(manager, retry.requestId)).status, 'succeeded');
+  assert.deepEqual(forwarded, { decisionId: retry.decisionId, options: { freshAuthorization: { source: 'app', requestId: retry.requestId } } });
+  const warmupDeadline = Date.now() + (process.platform === 'win32' ? 120000 : 10000);
+  while (!freshWarmup && Date.now() < warmupDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(freshWarmup, true);
+  assert.equal(calls.length, 2);
+  assert.throws(()=>manager.command({...payload(manager,'retry-decision'),decisionId:retry.decisionId,freshSession:true}),{code:'INVALID_TRANSITION'});
+  releaseWarmup();
+  while (manager.snapshot().state !== 'paused' && Date.now() < warmupDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(manager.snapshot().state, 'paused');
+  // A restored accepted retry cannot certify an authorization that never ran.
+  assert.deepEqual(decisions.map(({ message }) => Number(message.includes('[교정]'))), [0, 1, 0, 1]);
+  for (const freshSession of [false, true]) {
+    const abandoned = { ...payload(manager, 'retry-decision'),
+      decisionId: manager.snapshot().pendingDecision.decisionId, freshSession };
+    const beforeWarmups = calls.length;
+    const beforeDecisions = decisions.length;
+    await manager.close();
+    const engineFilename = path.join(manager.current.sessionDir, 'state.json');
+    const engineBefore = fs.readFileSync(engineFilename);
+    fs.writeFileSync(path.join(root, '.app', 'commands', `${abandoned.requestId}.json`),
+      JSON.stringify({ ...abandoned, payload: JSON.stringify(abandoned), status: 'accepted' }));
+    manager = createSessionManager({ storeDir: root,
+      resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
+    await manager.initialize();
+    assert.equal(manager.snapshot().state, 'paused');
+    assert.equal(manager.receipt(abandoned.requestId).status, 'failed');
+    assert.equal(manager.receipt(abandoned.requestId).error, 'RETRY_NOT_APPLIED');
+    assert.equal(calls.length, beforeWarmups);
+    assert.equal(decisions.length, beforeDecisions);
+    assert.deepEqual(fs.readFileSync(engineFilename), engineBefore);
+  }
+  const end = payload(manager, 'end');
+  manager.command(end);
+  assert.equal((await settle(manager, end.requestId)).status, 'succeeded');
 });
 
 test('managed favorable deal survives app restart and restart-game setup', {timeout:process.platform==='win32'?300000:30000}, async t=>{

@@ -57,6 +57,7 @@ function render() {
   const paused = s === "paused";
   $("table").inert = (!viewingRecord && s !== "playing") || Boolean(document.querySelector('dialog[open]'));
   $("status").textContent = labels[s] ?? s;
+  if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
   const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
   $("pause-message").textContent = recovery
@@ -71,10 +72,16 @@ function render() {
       $("pause-message").textContent += ` 직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회.`;
     }
     if (pending.retryWillCorrect) $("pause-message").textContent += ' 재시도하면 교정 안내를 함께 보냅니다.';
+    if (pending.freshSessionAvailable) $("pause-message").textContent += ' 같은 무효 회신이 반복되면 이 좌석의 새 세션으로 재시도할 수 있습니다.';
+    if (pending.freshSessionAuthorized) $("pause-message").textContent = '새 세션으로 재시도 중';
     if (pending.diagnosticsQuarantined) $("pause-message").textContent += ' (진단 기록이 손상되어 격리됨)';
   }
   $("retry-decision").hidden = !recovery;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
+  $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
+  $("retry-fresh-session").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
+  $("fresh-session-yes").disabled = busy || !snapshot.pendingDecision?.freshSessionAvailable;
+  if (!paused || !snapshot.pendingDecision?.freshSessionAvailable) $("fresh-session-dialog").close();
   $("resume").hidden = !!recovery;
   $("setup").hidden = !(selecting || s === "lobby");
   $("game").hidden =
@@ -144,6 +151,7 @@ async function refresh() {
   render();
 }
 const errorMessages = {
+  RETRY_NOT_APPLIED: '재시도 인가가 실행되기 전에 앱이 중단됐습니다. 필요하면 재시도를 다시 선택하세요.',
   INVALID_SETUP: "설정이 서로 맞지 않습니다. 인원, 스택, 핸드 수를 확인하세요.",
   TENDENCY_INSUFFICIENT:
     "내 성향 상대를 사용하려면 적격 기록 60핸드 이상이 필요합니다.",
@@ -171,7 +179,7 @@ const commands = createLobbyCommandClient({
   storage: sessionStorage,
   onPoll: refresh,
 });
-async function command(kind, setup) {
+async function command(kind, setup, extra = {}) {
   if (busy) return;
   viewingRecord = false;
   busy = true;
@@ -187,6 +195,7 @@ async function command(kind, setup) {
       kind,
       ...(kind === 'retry-decision' ? { decisionId: snapshot.pendingDecision?.decisionId } : {}),
       ...(setup ? { setup } : {}),
+      ...extra,
     };
     await commands.send(payload);
     selecting = false;
@@ -226,6 +235,12 @@ $("menu").onclick = () =>
     : command("pause");
 $("resume").onclick = () => command("resume");
 $("retry-decision").onclick = () => command('retry-decision');
+$("retry-fresh-session").onclick = () => $("fresh-session-dialog").showModal();
+$("fresh-session-no").onclick = () => $("fresh-session-dialog").close();
+$("fresh-session-yes").onclick = () => {
+  $("fresh-session-dialog").close();
+  if (snapshot.pendingDecision?.freshSessionAvailable) void command('retry-decision', undefined, {freshSession: true});
+};
 $("recover").onclick = () => command("resume");
 $("restart").onclick = () => confirm(() => command("restart"));
 $("end").onclick = () => confirm(() => command("end"));

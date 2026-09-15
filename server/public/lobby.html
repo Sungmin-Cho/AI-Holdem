@@ -150,9 +150,16 @@
       <p id="pause-message">일시정지 중입니다.</p>
       <button id="resume">계속하기</button
       ><button id="retry-decision" hidden>LLM 결정 재시도</button
+      ><button id="retry-fresh-session" hidden>새 세션으로 재시도</button
       ><button id="restart">같은 설정으로 새 게임</button
       ><button id="modes">모드 선택</button><button id="end">게임 종료</button
       ><button id="close-menu">메뉴 닫기 (일시정지 유지)</button>
+    </dialog>
+    <dialog id="fresh-session-dialog">
+      <h2>이 좌석의 세션을 새로 만들까요?</h2>
+      <p>좌석이 이번 게임에서 쌓은 대화 기억(페르소나가 기억하는 흐름)이 사라집니다. 페르소나 카드·칩·핸드 기록은 유지되며, 새 세션에는 교정 안내 없이 현재 결정을 처음부터 다시 묻습니다.</p>
+      <button id="fresh-session-yes">새 세션으로 재시도</button>
+      <button id="fresh-session-no">취소</button>
     </dialog>
     <dialog id="confirm-dialog">
       <h2>현재 게임을 종료할까요?</h2>
