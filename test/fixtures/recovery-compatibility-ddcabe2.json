@@ -1,0 +1,95 @@
+{
+  "baselineCommit": "ddcabe22f82b2fb5fc6d9a2d423b754f33b627ff",
+  "cases": [
+    {
+      "case": "snapshot-only",
+      "entrypoint": "legacy-loop-api",
+      "phase": "playing",
+      "actions": 0,
+      "freshAuthorizationRetained": false,
+      "abortingRetained": false
+    },
+    {
+      "case": "fresh-authorization",
+      "entrypoint": "legacy-loop-api",
+      "phase": "playing",
+      "actions": 0,
+      "freshAuthorizationRetained": true,
+      "abortingRetained": false
+    },
+    {
+      "case": "checkpoint-playing",
+      "entrypoint": "legacy-loop-api",
+      "phase": "playing",
+      "actions": 1,
+      "freshAuthorizationRetained": false,
+      "abortingRetained": true
+    },
+    {
+      "case": "checkpoint-playing",
+      "entrypoint": "managed-initialize",
+      "state": "paused",
+      "receiptStatus": "succeeded",
+      "newGame": false,
+      "currentEngineAborted": false,
+      "actions": 0
+    },
+    {
+      "case": "aborted-no-row",
+      "entrypoint": "managed-initialize",
+      "state": "ended",
+      "receiptStatus": null,
+      "newGame": false,
+      "currentEngineAborted": true,
+      "actions": 0
+    },
+    {
+      "case": "aborted-end",
+      "entrypoint": "managed-initialize",
+      "state": "ended",
+      "receiptStatus": "succeeded",
+      "newGame": false,
+      "currentEngineAborted": true,
+      "actions": 0
+    },
+    {
+      "case": "aborted-restart",
+      "entrypoint": "managed-initialize",
+      "state": "paused",
+      "receiptStatus": "succeeded",
+      "newGame": true,
+      "currentEngineAborted": false,
+      "actions": 0
+    },
+    {
+      "case": "restart-reservation",
+      "entrypoint": "managed-initialize",
+      "state": "paused",
+      "receiptStatus": "succeeded",
+      "newGame": true,
+      "currentEngineAborted": false,
+      "actions": 0
+    },
+    {
+      "case": "restart-staging",
+      "entrypoint": "managed-initialize",
+      "state": "paused",
+      "receiptStatus": "succeeded",
+      "newGame": true,
+      "currentEngineAborted": false,
+      "actions": 0
+    },
+    {
+      "case": "restart-committed",
+      "entrypoint": "managed-initialize",
+      "state": "paused",
+      "receiptStatus": "succeeded",
+      "newGame": true,
+      "currentEngineAborted": false,
+      "actions": 0
+    }
+  ],
+  "privateCaptureLogSha256": "56505b9925f9c425df6af966154ae981991120d476657fe616651e4653beec14",
+  "captureScriptSha256": "9a2dc1802a88b07eedf5f1e3ffe92e7cc04995fa871f2359346a53c4f662799a",
+  "captureMachineOutputSha256": "e94f82beb9249e8c4f10b730784fc7f275d8b31518cb3eebf7781cdfe24efae3"
+}

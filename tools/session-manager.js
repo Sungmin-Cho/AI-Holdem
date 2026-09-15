@@ -14,10 +14,12 @@ import {
 import { normalizeSetup, setupToArgs } from "../shared/game-setup.js";
 import {
   ALLOWED_COMMANDS,
+  ABORTABLE_ERROR_CODES,
   validateCommand,
   controlError,
 } from "../shared/session-control-contract.js";
 import { launchSession } from "./session-launcher.js";
+import { abortModeFor, validateAbortingCheckpoint } from './recovery-exit.js';
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -66,6 +68,22 @@ export function createSessionManager({
     revision++;
     onChange(snapshot());
   };
+  function abortTarget() {
+    if (state !== 'error' || session || startingLoop || !current) return null;
+    try {
+      const engine=read(path.join(current.sessionDir,'state.json'));
+      const loop=read(path.join(current.sessionDir,'loop-state.json'));
+      const epoch=createHash('sha256').update(engine.sessionToken).digest('hex');
+      if (loop.sessionToken!==engine.sessionToken || loop.gameEpoch!==epoch) return null;
+      if (loop.aborting) {
+        const checkpoint=validateAbortingCheckpoint(current.sessionDir,engine,loop);
+        return checkpoint ? {mode:checkpoint.mode} : null;
+      }
+      if (!ABORTABLE_ERROR_CODES.includes(error)) return null;
+      const mode=abortModeFor(engine,loop);
+      return mode ? {mode} : null;
+    } catch { return null; }
+  }
   function snapshot() {
     if (initialized && state === "external" && !pending) {
       const owner = readOwnedLock(root, "loop.lock.d");
@@ -100,6 +118,7 @@ export function createSessionManager({
           publicState = "finalizing";
       } catch {}
     }
+    const recoveryExit=abortTarget();
     return {
       instanceId,
       appRevision: revision,
@@ -123,9 +142,11 @@ export function createSessionManager({
       allowedCommands:
         closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []).filter((kind) =>
           kind === 'retry-decision' ? pendingDecision?.status === 'recovery_required' && pendingDecision.closeConfirmed === true
-            : kind === 'resume' && publicState === 'paused' ? !pendingDecision : true),
+            : kind === 'resume' && publicState === 'paused' ? !pendingDecision
+            : publicState === 'error' && ['end','restart'].includes(kind) ? !!recoveryExit && (kind!=='restart' || currentSetup()!==null) : true),
       pendingRequestId: pending?.requestId ?? null,
       error,
+      recoveryExit,
     };
   }
   const save = (row) =>
@@ -138,6 +159,19 @@ export function createSessionManager({
     )
       throw controlError("CURRENT_CHANGED");
   };
+  async function launchTracked(args, options) {
+    let launched;
+    try { launched=await launchSession(args,options); return launched; }
+    finally {
+      if (launched) startingLoop=null;
+      else {
+        try {
+          const lock=readOwnedLock(root,'loop.lock.d');
+          if (!lock || lock.status==='dead') startingLoop=null;
+        } catch { /* An unverified owner keeps the recovery gate closed. */ }
+      }
+    }
+  }
   function observeRun(launched) {
     session = launched;
     current = resolveCurrentSession(root);
@@ -170,7 +204,7 @@ export function createSessionManager({
   async function start(row, { recover = false } = {}) {
     const setup = row.setup;
     const args = { ...setupToArgs(setup, root), port: 0, playerRuntime };
-    const launched = await launchSession(args, {
+    const launched = await launchTracked(args, {
       resolver,
       onLoop: async (loop) => {
         startingLoop = loop;
@@ -206,8 +240,18 @@ export function createSessionManager({
       emit(paused.state);
     } else emit("playing");
   }
+  function consumeEndedLaunch(launched) {
+    if (launched.resumed?.code!=='GAME_ENDED') return false;
+    // A terminal launch has released its lock. Never relabel a newly selected
+    // game with this launch's outcome; publication remains bound to its target.
+    sameCurrent({expectedGameId:launched.gameId,expectedSelectionVersion:launched.selectionVersion});
+    current={gameId:launched.gameId,selectionVersion:launched.selectionVersion,sessionDir:launched.sessionDir};
+    session=null;
+    emit('ended');
+    return true;
+  }
   async function recoverPaused() {
-    const launched = await launchSession(
+    const launched = await launchTracked(
       { storeDir: root, resume: true, port: 0, playerRuntime },
       {
         resolver,
@@ -222,6 +266,7 @@ export function createSessionManager({
       },
     );
     startingLoop = null;
+    if (consumeEndedLaunch(launched)) return false;
     current = resolveCurrentSession(root);
     const phase = read(path.join(current.sessionDir, "loop-state.json")).phase;
     if (["aborted", "done"].includes(phase)) {
@@ -244,6 +289,21 @@ export function createSessionManager({
     emit(paused.state);
     return paused.state === "paused";
   }
+  async function abortUnrecoverable(row) {
+    const recovery=row.recovery;
+    if (session || startingLoop || recovery?.kind!=='abort-unrecoverable'
+      || !['abort','finalize'].includes(recovery.mode)) throw controlError('INVALID_TRANSITION');
+    const launched=await launchTracked({storeDir:root,resume:true,port:0,playerRuntime,
+      expectedCurrent:{gameId:recovery.gameId,selectionVersion:recovery.selectionVersion,gameEpoch:recovery.gameEpoch}}, {
+      resolver,
+      onLoop:async loop=>{startingLoop=loop;if(closed){await loop.requestStop();throw controlError('APP_STOPPING');}},
+      loopOptions:{controlProtocolVersion:1,abortUnrecoverable:{operationId:row.requestId}},
+    });
+    if (consumeEndedLaunch(launched)) return;
+    observeRun(launched);
+    emit('finalizing');
+    await runPromise;
+  }
   function reconcileFailure(code) {
     try {
       current = resolveCurrentSession(root);
@@ -265,11 +325,16 @@ export function createSessionManager({
       }
       const engine = read(path.join(current.sessionDir, "state.json"));
       const loopFile = path.join(current.sessionDir, "loop-state.json");
+      const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
+      if (engine.result === "abort" && loop?.aborting) {
+        emit("error", code);
+        return;
+      }
       if (engine.result === "abort") {
         emit("ended", code);
         return;
       }
-      if (fs.existsSync(loopFile) && read(loopFile).phase === "done") {
+      if (loop?.phase === "done") {
         emit("completed", code);
         return;
       }
@@ -281,7 +346,10 @@ export function createSessionManager({
   async function execute(row) {
     try {
       sameCurrent(row);
-      if (row.kind === "start") {
+      if (row.recovery?.kind==='abort-unrecoverable') {
+        await abortUnrecoverable(row);
+        if (row.kind==='restart') {emit('starting');await start(row);}
+      } else if (row.kind === "start") {
         emit("starting");
         await start(row);
       } else if (row.kind === "pause") {
@@ -367,6 +435,12 @@ export function createSessionManager({
       status: "accepted",
       acceptedAt: new Date().toISOString(),
     };
+    if (state==='error' && ['end','restart'].includes(body.kind)) {
+      const recoveryExit=abortTarget();
+      if (!recoveryExit) throw controlError('INVALID_TRANSITION');
+      row.recovery={kind:'abort-unrecoverable',mode:recoveryExit.mode,gameId:current.gameId,
+        selectionVersion:current.selectionVersion,gameEpoch:snapshot().gameEpoch};
+    }
     save(row);
     pending = row;
     revision++;
@@ -411,22 +485,12 @@ export function createSessionManager({
           if (reservedCurrent) {
             if (!currentSetup()) writeJsonAtomic(setupFile(), row.setup);
             await recoverPaused();
+          } else if (row.recovery?.kind==='abort-unrecoverable') {
+            await abortUnrecoverable(row);
+            if (row.kind==='restart') await start(row,{recover:true});
           } else if (row.kind === "start") await start(row, { recover: true });
           else {
-            const engine = current
-              ? read(path.join(current.sessionDir, "state.json"))
-              : null;
-            if (engine?.result !== "abort") await recoverPaused();
-            else {
-              await launchSession(
-                { storeDir: root, resume: true, port: 0, playerRuntime },
-                {
-                  resolver,
-                  loopOptions: { controlProtocolVersion: 1, startPaused: true },
-                },
-              );
-              emit("ended");
-            }
+            await recoverPaused();
             if (["end", "restart", "replace-current"].includes(row.kind)) {
               if (session) {
                 emit("stopping");
@@ -463,15 +527,19 @@ export function createSessionManager({
         return snapshot();
       }
       const engine = read(path.join(current.sessionDir, "state.json"));
-      if (engine.result === "abort") {
-        emit("ended");
-        return snapshot();
-      }
       const loopState = fs.existsSync(
         path.join(current.sessionDir, "loop-state.json"),
       )
         ? read(path.join(current.sessionDir, "loop-state.json"))
         : null;
+      if (engine.result === "abort" && loopState?.aborting) {
+        emit("error", "SESSION_RECOVERABLE");
+        return snapshot();
+      }
+      if (engine.result === "abort") {
+        emit("ended");
+        return snapshot();
+      }
       if (loopState?.phase === "done") {
         emit("completed");
         return snapshot();

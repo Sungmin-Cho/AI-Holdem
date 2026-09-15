@@ -41,6 +41,8 @@ jobs:
         run: npm run test:ui:browser -- --ci
       - name: Fresh-session recovery browser journey
         run: node test/browser/fresh-session-journey.mjs --out-dir output/playwright/ui-journey/fresh-session
+      - name: Unverifiable recovery exit browser journey
+        run: node test/browser/recovery-exit-journey.mjs --out-dir output/playwright/ui-journey/recovery-exit
       - name: Preserve UI check results and screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

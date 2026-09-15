@@ -1,3 +1,4 @@
+export const ABORTABLE_ERROR_CODES = Object.freeze(['BAD_PLAYER_RECOVERY']);
 export const COMMANDS = Object.freeze([
   "start",
   "pause",
@@ -17,7 +18,7 @@ export const ALLOWED_COMMANDS = Object.freeze({
   finalizing: [],
   completed: ["start", "restart"],
   ended: ["start", "restart"],
-  error: ["resume"],
+  error: ["resume", "end", "restart"],
   external: [],
 });
 export function controlError(code) {
