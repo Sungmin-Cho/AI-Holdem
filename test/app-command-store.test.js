@@ -106,6 +106,11 @@ test('managed command journal retries the displayed LLM decision once and preser
     assert.equal(manager.snapshot().state,'paused');
   };
   await waitPaused();
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAvailable,true);
+  assert.equal(manager.snapshot().pendingDecision.freshSessionAuthorized,false);
+  const originalRetry = manager.session.loop.retryDecision;
+  let forwarded;
+  manager.session.loop.retryDecision = async (id, options) => { forwarded=options; return originalRetry(id,options); };
   assert.equal(manager.snapshot().allowedCommands.includes('resume'),false);
   assert.deepEqual(manager.snapshot().pendingDecision.diagnostics,{detail:'no_json',corrections:1,lastRejection:{action:'unknown',amount:null,detail:'no_json'}});
   assert.equal(manager.snapshot().pendingDecision.retryWillCorrect,true);
@@ -114,6 +119,8 @@ test('managed command journal retries the displayed LLM decision once and preser
   manager.command(retry);
   manager.command(retry);
   assert.equal((await settle(manager,retry.requestId)).status,'succeeded');
+  assert.deepEqual(forwarded,{freshAuthorization:null});
+  assert.throws(()=>manager.command({...retry,freshSession:false}),{code:'REQUEST_ID_CONFLICT'});
   await waitPaused();
   assert.equal(calls.length,4);
   assert.equal(calls[0].timeoutMs,1000); assert.equal(calls[2].timeoutMs,1000);
