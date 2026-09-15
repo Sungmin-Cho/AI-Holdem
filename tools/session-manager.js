@@ -1,3 +1,4 @@
+import { validateDiagnostics, projectRejectionForSink, retryWillCorrect } from './player-decision.js';
 import fs from "node:fs";
 import {
   readPrivateJson,
@@ -84,6 +85,9 @@ export function createSessionManager({
     }
     let publicState = state;
     const pendingDecision = session?.loop.pendingDecision ?? null;
+    const diagnosticCheck = pendingDecision ? validateDiagnostics(pendingDecision.diagnostics, pendingDecision) : null;
+    const diagnostics = diagnosticCheck?.ok && !pendingDecision.diagnosticsQuarantined ? pendingDecision.diagnostics : null;
+    const rejection = diagnostics?.lastRejection ? projectRejectionForSink(diagnostics.lastRejection, pendingDecision) : null;
     if (session && state === 'playing' && session.loop.playState === 'paused') publicState = 'paused';
     if (session && state === "playing") {
       try {
@@ -109,6 +113,10 @@ export function createSessionManager({
         decisionId: pendingDecision.decisionId, status: pendingDecision.status,
         code: pendingDecision.code ?? null, softWait: pendingDecision.softWait === true,
         closeConfirmed: pendingDecision.closeConfirmed === true,
+        diagnostics: diagnostics ? {detail:diagnostics.detail ?? null, corrections:diagnostics.corrections,
+          lastRejection:rejection ? {action:rejection.projection.action, amount:rejection.projection.amount ?? null, detail:rejection.detail} : null} : null,
+        diagnosticsQuarantined: pendingDecision.diagnosticsQuarantined === true || !diagnosticCheck.ok,
+        retryWillCorrect: retryWillCorrect(pendingDecision),
       } : null,
       allowedCommands:
         closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []).filter((kind) =>

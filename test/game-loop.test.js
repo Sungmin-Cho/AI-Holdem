@@ -2788,9 +2788,11 @@ test('malformed and stale responses preserve engine action history', { timeout: 
       const adapter = makeAdapter({ onDecide: async () => ({ raw }) });
       const { gameDir, loop } = await setupAiFirst(st, { adapter });
       await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
-      assert.equal(adapter.decideCalls.length, 1);
+      assert.equal(adapter.decideCalls.length, 2);
       assert.deepEqual(readJson(path.join(gameDir, 'state.json')).hand.actions, []);
       assert.equal(loop.pendingDecision.status, 'recovery_required');
+      assert.ok(adapter.decideCalls[1].message.startsWith(adapter.decideCalls[0].message+'\n\n[교정]'));
+      assert.equal(loop.pendingDecision.diagnostics.detail,raw==='not-json'?'no_json':'decision_id_mismatch');
     });
   }
 });
@@ -2799,12 +2801,13 @@ test('configured budget survives restart before the first player decision', {tim
   const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter(),loopOpts:{playerBudget:{softMs:5000,hardMs:60000}}});
   assert.deepEqual(readJson(path.join(gameDir,'loop-state.json')).playerBudget,{softMs:5000,hardMs:60000});
   await loop.requestStop();
-  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
-  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0}});
+  let clock=0;
+  const adapter=makeAdapter({onDecide:async()=>{clock+=15;return {raw:'invalid'};}});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,monotonicNow:()=>clock}});
   t.after(()=>restored.requestStop());
   await restored.resume();
   await assert.rejects(restored.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
-  assert.deepEqual(adapter.decideCalls.map(call=>call.timeoutMs),[60000]);
+  assert.deepEqual(adapter.decideCalls.map(call=>call.timeoutMs),[60000,59985]);
 });
 
 test('retry CLI validates partial persisted budget only after merging', () => {
@@ -2839,7 +2842,7 @@ test('stop during real in-flight child preserves closed recovery and no engine a
 
 test('explicit retry after invalid response applies exactly one decision', { timeout: 10000 }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({message}, attempt) => ({
-    raw: attempt === 1 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
+    raw: attempt <= 2 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
   }) });
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
   await assert.rejects(loop.run(), {code:'PLAYER_RECOVERY_REQUIRED'});
@@ -2847,7 +2850,8 @@ test('explicit retry after invalid response applies exactly one decision', { tim
   await loop.retryDecision(pending.decisionId);
   await assert.rejects(loop.retryDecision(pending.decisionId), {code:'PLAYER_RECOVERY_REQUIRED'});
   await runUntilUserBoundary(loop, gameDir);
-  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls.length, 3);
+  assert.match(adapter.decideCalls[2].message,/\[교정\]/);
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
@@ -2868,6 +2872,7 @@ test('legacy restart retains unresolved decision until explicit retry', { timeou
   await restored.retryDecision(pending.decisionId);
   await runUntilUserBoundary(restored, gameDir);
   assert.equal(repaired.decideCalls.length, 1);
+  assert.match(repaired.decideCalls[0].message,/\[교정\]/);
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
@@ -2913,12 +2918,12 @@ test('failed resume cleanup cannot certify a foreign pending attempt', {timeout:
 
 test('managed recovery parks without action, rejects ordinary resume and duplicate retry, then ends', { timeout: 20000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({message}, attempt) => ({
-    raw: attempt === 1 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
+    raw: attempt <= 2 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
   }) });
   const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: {controlProtocolVersion: 1} });
   const running = startRun(loop);
   await waitFor(() => loop.playState === 'paused', 'recovery did not park', 10000 * WIN32_SCALE);
-  assert.equal(adapter.decideCalls.length, 1);
+  assert.equal(adapter.decideCalls.length, 2);
   assert.deepEqual(readJson(path.join(gameDir, 'state.json')).hand.actions, []);
   await assert.rejects(loop.resumePlay(), {code:'PLAYER_RECOVERY_REQUIRED'});
   const decisionId = loop.pendingDecision.decisionId;
@@ -2926,7 +2931,7 @@ test('managed recovery parks without action, rejects ordinary resume and duplica
   assert.equal(retries.filter(row => row.status === 'fulfilled').length, 1);
   await waitForUserSnapshot(gameDir);
   await loop.pause();
-  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(adapter.decideCalls.length, 3);
   await loop.endGame('recovery-end');
   await running;
   assert.equal(readJson(path.join(gameDir, 'state.json')).result, 'abort');
@@ -2955,11 +2960,13 @@ test('real 26-second CLI response survives soft wait and applies exactly once', 
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions.length, 1);
 });
 
-test('new default LLM hard budget reaches the runtime once', { timeout: 10000 }, async (t) => {
+test('new default LLM hard budget reaches the runtime first', { timeout: 10000 }, async (t) => {
   const adapter = makeAdapter({kind:'codex', onDecide: async () => ({raw:'invalid'})});
   const {loop} = await setupAiFirst(t, {adapter});
   await assert.rejects(loop.run(), {code:'PLAYER_RECOVERY_REQUIRED'});
-  assert.deepEqual(adapter.decideCalls.map(call => call.timeoutMs), [300000]);
+  assert.equal(adapter.decideCalls.length,2);
+  assert.equal(adapter.decideCalls[0].timeoutMs,300000);
+  assert.ok(adapter.decideCalls[1].timeoutMs<=300000);
 });
 
 test('zero-delay AI metrics include every timing field and keep non-model overhead under one second', { timeout: 10_000 }, async (t) => {
@@ -13506,4 +13513,316 @@ test('#192 oK1: readSidecarFileWithoutNoFollow는 lstat와 fstat의 inode가 같
   assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ nlink: 2n }) })), { status: 'invalid' }, '하드링크 sidecar를 읽었다');
   assert.deepEqual(read(fakeFs({ lstat: stat(), fstat: stat({ size: 65n }) })), { status: 'invalid' });
   assert.deepEqual(read(fakeFs({ lstat: stat(), openError: enoent })), { status: 'invalid' }, 'lstat 뒤 사라진 파일을 absent로 판정했다');
+});
+
+test('#194 unopened flop bet applies once without correction', {timeout:20000 * WIN32_SCALE}, async t => {
+  const adapter=makeAdapter({onDecide:async ({message})=>({raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'bet',amount:Number(/minRaiseTo=(\d+)/.exec(message)[1])})})});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,stack:5000});
+  await cliJson(gameDir,['step','--new-hand']);
+  await cliJson(gameDir,['apply','p1','call']); await cliJson(gameDir,['apply','user','check']);
+  if ((await cliJson(gameDir,['step'])).next.toAct==='user') await cliJson(gameDir,['apply','user','check']);
+  assert.equal(readJson(path.join(gameDir,'state.json')).hand.currentBet,0);
+  await runUntilUserBoundary(loop,gameDir);
+  const actions=readJson(path.join(gameDir,'state.json')).hand.actions.filter(x=>x.street==='flop'&&x.playerId==='p1');
+  assert.equal(actions.length,1); assert.equal(actions[0].action,'raise');
+  assert.equal(adapter.decideCalls.length,1);
+  assert.equal(readLoopLog(gameDir).filter(x=>x.event==='player-decision-normalized').length,1);
+  assert.equal(loop.pendingDecision,null);
+});
+
+test('#194 rejection diagnostics never persist raw reply or damaged call number', {timeout:20000 * WIN32_SCALE}, async t => {
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async()=>{
+    const p=path.join(gameDir,'loop-state.json'); const s=readJson(p);
+    if(s.pendingDecision.diagnostics) s.pendingDecision.diagnostics.callNo='PRIVATE_SENTINEL';
+    writeJsonAtomic(p,s); return {raw:'As Ad PRIVATE_SENTINEL'};
+  }});
+  const setup=await setupAiFirst(t,{adapter}); gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(setup.loop.pendingDecision.diagnostics.detail,'no_json');
+  for(const filename of ['loop.log','loop-state.json']) assert.doesNotMatch(fs.readFileSync(path.join(gameDir,filename),'utf8'),/As Ad|PRIVATE_SENTINEL/);
+  assert.ok(readLoopLog(gameDir).filter(x=>x.event==='player-call').every(x=>Number.isInteger(x.callNo)));
+});
+
+test('#194 quarantined bundles stay removed across resume and retry authorization', {timeout:60000 * WIN32_SCALE}, async t => {
+  for (const status of ['running','retry_authorized','recovery_required','unsafe']) await t.test(status,async st=>{
+    const {gameDir,loop}=await setupAiFirst(st,{adapter:makeAdapter({onDecide:async()=>({raw:'invalid'})})});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    const p=loop.pendingDecision;
+    await loop.requestStop();
+    const filename=path.join(gameDir,'loop-state.json');
+    writeJsonAtomic(filename,{...readJson(filename),pendingDecision:{...p,status,closeConfirmed:true,diagnostics:{...p.diagnostics,extra:'PRIVATE_SENTINEL'}}});
+    const before=readJson(path.join(gameDir,'state.json'));
+    const restored=createGameLoop({gameDir,resolver:resolverFor(makeAdapter()),opts:{port:0,waitMs:0}});
+    st.after(()=>restored.requestStop()); await restored.resume();
+    assert.equal(restored.pendingDecision.diagnosticsQuarantined,true);
+    assert.equal(Object.hasOwn(restored.pendingDecision,'diagnostics'),false);
+    assert.deepEqual(readJson(path.join(gameDir,'state.json')),before);
+    if(status!=='unsafe') {
+      await restored.retryDecision(p.decisionId);
+      assert.equal(Object.hasOwn(restored.pendingDecision,'diagnostics'),false);
+      await runUntilUserBoundary(restored,gameDir);
+      assert.equal(restored.pendingDecision,null);
+    }
+  });
+});
+
+test('#194 pending apply boundary preserves diagnostics and crash reconciliation', {timeout:30000 * WIN32_SCALE}, async t => {
+  let gameDir,captured;
+  const setup=await setupAiFirst(t,{adapter:makeAdapter(),ai:2,loopOpts:{onEngineInvoke:args=>{
+    if(args[0]==='step'&&args.includes('--expect-version')&&args[1]==='p1') captured=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  }}}); gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.ok(captured); assert.equal(captured.schemaVersion,2);
+  assert.equal(captured.diagnostics.callNo,1); assert.equal(captured.closeConfirmed,true);
+  assert.deepEqual(captured.proposedAction,{action:'fold'});
+  await setup.loop.requestStop();
+  const filename=path.join(gameDir,'loop-state.json');
+  writeJsonAtomic(filename,{...readJson(filename),pendingDecision:captured});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(makeAdapter()),opts:{port:0,waitMs:0}});
+  t.after(()=>restored.requestStop()); await restored.resume();
+  assert.equal(restored.pendingDecision,null);
+  assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-reconciled'));
+});
+
+test('#194 correction consumes one remaining-budget call and preserves soft wait', {timeout:20000 * WIN32_SCALE}, async t=>{
+  let clock=0,gameDir,inFlight=0,maxInFlight=0;
+  const adapter=makeAdapter({onDecide:async({message},attempt)=>{
+    maxInFlight=Math.max(maxInFlight,++inFlight);
+    try {
+      if(attempt===1) {await new Promise(r=>setTimeout(r,25)); clock+=15; return {raw:'invalid'};}
+      const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+      assert.equal(p.diagnostics.callNo,2); assert.equal(p.diagnostics.corrections,1); assert.equal(p.softWait,true);
+      assert.equal(Object.hasOwn(p,'closeConfirmed'),false); assert.equal(Object.hasOwn(p,'proposedAction'),false);
+      return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+    } finally {inFlight--;}
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},monotonicNow:()=>clock,minRepairFloorMs:100}}); gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.deepEqual(adapter.decideCalls.map(x=>x.timeoutMs),[40,25]);
+  assert.ok(adapter.decideCalls[1].message.startsWith(adapter.decideCalls[0].message+'\n\n[교정]'));
+  assert.equal(maxInFlight,1);
+  const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0]; assert.equal(metric.corrected,true); assert.equal(metric.outcome,'retried_accepted');
+});
+
+test('#194 correction budget admission rolls counters back after logging', {timeout:30000 * WIN32_SCALE}, async t=>{
+  for(const afterCommit of [false,true]) await t.test(String(afterCommit),async st=>{
+    let clock=0;
+    const adapter=makeAdapter({onDecide:async()=>{clock+=afterCommit?30:38;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},monotonicNow:()=>clock,minRepairFloorMs:100,log:r=>{if(r.event==='player-correction') clock+=8;}}});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    assert.equal(adapter.decideCalls.length,1); assert.equal(loop.pendingDecision.diagnostics.callNo,1); assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(afterCommit?'budget_after_commit':'budget')));
+  });
+});
+
+test('#194 repeated invalid responses inherit exactly one correction block in a new generation', {timeout:15000 * WIN32_SCALE},async t=>{
+  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0}});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(adapter.decideCalls.length,2);
+  const p=loop.pendingDecision; assert.equal(p.diagnostics.lastRejection.callNo,2);
+  await loop.retryDecision(p.decisionId); await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(loop.pendingDecision.generation,p.generation+1);
+  assert.equal(adapter.decideCalls.length,4);
+  assert.deepEqual(adapter.decideCalls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,1,1]);
+  assert.deepEqual(readLoopLog(gameDir).filter(x=>x.event==='player-call').map(x=>x.callNo),[1,2,1,2]);
+});
+
+test('#194 engine rejection corrects once and drops the rejected proposed action', {timeout:20000 * WIN32_SCALE},async t=>{
+  let armed=false,gameDir,plainSteps=0;
+  const adapter=makeAdapter({onDecide:async({message},attempt)=>{
+    if(attempt===1) armed=true;
+    else { const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision; assert.equal(p.diagnostics.lastRejection.detail,'engine_rejected'); assert.equal(p.proposedAction,undefined); assert.equal(p.closeConfirmed,undefined); }
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0,onEngineInvoke:args=>{
+    if(args[0]==='step'&&!args.includes('--expect-version')) plainSteps++;
+    if(armed&&args[0]==='step'&&args[1]==='p1'&&args.includes('--expect-version')) {armed=false;throw Object.assign(new Error('ILLEGAL_ACTION'),{code:'ILLEGAL_ACTION'});}
+  }}});gameDir=setup.gameDir;
+  await runUntilUserBoundary(setup.loop,gameDir);
+  assert.ok(plainSteps>0); assert.equal(adapter.decideCalls.length,2);
+  assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
+});
+
+test('#194 pause and stop during a rejected call prevent automatic correction', {timeout:30000 * WIN32_SCALE},async t=>{
+  for(const stop of [false,true]) await t.test(stop?'stop':'pause',async st=>{
+    let release,entered=false;
+    const gate=new Promise(r=>{release=r;});
+    const adapter=makeAdapter({onDecide:async()=>{entered=true;await gate;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{controlProtocolVersion:1,playerBudget:{softMs:500,hardMs:5000}}});
+    const running=startRun(loop); await waitFor(()=>entered,'no decision',5000*WIN32_SCALE);
+    const request=stop?loop.requestStop():loop.pause(); release(); await request;
+    assert.equal(adapter.decideCalls.length,1);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(stop?'stop':'pause')));
+    assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    if(stop) await running;
+    else {await loop.endGame('correction-pause-end'); await running;}
+  });
+});
+
+test('#194 correction timeout retains context across restart and restored-session repair', {timeout:30000 * WIN32_SCALE},async t=>{
+  const adapter=makeAdapter({onDecide:async(_,n)=>{if(n===1)return {raw:'invalid'};throw Object.assign(new Error('TIMEOUT'),{code:'TIMEOUT'});}});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:500,hardMs:5000}}});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(loop.pendingDecision.code,'TIMEOUT'); assert.equal(loop.pendingDecision.diagnostics.lastRejection.detail,'no_json');
+  const id=loop.pendingDecision.decisionId; await loop.requestStop();
+  const repaired=makeAdapter({onDecide:async({message},n)=>{
+    assert.match(message,/\[교정\]/);
+    if(n===1) throw Object.assign(new Error('SESSION_EXPIRED'),{code:'SESSION_EXPIRED'});
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(repaired),opts:{port:0,waitMs:0}});
+  t.after(()=>restored.requestStop()); await restored.resume(); await restored.retryDecision(id); await runUntilUserBoundary(restored,gameDir);
+  assert.equal(repaired.decideCalls.length,2);
+  const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0]; assert.equal(metric.corrected,true); assert.equal(metric.sessionRepaired,true);
+});
+
+test('#194 generation changed during correction cannot apply a stale reply', {timeout:15000 * WIN32_SCALE},async t=>{
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async({message},n)=>{
+    if(n===1) return {raw:'invalid'};
+    const filename=path.join(gameDir,'loop-state.json'),state=readJson(filename); state.pendingDecision.generation++; writeJsonAtomic(filename,state);
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0}});gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
+});
+
+test('#194 BB option bet needs correction while legacy unopened bet retries without it', {timeout:30000 * WIN32_SCALE},async t=>{
+  for(const legacy of [false,true]) await t.test(legacy?'legacy':'BB option',async st=>{
+    const onDecide=async({message},n)=>({raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:n===1?'bet':'raise',amount:Number(/minRaiseTo=(\d+)/.exec(message)[1])})});
+    let adapter=makeAdapter({onDecide});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,stack:5000,loopOpts:{monotonicNow:()=>0}});
+    let activeLoop=loop;
+    if(!legacy) putUserOnTheButton(gameDir);
+    await cliJson(gameDir,['step','--new-hand']);
+    if(legacy) {await cliJson(gameDir,['apply','p1','call']);await cliJson(gameDir,['apply','user','check']);
+      if((await cliJson(gameDir,['step'])).next.toAct==='user') await cliJson(gameDir,['apply','user','check']);}
+    else await cliJson(gameDir,['apply','user','call']);
+    const next=(await cliJson(gameDir,['step'])).next;
+    assert.equal(next.toAct,'p1');
+    if(legacy) {
+      const filename=path.join(gameDir,'loop-state.json'),state=readJson(filename);
+      const version=(await cliJson(gameDir,['step'])).stateVersion;
+      writeJsonAtomic(filename,{...state,pendingDecision:{schemaVersion:1,gameEpoch:state.gameEpoch,decisionId:next.decisionId,stateVersion:version,playerId:'p1',generation:1,status:'recovery_required',closeConfirmed:true,code:'INVALID_DECISION'}});
+      await loop.requestStop();
+      adapter=makeAdapter({onDecide});
+      activeLoop=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0}});
+      st.after(()=>activeLoop.requestStop());
+      await activeLoop.resume();
+      assert.equal(activeLoop.pendingDecision.schemaVersion,1);
+      assert.equal(activeLoop.pendingDecision.diagnosticsQuarantined,undefined);
+      await activeLoop.retryDecision(next.decisionId);
+    }
+    await runUntilUserBoundary(activeLoop,gameDir);
+    const metric=readJson(path.join(gameDir,'loop-state.json')).metrics[0];
+    assert.equal(adapter.decideCalls.length,legacy?1:2);
+    assert.equal(metric.outcome,'retried_accepted'); assert.equal(metric.corrected,legacy?undefined:true);
+    if(!legacy) assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-decision-rejected'&&x.detail==='bet_ambiguous'));
+  });
+});
+
+test('#194 repair bookkeeping cannot dispatch after the shared deadline', {timeout:20000 * WIN32_SCALE},async t=>{
+  const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter(),loopOpts:{playerBudget:{softMs:10,hardMs:40}}});
+  await loop.requestStop();
+  let clock=0,armed=false;
+  const adapter=makeAdapter({onWarmup:()=>{armed=true;clock=15;},onDecide:async(_,n)=>{
+    if(n===1) throw Object.assign(new Error('SESSION_EXPIRED'),{code:'SESSION_EXPIRED'});
+    return {raw:'invalid'};
+  }});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,monotonicNow:()=>{
+    if(armed&&readJson(path.join(gameDir,'loop-state.json')).pendingDecision?.diagnostics?.callNo===2) clock=40;
+    return clock;
+  }}});
+  t.after(()=>restored.requestStop());await restored.resume();
+  await assert.rejects(restored.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(adapter.decideCalls.length,1);
+  assert.equal(restored.pendingDecision.diagnostics.callNo,1);
+  assert.equal(restored.pendingDecision.code,'TIMEOUT');
+});
+
+test('#194 correction first admission rechecks budget after candidate selection', {timeout:15000 * WIN32_SCALE},async t=>{
+  let rejected=false,checks=0,skipChecks=0;
+  const adapter=makeAdapter({onDecide:async()=>({raw:'invalid'})});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},minRepairFloorMs:100,
+    log:r=>{if(r.event==='player-decision-rejected') rejected=true;if(r.event==='player-correction-skipped') skipChecks=checks;},
+    monotonicNow:()=>rejected?(++checks===1?30:40):0}});
+  await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.equal(skipChecks,3,'candidate check, repeat admission, then skipped-event timestamp');
+  assert.equal(adapter.decideCalls.length,1); assert.equal(loop.pendingDecision.diagnostics.callNo,1);
+  assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-correction'),false);
+  assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason==='budget'));
+});
+
+test('#194 restored repair then correction makes at most three serial decisions', {timeout:20000 * WIN32_SCALE},async t=>{
+  for(const accepts of [true,false]) await t.test(String(accepts),async st=>{
+  const {gameDir,loop}=await setupAiFirst(st,{adapter:makeAdapter(),loopOpts:{playerBudget:{softMs:10,hardMs:100}}});await loop.requestStop();
+  let clock=0;
+  const adapter=makeAdapter({onDecide:async({message},n)=>{
+    clock+=10;
+    if(n===1) throw Object.assign(new Error('SESSION_EXPIRED'),{code:'SESSION_EXPIRED'});
+    if(n===2||!accepts) return {raw:'invalid'};
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,monotonicNow:()=>clock}});
+  st.after(()=>restored.requestStop());await restored.resume();
+  if(accepts) await runUntilUserBoundary(restored,gameDir);
+  else await assert.rejects(restored.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.deepEqual(adapter.decideCalls.map(x=>x.timeoutMs),[100,90,80]);
+  assert.deepEqual(readLoopLog(gameDir).filter(x=>x.event==='player-call'&&x.purpose==='decision').map(x=>x.callNo),[1,2,3]);
+  assert.equal(adapter.calls.length,1);
+  if(accepts) assert.equal(readJson(path.join(gameDir,'loop-state.json')).metrics[0].corrected,true);
+  else {
+    const {validateDiagnostics,retryWillCorrect}=await import('../tools/player-decision.js');
+    assert.equal(restored.pendingDecision.diagnostics.callNo,3);
+    assert.equal(restored.pendingDecision.diagnostics.lastRejection.callNo,3);
+    assert.equal(validateDiagnostics(restored.pendingDecision.diagnostics,restored.pendingDecision).ok,true);
+    assert.equal(retryWillCorrect(restored.pendingDecision),true);
+  }
+  });
+});
+
+test('#194 crash during correction remains unsafe with its diagnostic bundle', {timeout:20000 * WIN32_SCALE},async t=>{
+  let gameDir,captured;
+  const adapter=makeAdapter({onDecide:async(_,n)=>{
+    if(n===2) captured=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+    return {raw:'invalid'};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{monotonicNow:()=>0}});gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});await setup.loop.requestStop();
+  assert.equal(captured.diagnostics.callNo,2);assert.equal(captured.closeConfirmed,undefined);
+  const filename=path.join(gameDir,'loop-state.json');writeJsonAtomic(filename,{...readJson(filename),pendingDecision:captured});
+  const restored=createGameLoop({gameDir,resolver:resolverFor(makeAdapter()),opts:{port:0,waitMs:0}});
+  t.after(()=>restored.requestStop());await restored.resume();
+  assert.equal(restored.pendingDecision.status,'unsafe');assert.equal(restored.pendingDecision.diagnostics.callNo,2);
+  await assert.rejects(restored.retryDecision(captured.decisionId),{code:'PLAYER_RECOVERY_REQUIRED'});
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
+});
+
+test('#194 zero floor never permits a nonpositive correction timeout', {timeout:20000 * WIN32_SCALE},async t=>{
+  for(const atCommit of [false,true]) await t.test(String(atCommit),async st=>{
+    let clock=0;
+    const adapter=makeAdapter({onDecide:async()=>{clock=atCommit?30:40;return {raw:'invalid'};}});
+    const {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:40},minRepairFloorMs:0,monotonicNow:()=>clock,
+      log:r=>{if(r.event==='player-correction') clock=40;}}});
+    await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+    assert.equal(adapter.decideCalls.length,1);assert.equal(loop.pendingDecision.diagnostics.callNo,1);
+    assert.equal(loop.pendingDecision.diagnostics.corrections,0);
+    assert.ok(readLoopLog(gameDir).some(x=>x.event==='player-correction-skipped'&&x.reason===(atCommit?'budget_after_commit':'budget')));
+  });
+});
+
+test('#194 stale identity at soft deadline does not escape the async decision', {timeout:20000 * WIN32_SCALE},async t=>{
+  let gameDir;
+  const adapter=makeAdapter({onDecide:async({message})=>{
+    const filename=path.join(gameDir,'loop-state.json'),s=readJson(filename);s.pendingDecision.stateVersion++;writeJsonAtomic(filename,s);
+    await new Promise(r=>setTimeout(r,35));
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  const setup=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:5,hardMs:500}}});gameDir=setup.gameDir;
+  await assert.rejects(setup.loop.run(),{code:'STALE_PLAYER_DECISION'});
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
+  assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-soft-wait'),false);
 });

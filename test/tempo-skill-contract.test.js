@@ -268,3 +268,12 @@ test('AGENTS: 사이드카가 루프를 소유하고 호스트 플레이어 정�
     '호스트 서브에이전트 스폰 지시가 남아 있다',
   );
 });
+
+test('#194 recovery documentation matches outcomes and correction events',()=>{
+  const skill=read(SKILL),readme=read('README.md');
+  for(const doc of [skill,readme]) assert.doesNotMatch(doc,/forced_default/);
+  for(const word of ['recovery_required','player-decision-rejected']) assert.ok(skill.includes(word));
+  for(const event of ['player-decision-rejected','player-decision-normalized','player-correction','player-correction-skipped','player-diagnostics-quarantined','player-recovery-required']) assert.ok(readme.includes(event));
+  assert.ok(readme.includes('corrected'));
+  assert.match(read('tools/player-prompt.md'),/첫 베팅도 "bet"이 아니라 "raise"/);
+});

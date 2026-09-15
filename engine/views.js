@@ -145,7 +145,7 @@ export function turnSummary(state, playerId) {
     // is the only legal amount. Printing "150~120" would read as no legal raise.
     choices.push(legal.minRaiseTo > legal.maxRaiseTo
       ? `raise ${legal.maxRaiseTo} (올인, 유일한 합법 레이즈)`
-      : `raise ${legal.minRaiseTo}~${legal.maxRaiseTo}`);
+      : `raise ${legal.minRaiseTo}~${legal.maxRaiseTo}${(hand?.currentBet ?? 0) === 0 ? " (이 스트리트 첫 베팅도 raise)" : ""}`);
   }
 
   const lines = [
@@ -155,7 +155,7 @@ export function turnSummary(state, playerId) {
     `생존자: ${survivors.join(' / ')}`,
     `이번 핸드 공개 액션: ${actions.length ? actions.join(' → ') : '없음'}`,
     `가능한 액션: ${choices.join(' / ')}`,
-    `legal 수치: canCheck=${legal.canCheck} callAmount=${legal.callAmount} canRaise=${legal.canRaise} minRaiseTo=${legal.minRaiseTo} maxRaiseTo=${legal.maxRaiseTo}`,
+    `legal 수치: canCheck=${legal.canCheck} callAmount=${legal.callAmount} canRaise=${legal.canRaise} minRaiseTo=${legal.minRaiseTo} maxRaiseTo=${legal.maxRaiseTo} currentBet=${hand.currentBet ?? 0}`,
   ];
   if (legal.canRaise && legal.minRaiseTo > legal.maxRaiseTo) {
     lines.push(`minRaiseTo>maxRaiseTo 이므로 합법 레이즈는 ${legal.maxRaiseTo}(올인)뿐이다.`);

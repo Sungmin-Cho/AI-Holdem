@@ -122,7 +122,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 **딜러는 개입하지 않는다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 **0회**이고, 그것이 이 구조의 성공 기준이다. 액션 전달·워치독·코치 스폰·게시·서버 재기동은 전부 사이드카가 한다.
 
-사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `outcome`이 `forced_default`인 결정이 잦으면 워치독이 자주 걸린다는 뜻이니 한 줄로 알린다. 상세 로그는 `$SESSION_DIR/loop.log`다.
+사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다.
 
 ---
 
