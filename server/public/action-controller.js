@@ -35,6 +35,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   let knownReceipt = null;
   let sendingCount = 0;
   let storageLoaded = false;
+  let closedDecisionId = null;
   const receiptRank = { accepted: 1, delivered: 2, consumed: 3 };
   const key = typeof gameEpoch === 'string' && gameEpoch ? `holdem.action.v1.${gameEpoch}` : null;
   const currentId = () => view?.legal?.decisionId ?? null;
@@ -149,6 +150,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
       }
       const before = currentId();
       view = nextView;
+      if (currentId() !== closedDecisionId) closedDecisionId = null;
       if (currentId() !== before) { setPhase('unknown'); void reconcile(); }
       else emit();
     },
@@ -162,6 +164,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   };
 
   async function sendAction(action, amount, note) {
+    if (closedDecisionId && currentId() === closedDecisionId) return state();
     const unchanged = request?.decisionId === currentId() && request.action === action
       && request.amount === (action === 'raise' ? amount : undefined);
     if (!key || (request && !unchanged) || (state().disabled && !(unchanged && state().canRetry))) return state();
@@ -190,7 +193,14 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         }
         return response;
       });
-      if (stillCurrent() && result?.ok !== true) await reconcile();
+      if (stillCurrent() && result?.ok !== true) {
+        if (result && ['DECISION_CLOSED', 'STALE_DECISION'].includes(result.code)) {
+          closedDecisionId = captured.decisionId;
+          release();
+          return setPhase('idle', result.code);
+        }
+        await reconcile();
+      }
     } catch (error) {
       if (stillCurrent()) { errorCode = error.message; await reconcile(); }
     } finally { sendingCount -= 1; emit(); }

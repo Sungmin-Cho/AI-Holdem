@@ -1,9 +1,9 @@
-import {appGameId, appEpoch, appFetch, eventStream} from './app-transport.js';
+import {appGameId, appEpoch, appFetch, eventStream, participantMode} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration } from './table-controls.js';
 import { createActionController } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint} from './seat-format.js';
@@ -51,6 +51,18 @@ let displayUnit = readPreference();
 const amountEditor = createAmountEditor();
 
 const $ = (id) => document.getElementById(id);
+if (participantMode) {
+  for (const id of ['tab-coach', 'tab-training', 'panel-coach', 'panel-training', 'study-open']) {
+    const node = $(id);
+    if (node) node.hidden = true;
+  }
+  const intent = $('intent-note');
+  if (intent) {
+    intent.hidden = true;
+    intent.closest('label')?.setAttribute('hidden', '');
+  }
+  document.body.classList.add('participant-mode');
+}
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -652,7 +664,7 @@ function logNode(item, verb, bb) {
       return row;
     }
     case 'narration':
-      return el('div', 'log-note', item.text ?? '');
+      return el('div', 'log-note', formatNarration(item, ui.view?.seats ?? []) || (item.text ?? ''));
     default:
       return el('div', 'log-row', item.text ?? item.type ?? '');
   }
@@ -997,9 +1009,15 @@ function renderSnapshot(snap) {
   for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
   upsertHandReplays(snap.handReplays, true);
-  authenticatedStudyUrl = studyLink(snap.studyUrl);
+  authenticatedStudyUrl = participantMode ? null : studyLink(snap.studyUrl);
   const study = $('study-open');
   study.hidden = !authenticatedStudyUrl;
+  const deadline = $('turn-deadline');
+  if (deadline) {
+    const text = formatTurnDeadline(snap.turnDeadline);
+    deadline.hidden = !text;
+    deadline.textContent = text ?? '';
+  }
   if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
   else study.removeAttribute('href');
   paint();

@@ -20,6 +20,27 @@ export function reviewDismissalAfterUpdate(dismissed) {
   return dismissed === true;
 }
 
+export function formatTurnDeadline(deadline, now = Date.now()) {
+  const at = deadline && typeof deadline === 'object' ? deadline.at : deadline;
+  if (typeof at !== 'string') return null;
+  const ms = Date.parse(at) - now;
+  if (!Number.isFinite(ms)) return null;
+  if (ms <= 0) return '제한 시간 종료';
+  return `남은 시간 ${Math.ceil(ms / 1000)}초`;
+}
+
+export function formatNarration(item, seats = []) {
+  if (!item || typeof item !== 'object') return '';
+  const nameOf = (id) => seats.find((seat) => seat.playerId === id)?.name
+    ?? (id === 'user' ? '호스트' : id === undefined ? '' : `참가자 ${String(id).replace(/^h/, '')}`);
+  if (item.code === 'TIMEOUT_FOLD') return `${nameOf(item.params?.playerId)} 시간 초과로 폴드했습니다.`;
+  if (item.code === 'TIMEOUT_CHECK') return `${nameOf(item.params?.playerId)} 시간 초과로 체크했습니다.`;
+  if (item.code === 'LEVEL_UP') return `블라인드가 ${item.params?.sb}/${item.params?.bb}로 올랐습니다.`;
+  if (item.code === 'RESYNC') return '상태를 다시 맞췄습니다.';
+  if (item.code === 'ILLEGAL_RETRY') return '잘못된 행동이 있어 다시 시도합니다.';
+  return typeof item.text === 'string' ? item.text : '';
+}
+
 export function studyLink(value, selectors = {}) {
   try {
     const url = new URL(value);

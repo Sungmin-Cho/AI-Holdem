@@ -21,7 +21,7 @@ export function validateAbortingCheckpoint(root, engine, state) {
     || audit?.operationId!==checkpoint.operationId || audit?.mode!==checkpoint.mode
     || audit?.sidecar!==`loop-state.abandoned.${checkpoint.operationId}.json`
     || !/^[a-f0-9]{64}$/.test(audit?.sha256 ?? '')
-    || audit?.reason!=='BAD_PLAYER_RECOVERY' || typeof audit?.unverifiedSnapshot!=='boolean'
+    || !['BAD_PLAYER_RECOVERY','ROOM_UNBOUND'].includes(audit?.reason) || typeof audit?.unverifiedSnapshot!=='boolean'
     || (engine?.result==='abort' && (engine.gameOver!==true || engine.abortOperationId!==checkpoint.operationId))
     || (abortModeFor(engine,state)!==checkpoint.mode && !(engine?.result==='abort' && checkpoint.mode==='abort'))) return null;
   try {

@@ -23,6 +23,9 @@ test('online session fieldset and join page are pinned',()=>{
   assert.equal(lobby.includes('crypto.randomUUID'), false);
   assert.equal(joinJs.includes('crypto.randomUUID'), false);
   assert.match(app,/function legacyGameEpoch/);
+  assert.match(lobby, /snapshot\?\.room/);
+  assert.match(lobby, /setup\.totalSeats/);
+  assert.equal((app.match(/crypto\.subtle/g) || []).length, 1);
 });
 test('fresh retry has a separate confirmation explaining seat memory loss',()=>{
   const html=read('lobby.html'),js=read('lobby.js');

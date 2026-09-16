@@ -50,3 +50,15 @@ test('new public fields survive relay persistence/reload; new assets respect app
     assert.ok([...fs.readFileSync('server/public/design-tokens.css')].every(n=>n<128));
   }finally{await app?.close();await relay?.close();workspace.close();}
 });
+test('participant chrome and action path omit host-only surfaces', () => {
+  const app = fs.readFileSync(new URL('../server/public/app.js', import.meta.url), 'utf8');
+  const transport = fs.readFileSync(new URL('../server/public/app-transport.js', import.meta.url), 'utf8');
+  assert.match(app, /participantMode/);
+  assert.match(app, /tab-coach/);
+  assert.match(app, /intent-note/);
+  assert.match(app, /formatNarration/);
+  assert.match(transport, /holdem-participant-token/);
+  assert.match(transport, /\/api\/p\/game/);
+  assert.match(app, /participant \? undefined/);
+  assert.match(app, /delete payload\.note/);
+});

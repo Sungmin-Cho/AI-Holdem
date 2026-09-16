@@ -194,6 +194,11 @@ const errorMessages = {
   RECOVERY_REQUIRED:
     "저장된 진행 정보를 자동으로 복구하지 못했습니다. 기록은 보존되어 있습니다.",
   SESSION_RECOVERABLE: "저장된 게임이 있습니다. 불러온 뒤 계속할 수 있습니다.",
+  ROOM_UNBOUND: "온라인 세션이 이 게임에 결합되어 있지 않습니다. 게임을 종료하거나 같은 설정으로 새로 시작하세요.",
+  ROOM_FULL: "참가 인원이 가득 찼습니다.",
+  JOIN_LOCKED: "이 주소는 잠시 참가가 잠겼습니다. 나중에 다시 시도하세요.",
+  ROOM_LOCKED: "게임이 진행 중이라 참가하거나 세션을 닫을 수 없습니다.",
+  NAME_TAKEN: "이미 쓰인 이름입니다. 다른 이름을 선택하세요.",
   UNAUTHORIZED:
     "접속 링크가 만료됐습니다. start game으로 로비 링크를 다시 열어 주세요.",
   NO_PLAYER_RUNTIME:
@@ -311,12 +316,19 @@ function setupFromForm() {
   for (const k of [
     "playerSoftMs",
     "playerHardMs",
-    "aiCount",
+    ...(snapshot?.room
+      ? []
+      : ["aiCount"]),
     ...(setup.mode === "cash-training"
       ? ["stackBb", "hands"]
       : ["stack", "levelEvery"]),
   ])
     setup[k] = Number(data.get(k));
+  if (snapshot?.room) {
+    setup.totalSeats = Number($("total-seats")?.value || 6);
+    setup.hints = "off";
+    setup.dealBias = "off";
+  }
   if (setup.mode === "cash-training" && data.get("cashStackUnit") === "chips") {
     delete setup.stackBb;
     setup.stack = Number(data.get("cashStack"));

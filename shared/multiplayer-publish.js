@@ -59,6 +59,7 @@ const WINNER_KEYS = new Set(['playerId', 'share']);
 const LEGAL_KEYS = new Set([
   'stateVersion', 'decisionId', 'handNo', 'street', 'toAct', 'canCheck', 'callAmount',
   'canRaise', 'minRaiseTo', 'maxRaiseTo', 'potTotal', 'handOver', 'gameOver',
+  'bustedPlayerIds',
 ]);
 
 function validateViewShape(view, id) {
@@ -85,8 +86,8 @@ function validateViewShape(view, id) {
   for (const pot of view.pots) {
     if (!isPlain(pot) || !allowKeys(pot, POT_KEYS) || !int(pot.potIndex) || !int(pot.amount)
       || !Array.isArray(pot.eligible) || !pot.eligible.every(seatId)
-      || !Array.isArray(pot.winners)) fail('BAD_VIEWS', 'pot');
-    for (const winner of pot.winners) {
+      || (pot.winners !== undefined && !Array.isArray(pot.winners))) fail('BAD_VIEWS', 'pot');
+    for (const winner of pot.winners ?? []) {
       if (!isPlain(winner) || !allowKeys(winner, WINNER_KEYS) || !seatId(winner.playerId) || !int(winner.share)) {
         fail('BAD_VIEWS', 'pot winner');
       }
@@ -108,7 +109,8 @@ function validateViewShape(view, id) {
       || typeof legal.canCheck !== 'boolean' || !int(legal.callAmount)
       || typeof legal.canRaise !== 'boolean' || !int(legal.minRaiseTo) || !int(legal.maxRaiseTo)
       || !int(legal.potTotal) || typeof legal.handOver !== 'boolean' || typeof legal.gameOver !== 'boolean'
-      || legal.toAct !== id) {
+      || legal.toAct !== id
+      || (legal.bustedPlayerIds !== undefined && (!Array.isArray(legal.bustedPlayerIds) || !legal.bustedPlayerIds.every(seatId)))) {
       fail('BAD_VIEWS', `legal for ${id}`);
     }
   }
@@ -208,8 +210,9 @@ export function validateEventsAgainstEngine(events, engineState) {
     }
     const type = event.type;
     if (type === 'hand_start') {
+      const handNo = engineState.hand ? engineState.handNo : source?.handNo;
       if (!int(event.handNo) || !int(event.level) || !Array.isArray(event.blinds) || !seatId(event.button)
-        || event.handNo !== source?.handNo) fail('BAD_EVENTS', 'hand_start');
+        || event.handNo !== handNo) fail('BAD_EVENTS', 'hand_start');
     } else if (type === 'level_up') {
       if (!int(event.level) || !int(event.sb) || !int(event.bb)) fail('BAD_EVENTS', 'level_up');
     } else if (type === 'blinds_posted') {

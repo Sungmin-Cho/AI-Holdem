@@ -54,6 +54,13 @@ export function createRoomManager({
   let memory = null;
   let lastWrite = 0;
   let pendingTouch = false;
+  const revokeListeners = [];
+  function notifyRevoke(event) {
+    try { onRevoke(event); } catch { /* constructor hook must not break room ops */ }
+    for (const fn of revokeListeners) {
+      try { fn(event); } catch { /* listener errors must not break room ops */ }
+    }
+  }
 
   const iso = () => now().toISOString();
 
@@ -173,7 +180,15 @@ export function createRoomManager({
       save(room, { force: true });
       throw coded('BAD_CODE');
     }
-    validateParticipantName(name, { hostName: room.hostName });
+    try {
+      validateParticipantName(name, { hostName: room.hostName });
+    } catch (error) {
+      const host = String(room.hostName ?? '').trim().toLowerCase();
+      if (error?.code === 'BAD_CONFIG' && String(name ?? '').trim().toLowerCase() === host) {
+        throw coded('NAME_TAKEN', error.message);
+      }
+      throw error;
+    }
     const taken = activeParticipants(room).some((row) => row.name.toLowerCase() === name.trim().toLowerCase());
     if (taken) throw coded('NAME_TAKEN');
     if (activeParticipants(room).length >= room.totalSeats - 1) throw coded('ROOM_FULL');
@@ -220,7 +235,7 @@ export function createRoomManager({
     row.tokenSha256 = sha256(token);
     row.tokenGeneration += 1;
     save(room, { force: true });
-    onRevoke({ participantId, previousGeneration: previous });
+    notifyRevoke({ participantId, previousGeneration: previous });
     return { token, link: `/join#rejoin=${token}` };
   }
 
@@ -233,7 +248,7 @@ export function createRoomManager({
     row.status = 'removed';
     row.tokenSha256 = sha256(randomToken(random));
     save(room, { force: true });
-    onRevoke({ participantId, previousGeneration: previous });
+    notifyRevoke({ participantId, previousGeneration: previous });
   }
 
   function update({ totalSeats, actionTimeoutSec } = {}) {
@@ -253,7 +268,7 @@ export function createRoomManager({
     const room = requireRoom();
     if (room.status === 'locked') throw coded('ROOM_LOCKED');
     for (const row of room.participants) {
-      if (row.status === 'active') onRevoke({ participantId: row.participantId, previousGeneration: row.tokenGeneration });
+      if (row.status === 'active') notifyRevoke({ participantId: row.participantId, previousGeneration: row.tokenGeneration });
       row.status = 'removed';
     }
     room.status = 'closed';
@@ -384,6 +399,7 @@ export function createRoomManager({
     open, join, authenticate, rotateCode, reissue, remove, update, close,
     lockForStart, bind, unlock, release, recover, touch, flush,
     hostView, participantView, load, displayCode,
+    addRevokeListener(fn) { revokeListeners.push(fn); },
     get boundGameId() { return load()?.lock?.boundGameId ?? null; },
   };
 }

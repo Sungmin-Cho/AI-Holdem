@@ -135,7 +135,7 @@ export function normalizeSetup(input = {}) {
       throw setupError("totalSeats");
     }
     const aiCount = value.totalSeats - 1 - k;
-    if (value.aiCount !== undefined && value.aiCount !== aiCount) throw setupError("aiCount");
+    if (Object.hasOwn(input, "aiCount") && value.aiCount !== aiCount) throw setupError("aiCount");
     if (aiCount < 0 || aiCount > 8) throw setupError("aiCount");
     value.aiCount = aiCount;
     if (k >= 1) {
@@ -146,6 +146,12 @@ export function normalizeSetup(input = {}) {
       if (!Number.isInteger(value.actionTimeoutSec) || value.actionTimeoutSec < 10 || value.actionTimeoutSec > 600) {
         throw setupError("actionTimeoutSec");
       }
+    } else {
+      if (value.actionTimeoutSec !== undefined && value.actionTimeoutSec !== 0) {
+        throw setupError("actionTimeoutSec");
+      }
+      value.actionTimeoutSec = 0;
+      delete value.participants;
     }
   } else if (value.actionTimeoutSec !== undefined && value.actionTimeoutSec !== 0
     && (value.participants === undefined || value.participants.length === 0)) {
@@ -160,6 +166,11 @@ export function normalizeSetup(input = {}) {
   return value;
 }
 export function setupToArgs(setup, storeDir) {
-  const { aiCount, ...rest } = normalizeSetup(setup);
-  return { ...rest, ai: aiCount, storeDir };
+  const normalized = normalizeSetup(setup);
+  const { aiCount, participants, ...rest } = normalized;
+  const args = { ...rest, ai: aiCount, storeDir };
+  if (Array.isArray(participants) && participants.length >= 1) {
+    args.participants = participants;
+  }
+  return args;
 }

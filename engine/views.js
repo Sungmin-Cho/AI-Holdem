@@ -26,12 +26,19 @@ function currentHandData(state) {
 
 function publicPots(hand) {
   if (!hand) return [];
-  if (Array.isArray(hand.pots)) return structuredClone(hand.pots);
+  if (Array.isArray(hand.pots)) {
+    return structuredClone(hand.pots).map((pot, potIndex) => ({
+      potIndex: pot.potIndex ?? potIndex,
+      amount: pot.amount,
+      eligible: [...(pot.eligible ?? [])],
+      winners: (pot.winners ?? []).map((winner) => ({ ...winner })),
+    }));
+  }
   const pots = buildPots(
     new Map(Object.entries(hand.contribs ?? {})),
     new Set(hand.folded ?? []),
   );
-  return pots.map((pot, potIndex) => ({ potIndex, ...pot }));
+  return pots.map((pot, potIndex) => ({ potIndex, winners: [], ...pot }));
 }
 
 function publicSeat(state, hand, seat) {

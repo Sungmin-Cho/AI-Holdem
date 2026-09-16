@@ -54,6 +54,12 @@ export function validateCommand(body) {
     throw controlError("BAD_COMMAND");
   if ("setup" in body && !["start", "replace-current"].includes(body.kind))
     throw controlError("BAD_COMMAND");
+  if ("setup" in body) {
+    if (!body.setup || typeof body.setup !== "object" || Array.isArray(body.setup))
+      throw controlError("BAD_COMMAND");
+    if ("participants" in body.setup || "hostName" in body.setup)
+      throw controlError("BAD_COMMAND");
+  }
   if (body.kind === 'retry-decision' && (typeof body.decisionId !== 'string' || !/^d-\d+-(preflop|flop|turn|river)-\d+$/.test(body.decisionId))) throw controlError('BAD_COMMAND');
   if ('decisionId' in body && body.kind !== 'retry-decision') throw controlError('BAD_COMMAND');
   if ('freshSession' in body && (body.kind !== 'retry-decision' || typeof body.freshSession !== 'boolean')) throw controlError('BAD_COMMAND');

@@ -7310,7 +7310,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (!matches) throw codedError('ABANDON_SIDECAR_CONFLICT','기존 감사 파일이 달라 덮어쓰지 않습니다.');
       }
       checkpoint={operationId,mode};
-      const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason:'BAD_PLAYER_RECOVERY'};
+      const reason=['BAD_PLAYER_RECOVERY','ROOM_UNBOUND'].includes(opts.abortUnrecoverable?.reason)
+        ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
+      const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason};
       state=writeLoopState({pendingDecision:undefined,aborting:checkpoint,abandonedPendingDecision:audit});
       preserveLoopState=false;
       logAbandonedRecovery(audit);
@@ -7894,6 +7896,15 @@ export async function initializePreparedSession(gameDir, args) {
     }));
   }
   const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
+  if (Array.isArray(args.participants) && args.participants.length >= 1) {
+    const file = path.join(gameDir, '.participants.json');
+    writeJsonAtomic(file, {
+      schemaVersion: 1,
+      hostName: args.hostName ?? '호스트',
+      participants: args.participants,
+    });
+    initArgs.push('--participants-file', file);
+  }
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [ENGINE_CLI, ...initArgs], childSpawnOptions({
       encoding: 'utf8',

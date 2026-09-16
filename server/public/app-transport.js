@@ -2,14 +2,17 @@
 const params = new URLSearchParams(location.search);
 export const appGameId = params.get("appGame");
 export const appEpoch = params.get("epoch");
+export const participantMode = params.get("participant") === "1";
+const tokenKey = participantMode ? "holdem-participant-token" : "holdem-app-token";
+const gamePrefix = participantMode ? "/api/p/game" : "/api/game";
 export function appFetch(endpoint, options = {}) {
   const headers = new Headers(options.headers);
   headers.set(
     "authorization",
-    `Bearer ${sessionStorage.getItem("holdem-app-token") ?? ""}`,
+    `Bearer ${sessionStorage.getItem(tokenKey) ?? ""}`,
   );
   headers.set("x-game-epoch", appEpoch ?? "");
-  return fetch(`/api/game/${appGameId}/${endpoint}`, { ...options, headers });
+  return fetch(`${gamePrefix}/${appGameId}/${endpoint}`, { ...options, headers });
 }
 export function eventStream(endpoint) {
   const listeners = new Map(),

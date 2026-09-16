@@ -95,7 +95,15 @@ export async function inspectAppService(store) {
 }
 export async function startAppService(
   store,
-  { playerRuntime = "codex", resolver, port = 0 } = {},
+  {
+    playerRuntime = "codex",
+    resolver,
+    port = 0,
+    publicPort = null,
+    publicHost = null,
+    tlsCert = null,
+    tlsKey = null,
+  } = {},
 ) {
   const dir = appDir(store),
     lock = acquireOwnedLock(store, LOCK);
@@ -128,7 +136,10 @@ export async function startAppService(
       token,
       storeDir: store,
       port,
-      publicPort: Number(process.env.HOLDEM_PUBLIC_PORT ?? 8899),
+      publicPort,
+      publicHost,
+      tlsCert,
+      tlsKey,
       onStop: () => void close(),
     });
     const identity = readOwnedLock(store, LOCK);
@@ -148,6 +159,8 @@ export async function startAppService(
       manager,
       close,
       url: `${server.origin}/#token=${token}`,
+      publicPort: server.publicPort,
+      publicOrigin: server.publicOrigin,
     };
   } catch (error) {
     await close();
@@ -235,14 +248,29 @@ export async function stopAppService(store) {
   }
   throw new Error("APP_STOP_UNCONFIRMED");
 }
+function parseServeArgs(rest) {
+  let playerRuntime = "codex";
+  let publicPort = Number(process.env.HOLDEM_PUBLIC_PORT ?? 8899);
+  let publicHost = null;
+  let tlsCert = null;
+  let tlsKey = null;
+  for (let i = 0; i < rest.length; i += 1) {
+    const flag = rest[i];
+    const next = rest[i + 1];
+    if (flag === "--player-runtime") { playerRuntime = next; i += 1; }
+    else if (flag === "--public-port") { publicPort = Number(next); i += 1; }
+    else if (flag === "--public-host") { publicHost = next; i += 1; }
+    else if (flag === "--tls-cert") { tlsCert = next; i += 1; }
+    else if (flag === "--tls-key") { tlsKey = next; i += 1; }
+  }
+  return { playerRuntime, publicPort, publicHost, tlsCert, tlsKey };
+}
 if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
   process.umask(0o077);
   const [command, store, ...rest] = process.argv.slice(2);
   try {
     if (command === "serve") {
-      const service = await startAppService(store, {
-        playerRuntime: rest[1] ?? "codex",
-      });
+      const service = await startAppService(store, parseServeArgs(rest));
       for (const signal of ["SIGINT", "SIGTERM"])
         process.once(
           signal,
