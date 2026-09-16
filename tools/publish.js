@@ -61,11 +61,11 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    const next = argv[i + 1];
     const needsValue = (name) => {
-      if (next == null) bail('USAGE', `옵션 ${name}의 값이 필요합니다.`);
+      const value = argv[i + 1];
+      if (value == null) bail('USAGE', `옵션 ${name}의 값이 필요합니다.`);
       i += 1;
-      return next;
+      return value;
     };
     const positiveMs = (name) => {
       const value = Number(needsValue(name));
