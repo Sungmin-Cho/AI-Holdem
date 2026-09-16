@@ -3,8 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
+import os from "node:os";
 import { loadUiState, publicSnapshot } from "../server/server.js";
 import { ensureStudyService } from "./study-service.js";
+import { createRoomManager } from "./room-manager.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
 const json = (res, status, value) => {
@@ -33,14 +35,30 @@ async function bodyOf(req) {
     throw Object.assign(new Error(), { code: "BAD_JSON" });
   }
 }
+function joinLinks(port, code) {
+  const hosts = [];
+  for (const rows of Object.values(os.networkInterfaces() ?? {})) {
+    for (const row of rows ?? []) {
+      if (row.internal || row.family !== "IPv4") continue;
+      hosts.push(row.address);
+    }
+  }
+  const display = `${code.slice(0, 4)}-${code.slice(4)}`;
+  return hosts.map((host) => `http://${host}:${port}/join?code=${display}`);
+}
+
 export async function startAppServer({
   manager,
   token,
   storeDir,
   port = 0,
+  publicPort = null,
+  publicListen = "0.0.0.0",
   onStop = () => {},
 }) {
   let origin;
+  const room = createRoomManager({ storeDir });
+  try { room.recover({}); } catch { /* no room yet */ }
   const server = http.createServer(async (req, res) => {
     try {
       if (
@@ -68,6 +86,8 @@ export async function startAppServer({
             ? "lobby.html"
             : pathname === "/table"
               ? "index.html"
+              : pathname === "/join"
+                ? "join.html"
               : pathname.slice(1);
         const shared = rel.startsWith("shared/");
         const name = shared ? rel.slice(7) : rel;
@@ -116,7 +136,26 @@ export async function startAppServer({
         return;
       }
       if (req.method === "GET" && pathname === "/api/app") {
-        json(res, 200, manager.snapshot());
+        const view = manager.snapshot();
+        const host = room.hostView();
+        json(res, 200, {
+          ...view,
+          room: host
+            ? { ...host, links: host.joinCode ? joinLinks(publicPort, room.load().joinCode) : [] }
+            : null,
+        });
+        return;
+      }
+      if (req.method === "POST" && pathname === "/api/room") {
+        const body = await bodyOf(req);
+        const op = body?.op;
+        if (op === "open") json(res, 200, room.open(body));
+        else if (op === "update") json(res, 200, room.update(body));
+        else if (op === "rotate-code") json(res, 200, { joinCode: room.rotateCode() });
+        else if (op === "reissue") json(res, 200, room.reissue(body.participantId));
+        else if (op === "remove") { room.remove(body.participantId); json(res, 200, { ok: true }); }
+        else if (op === "close") json(res, 200, room.close());
+        else json(res, 400, { code: "BAD_COMMAND" });
         return;
       }
       if (req.method === "POST" && pathname === "/api/commands") {
@@ -293,10 +332,89 @@ export async function startAppServer({
     server.listen(port, "127.0.0.1", resolve);
   });
   origin = `http://127.0.0.1:${server.address().port}`;
+  const publicServer = http.createServer(async (req, res) => {
+    try {
+      if (req.headers.origin) {
+        const originUrl = new URL(req.headers.origin);
+        if (originUrl.host !== req.headers.host || originUrl.protocol !== "http:") {
+          json(res, 403, { code: "BAD_ORIGIN" });
+          return;
+        }
+      }
+      const url = new URL(req.url, `http://${req.headers.host}`),
+        pathname = url.pathname;
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (pathname === "/api/join" && req.method === "POST") {
+        const body = await bodyOf(req);
+        const addr = req.socket.remoteAddress;
+        try {
+          json(res, 200, room.join({ code: body.code, name: body.name, addr }));
+        } catch (error) {
+          const code = error.code ?? "BAD_CODE";
+          json(res, code === "BAD_CODE" ? 401 : code === "ROOM_NOT_FOUND" ? 404 : 409, { code });
+        }
+        return;
+      }
+      if (pathname === "/api/p/state" && req.method === "GET") {
+        const header = req.headers.authorization ?? "";
+        const tokenValue = header.startsWith("Bearer ") ? header.slice(7) : "";
+        try {
+          const me = room.authenticate(tokenValue);
+          room.touch(me.participantId);
+          const snap = manager.snapshot();
+          json(res, 200, {
+            room: room.participantView(me.participantId),
+            me: { participantId: me.participantId, name: me.name, playerId: me.playerId },
+            game: {
+              gameId: snap.gameId,
+              gameEpoch: snap.gameEpoch,
+              state: snap.state === "lobby" ? "lobby" : snap.state,
+            },
+          });
+        } catch (error) {
+          json(res, error.code === "UNAUTHORIZED" ? 401 : 404, { code: error.code ?? "UNAUTHORIZED" });
+        }
+        return;
+      }
+      if (pathname.startsWith("/api/") || pathname.startsWith("/.app/")) {
+        json(res, 404, { code: "NOT_FOUND" });
+        return;
+      }
+      if (req.method !== "GET") {
+        json(res, 405, { code: "METHOD_NOT_ALLOWED" });
+        return;
+      }
+      const rel = pathname === "/join" ? "join.html" : pathname === "/table" ? "index.html" : pathname.slice(1);
+      if (!/^[a-zA-Z0-9_.-]+$/.test(rel) || rel.startsWith(".")) {
+        json(res, 404, { code: "NOT_FOUND" });
+        return;
+      }
+      let content;
+      try { content = fs.readFileSync(path.join(PUBLIC, rel)); }
+      catch { json(res, 404, { code: "NOT_FOUND" }); return; }
+      const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" }[path.extname(rel)] ?? "application/octet-stream";
+      res.writeHead(200, { "content-type": type, "cache-control": "no-store" });
+      res.end(content);
+    } catch (error) {
+      if (!res.headersSent) json(res, 400, { code: error.code ?? "BAD_JSON" });
+    }
+  });
+  if (publicPort != null) {
+    await new Promise((resolve, reject) => {
+      publicServer.once("error", reject);
+      publicServer.listen(publicPort, publicListen, resolve);
+    });
+  }
   return {
     server,
     origin,
+    publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
     close: async () => {
+      if (publicPort != null) {
+        publicServer.closeAllConnections();
+        await new Promise((resolve) => publicServer.close(resolve));
+      }
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },

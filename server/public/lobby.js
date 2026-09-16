@@ -1,6 +1,7 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
 import {formatAmount} from './chip-format.js';
+import { uuid } from './uuid.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -106,6 +107,30 @@ function render() {
   $("result-restart").hidden = !snapshot.allowedCommands.includes("restart");
   $("result-end").hidden = !snapshot.allowedCommands.includes("end");
   $("result-end").disabled = busy || !snapshot.allowedCommands.includes("end");
+  const room = snapshot.room;
+  if ($("room-panel")) {
+    $("room-panel").hidden = !room;
+    if (room) {
+      $("join-code").textContent = room.joinCode ?? "";
+      $("room-status").textContent = room.status;
+      $("join-links").replaceChildren(
+        ...(room.links ?? []).map((link) => {
+          const item = document.createElement("li");
+          item.textContent = link;
+          return item;
+        }),
+      );
+      $("room-participants").replaceChildren(
+        ...(room.participants ?? []).map((row) => {
+          const item = document.createElement("li");
+          item.textContent = `${row.name}${row.connected ? " ●" : ""}`;
+          return item;
+        }),
+      );
+      $("room-close").disabled = room.status === "locked";
+      $("ai-count").hidden = true;
+    } else $("ai-count").hidden = false;
+  }
   $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
   $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
   $("result-modes").hidden = !snapshot.allowedCommands.includes("start");
@@ -192,7 +217,7 @@ async function command(kind, setup, extra = {}) {
   $("error").textContent = "";
   try {
     const payload = {
-      requestId: crypto.randomUUID(),
+      requestId: uuid(),
       expectedInstanceId: snapshot.instanceId,
       expectedAppRevision: snapshot.appRevision,
       expectedGameId: snapshot.gameId,
@@ -367,6 +392,21 @@ async function recoverCommand() {
     render();
   }
 }
+async function roomOp(op, extra = {}) {
+  await api("/api/room", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op, ...extra }),
+  });
+  await refresh();
+}
+$("room-open")?.addEventListener("click", () => roomOp("open", {
+  hostName: $("host-name")?.value || "호스트",
+  totalSeats: Number($("total-seats")?.value || 6),
+  actionTimeoutSec: Number($("action-timeout")?.value || 60),
+}));
+$("room-rotate")?.addEventListener("click", () => roomOp("rotate-code"));
+$("room-close")?.addEventListener("click", () => roomOp("close"));
 await recoverCommand();
 setInterval(() => {
   if (!busy)

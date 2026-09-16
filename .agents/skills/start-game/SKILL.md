@@ -19,6 +19,8 @@ metadata:
 
 명시한 모드·AI 수·스택·블라인드·핸드 수·상대 방식·공개 옵션은 로비 기본 선택으로 보존한다. 구조화 JSON 파일을 작성하고 위 명령에 `--setup-file <absolute-json-file>`을 추가한다. 허용 키는 `shared/game-setup.js`의 SETUP_KEYS이며 `aiCount`는 숫자 1~8이다. raw shell 옵션/모델 문장을 JSON 값이나 argv에 끼워 넣지 않는다. 충돌한 옵션은 검증 오류를 보고하고 임의로 버리지 않는다. cash의 칩 단위 `stack`을 명시했다면 `stackBb`를 추가하지 않는다. 로비 토너먼트의 기본 상대 방식은 policy이며 명시 LLM은 유지한다.
 
+로비 **온라인 세션**은 공개 포트 8899(옵션 `--public-port`)로 LAN 참가 링크를 만든다. HTTP가 기본이고 `--tls-cert`/`--tls-key`가 있으면 HTTPS다. 멀티 세션은 앱으로만 재개한다.
+
 웹 메뉴는 일시정지, 계속하기, 같은 설정의 새 게임, 모드 선택, 게임 종료를 제공한다. 메뉴 닫기·Escape·모드 선택에서 돌아가기는 자동 재개가 아니다. 모드 변경/재시작/종료 확인은 웹 UI에서 처리한다. 앱 종료는 `npm run app:stop -- <absolute-store>`이고 학습 서비스는 독립적으로 유지된다.
 
 기존 standalone loop가 살아 있으면 로비는 외부 실행 상태를 표시한다. 해당 loop를 탈취하거나 강제 종료하지 않는다. 인증된 앱 서비스가 있다면 `resume` 요청도 로비로 연결하여 웹에서 계속하도록 한다. 앱 서비스가 없는 기존 standalone 게임에 사용자가 **명시적으로 legacy 직접 실행 또는 `resume`을 요청했을 때만 아래 기존 §1~§7 절차를 사용한다**. 새 게임 요청에 아래 직접 실행 절차를 적용하지 않는다. 중도 종료는 `phase: aborted`, 정상 완료는 `phase: done`이며 둘을 혼동하지 않는다.
@@ -157,7 +159,7 @@ legacy 정지 게임은 `node tools/game-loop.js --game-dir /absolute/game --res
 `/start-game resume` 또는 사전 점검에서 이어하기를 고른 경우. **분기는 `resume-check`의 `loopPidAlive` 하나다.**
 
 - **`loopPidAlive: true` → attach.** 사이드카를 **다시 띄우지 않는다**(loop 락이 살아 있는 선점자를 거부하므로 이것이 유일한 정상 경로다). `loop-state.json`을 읽어 "게임 진행 중"과 `phase`·`handNo`를 보고하고, 사용자가 원하면 §4처럼 종료까지 관찰만 한다. 브라우저가 닫혔으면 `port`·`sessionToken`으로 다시 열어 준다.
-- **`loopPidAlive: false` → `--resume` 기동.** 새 게임 기동과 같은 문면이되 `--ai`·`--force` 자리에 `--resume`이 온다.
+- **`loopPidAlive: false` → `--resume` 기동.** 새 게임 기동과 같은 문면이되 `--ai`·`--force` 자리에 `--resume`이 온다. 멀티 세션(`humanCount > 1`)은 앱 관리 모드가 아니면 `MULTIPLAYER_REQUIRES_APP`로 거부되므로 웹 로비에서 재개한다.
 
 ```bash
 nohup node tools/game-loop.js --store-dir game --resume \
@@ -178,6 +180,8 @@ nohup node tools/game-loop.js --store-dir game --resume \
 ```bash
 node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 ```
+
+멀티 세션이 current이면 롤백 전에 게임을 종료하고 룸을 닫는다. S0+S1(엔진 계약·복기·relay)은 한 단위로만 revert한다.
 
 **이 변경을 되돌리거나(revert) 새 버전을 얹기 전에는 아래 3단계를 순서대로 밟는다.** detached 사이드카는 revert 뒤에도 메모리에 올린 코드로 계속 돌기 때문에 revert 단독으로는 부족하다.
 

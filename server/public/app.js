@@ -1209,18 +1209,24 @@ async function getStatus({ signal } = {}) {
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
   return response.json();
 }
+async function legacyGameEpoch(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 async function initializeController() {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-  const gameEpoch = appGameId ? appEpoch : Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const { uuid } = await import('./uuid.js');
+  const gameEpoch = appGameId ? appEpoch : await legacyGameEpoch(token);
   actionController = createActionController({
-    gameEpoch, getSnapshot, getStatus, storage: sessionStorage,
+    gameEpoch, getSnapshot, getStatus, storage: sessionStorage, uuid,
     postAction: async (body, { signal }) => {
+      const participant = new URLSearchParams(location.search).get('participant') === '1';
       const live = $('intent-note')?.value;
-      const note = typeof body.note === 'string' ? body.note
-        : typeof live === 'string' ? live
-          : undefined;
+      const note = participant ? undefined
+        : typeof body.note === 'string' ? body.note
+          : typeof live === 'string' ? live
+            : undefined;
       const payload = appGameId ? {...body} : { token, ...body };
-      if (typeof note === 'string') payload.note = note;
+      if (!participant && typeof note === 'string') payload.note = note;
       else delete payload.note;
       const actionOptions={method:'POST',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)};
       const response=await (appGameId ? appFetch('action',actionOptions) : fetch('/api/action',actionOptions));

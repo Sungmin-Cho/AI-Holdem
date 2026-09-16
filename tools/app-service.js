@@ -128,6 +128,7 @@ export async function startAppService(
       token,
       storeDir: store,
       port,
+      publicPort: Number(process.env.HOLDEM_PUBLIC_PORT ?? 8899),
       onStop: () => void close(),
     });
     const identity = readOwnedLock(store, LOCK);

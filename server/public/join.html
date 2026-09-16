@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AI 홀덤 · 참가</title>
+    <link rel="stylesheet" href="/design-tokens.css" />
+    <link rel="stylesheet" href="/lobby.css" />
+    <script type="module" src="/join-bootstrap.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>테이블 참가</h1>
+      <form id="join-form">
+        <label>참가 코드 <input id="join-code" name="code" required /></label>
+        <label>이름 <input id="join-name" name="name" required maxlength="12" /></label>
+        <button type="submit" id="join-submit">참가</button>
+      </form>
+      <p id="join-error" role="alert"></p>
+      <section id="waiting" hidden>
+        <p id="waiting-status">호스트가 시작하기를 기다리는 중</p>
+        <ul id="waiting-participants"></ul>
+        <button type="button" id="leave">나가기</button>
+      </section>
+      <section id="playing" hidden>
+        <p id="pause-banner" hidden>호스트가 일시정지했습니다</p>
+        <iframe id="table" title="홀덤 테이블"></iframe>
+      </section>
+      <section id="final" hidden>
+        <h2>최종 스택</h2>
+        <table id="final-stacks"></table>
+      </section>
+    </main>
+  </body>
+</html>
