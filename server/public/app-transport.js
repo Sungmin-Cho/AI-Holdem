@@ -5,12 +5,12 @@ export const appEpoch = params.get("epoch");
 export const participantMode = params.get("participant") === "1";
 const tokenKey = participantMode ? "holdem-participant-token" : "holdem-app-token";
 const gamePrefix = participantMode ? "/api/p/game" : "/api/game";
+export function authToken() {
+  return sessionStorage.getItem(tokenKey) ?? "";
+}
 export function appFetch(endpoint, options = {}) {
   const headers = new Headers(options.headers);
-  headers.set(
-    "authorization",
-    `Bearer ${sessionStorage.getItem(tokenKey) ?? ""}`,
-  );
+  headers.set("authorization", `Bearer ${authToken()}`);
   headers.set("x-game-epoch", appEpoch ?? "");
   return fetch(`${gamePrefix}/${appGameId}/${endpoint}`, { ...options, headers });
 }

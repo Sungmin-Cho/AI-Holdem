@@ -152,3 +152,12 @@ body.has-game > #error:empty {display:none;}
   body.has-game > header {padding:6px 16px;gap:12px;}
   body.has-game > header button {padding:6px 12px;min-height:32px;}
 }
+
+/* Join page: while a game is on, the participant table fills the viewport like the host lobby. */
+#table {width:100%;height:calc(100dvh - 80px);border:0;}
+body.has-game > main {flex:1;min-height:0;max-width:none;margin:0;padding:0;display:flex;flex-direction:column;}
+body.has-game > main > h1 {display:none;}
+body.has-game #join-error:empty {display:none;}
+body.has-game #playing {flex:1;min-height:240px;display:flex;flex-direction:column;overflow:auto;-webkit-overflow-scrolling:touch;}
+body.has-game #pause-banner {flex:none;margin:0;padding:10px 16px;}
+body.has-game #table {display:block;flex:1;height:100%;min-height:240px;}
