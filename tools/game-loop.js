@@ -13,6 +13,7 @@ import { cliModeDefaults } from '../shared/game-setup.js';
 import {checkDealBiasResume} from '../shared/deal-selection.js';
 import { playerBudget, playerFailureCategory } from '../shared/player-budget.js';
 import { createSessionControl, retryControlWrite } from './session-control.js';
+import { HOST_ID, aiRowsOf, isHumanSeat } from '../shared/seat-roles.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -602,7 +603,7 @@ export const applyModeDefaults = cliModeDefaults;
 
 export function gtoEvalNotice(config = {}) {
   if (config.mode !== 'cash-training') return null;
-  const seats = Number(config.aiCount) + 1;
+  const seats = Number(config.aiCount) + (config.humanCount ?? 1);
   const stackBb = config.startStackBb;
   const badSeats = !Number.isFinite(seats) || ![6, 8, 9].includes(seats);
   const badStack = !Number.isFinite(stackBb) || stackBb !== 100;
@@ -2058,7 +2059,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!playerAdapter) throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
     const players = readJsonOptional(playersPath, 'PLAYERS');
     if (!Array.isArray(players)) throw codedError('BAD_PLAYERS', 'players.json이 배열이 아닙니다.');
-    const aiPlayers = players.filter((player) => player.playerId !== 'user');
+    const aiPlayers = aiRowsOf(players);
     const createdAt = readLoopState()?.startedAt ?? isoNow(now);
     let existing = {};
     if (reuseExisting) {
@@ -2114,7 +2115,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   }) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const persona = Array.isArray(players)
-      ? players.find((player) => player?.playerId === playerId && playerId !== 'user')
+      ? players.find((player) => player?.playerId === playerId && !isHumanSeat(player))
       : null;
     if (!persona) throw codedError('BAD_PLAYERS', `복구할 플레이어 ${playerId} 페르소나가 없습니다.`);
     const repaired = await createPlayerSession(persona, isoNow(now), {
@@ -3263,6 +3264,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     envelope = await prepareHintEnvelope(envelope);
     writeJsonAtomic(turnPath, envelope);
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    const hasDeadline = flags.some((flag) => flag === '--turn-deadline' || String(flag).startsWith('--turn-deadline'));
+    if (timeoutMs > 0 && envelope.next?.kind === 'user' && !flags.includes('--view-only') && !hasDeadline) {
+      flags = ['--turn-deadline', `${envelope.next.decisionId}:${new Date(Date.now() + timeoutMs).toISOString()}`, ...flags];
+    }
     let currentArgs = ['--from', turnPath, ...flags];
     let args = currentArgs;
     let resolvingPending = false;
@@ -3590,7 +3596,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     players: readJsonOptional(playersPath, 'PLAYERS'),
     engineState: readJsonOptional(engineStatePath, 'ENGINE_STATE'),
     records: [fullHandRecord(handNo)],
-  });
+  }, { alwaysDenyHumanSeats: true });
 
   const coachForbiddenLiterals = (handNo) => {
     const { cards, others } = coachForbiddenDetailed(handNo);
@@ -3608,7 +3614,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);
-    if (literals.length === 0) {
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    const aiCount = aiRowsOf(Array.isArray(players) ? players : []).length;
+    if (literals.length === 0 && aiCount !== 0) {
       throw codedError('BAD_COACH_DENY', `핸드 ${handNo} private literal deny 목록이 비어 있습니다.`);
     }
     const filePath = coachDenyPath(handNo);
@@ -5880,8 +5888,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const cutoff = readLoopState()?.finalization?.cutoff;
       if (cutoff?.reviewGate !== 'open' || cutoff.terminationConfirmed !== true
-        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed
-        || stats.user.sample !== completed) {
+        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed) {
+        throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
+      }
+      const hostDealtHands = Array.from({ length: completed }, (_, i) => i + 1)
+        .filter((handNo) => {
+          try {
+            const record = fullHandRecord(handNo);
+            return record && Object.hasOwn(record.holes ?? {}, HOST_ID);
+          } catch { return false; }
+        }).length;
+      if (stats.user.sample !== hostDealtHands) {
         throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
       }
       // Read derived evidence before optional sections can downgrade its errors.
@@ -6464,9 +6481,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if(pauseRequested&&!drain)return {...current,controlInterrupted:true};
     const controller = new AbortController();
     if (!drain) waitController = controller;
-    const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(drain ? 0 : waitMs)});
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    let waitFor = drain ? 0 : waitMs;
+    if (!drain && timeoutMs > 0 && current.next?.kind === 'user') {
+      let humanTurn = readLoopState()?.humanTurn;
+      if (!humanTurn || humanTurn.decisionId !== current.next.decisionId) {
+        humanTurn = {
+          decisionId: current.next.decisionId,
+          playerId: current.next.toAct,
+          deadlineAt: Date.now() + timeoutMs,
+        };
+        writeLoopState({ humanTurn });
+      }
+      waitFor = Math.max(0, Math.min(waitMs, humanTurn.deadlineAt - Date.now()));
+    }
+    const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(waitFor)});
     try {
-      const response = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {signal:AbortSignal.any([controller.signal,AbortSignal.timeout((drain ? 0 : waitMs)+10000)])});
+      const response = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {signal:AbortSignal.any([controller.signal,AbortSignal.timeout(waitFor+10000)])});
       if (!response.ok) throw codedError('WAIT_FAILED', 'relay wait failed');
       return { ...current, userAction: await response.json(), controlInterrupted: undefined, waitError: undefined };
     } catch (error) {
@@ -6497,8 +6528,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('PLAYER_RECOVERY_REQUIRED', 'LLM 결정을 재시도하거나 게임을 종료하세요.');
     }
     const current = await runCli(['step']);
-    await publishEnvelope(current, ['--view-only']);
-    await retryControlWrite(()=>control.set('playing', {pauseIntent:false}));
+    await retryControlWrite(()=>control.set('playing', {pauseIntent:false, closedDecisionId:null}));
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    const deadlineFlags = timeoutMs > 0 && current.next?.kind === 'user'
+      ? ['--turn-deadline', `${current.next.decisionId}:${new Date(Date.now() + timeoutMs).toISOString()}`]
+      : [];
+    await publishEnvelope(current, ['--view-only', ...deadlineFlags]);
     assertNotStopping();
     pauseRequested = false;
     pauseCompletion = null;
@@ -6626,13 +6661,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const republishAfterRejectedUserAction = async (code, submitted) => {
     const synchronized = await runCli(['step']);
-    const narration = code === 'VERSION_MISMATCH'
-      ? '게임 상태가 변경되어 최신 결정으로 다시 기다립니다.'
-      : '입력한 액션이 허용되지 않아 같은 결정을 다시 기다립니다.';
     const phase = synchronized.next?.decisionId === submitted.decisionId ? 'rejected' : 'consumed';
     const actionAck = userActionAck(submitted, phase, code);
     log('user-action-rejected', { code, decisionId: synchronized.next?.decisionId ?? null });
-    return publishEnvelope({ ...synchronized, actionAck }, ['--narration', narration, ...waitFlags()]);
+    const narrationCode = code === 'VERSION_MISMATCH' ? 'RESYNC' : 'ILLEGAL_RETRY';
+    return publishEnvelope({ ...synchronized, actionAck }, ['--narration-code', narrationCode, ...waitFlags()]);
   };
 
   const handleUserTurn = async (out) => {
@@ -6653,7 +6686,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
 
     const submitted = out.userAction;
+    if (out.controlInterrupted) return out;
     if (!submitted || submitted.timeout) {
+      const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+      const humanTurn = readLoopState()?.humanTurn;
+      const remaining = timeoutMs > 0 && humanTurn?.decisionId === next.decisionId
+        ? humanTurn.deadlineAt - Date.now()
+        : timeoutMs > 0 ? timeoutMs : Infinity;
+      if (remaining > 0) {
+        log('user-wait-timeout', { decisionId: next.decisionId });
+        return waitOnlyForUser(out);
+      }
+      if (managed && control) {
+        const closed = control.closeDecision(next.decisionId);
+        if (!closed.closed) return out;
+        const drained = await waitOnlyForUser(out, { drain: true });
+        if (drained.userAction && !drained.userAction.timeout) return handleUserTurn(drained);
+        const legal = await runCli(['legal']);
+        const narrationCode = legal.canCheck ? 'TIMEOUT_CHECK' : 'TIMEOUT_FOLD';
+        return runAtomicStepPublish(
+          ['step', next.toAct ?? HOST_ID, '--force-default', '--expect-version', String(out.stateVersion)],
+          ['--narration-code', narrationCode, '--narration-params', JSON.stringify({ playerId: next.toAct ?? HOST_ID }), ...waitFlags()],
+        );
+      }
       log('user-wait-timeout', { decisionId: next.decisionId });
       return waitOnlyForUser(out);
     }
@@ -6676,13 +6731,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('user-note-ignored', { type: typeof submitted.note });
     }
 
-    const stepArgs = ['step', 'user', action.action];
+    const actor = next.toAct ?? HOST_ID;
+    const stepArgs = ['step', actor, action.action];
     if (action.amount !== undefined) stepArgs.push(String(action.amount));
     stepArgs.push('--expect-version', String(out.stateVersion));
-    if (action.note) {
+    if (action.note && actor === HOST_ID) {
       const metaPath = path.join(root, '.decision-meta.json');
       writeJsonAtomic(metaPath, { decisionId: next.decisionId, note: action.note });
       stepArgs.push('--meta-file', metaPath);
+    } else if (action.note && actor !== HOST_ID) {
+      log('user-note-ignored', { playerId: actor });
     }
     const actionAck = userActionAck(submitted, 'consumed', 'ACTION_APPLIED');
     try {
@@ -7407,6 +7465,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
       }
+      if ((engineState.config?.humanCount ?? 1) > 1 && !managed) {
+        throw codedError('MULTIPLAYER_REQUIRES_APP', '멀티플레이어 세션은 앱으로만 재개합니다.');
+      }
       opts.hints=checkHintResume(engineState.config, opts.hints);
       opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
       if (engineState.config?.hintContractVersion === 1) await assertHintEngine();
@@ -7705,8 +7766,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopRequested || out === null) break;
       await checkArchivePending(out);
       if (out.handOver) {
-        const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
-        const ending = out.gameOver || userBusted;
+        const ending = out.gameOver;
         if (ending) ensureFinalizationResultWaitCutoff();
         launchTrainingPipeline(out.handNo);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
@@ -7731,7 +7791,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
           const narration = started.events?.find((event) => event.type === 'level_up');
           return narration
-            ? ['--narration', `블라인드 ${narration.sb}/${narration.bb}`, ...waitFlags()]
+            ? ['--narration-code', 'LEVEL_UP', '--narration-params', JSON.stringify({ sb: narration.sb, bb: narration.bb }), ...waitFlags()]
             : waitFlags();
         });
         continue;
