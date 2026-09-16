@@ -19,7 +19,7 @@ metadata:
 
 명시한 모드·AI 수·스택·블라인드·핸드 수·상대 방식·공개 옵션은 로비 기본 선택으로 보존한다. 구조화 JSON 파일을 작성하고 위 명령에 `--setup-file <absolute-json-file>`을 추가한다. 허용 키는 `shared/game-setup.js`의 SETUP_KEYS이며 `aiCount`는 숫자 1~8이다. raw shell 옵션/모델 문장을 JSON 값이나 argv에 끼워 넣지 않는다. 충돌한 옵션은 검증 오류를 보고하고 임의로 버리지 않는다. cash의 칩 단위 `stack`을 명시했다면 `stackBb`를 추가하지 않는다. 로비 토너먼트의 기본 상대 방식은 policy이며 명시 LLM은 유지한다.
 
-로비 **온라인 세션**은 공개 포트 8899(옵션 `--public-port`)로 LAN 참가 링크를 만든다. HTTP가 기본이고 `--tls-cert`/`--tls-key`가 있으면 HTTPS다. 멀티 세션은 앱으로만 재개한다.
+로비 **온라인 세션**은 공개 포트 8899(옵션 `--public-port`, 표시 호스트는 `--public-host`)로 LAN 참가 링크를 만든다. HTTP가 기본이고 `--tls-cert`/`--tls-key`가 있으면 HTTPS다. 멀티 세션은 앱으로만 재개한다.
 
 웹 메뉴는 일시정지, 계속하기, 같은 설정의 새 게임, 모드 선택, 게임 종료를 제공한다. 메뉴 닫기·Escape·모드 선택에서 돌아가기는 자동 재개가 아니다. 모드 변경/재시작/종료 확인은 웹 UI에서 처리한다. 앱 종료는 `npm run app:stop -- <absolute-store>`이고 학습 서비스는 독립적으로 유지된다.
 
