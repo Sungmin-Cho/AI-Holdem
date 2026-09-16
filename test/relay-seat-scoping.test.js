@@ -148,6 +148,7 @@ test('ui-snapshot history에는 views가 없고 구 형식은 user view로 복�
   fs.writeFileSync(snapPath, JSON.stringify({
     revision: 1,
     view: { handNo: 1, toAct: 'user', legal: { decisionId: 'd-1-preflop-0', toAct: 'user' } },
+    views: { h1: { myCards: ['As', 'Ah'] }, user: { myCards: ['Kd', 'Kc'] } },
     log: [],
     coach: [],
     history: [{ revision: 1, at: 't', payload: { view: { handNo: 1 }, views: { h1: { myCards: ['As', 'Ah'] } } } }],
@@ -158,6 +159,7 @@ test('ui-snapshot history에는 views가 없고 구 형식은 user view로 복�
   assert.equal(loaded.views.user.handNo, 1);
   assert.equal(loaded.decision.decisionId, 'd-1-preflop-0');
   assert.equal('views' in loaded.history[0].payload, false);
+  assert.equal(JSON.stringify(loaded).includes('As'), false);
   const projected = publicSnapshot(loaded, null, 'h1');
   assert.equal('coach' in projected, false);
   assert.equal('studyUrl' in projected, false);

@@ -655,21 +655,10 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
     if (droppedAnnotations || replay.dropped) {
       process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
     }
-    let views = raw.views;
+    let views = raw.view ? { [HOST_ID]: raw.view } : undefined;
     let decision = raw.decision ?? null;
-    if (!views || typeof views !== 'object') {
-      views = raw.view ? { [HOST_ID]: raw.view } : undefined;
-      if (!decision && raw.view?.legal) {
-        decision = { decisionId: raw.view.legal.decisionId, toAct: raw.view.legal.toAct ?? HOST_ID };
-      }
-    }
-    try {
-      if (views && engineState) {
-        const players = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json'), 'utf8'));
-        validateViewsAgainstEngine(views, { players, engineState, view: raw.view });
-      }
-    } catch {
-      views = raw.view ? { [HOST_ID]: raw.view } : undefined;
+    if (!decision && raw.view?.legal) {
+      decision = { decisionId: raw.view.legal.decisionId, toAct: raw.view.legal.toAct ?? HOST_ID };
     }
     return {
       revision: Number(raw.revision) || 0,
@@ -913,7 +902,6 @@ function persistUiStateAtomic(owner, state) {
     }),
     lastActionAck: state.lastActionAck,
     handReplays: state.handReplays ?? {},
-    views: state.views ?? undefined,
     decision: state.decision ?? null,
     turnDeadline: state.turnDeadline ?? null,
   };
