@@ -45,14 +45,20 @@ function copyShowdown(record) {
   };
 }
 
-export function replayRecord(record, { reveal } = {}) {
+export function replayRecord(record, { reveal, humanIds } = {}) {
   const mode = reveal === 'all' ? 'all' : 'showdown';
+  const humans = humanIds != null ? new Set(humanIds) : null;
   const shown = new Set(['user']);
   if (mode === 'all') {
-    for (const pid of Object.keys(record.holes ?? {})) shown.add(pid);
-  } else {
-    for (const row of record.showdown?.reveals ?? []) shown.add(row.playerId);
+    if (humans) {
+      for (const pid of Object.keys(record.holes ?? {})) {
+        if (!humans.has(pid)) shown.add(pid);
+      }
+    } else {
+      for (const pid of Object.keys(record.holes ?? {})) shown.add(pid);
+    }
   }
+  for (const row of record.showdown?.reveals ?? []) shown.add(row.playerId);
 
   const holes = {};
   for (const pid of shown) {
@@ -68,6 +74,8 @@ export function replayRecord(record, { reveal } = {}) {
     if (action.forced === true) row.forced = true;
     if (action.playerId === 'user') {
       if (typeof action.note === 'string') row.note = action.note;
+    } else if (humans?.has(action.playerId)) {
+      row.reasonKind = 'human';
     } else {
       const hidden = !shown.has(action.playerId);
       row.reasonKind = hidden ? 'hidden' : reasonKindOf(action);

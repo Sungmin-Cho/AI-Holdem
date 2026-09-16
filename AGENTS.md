@@ -2,7 +2,7 @@
 
 스킬 정본: `.agents/skills/start-game/SKILL.md`
 
-**새 `start game` 요청은 `tools/app-service.js`로 웹 로비를 연다.** 모드·AI 수 선택과 시작, 일시정지·재개·재시작·종료는 웹 UI에서 처리한다. 앱 서비스는 동일 프로세스에서 하나의 game-loop를 호스팅한다. 기존 standalone 직접 실행/재개 경로는 정본 스킬의 legacy 절차를 사용한다.
+**새 `start game` 요청은 `tools/app-service.js`로 웹 로비를 연다.** 모드·AI 수 선택과 시작, 일시정지·재개·재시작·종료는 웹 UI에서 처리한다. 온라인 세션은 공개 포트 8899의 참가 링크를 쓰고, 멀티 게임은 앱으로만 재개한다. 앱 서비스는 동일 프로세스에서 하나의 game-loop를 호스팅한다. 기존 standalone 직접 실행/재개 경로는 정본 스킬의 legacy 절차를 사용한다.
 
 **게임 루프는 `tools/game-loop.js`가 소유한다.** 부트스트랩(loop 락 → `init` → 서버)부터 핸드 안 액션, 코치, 종합 리뷰, 종료까지 앱이 호스팅하는 loop 또는 legacy detached 노드 프로세스가 전부 한다. 딜러 세션이 하는 일은 사전 점검 → 앱 로비 기동 → 보고 셋뿐이고, 핸드 안 딜러 LLM 라운드는 0회다.
 

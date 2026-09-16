@@ -112,6 +112,7 @@ jobs:
           - learning-a
           - learning-b
           - loop
+          - loop-b
           - recovery
           - rest
     steps:

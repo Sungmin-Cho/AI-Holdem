@@ -279,3 +279,33 @@ test('failed initial storage read must recover captured intent before unreceived
   await c.send('fold'); assert.equal(posts.length, 0); assert.deepEqual(JSON.parse(value), original);
   await c.retry(); assert.deepEqual(posts, [original]);
 });
+
+import { formatTurnDeadline, formatNarration } from '../server/public/table-controls.js';
+
+test('DECISION_CLOSED discards the request and blocks the same decision', async () => {
+  const f = fixture({ post: () => ({ ok: false, code: 'DECISION_CLOSED' }) });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  assert.equal(f.controller.state.canRetry, false);
+  assert.equal(f.controller.state.phase, 'idle');
+  assert.equal(f.sent.length, 1);
+  await f.controller.send('fold');
+  assert.equal(f.sent.length, 1);
+  f.controller.observe({ legal: { decisionId: 'd-2-preflop-1' } }, { revision: 2 });
+  f.setSnapshot({ revision: 2, view: { legal: { decisionId: 'd-2-preflop-1' } } });
+  f.setStatus({ ok: true, decisionId: 'd-2-preflop-1', requestId: null, phase: 'unreceived' });
+  await f.controller.reconcile();
+  await f.controller.send('check');
+  assert.equal(f.sent.length, 2);
+});
+
+test('turnDeadline and structured narration formatters are pure', () => {
+  assert.equal(formatTurnDeadline(null), null);
+  assert.equal(formatTurnDeadline({ at: new Date(0).toISOString() }, 10_000), '제한 시간 종료');
+  assert.equal(formatTurnDeadline({ at: new Date(25_000).toISOString() }, 10_000), '남은 시간 15초');
+  assert.equal(formatNarration({ code: 'TIMEOUT_FOLD', params: { playerId: 'h1' } }, [{ playerId: 'h1', name: '민준' }]), '민준 시간 초과로 폴드했습니다.');
+  assert.equal(formatNarration({ code: 'ILLEGAL_RETRY' }), '잘못된 행동이 있어 다시 시도합니다.');
+  assert.equal(formatNarration({ code: 'RESYNC' }), '상태를 다시 맞췄습니다.');
+  assert.equal(formatNarration({ code: 'LEVEL_UP', params: { sb: 50, bb: 100 } }), '블라인드가 50/100로 올랐습니다.');
+  assert.equal(formatNarration({ text: '레거시 문구' }), '레거시 문구');
+});

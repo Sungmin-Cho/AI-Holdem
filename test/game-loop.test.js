@@ -1885,11 +1885,9 @@ async function holdNamedLock(gameDir, name) {
   return { release, done };
 }
 
-function narrationTexts(gameDir) {
+function narrationItems(gameDir) {
   const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
-  return (snapshot.log ?? [])
-    .filter((entry) => entry.type === 'narration')
-    .map((entry) => entry.text);
+  return (snapshot.log ?? []).filter((entry) => entry.type === 'narration');
 }
 
 function stackedDeck(front) {
@@ -4379,7 +4377,7 @@ test('illegal user action resynchronizes, narrates, and waits again without fold
   assert.deepEqual(await postUserAction(lock, illegal), { status: 200, body: { ok: true } });
 
   await waitWhileRunning(running, () => (
-    narrationTexts(gameDir).some((text) => text.includes('허용되지 않아'))
+    narrationItems(gameDir).some((item) => item.code === 'ILLEGAL_RETRY')
   ), 'illegal-action narration was not published');
   assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);
   const refreshed = await waitForUserSnapshot(gameDir);
@@ -4405,7 +4403,7 @@ test('user VERSION_MISMATCH republishes the authoritative decision with narratio
   await postUserAction(lock, preferredUserAction(snapshot.view.legal));
 
   await waitWhileRunning(running, () => (
-    narrationTexts(gameDir).some((text) => text.includes('상태가 변경되어'))
+    narrationItems(gameDir).some((item) => item.code === 'RESYNC')
   ), 'VERSION_MISMATCH narration was not published');
   assert.equal(readJson(path.join(gameDir, 'state.json')).stateVersion, staleVersion + 1);
   assert.equal((readJson(path.join(gameDir, 'state.json')).hand?.actions ?? []).length, 0);

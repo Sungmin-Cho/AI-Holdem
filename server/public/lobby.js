@@ -1,6 +1,7 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
 import {formatAmount} from './chip-format.js';
+import { uuid } from './uuid.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -106,6 +107,30 @@ function render() {
   $("result-restart").hidden = !snapshot.allowedCommands.includes("restart");
   $("result-end").hidden = !snapshot.allowedCommands.includes("end");
   $("result-end").disabled = busy || !snapshot.allowedCommands.includes("end");
+  const room = snapshot.room;
+  if ($("room-panel")) {
+    $("room-panel").hidden = !room;
+    if (room) {
+      $("join-code").textContent = room.joinCode ?? "";
+      $("room-status").textContent = room.status;
+      $("join-links").replaceChildren(
+        ...(room.links ?? []).map((link) => {
+          const item = document.createElement("li");
+          item.textContent = link;
+          return item;
+        }),
+      );
+      $("room-participants").replaceChildren(
+        ...(room.participants ?? []).map((row) => {
+          const item = document.createElement("li");
+          item.textContent = `${row.name}${row.connected ? " ●" : ""}`;
+          return item;
+        }),
+      );
+      $("room-close").disabled = room.status === "locked";
+      $("ai-count").hidden = true;
+    } else $("ai-count").hidden = false;
+  }
   $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
   $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
   $("result-modes").hidden = !snapshot.allowedCommands.includes("start");
@@ -169,6 +194,11 @@ const errorMessages = {
   RECOVERY_REQUIRED:
     "저장된 진행 정보를 자동으로 복구하지 못했습니다. 기록은 보존되어 있습니다.",
   SESSION_RECOVERABLE: "저장된 게임이 있습니다. 불러온 뒤 계속할 수 있습니다.",
+  ROOM_UNBOUND: "온라인 세션이 이 게임에 결합되어 있지 않습니다. 게임을 종료하거나 같은 설정으로 새로 시작하세요.",
+  ROOM_FULL: "참가 인원이 가득 찼습니다.",
+  JOIN_LOCKED: "이 주소는 잠시 참가가 잠겼습니다. 나중에 다시 시도하세요.",
+  ROOM_LOCKED: "게임이 진행 중이라 참가하거나 세션을 닫을 수 없습니다.",
+  NAME_TAKEN: "이미 쓰인 이름입니다. 다른 이름을 선택하세요.",
   UNAUTHORIZED:
     "접속 링크가 만료됐습니다. start game으로 로비 링크를 다시 열어 주세요.",
   NO_PLAYER_RUNTIME:
@@ -192,7 +222,7 @@ async function command(kind, setup, extra = {}) {
   $("error").textContent = "";
   try {
     const payload = {
-      requestId: crypto.randomUUID(),
+      requestId: uuid(),
       expectedInstanceId: snapshot.instanceId,
       expectedAppRevision: snapshot.appRevision,
       expectedGameId: snapshot.gameId,
@@ -286,12 +316,19 @@ function setupFromForm() {
   for (const k of [
     "playerSoftMs",
     "playerHardMs",
-    "aiCount",
+    ...(snapshot?.room
+      ? []
+      : ["aiCount"]),
     ...(setup.mode === "cash-training"
       ? ["stackBb", "hands"]
       : ["stack", "levelEvery"]),
   ])
     setup[k] = Number(data.get(k));
+  if (snapshot?.room) {
+    setup.totalSeats = Number($("total-seats")?.value || 6);
+    setup.hints = "off";
+    setup.dealBias = "off";
+  }
   if (setup.mode === "cash-training" && data.get("cashStackUnit") === "chips") {
     delete setup.stackBb;
     setup.stack = Number(data.get("cashStack"));
@@ -367,6 +404,21 @@ async function recoverCommand() {
     render();
   }
 }
+async function roomOp(op, extra = {}) {
+  await api("/api/room", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op, ...extra }),
+  });
+  await refresh();
+}
+$("room-open")?.addEventListener("click", () => roomOp("open", {
+  hostName: $("host-name")?.value || "호스트",
+  totalSeats: Number($("total-seats")?.value || 6),
+  actionTimeoutSec: Number($("action-timeout")?.value || 60),
+}));
+$("room-rotate")?.addEventListener("click", () => roomOp("rotate-code"));
+$("room-close")?.addEventListener("click", () => roomOp("close"));
 await recoverCommand();
 setInterval(() => {
   if (!busy)

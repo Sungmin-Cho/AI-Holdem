@@ -246,7 +246,7 @@ export function assignSelfOpponents({
     ...row,
     policy: row.policy && typeof row.policy === 'object' ? { ...row.policy } : row.policy,
   }));
-  const ai = next.filter((row) => row.playerId !== 'user');
+  const ai = next.filter((row) => row.playerId !== 'user' && row.kind !== 'human');
   const remaining = [...ai];
   const configs = {};
   const assigned = { mirror: false, exploiter: false };
@@ -278,7 +278,7 @@ export function assignSelfOpponents({
 
 function hasDerivedTriple(players, policyId, archetype) {
   return (players ?? []).some((row) => (
-    row.playerId !== 'user'
+    row.playerId !== 'user' && row.kind !== 'human'
     && row.archetype === archetype
     && row.policy?.policyId === policyId
     && typeof row.policy?.policyVersion === 'string'

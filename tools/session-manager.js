@@ -20,6 +20,8 @@ import {
 } from "../shared/session-control-contract.js";
 import { launchSession } from "./session-launcher.js";
 import { abortModeFor, validateAbortingCheckpoint } from './recovery-exit.js';
+import { createRoomManager } from "./room-manager.js";
+import { validateParticipantName } from "../shared/seat-roles.js";
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -37,11 +39,13 @@ export function createSessionManager({
   playerRuntime = "codex",
   resolver,
   onChange = () => {},
+  room: injectedRoom,
 }) {
   const root = path.resolve(storeDir);
   ensureSessionStore(root);
   const journalDir = path.join(root, ".app", "commands");
   fs.mkdirSync(journalDir, { recursive: true, mode: 0o700 });
+  const room = injectedRoom ?? createRoomManager({ storeDir: root });
   let defaultSetup = normalizeSetup({});
   let current = resolveCurrentSession(root),
     state = "starting",
@@ -55,17 +59,124 @@ export function createSessionManager({
     initialized = false;
   const setupFile = () =>
     current && path.join(current.sessionDir, ".app-setup.json");
-  const currentSetup = () => {
+  const readSetupFile = () => {
     try {
       return normalizeSetup(read(setupFile()));
     } catch {
       return null;
     }
   };
+  const currentSetup = () => {
+    const stored = readSetupFile();
+    if (!stored) return null;
+    const { participants, hostName, totalSeats, actionTimeoutSec, ...rest } = stored;
+    return normalizeSetup(rest);
+  };
+  const readPlayers = () => {
+    if (!current?.sessionDir) return [];
+    try {
+      const rows = read(path.join(current.sessionDir, "players.json"));
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      return [];
+    }
+  };
+  const setupHasParticipants = (setup) =>
+    Array.isArray(setup?.participants) && setup.participants.length >= 1;
+  const actionTimeoutMsFor = (setup) =>
+    setupHasParticipants(setup) ? (setup.actionTimeoutSec ?? 60) * 1000 : 0;
+  const roomBoundToCurrent = () => {
+    const existing = room.load();
+    return Boolean(
+      existing &&
+        existing.status === "locked" &&
+        existing.lock?.boundGameId &&
+        existing.lock.boundGameId === current?.gameId,
+    );
+  };
+  const requireBoundRoom = (setup) => {
+    if (!setupHasParticipants(setup) && !(readPlayers().some((row) => row.playerId !== "user" && row.kind === "human")))
+      return;
+    if (roomBoundToCurrent()) return;
+    emit("error", "ROOM_UNBOUND");
+    throw controlError("ROOM_UNBOUND");
+  };
+  const injectFromLock = (clientSetup, locked) => {
+    const members = locked.participants ?? [];
+    const participants = members.map((row, index) => ({
+      playerId: `h${index + 1}`,
+      name: row.name,
+      participantId: row.participantId,
+    }));
+    const base = { ...(clientSetup ?? {}) };
+    delete base.aiCount;
+    delete base.participants;
+    delete base.hostName;
+    const totalSeats = room.load().totalSeats;
+    if (participants.length >= 1) {
+      for (const row of participants) {
+        try {
+          validateParticipantName(row.name, { hostName: locked.hostName });
+        } catch {
+          throw controlError("NAME_TAKEN");
+        }
+      }
+      return normalizeSetup({
+        ...base,
+        hostName: locked.hostName,
+        totalSeats,
+        participants,
+        actionTimeoutSec: locked.actionTimeoutSec || 60,
+      });
+    }
+    return normalizeSetup({
+      ...base,
+      totalSeats,
+      actionTimeoutSec: 0,
+    });
+  };
+  const shouldLockRoom = (kind) => {
+    if (!["start", "restart", "replace-current"].includes(kind)) return false;
+    const existing = room.load();
+    return Boolean(existing && (existing.status === "open" || existing.status === "locked"));
+  };
+  const safeUnlock = (requestId) => {
+    try {
+      room.unlock(requestId);
+    } catch {
+      /* no room */
+    }
+  };
+  const safeBind = (gameId) => {
+    try {
+      room.bind(gameId, readPlayers());
+    } catch {
+      /* bind is best-effort after a committed session */
+    }
+  };
+  const currentIsTerminal = () => {
+    if (!current) return false;
+    try {
+      const engine = read(path.join(current.sessionDir, "state.json"));
+      const loopFile = path.join(current.sessionDir, "loop-state.json");
+      const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
+      return engine.result === "abort" || loop?.phase === "done";
+    } catch {
+      return false;
+    }
+  };
   const emit = (next, code = null) => {
     state = next;
     error = code;
     revision++;
+    if (["ended", "completed"].includes(next) && current?.gameId) {
+      const keepLock = pending && ["start", "restart", "replace-current"].includes(pending.kind);
+      try {
+        room.release(current.gameId, { pendingRequestId: keepLock ? pending.requestId : null });
+      } catch {
+        /* room may be absent */
+      }
+    }
     onChange(snapshot());
   };
   function abortTarget() {
@@ -220,6 +331,7 @@ export function createSessionManager({
         controlProtocolVersion: 1,
         startPaused: recover,
         appSetup: setup,
+        actionTimeoutMs: actionTimeoutMsFor(setup),
       },
       onReserve: (previous) => {
         // This comparison runs while the launcher owns loop.lock.d.
@@ -265,7 +377,11 @@ export function createSessionManager({
             throw controlError("APP_STOPPING");
           }
         },
-        loopOptions: { controlProtocolVersion: 1, startPaused: true },
+        loopOptions: {
+          controlProtocolVersion: 1,
+          startPaused: true,
+          actionTimeoutMs: actionTimeoutMsFor(readSetupFile()),
+        },
       },
     );
     startingLoop = null;
@@ -300,7 +416,7 @@ export function createSessionManager({
       expectedCurrent:{gameId:recovery.gameId,selectionVersion:recovery.selectionVersion,gameEpoch:recovery.gameEpoch}}, {
       resolver,
       onLoop:async loop=>{startingLoop=loop;if(closed){await loop.requestStop();throw controlError('APP_STOPPING');}},
-      loopOptions:{controlProtocolVersion:1,abortUnrecoverable:{operationId:row.requestId}},
+      loopOptions:{controlProtocolVersion:1,abortUnrecoverable:{operationId:row.requestId,reason:row.recovery?.reason ?? 'BAD_PLAYER_RECOVERY'}},
     });
     if (consumeEndedLaunch(launched)) return;
     observeRun(launched);
@@ -391,9 +507,13 @@ export function createSessionManager({
           await start(row);
         }
       }
+      if (row.roomLocked && ["start", "restart", "replace-current"].includes(row.kind) && current?.gameId) {
+        safeBind(current.gameId);
+      }
       row.status = "succeeded";
       row.result = snapshot();
     } catch (err) {
+      if (row.roomLocked) safeUnlock(row.requestId);
       row.status = "failed";
       row.error = err.code ?? "COMMAND_FAILED";
       reconcileFailure(row.error);
@@ -411,6 +531,7 @@ export function createSessionManager({
     if (["start", "replace-current"].includes(body.kind))
       normalized.setup = normalizeSetup(body.setup);
     // Stable deep encoding: setup's key order must not change request identity.
+    // Payload is the client surface — room injection must not change identity.
     const payload = canonical(normalized);
     const file = path.join(journalDir, `${body.requestId}.json`);
     if (fs.existsSync(file)) {
@@ -428,13 +549,30 @@ export function createSessionManager({
     sameCurrent(body);
     if (!snapshot().allowedCommands.includes(body.kind))
       throw controlError("INVALID_TRANSITION");
-    const setup = body.kind === "restart" ? currentSetup() : normalized.setup;
+    if (["resume", "retry-decision"].includes(body.kind)) {
+      requireBoundRoom(readSetupFile());
+    }
+    let setup = body.kind === "restart" ? currentSetup() : normalized.setup;
     if (["restart", "replace-current", "start"].includes(body.kind) && !setup)
       throw controlError("SETUP_UNAVAILABLE");
+    let roomLocked = false;
+    if (shouldLockRoom(body.kind)) {
+      let locked;
+      try {
+        locked = room.lockForStart({ requestId: body.requestId });
+        roomLocked = true;
+        const source = body.kind === "restart" ? currentSetup() : body.setup;
+        setup = injectFromLock(source, locked);
+      } catch (err) {
+        if (roomLocked) safeUnlock(body.requestId);
+        throw err;
+      }
+    }
     const row = {
       ...normalized,
       setup,
       payload,
+      roomLocked,
       status: "accepted",
       acceptedAt: new Date().toISOString(),
     };
@@ -442,9 +580,15 @@ export function createSessionManager({
       const recoveryExit=abortTarget();
       if (!recoveryExit) throw controlError('INVALID_TRANSITION');
       row.recovery={kind:'abort-unrecoverable',mode:recoveryExit.mode,gameId:current.gameId,
-        selectionVersion:current.selectionVersion,gameEpoch:snapshot().gameEpoch};
+        selectionVersion:current.selectionVersion,gameEpoch:snapshot().gameEpoch,
+        reason: error === 'ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY'};
     }
-    save(row);
+    try {
+      save(row);
+    } catch (err) {
+      if (roomLocked) safeUnlock(body.requestId);
+      throw err;
+    }
     pending = row;
     revision++;
     onChange(snapshot());
@@ -470,6 +614,16 @@ export function createSessionManager({
         .filter((f) => f.endsWith(".json"))
         .map((f) => read(path.join(journalDir, f)));
       const unfinished = rows.filter((r) => r.status === "accepted");
+      try {
+        room.recover({
+          current,
+          players: readPlayers(),
+          unfinishedRow: unfinished.length === 1 ? unfinished[0] : null,
+          gameTerminal: currentIsTerminal(),
+        });
+      } catch {
+        /* no room yet */
+      }
       if (unfinished.length > 1) {
         emit("error", "RECOVERY_REQUIRED");
         return snapshot();
@@ -486,12 +640,19 @@ export function createSessionManager({
           const lock = readOwnedLock(root, "loop.lock.d");
           if (lock && lock.status !== "dead") throw controlError("ACTIVE_GAME");
           if (reservedCurrent) {
-            if (!currentSetup()) writeJsonAtomic(setupFile(), row.setup);
+            if (!readSetupFile()) writeJsonAtomic(setupFile(), row.setup);
+            if (row.roomLocked || setupHasParticipants(row.setup)) safeBind(current.gameId);
             await recoverPaused();
           } else if (row.recovery?.kind==='abort-unrecoverable') {
             await abortUnrecoverable(row);
-            if (row.kind==='restart') await start(row,{recover:true});
-          } else if (row.kind === "start") await start(row, { recover: true });
+            if (row.kind==='restart') {
+              await start(row,{recover:true});
+              if (row.roomLocked || setupHasParticipants(row.setup)) safeBind(current.gameId);
+            }
+          } else if (row.kind === "start") {
+            await start(row, { recover: true });
+            if (row.roomLocked || setupHasParticipants(row.setup)) safeBind(current.gameId);
+          }
           else {
             await recoverPaused();
             if (["end", "restart", "replace-current"].includes(row.kind)) {
@@ -501,7 +662,10 @@ export function createSessionManager({
                 await runPromise;
               }
               if (row.kind === "end") emit("ended");
-              else await start(row, { recover: true });
+              else {
+                await start(row, { recover: true });
+                if (row.roomLocked || setupHasParticipants(row.setup)) safeBind(current.gameId);
+              }
             }
             // A crash-restored resume is parked; opening the app never silently plays.
           }
@@ -509,6 +673,7 @@ export function createSessionManager({
           if (row.kind === "retry-decision") row.error = "RETRY_NOT_APPLIED";
           row.result = snapshot();
         } catch (err) {
+          if (row.roomLocked) safeUnlock(row.requestId);
           row.status = "failed";
           row.error = err.code ?? "RECOVERY_REQUIRED";
           reconcileFailure(row.error);
@@ -593,6 +758,7 @@ export function createSessionManager({
     snapshot,
     command,
     close,
+    room,
     setPrefill(value) {
       defaultSetup = normalizeSetup(value);
       revision++;

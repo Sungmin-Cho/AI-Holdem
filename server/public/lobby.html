@@ -128,6 +128,35 @@
             선택하면 AI가 2명 이상이어야 합니다.
           </p>
         </details>
+        <fieldset id="online-session">
+          <legend>온라인 세션</legend>
+          <p id="tls-warning">이 링크는 암호화되지 않습니다 — 참가 코드·카드가 경로상 노출될 수 있습니다</p>
+          <label>호스트 이름 <input name="hostName" id="host-name" value="호스트" maxlength="12" /></label>
+          <label>총 인원
+            <select name="totalSeats" id="total-seats">
+              <option>2</option><option>3</option><option>4</option>
+              <option>5</option><option selected>6</option><option>7</option>
+              <option>8</option><option>9</option>
+            </select>
+          </label>
+          <label>행동 제한 시간
+            <select name="actionTimeoutSec" id="action-timeout">
+              <option value="30">30초</option>
+              <option value="60" selected>60초</option>
+              <option value="90">90초</option>
+              <option value="120">120초</option>
+            </select>
+          </label>
+          <button type="button" id="room-open">세션 열기</button>
+          <div id="room-panel" hidden>
+            <p id="join-code"></p>
+            <ul id="join-links"></ul>
+            <p id="room-status"></p>
+            <ul id="room-participants"></ul>
+            <button type="button" id="room-rotate">코드 재발급</button>
+            <button type="button" id="room-close">세션 닫기</button>
+          </div>
+        </fieldset>
         <button id="start" disabled type="submit">게임 시작</button
         ><button type="button" id="back" hidden>
           일시정지 메뉴로 돌아가기

@@ -17,6 +17,10 @@ export const SETUP_KEYS = Object.freeze([
   "replayReveal",
   "playerSoftMs",
   "playerHardMs",
+  "totalSeats",
+  "actionTimeoutSec",
+  "hostName",
+  "participants",
 ]);
 export function setupError(field) {
   return Object.assign(new Error(`게임 설정을 확인하세요: ${field}`), {
@@ -89,7 +93,7 @@ export function normalizeSetup(input = {}) {
   for (const key of ["aiCount", "stack", "stackBb", "hands", "levelEvery"])
     if (
       value[key] !== undefined &&
-      (!Number.isSafeInteger(value[key]) || value[key] < 1)
+      (!Number.isSafeInteger(value[key]) || value[key] < (key === "aiCount" && Array.isArray(value.participants) && value.participants.length >= 1 ? 0 : 1))
     )
       throw setupError(key);
   if (value.aiCount > 8) throw setupError("aiCount");
@@ -123,9 +127,50 @@ export function normalizeSetup(input = {}) {
     (value.opponentRuntime !== "policy" || selfCount > value.aiCount)
   )
     throw setupError("mirrorSelf");
+  if (value.participants !== undefined) {
+    if (!Array.isArray(value.participants)) throw setupError("participants");
+    const k = value.participants.length;
+    if (value.totalSeats === undefined) throw setupError("totalSeats");
+    if (!Number.isInteger(value.totalSeats) || value.totalSeats < 2 || value.totalSeats > 9) {
+      throw setupError("totalSeats");
+    }
+    const aiCount = value.totalSeats - 1 - k;
+    if (Object.hasOwn(input, "aiCount") && value.aiCount !== aiCount) throw setupError("aiCount");
+    if (aiCount < 0 || aiCount > 8) throw setupError("aiCount");
+    value.aiCount = aiCount;
+    if (k >= 1) {
+      if (value.hints !== "off" || value.dealBias !== "off") throw setupError("hints");
+      if (aiCount === 0 && (value.mirrorSelf || value.exploitSelf)) throw setupError("mirrorSelf");
+      if (value.actionTimeoutSec === 0) throw setupError("actionTimeoutSec");
+      value.actionTimeoutSec ??= 60;
+      if (!Number.isInteger(value.actionTimeoutSec) || value.actionTimeoutSec < 10 || value.actionTimeoutSec > 600) {
+        throw setupError("actionTimeoutSec");
+      }
+    } else {
+      if (value.actionTimeoutSec !== undefined && value.actionTimeoutSec !== 0) {
+        throw setupError("actionTimeoutSec");
+      }
+      value.actionTimeoutSec = 0;
+      delete value.participants;
+    }
+  } else if (value.actionTimeoutSec !== undefined && value.actionTimeoutSec !== 0
+    && (value.participants === undefined || value.participants.length === 0)) {
+    throw setupError("actionTimeoutSec");
+  }
+  if (value.totalSeats !== undefined && value.participants === undefined) {
+    if (!Number.isInteger(value.totalSeats) || value.totalSeats < 2 || value.totalSeats > 9) {
+      throw setupError("totalSeats");
+    }
+    value.aiCount = value.totalSeats - 1;
+  }
   return value;
 }
 export function setupToArgs(setup, storeDir) {
-  const { aiCount, ...rest } = normalizeSetup(setup);
-  return { ...rest, ai: aiCount, storeDir };
+  const normalized = normalizeSetup(setup);
+  const { aiCount, participants, ...rest } = normalized;
+  const args = { ...rest, ai: aiCount, storeDir };
+  if (Array.isArray(participants) && participants.length >= 1) {
+    args.participants = participants;
+  }
+  return args;
 }

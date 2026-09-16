@@ -16,7 +16,14 @@ const MESSAGES = {
 /** Network/auth adapters are injected. Only a hash of the authenticated game token
  * identifies the game. Credentials never enter the persisted request object. */
 export function createActionController({ gameEpoch, postAction, getSnapshot, getStatus, storage,
-  onState = () => {}, onSnapshot = () => {}, uuid = () => crypto.randomUUID(), timeoutMs = 8000 } = {}) {
+  onState = () => {}, onSnapshot = () => {}, uuid = () => {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }, timeoutMs = 8000 } = {}) {
   let view = null;
   let request = null;
   let phase = 'unknown';
@@ -28,6 +35,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   let knownReceipt = null;
   let sendingCount = 0;
   let storageLoaded = false;
+  let closedDecisionId = null;
   const receiptRank = { accepted: 1, delivered: 2, consumed: 3 };
   const key = typeof gameEpoch === 'string' && gameEpoch ? `holdem.action.v1.${gameEpoch}` : null;
   const currentId = () => view?.legal?.decisionId ?? null;
@@ -142,6 +150,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
       }
       const before = currentId();
       view = nextView;
+      if (currentId() !== closedDecisionId) closedDecisionId = null;
       if (currentId() !== before) { setPhase('unknown'); void reconcile(); }
       else emit();
     },
@@ -155,6 +164,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   };
 
   async function sendAction(action, amount, note) {
+    if (closedDecisionId && currentId() === closedDecisionId) return state();
     const unchanged = request?.decisionId === currentId() && request.action === action
       && request.amount === (action === 'raise' ? amount : undefined);
     if (!key || (request && !unchanged) || (state().disabled && !(unchanged && state().canRetry))) return state();
@@ -183,7 +193,14 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         }
         return response;
       });
-      if (stillCurrent() && result?.ok !== true) await reconcile();
+      if (stillCurrent() && result?.ok !== true) {
+        if (result && ['DECISION_CLOSED', 'STALE_DECISION'].includes(result.code)) {
+          closedDecisionId = captured.decisionId;
+          release();
+          return setPhase('idle', result.code);
+        }
+        await reconcile();
+      }
     } catch (error) {
       if (stillCurrent()) { errorCode = error.message; await reconcile(); }
     } finally { sendingCount -= 1; emit(); }

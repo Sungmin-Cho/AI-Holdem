@@ -41,7 +41,10 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/study-summary.js` | 검증된 학습 이벤트를 게임·연습·평가·재시험별 공개 요약으로 투영한다. |
 | `shared/reference.js` | 휴리스틱 기준표의 출처·허용 액션·분포 일치 계약. 학습 효과나 solver 권위로 승격하지 않는다. |
 | `shared/free-text.js` | 사유·메모 정규화(`normalizeFreeText`). 코드포인트·바이트 상한. import 없음. |
+| `shared/seat-roles.js` | 호스트 id `'user'`, 참가자 `h1..hK`, `isHumanSeat`/`humanIdsOf`/`seatLabel`. 서버는 `publish-contract.js` 재수출만 쓴다. |
+| `shared/reserved-names.js` | 좌석 예약어(`나` 등). 엔진 페르소나와 참가 이름이 공유한다. |
 | `shared/hand-replay.js` | 완료 핸드 복기 투영(`replayRecord`). 엔진 CLI와 서버가 같은 함수를 부른다. |
+| `tools/room-manager.js` | 로비 룸 상태(`open/locked/closed/error`), 참가 코드·토큰 세대, `lockForStart`/`bind`/`unlock`/`release`. |
 | `server/public/replay-format.js` | 복기 오버레이용 순수 행 모델(`formatReplay`). 표식 문구와 벳/레이즈 동사. |
 | `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
@@ -83,6 +86,12 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 - 코치 proof tuple은 `canonicalPayloadJson` 한 함수.
 - 오래된 `gameEpoch`/`activeOwnerSessionId`의 코치 콜백이 새 게임의 상태를 오염시키면 안 된다.
 - decision snapshot은 `engine/` 소유이며, redacted 핸드·코치 입력은 viewer 자신의 스냅샷만 남기고 `decisions[].priorActions`를 최상위 액션과 같은 허용 키로 다시 걸러 상대 홀카드·비공개 정책 필드가 새면 안 된다.
+- **참가자 채널은 자기 좌석 view·공개 이벤트·나레이션·턴 마감만 싣는다.** 코치·학습·힌트·복기·종합 리뷰·study 링크는 호스트 채널(`'user'`) 전용이다.
+- **인간 좌석의 홀카드는 쇼다운 공개분 외에 진행 중·종료 후 어느 채널로도 나가지 않는다.** `showdownPolicy=open`·`replayReveal=all`은 AI 좌석에만 적용된다. 공개 채널은 닫힌 스키마와 엔진 결합으로, 호스트 텍스트는 그 핸드의 참가자 숨은 홀 집합으로 relay가 검사한다.
+- **relay는 loopback 전용이다.** 외부에 열리는 것은 앱 서버의 공개 리스너뿐이고, 그 리스너는 참가 라우트만 안다.
+- **좌석 집합은 시작 명령 접수 시점에 룸에서 고정된다.** 게임 중 좌석은 추가·삭제·교체되지 않는다.
+- **relay의 접수·전달·ACK는 좌석이 아니라 게시된 유일한 `legal`이 가리키는 결정 하나에 결합된다.**
+- **참가자 좌석의 view는 디스크에 이력으로 남지 않는다**(현재 호스트 view만 `ui-snapshot.json`에). 사용자가 입력한 이름은 LLM 프롬프트에 들어가지 않는다.
 
 ## 4. 레이어 경계
 
@@ -149,5 +158,7 @@ Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축�
 `app.lock.d`는 앱 수명, `loop.lock.d`는 현재 게임 수명이다. pause는 loop lock과 relay를 유지한 채 `run()`을 park한다. managed relay는 명시된 control protocol v1을 사용하며 `.session-control.json`이 없거나 손상되면 액션을 거부한다. legacy relay에 자동으로 이 규칙을 추정 적용하지 않는다. 공유 제어 락 안에서 게이트 변경과 receipt 접수를 직렬화하며 네트워크/엔진 await는 락 밖에서 수행한다.
 
 앱 HTTP는 Host·Origin·Authorization을 검사하고 current gameId/epoch에 묶인 snapshot/events/action-status/training-detail/action만 전달한다. publish/wait-action은 공개 프록시가 없다. gameEpoch는 기존 private sessionToken의 SHA-256이며 앱 토큰과 구별한다. 중도 종료는 엔진 `result: abort`와 loop `phase: aborted`, `endedAt`으로 기록한다. 정상 완료 `done`, `finishedAt`, 종합 리뷰와 구분한다. 미완료 핸드는 private abort audit에 남기고 완료 핸드 archive에는 쓰지 않는다.
+
+공개 리스너는 앱 서버만 띄운다(기본 `0.0.0.0:8899`, `--public-port`/`--public-host`, `--tls-cert`/`--tls-key`). 참가 라우트(`/join`, `/api/join`, `/api/p/*`) 외는 404다. 주소당 연결 32·전체 128, 같은 주소의 `/api/join`은 분당 10을 넘으면 429, 참가자 SSE는 좌석당 4다. relay history는 바이트 예산으로 자르고, 참가자 프레임은 메모리 링(200)이며 영속 `ui-snapshot.json` history에는 `views`가 없다.
 
 명령은 부작용 전에 `.app/commands/<requestId>.json`에 저장한다. 동일 payload 재전송은 CAS보다 먼저 같은 receipt를 반환한다. 새 게임은 락 획득 후 UUID/selectionVersion을 예약하고 staging init 완료 hash를 남긴 뒤 current를 교체한다. crash 복구에서 불완전한 staging은 보존하고 `RECOVERY_REQUIRED`로 닫는다. 게임이 복원되면 자동 플레이하지 않고 paused 상태로 대기한다. 구현·검증 근거는 `docs/implementation/lobby-session-*.md`에 있다.

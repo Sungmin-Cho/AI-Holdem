@@ -16,6 +16,7 @@ import {
   META_FILE_MAX_BYTES, NOTE_MAX_BYTES, NOTE_MAX_CHARS,
   normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS,
 } from '../shared/free-text.js';
+import { HOST_ID, humanIdsOf, isHumanSeat, validateParticipantList } from '../shared/seat-roles.js';
 
 const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand', 'replay']);
 const VALUE_FLAGS = new Set([
@@ -23,6 +24,7 @@ const VALUE_FLAGS = new Set([
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta',
   'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id', 'deal-bias',
+  'participants-file',
 ]);
 
 const FAIL_MESSAGES = {
@@ -99,8 +101,34 @@ function parseIntArg(value, label) {
 
 function parseAi(value) {
   const n = parseIntArg(value, '--ai');
-  if (n < 1 || n > 8) usage('--ai는 1에서 8 사이여야 합니다.');
+  if (n < 0 || n > 8) usage('--ai는 0에서 8 사이여야 합니다.');
   return n;
+}
+
+function readParticipantsFile(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    usage('--participants-file을 읽을 수 없습니다.');
+  }
+  if (!stat.isFile() || stat.size > META_FILE_MAX_BYTES) usage('--participants-file이 너무 큽니다.');
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    usage('--participants-file이 JSON이 아닙니다.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.schemaVersion !== 1
+    || !Array.isArray(parsed.participants)) {
+    usage('--participants-file 형식이 올바르지 않습니다.');
+  }
+  try {
+    validateParticipantList(parsed.participants, { hostName: parsed.hostName });
+  } catch {
+    usage('--participants-file의 참가자 목록이 올바르지 않습니다.');
+  }
+  return parsed;
 }
 
 function parseBlinds(value) {
@@ -152,6 +180,13 @@ function mutate(gameDir, fn) {
   if (envelope.view?.legal?.stateVersion !== undefined) {
     envelope.view.legal.stateVersion = envelope.stateVersion;
   }
+  if (envelope.views) {
+    for (const view of Object.values(envelope.views)) {
+      if (view?.legal?.stateVersion !== undefined) {
+        view.legal.stateVersion = envelope.stateVersion;
+      }
+    }
+  }
   const lastHand = result.state.lastHand;
   if (lastHand && lastHand.handNo !== result.beforeHandNo) {
     envelope.handReplay = { handNos: [lastHand.handNo] };
@@ -180,6 +215,15 @@ function parseSafePositive(value, label) {
 function cmdInit(gameDir, flags) {
   if (flags.ai == null) usage('--ai가 필요합니다.');
   const aiCount = parseAi(flags.ai);
+  let participants;
+  let hostName;
+  if (flags['participants-file'] != null) {
+    const file = readParticipantsFile(path.resolve(flags['participants-file']));
+    participants = file.participants;
+    hostName = file.hostName;
+  } else if (aiCount === 0) {
+    usage('--ai 0은 --participants-file이 필요합니다.');
+  }
   const mode = flags.mode;
   if (mode != null && mode !== 'tournament' && mode !== 'cash-training') {
     usage('--mode는 tournament 또는 cash-training이어야 합니다.');
@@ -227,6 +271,8 @@ function cmdInit(gameDir, flags) {
     opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
     showdownPolicy: parseShowdownPolicy(flags['showdown-policy']),
     replayReveal: parseReplayReveal(flags['replay-reveal']),
+    participants,
+    hostName,
   });
   succeed({
     stateVersion: result.stateVersion,
@@ -273,7 +319,7 @@ function cmdApply(gameDir, flags, rest) {
     }
     const metaResult = flags['force-default']
       ? null
-      : readMetaFlag(flags, legalFor(state), playerId);
+      : readMetaFlag(flags, legalFor(state), playerId, state);
     const result = flags['force-default']
       ? forceDefault(state, playerId)
       : applyAction(state, playerId, action, amount, {
@@ -307,7 +353,9 @@ function nextBlock(gameDir, state, legal) {
   const next = {
     toAct: legal.toAct,
     decisionId: legal.decisionId,
-    kind: legal.toAct === 'user' ? 'user' : 'ai',
+    kind: isHumanSeat(state.seats.find((seat) => seat.playerId === legal.toAct) ?? { playerId: legal.toAct })
+      ? 'user'
+      : 'ai',
   };
   if (next.kind === 'ai') {
     const record = readPlayers(gameDir).find((player) => player.playerId === legal.toAct);
@@ -321,9 +369,13 @@ function nextBlock(gameDir, state, legal) {
 // events to publish, the user view, and the next actor's self-contained summary.
 function stepEnvelope(gameDir, state, events) {
   const response = applyEnvelope(state, events);
-  response.view = viewFor(state, 'user');
+  const views = {};
+  for (const id of humanIdsOf(state.seats)) views[id] = viewFor(state, id);
+  if (!views[HOST_ID]) views[HOST_ID] = viewFor(state, HOST_ID);
+  response.views = views;
+  response.view = views[HOST_ID];
   // Marks whose view this is: publishing any other player's view would expose their hole cards.
-  response.viewFor = 'user';
+  response.viewFor = HOST_ID;
   response.next = nextBlock(gameDir, state, legalFor(state));
   return response;
 }
@@ -368,7 +420,7 @@ function cmdStep(gameDir, flags, rest) {
     } else if (flags['force-default']) {
       result = forceDefault(state, playerId);
     } else {
-      metaResult = readMetaFlag(flags, legalFor(state), playerId);
+      metaResult = readMetaFlag(flags, legalFor(state), playerId, state);
       result = applyAction(state, playerId, action, amount, {
         policyMeta: parsePolicyMeta(flags['policy-meta']),
         meta: metaResult?.meta,
@@ -390,7 +442,7 @@ function cmdHand(gameDir, flags, rest) {
   if (!record) throwCoded('HAND_NOT_FOUND', `핸드 ${n}을 찾을 수 없습니다.`);
   if (flags.replay) {
     const reveal = state.config?.replayReveal ?? 'showdown';
-    succeed({ stateVersion: state.stateVersion, ...replayRecord(record, { reveal }) });
+    succeed({ stateVersion: state.stateVersion, ...replayRecord(record, { reveal, humanIds: humanIdsOf(state.seats) }) });
     return;
   }
   if (flags.redacted) record = redactRecord(record);
@@ -468,7 +520,7 @@ function rejectForceDefaultWithMeta(flags) {
 
 const META_KEYS = new Set(['decisionId', 'reason', 'note']);
 
-function readDecisionMeta(metaPath, legal, playerId) {
+function readDecisionMeta(metaPath, legal, playerId, actorRow) {
   let stat;
   try {
     stat = fs.statSync(metaPath);
@@ -489,8 +541,9 @@ function readDecisionMeta(metaPath, legal, playerId) {
   if (parsed.decisionId !== legal.decisionId) return { dropped: 'META_STALE' };
   if (parsed.reason !== undefined && typeof parsed.reason !== 'string') return { dropped: 'META_TYPE' };
   if (parsed.note !== undefined && typeof parsed.note !== 'string') return { dropped: 'META_TYPE' };
-  if (playerId === 'user' && parsed.reason !== undefined) return { dropped: 'META_ACTOR' };
-  if (playerId !== 'user' && parsed.note !== undefined) return { dropped: 'META_ACTOR' };
+  const human = isHumanSeat(actorRow ?? { playerId });
+  if (parsed.reason !== undefined && human) return { dropped: 'META_ACTOR' };
+  if (parsed.note !== undefined && playerId !== HOST_ID) return { dropped: 'META_ACTOR' };
 
   const meta = {};
   const applied = [];
@@ -513,9 +566,10 @@ function readDecisionMeta(metaPath, legal, playerId) {
   return { meta, applied };
 }
 
-function readMetaFlag(flags, legal, playerId) {
+function readMetaFlag(flags, legal, playerId, state) {
   if (flags['meta-file'] == null) return null;
-  return readDecisionMeta(flags['meta-file'], legal, playerId);
+  const actorRow = state?.seats?.find((seat) => seat.playerId === playerId);
+  return readDecisionMeta(flags['meta-file'], legal, playerId, actorRow);
 }
 
 function attachMeta(response, metaResult) {
