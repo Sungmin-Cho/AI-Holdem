@@ -6,6 +6,7 @@ import { positionsOf } from './positions.js';
 import { awardPots, buildPots } from './sidepots.js';
 import { selectedDeck } from './deal-selection.js';
 import { DEAL_BIAS_MODES, checkDealBiasResume, dealSelectionFields } from '../shared/deal-selection.js';
+import { HOST_ID, isHumanSeat, validateParticipantList } from '../shared/seat-roles.js';
 
 const DEFAULT_BLINDS = [25, 50];
 const BASE_BLINDS = [
@@ -65,6 +66,8 @@ export function createGame({
   replayReveal,
   hints,
   dealBias,
+  participants,
+  hostName,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
   if (dealBias !== undefined && !DEAL_BIAS_MODES.includes(dealBias)) throwBadConfig('dealBias는 off/light/strong이어야 합니다.');
@@ -85,13 +88,49 @@ export function createGame({
     throwBadConfig('handLimit은 cash-training 전용입니다.');
   }
 
-  const seats = [{ playerId: 'user', name: '나', stack: startStack, out: false }];
+  const participantList = Array.isArray(participants) ? participants : [];
+  const K = participantList.length;
+  if (K > 0) {
+    try {
+      validateParticipantList(participantList, { hostName });
+    } catch (error) {
+      throwBadConfig(error.message);
+    }
+  }
+  if (!Number.isInteger(aiCount) || aiCount < 0 || aiCount > 8) {
+    throwBadConfig('aiCount는 0에서 8 사이여야 합니다.');
+  }
+  const totalSeats = 1 + K + aiCount;
+  if (totalSeats < 2 || totalSeats > 9) {
+    throwBadConfig('총 좌석은 2에서 9 사이여야 합니다.');
+  }
+  if (K === 0 && aiCount === 0) {
+    throwBadConfig('AI 0명은 참가자가 있을 때만 허용됩니다.');
+  }
+  if (K >= 1 && ((dealBias ?? 'off') !== 'off' || hints === 'on')) {
+    throwBadConfig('참가자가 있는 게임은 힌트와 편향 딜을 쓸 수 없습니다.');
+  }
+
+  const resolvedHostName = hostName ?? (K >= 1 ? '호스트' : '나');
+  const seats = [{
+    playerId: HOST_ID, name: resolvedHostName, stack: startStack, out: false, kind: 'human',
+  }];
+  for (const row of participantList) {
+    seats.push({
+      playerId: row.playerId,
+      name: row.name.trim(),
+      stack: startStack,
+      out: false,
+      kind: 'human',
+    });
+  }
   for (let i = 1; i <= aiCount; i += 1) {
     seats.push({
       playerId: `p${i}`,
       name: names?.[i - 1] ?? `p${i}`,
       stack: startStack,
       out: false,
+      kind: 'ai',
     });
   }
   const stats = {};
@@ -114,6 +153,7 @@ export function createGame({
     showdownPolicy: resolvedShowdown,
     replayReveal: resolvedReplay,
   };
+  if (K >= 1) config.humanCount = 1 + K;
   if (dealBias !== undefined) { config.dealBias=dealBias; config.dealSelectionContractVersion=1; }
   if (hints !== undefined) {
     if (!['on', 'off'].includes(hints)) throwBadConfig('hints는 on 또는 off여야 합니다.');
@@ -126,7 +166,7 @@ export function createGame({
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: K >= 1 ? 2 : 1,
     stateVersion: 0,
     config,
     sessionToken: randomBytes(16).toString('hex'),
@@ -180,10 +220,10 @@ function handLimitReached(state) {
 }
 
 export function startHand(state, options = {}) {
-  const user = state.seats.find((seat) => seat.playerId === 'user');
   const cash = isCashTraining(state);
   if (state.gameOver) throwGameOver();
-  if (!cash && (!user || user.stack <= 0)) throwGameOver();
+  const liveHumans = state.seats.filter((seat) => isHumanSeat(seat) && isLive(seat));
+  if (!cash && liveHumans.length === 0) throwGameOver();
   if (cash && handLimitReached(state)) {
     const next = structuredClone(state);
     next.gameOver = true;
@@ -246,7 +286,7 @@ export function startHand(state, options = {}) {
 
   const dealBias = checkDealBiasResume(state.config);
   if(options.deck && dealBias !== 'off') throwBadConfig('편향 딜은 명시적 테스트 덱과 함께 사용할 수 없습니다.');
-  const deck = options.deck ? [...options.deck] : selectedDeck(dealBias,dealOrder.findIndex(index=>next.seats[index].playerId==='user'),dealOrder.length,options.rng);
+  const deck = options.deck ? [...options.deck] : selectedDeck(dealBias,dealOrder.findIndex(index=>next.seats[index].playerId===HOST_ID),dealOrder.length,options.rng);
   for (let round = 0; round < 2; round += 1) {
     for (const seatIdx of dealOrder) {
       const pid = next.seats[seatIdx].playerId;
@@ -451,7 +491,8 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
       }
       return compareScore(scores.get(pid), bestShown) > 0;
     });
-    const forcedReveal = state.config?.showdownPolicy === 'open' && pid !== 'user';
+    const revealSeat = state.seats.find((seat) => seat.playerId === pid);
+    const forcedReveal = state.config?.showdownPolicy === 'open' && !isHumanSeat(revealSeat ?? { playerId: pid });
     // reveals and shown stay in lockstep; otherwise a losing user hand leaks
     // when a prior forced AI reveal is not counted as shown.
     if (forcedReveal || mustShow) {
@@ -625,18 +666,27 @@ function finishHand(state, events) {
       }
     }
 
-    const user = state.seats.find((seat) => seat.playerId === 'user');
-    const aiAlive = state.seats.some((seat) => seat.playerId !== 'user' && !seat.out);
-    if (!user || user.stack <= 0) {
+    const live = state.seats.filter((seat) => !seat.out && seat.stack > 0);
+    const liveHumans = live.filter((seat) => isHumanSeat(seat));
+    if (liveHumans.length === 0) {
       state.gameOver = true;
       state.result = 'lose';
       state.bustedPlayerIds = bustedPlayerIds;
       emit(events, 'public', 'game_over', { result: 'lose', bustedPlayerIds });
-    } else if (!aiAlive) {
+    } else if (live.length <= 1) {
+      const survivor = live[0];
       state.gameOver = true;
-      state.result = 'win';
       state.bustedPlayerIds = bustedPlayerIds;
-      emit(events, 'public', 'game_over', { result: 'win', bustedPlayerIds });
+      if (survivor.playerId === HOST_ID) {
+        state.result = 'win';
+        emit(events, 'public', 'game_over', { result: 'win', bustedPlayerIds });
+      } else {
+        state.result = 'completed';
+        state.winnerId = survivor.playerId;
+        emit(events, 'public', 'game_over', {
+          result: 'completed', bustedPlayerIds, winnerId: survivor.playerId,
+        });
+      }
     }
   }
 
@@ -776,16 +826,16 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     stacks: Object.fromEntries(next.seats.map((s) => [s.playerId, s.stack])),
   };
   if (forced) record.forced = true;
-  if (policyMeta && playerId !== 'user') {
+  if (policyMeta && !isHumanSeat(seat)) {
     for (const key of ['policyId', 'policyVersion', 'sampledProbability', 'reasonCode']) {
       if (policyMeta[key] !== undefined) record[key] = policyMeta[key];
     }
   }
   if (meta) {
-    if (playerId !== 'user' && meta.reason != null) record.reason = meta.reason;
-    if (playerId === 'user' && meta.note != null) record.note = meta.note;
+    if (!isHumanSeat(seat) && meta.reason != null) record.reason = meta.reason;
+    if (playerId === HOST_ID && meta.note != null) record.note = meta.note;
   }
-  if (playerId === 'user') {
+  if (playerId === HOST_ID) {
     if (!hand.decisions) hand.decisions = [];
     hand.decisions.push(snapshotDecision(next, playerId, {
       action,

@@ -7,6 +7,9 @@ import {
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
 import { referenceClaimAllowed } from './shared/reference.js';
+import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
+
+export { HOST_ID, humanIdsOf, isHumanSeat };
 
 export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS, NOTE_MAX_BYTES } from './shared/free-text.js';
 export {
@@ -189,7 +192,10 @@ export function materializeHandReplay({ handNo, engineState, record, source }) {
     }
   }
   try {
-    return replayRecord(record, { reveal: engineState.config?.replayReveal ?? 'showdown' });
+    return replayRecord(record, {
+      reveal: engineState.config?.replayReveal ?? 'showdown',
+      humanIds: Array.isArray(engineState.seats) ? humanIdsOf(engineState.seats) : undefined,
+    });
   } catch {
     return replayMarker(handNo, 'REPLAY_UNAVAILABLE');
   }
@@ -282,7 +288,7 @@ function privateCards(value, label) {
   return value;
 }
 
-function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) {
+export function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) {
   if (!plainObject(record) || !Number.isInteger(record.handNo) || record.handNo < 1
     || !plainObject(record.holes) || Object.keys(record.holes).length === 0
     || !plainObject(record.startStacks)) {
@@ -294,7 +300,7 @@ function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) 
     || holeIds.some((playerId, index) => playerId !== stackIds[index])) {
     throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind holes to startStacks`);
   }
-  if (!holeIds.includes('user')
+  if ((Object.hasOwn(record.startStacks, HOST_ID) && !holeIds.includes(HOST_ID))
     || (allowedPlayerIds && holeIds.some((playerId) => !allowedPlayerIds.has(playerId)))) {
     throw coded('PRIVATE_LITERAL_INVALID', `${label} participants do not bind engine seats`);
   }
@@ -356,7 +362,7 @@ function validatePrivateRecord(record, label, { allowedPlayerIds = null } = {}) 
 
 export function validatePrivateEngineState(engineState, { expectedSessionToken = null } = {}) {
   if (!plainObject(engineState)
-    || engineState.schemaVersion !== 1
+    || (engineState.schemaVersion !== 1 && engineState.schemaVersion !== 2)
     || !Number.isInteger(engineState.stateVersion) || engineState.stateVersion < 0
     || !plainObject(engineState.config)
     || typeof engineState.sessionToken !== 'string' || engineState.sessionToken.length === 0
@@ -425,7 +431,19 @@ export function validatePrivateEngineState(engineState, { expectedSessionToken =
  * (`collectDenyLiterals`)가 같은 규칙을 쓰기 위한 정본이다.
  * `records`는 핸드 레코드의 배열이며, 각 레코드에서 showdown으로 공개된 카드는 뺀다.
  */
-export function collectPrivateLiteralsDetailed({ players, engineState, records } = {}) {
+export function participantHiddenCards(record, humanIds) {
+  const revealed = new Set((record?.showdown?.reveals ?? []).map((row) => row.playerId));
+  const cards = [];
+  for (const id of humanIds ?? []) {
+    if (id === HOST_ID) continue;
+    if (revealed.has(id)) continue;
+    const holes = record?.holes?.[id];
+    if (Array.isArray(holes)) cards.push(...holes);
+  }
+  return cards;
+}
+
+export function collectPrivateLiteralsDetailed({ players, engineState, records } = {}, { alwaysDenyHumanSeats = false } = {}) {
   const cards = new Set();
   const others = new Set();
   const list = Array.isArray(players) ? players : players?.players;
@@ -442,7 +460,7 @@ export function collectPrivateLiteralsDetailed({ players, engineState, records }
       throw coded('PRIVATE_LITERAL_INVALID', 'players contains a duplicate player id');
     }
     playerIds.add(player.playerId);
-    if (player.playerId === 'user') continue;
+    if (player.playerId === HOST_ID) continue;
     for (const field of PRIVATE_PLAYER_FIELDS) {
       const value = player?.[field];
       if (value !== undefined && value !== null) others.add(privateScalar(value, `player.${field}`));
@@ -468,17 +486,20 @@ export function collectPrivateLiteralsDetailed({ players, engineState, records }
   const holes = engineState.hand?.holes;
   if (holes) {
     for (const [playerId, holeCards] of Object.entries(holes)) {
-      if (playerId === 'user') continue;
+      if (playerId === HOST_ID) continue;
       for (const card of holeCards) cards.add(String(card));
     }
   }
   const allowedPlayerIds = new Set(engineState.seats.map((seat) => seat.playerId));
+  const seatById = new Map(engineState.seats.map((seat) => [seat.playerId, seat]));
   for (const [recordIndex, candidate] of records.entries()) {
     const record = validatePrivateRecord(candidate, `records.${recordIndex}`, { allowedPlayerIds });
-    if (replayAll) continue;
+    if (replayAll && !alwaysDenyHumanSeats) continue;
     const revealedPlayers = new Set((record.showdown?.reveals ?? []).map((reveal) => reveal.playerId));
     for (const [playerId, holeCards] of Object.entries(record.holes)) {
-      if (playerId === 'user' || revealedPlayers.has(playerId)) continue;
+      if (playerId === HOST_ID || revealedPlayers.has(playerId)) continue;
+      if (alwaysDenyHumanSeats && replayAll
+        && !isHumanSeat(seatById.get(playerId) ?? { playerId })) continue;
       for (const card of holeCards) cards.add(String(card));
     }
   }

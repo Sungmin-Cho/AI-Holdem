@@ -310,6 +310,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const {
     aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
     opponentRuntime, showdownPolicy, replayReveal, hints, dealBias,
+    participants, hostName,
   } = flags;
   if(dealBias!==undefined && !['off','light','strong'].includes(dealBias)) throwCoded('BAD_CONFIG','invalid deal bias');
 
@@ -348,7 +349,11 @@ export function initGameDir(gameDir, flags, deps = {}) {
     const vacated = vacateLive(gameDir, io);
     const archivedTo = closed ?? vacated ?? null;
 
-    const personas = generatePersonas(aiCount);
+    const participantList = Array.isArray(participants) ? participants : [];
+    const resolvedHostName = hostName ?? (participantList.length ? '호스트' : '나');
+    const personas = generatePersonas(aiCount, {
+      excludeNames: [resolvedHostName, ...participantList.map((row) => row.name)],
+    });
     const state = createGame({
       aiCount,
       startStack,
@@ -362,13 +367,26 @@ export function initGameDir(gameDir, flags, deps = {}) {
       replayReveal,
       hints,
       dealBias,
+      participants: participantList.length ? participantList : undefined,
+      hostName: resolvedHostName,
     });
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');
     }
     const players = [
-      { playerId: 'user', seat: 0, name: '나' },
-      ...personas,
+      { playerId: 'user', seat: 0, name: resolvedHostName, kind: 'human' },
+      ...participantList.map((row, index) => ({
+        playerId: row.playerId,
+        seat: index + 1,
+        name: row.name.trim(),
+        kind: 'human',
+        participantId: row.participantId,
+      })),
+      ...personas.map((persona, index) => ({
+        ...persona,
+        seat: 1 + participantList.length + index,
+        kind: 'ai',
+      })),
     ];
     writeJsonAtomic(path.join(gameDir, 'players.json'), players);
     saveState(gameDir, state);

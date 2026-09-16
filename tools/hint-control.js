@@ -8,6 +8,9 @@ import { observationHash, hintError } from '../shared/decision-observation.js';
 import { gameEpochOf } from '../publish-contract.js';
 
 export function checkHintResume(config, requested) {
+  if (config?.humanCount > 1 && (config.hints === 'on' || requested === 'on')) {
+    throw hintError('HINT_MODE_CONFLICT');
+  }
   if (requested !== undefined && !['on','off'].includes(requested)) throw hintError('USAGE');
   if (config?.hintContractVersion !== 1) {
     if (requested === 'on') throw hintError('HINT_SESSION_UPGRADE_REQUIRED');

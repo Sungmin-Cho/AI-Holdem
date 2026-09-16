@@ -7,7 +7,7 @@ export const GATE = 'platform-learning-runtime.test.js';
 export const NAMED = {
   'study-a': ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js'],
   'study-b': ['study-service-recovery.test.js'],
-  'learning-a': ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js'],
+  'learning-a': ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js'],
   'learning-b': ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js'],
   loop: ['game-loop.test.js'],
   recovery: ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js'],
