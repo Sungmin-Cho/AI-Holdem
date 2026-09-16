@@ -19,6 +19,8 @@ export const requiredJourneyChecks = [
   "lan-join-url",
   "name-taken",
   "two-guests-start",
+  "guest-table-booted",
+  "guest-table-viewport",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
   "pause-banner",
@@ -182,6 +184,22 @@ export async function runMultiplayerJourney(outDir) {
       },
       "guest A iframe",
     );
+    // The table buttons are enabled in static markup, so a click alone cannot
+    // prove app.js ran. Require the participant-mode DOM and a live connection.
+    const tableBooted = (browser) => evaluate(browser)(`(() => {
+      const doc = document.querySelector('#table')?.contentDocument;
+      return doc?.body?.classList.contains('participant-mode') === true
+        && doc?.querySelector('#conn-text')?.textContent === '연결됨';
+    })()`);
+    await wait(async () => (await tableBooted(guestA)) === true, "guest A table booted");
+    await wait(async () => (await tableBooted(guestB)) === true, "guest B table booted");
+    check("guest-table-booted");
+    // The browser default iframe is 300x150; the join page must size it to the viewport.
+    const tableHeight = (browser) => evaluate(browser)(
+      "document.querySelector('#table')?.getBoundingClientRect().height ?? 0",
+    );
+    await wait(async () => Number(await tableHeight(guestA)) >= 400, "guest A table fills the viewport");
+    check("guest-table-viewport");
     const hostHtml = await tableText(host);
     const bHtml = await tableText(guestB);
     for (const card of hidden) {

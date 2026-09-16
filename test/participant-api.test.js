@@ -135,6 +135,41 @@ test('public listener 404s host APIs and serves join', async () => {
   }
 });
 
+test('public listener serves the whole table module graph that app.js imports', async (t) => {
+  const { app } = await boot(t);
+  const publicOrigin = `http://127.0.0.1:${app.publicPort}`;
+  const specifiers = (source) => [
+    ...source.matchAll(/(?:^|\n)\s*import\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/g),
+    ...source.matchAll(/import\(\s*['"]([^'"]+)['"]\s*\)/g),
+  ].map((m) => m[1]);
+  for (const origin of [publicOrigin, app.origin]) {
+    const table = await fetch(`${origin}/table`);
+    assert.equal(table.status, 200, `${origin}/table`);
+    const html = await table.text();
+    const entries = [...html.matchAll(/<script[^>]*type="module"[^>]*src="([^"]+)"/g)]
+      .map((m) => new URL(m[1], `${origin}/table`).href);
+    assert.ok(entries.length > 0, `${origin}/table has a module entry`);
+    const seen = new Set();
+    const queue = [...entries];
+    while (queue.length) {
+      const href = queue.shift();
+      if (seen.has(href)) continue;
+      seen.add(href);
+      const res = await fetch(href);
+      assert.equal(res.status, 200, `${href} (reached from ${origin}/table)`);
+      assert.match(res.headers.get('content-type') ?? '', /javascript/, href);
+      const source = await res.text();
+      for (const spec of specifiers(source)) {
+        if (/^[a-z]+:/i.test(spec)) continue;
+        queue.push(new URL(spec, href).href);
+      }
+    }
+    assert.ok([...seen].some((href) => href.includes('/shared/')), `shared modules reached from ${origin}`);
+  }
+  assert.equal((await fetch(`${publicOrigin}/shared/platform-files.js`)).status, 404);
+  assert.equal((await fetch(`${publicOrigin}/`)).status, 404);
+});
+
 test('join errors, origin, and rate limit', async (t) => {
   const { app } = await boot(t);
   const publicOrigin = `http://127.0.0.1:${app.publicPort}`;

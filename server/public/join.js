@@ -40,14 +40,20 @@ async function poll() {
     $('join-form').hidden = true;
     $('waiting').hidden = state.game?.state === 'playing' || state.game?.state === 'paused' || Boolean(state.game?.final);
     $('playing').hidden = !['playing', 'paused'].includes(state.game?.state);
+    document.body.classList.toggle('has-game', !$('playing').hidden);
     $('pause-banner').hidden = state.game?.state !== 'paused';
     $('final').hidden = !state.game?.final;
     if (state.game?.final) paintFinal(state.game.final);
     $('waiting-status').textContent = state.game?.state === 'starting'
       ? '게임 준비 중'
       : '호스트가 시작하기를 기다리는 중';
-    if (state.game?.gameId && $('table').src === '') {
-      $('table').src = `/table?participant=1&appGame=${state.game.gameId}&epoch=${state.game.gameEpoch ?? ''}`;
+    if (
+      state.game?.gameId
+      && state.game?.gameEpoch
+      && ['playing', 'paused'].includes(state.game.state)
+      && $('table').src === ''
+    ) {
+      $('table').src = `/table?participant=1&appGame=${state.game.gameId}&epoch=${encodeURIComponent(state.game.gameEpoch)}`;
     }
   } catch {
     fails += 1;

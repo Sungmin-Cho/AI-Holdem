@@ -61,4 +61,13 @@ test('participant chrome and action path omit host-only surfaces', () => {
   assert.match(transport, /\/api\/p\/game/);
   assert.match(app, /participant \? undefined/);
   assert.match(app, /delete payload\.note/);
+  // A guest device never holds the host token; the table must read its own key.
+  assert.match(transport, /export function authToken/);
+  assert.match(app, /appGameId \? authToken\(\)/);
+  assert.equal(app.includes("sessionStorage.getItem('holdem-app-token')"), false);
+  // The join page must size the participant iframe; the browser default is 300x150.
+  const join = fs.readFileSync(new URL('../server/public/join.js', import.meta.url), 'utf8');
+  const lobbyCss = fs.readFileSync(new URL('../server/public/lobby.css', import.meta.url), 'utf8');
+  assert.match(join, /classList\.toggle\('has-game'/);
+  assert.match(lobbyCss, /body\.has-game #table/);
 });

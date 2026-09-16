@@ -1,4 +1,4 @@
-import {appGameId, appEpoch, appFetch, eventStream, participantMode} from './app-transport.js';
+import {appGameId, appEpoch, appFetch, eventStream, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
@@ -1209,7 +1209,7 @@ $('review-reopen').addEventListener('click', () => {
 $('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
 $('action-retry').addEventListener('click', () => void actionController?.retry());
 
-const token = appGameId ? sessionStorage.getItem('holdem-app-token') : new URLSearchParams(location.search).get('token');
+const token = appGameId ? authToken() : new URLSearchParams(location.search).get('token');
 let revision = 0;
 const buffer = [];
 let booted = false;

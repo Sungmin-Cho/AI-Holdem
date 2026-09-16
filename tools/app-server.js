@@ -53,6 +53,47 @@ function joinLinks(port, code, { tls = false, publicHost = null } = {}) {
 function usage(message) {
   throw Object.assign(new Error(message), { code: "USAGE" });
 }
+// Both listeners serve the same table bundle. app.js imports ../../shared/*.js, so
+// a listener that cannot serve shared/ leaves /table with static markup and no script.
+const SHARED_ASSETS = [
+  "reference.js",
+  "reference-coverage.js",
+  "preflop-key.js",
+  "assistance.js",
+  "deal-selection.js",
+  "game-setup.js",
+  "player-budget.js",
+];
+const ASSET_TYPES = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".svg": "image/svg+xml",
+};
+function serveAsset(res, rel) {
+  const shared = rel.startsWith("shared/");
+  const name = shared ? rel.slice(7) : rel;
+  if (
+    !/^[a-zA-Z0-9_.-]+$/.test(name) ||
+    name.startsWith(".") ||
+    (shared && !SHARED_ASSETS.includes(name))
+  ) {
+    json(res, 404, { code: "NOT_FOUND" });
+    return;
+  }
+  let content;
+  try {
+    content = fs.readFileSync(path.join(shared ? SHARED : PUBLIC, name));
+  } catch {
+    json(res, 404, { code: "NOT_FOUND" });
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": ASSET_TYPES[path.extname(name)] ?? "application/octet-stream",
+    "cache-control": "no-store",
+  });
+  res.end(content);
+}
 
 export async function startAppServer({
   manager,
@@ -296,46 +337,7 @@ export async function startAppServer({
               : pathname === "/join"
                 ? "join.html"
               : pathname.slice(1);
-        const shared = rel.startsWith("shared/");
-        const name = shared ? rel.slice(7) : rel;
-        if (!/^[a-zA-Z0-9_.-]+$/.test(name) || name.startsWith(".")) {
-          json(res, 404, { code: "NOT_FOUND" });
-          return;
-        }
-        if (
-          shared &&
-          ![
-            "reference.js",
-            "reference-coverage.js",
-            "preflop-key.js",
-            "assistance.js",
-            "deal-selection.js",
-            "game-setup.js",
-            "player-budget.js",
-          ].includes(name)
-        ) {
-          json(res, 404, { code: "NOT_FOUND" });
-          return;
-        }
-        let content;
-        try {
-          content = fs.readFileSync(path.join(shared ? SHARED : PUBLIC, name));
-        } catch {
-          json(res, 404, { code: "NOT_FOUND" });
-          return;
-        }
-        const type =
-          {
-            ".html": "text/html",
-            ".js": "text/javascript",
-            ".css": "text/css",
-            ".svg": "image/svg+xml",
-          }[path.extname(name)] ?? "application/octet-stream";
-        res.writeHead(200, {
-          "content-type": type,
-          "cache-control": "no-store",
-        });
-        res.end(content);
+        serveAsset(res, rel);
         return;
       }
       if (!equal(req.headers.authorization, `Bearer ${token}`)) {
@@ -569,16 +571,7 @@ export async function startAppServer({
         return;
       }
       const rel = pathname === "/join" ? "join.html" : pathname === "/table" ? "index.html" : pathname.slice(1);
-      if (!/^[a-zA-Z0-9_.-]+$/.test(rel) || rel.startsWith(".")) {
-        json(res, 404, { code: "NOT_FOUND" });
-        return;
-      }
-      let content;
-      try { content = fs.readFileSync(path.join(PUBLIC, rel)); }
-      catch { json(res, 404, { code: "NOT_FOUND" }); return; }
-      const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" }[path.extname(rel)] ?? "application/octet-stream";
-      res.writeHead(200, { "content-type": type, "cache-control": "no-store" });
-      res.end(content);
+      serveAsset(res, rel);
     } catch (error) {
       if (!res.headersSent) json(res, 400, { code: error.code ?? "BAD_JSON" });
     }
@@ -588,7 +581,9 @@ export async function startAppServer({
     : http.createServer(publicHandler);
   publicServer.maxConnections = MAX_TOTAL;
   publicServer.headersTimeout = 10_000;
-  publicServer.requestTimeout = 30_000;
+  // Node's default requestTimeout would cut long-lived SSE proxies; match server/server.js.
+  publicServer.timeout = 0;
+  publicServer.requestTimeout = 0;
   publicServer.on("connection", (socket) => {
     if (!trackSocket(socket)) return;
   });
