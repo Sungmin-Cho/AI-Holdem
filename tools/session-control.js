@@ -48,10 +48,13 @@ export function withControlLock(root, fn) {
     releaseOwnedLock(lock);
   }
 }
-export function withActionGate(root, epoch, fn) {
+export function withActionGate(root, epoch, fn, { decisionId } = {}) {
   return withControlLock(root, () => {
-    if (readSessionControl(root, epoch).playState !== "playing")
-      throw controlError("GAME_PAUSED");
+    const control = readSessionControl(root, epoch);
+    if (control.playState !== "playing") throw controlError("GAME_PAUSED");
+    if (decisionId != null && control.closedDecisionId === decisionId) {
+      throw controlError("DECISION_CLOSED");
+    }
     return fn();
   });
 }
@@ -100,9 +103,22 @@ export function createSessionControl(
           playState,
           controlRevision: old.controlRevision + 1,
         };
+        if (!Object.hasOwn(patch, "closedDecisionId")) next.closedDecisionId = null;
         if (!STATES.has(playState)) throw controlError("CONTROL_UNAVAILABLE");
         writeJsonAtomic(path.join(root, FILE), next);
         return next;
+      });
+    },
+    closeDecision(decisionId) {
+      return withControlLock(root, () => {
+        const old = readSessionControl(root, epoch);
+        if (old.playState !== "playing") return { closed: false };
+        writeJsonAtomic(path.join(root, FILE), {
+          ...old,
+          closedDecisionId: decisionId,
+          controlRevision: old.controlRevision + 1,
+        });
+        return { closed: true };
       });
     },
   };

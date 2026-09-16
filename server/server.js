@@ -10,6 +10,9 @@ import {
   canonicalHandReplayJson,
   collectPrivateLiterals,
   gameEpochOf,
+  HOST_ID,
+  humanIdsOf,
+  isHumanSeat,
   validateActionAck,
   legacyExplanationAnnotation,
   MAX_PUBLISH_BODY_BYTES,
@@ -19,17 +22,28 @@ import {
   payloadSha256,
   publicProofId,
   validateCoachDecisions,
+  projectForSeat,
   projectTrainingAnnotation,
   projectTrainingSummary,
   textLeaksPrivate,
   validateHandReplayTrigger,
   validatePrivateEngineState,
+  validateViewsAgainstEngine,
+  validateTurnDeadline,
+  validateEventsAgainstEngine,
+  validateMessages,
+  assertHostText,
+  nextDecisionFromViews,
 } from '../publish-contract.js';
+
+export { projectForSeat };
 import { openContained } from '../tools/training-store.js';
 import { createActionReceiptStore, createRelayRootOwner, writeRelayJsonAtomic } from './action-receipts.js';
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 const HAND_REPLAY_KEEP = 200;
+const PARTICIPANT_FRAME_KEEP = 200;
+const HISTORY_BUDGET_BYTES = 1024 * 1024;
 // 서버가 읽기 전용 보안 술어로만 여는 세션 파일들. 엔진은 원자적 rename으로 쓰므로
 // 부분 읽기는 없고, 이 상한을 넘는 파일은 읽기 실패(=fail-closed)로 다룬다.
 const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
@@ -83,6 +97,9 @@ function emptyState() {
     publishId: undefined,
     history: [],
     handReplays: Object.create(null),
+    views: undefined,
+    decision: null,
+    turnDeadline: null,
   };
 }
 
@@ -224,6 +241,62 @@ function readSecurityJson(root, segments) {
   return JSON.parse(
     openContained(root, segments, { maxBytes: SECURITY_READ_MAX_BYTES }).toString('utf8'),
   );
+}
+
+function readPlayers(root) {
+  try {
+    const players = readSecurityJson(root, ['players.json']);
+    return Array.isArray(players) ? players : [];
+  } catch {
+    return [];
+  }
+}
+
+function sessionHasParticipants(players) {
+  return players.some((row) => row.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row.playerId)));
+}
+
+function lookupHandRecord(root, engineState, handNo) {
+  if (engineState?.hand && engineState.handNo === handNo) {
+    return { ...engineState.hand, handNo, seats: engineState.seats };
+  }
+  if (engineState?.lastHand?.handNo === handNo) {
+    return { ...engineState.lastHand, seats: engineState.seats };
+  }
+  try {
+    const name = `hand-${String(handNo).padStart(4, '0')}.json`;
+    return { ...readSecurityJson(root, ['hands', name]), seats: engineState?.seats };
+  } catch {
+    return null;
+  }
+}
+
+function parseSeat(req, url, players) {
+  const raw = req.headers['x-seat'] ?? url.searchParams.get('seat') ?? HOST_ID;
+  if (!players.length) {
+    if (raw !== HOST_ID) {
+      const error = new Error('BAD_SEAT');
+      error.code = 'BAD_SEAT';
+      throw error;
+    }
+    return HOST_ID;
+  }
+  const humans = new Set(humanIdsOf(players));
+  if (!humans.has(raw)) {
+    const error = new Error('BAD_SEAT');
+    error.code = 'BAD_SEAT';
+    throw error;
+  }
+  return raw;
+}
+
+function trimHistoryBudget(history) {
+  let bytes = Buffer.byteLength(JSON.stringify(history));
+  while (history.length > 1 && bytes > HISTORY_BUDGET_BYTES) {
+    history.shift();
+    bytes = Buffer.byteLength(JSON.stringify(history));
+  }
+  return history;
 }
 
 // 위조된 POST로는 바꿀 수 없는 유일한 진실. 부재·symlink·파싱 실패·타입 불일치는
@@ -477,6 +550,7 @@ function restoreHistory(rawHistory, context) {
       if (rows.length) payload.handReplays = rows;
       else delete payload.handReplays;
     }
+    delete payload.views;
     restored.push({ revision: Number(entry.revision) || 0, at: entry.at, payload });
   }
   return { history: restored, dropped };
@@ -581,6 +655,22 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
     if (droppedAnnotations || replay.dropped) {
       process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
     }
+    let views = raw.views;
+    let decision = raw.decision ?? null;
+    if (!views || typeof views !== 'object') {
+      views = raw.view ? { [HOST_ID]: raw.view } : undefined;
+      if (!decision && raw.view?.legal) {
+        decision = { decisionId: raw.view.legal.decisionId, toAct: raw.view.legal.toAct ?? HOST_ID };
+      }
+    }
+    try {
+      if (views && engineState) {
+        const players = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json'), 'utf8'));
+        validateViewsAgainstEngine(views, { players, engineState, view: raw.view });
+      }
+    } catch {
+      views = raw.view ? { [HOST_ID]: raw.view } : undefined;
+    }
     return {
       revision: Number(raw.revision) || 0,
       view: raw.view ?? null,
@@ -594,6 +684,9 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       history: replay.history,
       lastActionAck: raw.lastActionAck,
       handReplays: restoreHandReplays(raw.handReplays, gameDir, engineState, assertRaw),
+      views,
+      decision,
+      turnDeadline: raw.turnDeadline ?? null,
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -769,7 +862,15 @@ function mergeCoach(existing, incoming) {
   return merged.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
 }
 
-export function publicSnapshot(state, hint = null) {
+export function publicSnapshot(state, hint = null, seat = HOST_ID) {
+  if (seat && seat !== HOST_ID) {
+    return {
+      revision: state.revision,
+      view: state.views?.[seat] ?? null,
+      log: state.log,
+      turnDeadline: state.turnDeadline ?? null,
+    };
+  }
   const snap = {
     revision: state.revision,
     view: state.view,
@@ -778,6 +879,7 @@ export function publicSnapshot(state, hint = null) {
     coach: state.coach,
     training: state.training ?? [],
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
+    turnDeadline: state.turnDeadline ?? null,
   };
   if (state.review !== undefined) snap.review = state.review;
   snap.handReplays = handReplayList(state.handReplays);
@@ -804,9 +906,16 @@ function persistUiStateAtomic(owner, state) {
     training: state.training ?? [],
     trainingAnnotations: state.trainingAnnotations ?? {},
     publishId: state.publishId,
-    history: state.history,
+    history: (state.history ?? []).map((entry) => {
+      const payload = { ...(entry.payload ?? {}) };
+      delete payload.views;
+      return { ...entry, payload };
+    }),
     lastActionAck: state.lastActionAck,
     handReplays: state.handReplays ?? {},
+    views: state.views ?? undefined,
+    decision: state.decision ?? null,
+    turnDeadline: state.turnDeadline ?? null,
   };
   if (state.review !== undefined) file.review = state.review;
   writeRelayJsonAtomic(owner, 'ui-snapshot.json', file);
@@ -946,9 +1055,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   owner.assert();
   const sseClients = new Set();
   const waiters = new Set();
+  const participantFrames = [];
   const gameEpoch = gameEpochOf(token);
   const receiptStore = createActionReceiptStore(root, gameEpoch, { checkpoint: receiptCheckpoint, owner });
-  receiptStore.reconcile(state.view, state.lastActionAck, state.publishId);
+  receiptStore.reconcile({ legal: state.decision }, state.lastActionAck, state.publishId);
   let recoveryRequired = false;
   const hintContext = {};
   const hintInitialized = verifyHintPublication({sessionDir:root,token,context:hintContext,initialize:true});
@@ -966,6 +1076,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   const clearHintClients = decisionId => {
     const payload=JSON.stringify({gameEpoch,decisionId});
     for (const client of sseClients) {
+      if (client.seat && client.seat !== HOST_ID) continue;
       try { client.res.write(`event: hint-clear\ndata: ${payload}\n\n`); } catch { /* reconnect revalidates */ }
     }
   };
@@ -977,7 +1088,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     return false;
   };
 
-  const currentDecisionId = () => state.view?.legal?.decisionId ?? null;
+  const currentDecisionId = () => state.decision?.decisionId ?? null;
 
   const deliverSlot = () => {
     for (const waiter of waiters) {
@@ -997,6 +1108,15 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   };
 
   const sendCommitted = async (client) => {
+    const seat = client.seat ?? HOST_ID;
+    if (seat !== HOST_ID) {
+      for (const frame of participantFrames) {
+        if (frame.revision <= client.lastRevision) continue;
+        writeSse(client.res, frame.revision, frame.bySeat[seat] ?? {});
+        client.lastRevision = frame.revision;
+      }
+      return;
+    }
     const revision=state.revision; const history=state.history; const hint=await currentHint();
     for (const entry of history) {
       if (entry.revision <= client.lastRevision) continue;
@@ -1041,7 +1161,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         owner.assert();
         const durable = (restored.publishId ?? 0) >= (state.publishId ?? 0) ? restored : state;
         assertNoStudyCapability(durable);
-        receiptStore.reconcile(durable.view, durable.lastActionAck, durable.publishId);
+        receiptStore.reconcile({ legal: durable.decision }, durable.lastActionAck, durable.publishId);
         Object.assign(state, durable);
         fanoutCommitted();
         recoveryRequired = false;
@@ -1072,7 +1192,9 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         }
         const receipt = alreadyApplied ? state.lastActionAck : receiptStore.read();
         boundAck = validateActionAck(body.actionAck, {
-          receipt, gameEpoch, view: body.view, viewOnly: body.viewOnly === true,
+          receipt, gameEpoch,
+          view: body.view === undefined ? undefined : { legal: nextDecisionFromViews(body.views ?? { [HOST_ID]: body.view }) },
+          viewOnly: body.viewOnly === true,
         });
         boundAckPublishId = receipt?.publishId ?? body.publishId;
         if (!alreadyApplied) receiptStore.preflightAcknowledge(boundAck, boundAckPublishId);
@@ -1111,11 +1233,56 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     // Mutating first would leave memory ahead of disk after a write failure, and the
     // publisher's same-id retry would then hit the duplicate fast-path above — reported
     // as published, present nowhere.
+    let nextDecision = body.view === undefined
+      ? state.decision
+      : nextDecisionFromViews(body.views ?? { [HOST_ID]: body.view });
+    try {
+      const players = readPlayers(root);
+      const multi = sessionHasParticipants(players);
+      if (multi) {
+        if (body.view !== undefined && body.views === undefined) {
+          sendJson(res, 400, { ok: false, code: 'VIEWS_REQUIRED' });
+          return;
+        }
+        let engineState;
+        try {
+          engineState = validatePrivateEngineState(
+            readSecurityJson(root, ['state.json']),
+            { expectedSessionToken: token },
+          );
+        } catch {
+          sendJson(res, 500, { ok: false, code: 'PRIVATE_LITERAL_INVALID' });
+          return;
+        }
+        if (body.view !== undefined) {
+          const views = body.views ?? { [HOST_ID]: body.view };
+          validateViewsAgainstEngine(views, { players, engineState, view: body.view });
+          nextDecision = nextDecisionFromViews(views);
+          if (body.turnDeadline !== undefined) validateTurnDeadline(body.turnDeadline, nextDecision);
+        }
+        if (body.events) validateEventsAgainstEngine(body.events, engineState);
+        validateMessages(body.messages, { multi: true });
+        assertHostText(body, (handNo) => lookupHandRecord(root, engineState, handNo));
+      } else if (body.turnDeadline !== undefined) {
+        validateTurnDeadline(body.turnDeadline, nextDecision);
+      }
+    } catch (error) {
+      const code = error.code ?? 'BAD_VIEWS';
+      const status = code === 'FORBIDDEN_LITERAL_UNAVAILABLE' || code === 'PRIVATE_LITERAL_INVALID' ? 500 : 400;
+      sendJson(res, status, { ok: false, code });
+      return;
+    }
+
     const next = {
       revision: state.revision + 1,
       hint: body.view !== undefined ? body.hint ?? null : state.hint ?? null,
       publishId: body.publishId,
       view: state.view,
+      views: body.view !== undefined ? (body.views ?? { [HOST_ID]: body.view }) : state.views,
+      decision: nextDecision,
+      turnDeadline: body.view !== undefined
+        ? (body.turnDeadline ?? (nextDecision?.decisionId === state.decision?.decisionId ? state.turnDeadline : null))
+        : state.turnDeadline,
       log: state.log,
       coach: state.coach,
       training: state.training ?? [],
@@ -1131,6 +1298,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       next.view = body.view;
       payload.view = body.view;
     }
+    if (next.turnDeadline !== undefined && next.turnDeadline !== null) payload.turnDeadline = next.turnDeadline;
     if (Array.isArray(body.events) && body.events.length) {
       next.log = [...next.log, ...body.events];
       payload.events = body.events;
@@ -1232,12 +1400,20 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     }
 
     // Stamped for turn-latency measurement; kept off the payload so clients see no change.
-    next.history = [...next.history, { revision: next.revision, at: new Date().toISOString(), payload }];
+    next.history = trimHistoryBudget([...next.history, { revision: next.revision, at: new Date().toISOString(), payload }]);
+    const humans = humanIdsOf(readPlayers(root));
+    const bySeat = {};
+    for (const id of humans) {
+      if (id === HOST_ID) continue;
+      bySeat[id] = projectForSeat({ ...payload, views: next.views }, id);
+    }
+    participantFrames.push({ revision: next.revision, bySeat });
+    if (participantFrames.length > PARTICIPANT_FRAME_KEEP) participantFrames.shift();
 
     try {
       // This is the single commit owner: UI anchor -> terminal receipt -> memory.
       if (!boundAck && body.view !== undefined
-        && receiptStore.shouldClearHistoricalAck(body.view, state.lastActionAck, state.publishId)) {
+        && receiptStore.shouldClearHistoricalAck({ legal: nextDecision }, state.lastActionAck, state.publishId)) {
         // Exact ledger validation precedes removal. A current receipt's own anchor
         // is retained; obsolete correction history leaves with its old decision.
         next.lastActionAck = undefined;
@@ -1246,7 +1422,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       persistUiStateAtomic(owner, next);
       publishCheckpoint('after-ui-commit');
       if (boundAck) receiptStore.acknowledgeDurable(boundAck, boundAckPublishId);
-      receiptStore.reconcile(next.view, next.lastActionAck, next.publishId);
+      receiptStore.reconcile({ legal: next.decision }, next.lastActionAck, next.publishId);
       publishCheckpoint('after-receipt-commit');
     } catch {
       recoveryRequired = true;
@@ -1265,16 +1441,25 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     });
   };
 
-  const handleAction = async (body, res) => {
+  const handleAction = async (body, res, seat = HOST_ID) => {
     const current = currentDecisionId();
     if (!checkRecovery(res)) return;
+    if (seat !== HOST_ID && Object.hasOwn(body, 'note')) {
+      sendJson(res, 400, { ok: false, code: 'BAD_ACTION' });
+      return;
+    }
+    if (state.decision?.toAct && state.decision.toAct !== seat) {
+      sendJson(res, 409, { ok: false, code: 'NOT_YOUR_TURN' });
+      return;
+    }
     try {
-      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => receiptStore.accept(body,currentDecisionId())), {timeoutMs:250});
+      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => receiptStore.accept(body,currentDecisionId()), { decisionId: body.decisionId }), {timeoutMs:250});
       else receiptStore.accept(body, current);
       clearHintClients(current);
       deliverSlot();
     } catch (error) {
-      const status = error.code === 'GAME_PAUSED' ? 409 : ['CONTROL_BUSY','CONTROL_UNAVAILABLE'].includes(error.code) ? 503 : error.code === 'BAD_ACTION' ? 400
+      const status = error.code === 'GAME_PAUSED' || error.code === 'DECISION_CLOSED' || error.code === 'NOT_YOUR_TURN' ? 409
+        : ['CONTROL_BUSY','CONTROL_UNAVAILABLE'].includes(error.code) ? 503 : error.code === 'BAD_ACTION' ? 400
         : ['STALE_DECISION', 'ACTION_ALREADY_RECEIVED', 'ACTION_REJECTED', 'ACTION_RECEIPT_CAPACITY'].includes(error.code) ? 409 : 500;
       sendJson(res, status, { ok: false, code: error.code ?? 'PERSIST_FAILED' });
       return;
@@ -1282,7 +1467,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     sendJson(res, 200, { ok: true });
   };
 
-  const attachSse = (req, res, url) => {
+  const attachSse = (req, res, url, seat = HOST_ID) => {
     const afterRaw = Number(url.searchParams.get('after'));
     const after = Number.isFinite(afterRaw) ? afterRaw : 0;
     res.writeHead(200, {
@@ -1295,6 +1480,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
 
     const client = {
       res,
+      seat,
       lastRevision: Math.min(Math.max(after, 0), state.revision),
       heartbeat: setInterval(() => {
         try { res.write(':heartbeat\n\n'); } catch { /* gone */ }
@@ -1358,6 +1544,13 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     if (req.method === 'GET' && pathname === '/api/action-status') {
       if (!checkToken(req.headers['x-session-token'] ?? url.searchParams.get('token'), res)) return;
       if (!checkRecovery(res)) return;
+      let seat;
+      try { seat = parseSeat(req, url, readPlayers(root)); }
+      catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
+      if (state.decision?.toAct && state.decision.toAct !== seat) {
+        sendJson(res, 200, { ok: true, decisionId: null, requestId: null, phase: 'unreceived' });
+        return;
+      }
       try { sendJson(res, 200, receiptStore.status(currentDecisionId())); }
       catch { sendJson(res, 503, { ok: false, code: 'ACTION_RECEIPT_CORRUPT' }); }
       return;
@@ -1365,18 +1558,32 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
 
     if (req.method === 'GET' && pathname === '/api/events') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
-      attachSse(req, res, url);
+      let seat;
+      try { seat = parseSeat(req, url, readPlayers(root)); }
+      catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
+      attachSse(req, res, url, seat);
       return;
     }
 
     if (req.method === 'GET' && pathname === '/api/snapshot') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
-      sendJson(res, 200, { ...publicSnapshot(state, await currentHint()), ...(trustedStudyUrl ? { studyUrl: trustedStudyUrl } : {}) });
+      let seat;
+      try { seat = parseSeat(req, url, readPlayers(root)); }
+      catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
+      const snap = publicSnapshot(state, seat === HOST_ID ? await currentHint() : null, seat);
+      sendJson(res, 200, { ...snap, ...(trustedStudyUrl && seat === HOST_ID ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
 
     if (req.method === 'GET' && pathname === '/api/training-detail') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
+      try {
+        const seat = parseSeat(req, url, readPlayers(root));
+        if (seat !== HOST_ID) {
+          sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+          return;
+        }
+      } catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
       const ref = url.searchParams.get('ref') ?? '';
       if (!/^[0-9a-f]{64}$/.test(ref)) {
         sendJson(res, 400, { ok: false, code: 'BAD_DETAIL_REF' });
@@ -1421,7 +1628,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       const body = await readJsonBody(req, res);
       if (body == null) return;
       if (!checkToken(supplied ?? body.token, res)) return;
-      await handleAction(body, res);
+      let seat;
+      try { seat = parseSeat(req, url, readPlayers(root)); }
+      catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
+      await handleAction(body, res, seat);
       return;
     }
 

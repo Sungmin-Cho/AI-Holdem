@@ -10,7 +10,7 @@ export const NAMED = {
   'learning-a': ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js'],
   'learning-b': ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js'],
   loop: ['game-loop.test.js'],
-  recovery: ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js'],
+  recovery: ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js', 'relay-seat-scoping.test.js'],
 };
 export const DEFAULT_FILE_TIMEOUT_MS = 2_700_000;
 export const SHARD_NAMES = [...Object.keys(NAMED), 'rest'];

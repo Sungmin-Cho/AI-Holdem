@@ -53,7 +53,8 @@ function bail(code, message) {
 
 function parseArgs(argv) {
   const out = {
-    gameDir: 'game', from: null, narrations: [],
+    gameDir: 'game', from: null, narrations: [], narrationCodes: [],
+    turnDeadline: null,
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
     printGameEpoch: false, deadlineMonotonicNs: null, actionAckFile: null,
@@ -75,6 +76,22 @@ function parseArgs(argv) {
     else if (arg === '--from') out.from = needsValue(arg);
     else if (arg === '--action-ack') out.actionAckFile = needsValue(arg);
     else if (arg === '--narration') out.narrations.push(needsValue(arg));
+    else if (arg === '--narration-code') {
+      const code = needsValue(arg);
+      let params = {};
+      if (argv[i + 1] === '--narration-params') {
+        i += 1;
+        try { params = JSON.parse(needsValue('--narration-params')); }
+        catch { bail('USAGE', '--narration-params는 JSON이어야 합니다.'); }
+      }
+      out.narrationCodes.push({ code, params });
+    }
+    else if (arg === '--turn-deadline') {
+      const raw = needsValue(arg);
+      const at = raw.indexOf(':');
+      if (at < 1) bail('USAGE', '--turn-deadline은 <decisionId>:<iso> 형식입니다.');
+      out.turnDeadline = { decisionId: raw.slice(0, at), at: raw.slice(at + 1) };
+    }
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
     else if (arg === '--wait') out.wait = true;
@@ -149,6 +166,9 @@ function checkEnvelope(envelope, file) {
   if (hasView && envelope.viewFor !== 'user') {
     bail('BAD_ENVELOPE', `사용자 관점 표식이 없는 view는 게시할 수 없습니다(viewFor=${envelope.viewFor ?? '없음'}).`);
   }
+  if (hasView && envelope.views && JSON.stringify(envelope.views.user) !== JSON.stringify(envelope.view)) {
+    bail('BAD_ENVELOPE', 'views.user가 view와 같지 않습니다.');
+  }
   if (!hasView) return;
   // Everything `cli step` always emits. A hollow envelope would burn a publishId and
   // hand back `next: null`, which the dealer's rules read as "hand over".
@@ -165,8 +185,10 @@ function buildBody(envelope, opts) {
   const body = {};
   if (envelope.view !== undefined) {
     body.view = envelope.view;
+    if (envelope.views !== undefined) body.views = envelope.views;
     if (envelope.hint !== undefined) body.hint = envelope.hint === null ? null : projectHint(envelope.hint);
   }
+  if (opts.turnDeadline) body.turnDeadline = opts.turnDeadline;
   // Tells the server this republish re-shows a state rather than acknowledging an
   // action, so a user action whose response was lost survives a dealer's resume.
   if (opts.viewOnly) body.viewOnly = true;
@@ -178,6 +200,7 @@ function buildBody(envelope, opts) {
   }
   const messages = [
     ...opts.narrations.map((text) => ({ type: 'narration', text })),
+    ...opts.narrationCodes.map((row) => ({ type: 'narration', code: row.code, params: row.params })),
   ];
   if (messages.length) body.messages = messages;
   if (Array.isArray(envelope.coach) && envelope.coach.length) body.coach = envelope.coach;
@@ -200,7 +223,7 @@ function controlOf(envelope) {
     if (event.visibility !== 'public' || !CONTROL_TYPES.has(event.type)) continue;
     if (event.type === 'bust') (control.bust ??= []).push(event.playerId);
     else if (event.type === 'level_up') control.level_up = { level: event.level, sb: event.sb, bb: event.bb };
-    else control.game_over = { result: event.result, bustedPlayerIds: event.bustedPlayerIds ?? [] };
+    else control.game_over = { result: event.result, bustedPlayerIds: event.bustedPlayerIds ?? [], ...(event.winnerId ? { winnerId: event.winnerId } : {}) };
   }
   return Object.keys(control).length ? control : null;
 }

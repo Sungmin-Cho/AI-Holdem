@@ -10,6 +10,19 @@ import { referenceClaimAllowed } from './shared/reference.js';
 import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
 
 export { HOST_ID, humanIdsOf, isHumanSeat };
+export {
+  NARRATION_CODES,
+  validateViewsAgainstEngine,
+  validateTurnDeadline,
+  validateEventsAgainstEngine,
+  validateMessages,
+  hostTextFieldsOf,
+  cardTokenLeaks,
+  assertHostText,
+  projectForSeat,
+  nextDecisionFromViews,
+  EVENT_SCHEMAS,
+} from './shared/multiplayer-publish.js';
 
 export { normalizeFreeText, REASON_MAX_CHARS, NOTE_MAX_CHARS, NOTE_MAX_BYTES } from './shared/free-text.js';
 export {
