@@ -159,6 +159,6 @@ Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축�
 
 앱 HTTP는 Host·Origin·Authorization을 검사하고 current gameId/epoch에 묶인 snapshot/events/action-status/training-detail/action만 전달한다. publish/wait-action은 공개 프록시가 없다. gameEpoch는 기존 private sessionToken의 SHA-256이며 앱 토큰과 구별한다. 중도 종료는 엔진 `result: abort`와 loop `phase: aborted`, `endedAt`으로 기록한다. 정상 완료 `done`, `finishedAt`, 종합 리뷰와 구분한다. 미완료 핸드는 private abort audit에 남기고 완료 핸드 archive에는 쓰지 않는다.
 
-공개 리스너는 앱 서버만 띄운다(기본 `0.0.0.0:8899`, `--public-port`/`--public-host`, `--tls-cert`/`--tls-key`). 참가 라우트(`/join`, `/api/join`, `/api/p/*`) 외는 404다. 주소당 연결 32·전체 128, join 실패는 주소당 분당 10 뒤 429, 참가자 SSE는 좌석당 4다. relay history는 바이트 예산으로 자르고, 참가자 프레임은 메모리 링(200)이며 영속 `ui-snapshot.json` history에는 `views`가 없다.
+공개 리스너는 앱 서버만 띄운다(기본 `0.0.0.0:8899`, `--public-port`/`--public-host`, `--tls-cert`/`--tls-key`). 참가 라우트(`/join`, `/api/join`, `/api/p/*`) 외는 404다. 주소당 연결 32·전체 128, 같은 주소의 `/api/join`은 분당 10을 넘으면 429, 참가자 SSE는 좌석당 4다. relay history는 바이트 예산으로 자르고, 참가자 프레임은 메모리 링(200)이며 영속 `ui-snapshot.json` history에는 `views`가 없다.
 
 명령은 부작용 전에 `.app/commands/<requestId>.json`에 저장한다. 동일 payload 재전송은 CAS보다 먼저 같은 receipt를 반환한다. 새 게임은 락 획득 후 UUID/selectionVersion을 예약하고 staging init 완료 hash를 남긴 뒤 current를 교체한다. crash 복구에서 불완전한 staging은 보존하고 `RECOVERY_REQUIRED`로 닫는다. 게임이 복원되면 자동 플레이하지 않고 paused 상태로 대기한다. 구현·검증 근거는 `docs/implementation/lobby-session-*.md`에 있다.

@@ -368,6 +368,12 @@ export function createRoomManager({
         save(room, { force: true });
         return room;
       }
+      if (!room.lock?.boundGameId && !current) {
+        room.status = 'open';
+        room.lock = { requestId: null, boundGameId: null, previous: null };
+        save(room, { force: true });
+        return room;
+      }
       const roomIds = new Set(activeParticipants(room).map((row) => row.participantId));
       const playerIds = new Set((players ?? []).map((row) => row.participantId).filter(Boolean));
       const same = roomIds.size === playerIds.size && [...roomIds].every((id) => playerIds.has(id));

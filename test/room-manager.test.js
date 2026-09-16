@@ -90,6 +90,10 @@ test('recover 판정: 미완료 행 유지, 터미널 open, 집합 일치 bind, 
   assert.equal(room.load().status, 'locked');
   room.recover({ gameTerminal: true });
   assert.equal(room.load().status, 'open');
+  room.lockForStart({ requestId: 'orphan-lock' });
+  room.recover({ gameTerminal: false });
+  assert.equal(room.load().status, 'open');
+  assert.equal(room.load().lock.boundGameId, null);
   room.lockForStart({ requestId: 'start-2' });
   room.recover({
     current: { gameId: 'g2' },

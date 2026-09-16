@@ -9,6 +9,7 @@ import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixture
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
 import { createGame, startHand } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
+import { viewFor } from '../engine/views.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { saveState, writeJsonAtomic } from '../engine/state.js';
 
@@ -163,4 +164,31 @@ test('ui-snapshot history에는 views가 없고 구 형식은 user view로 복�
   const projected = publicSnapshot(loaded, null, 'h1');
   assert.equal('coach' in projected, false);
   assert.equal('studyUrl' in projected, false);
+});
+
+test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없다', async (t) => {
+  const f = await multiRelay(t);
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const views = { user: viewFor(engine, 'user'), h1: viewFor(engine, 'h1') };
+  const published = await f.http('/api/publish', {
+    method: 'POST',
+    body: {
+      token: TOKEN,
+      publishId: 1,
+      view: views.user,
+      views,
+      viewFor: 'user',
+      events: [],
+    },
+  });
+  assert.equal(published.status, 200, JSON.stringify(published.json));
+  const raw = JSON.parse(fs.readFileSync(path.join(f.dir, 'ui-snapshot.json'), 'utf8'));
+  assert.equal('views' in raw, false);
+  assert.equal((raw.history ?? []).some((row) => row.payload && 'views' in row.payload), false);
+  const blob = JSON.stringify(raw);
+  for (const card of views.h1.myCards) {
+    assert.equal(blob.includes(card), false, card);
+  }
 });
