@@ -1,6 +1,6 @@
 # Remaining issue initial implementation plan
 
-Date: 2026-09-11. Design: [issues-remaining-design.md](../design/issues-remaining-design.md). Baseline: `6175a64da4f183389aa1aed6781f174635da5d26`. This plan follows the initial design; steps below are pending unless separately accompanied by implementation evidence. Work order is #173 → #168 → #181 → #174 → #175 → #179. Keep each issue reviewable and preserve unrelated worktree changes.
+Date: 2026-09-11. Design: `docs/design/issues-remaining-design.md` (local-only; `docs/design/` is gitignored and no longer tracked). Baseline: `6175a64da4f183389aa1aed6781f174635da5d26`. This plan follows the initial design; steps below are pending unless separately accompanied by implementation evidence. Work order is #173 → #168 → #181 → #174 → #175 → #179. Keep each issue reviewable and preserve unrelated worktree changes.
 
 ## Delivery and evidence rules
 
