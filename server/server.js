@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SPECTATOR_ID, viewerRole, spectatorAudience } from '../shared/viewer-access.js';
+import { prepareViewerProjection, restoreViewerProjection } from './viewer-projection.js';
 import {
   canonicalHandReplayJson,
   collectPrivateLiterals,
@@ -100,6 +102,8 @@ function emptyState() {
     views: undefined,
     decision: null,
     turnDeadline: null,
+    spectatorView: null,
+    projectionAnchor: null,
   };
 }
 
@@ -273,6 +277,8 @@ function lookupHandRecord(root, engineState, handNo) {
 
 function parseSeat(req, url, players) {
   const raw = req.headers['x-seat'] ?? url.searchParams.get('seat') ?? HOST_ID;
+  // This audience requires the private relay token; the public gateway owns it.
+  if (raw === SPECTATOR_ID && req.headers['x-seat'] === SPECTATOR_ID) return raw;
   if (!players.length) {
     if (raw !== HOST_ID) {
       const error = new Error('BAD_SEAT');
@@ -676,6 +682,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       views,
       decision,
       turnDeadline: raw.turnDeadline ?? null,
+      ...restoreViewerProjection(engineState, raw),
     };
   } catch (error) {
     if (error.code === 'ENOENT') return emptyState();
@@ -852,14 +859,27 @@ function mergeCoach(existing, incoming) {
 }
 
 export function publicSnapshot(state, hint = null, seat = HOST_ID) {
+  if (spectatorAudience(state.view, seat)) {
+    return {revision:state.revision, view:state.spectatorView ?? null,
+      viewerRole:state.spectatorView?.viewerRole ?? 'unavailable',
+      ...(!state.spectatorView ? {code:'VIEW_NOT_READY'} : {}),
+      log:state.log, turnDeadline:state.turnDeadline ?? null};
+  }
   if (seat && seat !== HOST_ID) {
     return {
       revision: state.revision,
       view: state.views?.[seat] ?? null,
       log: state.log,
       turnDeadline: state.turnDeadline ?? null,
+      viewerRole: viewerRole(state.view, seat),
     };
   }
+  return hostSnapshot(state, hint);
+}
+
+// Loop identity/recovery probes use the stable host contract, independently of
+// the host's current viewing role. Never routed by the public app proxy.
+function hostSnapshot(state, hint = null) {
   const snap = {
     revision: state.revision,
     view: state.view,
@@ -869,6 +889,7 @@ export function publicSnapshot(state, hint = null, seat = HOST_ID) {
     training: state.training ?? [],
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
     turnDeadline: state.turnDeadline ?? null,
+    viewerRole: viewerRole(state.view, HOST_ID),
   };
   if (state.review !== undefined) snap.review = state.review;
   snap.handReplays = handReplayList(state.handReplays);
@@ -904,6 +925,7 @@ function persistUiStateAtomic(owner, state) {
     handReplays: state.handReplays ?? {},
     decision: state.decision ?? null,
     turnDeadline: state.turnDeadline ?? null,
+    projectionAnchor: state.projectionAnchor ?? null,
   };
   if (state.review !== undefined) file.review = state.review;
   writeRelayJsonAtomic(owner, 'ui-snapshot.json', file);
@@ -1097,7 +1119,22 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
 
   const sendCommitted = async (client) => {
     const seat = client.seat ?? HOST_ID;
+    if (recoveryRequired) return;
+    if (spectatorAudience(state.view, seat)) {
+      if (client.spectatorRevision !== state.revision) {
+        writeSse(client.res, state.revision, {snapshot:publicSnapshot(state, null, seat)});
+        client.spectatorRevision = state.revision;
+        client.lastRevision = state.revision;
+      }
+      return;
+    }
     if (seat !== HOST_ID) {
+      if (client.resetSnapshot) {
+        writeSse(client.res, state.revision, {snapshot:publicSnapshot(state, null, seat)});
+        client.lastRevision = state.revision;
+        client.resetSnapshot = false;
+        return;
+      }
       for (const frame of participantFrames) {
         if (frame.revision <= client.lastRevision) continue;
         writeSse(client.res, frame.revision, frame.bySeat[seat] ?? {});
@@ -1151,8 +1188,12 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         assertNoStudyCapability(durable);
         receiptStore.reconcile({ legal: durable.decision }, durable.lastActionAck, durable.publishId);
         Object.assign(state, durable);
-        fanoutCommitted();
+        // A durable commit may have failed before its in-memory guest frame was
+        // installed. Reset surviving guests from the reconciled seat projection
+        // before a duplicate publication can return alreadyApplied.
+        for (const client of sseClients) if (client.seat !== HOST_ID) client.resetSnapshot = true;
         recoveryRequired = false;
+        fanoutCommitted();
       } catch { checkRecovery(res); return; }
     }
     if (!Number.isInteger(body.publishId) || body.publishId < 1 || body.publishId > MAX_PUBLISH_ID) {
@@ -1279,12 +1320,23 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       history: state.history,
       lastActionAck: boundAck ? { ...boundAck, publishId: boundAckPublishId } : state.lastActionAck,
       handReplays: { ...(state.handReplays ?? {}) },
+      spectatorView: state.spectatorView ?? null,
+      projectionAnchor: state.projectionAnchor ?? null,
     };
 
     const payload = {};
     if (body.view !== undefined) {
       next.view = body.view;
       payload.view = body.view;
+      // Publication may contain only coaching/logs: retain the last committed
+      // view anchor in that case rather than reading a newer private hand.
+      let projection = null;
+      try {
+        const engine = validatePrivateEngineState(readSecurityJson(root, ['state.json']), {expectedSessionToken:token});
+        projection = prepareViewerProjection(engine, body.view, {publishId:body.publishId,revision:next.revision});
+      } catch { /* no full-card access without an exact validated engine view */ }
+      next.spectatorView = projection?.spectatorView ?? null;
+      next.projectionAnchor = projection?.projectionAnchor ?? null;
     }
     if (next.turnDeadline !== undefined && next.turnDeadline !== null) payload.turnDeadline = next.turnDeadline;
     if (Array.isArray(body.events) && body.events.length) {
@@ -1395,8 +1447,6 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       if (id === HOST_ID) continue;
       bySeat[id] = projectForSeat({ ...payload, views: next.views }, id);
     }
-    participantFrames.push({ revision: next.revision, bySeat });
-    if (participantFrames.length > PARTICIPANT_FRAME_KEEP) participantFrames.shift();
 
     try {
       // This is the single commit owner: UI anchor -> terminal receipt -> memory.
@@ -1419,6 +1469,8 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     }
 
     Object.assign(state, next);
+    participantFrames.push({ revision: next.revision, bySeat });
+    if (participantFrames.length > PARTICIPANT_FRAME_KEEP) participantFrames.shift();
     fanoutCommitted();
     sendJson(res, 200, {
       ok: true,
@@ -1432,6 +1484,9 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   const handleAction = async (body, res, seat = HOST_ID) => {
     const current = currentDecisionId();
     if (!checkRecovery(res)) return;
+    if (spectatorAudience(state.view, seat)) {
+      sendJson(res, 403, {ok:false,code:'SPECTATOR_READ_ONLY'}); return;
+    }
     if (seat !== HOST_ID && Object.hasOwn(body, 'note')) {
       sendJson(res, 400, { ok: false, code: 'BAD_ACTION' });
       return;
@@ -1535,6 +1590,9 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       let seat;
       try { seat = parseSeat(req, url, readPlayers(root)); }
       catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
+      if (spectatorAudience(state.view, seat)) {
+        sendJson(res, 403, {ok:false,code:'SPECTATOR_READ_ONLY'}); return;
+      }
       if (state.decision?.toAct && state.decision.toAct !== seat) {
         sendJson(res, 200, { ok: true, decisionId: null, requestId: null, phase: 'unreceived' });
         return;
@@ -1546,6 +1604,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
 
     if (req.method === 'GET' && pathname === '/api/events') {
       if (!checkToken(url.searchParams.get('token'), res)) return;
+      if (!checkRecovery(res)) return;
       let seat;
       try { seat = parseSeat(req, url, readPlayers(root)); }
       catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
@@ -1558,8 +1617,12 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       let seat;
       try { seat = parseSeat(req, url, readPlayers(root)); }
       catch { sendJson(res, 400, { ok: false, code: 'BAD_SEAT' }); return; }
-      const snap = publicSnapshot(state, seat === HOST_ID ? await currentHint() : null, seat);
-      sendJson(res, 200, { ...snap, ...(trustedStudyUrl && seat === HOST_ID ? { studyUrl: trustedStudyUrl } : {}) });
+      const loopProbe = req.headers['x-loop-probe'] === '1';
+      // Preserve the last committed player snapshot (and the loop's identity
+      // probe) while recovering; observers must wait for proven projection.
+      if (!loopProbe && spectatorAudience(state.view, seat) && !checkRecovery(res)) return;
+      const snap = loopProbe ? hostSnapshot(state) : publicSnapshot(state, seat === HOST_ID ? await currentHint() : null, seat);
+      sendJson(res, snap.code === 'VIEW_NOT_READY' ? 503 : 200, { ...snap, ...(trustedStudyUrl && seat === HOST_ID && (loopProbe || !spectatorAudience(state.view, seat)) ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
 

@@ -96,6 +96,21 @@ export function userView(state) {
   return viewFor(state, 'user');
 }
 
+// Deliberately constructed from public fields; never spread a private hand/state.
+export function spectatorView(state) {
+  const view = viewFor(state, null);
+  delete view.legal;
+  view.viewerRole = state.gameOver ? 'finished' : 'spectator';
+  view.holeCardsByPlayerId = {};
+  const hand = currentHandData(state);
+  if (!state.gameOver) {
+    for (const seat of state.seats) {
+      if (hand?.holes?.[seat.playerId]) view.holeCardsByPlayerId[seat.playerId] = [...hand.holes[seat.playerId]];
+    }
+  }
+  return view;
+}
+
 const STREET_KO = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION_KO = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈' };
 

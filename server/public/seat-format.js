@@ -1,11 +1,13 @@
 /** No private cards or replay objects are accepted by this state projector. */
+export const viewerId = view => Object.hasOwn(view ?? {}, 'viewer') ? view.viewer : 'user';
+export const isSpectating = view => viewerId(view) === null && Object.hasOwn(view ?? {}, 'holeCardsByPlayerId');
 export function seatPresentation(view, seat) {
   const out = view?.mode !== 'cash-training' && seat.out === true;
   const playing = view?.handInProgress !== false;
   const active = !out && playing && !view?.gameOver && view?.toAct === seat.playerId;
   const folded = !out && playing && Boolean(seat.folded);
   const allIn = !out && playing && Boolean(seat.allIn);
-  const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === 'user' ? '내 차례' : '행동 중')
+  const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === viewerId(view) ? '내 차례' : '행동 중')
     : view?.mode !== 'cash-training' && typeof seat.out !== 'boolean' ? '상태 확인 불가' : '플레이 중';
   return {out, active, folded, allIn, status, showBacks: !out && playing && !folded && Boolean(view?.street),
     showButton: !out && playing && Boolean(seat.isButton),

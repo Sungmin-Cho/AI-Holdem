@@ -11,16 +11,21 @@
   <body>
     <main>
       <h1>테이블 참가</h1>
+      <p>게임 시작 후에는 관전으로 입장합니다. 관전자에게는 모든 카드가 실시간 공개됩니다.</p>
       <form id="join-form">
         <label>참가 코드 <input id="join-code" name="code" required /></label>
         <label>이름 <input id="join-name" name="name" required maxlength="12" /></label>
         <button type="submit" id="join-submit">참가</button>
       </form>
       <p id="join-error" role="alert"></p>
+      <section id="member-controls" hidden>
+        <p id="member-role" role="status"></p>
+        <button type="button" id="seat-request" hidden>다음 게임 참가</button>
+        <button type="button" id="leave">나가기</button>
+      </section>
       <section id="waiting" hidden>
         <p id="waiting-status">호스트가 시작하기를 기다리는 중</p>
         <ul id="waiting-participants"></ul>
-        <button type="button" id="leave">나가기</button>
       </section>
       <section id="playing" hidden>
         <p id="pause-banner" hidden>호스트가 일시정지했습니다</p>
@@ -28,6 +33,7 @@
       </section>
       <section id="final" hidden>
         <h2>최종 스택</h2>
+        <p id="final-reason"></p>
         <table id="final-stacks"></table>
       </section>
     </main>

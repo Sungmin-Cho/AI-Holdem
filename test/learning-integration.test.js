@@ -219,7 +219,12 @@ test('S8 early: explicit LLM store launch still requires an eligible player runt
     calls.map((call) => call.kind),
     expectGrokSpawn ? ['claude', 'codex', 'grok'] : ['claude', 'codex'],
   );
-  for (const call of calls) assert.ok(call.argv.includes(RUNTIME_TABLE[call.kind].player));
+  for (const call of calls) {
+    // Grok checks containment with `inspect` before attempting any model.
+    // This fixture fails every invocation, so it never reaches its player.
+    if (call.kind === 'grok') assert.deepEqual(call.argv, ['--no-auto-update', 'inspect', '--json']);
+    else assert.ok(call.argv.includes(RUNTIME_TABLE[call.kind].player));
+  }
   const selected = JSON.parse(fs.readFileSync(path.join(store, '.session-store/current.json')));
   const gameDir = path.join(store, '.session-store', selected.sessionRel);
   const loopState = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json')));

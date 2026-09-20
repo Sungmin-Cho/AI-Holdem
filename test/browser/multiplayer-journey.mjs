@@ -39,7 +39,7 @@ function lanIPv4() {
   return null;
 }
 
-function makeBrowser(session) {
+export function makeBrowser(session) {
   return async (args) => {
     const r = await runOwnedCommand(
       "npx",

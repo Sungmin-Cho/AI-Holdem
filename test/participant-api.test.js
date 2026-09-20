@@ -81,6 +81,35 @@ async function boot(t, { publicPort = 0, tlsCert, tlsKey } = {}) {
   return { storeDir, manager, app };
 }
 
+test('seat request reauthenticates a partial body after token reissue', {timeout:TIMEOUT}, async t=>{
+  const {manager,app}=await boot(t);
+  const room=manager.room;
+  room.open({totalSeats:3});room.lockForStart({requestId:'start'});room.bind('game-a',[]);
+  const observer=room.join({code:room.load().joinCode,name:'Observer',addr:'1',game:{state:'playing',gameId:'game-a'}});
+  room.release('game-a');
+  let resolveAuthenticated;
+  const authenticated=new Promise(resolve=>{resolveAuthenticated=resolve;});
+  const originalAuth=room.authenticate;
+  room.authenticate=token=>{const me=originalAuth(token);resolveAuthenticated();return me;};
+  t.after(()=>{room.authenticate=originalAuth;});
+  let request;
+  const response=new Promise((resolve,reject)=>{
+    request=http.request({hostname:'127.0.0.1',port:app.publicPort,path:'/api/p/seat-request',method:'POST',headers:auth(observer.participantToken)},res=>{
+      let text='';res.on('data',chunk=>{text+=chunk;});res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text)}));
+    });
+    request.on('error',reject);request.write('{');
+  });
+  t.after(()=>request.destroy());
+  await authenticated;
+  room.reissue(observer.participantId);
+  const before=structuredClone(room.load());
+  request.end(JSON.stringify({expectedRoomId:before.roomId,expectedRevision:before.revision}).slice(1));
+  assert.equal((await response).status,401);
+  assert.deepEqual(room.load(),before);
+  assert.equal(room.hostView().participants.length,0);
+  assert.equal(room.hostView().spectators.length,1);
+});
+
 test('public listener 404s host APIs and serves join', async () => {
   const storeDir = createOwnedTempDir('holdem-public');
   const manager = {
@@ -432,6 +461,57 @@ test('closed multi room resume becomes ROOM_UNBOUND and abort-unrecoverable end 
   assert.ok(sidecar, fs.readdirSync(gameDir).join(','));
   const audit = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'), 'utf8'));
   assert.equal(audit.abandonedPendingDecision?.reason, 'ROOM_UNBOUND');
+});
+
+test('late spectator API is read-only and promotion only affects the next game', {timeout:TIMEOUT}, async t => {
+  const {manager,app}=await boot(t);
+  manager.room.open({hostName:'Host',totalSeats:3,actionTimeoutSec:60});
+  const origin=`http://127.0.0.1:${app.publicPort}`;
+  const join=async name=>(await jsonOf(await fetch(`${origin}/api/join`,{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:manager.room.load().joinCode,name})}))).body;
+  const guest=await join('Guest');
+  const start={...cas(manager),setup:{mode:'cash-training',totalSeats:3,opponentRuntime:'policy',hints:'off',dealBias:'off'}};
+  manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');await waitPlaying(manager);
+  const pause=cas(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
+  const observer=await join('Observer');assert.equal(observer.roomRole,'spectator');
+  const snap=manager.snapshot();
+  const read=async(pathname,who=observer,options={})=>jsonOf(await fetch(`${origin}${pathname}`,{
+    ...options,headers:{authorization:`Bearer ${who.participantToken}`,'x-game-epoch':snap.gameEpoch,'content-type':'application/json',...options.headers}}));
+  const prefix=`/api/p/game/${snap.gameId}`;
+  const observed=await read(`${prefix}/snapshot`,observer,{headers:{'x-loop-probe':'1'}});assert.equal(observed.status,200,JSON.stringify(observed.body));
+  assert.ok(Object.keys(observed.body.view.holeCardsByPlayerId).length===3);
+  assert.equal(observed.body.view.viewer,null);assert.equal(observed.body.coach,undefined);
+  const snapshotFile=path.join(manager.current.sessionDir,'ui-snapshot.json');
+  const originalRead=fs.readFileSync;let viewReads=0;
+  try {
+    fs.readFileSync=(file,...args)=>{if(String(file)===snapshotFile)viewReads++;return originalRead(file,...args);};
+    for(let i=0;i<4;i++)assert.equal((await read('/api/p/state')).body.me.viewerRole,'spectator');
+    assert.ok(viewReads<=1,`unchanged committed view was parsed ${viewReads} times`);
+  } finally {fs.readFileSync=originalRead;}
+  const playing=await read(`${prefix}/snapshot`,guest,{headers:{'x-seat':'spectator','x-loop-probe':'1'}});
+  assert.equal(playing.body.view.holeCardsByPlayerId,undefined);
+  assert.equal(playing.body.view.viewer,'h1');
+  assert.equal((await read(`${prefix}/snapshot?seat=spectator`,guest)).status,400);
+  for(const endpoint of ['action','action-status']) {
+    const result=await read(`${prefix}/${endpoint}`,observer,endpoint==='action'?{method:'POST',body:'{}'}:{});
+    assert.equal(result.status,403);assert.equal(result.body.code,'SPECTATOR_READ_ONLY');
+  }
+  const before=JSON.parse(fs.readFileSync(path.join(manager.current.sessionDir,'players.json'),'utf8'));
+  assert.equal(before.length,3);assert.equal(before.some(p=>p.participantId===observer.participantId),false);
+  const oldCode=manager.room.load().joinCode;manager.room.rotateCode();assert.notEqual(manager.room.load().joinCode,oldCode);
+  assert.equal((await read(`${prefix}/snapshot`)).status,200);
+  const end=cas(manager,'end');manager.command(end);assert.equal((await settle(manager,end.requestId)).status,'succeeded');
+  const state=await read('/api/p/state');assert.equal(state.body.room.canRequestSeat,true);
+  assert.equal(state.body.me.roomRole,'spectator');assert.ok(state.body.game.final);
+  const requested=await read('/api/p/seat-request',observer,{method:'POST',body:JSON.stringify({expectedRoomId:state.body.room.roomId,expectedRevision:state.body.room.revision})});
+  assert.equal(requested.status,200);
+  const restart={...cas(manager,'start'),setup:{mode:'cash-training',totalSeats:3,opponentRuntime:'policy',hints:'off',dealBias:'off'}};
+  manager.command(restart);assert.equal((await settle(manager,restart.requestId)).status,'succeeded');await waitPlaying(manager);
+  const next=manager.snapshot();assert.notEqual(next.gameId,snap.gameId);
+  const nextSnapshot=await read(`/api/p/game/${next.gameId}/snapshot`,observer,{headers:{'x-game-epoch':next.gameEpoch}});
+  assert.equal(nextSnapshot.status,200);assert.equal(nextSnapshot.body.view.viewer,'h2');
+  assert.equal(nextSnapshot.body.view.holeCardsByPlayerId,undefined);
+  assert.equal((await read(`${prefix}/snapshot`)).status,409);
 });
 
 test('TLS requires both files; http when absent', async (t) => {

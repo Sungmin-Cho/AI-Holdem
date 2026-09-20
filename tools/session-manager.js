@@ -69,8 +69,11 @@ export function createSessionManager({
   const currentSetup = () => {
     const stored = readSetupFile();
     if (!stored) return null;
-    const { participants, hostName, totalSeats, actionTimeoutSec, ...rest } = stored;
-    return normalizeSetup(rest);
+    const { participants, hostName, totalSeats, actionTimeoutSec, aiCount, ...rest } = stored;
+    // Strip old identities, not the table size. A full-human table has zero
+    // AIs, which is only valid together with its roster; the next lock derives
+    // the actual AI count from the current room again.
+    return normalizeSetup({ ...rest, ...(totalSeats ? { totalSeats } : { aiCount }) });
   };
   const readPlayers = () => {
     if (!current?.sessionDir) return [];

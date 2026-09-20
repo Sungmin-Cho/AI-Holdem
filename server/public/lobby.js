@@ -10,6 +10,7 @@ if (fragment.has("token")) {
   history.replaceState(null, "", location.pathname);
 }
 let appliedDefaults = false;
+let rejoinFor = null;
 let snapshot = null,
   busy = false,
   selecting = false,
@@ -108,6 +109,42 @@ function render() {
   $("result-end").hidden = !snapshot.allowedCommands.includes("end");
   $("result-end").disabled = busy || !snapshot.allowedCommands.includes("end");
   const room = snapshot.room;
+  $('seat-management').hidden = room?.status !== 'open';
+  if (room?.status !== 'open' || rejoinFor?.roomId !== room?.roomId
+    || !room?.participants?.some(row=>row.participantId===rejoinFor?.participantId)) {
+    rejoinFor=null;$('rejoin-link').value='';$('rejoin-link').hidden=true;
+  }
+  $('managed-seats').replaceChildren(...(room?.participants ?? []).map(row=>{
+    const item=document.createElement('li');item.dataset.participantId=row.participantId;
+    item.textContent=`${row.name}${row.connected ? ' ●' : ' (오프라인)'} `;
+    const rejoin=document.createElement('button');rejoin.type='button';rejoin.textContent='재입장 링크';
+    rejoin.disabled=busy||room.status!=='open';rejoin.dataset.action='reissue';
+    rejoin.onclick=async()=>{
+      try {
+        const result=await roomOp('reissue',{participantId:row.participantId});
+        if(snapshot.room?.roomId!==room.roomId||snapshot.room?.status!=='open')return;
+        rejoinFor={roomId:room.roomId,participantId:row.participantId};
+        $('rejoin-link').value=new URL(result.link,room.links?.[0]??location.origin).href;
+        $('rejoin-link').hidden=false;$('rejoin-link').select();
+      } catch(error) {showError(error);}
+    };
+    const remove=document.createElement('button');remove.type='button';remove.textContent='좌석 비우기';
+    remove.disabled=busy||room.status!=='open';remove.dataset.action='remove';
+    remove.onclick=()=>roomOp('remove',{participantId:row.participantId}).catch(showError);
+    item.append(rejoin,remove);return item;
+  }));
+  if ($('live-observers')) $('live-observers').hidden = !room;
+  for (const id of ['spectator-count','live-spectator-count']) if ($(id)) $(id).textContent=String(room?.spectators?.length ?? 0);
+  for (const id of ['room-spectators','live-spectators']) {
+    if (!$(id)) continue;
+    $(id).replaceChildren(...(room?.spectators ?? []).map(row=>{
+      const item=document.createElement('li');
+      item.textContent=`${row.name}${row.connected ? ' ●' : ' (오프라인)'} `;
+      const remove=document.createElement('button');remove.type='button';remove.textContent='내보내기';
+      remove.onclick=()=>roomOp('remove',{participantId:row.participantId}).catch(showError);
+      item.append(remove);return item;
+    }));
+  }
   if ($("room-panel")) {
     $("room-panel").hidden = !room;
     if (room) {
@@ -405,12 +442,13 @@ async function recoverCommand() {
   }
 }
 async function roomOp(op, extra = {}) {
-  await api("/api/room", {
+  const result=await api("/api/room", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ op, ...extra }),
   });
   await refresh();
+  return result;
 }
 $("room-open")?.addEventListener("click", () => roomOp("open", {
   hostName: $("host-name")?.value || "호스트",
@@ -418,6 +456,7 @@ $("room-open")?.addEventListener("click", () => roomOp("open", {
   actionTimeoutSec: Number($("action-timeout")?.value || 60),
 }));
 $("room-rotate")?.addEventListener("click", () => roomOp("rotate-code"));
+$("live-room-rotate")?.addEventListener("click", () => roomOp("rotate-code").catch(showError));
 $("room-close")?.addEventListener("click", () => roomOp("close"));
 await recoverCommand();
 setInterval(() => {

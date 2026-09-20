@@ -153,6 +153,8 @@
             <ul id="join-links"></ul>
             <p id="room-status"></p>
             <ul id="room-participants"></ul>
+            <p>관전자 <span id="spectator-count">0</span> / 20</p>
+            <ul id="room-spectators"></ul>
             <button type="button" id="room-rotate">코드 재발급</button>
             <button type="button" id="room-close">세션 닫기</button>
           </div>
@@ -164,7 +166,19 @@
       </form>
     </main>
     <section id="game" hidden>
+      <details id="live-observers" hidden>
+        <summary>관전자 관리 · <span id="live-spectator-count">0</span>명</summary>
+        <p>관전자에게 모든 카드가 실시간 공개됩니다.</p>
+        <ul id="live-spectators"></ul>
+        <button type="button" id="live-room-rotate">참가 코드 재발급</button>
+      </details>
       <iframe id="table" title="홀덤 게임 테이블"></iframe>
+    </section>
+    <section id="seat-management" hidden>
+      <h2>다음 게임 참가자 관리</h2>
+      <p>탈락 후 관전을 나간 참가자의 좌석은 보존됩니다. 다시 올 사람에게 재입장 링크를 전달하거나 좌석을 비워 주세요.</p>
+      <ul id="managed-seats"></ul>
+      <input id="rejoin-link" aria-label="참가자 재입장 링크" readonly hidden />
     </section>
     <section id="result" hidden>
       <h1 id="result-title"></h1>

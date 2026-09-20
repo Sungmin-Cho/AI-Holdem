@@ -1499,7 +1499,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         const response = await fetch(
           `http://127.0.0.1:${port}/api/snapshot?token=${encodeURIComponent(token)}`,
-          { signal: controller.signal },
+          { signal: controller.signal, headers: { 'x-loop-probe': '1' } },
         );
         let body = null;
         try { body = await response.json(); } catch { /* validated by caller */ }
@@ -7732,7 +7732,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!opts.retryDecisionId) throw codedError('PLAYER_RECOVERY_REQUIRED', '미해결 결정을 보존했습니다. --resume --retry-decision <decisionId>로 재시도하세요.');
       await retryDecision(opts.retryDecisionId, {freshAuthorization: opts.freshAuthorization ?? null});
     }
-    if (managed && pauseRequested) { await pauseBarrier(await runCli(['step'])); if (stopRequested) return readLoopState(); }
+    if (managed && pauseRequested) {
+      // A restored paused session must publish a verified current projection
+      // before parking, including legacy snapshots without a viewer anchor.
+      const current = await runCli(['step']);
+      if (fs.existsSync(path.join(root, '.publish-attempt.json'))) await publishEnvelope(current, ['--retry']);
+      await publishEnvelope(current, ['--view-only']);
+      await pauseBarrier(current);
+      if (stopRequested) return readLoopState();
+    }
     if (resumeEntryPending) {
       const current = await runCli(['step']);
       if (fs.existsSync(path.join(root, '.publish-attempt.json'))) {
