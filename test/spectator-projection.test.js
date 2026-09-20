@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {createGame,startHand,applyAction,legalFor} from '../engine/hand.js';
 import {newDeck} from '../engine/cards.js';
 import {viewFor,spectatorView} from '../engine/views.js';
@@ -30,6 +31,12 @@ async function fixture(t,{fault}={}) {
       method:body?'POST':'GET',headers:{'x-seat':seat,'content-type':'application/json',...headers},...(body?{body:JSON.stringify(body)}:{})});
     return {status:response.status,body:await response.json()};
   };
+  // The relay initializes hint evidence with asynchronous file reads. This
+  // in-process fixture must let that reader close before its synchronous engine
+  // writes: Windows otherwise holds state.json open while renameSync retries
+  // block the same event loop needed to finish the reader. A host snapshot waits
+  // for initialization (no timer guess or weakening of atomic state writes).
+  assert.equal((await request('snapshot')).status,200);
   let publishId=0;
   const publish=async(engine=state,events=[])=>{
     saveState(dir,engine);
@@ -38,6 +45,32 @@ async function fixture(t,{fault}={}) {
   };
   return {dir,state,relay,request,publish};
 }
+
+test('in-process fixture drains asynchronous startup readers before atomic engine writes',async t=>{
+  const opened=new Set();
+  let observedOpen;
+  const startupRead=new Promise(resolve=>{observedOpen=resolve;});
+  const realOpen=fs.promises.open.bind(fs.promises);
+  const realRename=fs.renameSync.bind(fs);
+  t.mock.method(fs.promises,'open',async(file,...args)=>{
+    const handle=await realOpen(file,...args);
+    if(path.basename(String(file))==='state.json') {
+      const key=path.resolve(String(file));opened.add(key);observedOpen();
+      const close=handle.close.bind(handle);
+      handle.close=async()=>{await delay(100);try{return await close();}finally{opened.delete(key);}};
+    }
+    return handle;
+  });
+  t.mock.method(fs,'renameSync',(from,to)=>{
+    if(opened.has(path.resolve(to)))throw Object.assign(Error('Windows reader sharing violation'),{code:'EPERM'});
+    return realRename(from,to);
+  });
+  const f=await fixture(t);
+  await startupRead;
+  assert.equal(opened.size,0,'fixture readiness includes closing the hint startup reader');
+  assert.equal((await f.publish()).status,200);
+  assert.equal((await f.publish()).status,200);
+});
 
 test('spectator projection includes folded holes, never private state or future cards',()=>{
   const state=game();state.hand.folded.push('h1');

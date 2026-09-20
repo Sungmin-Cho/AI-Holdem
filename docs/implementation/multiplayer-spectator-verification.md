@@ -44,6 +44,7 @@
 - guest 탈락 후 퇴장→호스트 링크 재발급→재입장과 호스트 좌석 제거도 실제 브라우저에서 확인했다.
 - 기존 multiplayer, lobby, UI presentation journeys도 통과했다. 실제 사용자 `game/` 트리의 hash 불변과 테스트 소유 서비스·브라우저 정리를 확인했다.
 - 최종 전체 재실행 결과와 Linux/Windows CI의 최종 상태는 PR 검증 기록에 남긴다. 설치되지 않은 ESLint/Stryker를 실행했다고 주장하지 않는다.
+- 첫 PR CI의 Windows Node 20/22 `rest`에서 관전 fixture 13개가 `state.json` rename `EPERM`으로 실패했다. 같은 프로세스의 비동기 hint 초기화 reader가 닫히기 전에 동기식 엔진 쓰기가 event loop를 막는 fixture 경쟁이었다. host snapshot의 초기화 완료 응답을 기다리도록 수정했으며, 열린 reader를 추적하는 회귀 테스트에서 수정 전 1개 잔존→수정 후 0개를 확인했다. 원자적 저장·보안 판정은 변경하지 않았고 두 버전의 원본 실패 로그를 보존했다. Windows 실제 수정 검증은 후속 CI 결과로 판단한다.
 
 로컬 원본 로그·스크린샷·독립 리뷰 근거: `/tmp/holdem-spectator-validation.pRpm4j/`. PR의 UI browser artifact에는 새 관전 journey 결과가 포함된다.
 
