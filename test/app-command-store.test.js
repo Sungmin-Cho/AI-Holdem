@@ -246,7 +246,11 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     manager = createSessionManager({ storeDir: root,
       resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
     await manager.initialize();
-    assert.equal(manager.snapshot().state, 'paused');
+    const recovered = manager.snapshot();
+    assert.equal(recovered.state, 'paused', JSON.stringify({
+      freshSession, state: recovered.state, error: recovered.error,
+      receiptError: manager.receipt(abandoned.requestId)?.error,
+    }));
     assert.equal(manager.receipt(abandoned.requestId).status, 'failed');
     assert.equal(manager.receipt(abandoned.requestId).error, 'RETRY_NOT_APPLIED');
     assert.equal(calls.length, beforeWarmups);

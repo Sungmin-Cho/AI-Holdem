@@ -145,6 +145,9 @@ jobs:
       - name: Verify learning runtime on the runner platform
         if: matrix.shard == 'rest'
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Verify fresh retry recovery before the long study shard
+        if: matrix.shard == 'study-a'
+        run: node --test --test-name-pattern="fresh retry command forwards" test/app-command-store.test.js
       - name: Run tests
         run: npm run test:ci:windows -- ${{ matrix.shard }}
       - name: Report Windows proof profile
