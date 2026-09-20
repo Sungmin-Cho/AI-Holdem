@@ -9,6 +9,7 @@ import { loadUiState, publicSnapshot } from "../server/server.js";
 import { ensureStudyService } from "./study-service.js";
 import { createRoomManager } from "./room-manager.js";
 import { HOST_ID } from "../shared/seat-roles.js";
+import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
 const json = (res, status, value) => {
@@ -112,7 +113,8 @@ export async function startAppServer({
   }
   let origin;
   const room = manager.room ?? createRoomManager({ storeDir });
-  try { room.recover({}); } catch { /* no room yet */ }
+  // The session manager already recovered its bound roster with engine players.
+  if (!manager.room) { try { room.recover({}); } catch { /* no room yet */ } }
   const tls = Boolean(tlsCert && tlsKey);
   const tlsOptions = tls
     ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) }
@@ -174,6 +176,28 @@ export async function startAppServer({
     sseByParticipant.delete(participantId);
   }
   room.addRevokeListener?.((event) => revokeParticipant(event.participantId));
+  const committedCache = new Map();
+  const readCommitFile = name => {
+    const file = path.join(manager.current.sessionDir, name);
+    const stat = fs.statSync(file);
+    const key = JSON.stringify([file,stat.dev,stat.ino,stat.size,stat.mtimeMs,stat.ctimeMs]);
+    if (committedCache.get(name)?.key === key) return committedCache.get(name).data;
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    committedCache.set(name,{key,data});
+    return data;
+  };
+  const committedView = () => {
+    try {
+      const raw = readCommitFile('ui-snapshot.json');
+      const loop = readCommitFile('loop-state.json');
+      // The UI file precedes receipt reconciliation. Only the loop's successful
+      // publish acknowledgement authorizes role changes and token revocation.
+      const viewPublishId = raw.projectionAnchor?.publishId;
+      if (!Number.isSafeInteger(viewPublishId) || viewPublishId < 1 || viewPublishId > raw.publishId
+        || !Number.isSafeInteger(loop.lastPublishId) || loop.lastPublishId < viewPublishId) return null;
+      return raw.view ?? null;
+    } catch { committedCache.clear(); return null; }
+  };
   function rateLimitJoin(addr) {
     const now = Date.now();
     const row = joinAttempts.get(addr) ?? { count: 0, start: now };
@@ -352,6 +376,7 @@ export async function startAppServer({
           : publicServer?.address()?.port ?? publicPort;
         json(res, 200, {
           ...view,
+          viewerRole: viewerRole(committedView(), HOST_ID),
           room: host
             ? {
                 ...host,
@@ -466,7 +491,9 @@ export async function startAppServer({
           return;
         }
         try {
-          json(res, 200, room.join({ code: body.code, name: body.name, addr }));
+          const game = manager.snapshot();
+          if (committedView()?.gameOver && room.load()?.status === 'locked') game.state = 'finalizing';
+          json(res, 200, room.join({ code: body.code, name: body.name, addr, game }));
         } catch (error) {
           const code = error.code ?? "BAD_CODE";
           if (code === "BAD_CODE") await new Promise((r) => setTimeout(r, 250));
@@ -507,7 +534,9 @@ export async function startAppServer({
           }
           json(res, 200, {
             room: room.participantView(me.participantId),
-            me: { participantId: me.participantId, name: me.name, playerId: me.playerId },
+            me: { participantId: me.participantId, name: me.name, playerId: me.playerId,
+              roomRole:me.roomRole, viewerGeneration:me.viewerGeneration,
+              viewerRole:viewerRole(committedView(), me.roomRole === 'spectator' ? SPECTATOR_ID : me.playerId) },
             game: {
               gameId: snap.gameId,
               gameEpoch: snap.gameEpoch,
@@ -520,10 +549,30 @@ export async function startAppServer({
         }
         return;
       }
+      if (pathname === '/api/p/seat-request' && req.method === 'POST') {
+        try {
+          participantAuth();
+          const body = await bodyOf(req);
+          // Body streaming yields to token reissue/removal. Recheck credentials
+          // immediately before the synchronous capacity/role mutation.
+          const me = participantAuth();
+          if (manager.snapshot().pendingRequestId) throw Object.assign(new Error(), {code:'ROOM_LOCKED'});
+          // Synchronous room mutation serializes against start/other admissions.
+          const state = room.requestSeat(me.participantId, body);
+          json(res, 200, state);
+        } catch (error) {
+          json(res, error.code === 'UNAUTHORIZED' ? 401 : 409, {code:error.code ?? 'BAD_COMMAND'});
+        }
+        return;
+      }
       if (pathname === "/api/p/leave" && req.method === "POST") {
         try {
           const me = participantAuth();
-          room.remove(me.participantId);
+          if (room.load()?.status === 'locked' && me.roomRole === 'seated'
+            && me.boundGameId === manager.current?.gameId
+            && committedView()?.seats?.some(row => row.playerId === me.playerId && row.out === true)) {
+            room.leaveEliminated(me.participantId);
+          } else room.remove(me.participantId);
           json(res, 200, { ok: true });
         } catch (error) {
           json(res, error.code === "UNAUTHORIZED" ? 401 : error.code === "ROOM_LOCKED" ? 409 : 404, { code: error.code ?? "UNAUTHORIZED" });
@@ -543,9 +592,13 @@ export async function startAppServer({
           return;
         }
         room.touch(me.participantId);
-        if (!me.playerId) {
+        const spectator = me.roomRole === 'spectator';
+        if (!spectator && (!me.playerId || me.boundGameId !== manager.current?.gameId)) {
           json(res, 409, { code: "NOT_SEATED" });
           return;
+        }
+        if (spectator && ['action','action-status'].includes(pMatch[2])) {
+          json(res, 403, {code:'SPECTATOR_READ_ONLY'}); return;
         }
         const sse = pMatch[2] === "events";
         if (!attachResponse(me.participantId, res, { sse })) {
@@ -558,7 +611,7 @@ export async function startAppServer({
           url,
           gameId: pMatch[1],
           endpoint: pMatch[2],
-          seat: me.playerId,
+          seat: spectator ? SPECTATOR_ID : me.playerId,
         });
         return;
       }

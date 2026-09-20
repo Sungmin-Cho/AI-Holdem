@@ -189,6 +189,7 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
   assert.equal((raw.history ?? []).some((row) => row.payload && 'views' in row.payload), false);
   const blob = JSON.stringify(raw);
   for (const card of views.h1.myCards) {
-    assert.equal(blob.includes(card), false, card);
+    // Card values must be absent; the card-free epoch digest may contain "2c".
+    assert.equal(blob.includes(JSON.stringify(card)), false, card);
   }
 });

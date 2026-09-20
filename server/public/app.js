@@ -6,7 +6,7 @@ import { formatReplay, actionVerbs } from './replay-format.js';
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration } from './table-controls.js';
 import { createActionController } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
-import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint} from './seat-format.js';
+import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
@@ -159,7 +159,7 @@ function miniCard(code) {
 }
 
 function playerName(playerId) {
-  if (playerId === 'user') return '나';
+  if (playerId === viewerId(ui.view)) return '나';
   const seat = ui.view?.seats?.find((s) => s.playerId === playerId);
   return seat?.name ?? playerId ?? '';
 }
@@ -183,7 +183,7 @@ function revealedCards() {
 }
 
 function myBetOf(view) {
-  const seat = view?.seats?.find((s) => s.playerId === 'user');
+  const seat = view?.seats?.find((s) => s.playerId === viewerId(view));
   return seat?.bet ?? 0;
 }
 
@@ -274,8 +274,8 @@ function paintTop(view) {
   $('game-mode').textContent = cash ? '캐시 연습' : '토너먼트';
   if(view?.dealBias && view.dealBias!=='off') $('game-mode').textContent += ' · 유리한 딜 (평가 제외)';
   for (const row of document.querySelectorAll('[data-tournament-meta]')) row.hidden = cash;
-  const net = view?.sessionNet?.user;
-  $('session-net').closest('.meta-seg').hidden = !cash;
+  const net = view?.sessionNet?.[viewerId(view)];
+  $('session-net').closest('.meta-seg').hidden = !cash || isSpectating(view);
   $('session-net').textContent = amountText(net, view?.blinds?.[1], true);
   $('participants-summary').textContent = view ? participantSummary(view) : '참가자 —';
   $('cash-reset-note').hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
@@ -345,7 +345,11 @@ function avatarRing() {
 
 function seatCards(seat, view, revealed, mucks) {
   const box = el('div', 'seat-cards');
-  if (seat.playerId === 'user') {
+  if (isSpectating(view)) {
+    for (const code of view.holeCardsByPlayerId[seat.playerId] ?? []) box.append(cardNode(code, {small:true}));
+    return box;
+  }
+  if (seat.playerId === viewerId(view)) {
     for (const code of view.myCards ?? []) box.append(cardNode(code, { hero: true }));
     return box;
   }
@@ -375,14 +379,14 @@ function paintSeats(view) {
   $('table').classList.toggle('is-crowded', seats.length >= 7);
   if (!seats.length) {seatRoot.replaceChildren();paintParticipants(view);return;}
 
-  const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === 'user'));
+  const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === viewerId(view)));
   const { map: revealed, mucks } = revealedCards();
   const n = seats.length;
   const positions = blindPositions(view);
 
   for (let i = 0; i < n; i += 1) {
     const seat = seats[(userIdx + i) % n];
-    const isHero = seat.playerId === 'user';
+    const isHero = seat.playerId === viewerId(view);
     const state = seatPresentation(view, seat);
     const active = state.active;
 
@@ -464,7 +468,7 @@ function paintThinking(view) {
     return;
   }
   idle.hidden = true;
-  if (view.toAct && view.toAct !== 'user' && !view.gameOver) {
+  if (view.toAct && view.toAct !== viewerId(view) && !view.gameOver) {
     box.hidden = false;
     box.textContent = `${playerName(view.toAct)} 생각 중…`;
     return;
@@ -531,10 +535,10 @@ function syncRaisePanel(legal) {
 function paintActionBar(view) {
   const bar = $('action-bar');
   const legal = view?.legal;
-  const mine = Boolean(legal) && !view?.gameOver;
+  const mine = Boolean(legal) && !view?.gameOver && !isSpectating(view);
   bar.hidden = !mine;
   if (!mine) return;
-  const hero=view.seats?.find(s=>s.playerId==='user');
+  const hero=view.seats?.find(s=>s.playerId===viewerId(view));
   const pot=aggregatePot(view);
   const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
   $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
@@ -686,7 +690,7 @@ function paintLog() {
   const anchorIndex=anchor?.dataset.logIndex;
   const anchorOffset=anchor?.getBoundingClientRect().top-list.getBoundingClientRect().top;
   const contexts=logBlindContexts(ui.log,ui.handReplays);
-  const keys=ui.log.map((item,i)=>{const replay=item.type==='hand_start'?ui.handReplays?.[item.handNo]:null;return JSON.stringify([item,contexts[i],displayUnit,replay?{unavailable:replay.unavailable??false,reason:replay.reason??null}:null]);});
+  const keys=ui.log.map((item,i)=>{const replay=item.type==='hand_start'?ui.handReplays?.[item.handNo]:null;return JSON.stringify([item,contexts[i],displayUnit,viewerId(ui.view),replay?{unavailable:replay.unavailable??false,reason:replay.reason??null}:null]);});
   if(JSON.stringify(oldKeys)===JSON.stringify(keys))return;
   const appendOnly=oldKeys.length>0 && oldKeys.every((key,i)=>key===keys[i]);
   const verbs = actionVerbs(ui.log);
@@ -824,7 +828,7 @@ let openReplayHandNo = null;
 function seatNames() {
   const names = { user: '나' };
   for (const seat of ui.view?.seats ?? []) {
-    names[seat.playerId] = seat.playerId === 'user' ? '나' : (seat.name ?? seat.playerId);
+    names[seat.playerId] = seat.playerId === viewerId(ui.view) ? '나' : (seat.name ?? seat.playerId);
   }
   return names;
 }
@@ -966,6 +970,16 @@ function paintReview(view) {
 
 function paint() {
   const view = ui.view;
+  const spectator = isSpectating(view);
+  document.body.classList.toggle('spectator-mode', spectator);
+  const banner = $('spectator-banner');
+  banner.hidden = !spectator;
+  banner.textContent = view?.gameOver ? '게임이 종료되었습니다.' : '관전 중 · 모든 카드 실시간 공개';
+  for (const name of ['coach','training']) {
+    $(`tab-${name}`).hidden = spectator || participantMode;
+    $(`panel-${name}`).hidden = spectator || participantMode || selectedTab !== name;
+  }
+  if (spectator && ['coach','training'].includes(selectedTab)) selectTab('log');
   paintTop(view);
   paintBoard(view);
   paintPots(view);
@@ -998,6 +1012,13 @@ function mergeAnnotationOntoCards(ann) {
 }
 
 function renderSnapshot(snap) {
+  const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
+  if (isSpectating(snap.view)) {
+    actionController?.disconnect(); actionController = null;
+    pendingAction = true; lastDecisionId = null;
+    $('intent-note').value = '';
+    if (becameSpectator && ui.view?.viewer != null) $('seat-announcement').textContent = '탈락하여 관전으로 전환되었습니다.';
+  }
   ui.hint=hintState.accept(snap.hint,snap.view,hintRequests.get(snap)??{generation:-1});
   ui.view = snap.view ?? null;
   ui.log = Array.isArray(snap.log) ? snap.log.slice() : [];
@@ -1266,6 +1287,12 @@ async function initializeController() {
   });
 }
 function applyMessage(m) {
+  if (m.snapshot && m.revision >= revision) {
+    renderSnapshot(m.snapshot); revision = m.revision;
+    actionController?.observe(m.snapshot.view, {revision:m.revision});
+    if (m.snapshot.view) {booted = true; setConn(true);}
+    return;
+  }
   if (m.revision <= revision) return;
   revision = m.revision; render(m);
 }
@@ -1281,6 +1308,7 @@ else {
   es.onmessage = (event) => {
     try {
       const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data),hintGeneration:hintState.capture() };
+      if (msg.snapshot) {applyMessage(msg); return;}
       if (!booted) { buffer.push(msg); return; }
       applyMessage(msg);
     } catch (error) {
@@ -1293,8 +1321,11 @@ else {
     opening = true;
     try {
       const snapshot = await getSnapshot();
-      if (!actionController) await initializeController();
-      await actionController.connect(snapshot);
+      if (isSpectating(snapshot.view)) {if(snapshot.revision >= revision){renderSnapshot(snapshot);revision = snapshot.revision;}}
+      else {
+        if (!actionController) await initializeController();
+        await actionController.connect(snapshot);
+      }
       booted = true; setConn(true);
       for (const msg of buffer.splice(0)) applyMessage(msg);
     } catch {

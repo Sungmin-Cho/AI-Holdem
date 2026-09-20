@@ -134,12 +134,20 @@ const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
 const CONTAINMENT_MODULE = 'tools/training-store.js';
 const SERVER_ALLOWED_REFERENCE = 'shared/reference.js';
 
-test('server imports only the publish contract and named containment primitives', () => {
+test('server imports only contracts, named containment and pure viewer projection primitives', () => {
   const offenders = [];
   for (const edge of edgesFrom('server')) {
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
+    // Only this projection adapter may inspect the canonical engine view. These
+    // functions are pure readers; game mutation/state I/O remain forbidden.
+    if (edge.from === 'server/viewer-projection.js' && edge.to === 'engine/views.js'
+      && !edge.dynamic && edge.bindings?.length
+      && edge.bindings.every(name=>['viewFor','spectatorView'].includes(name))) continue;
+    if (edge.from === 'server/server.js' && edge.to === 'shared/viewer-access.js'
+      && !edge.dynamic && edge.bindings?.length
+      && edge.bindings.every(name=>['SPECTATOR_ID','viewerRole','spectatorAudience'].includes(name))) continue;
     // Lobby previews reuse the same pure validator as the authoritative server.
     if (edge.from === 'server/public/lobby.js' && edge.to === 'shared/game-setup.js'
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;

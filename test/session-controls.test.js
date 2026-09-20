@@ -6,6 +6,28 @@ import path from "node:path";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { createGameLoop } from "../tools/game-loop.js";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+test('paused resume republishes a legacy observer anchor without advancing the hand',
+  {timeout:process.platform==='win32'?300000:30000},async t=>{
+    const root=createOwnedTempDir('holdem-spectator-paused');
+    const options={gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+      opts:{port:0,waitMs:60000,opponentRuntime:'policy',controlProtocolVersion:1}};
+    const loop=createGameLoop(options);t.after(()=>loop.requestStop());
+    await loop.bootstrap({ai:1,stack:5000,opponentRuntime:'policy'});
+    const running=loop.run();running.catch(()=>{});await sleep(300);await loop.pause();
+    await loop.requestStop();await running.catch(error=>{if(error.code!=='CHILD_FAILED'&&error.code!=='STOPPING')throw error;});
+    const engineFile=path.join(root,'state.json');const before=fs.readFileSync(engineFile,'utf8');
+    const snapshotFile=path.join(root,'ui-snapshot.json');
+    const old=JSON.parse(fs.readFileSync(snapshotFile,'utf8'));delete old.projectionAnchor;
+    fs.writeFileSync(snapshotFile,JSON.stringify(old));
+    const restored=createGameLoop({...options,opts:{...options.opts,startPaused:true}});
+    t.after(()=>restored.requestStop());await restored.resume();
+    const resumed=restored.run();resumed.catch(()=>{});
+    const deadline=Date.now()+(process.platform==='win32'?120000:10000);
+    while(Date.now()<deadline&&!JSON.parse(fs.readFileSync(snapshotFile,'utf8')).projectionAnchor)await sleep(20);
+    assert.ok(JSON.parse(fs.readFileSync(snapshotFile,'utf8')).projectionAnchor);
+    assert.equal(fs.readFileSync(engineFile,'utf8'),before);
+    await restored.requestStop();await resumed.catch(error=>{if(error.code!=='CHILD_FAILED'&&error.code!=='STOPPING')throw error;});
+  });
 test(
   "managed loop pauses durably, rejects actions, resumes and aborts without review",
   { timeout: process.platform === "win32" ? 300000 : 30000 },

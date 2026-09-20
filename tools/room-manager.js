@@ -6,6 +6,7 @@ import { validateParticipantName } from '../shared/seat-roles.js';
 
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const FILE = ['.app', 'room.json'];
+export const SPECTATOR_CAPACITY = 20;
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -71,6 +72,25 @@ export function createRoomManager({
     } catch {
       memory = null;
     }
+    if (memory) {
+      if (![1, 2].includes(memory.schemaVersion) || !Array.isArray(memory.participants)) {
+        memory = null;
+        throw coded('ROOM_SCHEMA_INVALID');
+      }
+      const restored = structuredClone(memory);
+      memory = null;
+      for (const row of restored.participants) {
+        if (restored.schemaVersion === 1) {
+          if (row.roomRole !== undefined) throw coded('ROOM_SCHEMA_INVALID');
+          row.roomRole = 'seated';
+        }
+        if (!['seated', 'spectator'].includes(row.roomRole)) throw coded('ROOM_SCHEMA_INVALID');
+        row.viewerGeneration ??= 1;
+      }
+      restored.schemaVersion = 2;
+      restored.revision ??= 0;
+      memory = restored;
+    }
     return memory;
   }
 
@@ -82,6 +102,7 @@ export function createRoomManager({
       return room;
     }
     room.updatedAt = iso();
+    if (force) room.revision = (room.revision ?? 0) + 1;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     writePrivateJson(file, room);
     lastWrite = t;
@@ -93,21 +114,28 @@ export function createRoomManager({
   function requireRoom() {
     const room = load();
     if (!room) throw coded('ROOM_NOT_FOUND', '룸이 없습니다.');
-    return room;
+    return structuredClone(room);
   }
 
   function activeParticipants(room) {
     return (room.participants ?? []).filter((row) => row.status === 'active');
   }
 
+  function seatedParticipants(room) {
+    return activeParticipants(room).filter(row => row.roomRole === 'seated');
+  }
+
   function hostView() {
     const room = load();
     if (!room) return null;
-    const active = activeParticipants(room);
+    const active = seatedParticipants(room);
+    const spectators = activeParticipants(room).filter(row => row.roomRole === 'spectator');
     const capacity = Math.max(0, (room.totalSeats ?? 9) - 1);
     const lockedAddresses = Object.keys(room.joinFailures ?? {}).length;
     return {
       status: room.status,
+      roomId: room.roomId,
+      revision: room.revision,
       errorCode: room.errorCode ?? null,
       hostName: room.hostName,
       totalSeats: room.totalSeats,
@@ -122,6 +150,9 @@ export function createRoomManager({
         connected: now().getTime() - Date.parse(row.lastSeenAt ?? row.joinedAt) < 10_000,
         playerId: row.playerId ?? null,
       })),
+      spectators: spectators.map(row => ({participantId:row.participantId,name:row.name,
+        connected:now().getTime()-Date.parse(row.lastSeenAt ?? row.joinedAt)<10_000})),
+      spectatorCapacity: SPECTATOR_CAPACITY,
       aiPreview: Math.max(0, room.totalSeats - 1 - active.length),
     };
   }
@@ -132,11 +163,17 @@ export function createRoomManager({
     if (!me || me.status !== 'active') throw coded('UNAUTHORIZED');
     return {
       status: room.status,
+      roomId: room.roomId,
+      revision: room.revision,
       hostName: room.hostName,
       totalSeats: room.totalSeats,
-      me: { participantId: me.participantId, name: me.name, playerId: me.playerId ?? null },
+      me: { participantId: me.participantId, name: me.name, playerId: me.playerId ?? null,
+        roomRole:me.roomRole,viewerGeneration:me.viewerGeneration },
+      canRequestSeat: room.status === 'open' && me.roomRole === 'spectator' && seatedParticipants(room).length < room.totalSeats - 1,
+      spectatorCount: activeParticipants(room).filter(row => row.roomRole === 'spectator').length,
       participants: activeParticipants(room).map((row) => ({
         name: row.name,
+        roomRole: row.roomRole,
         connected: now().getTime() - Date.parse(row.lastSeenAt ?? row.joinedAt) < 10_000,
         me: row.participantId === participantId,
       })),
@@ -148,7 +185,8 @@ export function createRoomManager({
     if (!Number.isInteger(totalSeats) || totalSeats < 2 || totalSeats > 9) throw coded('INVALID_SETUP');
     if (actionTimeoutSec !== 0 && (actionTimeoutSec < 10 || actionTimeoutSec > 600)) throw coded('INVALID_SETUP');
     const room = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      revision: 0,
       roomId: randomBytes(16).toString('hex'),
       status: 'open',
       errorCode: null,
@@ -167,10 +205,13 @@ export function createRoomManager({
     return save(room, { force: true });
   }
 
-  function join({ code, name, addr } = {}) {
+  function join({ code, name, addr, game } = {}) {
     const room = requireRoom();
-    if (room.status === 'locked') throw coded('ROOM_LOCKED', '게임 진행 중 — 끝나면 참가할 수 있습니다');
-    if (room.status !== 'open') throw coded('ROOM_NOT_FOUND');
+    const spectator = room.status === 'locked' && ['playing','paused'].includes(game?.state)
+      && Boolean(room.lock?.boundGameId) && room.lock.boundGameId === game?.gameId && !game.pendingRequestId;
+    if (room.status === 'locked' && !spectator) throw coded('ROOM_LOCKED', '게임 준비 중입니다. 잠시 후 다시 시도하세요.');
+    if (room.status !== 'open' && !spectator) throw coded('ROOM_NOT_FOUND');
+    if (game?.pendingRequestId) throw coded('ROOM_LOCKED');
     const failures = room.joinFailures[addr] ?? [];
     const windowStart = now().getTime() - 10 * 60 * 1000;
     const recent = failures.map((t) => Date.parse(t)).filter((t) => t >= windowStart);
@@ -191,7 +232,9 @@ export function createRoomManager({
     }
     const taken = activeParticipants(room).some((row) => row.name.toLowerCase() === name.trim().toLowerCase());
     if (taken) throw coded('NAME_TAKEN');
-    if (activeParticipants(room).length >= room.totalSeats - 1) throw coded('ROOM_FULL');
+    if (spectator) {
+      if (activeParticipants(room).filter(row => row.roomRole === 'spectator').length >= SPECTATOR_CAPACITY) throw coded('SPECTATOR_FULL');
+    } else if (seatedParticipants(room).length >= room.totalSeats - 1) throw coded('ROOM_FULL');
     const token = randomToken(random);
     const participant = {
       participantId: randomBytes(16).toString('hex'),
@@ -202,10 +245,30 @@ export function createRoomManager({
       lastSeenAt: iso(),
       status: 'active',
       playerId: null,
+      roomRole: spectator ? 'spectator' : 'seated',
+      viewerGeneration: 1,
     };
     room.participants.push(participant);
     save(room, { force: true });
-    return { participantToken: token, participantId: participant.participantId, roomId: room.roomId };
+    return { participantToken: token, participantId: participant.participantId, roomId: room.roomId, roomRole:participant.roomRole };
+  }
+
+  function requestSeat(participantId, {expectedRoomId, expectedRevision} = {}) {
+    const room = requireRoom();
+    if (room.roomId !== expectedRoomId) throw coded('STALE_ROOM');
+    if (room.status !== 'open') throw coded('ROOM_LOCKED');
+    const row = activeParticipants(room).find(entry => entry.participantId === participantId);
+    if (!row) throw coded('UNAUTHORIZED');
+    if (row.roomRole === 'seated') return participantView(participantId);
+    if (room.revision !== expectedRevision) throw coded('STALE_ROOM');
+    if (seatedParticipants(room).length >= room.totalSeats - 1) throw coded('ROOM_FULL');
+    row.roomRole = 'seated';
+    row.playerId = null;
+    row.boundGameId = null;
+    row.viewerGeneration += 1;
+    save(room, {force:true});
+    notifyRevoke({participantId, previousGeneration:row.tokenGeneration});
+    return participantView(participantId);
   }
 
   function authenticate(token) {
@@ -218,7 +281,7 @@ export function createRoomManager({
 
   function rotateCode() {
     const room = requireRoom();
-    if (room.status === 'locked') throw coded('ROOM_LOCKED');
+    if (!['open','locked'].includes(room.status)) throw coded('ROOM_NOT_FOUND');
     room.joinCode = randomCode(random);
     room.codeRotatedAt = iso();
     save(room, { force: true });
@@ -241,9 +304,9 @@ export function createRoomManager({
 
   function remove(participantId) {
     const room = requireRoom();
-    if (room.status === 'locked') throw coded('ROOM_LOCKED');
     const row = room.participants.find((entry) => entry.participantId === participantId);
     if (!row) return;
+    if (room.status === 'locked' && row.roomRole !== 'spectator') throw coded('ROOM_LOCKED');
     const previous = row.tokenGeneration;
     row.status = 'removed';
     row.tokenSha256 = sha256(randomToken(random));
@@ -251,12 +314,25 @@ export function createRoomManager({
     notifyRevoke({ participantId, previousGeneration: previous });
   }
 
+  // Caller must establish committed elimination; retain the game's recovery roster.
+  function leaveEliminated(participantId) {
+    const room = requireRoom();
+    const row = seatedParticipants(room).find(entry => entry.participantId === participantId);
+    if (!row || !room.lock?.boundGameId) throw coded('ROOM_LOCKED');
+    const previous = row.tokenGeneration;
+    row.tokenSha256 = sha256(randomToken(random));
+    row.tokenGeneration += 1;
+    row.lastSeenAt = new Date(0).toISOString();
+    save(room, {force:true});
+    notifyRevoke({participantId,previousGeneration:previous});
+  }
+
   function update({ totalSeats, actionTimeoutSec } = {}) {
     const room = requireRoom();
     if (room.status !== 'open') throw coded('ROOM_LOCKED');
     if (totalSeats !== undefined) {
       if (!Number.isInteger(totalSeats) || totalSeats < 2 || totalSeats > 9) throw coded('INVALID_SETUP');
-      if (totalSeats < 1 + activeParticipants(room).length) throw coded('INVALID_SETUP');
+      if (totalSeats < 1 + seatedParticipants(room).length) throw coded('INVALID_SETUP');
       room.totalSeats = totalSeats;
     }
     if (actionTimeoutSec !== undefined) room.actionTimeoutSec = actionTimeoutSec;
@@ -287,7 +363,7 @@ export function createRoomManager({
         roomId: room.roomId,
         hostName: room.hostName,
         actionTimeoutSec: room.actionTimeoutSec,
-        participants: activeParticipants(room)
+        participants: seatedParticipants(room)
           .slice()
           .sort((a, b) => Date.parse(a.joinedAt) - Date.parse(b.joinedAt))
           .map((row) => ({ participantId: row.participantId, name: row.name })),
@@ -305,7 +381,7 @@ export function createRoomManager({
       roomId: room.roomId,
       hostName: room.hostName,
       actionTimeoutSec: room.actionTimeoutSec,
-      participants: activeParticipants(room)
+      participants: seatedParticipants(room)
         .slice()
         .sort((a, b) => Date.parse(a.joinedAt) - Date.parse(b.joinedAt))
         .map((row) => ({ participantId: row.participantId, name: row.name })),
@@ -315,9 +391,10 @@ export function createRoomManager({
   function bind(gameId, players) {
     const room = requireRoom();
     const list = Array.isArray(players) ? players : [];
-    for (const row of activeParticipants(room)) {
+    for (const row of seatedParticipants(room)) {
       const mapped = list.find((player) => player.participantId === row.participantId);
-      row.playerId = mapped?.playerId ?? row.playerId;
+      row.playerId = mapped?.playerId ?? null;
+      row.boundGameId = gameId;
     }
     room.lock = { ...(room.lock ?? {}), boundGameId: gameId };
     room.status = 'locked';
@@ -374,7 +451,7 @@ export function createRoomManager({
         save(room, { force: true });
         return room;
       }
-      const roomIds = new Set(activeParticipants(room).map((row) => row.participantId));
+      const roomIds = new Set(seatedParticipants(room).map((row) => row.participantId));
       const playerIds = new Set((players ?? []).map((row) => row.participantId).filter(Boolean));
       const same = roomIds.size === playerIds.size && [...roomIds].every((id) => playerIds.has(id));
       if (same) {
@@ -402,7 +479,7 @@ export function createRoomManager({
   }
 
   return {
-    open, join, authenticate, rotateCode, reissue, remove, update, close,
+    open, join, authenticate, rotateCode, reissue, remove, update, close, requestSeat, leaveEliminated,
     lockForStart, bind, unlock, release, recover, touch, flush,
     hostView, participantView, load, displayCode,
     addRevokeListener(fn) { revokeListeners.push(fn); },

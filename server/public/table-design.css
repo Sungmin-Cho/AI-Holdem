@@ -35,6 +35,9 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
 .plate .plate-tag {width:100%;color:var(--muted);}
 .seat.is-hero .plate {border-color:var(--gold);}
 .seat.is-hero .amount-primary {font-size:18px;color:var(--gold);}
+.spectator-banner {margin:.25rem 0;padding:.5rem 1rem;color:var(--gold, #e7c777);text-align:center;border:1px solid currentColor;border-radius:.5rem;}
+.spectator-mode .action-feedback, .spectator-mode #pre-action-hint {display:none;}
+.spectator-mode .seat.is-folded .seat-cards {opacity:1;}
 .seat.is-out .plate {border-style:dashed;background:var(--panel);}
 .seat.is-out .avatar {filter:grayscale(1);}
 .seat.is-folded .plate {border-style:dashed;}
