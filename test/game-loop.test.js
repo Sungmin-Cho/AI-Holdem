@@ -15052,3 +15052,47 @@ test('interrupt after proposedAction commit cannot replace the accepted action',
  await runUntilUserBoundary(loop,gameDir);assert.ok(answer);assert.deepEqual(await answer,{interrupted:false});
  assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
 });
+
+test('soft-wait logging failure is contained while the same decision completes', {timeout:15000*WIN32_SCALE},async t=>{
+ let reported=false;
+ const adapter=makeAdapter({onDecide:async({message})=>{
+  await new Promise(resolve=>setTimeout(resolve,100));
+  return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+ }});
+ const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:5000},log:entry=>{
+  if(entry.event==='player-soft-wait')throw Object.assign(Error('logger unavailable'),{code:'LOGGER_FAILED'});
+  if(entry.event==='player-soft-wait-error'){reported=true;assert.equal(entry.code,'LOGGER_FAILED');assert.ok(entry.decisionId);assert.ok(entry.generation);}
+ }}});
+ await runUntilUserBoundary(loop,gameDir);
+ assert.equal(reported,true);
+ assert.equal(readJson(path.join(gameDir,'loop-state.json')).metrics.length,1);
+});
+
+test('completed player decisions bound persisted metric history and retain dropped count', {timeout:15000*WIN32_SCALE},async t=>{
+ const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter()});
+ const file=path.join(gameDir,'loop-state.json'),state=readJson(file);
+ assert.equal(state.metricsDropped,0);
+ state.metrics=Array.from({length:5000},(_,id)=>({id}));state.metricsDropped=12;
+ fs.writeFileSync(file,JSON.stringify(state));
+ await runUntilUserBoundary(loop,gameDir);
+ const result=readJson(file);assert.equal(result.metrics.length,5000);assert.equal(result.metrics[0].id,1);
+ assert.equal(result.metricsDropped,13);assert.ok(result.metrics.at(-1).decisionId);
+});
+
+test('soft-wait readLoopState failure is contained and the awaited decision still completes', {timeout:15000*WIN32_SCALE},async t=>{
+ let gameDir,reported=false;
+ const adapter=makeAdapter({onDecide:async({message})=>{
+  const file=path.join(gameDir,'loop-state.json'), saved=fs.readFileSync(file);
+  fs.writeFileSync(file,'{invalid-json');
+  try {await new Promise(resolve=>setTimeout(resolve,100));}
+  finally {fs.writeFileSync(file,saved);}
+  return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+ }});
+ const setup=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:5000},log:entry=>{
+  if(entry.event==='player-soft-wait-error'){reported=true;assert.equal(entry.code,'BAD_LOOP_STATE');}
+ }}});
+ gameDir=setup.gameDir;
+ await runUntilUserBoundary(setup.loop,gameDir);
+ assert.equal(reported,true);
+ assert.equal(readJson(path.join(gameDir,'loop-state.json')).metrics.length,1);
+});

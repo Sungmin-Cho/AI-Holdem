@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {appendBoundedMetric} from '../shared/runtime-bounds.js';
 import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
@@ -2585,16 +2586,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         softDeadlineAt = monotonicNow() + watchdog.softMs;
       }
       const softTimer = setTimeout(() => {
-        if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
-        if (record.proposedAction || record.softWait) return;
-        try { commitPending({softWait:true}); }
-        catch (error) {
-          // The awaited decision path reports stale identity. A timer must not
-          // turn that recoverable rejection into an uncaught process exception.
-          if (error.code === 'STALE_PLAYER_DECISION') return;
-          throw error;
+        try {
+          if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
+          if (record.proposedAction || record.softWait) return;
+          commitPending({softWait:true});
+          log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
+        } catch (error) {
+          if (error?.code === 'STALE_PLAYER_DECISION') return;
+          // Timer diagnostics cannot terminate the awaited decision path. Even
+          // the logger may fail; the normal decision path retains authority.
+          try { log('player-soft-wait-error', { decisionId: next.decisionId, generation: record.generation, code: error?.code ?? 'ERROR' }); } catch {}
         }
-        log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
@@ -6578,8 +6580,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const appendMetric = (metric) => {
     const state = readLoopState();
-    const metrics = Array.isArray(state?.metrics) ? [...state.metrics, metric] : [metric];
-    writeLoopState({ metrics });
+    writeLoopState(appendBoundedMetric(state, metric));
   };
 
   const waitOnlyForUser = async (out, { drain = false } = {}) => {
@@ -7253,6 +7254,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ...(initialized.archivedTo ? { archivedTo: initialized.archivedTo } : {}),
         notices: [],
         metrics: [],
+        metricsDropped: 0,
         playerBudget: undefined,
       });
       // #192 S4 E1: only an owner this instance itself just durably wrote counts —
@@ -7686,6 +7688,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           startedAt: isoNow(now),
           notices: resumeNotices,
           metrics: [],
+          metricsDropped: 0,
           opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
         });
       } else {

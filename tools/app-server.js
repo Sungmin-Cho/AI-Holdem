@@ -1,3 +1,4 @@
+import {pruneJoinAttempts} from '../shared/runtime-bounds.js';
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
@@ -248,6 +249,7 @@ export async function startAppServer({
     }
     row.count += 1;
     joinAttempts.set(addr, row);
+    pruneJoinAttempts(joinAttempts, now);
     return row.count > 10;
   }
   async function proxyGame({ req, res, url, gameId, endpoint, seat }) {

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { SPECTATOR_ID, viewerRole, spectatorAudience } from '../shared/viewer-access.js';
 import { prepareViewerProjection, restoreViewerProjection } from './viewer-projection.js';
 import {
+  trimHandLog,
   canonicalHandReplayJson,
   collectPrivateLiterals,
   gameEpochOf,
@@ -1358,6 +1359,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       next.log = [...next.log, ...body.messages];
       payload.messages = body.messages;
     }
+    if (payload.events?.length || payload.messages?.length) next.log = trimHandLog(next.log);
     if (Array.isArray(body.coach) && body.coach.length) {
       const coachError = validateIncomingCoach(next.coach, body.coach, root);
       if (coachError) {

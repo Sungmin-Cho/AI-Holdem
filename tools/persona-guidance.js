@@ -7,7 +7,6 @@ const GUIDANCE = Object.freeze({
   Trickster: '최근 공개 액션을 바탕으로 강한 패의 슬로플레이와 선택적 블러프를 섞어 읽히기 어렵게 하라. 같은 상황을 자동 반복하지 말고 가격과 위치에 맞춰 노선을 바꿔라.',
 });
 
-export const PERSONA_ARCHETYPES = Object.freeze(Object.keys(GUIDANCE));
 
 export function personaGuidance(archetype) {
   if (!Object.hasOwn(GUIDANCE, archetype)) {

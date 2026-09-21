@@ -1,3 +1,4 @@
+export { trimHandLog } from './shared/runtime-bounds.js';
 import { projectAssistance } from './shared/assistance.js';
 import {dealSelectionFields} from './shared/deal-selection.js';
 import { projectReferenceCoverage } from './shared/reference-coverage.js';

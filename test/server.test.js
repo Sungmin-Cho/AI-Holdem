@@ -1145,3 +1145,27 @@ test('result hold persists through side frames, snapshot restore and expires on 
     assert.equal((await publish(srv.port,token,{publishId:5,resultHold:hold})).json.code,'BAD_RESULT_HOLD');
   } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
 });
+
+ test('relay bounds persisted log by whole hands and preserves the remaining hand after restart', async () => {
+  const gameDir=tmpDir(), token='tok-bounded-log';
+  let srv=await start(gameDir,token);
+  try {
+    let publishId=0;
+    for(let hand=1;hand<=3;hand++){
+      for(let part=0;part<10;part++){
+        const response=await publish(srv.port,token,{publishId:++publishId,view:{handNo:hand},
+          ...(part===0?{events:[{...ev(hand,'hand_start'),handNo:hand}]}:{}),
+          messages:[{type:'narration',text:String(hand).repeat(55000)}]});
+        assert.equal(response.status,200);
+      }
+    }
+    const before=(await snapshot(srv.port,token)).json;
+    assert.equal(before.log.length,11);
+    assert.equal(before.log[0].handNo,3);
+    assert.equal(before.log[1].text.length,55000);
+    await closeOf(srv);srv=await start(gameDir,token);
+    const after=(await snapshot(srv.port,token)).json;
+    assert.deepEqual(after.log,before.log);
+    assert.equal(after.revision,before.revision);
+  } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
+ });

@@ -50,17 +50,30 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 | `codex` | `exec --ignore-user-config` + `--disable hooks` | 실행 중 감사 스트림이 없다. 플래그 의미 변경은 자동으로 알 수 없다 |
 | `grok` | 스토어별 격리 홈 + `inspect --json`·세션 기록 감사 + `--disallowed-tools`/`--deny`(도구 표면 `[read_file]`, 호출은 전부 거부) | Windows 미지원(fail-closed). 격리 홈은 스토어별 약 14 MB(`~/.ai-holdem/runtime-home/`, 지워도 다음 기동에서 재생성). 도구 목록은 이름 기반이라 새 기본 도구가 생기면 표면 감사로 탈락한다. 읽기 차단은 권한 계층이지 OS 샌드박스가 아니다. 부트 1–2분(카나리 거부 왕복 각 25–50 s). 같은 uid 프로세스의 홈 변조는 위협 모델 밖. API 키 env 인증은 미지원 |
 
-| 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 워치독 1차/재전송 |
+| 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 플레이어 예산 soft / hard |
 |---|---|---|---|
-| `claude` | `sonnet --effort medium` | `opus` | 25s / 15s |
-| `codex` | `gpt-5.6-luna` | `gpt-5.6-sol` | 25s / 15s |
-| `grok` | `grok-4.6` | `grok-4.6` | 60s / 30s |
+| `claude` | `sonnet --effort medium` | `opus` | 25s / 300s |
+| `codex` | `gpt-5.6-luna` | `gpt-5.6-sol` | 25s / 300s |
+| `grok` | `grok-4.6` | `grok-4.6` | 25s / 300s |
+
+플레이어 예산은 `--player-soft-ms`·`--player-hard-ms` 또는 로비 setup의 `playerSoftMs`·`playerHardMs`로 설정한다. soft는 대기 안내 기준이며, hard가 결정 세대의 전체 호출 예산이다. `RUNTIME_TABLE.watchdog`의 `t1Ms`·`t2Ms`는 테스트 주입 호환 값이며 실제 기본 예산 표가 아니다.
 
 Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측).
 
 LLM 모드 진행 중 게임은 업그레이드 전에 끝낼 것. 새 Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
 
 기본 런타임은 `/start-game`을 실행한 호스트이고, 딜러가 `--player-runtime`으로 명시한다. policy 모드는 상위 모델만 검사하고 LLM 플레이어 probe·세션을 만들지 않는다. llm 모드에서는 플레이어 모델 왕복이나 컨테인먼트 검증에 실패하면 폴백 사다리(claude → codex → grok)가 돌며, 모두 부적격일 때 `NO_PLAYER_RUNTIME`으로 기동을 중단한다. 상위 모델만 없으면 LLM 설명을 제공할 수 없음을 알린다.
+
+
+### 결과 표시와 진행 제어
+
+새 로비의 진행 속도는 `즉시/빠름/보통/느림` 중 기본 `보통`이다. setup의 `pace` 및 legacy `--pace`는 `instant/fast/normal/slow`를 쓴다. pace가 없는 기존 게임은 즉시 진행한다. 핸드 결과 배너·런아웃·좌석 행동 배지는 공개 이벤트로 만들고, 턴 카운트다운은 서버가 저장한 같은 마감 시각을 쓴다. 단독 인간 게임의 호스트만 결과 대기를 건너뛸 수 있다. 모바일의 금액·메모 버튼은 보조 입력을 펼친다.
+
+게임 종료 시 리뷰를 기다리지 않고 결과 화면을 표시한다. 요약을 읽는 동안 기존 순위가 보이며, 확인된 종료 시 리뷰가 없으면 그 사실을 표시한다. 종료 후 로비·참가자 테이블을 유지한다. 호스트 `GET /api/game/:gameId/summary`와 참가자 `GET /api/p/game/:gameId/summary`는 인증·게임 세대·종료 상태를 검사하며, 참가자 요약은 토큰당 2초에 한 번 허용한다. 손상·누락 기록은 손익을 임의로 채우지 않고 불완전으로 표시한다.
+
+호스트 `POST /api/game/:gameId/skip-result`는 같은 핸드의 대기만, `POST /api/app/interrupt-decision`은 soft 대기 중인 같은 게임·결정·세대의 AI 호출만 제어한다. 취소는 자식 종료 확인을 기다린 뒤 복구 상태로 전환한다. 이후 웹 UI에서 재시도한다. 늦은 완료·이미 반영된 액션을 취소로 덮어쓰지 않는다. 두 제어는 일반 명령 저널을 기다리지 않아 일시정지와 교착하지 않는다.
+
+진단 `metrics`는 최근 5,000건을 보존하고 `metricsDropped`에 폐기 개수를 누적한다. relay 화면 로그는 1 MiB를 넘으면 오래된 핸드 단위로 줄이되 마지막 핸드는 단독으로 1 MiB를 넘어도 보존하므로 하드 상한은 아니다. 새로고침 후 잘린 과거 핸드의 로그 복기 진입점은 사라질 수 있다. 전체 결과 요약은 화면 로그가 아닌 완료 아카이브에서 계산한다. 진단 이력은 기존 loop-state로 재개하면 유지된다. loop-state가 없어 재구성한 경우에는 `metrics`와 `metricsDropped`가 0부터 시작하므로, 폐기 누계가 0이어도 게임 전체 표본이라고 단정하지 않는다. 참가 요청 주소 목록은 1,024개 초과 시 60초가 지난 항목을 청소하며 활성 주소 수의 하드 상한은 아니다.
 
 ## 시작하기
 
