@@ -354,6 +354,7 @@ function renderTrainingCards(items, receipts = new Map()) {
   const functionSource = src.slice(src.indexOf('function paintTraining()'), src.indexOf('function paintReview('));
   runInNewContext(`${functionSource}; paintTraining();`, {
     ui: { training: items }, document: { activeElement: null },
+    URLSearchParams, location: {search:''},
     $: (id) => id === 'training-list' ? list : panel,
     el: (tag, cls, text) => new Node(tag, cls, text),
     detailKey: (item) => `${item.evaluationId}:${item.detailSha256}`,

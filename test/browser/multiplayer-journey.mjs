@@ -28,6 +28,8 @@ export const requiredJourneyChecks = [
   "turn-deadline-ticks",
   "pause-banner",
   "end-final-stacks",
+  "participant-survives-stopping",
+  "late-join-waits-for-next-game",
   "room-closed-offline",
   "real-user-store-unchanged",
   "owned-cleanup",
@@ -285,6 +287,7 @@ export async function runMultiplayerJourney(outDir) {
 
     await click(host, "#menu");
     await wait(() => app.manager.snapshot().state === "paused", "pause to end");
+    await evaluate(guestA)("window.__endingDocument=document.querySelector('#table').contentDocument;window.__stoppingFrames=[];window.__endWatch=setInterval(()=>{const f=document.querySelector('#table');window.__stoppingFrames.push(f.contentDocument===window.__endingDocument && !document.querySelector('#playing').hidden)},20)");
     await click(host, "#end");
     await click(host, "#confirm-yes");
     await wait(
@@ -298,6 +301,17 @@ export async function runMultiplayerJourney(outDir) {
     const stackText = await evaluate(guestA)("document.querySelector('#final-stacks')?.innerText ?? ''");
     assert.match(String(stackText), /민준|서연|호스트/);
     check("end-final-stacks");
+    const retained=await evaluate(guestA)("clearInterval(window.__endWatch);({same:document.querySelector('#table').contentDocument===window.__endingDocument,samples:window.__stoppingFrames,visible:!document.querySelector('#playing').hidden})");
+    assert.equal(retained.same,true);assert.equal(retained.visible,true);assert.ok(retained.samples.length>0 && retained.samples.every(Boolean));
+    check("participant-survives-stopping");
+
+    await click(guestA,'#leave');
+    await guestA(['open',joinHref]);
+    await guestA(['fill','#join-name','새 참가자']);
+    await click(guestA,'#join-submit');
+    await wait(()=>evaluate(guestA)("!document.querySelector('#waiting').hidden && document.querySelector('#join-form').hidden"),'late participant waiting');
+    assert.equal(await evaluate(guestA)("document.querySelector('#playing').hidden && document.querySelector('#final').hidden && !document.querySelector('#table').getAttribute('src')"),true);
+    check('late-join-waits-for-next-game');
 
     await click(host, "#result-modes");
     await wait(

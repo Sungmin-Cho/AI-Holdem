@@ -76,14 +76,16 @@ async function poll() {
     $('leave').hidden = !watching && state.room.status === 'locked';
     $('leave').textContent = watching ? '관전 나가기' : '나가기';
     $('join-form').hidden = true;
-    const inGame = ['playing','pausing','paused','stopping','finalizing','completed','ended'].includes(state.game?.state);
-    $('waiting').hidden = inGame || Boolean(state.game?.final);
+    const admitted = watching || Boolean(state.me.playerId);
+    const final = admitted ? state.game?.final : null;
+    const inGame = admitted && ['playing','pausing','paused','stopping','finalizing','completed','ended'].includes(state.game?.state);
+    $('waiting').hidden = inGame || Boolean(final);
     $('playing').hidden = !inGame;
     document.body.classList.toggle('has-game', !$('playing').hidden);
     $('pause-banner').hidden = state.game?.state !== 'paused';
-    $('final').hidden = !state.game?.final;
-    if (state.game?.final) {
-      paintFinal(state.game.final,state);
+    $('final').hidden = !final;
+    if (final) {
+      paintFinal(final,state);
       void loadSummary(state,token);
       $('final-reason').textContent = state.game.final.result === 'lose' ? '모든 인간 플레이어 탈락으로 종료되었습니다.'
         : state.game.final.result === 'abort' ? '게임이 중단되었습니다.' : '게임이 완료되었습니다.';

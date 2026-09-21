@@ -26,6 +26,7 @@ export const requiredJourneyChecks = [
   "menu-close-reopen",
   "restart-new-id",
   "abort-summary",
+  "final-overlay-ended",
   "completed-review-reload",
   "command-reconnect",
   "study-paused-roundtrip",
@@ -247,6 +248,7 @@ export async function runLobbyJourney(outDir) {
     );
     await click("#menu");
     await state("paused");
+    await evaluate("window.__endingFrame=document.querySelector('#table').contentDocument");
     await click("#end");
     await click("#confirm-yes");
     await state("ended");
@@ -257,6 +259,9 @@ export async function runLobbyJourney(outDir) {
       ),
     );
     check("abort-summary");
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#review-overlay')?.hidden===false"));
+    assert.equal(await evaluate("!document.querySelector('#game').hidden && document.querySelector('#table').contentDocument===window.__endingFrame"),true);
+    check("final-overlay-ended");
     await click("#result-modes");
     await browser(["check", 'input[value="cash-training"]']);
     await browser(["select", "#ai-count", "1"]);
