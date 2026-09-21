@@ -384,3 +384,8 @@ test('action notice formatter maps expected failures without displaying raw erro
   assert.match(formatActionNotice({code:'ILLEGAL_ACTION'}),/가능한/);
   assert.doesNotMatch(formatActionNotice({code:'arbitrary private value'}),/arbitrary/);
 });
+
+ test('action notice codes never resolve inherited object properties', async () => {
+  const {formatActionNotice}=await import('../server/public/action-controller.js');
+  for(const code of ['toString','constructor','__proto__']) assert.equal(formatActionNotice({code}), '요청 결과를 확인하지 못했습니다. 연결 상태를 확인해 주세요.');
+ });

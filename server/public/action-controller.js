@@ -233,5 +233,6 @@ const NOTICE_MESSAGES={
   STORAGE:'복구 정보를 저장할 수 없습니다. 브라우저 저장 공간을 확인하세요.',
 };
 export function formatActionNotice(notice) {
-  return notice ? NOTICE_MESSAGES[notice.code]??'요청 결과를 확인하지 못했습니다. 연결 상태를 확인해 주세요.' : '';
+  if (!notice) return '';
+  return Object.hasOwn(NOTICE_MESSAGES, notice.code) ? NOTICE_MESSAGES[notice.code] : '요청 결과를 확인하지 못했습니다. 연결 상태를 확인해 주세요.';
 }

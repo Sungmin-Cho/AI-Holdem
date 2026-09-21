@@ -546,6 +546,10 @@ function markAmountValid(valid) {
   $('raise-amount').closest('.amount-field').classList.toggle('is-invalid', !valid);
   $('raise-amount').setAttribute('aria-invalid', String(!valid));
   $('amount-error').textContent = !valid ? '칩 정수와 합법 범위를 확인해 주세요.' : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 ${amountEditor.state.value.toLocaleString('ko-KR')} 칩을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
+  if ($('amount-error').textContent && matchMedia('(max-width:600px)').matches) {
+    $('action-bar').classList.add('options-expanded');
+    $('action-options-toggle').setAttribute('aria-expanded','true');
+  }
 }
 
 function setRaiseTo(value, { fromInput = false } = {}) {
@@ -1317,6 +1321,11 @@ $('review-reopen').addEventListener('click', () => {
   paintReview(ui.view);
   $('review-close').focus();
 });
+$('action-options-toggle').addEventListener('click', () => {
+  const expanded=$('action-bar').classList.toggle('options-expanded');
+  $('action-options-toggle').setAttribute('aria-expanded',String(expanded));
+  if(expanded)$('raise-amount').focus({preventScroll:true});
+});
 $('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
 $('action-retry').addEventListener('click', () => void actionController?.retry());
 
@@ -1398,7 +1407,7 @@ function applyMessage(m) {
 }
 if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
 else if (appGameId && new URLSearchParams(location.search).get('terminal') === '1') {
-  try { const snapshot=await getSnapshot();renderSnapshot(snapshot);setConn(true);$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
+  try { const snapshot=await getSnapshot();ui.sessionEnded=true;renderSnapshot(snapshot);paintEndedControls();setConn(false,'게임 종료');$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
 }
 else {
   const es = appGameId ? eventStream('events?after=0') : new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
@@ -1431,10 +1440,11 @@ else {
       if(!current())return;
       booted = true; setConn(true);
       for (const msg of buffer.splice(0)) applyMessage(msg);
-    } catch {
+    } catch (error) {
       if(!current())return;
       booted = false; setConn(false); actionController?.disconnect();
       $('action-status').textContent = '현재 상태를 불러오지 못했습니다. 연결 또는 접속 링크를 확인하세요.';
+      if(appGameId)throw error;
     }
   };
   es.onerror = () => { booted = false; setConn(false); actionController?.disconnect(); };
@@ -1443,6 +1453,7 @@ else {
     es.onfatal=async(code,{signal})=>{
       ++openingAttempt;booted=false;clearInterval(poll);actionController?.disconnect();
       if(code==='SESSION_INACTIVE') {
+        ui.sessionEnded=true;paintEndedControls();setConn(false,'종료 결과를 확인하고 있습니다…');
         try {
           const snapshot=await recoverFinalSnapshot({getSnapshot,signal});
           if(signal.aborted)return;

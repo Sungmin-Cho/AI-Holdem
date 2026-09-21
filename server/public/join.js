@@ -85,7 +85,6 @@ async function poll() {
   } finally {polling=false;}
 }
 $('join-form').onsubmit = async (event) => {
-  delete $('join-error').dataset.kind;
   event.preventDefault();
   $('join-error').textContent = '';
   const res = await fetch('/api/join', {
@@ -95,6 +94,7 @@ $('join-form').onsubmit = async (event) => {
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
+    delete $('join-error').dataset.kind;
     $('join-error').textContent = JOIN_ERRORS[body.code] ?? body.code ?? '참가에 실패했습니다';
     return;
   }
@@ -103,20 +103,19 @@ $('join-form').onsubmit = async (event) => {
   await poll();
 };
 $('leave')?.addEventListener('click', async () => {
-  delete $('join-error').dataset.kind;
   const token = sessionStorage.getItem('holdem-participant-token');
   const response = await fetch('/api/p/leave', { method: 'POST', headers: { authorization: `Bearer ${token}` } });
-  if (!response.ok) { $('join-error').textContent='지금은 나갈 수 없습니다. 잠시 후 다시 시도하세요.';return; }
+  if (!response.ok) { delete $('join-error').dataset.kind; $('join-error').textContent='지금은 나갈 수 없습니다. 잠시 후 다시 시도하세요.';return; }
   sessionStorage.removeItem('holdem-participant-token');
   location.reload();
 });
 $('seat-request')?.addEventListener('click', async () => {
-  delete $('join-error').dataset.kind;
   if (!latest) return;
   const response = await fetch('/api/p/seat-request', {method:'POST',headers:{
     authorization:`Bearer ${sessionStorage.getItem('holdem-participant-token')}`,'content-type':'application/json'},
     body:JSON.stringify({expectedRoomId:latest.room.roomId,expectedRevision:latest.room.revision})});
   const result = await response.json().catch(()=>({}));
+  delete $('join-error').dataset.kind;
   $('join-error').textContent=response.ok ? '' : JOIN_ERRORS[result.code] ?? '참가 신청에 실패했습니다.';
   await poll();
 });

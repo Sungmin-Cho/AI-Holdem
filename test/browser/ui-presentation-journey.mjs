@@ -137,12 +137,21 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     view=ownView;await publish();checks.push('bet-owner-spacing');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
-    const sticky=await evaluate(`(()=>{scrollTo(0,0);const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect();return {position:getComputedStyle(a).position,bottom:r.bottom,top:r.top,height:innerHeight,plates:[...document.querySelectorAll('.seat .plate')].every(n=>{const p=n.getBoundingClientRect();return p.bottom<=r.top||p.top>=r.bottom;})}})()`);
-    assert.equal(sticky.position,'sticky');assert.ok(sticky.bottom<=sticky.height+1,JSON.stringify(sticky));assert.ok(sticky.top>=0);assert.equal(sticky.plates,true);
+    for (const position of ['top', 'bottom']) {
+      await evaluate(position === 'top' ? 'scrollTo(0,0)' : "document.querySelector('#action-bar').scrollIntoView({block:'end'})");
+      const sticky=await evaluate(`(()=>{const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect();return {position:getComputedStyle(a).position,hidden:a.hidden,barHeight:r.height,bottom:r.bottom,top:r.top,height:innerHeight,plates:[...document.querySelectorAll('.seat .plate')].every(n=>{const p=n.getBoundingClientRect();return p.bottom<=r.top||p.top>=r.bottom;}),controls:[...a.querySelectorAll('button')].filter(n=>n.getClientRects().length).every(n=>n.getBoundingClientRect().height>=44)}})()`);
+      assert.equal(sticky.hidden,false,JSON.stringify({position,sticky}));
+      assert.ok(sticky.barHeight>0,JSON.stringify({position,sticky}));
+      assert.equal(sticky.position,'sticky');assert.ok(sticky.bottom<=sticky.height+1,JSON.stringify({position,sticky}));
+      assert.ok(sticky.top>=0,JSON.stringify({position,sticky}));assert.equal(sticky.plates,true,JSON.stringify({position,sticky}));
+      assert.equal(sticky.controls,true,JSON.stringify({position,sticky}));
+      await browser(['screenshot',path.join(outDir,`mobile-sticky-${position}.png`)]);
+    }
     checks.push('mobile-action-bar-sticky');
 
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
+    await click('#action-options-toggle');
     await browser(['fill','#intent-note','fixture intention']);
     await browser(['fill','#raise-amount',String(view.legal.minRaiseTo)]);
     await browser(['fill','#raise-amount','9999999']);await browser(['press','ArrowUp']);
@@ -173,6 +182,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     view={...view,seats:view.seats.map((s,i)=>i===1?{...s,out:true,stack:0}:s)};await publish();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);
     assert.equal(await evaluate("document.querySelectorAll('[data-player-id=p1] .card--back').length"),0);checks.push('elimination');
+    await evaluate("document.querySelector('[data-player-id=p1] .plate').scrollIntoView({block:'center'})");
     await click('[data-player-id=p1] .plate');
     assert.equal(await evaluate("document.querySelector('#seat-overlay').hidden"),false);
     assert.equal(await evaluate("document.querySelector('main').inert"),true);
@@ -194,6 +204,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['reload']);await ready();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
+    await click('#action-options-toggle');
     await browser(['fill','#raise-amount','9999999']);await browser(['press','Tab']);await click('#btn-raise');
     assert.equal(await evaluate('window.actionBodies.length'),0);
     await click('#btn-raise');

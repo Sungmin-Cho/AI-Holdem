@@ -65,7 +65,7 @@ test('actual table onopen ignores a late snapshot from an aborted connection att
   pending[0]({revision:100,view:{viewer:null}});await stale;
   assert.deepEqual(rendered,[2]);assert.equal(context.revision,2);assert.equal(context.booted,true);
 });
-test('actual table terminal transition retrieves final snapshot before ending, without reopening SSE',async()=>{
+test('actual table terminal transition locks controls before retrieving the final snapshot, without reopening SSE',async()=>{
   const app=fs.readFileSync(new URL('../server/public/app.js',import.meta.url),'utf8');
   const block=app.slice(app.indexOf('  es.onopen = async'),app.indexOf('  const poll = setInterval'));
   for(const snapshot of [{revision:5,view:{gameOver:true},review:'final review'},null,'render-failure']) {
@@ -75,6 +75,37 @@ test('actual table terminal transition retrieves final snapshot before ending, w
       setConn:(_on,text)=>calls.push(text),appGameId:'test'};
     vm.runInNewContext(block,context);await context.es.onfatal('SESSION_INACTIVE',{signal:new AbortController().signal});
     assert.equal(context.ui.sessionEnded,true);assert.equal(calls.at(-1),'게임 종료');assert.ok(calls.includes('ended-controls'));
-    assert.equal(calls.includes('render'),!!snapshot);assert.ok(calls.indexOf('recover')<calls.indexOf('paint'));
+    assert.equal(calls.includes('render'),!!snapshot);assert.ok(calls.indexOf('recover')<calls.indexOf('paint'));assert.ok(calls.indexOf('ended-controls')<calls.indexOf('recover'));
   }
+});
+
+test('every terminal code stops retries even if the final handler throws',async()=>{
+ for(const code of ['UNAUTHORIZED','STALE_GAME','SESSION_INACTIVE','NOT_SEATED']) {
+  let calls=0;const f=fixture(async()=>{calls++;return failed(503,code);});const stream=f.start();
+  let seen;stream.onfatal=value=>{seen=value;throw Error('render failed');};
+  await flush();await f.advance(60000);assert.equal(seen,code);assert.equal(calls,1);stream.close();
+ }
+});
+test('watchdog also bounds an unresponsive SSE fetch',async()=>{
+ let calls=0;const signals=[];const f=fixture((_url,{signal})=>{calls++;signals.push(signal);return new Promise(()=>{});});
+ const stream=f.start();await flush();await f.advance(35000);assert.equal(signals[0].aborted,true);
+ await f.advance(1500);assert.equal(calls,2);stream.close();assert.equal(signals[1].aborted,true);
+});
+test('final snapshot recovery retries then succeeds, and external cancellation stops it',async()=>{
+ const f=fixture(()=>{});let attempts=0;
+ const work=f.context.recover({getSnapshot:async()=>{attempts++;if(attempts===1)throw Error('offline');return {view:{gameOver:true},review:'saved'};},schedule:f.context.setTimeout,cancel:f.context.clearTimeout});
+ await flush();await f.advance(3000);assert.equal((await work).review,'saved');assert.equal(attempts,2);
+ const controller=new AbortController();let signal;
+ const cancelled=f.context.recover({signal:controller.signal,getSnapshot:input=>{signal=input.signal;return new Promise(()=>{});},schedule:f.context.setTimeout,cancel:f.context.clearTimeout});
+ await flush();controller.abort();assert.equal(await cancelled,null);assert.equal(signal.aborted,true);
+});
+
+test('actual table initial snapshot failure rejects its SSE attempt and reconnects',async()=>{
+ const app=fs.readFileSync(new URL('../server/public/app.js',import.meta.url),'utf8');
+ const block=app.slice(app.indexOf('  es.onopen = async'),app.indexOf('  const poll = setInterval'));
+ let calls=0,snapshots=0;const f=fixture(async()=>{calls++;return {ok:true,body:new ReadableStream({start(){}})};});
+ const stream=f.start();const context={es:stream,openingAttempt:0,ui:{sessionEnded:false},revision:0,booted:false,buffer:[],actionController:null,
+  getSnapshot:async()=>{if(++snapshots===1)throw Error('503');return {revision:1,view:{viewer:null}};},isSpectating:()=>true,renderSnapshot(){},setConn(){},applyMessage(){},appGameId:'test',$:()=>({}),recoverFinalSnapshot(){}};
+ vm.runInNewContext(block,context);
+ await flush();await f.advance(1500);assert.equal(calls,2);assert.equal(context.booted,true);stream.close();
 });
