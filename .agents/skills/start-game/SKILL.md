@@ -124,7 +124,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 **딜러는 개입하지 않는다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 **0회**이고, 그것이 이 구조의 성공 기준이다. 액션 전달·워치독·코치 스폰·게시·서버 재기동은 전부 사이드카가 한다.
 
-사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다.
+사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다. `metrics`는 최근 5,000건이며 버린 개수는 `metricsDropped`에 누적된다. `metricsDropped > 0`이면 이 배열만으로 게임 전체의 실패율·지연 분포를 계산하지 않는다.
 
 ---
 
@@ -232,3 +232,7 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 새 로비 게임의 진행 속도는 보통(`normal`)이다. 사용자는 즉시/빠름/보통/느림을 고를 수 있다. 기록된 `pace`는 재개·같은 설정 재시작에서도 유지하며, 기록이 없는 예전 게임은 즉시(`instant`)다. legacy CLI는 `--pace instant|fast|normal|slow`를 받는다. 일시정지 후 남은 결과 대기를 다시 기다리지 않는다. 사람 좌석이 하나일 때만 현재 핸드 결과 대기를 건너뛴다.
 
 이 기능을 revert할 때는 게임을 먼저 종료하고 해당 세션 `.app-setup.json`의 `pace` 키를 제거한다. 진행 중인 게임의 설정을 임의로 바꾸지 않는다.
+
+### 결과 화면과 수동 제어
+
+단독 인간 호스트의 결과 건너뛰기는 `POST /api/game/:gameId/skip-result`, soft 대기 중 AI 취소는 `POST /api/app/interrupt-decision`을 웹 UI가 호출한다. 취소 뒤 종료 확인된 복구 상태에서 재시도한다. 종료 결과는 리뷰 대기와 독립적으로 먼저 표시되며 테이블을 유지한다. 종료 요약은 호스트 `GET /api/game/:gameId/summary`, 참가자 `GET /api/p/game/:gameId/summary`로 읽는다. 참가자 요약은 토큰당 2초 제한이며 모든 요청은 인증·현재 게임 세대와 종료 상태 검사를 받는다.

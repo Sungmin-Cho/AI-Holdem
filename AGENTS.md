@@ -23,3 +23,5 @@ LLM 모드의 플레이어와 LLM 코치·evaluator·종합자는 사이드카�
 
 
 새 로비 게임의 진행 속도는 `normal`(보통)이며, 즉시/빠름/보통/느림을 선택한다. resume과 같은 설정 재시작은 저장된 `pace`를 유지하고 기록이 없는 예전 게임은 `instant`다. legacy CLI의 `--pace`는 명시한 값만 적용한다.
+
+결과 대기 건너뛰기는 단독 인간 호스트의 `POST /api/game/:gameId/skip-result`, 오래 걸리는 AI 취소는 호스트 `POST /api/app/interrupt-decision`으로 처리한다. 후자는 자식 종료 확인 후 복구 상태를 남기므로 UI에서 재시도한다. 최종 결과는 리뷰보다 먼저 표시하고 종료 후 테이블을 유지한다. 종료 요약은 호스트 `/api/game/:gameId/summary`, 참가자 `/api/p/game/:gameId/summary`이며 인증·세대·완료 상태를 검사한다. `metrics`는 최근 5,000건, 폐기 누계는 `metricsDropped`다.

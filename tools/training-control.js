@@ -11,7 +11,6 @@ import { assertEvaluationId } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
 import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
-  SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
   collectPrivateLiterals,
   detailRefOf,
   gameEpochOf,
@@ -36,7 +35,6 @@ import {
 import { referenceClaimAllowed } from '../shared/reference.js';
 
 export const TRAINING_LOCK = 'training.lock.d';
-export const SUPPORTED_SCHEMAS = SUPPORTED_TRAINING_AUTHORITY_SCHEMAS;
 const ANNOTATION_MAX_BYTES = 64_000;
 const SECURITY_READ_MAX_BYTES = 4 * 1024 * 1024;
 const HAND_FILE_RE = /^hand-(\d{4,})\.json$/;
@@ -99,10 +97,6 @@ export function hasCutoffMarker(sessionDir) {
   } catch {
     return false;
   }
-}
-
-export function hasExplanationCutoff(sessionDir) {
-  return explanationCutoffSessions.has(path.resolve(sessionDir)) || hasCutoffMarker(sessionDir);
 }
 
 function inspectCutoffMarker(file) {

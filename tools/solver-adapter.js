@@ -9,10 +9,6 @@ const ADAPTERS = new Map([
   [DEFAULT_SOLVER_ADAPTER, solveWithFake],
 ]);
 
-export function solverAdapterIds() {
-  return [...ADAPTERS.keys()];
-}
-
 export async function solvePostflop(snapshot, opts = {}) {
   const { adapterId = DEFAULT_SOLVER_ADAPTER, ...rest } = opts;
   const adapter = ADAPTERS.get(adapterId);

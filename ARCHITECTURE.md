@@ -64,6 +64,13 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/publish.js` | 게시 CLI — `engine/cli.js step` envelope의 공개분만 골라 서버에 POST하고 `publishId`를 관리. |
 | `publish-contract.js` | `server/`와 `tools/`가 공유하는 계약 하나 — body-byte 상한(65,536)·`publishId` 상한·`gameEpoch = sha256(sessionToken)` 파생. |
 | `server/server.js` | HTTP 중계 — `/api/events`(SSE), `/api/snapshot`, `/api/wait-action`, `/api/action`, `/api/publish`, `/api/health`. 토큰 검증만 하고 게임 규칙은 모른다. |
+| `shared/player-budget.js` | soft 25초·hard 300초의 결정 세대 예산 검증과 실패 분류. |
+| `shared/runtime-bounds.js` | 최근 5,000개 결정 지표·폐기 개수, 마지막 핸드를 보존하는 1 MiB 로그 절단, 만료 참가 요청 정리. |
+| `shared/pace.js` | 즉시·빠름·보통·느림의 정책 결정 간격과 절대 결과 표시 구간. |
+| `server/public/hand-result.js` | 공개 팟 수여·쇼다운 이벤트에서 핸드 배너와 좌석 행동을 계산한다. |
+| `server/public/final-summary.js`, `server/public/final-panel.js` | 최종 순위·누적 손익·개인 요약 표시와 DOM 생성. |
+| `tools/session-summary.js` | 완료 핸드 아카이브의 제한된 읽기·증분 캐시·공개 세션 요약. |
+| `server/public/app-transport.js` | 앱 SSE 단일 연결·35초 워치독·백오프·종료 스냅샷 복구. |
 | `server/public/` | 정적 UI(`index.html`/`app.js`/`style.css`) — 한국어 포커 테이블. |
 | `game/` | gitignore된 runtime store — `loop.lock.d/`와 `.session-store/current.json`; 선택된 `.session-store/sessions/<gameId>/` 아래에 `loop-state.json`, `state.json`, server/publish/coach 파일이 있다. |
 | `test/` | `node --test` 스위트 — 엔진 단위 테스트부터 사이드카 통합(`game-loop.test.js`), 어댑터 계약(`player-runtime.test.js`), step→publish 통합 계약(`turn-contract.test.js`)까지. |
@@ -78,7 +85,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 - `--resume`은 어떤 경로로도 `init`을 호출하면 안 된다.
 - 종료 phase 체크포인트는 역행하면 안 된다: `playing → finalizing → review_generated → review_published → done`. `review_generated` 이후 재개는 선택된 session의 `review.md`를 다시 만들지 않고, 먼저 기록해 둔 sha256으로 그 산출물을 재사용해야 한다.
 - 서버는 세션 디렉터리의 `players.json`·`.coach-authority.json`·`state.json`·`hands/hand-*.json`을 **읽기 전용**으로만 참조하며(보안 술어와 완료 핸드의 복기 재계산) 어느 것도 쓰지 않는다 — 게시자의 주장(`view`·machine item의 `handNo`·복기 트리거)은 exploit 게이트·deny 목록·복기 내용의 입력이 될 수 없다; 트리거의 `handNo`는 선택자다.
-- **핸드 진행 중** 상대 홀카드·결정 사유·정책 필드는 어떤 채널로도 나가지 않는다.
+- **핸드 진행 중** 상대 홀카드·결정 사유·정책 필드는 플레이어 채널로 나가지 않는다. 관전자 예외: `spectatorView`는 진행 중 전 좌석의 홀카드를 싣는다(`test/spectator-projection.test.js`). 결정 사유·비공개 정책 필드는 이 예외에 포함되지 않는다.
 - **상대 LLM 플레이어는 사용자 정보를 더 얻지 않는다.** `open`은 AI 좌석만 넓히고, 사용자가 진 쇼다운 패·폴드 카드·사유·메모는 상대 프롬프트에 들어가지 않는다.
 - **아키타입·정책 정체는 종합 리뷰까지 비공개.** 복기 투영은 `policyId`·`policyVersion`·`sampledProbability`·`reasonCode`를 싣지 않는다.
 - **핸드 종료 후** 공개 범위와 내용은 서버가 저장된 `state.json`·`hands/`에서 재계산한다 — 게시자는 트리거일 뿐이다.
@@ -87,7 +94,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 - 오래된 `gameEpoch`/`activeOwnerSessionId`의 코치 콜백이 새 게임의 상태를 오염시키면 안 된다.
 - decision snapshot은 `engine/` 소유이며, redacted 핸드·코치 입력은 viewer 자신의 스냅샷만 남기고 `decisions[].priorActions`를 최상위 액션과 같은 허용 키로 다시 걸러 상대 홀카드·비공개 정책 필드가 새면 안 된다.
 - **참가자 채널은 자기 좌석 view·공개 이벤트·나레이션·턴 마감만 싣는다.** 코치·학습·힌트·복기·종합 리뷰·study 링크는 호스트 채널(`'user'`) 전용이다.
-- **인간 좌석의 홀카드는 쇼다운 공개분 외에 진행 중·종료 후 어느 채널로도 나가지 않는다.** `showdownPolicy=open`·`replayReveal=all`은 AI 좌석에만 적용된다. 공개 채널은 닫힌 스키마와 엔진 결합으로, 호스트 텍스트는 그 핸드의 참가자 숨은 홀 집합으로 relay가 검사한다.
+- **인간 좌석의 홀카드는 쇼다운 공개분 외에 진행 중·종료 후 다른 플레이어 채널로 나가지 않는다.** 관전자 `spectatorView`에는 위 예외가 적용된다. `showdownPolicy=open`·`replayReveal=all`은 AI 좌석에만 적용된다. 공개 채널은 닫힌 스키마와 엔진 결합으로, 호스트 텍스트는 그 핸드의 참가자 숨은 홀 집합으로 relay가 검사한다.
 - **relay는 loopback 전용이다.** 외부에 열리는 것은 앱 서버의 공개 리스너뿐이고, 그 리스너는 참가 라우트만 안다.
 - **좌석 집합은 시작 명령 접수 시점에 룸에서 고정된다.** 게임 중 좌석은 추가·삭제·교체되지 않는다.
 - **relay의 접수·전달·ACK는 좌석이 아니라 게시된 유일한 `legal`이 가리키는 결정 하나에 결합된다.**
@@ -170,3 +177,13 @@ Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축�
 `resultHold {handNo,startAt,until,runoutStepMs,runoutStreets}`는 `turnDeadline`과 같은 envelope 층의 절대 시각 메타데이터다. relay는 검증·보관·전달만 하며, 부가 게시와 같은 완료 핸드 재게시에도 유지하고 새 핸드에는 지운다. 스냅샷과 영속 파일에도 들어가므로 재접속자의 기준 시각이 같다. 지난 `until`은 무해하다. 게시 재시도는 최초 시각을 유지한다.
 
 호스트 전용 `POST /api/game/:id/skip-result`는 게임 epoch와 handNo를 검사한다. 이는 durable 게임 명령이 아닌 활성 타이머 해제이므로 명령 저널 밖에 있고, 현재 결과 대기만 끊으며 policy 간격에는 영향을 주지 않는다. 사람 좌석이 둘 이상이면 적용하지 않는다.
+
+## 결과 표시와 제어 경계
+
+새 로비의 진행 속도는 `즉시/빠름/보통/느림` 중 기본 `보통`이다. setup의 `pace` 및 legacy `--pace`는 `instant/fast/normal/slow`를 쓴다. pace가 없는 기존 게임은 즉시 진행한다. 핸드 결과 배너·런아웃·좌석 행동 배지는 공개 이벤트로 만들고, 턴 카운트다운은 서버가 저장한 같은 마감 시각을 쓴다. 단독 인간 게임의 호스트만 결과 대기를 건너뛸 수 있다. 모바일의 금액·메모 버튼은 보조 입력을 펼친다.
+
+게임 종료 시 리뷰를 기다리지 않고 결과 화면을 표시한다. 요약을 읽는 동안 기존 순위가 보이며, 확인된 종료 시 리뷰가 없으면 그 사실을 표시한다. 종료 후 로비·참가자 테이블을 유지한다. 호스트 `GET /api/game/:gameId/summary`와 참가자 `GET /api/p/game/:gameId/summary`는 인증·게임 세대·종료 상태를 검사하며, 참가자 요약은 토큰당 2초에 한 번 허용한다. 손상·누락 기록은 손익을 임의로 채우지 않고 불완전으로 표시한다.
+
+호스트 `POST /api/game/:gameId/skip-result`는 같은 핸드의 대기만, `POST /api/app/interrupt-decision`은 soft 대기 중인 같은 게임·결정·세대의 AI 호출만 제어한다. 취소는 자식 종료 확인을 기다린 뒤 복구 상태로 전환한다. 이후 웹 UI에서 재시도한다. 늦은 완료·이미 반영된 액션을 취소로 덮어쓰지 않는다. 두 제어는 일반 명령 저널을 기다리지 않아 일시정지와 교착하지 않는다.
+
+진단 `metrics`는 최근 5,000건을 보존하고 `metricsDropped`에 폐기 개수를 누적한다. relay 화면 로그는 1 MiB를 넘으면 오래된 핸드 단위로 줄이되 마지막 핸드는 보존한다. 전체 결과 요약은 화면 로그가 아닌 완료 아카이브에서 계산한다.
