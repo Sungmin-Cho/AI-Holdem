@@ -408,7 +408,8 @@ function paintSeats(view) {
     if (state.folded) node.classList.add('is-folded');
     if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
-    const at = ovalPoint(i, n, 38, 40);
+    // Leave room for rotated hero cards beside the lower seats on dense tables.
+    const at = ovalPoint(i, n, n >= 8 ? 40 : 38, 40);
     node.dataset.side = at.x < 50 ? 'left' : 'right';
     node.dataset.betBand = at.y > 75 ? 'lower' : at.y < 16 ? 'top' : at.y < 40 ? 'upper' : 'middle';
     node.dataset.betEdge = at.y < 25 || at.y > 75 ? 'bottom' : at.x < 50 ? 'right' : 'left';
