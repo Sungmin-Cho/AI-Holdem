@@ -2592,9 +2592,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           commitPending({softWait:true});
           log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
         } catch (error) {
+          if (error?.code === 'STALE_PLAYER_DECISION') return;
           // Timer diagnostics cannot terminate the awaited decision path. Even
           // the logger may fail; the normal decision path retains authority.
-          try { log('player-soft-wait-error', { code: error?.code ?? 'ERROR' }); } catch {}
+          try { log('player-soft-wait-error', { decisionId: next.decisionId, generation: record.generation, code: error?.code ?? 'ERROR' }); } catch {}
         }
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
@@ -7253,6 +7254,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ...(initialized.archivedTo ? { archivedTo: initialized.archivedTo } : {}),
         notices: [],
         metrics: [],
+        metricsDropped: 0,
         playerBudget: undefined,
       });
       // #192 S4 E1: only an owner this instance itself just durably wrote counts —
@@ -7686,6 +7688,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           startedAt: isoNow(now),
           notices: resumeNotices,
           metrics: [],
+          metricsDropped: 0,
           opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
         });
       } else {

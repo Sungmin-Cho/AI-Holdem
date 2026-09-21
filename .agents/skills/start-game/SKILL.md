@@ -124,7 +124,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 **딜러는 개입하지 않는다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 **0회**이고, 그것이 이 구조의 성공 기준이다. 액션 전달·워치독·코치 스폰·게시·서버 재기동은 전부 사이드카가 한다.
 
-사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다. `metrics`는 최근 5,000건이며 버린 개수는 `metricsDropped`에 누적된다. `metricsDropped > 0`이면 이 배열만으로 게임 전체의 실패율·지연 분포를 계산하지 않는다.
+사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다. `metrics`는 최근 5,000건이며 버린 개수는 `metricsDropped`에 누적된다. `metricsDropped > 0`이면 이 배열만으로 게임 전체의 실패율·지연 분포를 계산하지 않는다. 진단 이력은 기존 loop-state로 재개하면 유지된다. loop-state가 없어 재구성한 경우에는 `metrics`와 `metricsDropped`가 0부터 시작하므로, 폐기 누계가 0이어도 게임 전체 표본이라고 단정하지 않는다. 참가 요청 주소 목록은 1,024개 초과 시 60초가 지난 항목을 청소하며 활성 주소 수의 하드 상한은 아니다.
 
 ---
 

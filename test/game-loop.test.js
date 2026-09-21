@@ -15061,7 +15061,7 @@ test('soft-wait logging failure is contained while the same decision completes',
  }});
  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:5000},log:entry=>{
   if(entry.event==='player-soft-wait')throw Object.assign(Error('logger unavailable'),{code:'LOGGER_FAILED'});
-  if(entry.event==='player-soft-wait-error'){reported=true;assert.equal(entry.code,'LOGGER_FAILED');}
+  if(entry.event==='player-soft-wait-error'){reported=true;assert.equal(entry.code,'LOGGER_FAILED');assert.ok(entry.decisionId);assert.ok(entry.generation);}
  }}});
  await runUntilUserBoundary(loop,gameDir);
  assert.equal(reported,true);
@@ -15071,6 +15071,7 @@ test('soft-wait logging failure is contained while the same decision completes',
 test('completed player decisions bound persisted metric history and retain dropped count', {timeout:15000*WIN32_SCALE},async t=>{
  const {gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter()});
  const file=path.join(gameDir,'loop-state.json'),state=readJson(file);
+ assert.equal(state.metricsDropped,0);
  state.metrics=Array.from({length:5000},(_,id)=>({id}));state.metricsDropped=12;
  fs.writeFileSync(file,JSON.stringify(state));
  await runUntilUserBoundary(loop,gameDir);

@@ -85,11 +85,8 @@ export function cutoffMarkerPath(sessionDir) {
   return path.join(trainingDir(sessionDir), '.cutoff');
 }
 
-const explanationCutoffSessions = new Set();
-
-export function enterExplanationCutoff(sessionDir) {
-  explanationCutoffSessions.add(path.resolve(sessionDir));
-}
+// Legacy compatibility signal only; the durable .cutoff file owns authority.
+export function enterExplanationCutoff() {}
 
 export function hasCutoffMarker(sessionDir) {
   try {

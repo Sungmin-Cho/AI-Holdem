@@ -22,3 +22,10 @@ test('join attempt cleanup expires old addresses only above the size threshold',
  pruneJoinAttempts(attempts,60001);assert.equal(attempts.size,25);assert.ok(attempts.has('1024'));
  const small=new Map([['old',{start:0,count:1}]]);pruneJoinAttempts(small,90000);assert.equal(small.size,1);
 });
+
+test('oversized startup narration is dropped only before the retained current hand',()=>{
+ const hand=[{type:'hand_start',handNo:1},{type:'narration',text:'current'}];
+ const startup={type:'narration',text:'x'.repeat(1100000)};
+ assert.deepEqual(trimHandLog([startup,...hand]),hand);
+ assert.deepEqual(trimHandLog([startup]),[startup]);
+});

@@ -1,3 +1,4 @@
+// Server/runtime helpers; not a browser-served shared asset.
 /** Keep diagnostics bounded without changing the newest decision evidence. */
 export function appendBoundedMetric(state, metric) {
   const rows = [...(Array.isArray(state?.metrics) ? state.metrics : []), metric];
@@ -6,7 +7,7 @@ export function appendBoundedMetric(state, metric) {
   return { metrics: dropped ? rows.slice(dropped) : rows, metricsDropped: prior + dropped };
 }
 
-/** Only whole completed hand prefixes may be discarded. The current hand stays. */
+/** Discard startup narration and completed hands only at a hand boundary. The current hand stays. */
 export function trimHandLog(log) {
   const budget = 1024 * 1024;
   const sizes = log.map(row => Buffer.byteLength(JSON.stringify(row)) + 1);
