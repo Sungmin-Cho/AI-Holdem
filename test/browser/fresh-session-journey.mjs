@@ -8,15 +8,22 @@ import {startAppService} from '../../tools/app-service.js';
 import {inspectStudyService,stopStudyService} from '../../tools/study-service.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks = ["cancel-does-not-recreate", "confirmed-fresh-session", "correction-context-reset", "end-after-fresh-retry", "owned-cleanup", "real-user-store-unchanged"];
+export const requiredJourneyChecks = ["interrupt-soft-wait", "interrupt-reparks", "retry-after-interrupt", "cancel-does-not-recreate", "confirmed-fresh-session", "correction-context-reset", "end-after-fresh-retry", "owned-cleanup", "real-user-store-unchanged"];
 
 export async function runFreshSessionJourney(outDir) {
   fs.mkdirSync(outDir,{recursive:true});
   const workspace=createBrowserWorkspace(), root=workspace.root;
   const userStore=path.resolve('game'),before=hashTree(userStore),session=`fresh-${randomUUID()}`;
-  const calls=[],warmups=[];
+  const calls=[],warmups=[];let interruptedChildClosed=false;
   const adapter={kind:'fake',async warmup(input) {warmups.push(input);return {sessionId:`session-${input.playerId}-${warmups.length}`,raw:'ready'};},
-    async decide(input) {calls.push(input);return {raw:'invalid'};},async dispose(){}};
+    async decide(input) {
+      calls.push(input);
+      if(calls.length===1)await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(Object.assign(Error('interrupt not received'),{code:'TIMEOUT'})),30000);
+        input.signal.addEventListener('abort',()=>{clearTimeout(timer);setTimeout(()=>{interruptedChildClosed=true;reject(Object.assign(Error('interrupted'),{code:'INTERRUPTED'}));},100);},{once:true});
+      });
+      return {raw:'invalid'};
+    },async dispose(){}};
   let app,failure;
   const checks=[];
   const browser=async args=>{
@@ -29,17 +36,29 @@ export async function runFreshSessionJourney(outDir) {
   const click=selector=>browser(['click',selector]);
   try {
     app=await startAppService(root,{resolver:async()=>({player:adapter,upper:null,notices:[]})});
-    app.manager.setPrefill({pace:'instant',aiCount:5,opponentRuntime:'llm',playerSoftMs:100,playerHardMs:1000});
+    app.manager.setPrefill({pace:'instant',aiCount:5,opponentRuntime:'llm',playerSoftMs:100,playerHardMs:30000});
     await browser(['open',app.url]);
     await wait(()=>evaluate("!document.querySelector('#start').disabled"));
     await click('#start');
     await wait(async()=>{
-      if(app.manager.snapshot().state==='paused')return true;
+      if(app.manager.snapshot().pendingDecision?.softWait)return true;
       await evaluate("(()=>{const d=document.querySelector('#table').contentDocument;const b=d?.querySelector('#btn-fold');if(b&&!b.disabled)b.click();})()");
       return false;
     });
+    const pending=app.manager.snapshot().pendingDecision;
+    assert.equal(pending.status,'running');assert.ok(Number.isSafeInteger(pending.generation));
+    await wait(()=>evaluate("!document.querySelector('#interrupt-decision').hidden&&!document.querySelector('#interrupt-decision').disabled"));
+    await click('#interrupt-decision');checks.push('interrupt-soft-wait');
+    await wait(()=>app.manager.snapshot().state==='paused');
+    assert.equal(interruptedChildClosed,true);
+    assert.equal(app.manager.snapshot().pendingDecision.code,'INTERRUPTED');checks.push('interrupt-reparks');
     await wait(()=>evaluate("document.querySelector('#menu').textContent==='일시정지 메뉴'"));
-    await click('#menu');
+    await click('#menu');await wait(()=>evaluate("!document.querySelector('#retry-decision').disabled"));
+    await click('#retry-decision');
+    await wait(()=>calls.length===3&&app.manager.snapshot().state==='paused'&&!app.manager.snapshot().pendingRequestId);
+    checks.push('retry-after-interrupt');
+    await wait(()=>evaluate("document.querySelector('#menu').textContent==='일시정지 메뉴'"));
+    if(!await evaluate("document.querySelector('#pause-dialog').open"))await click('#menu');
     await wait(()=>evaluate("!document.querySelector('#retry-fresh-session').hidden&&!document.querySelector('#retry-fresh-session').disabled"));
     const count=warmups.length;
     await click('#retry-fresh-session');
@@ -49,8 +68,8 @@ export async function runFreshSessionJourney(outDir) {
     await click('#fresh-session-no');
     assert.equal(warmups.length,count);checks.push('cancel-does-not-recreate');
     await click('#retry-fresh-session');await click('#fresh-session-yes');
-    await wait(()=>warmups.length===count+1&&calls.length===4&&app.manager.snapshot().state==='paused'&&!app.manager.snapshot().pendingRequestId);
-    assert.deepEqual(calls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,0,1]);
+    await wait(()=>warmups.length===count+1&&calls.length===5&&app.manager.snapshot().state==='paused'&&!app.manager.snapshot().pendingRequestId);
+    assert.deepEqual(calls.slice(1).map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,0,1]);
     checks.push('confirmed-fresh-session','correction-context-reset');
     await wait(()=>evaluate("!document.querySelector('#retry-fresh-session').disabled"));
     if(!await evaluate("document.querySelector('#pause-dialog').open"))await click('#menu');

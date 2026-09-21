@@ -892,12 +892,8 @@ export function createPlayerRuntime(kind, opts = {}) {
     } catch (error) {
       throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
     }
-    if (delivered === false) {
-      // A close queued just before kill may settle on the next microtask.
-      await Promise.resolve();
-      if (entry.closed) return;
-      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { details: details() });
-    }
+    // exit may precede close: a false kill result is not closure evidence, but
+    // allow the same bounded close observation to settle before declaring it unsafe.
     const outcome = await Promise.race([
       (entry.handle.closed ?? entry.handle.done).then(
         () => ({ closed: true }),
@@ -906,6 +902,9 @@ export function createPlayerRuntime(kind, opts = {}) {
       sleep(killWaitMs).then(() => ({ closed: false, timeout: true })),
     ]);
     if (entry.closed) return;
+    if (delivered === false) {
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { cause: outcome.error, details: details() });
+    }
     throw runtimeError(
       'CHILD_CLOSE_UNCONFIRMED',
       `CHILD_CLOSE_UNCONFIRMED: ${kind} 자식의 close를 확인하지 못했습니다.`,
@@ -914,12 +913,19 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   // decide/warmup/probe의 공통 실행: 타임아웃이 이기면 **여기서** 자식을 죽인다.
-  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [] }) {
+  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [], signal }) {
+    if(signal?.aborted)throw runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.');
     const started = Date.now();
     const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs });
     const timer = timeoutIn(timeoutMs);
+    let abort;
+    const interrupted=new Promise((_,reject)=>{
+      abort=()=>{if(!entry.closed)reject(runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.'));};
+      signal?.addEventListener('abort',abort,{once:true});
+      if(signal?.aborted)abort();
+    });
     try {
-      const result = await Promise.race([handle.done, timer.promise]);
+      const result = await Promise.race([handle.done, timer.promise, interrupted]);
       return { ...result, format, args, elapsedMs: Date.now() - started };
     } catch (error) {
       if (!entry.closed) {
@@ -930,6 +936,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       throw error;
     } finally {
       timer.cancel();
+      signal?.removeEventListener('abort',abort);
     }
   }
 
@@ -1237,13 +1244,13 @@ export function createPlayerRuntime(kind, opts = {}) {
     // 최종 응답이 trim 뒤 정확히 `ready`일 때만 세션을 돌려준다 — 거부·빈 출력·
     // thread.started뿐인 스트림·비-ready 산문은 준비 완료가 아니고, 그 세션으로
     // 결정을 돌리면 안 된다(스펙 §5 워밍업 문면).
-    async warmup({ playerId, prompt, timeoutMs = WARMUP_TIMEOUT_MS }) {
+    async warmup({ playerId, prompt, timeoutMs = WARMUP_TIMEOUT_MS, signal }) {
       if (kind === 'grok') {
         ensureGrokHome();
         assertGrokVerified('player');
       }
       const sessionId = runtime.newSessionId();
-      const result = await runOnce({ purpose: 'create', model: table.player, modelArgs: table.playerArgs, sessionId, input: prompt, timeoutMs });
+      const result = await runOnce({ purpose: 'create', model: table.player, modelArgs: table.playerArgs, sessionId, input: prompt, timeoutMs, signal });
       if (result.code !== 0) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
       }
@@ -1262,7 +1269,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     },
 
     // 결정 1회. 요약은 stdin으로만 가고, 타임아웃은 자식을 죽인 뒤 TIMEOUT을 던진다.
-    async decide({ playerId, sessionId, message, timeoutMs = table.watchdog.t1Ms }) {
+    async decide({ playerId, sessionId, message, timeoutMs = table.watchdog.t1Ms, signal }) {
       if (kind === 'grok') {
         ensureGrokHome();
         assertGrokVerified('player');
@@ -1273,7 +1280,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (!isArgvSafeSessionId(sessionId)) {
         throw runtimeError('INVALID_SESSION_ID', 'INVALID_SESSION_ID: 안전하지 않은 세션 id로 결정을 요청할 수 없습니다.', { playerId });
       }
-      const result = await runOnce({ purpose: 'resume', model: table.player, modelArgs: table.playerArgs, sessionId, input: message, timeoutMs });
+      const result = await runOnce({ purpose: 'resume', model: table.player, modelArgs: table.playerArgs, sessionId, input: message, timeoutMs, signal });
       const raw = parseResponse(result.format, result.stdout);
       if (result.code !== 0 || !raw) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });

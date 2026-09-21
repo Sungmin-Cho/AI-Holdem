@@ -2055,6 +2055,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     deadlineAt = null,
     purpose = 'repair-warmup',
     onWarmupClosed = null,
+    signal,
   } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
     const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
@@ -2064,7 +2065,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let result, code='RESPONSE_RECEIVED';
     const started=monotonicNow();
     try { result = await playerAdapter.warmup({
-      playerId: persona.playerId, prompt, ...(timeoutMs === null ? {} : { timeoutMs }),
+      playerId: persona.playerId, prompt, signal, ...(timeoutMs === null ? {} : { timeoutMs }),
     }); } catch(error) {code=error.code??'CLI_FAILED';throw error;}
     finally {
       if(deadlineAt!==null) log('player-call',{purpose,
@@ -2147,6 +2148,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     deadlineAt,
     reason,
     onWarmupClosed = null,
+    signal,
   }) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const persona = Array.isArray(players)
@@ -2156,7 +2158,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const repaired = await createPlayerSession(persona, isoNow(now), {
       deadlineAt,
       purpose: reason === 'user_fresh_session' ? 'fresh-warmup' : 'repair-warmup',
-      onWarmupClosed,
+      onWarmupClosed,signal,
     });
     if (stopRequested) throw codedError('STOPPING', '세션 기록 전에 loop 정지가 요청되었습니다.');
     const nextSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
@@ -2173,12 +2175,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return repaired;
   };
 
-  const repairRestoredPlayerSession = async (playerId, { deadlineAt }) => {
+  const repairRestoredPlayerSession = async (playerId, { deadlineAt, signal }) => {
     if (!restoredPlayerSessions.has(playerId)) return null;
     // Consume-before-await prevents a failed repair from recursively recreating the same
     // persisted child. A later process resume may still retry the old on-disk entry.
     restoredPlayerSessions.delete(playerId);
-    return recreatePlayerSession(playerId, { deadlineAt, reason: 'restored_session_repair' });
+    return recreatePlayerSession(playerId, { deadlineAt, signal, reason: 'restored_session_repair' });
   };
 
   const clearDirectServerOwnership = () => {
@@ -2418,6 +2420,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return cleaned;
   };
 
+  let activeDecision=null;
+  const interruptDecision=async({gameEpoch,decisionId,generation}={})=>{
+    const active=activeDecision,pending=readLoopState()?.pendingDecision;
+    const same=value=>value && value.gameEpoch===gameEpoch && value.decisionId===decisionId && value.generation===generation;
+    if(!active || !same(active.identity) || !same(pending) || pending.status!=='running' || pending.softWait!==true || pending.proposedAction)return {interrupted:false};
+    active.controller.abort();
+    await active.settled;
+    const outcome=readLoopState()?.pendingDecision;
+    return {interrupted:!!(same(outcome) && outcome.status==='recovery_required' && outcome.code==='INTERRUPTED' && outcome.closeConfirmed===true)};
+  };
   const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
@@ -2469,6 +2481,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return record;
     };
     beginPending();
+    let settleAttempt;
+    const active={identity:{gameEpoch:record.gameEpoch,decisionId:record.decisionId,generation:record.generation},controller:new AbortController(),settled:new Promise(resolve=>{settleAttempt=resolve;})};
+    activeDecision=active;
+    const signal=active.controller.signal;
+    try {
     let callNo = 1;
     let lastRejection = inherited;
     let candidate = null;
@@ -2477,13 +2494,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let softDeadlineAt;
     const floor = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
     const correctionSkip = () => {
+      if (signal.aborted) return 'interrupted';
       if (stopRequested) return 'stop';
       if (pauseRequested) return 'pause';
       const remaining = deadlineAt - monotonicNow();
       return remaining <= 0 || remaining < floor ? 'budget' : null;
     };
-    const logSkipped = reason => log('player-correction-skipped', {decisionId:next.decisionId,
-      generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+    const logSkipped = reason => {
+      if (reason === 'interrupted') failureCode = 'INTERRUPTED';
+      log('player-correction-skipped', {decisionId:next.decisionId,
+        generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+    };
     const rejectionContext = {generation:record.generation, decisionId:record.decisionId, gameEpoch:record.gameEpoch};
     const rejectDecision = (rejection) => {
       lastRejection = projectRejectionForSink({v:1, ...rejectionContext, callNo, code:rejection.code,
@@ -2552,7 +2573,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           callNo, detail:lastRejection.detail, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
         message = correctionMessage(next.message, lastRejection, rejectionContext);
         timeoutMs = Math.ceil(deadlineAt - monotonicNow());
-        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
+        const finalSkip = signal.aborted ? 'interrupted' : stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
         if (finalSkip) {
           callNo -= 1; corrections = 0;
           commitPending({diagnostics:{...record.diagnostics, callNo, corrections}});
@@ -2582,7 +2603,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (stopRequested) return { kind: 'recovery_required' };
         try {
           session = await recreatePlayerSession(next.toAct, {
-            deadlineAt,
+            deadlineAt,signal,
             reason: 'user_fresh_session',
             onWarmupClosed: async (freshSessionId) => commitPending({
               closeConfirmed: true,
@@ -2620,7 +2641,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             round = {ok:false, error:codedError('TIMEOUT', '새 세션 기록 뒤 결정 예산이 만료됐습니다.'), modelMs:0};
           } else {
             round = await decideOnce({
-              playerId: next.toAct,
+              playerId: next.toAct,signal,
               sessionId: session.sessionId,
               message,
             }, timeoutMs, { callNo });
@@ -2628,7 +2649,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       } else {
         round = await decideOnce({
-          playerId: next.toAct,
+          playerId: next.toAct,signal,
           sessionId: session.sessionId,
           message,
         }, timeoutMs, { callNo });
@@ -2656,7 +2677,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (remainingBeforeRepair < minRepairMs) continue;
         let repaired = null;
         try {
-          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt,signal });
         } catch (error) {
           if (error.code === 'STOPPING') return { kind: 'recovery_required' };
           if (isFatalRepairFailure(error)) throw error;
@@ -2681,7 +2702,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             const remainingForCall = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
             if (remainingForCall > 0) {
               round = await decideOnce({
-                playerId: next.toAct,
+                playerId: next.toAct,signal,
                 sessionId: session.sessionId,
                 message: attemptMessage,
               }, remainingForCall, { callNo });
@@ -2745,12 +2766,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // termination/identity failures above are the fail-closed exception. This
     // also applies to repair warmup calls through the same runtime.runOnce.
     commitPending({ status: 'recovery_required', code: failureCode,
+      ...(failureCode === 'INTERRUPTED' ? {softWait:false} : {}),
       category: playerFailureCategory(failureCode), elapsedMs: Math.max(0, monotonicNow() - startedAt),
       closeConfirmed: true, sessionRepaired, diagnostics:{...record.diagnostics,
         ...(lastRejection && ['INVALID_DECISION','ILLEGAL_ACTION'].includes(failureCode) ? {detail:lastRejection.detail} : {})} });
     log('player-recovery-required', { decisionId: next.decisionId, generation: record.generation, code: failureCode,
       detail:record.diagnostics.detail, corrections:record.diagnostics.corrections, callNo });
     return { kind: 'recovery_required' };
+    } finally {if(activeDecision===active)activeDecision=null;settleAttempt();}
   };
 
   const recoverServerForPublish = async () => {
@@ -7996,7 +8019,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     resume,
     run,
     coachPipeline,
-    pause, resumePlay, retryDecision, endGame, skipHandResult,
+    pause, resumePlay, retryDecision, endGame, skipHandResult, interruptDecision,
     get pendingDecision() { return readLoopState()?.pendingDecision ?? null; },
     get playState() { return control?.read().playState ?? null; },
     requestStop,
