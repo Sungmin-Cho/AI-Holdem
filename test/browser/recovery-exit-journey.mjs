@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +9,8 @@ import {inspectStudyService,stopStudyService} from '../../tools/study-service.js
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
 // The adapter exercises the full app/relay/browser protocol without paid models.
+export const requiredJourneyChecks = ["page-loaded-no-overlay-or-uncaught-errors", "end-cancel-preserves-engine", "end-confirmed", "restart-cancel-preserves-engine", "restart-confirmed", "raw-bytes-and-old-engine-preserved-end", "raw-bytes-and-old-engine-preserved-restart", "owned-cleanup", "real-user-store-unchanged"];
+
 export async function runRecoveryExitJourney(outDir) {
   fs.mkdirSync(outDir,{recursive:true});
   const workspace=createBrowserWorkspace(),root=workspace.root;
@@ -87,15 +90,25 @@ export async function runRecoveryExitJourney(outDir) {
     }
   } catch(error){failure=error;await browser(['screenshot',path.join(outDir,'error.png')]).catch(()=>{});}
   finally {
-    await browser(['close']).catch(()=>{});await app?.close();
-    const study=await inspectStudyService(root);
-    if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});
-    assert.equal(hashTree(userStore),before);workspace.close();checks.push('owned-cleanup','real-user-store-unchanged');
-    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,error:failure?.message},null,2));
+    const cleanup = await cleanupJourney({ failure, steps: [
+      () => browser(['close']),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
+    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,cleanupErrors:cleanup.errors.map(error=>error.message),error:failure?.message},null,2));
   }
-  if(failure)throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if(!process.env.NODE_TEST_CONTEXT&&process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  const i=process.argv.indexOf('--out-dir');if(i<0)throw new Error('--out-dir required');
-  await runRecoveryExitJourney(path.resolve(process.argv[i+1]));console.log('Recovery exit browser journey PASS');
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i=process.argv.lastIndexOf('--out-dir');if(i<0)throw new Error('--out-dir required');
+    await runRecoveryExitJourney(path.resolve(process.argv[i+1]));console.log('Recovery exit browser journey PASS');
+  }
 }

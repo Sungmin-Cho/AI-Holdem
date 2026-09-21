@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -89,16 +90,9 @@ export async function runMultiplayerJourney(outDir) {
     );
     await browser(["click", selector]);
   };
-  const closeBrowsers = async () => {
-    await Promise.all([
-      host(["close"]).catch(() => {}),
-      guestA(["close"]).catch(() => {}),
-      guestB(["close"]).catch(() => {}),
-    ]);
-  };
   try {
     if (!lan) {
-      throw new Error("skip: no LAN IPv4 (insecure-context join cannot be verified)");
+      throw new Error("NO_LAN_IPV4 (insecure-context join cannot be verified)");
     }
     app = await startAppService(root, {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
@@ -286,16 +280,18 @@ export async function runMultiplayerJourney(outDir) {
       await guestA(["screenshot", path.join(outDir, "failure-guest.png")]);
     } catch { /* best-effort */ }
   } finally {
-    await closeBrowsers();
-    await app?.close();
-    const study = await inspectStudyService(root);
-    if (study.status === "running") {
-      await stopStudyService(root, { expectedInstanceId: study.instanceId });
-    }
-    assert.equal(hashTree(userStore), before);
-    check("real-user-store-unchanged");
-    workspace.close();
-    check("owned-cleanup");
+    const cleanup = await cleanupJourney({ failure, steps: [
+      ...[host, guestA, guestB].map(browser => () => browser(['close'])),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
     const result = {
       schemaVersion: 1,
       pass: !failure && requiredJourneyChecks.every((name) => checks.includes(name)),
@@ -305,10 +301,11 @@ export async function runMultiplayerJourney(outDir) {
       checks,
       pending: requiredJourneyChecks.filter((name) => !checks.includes(name)),
       error: failure?.message,
+      cleanupErrors: cleanup.errors.map(error => error.message),
     };
     fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
   }
-  if (failure) throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 
 if (
@@ -316,8 +313,10 @@ if (
   && process.argv[1]
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  const i = process.argv.indexOf("--out-dir");
-  if (i < 0) throw new Error("--out-dir required");
-  await runMultiplayerJourney(path.resolve(process.argv[i + 1]));
-  console.log("Multiplayer browser journey PASS");
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i = process.argv.lastIndexOf("--out-dir");
+    if (i < 0) throw new Error("--out-dir required");
+    await runMultiplayerJourney(path.resolve(process.argv[i + 1]));
+    console.log("Multiplayer browser journey PASS");
+  }
 }

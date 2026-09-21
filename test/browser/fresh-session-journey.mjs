@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 import {startAppService} from '../../tools/app-service.js';
 import {inspectStudyService,stopStudyService} from '../../tools/study-service.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
+
+export const requiredJourneyChecks = ["cancel-does-not-recreate", "confirmed-fresh-session", "correction-context-reset", "end-after-fresh-retry", "owned-cleanup", "real-user-store-unchanged"];
 
 export async function runFreshSessionJourney(outDir) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -56,15 +59,25 @@ export async function runFreshSessionJourney(outDir) {
     await wait(()=>app.manager.snapshot().state==='ended');checks.push('end-after-fresh-retry');
   } catch(error) {failure=error;}
   finally {
-    await browser(['close']).catch(()=>{});await app?.close();
-    const study=await inspectStudyService(root);
-    if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});
-    assert.equal(hashTree(userStore),before);workspace.close();checks.push('owned-cleanup','real-user-store-unchanged');
-    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,error:failure?.message},null,2));
+    const cleanup = await cleanupJourney({ failure, steps: [
+      () => browser(['close']),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
+    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,cleanupErrors:cleanup.errors.map(error=>error.message),error:failure?.message},null,2));
   }
-  if(failure)throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if(!process.env.NODE_TEST_CONTEXT&&process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  const i=process.argv.indexOf('--out-dir');if(i<0)throw new Error('--out-dir required');
-  await runFreshSessionJourney(path.resolve(process.argv[i+1]));console.log('Fresh session browser journey PASS');
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i=process.argv.lastIndexOf('--out-dir');if(i<0)throw new Error('--out-dir required');
+    await runFreshSessionJourney(path.resolve(process.argv[i+1]));console.log('Fresh session browser journey PASS');
+  }
 }

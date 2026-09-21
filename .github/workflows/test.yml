@@ -24,12 +24,13 @@ concurrency:
 #   learning-a learning-integration + mistake-bank + publish  11.0
 #   learning-b learning-integration-session + action-receipts + drill-* 12.9
 #   loop       game-loop                                     32.0
+#   loop-b     game-loop-multiplayer (time unmeasured)
 #   recovery   app-recovery-exit + release-verifier + server-security-gates 28.6
 #   rest       remaining files + GATE                        26.1
 # Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
 # If game-loop.test.js exceeds 36 min on Windows, split by topic starting
 # with coach recovery/finalize. Track app-recovery-exit's 22.1 min separately.
-# Seven shards x Node 20/22 adds two jobs and their fixed overhead.
+# Eight shards x Node 20/22 include the multiplayer loop partition.
 jobs:
   ui-browser:
     name: UI browser
@@ -42,6 +43,8 @@ jobs:
           node-version: 22.x
       - name: Install pinned browser and dependencies
         run: npx --yes agent-browser@0.36.0 install --with-deps
+      - name: Prepare protected default game store
+        run: mkdir -p "$GITHUB_WORKSPACE/game"
       - name: Check UI presentation
         run: npm run test:ui:browser -- --ci
       - name: Fresh-session recovery browser journey
@@ -50,6 +53,15 @@ jobs:
         run: node test/browser/recovery-exit-journey.mjs --out-dir output/playwright/ui-journey/recovery-exit
       - name: Multiplayer spectator real-play journey
         run: node test/browser/spectator-journey.mjs --out-dir output/playwright/ui-journey/spectator
+      - name: Lobby session browser journey
+        run: npm run test:lobby:browser
+      - name: Multiplayer browser journey
+        run: npm run test:multiplayer:browser
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 26.0.0
+      - name: Learning browser journey
+        run: node test/browser/learning-journey.mjs --out-dir output/playwright/ui-journey/learning --user-store-dir "$GITHUB_WORKSPACE/game"
       - name: Preserve UI check results and screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
