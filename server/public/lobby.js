@@ -58,7 +58,7 @@ function render() {
   const s = snapshot.state;
   const paused = s === "paused";
   const terminal=['completed','ended'].includes(s);
-  if(!selecting && terminal && snapshot.gameId)viewingRecord=true;
+  viewingRecord=!!(!selecting && terminal && snapshot.gameId);
 
   $("table").inert = (!["playing","finalizing","completed","ended"].includes(s)) || Boolean(document.querySelector('dialog[open]'));
   $("status").textContent = labels[s] ?? s;

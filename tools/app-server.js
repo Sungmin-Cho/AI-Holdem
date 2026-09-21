@@ -215,7 +215,7 @@ export async function startAppServer({
         json(res,409,{code:'STALE_GAME'});return;
       }
       json(res,200,summary);
-    } catch(error){json(res,error.code==='UNAUTHORIZED'?401:503,{code:error.code==='UNAUTHORIZED'?'UNAUTHORIZED':'SUMMARY_UNAVAILABLE'});}
+    } catch(error){const code=['UNAUTHORIZED','NOT_SEATED'].includes(error.code)?error.code:'SUMMARY_UNAVAILABLE';json(res,code==='UNAUTHORIZED'?401:code==='NOT_SEATED'?409:503,{code});}
   }
   const committedCache = new Map();
   const readCommitFile = name => {

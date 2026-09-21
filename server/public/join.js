@@ -44,6 +44,9 @@ function paintFinal(final,state) {
   const key=JSON.stringify([final,finalSummary,state.me.playerId,spectator]);if(key===finalPanelKey)return;finalPanelKey=key;
   const table=$('final-stacks');table.replaceChildren();
   const hasNet=final.stacks.every(row=>Number.isSafeInteger(row.net));
+  const head=document.createElement('tr');
+  for(const label of ['순위','이름',...(hasNet?['증감']:[]),'최종 스택']){const th=document.createElement('th');th.textContent=label;head.append(th);}
+  const thead=document.createElement('thead');thead.append(head);table.append(thead);
   for(const row of [...final.stacks].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))) {
     const tr=document.createElement('tr');
     for(const value of [row.rank??'—',row.name??row.playerId,...(hasNet?[`${row.net>0?'+':''}${row.net}`]:[]),row.stack??'']){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}table.append(tr);
@@ -94,7 +97,7 @@ async function poll() {
       // Remove the old document and its SSE/card/receipt state before any new game.
       const table = document.createElement('iframe');table.id='table';table.title='홀덤 테이블';
       $('table').replaceWith(table);tableIdentity=identity;
-      if(summaryIdentity && !summaryIdentity.startsWith(`${state.game.gameId}:`)){summaryIdentity=null;finalSummary=null;finalPanelKey=null;}
+      if(summaryIdentity && !summaryIdentity.startsWith(`${state.game?.gameId}:`)){summaryIdentity=null;finalSummary=null;finalPanelKey=null;}
     }
     if (identity && !$('table').getAttribute('src')) {
       $('table').src = `/table?participant=1&appGame=${state.game.gameId}&epoch=${encodeURIComponent(state.game.gameEpoch)}${['completed','ended'].includes(state.game.state)?'&terminal=1':''}`;

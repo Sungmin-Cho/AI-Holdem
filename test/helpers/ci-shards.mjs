@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 export const GATE = 'platform-learning-runtime.test.js';
 export const NAMED = {
   'study-a': ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js'],
-  'study-b': ['study-service-recovery.test.js', 'room-manager.test.js'],
+  'study-b': ['study-service-recovery.test.js', 'room-manager.test.js', 'session-summary.test.js', 'session-summary-api.test.js', 'final-summary.test.js'],
   'learning-a': ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js'],
   'learning-b': ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js'],
   loop: ['game-loop.test.js'],

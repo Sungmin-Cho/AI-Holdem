@@ -166,6 +166,15 @@
         </button>
       </form>
     </main>
+    <section id="result" hidden>
+      <h1 id="result-title"></h1>
+      <p id="result-message"></p>
+      <button id="review">게임 기록 보기</button
+      ><button id="result-restart">같은 설정으로 새 게임</button
+      ><button id="result-end" hidden>게임 종료</button
+      ><button id="result-modes">모드 선택</button
+      ><button id="recover" hidden>저장된 게임 불러오기</button>
+    </section>
     <section id="game" hidden>
       <details id="live-observers" hidden>
         <summary>관전자 관리 · <span id="live-spectator-count">0</span>명</summary>
@@ -180,15 +189,6 @@
       <p>탈락 후 관전을 나간 참가자의 좌석은 보존됩니다. 다시 올 사람에게 재입장 링크를 전달하거나 좌석을 비워 주세요.</p>
       <ul id="managed-seats"></ul>
       <input id="rejoin-link" aria-label="참가자 재입장 링크" readonly hidden />
-    </section>
-    <section id="result" hidden>
-      <h1 id="result-title"></h1>
-      <p id="result-message"></p>
-      <button id="review">게임 기록 보기</button
-      ><button id="result-restart">같은 설정으로 새 게임</button
-      ><button id="result-end" hidden>게임 종료</button
-      ><button id="result-modes">모드 선택</button
-      ><button id="recover" hidden>저장된 게임 불러오기</button>
     </section>
     <dialog id="pause-dialog">
       <h2>게임 메뉴</h2>

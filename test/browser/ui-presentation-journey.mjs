@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -239,12 +239,17 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.match(await evaluate("document.querySelector('.seat.is-hero .plate-tag').textContent"),/올인/);
     while(!legalFor(settlement).handOver){const legal=legalFor(settlement);const step=applyAction(settlement,legal.toAct,legal.canCheck?'check':'call');settlement=step.state;view=userView(settlement);await publish(step.events);}
     const eliminated=view.seats.filter(s=>s.out).length;assert.equal(eliminated,2);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.equal(await evaluate("document.querySelector('#final-last-hand').hidden"),false);
+    checks.push('final-overlay-immediate');
+    await click('#review-close');
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out').length"),eliminated);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out .card--back,.seat.is-out .dealer-btn,.seat.is-out.is-to-act').length"),0);
     assert.match(await evaluate("document.querySelector('#seat-announcement').textContent"),/탈락/);
     await browser(['reload']);await browser(['wait','.seat.is-out']);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out').length"),eliminated);
     assert.equal(await evaluate("document.querySelector('#seat-announcement').textContent"),'');checks.push('real-settlement');
+    await click('#review-close');
     assert.equal(await evaluate("document.querySelector('#session-net').closest('.meta-seg').hidden"),true);
     const settledView=view;view={...view,pots:[]};await publish();assert.match(await evaluate("document.querySelector('#pots').textContent"),/팟 정보 없음/);
     view={...settledView,legal:{potTotal:1}};await publish();assert.match(await evaluate("document.querySelector('#pots').textContent"),/팟 정보 확인 중/);
@@ -257,9 +262,17 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     view={...view,handNo:view.handNo+1};await publish();
     assert.equal(await evaluate("document.querySelector('#pots details').open"),false);
     await publish([],{review:'UI review fixture'});
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),true,'late review must not reopen dismissed final result');
+    await click('#review-reopen');
     assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
     await publish([],{review:null});
-    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden && !document.querySelector('main').inert"),true);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰 생성 중/);
+    await browser(['open',`${origin}/?token=${token}&terminal=1`]);await ready();
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰가 없습니다/);
+    await browser(['open',`${origin}/?token=${token}`]);await ready();
+    await click('#review-close');
     // This synthetic scenario shares a relay; never reuse a retired decision ID.
     let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:102});cash.handNo=100;
     const cashDeal=startHand(cash,{deck:fixedDeck()});cash=cashDeal.state;view=userView(cash);await publish(cashDeal.events);

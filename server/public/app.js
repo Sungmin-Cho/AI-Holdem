@@ -1014,17 +1014,25 @@ function closeReplay() {
 }
 
 const terminalRecord=new URLSearchParams(location.search).get('terminal')==='1';
-let finalSummary=null,summaryStarted=false,finalPanelKey=null,reviewSeen;
+let finalSummary=null,summaryPhase=null,summaryLoading=false,summaryVersion=0,finalPanelKey=null,reviewSeen;
 async function loadFinalSummary() {
-  if(summaryStarted || !appGameId)return;
-  summaryStarted=true;
-  for(let attempt=0;attempt<4;attempt++) {
-    if(attempt)await new Promise(resolve=>setTimeout(resolve,2500));
-    try {
-      const response=await appFetch('summary',{signal:AbortSignal.timeout(8000)});
-      if(!response.ok)throw new Error('SUMMARY_UNAVAILABLE');
-      finalSummary=await response.json();paintReview(ui.view);return;
-    } catch { /* Bounded retry, then the public view remains the fallback. */ }
+  if(finalSummary || summaryLoading || !appGameId)return;
+  const ended=!!(ui.sessionEnded||terminalRecord);
+  if(summaryPhase===ended)return;
+  summaryPhase=ended;summaryLoading=true;
+  try {
+    for(let attempt=0;attempt<4;attempt++) {
+      if(attempt)await new Promise(resolve=>setTimeout(resolve,2500));
+      try {
+        const response=await appFetch('summary',{signal:AbortSignal.timeout(8000)});
+        if(!response.ok)throw new Error('SUMMARY_UNAVAILABLE');
+        finalSummary=await response.json();summaryVersion++;paintReview(ui.view);return;
+      } catch { /* Bounded retries retain the public-view fallback. */ }
+    }
+  } finally {
+    summaryLoading=false;
+    // Ending can open the state gate while the initial bounded series is in flight.
+    if(!finalSummary && !!(ui.sessionEnded||terminalRecord)!==ended)void loadFinalSummary();
   }
 }
 function paintReview(view) {
@@ -1043,7 +1051,7 @@ function paintReview(view) {
   result.textContent=title+(Number.isSafeInteger(finalSummary?.handCount)?` · 완료 ${finalSummary.handCount}핸드`:'');
   result.classList.toggle('is-win',view?.result==='win');result.classList.toggle('is-lose',view?.result==='lose');
   const spectator=isSpectating(view),viewer=spectator?null:viewerId(view);
-  const key=JSON.stringify([finalSummary,view?.handNo,view?.seats,view?.sessionNet,viewer]);
+  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays)]);
   if(key!==finalPanelKey){
     finalPanelKey=key;
     paintFinalPanel($('final-summary'),{summary:finalSummary,view,viewer,

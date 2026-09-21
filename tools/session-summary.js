@@ -88,7 +88,7 @@ export function createSessionSummaryCache({openFile=openContained,yieldTurn=()=>
         startStack:integer(engine.config?.startStack)?engine.config.startStack:null,complete,players,hands};
       entry.summary=summary;
       return summary;
-    })().finally(()=>{entry.flight=null;});
+    })().catch(error=>{entry.summary=null;throw error;}).finally(()=>{entry.flight=null;});
     return entry.flight;
   };
   return {get,peek:gameId=>current?.gameId===gameId?current.summary:null,clear(){current=null;}};

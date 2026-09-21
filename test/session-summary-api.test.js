@@ -43,6 +43,8 @@ test('participant summary keeps seat binding and per-token two second throttle; 
  // A new member is unbound to this completed table and cannot impersonate its seats.
  const fresh=await fetch(url,{headers:{authorization:`Bearer ${watch.participantToken}`,'x-game-epoch':epoch}});
  assert.equal(fresh.status,200);
+ await new Promise(resolve=>setTimeout(resolve,2050));
+ assert.equal((await fetch(url,{headers:f.participant})).status,200);
 });
 test('participant final never starts an archive build and uses completed cash net, omitting unverified tournament net',async t=>{
  for(const mode of ['cash-training','tournament']) {
@@ -55,4 +57,31 @@ test('participant final never starts an archive build and uses completed cash ne
   if(mode==='cash-training')assert.deepEqual(json.game.final.stacks.map(row=>[row.net,row.rank]),[[20,1],[-20,2]]);
   else assert.ok(json.game.final.stacks.every(row=>!Object.hasOwn(row,'net')&&!Object.hasOwn(row,'rank')));
  }
+});
+
+test('cold summary build rechecks the game after yielding and never discloses a stale result',async t=>{
+ let release,entered;const started=new Promise(resolve=>{entered=resolve;});
+ const summaryCache={get:()=>{entered();return new Promise(resolve=>{release=resolve;});},peek:()=>null,clear(){}};
+ const f=await fixture(t,{summaryCache});f.setStatus('finalizing');
+ const pending=fetch(f.app.publicOrigin+`/api/p/game/${gameId}/summary`,{headers:f.participant});
+ await started;f.manager.current={...f.manager.current,gameId:'00000000-0000-4000-8000-000000000010'};
+ release({complete:true,privateSentinel:'STALE_SUMMARY'});
+ const response=await pending;assert.equal(response.status,409);assert.equal((await response.json()).code,'NOT_SEATED');
+});
+test('revoking a participant during a cold summary build closes its response',async t=>{
+ let release,entered;const started=new Promise(resolve=>{entered=resolve;});
+ const summaryCache={get:()=>{entered();return new Promise(resolve=>{release=resolve;});},peek:()=>null,clear(){}};
+ const f=await fixture(t,{summaryCache});f.setStatus('finalizing');
+ const watcher=f.room.join({code:f.room.load().joinCode,name:'Watcher',addr:'revoke',game:{state:'playing',gameId}});
+ const request=fetch(f.app.publicOrigin+`/api/p/game/${gameId}/summary`,{headers:{authorization:`Bearer ${watcher.participantToken}`,'x-game-epoch':epoch}});
+ const rejected=assert.rejects(request);await started;f.room.remove(watcher.participantId);
+ release({complete:true,privateSentinel:'REVOKED_SUMMARY'});await rejected;
+});
+test('participant final uses complete cached net and rank without triggering a build',async t=>{
+ let builds=0;
+ const summary={complete:true,players:[{playerId:'user',name:'Host',finalStack:105,net:-10},{playerId:'h1',name:'Guest',finalStack:75,net:10}]};
+ const f=await fixture(t,{summaryCache:{get(){builds++;return Promise.resolve(summary);},peek:()=>summary,clear(){}}});f.setStatus('completed');
+ const response=await fetch(f.app.publicOrigin+'/api/p/state',{headers:f.participant});
+ const data=await response.json();assert.equal(builds,0);
+ assert.deepEqual(data.game.final.stacks.map(row=>[row.playerId,row.net,row.rank]),[['user',-10,2],['h1',10,1]]);
 });

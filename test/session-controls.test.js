@@ -77,6 +77,7 @@ test(
     const state = JSON.parse(fs.readFileSync(path.join(root, "state.json")));
     assert.equal(state.result, "abort");
     assert.equal(state.abortOperationId, "test-end");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root,"ui-snapshot.json"))).view.gameOver,true);
     assert.equal(
       JSON.parse(fs.readFileSync(path.join(root, "loop-state.json"))).phase,
       "aborted",
@@ -525,3 +526,22 @@ test('published human deadline equals enforcement and only explicit resume renew
   assert.equal(read('ui-snapshot.json').log.some(event=>/^TIMEOUT_/.test(event.code??'')),false);
   await loop.pause();
 });
+
+test('abort end-view publication failure is best effort and never enters relay recovery',
+ {timeout:process.platform==='win32'?300000:30000},async t=>{
+  const root=createOwnedTempDir('holdem-abort-view-failure');let abortPublishes=0;const events=[];
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),opts:{
+   port:0,waitMs:60000,opponentRuntime:'policy',controlProtocolVersion:1,startPaused:true,
+   log:entry=>events.push(entry.event),onPublishInvoke(){
+    const state=JSON.parse(fs.readFileSync(path.join(root,'state.json')));
+    if(state.result==='abort'){abortPublishes++;throw Object.assign(Error('relay rejected publication'),{code:'PUBLISH_REJECTED'});}
+   },
+  }});t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,stack:5000,opponentRuntime:'policy'});
+  const running=loop.run();running.catch(()=>{});await loop.pause();
+  const before=events.filter(event=>event==='server-spawn').length;
+  await loop.endGame('abort-view-failure');await running;
+  assert.equal(abortPublishes,1);assert.equal(events.filter(event=>event==='server-spawn').length,before);
+  assert.equal(events.includes('server-recovered'),false);assert.equal(events.includes('server-recovery-verified'),false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'loop-state.json'))).phase,'aborted');
+ });

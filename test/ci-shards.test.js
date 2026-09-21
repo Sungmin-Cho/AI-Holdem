@@ -74,7 +74,7 @@ test('#206 named partitions reserve headroom for Windows recovery', () => {
   assert.deepEqual(NAMED['loop-b'], ['game-loop-multiplayer.test.js', 'pace-loop.test.js']);
   assert.deepEqual(NAMED.recovery, ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js', 'relay-seat-scoping.test.js']);
   assert.deepEqual(NAMED['study-a'], ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js']);
-  assert.deepEqual(NAMED['study-b'], ['study-service-recovery.test.js', 'room-manager.test.js']);
+  assert.deepEqual(NAMED['study-b'], ['study-service-recovery.test.js', 'room-manager.test.js', 'session-summary.test.js', 'session-summary-api.test.js', 'final-summary.test.js']);
   assert.deepEqual(NAMED['learning-a'], ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js']);
   assert.deepEqual(NAMED['learning-b'], ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js']);
 });

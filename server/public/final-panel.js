@@ -12,7 +12,7 @@ export function paintFinalPanel(container,{summary,view,viewer=null,onReplay=nul
   for(const row of rows){const tr=node('tr');for(const value of [row.rank,row.name??row.playerId,...(withNet?[signed(row.net)]:[]),row.finalStack??'—'])tr.append(node('td',String(value)));body.append(tr);}
   table.append(body);if(includeRanking)container.append(table);
   const data=summarizeHands(summary,viewer);
-  if(!data){container.append(node('p','일부 핸드 기록을 읽지 못해 생략했습니다'));return;}
+  if(!data){if(summary?.complete===false)container.append(node('p','일부 핸드 기록을 읽지 못해 생략했습니다'));return;}
   const handLink=(hand,label)=>{
     const enabled=onReplay&&canReplay(hand.handNo);const el=node(enabled?'button':'span',label);if(enabled){el.type='button';el.className='btn btn-ghost';el.addEventListener('click',()=>onReplay(hand.handNo));}return el;
   };
@@ -20,7 +20,7 @@ export function paintFinalPanel(container,{summary,view,viewer=null,onReplay=nul
     container.append(node('h2','내 요약'));
     const points=graphPoints(data.series);
     if(points.length){
-      const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 320 100');svg.setAttribute('role','img');svg.setAttribute('aria-label',`완료 핸드별 누적 증감: ${data.series.map(row=>`${row.handNo}핸드 ${signed(row.value)}`).join(', ')}`);svg.classList.add('final-chart');
+      const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 320 100');svg.setAttribute('role','img');svg.setAttribute('aria-label',`완료 ${data.series.length}핸드 누적 증감 그래프 · 최종 ${signed(data.series.at(-1).value)}`);svg.classList.add('final-chart');
       const line=document.createElementNS(ns,'polyline');line.setAttribute('points',points.map(p=>`${p.x},${p.y}`).join(' '));line.setAttribute('fill','none');line.setAttribute('stroke','currentColor');line.setAttribute('stroke-width','2');svg.append(line);
       for(const p of points){const dot=document.createElementNS(ns,'circle');dot.setAttribute('cx',p.x);dot.setAttribute('cy',p.y);dot.setAttribute('r','3');svg.append(dot);}container.append(svg);
     }

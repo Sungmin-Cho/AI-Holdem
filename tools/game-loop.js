@@ -3269,7 +3269,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     readJsonOptional(coachSnapshotPath, 'UI_SNAPSHOT')?.view?.gameOver === true
   );
 
-  const ensureGameOverViewPublished = async () => {
+  const ensureGameOverViewPublished = async ({ recover = true } = {}) => {
+    const publish = recover ? executePublish : runPublish;
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     if (engine?.gameOver !== true) return;
     for (let step = 0; step < 4; step += 1) {
@@ -3277,12 +3278,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         if (fs.existsSync(publishAttemptPath)) {
           if (!fs.existsSync(turnPath)) writeJsonAtomic(turnPath, { ok: true });
-          await executePublish(['--from', turnPath, '--retry']);
+          await publish(['--from', turnPath, '--retry']);
           continue;
         }
         const envelope = await runCli(['step']);
         writeJsonAtomic(turnPath, envelope);
-        await executePublish(['--from', turnPath, '--view-only']);
+        await publish(['--from', turnPath, '--view-only']);
       } catch (error) {
         if (error.code === 'ATTEMPT_PENDING') continue;
         appendNotice(`gameOver 뷰 게시 실패: ${error.code ?? 'ERROR'}`);
@@ -3304,7 +3305,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await assertServerBinding(lock);
       assertPinnedServerLock(pin);
       if(startTimeOf(serverPid)!==serverIdentity.startTime)return;
-      await ensureGameOverViewPublished();
+      await ensureGameOverViewPublished({ recover: false });
     } catch(error) {
       appendNotice(`중도 종료 뷰 게시를 생략했습니다: ${error.code??'ERROR'}`);
     } finally {closeServerLockPin(pin);}

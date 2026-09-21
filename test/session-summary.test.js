@@ -78,3 +78,11 @@ test('symlink archives cannot bypass contained reads or become a cached success'
   fs.symlinkSync(target,path.join(root,'hands','hand-0001.json'));
   const result=await (await cache()).get({gameId:'a',sessionDir:root,state:state(a)});assert.equal(result.complete,false);assert.equal(result.players[0].net,null);
 });
+
+test('a failed rebuild clears the previous complete summary',async()=>{
+ const a=record(1),root=fixture([a]),builder=await cache();
+ fs.writeFileSync(path.join(root,'state.json'),JSON.stringify(state(a)));
+ await builder.get({gameId:'a',sessionDir:root});assert.equal(builder.peek('a').complete,true);
+ fs.writeFileSync(path.join(root,'state.json'),'broken');
+ await assert.rejects(builder.get({gameId:'a',sessionDir:root}));assert.equal(builder.peek('a'),null);
+});
