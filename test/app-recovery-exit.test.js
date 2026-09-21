@@ -274,7 +274,7 @@ test('#197 finalize end retains the engine outcome and finishes with no player d
   const before=fs.readFileSync(path.join(f.gameDir,'state.json'));
   const request=body(f.manager,'end');f.manager.command(request);
   const row=await settle(f.manager,request.requestId);
-  assert.equal(row.status,'succeeded');assert.equal(row.recovery.mode,'finalize');
+  assert.equal(row.status,'succeeded',JSON.stringify({status:row.status,error:row.error,state:f.manager.snapshot().state,managerError:f.manager.snapshot().error}));assert.equal(row.recovery.mode,'finalize');
   assert.equal(f.manager.snapshot().state,'completed');
   assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
 });
