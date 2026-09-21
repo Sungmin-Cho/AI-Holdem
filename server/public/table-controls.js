@@ -55,3 +55,17 @@ export function studyLink(value, selectors = {}) {
     return url.href;
   } catch { return null; }
 }
+
+
+export function retainTurnDeadline(previous, incoming, previousView, view) {
+  const deadline = incoming === undefined ? previous : incoming;
+  if (!deadline || !view?.toAct || view.handInProgress === false) return null;
+  if (incoming === undefined && (previousView?.toAct !== view.toAct || previousView?.handNo !== view.handNo)) return null;
+  if (view.viewer === view.toAct && view.legal?.decisionId !== deadline.decisionId) return null;
+  return deadline;
+}
+
+export function serverClockOffset(dateHeader, receivedAt = Date.now()) {
+  const at = typeof dateHeader === 'string' ? Date.parse(dateHeader) : NaN;
+  return Number.isFinite(at) ? at - receivedAt : 0;
+}

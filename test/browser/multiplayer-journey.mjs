@@ -24,6 +24,7 @@ export const requiredJourneyChecks = [
   "guest-table-viewport",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
+  "turn-deadline-ticks",
   "pause-banner",
   "end-final-stacks",
   "room-closed-offline",
@@ -207,6 +208,24 @@ export async function runMultiplayerJourney(outDir) {
     assert.deepEqual(await guestCardVisibility(guestB),{backs:2,faces:0});
     assert.deepEqual(await guestCardVisibility(guestA),{backs:0,faces:2});
     check("guest-cards-hidden-from-others");
+
+    await wait(async () => evaluate(guestA)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      return doc?.querySelector('#btn-fold')?.disabled===false;
+    })()`), 'guest A active before countdown');
+    const countdown = browser => evaluate(browser)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      const text=doc?.querySelector('.is-to-act .plate-deadline')?.textContent;
+      return Number(text?.match(/([0-9]+)초/)?.[1]);
+    })()`);
+    const before=await countdown(guestA);
+    const observerBefore=await countdown(guestB);
+    assert.ok(before>0 && observerBefore>0,'both actor and other player see countdown');
+    await new Promise(resolve=>setTimeout(resolve,2100));
+    const after=await countdown(guestA),observerAfter=await countdown(guestB);
+    assert.ok(after>0 && after<before,'actor countdown ticks without new frames');
+    assert.ok(observerAfter>0 && observerAfter<observerBefore,'other player countdown ticks');
+    check('turn-deadline-ticks');
 
     await wait(
       async () => {

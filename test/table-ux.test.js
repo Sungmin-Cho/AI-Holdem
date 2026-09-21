@@ -309,3 +309,40 @@ test('turnDeadline and structured narration formatters are pure', () => {
   assert.equal(formatNarration({ code: 'LEVEL_UP', params: { sb: 50, bb: 100 } }), '블라인드가 50/100로 올랐습니다.');
   assert.equal(formatNarration({ text: '레거시 문구' }), '레거시 문구');
 });
+
+test('turn deadline state follows actor and decision identity for every audience', async () => {
+  const {retainTurnDeadline,serverClockOffset}=await import('../server/public/table-controls.js');
+  const deadline={decisionId:'d1',at:new Date(25000).toISOString()};
+  const view={viewer:'user',toAct:'user',handNo:1,handInProgress:true,legal:{decisionId:'d1'}};
+  assert.deepEqual(retainTurnDeadline(null,deadline,null,view),deadline);
+  assert.deepEqual(retainTurnDeadline(deadline,undefined,view,view),deadline);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,toAct:'h1'}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,handNo:2}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,handInProgress:false}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,legal:{decisionId:'d2'}}),null);
+  assert.deepEqual(retainTurnDeadline(null,deadline,null,{...view,viewer:'h1',legal:null}),deadline);
+  assert.equal(serverClockOffset(null,5000),0);
+  assert.equal(serverClockOffset('bad',5000),0);
+  assert.equal(serverClockOffset(new Date(10000).toUTCString(),5000),5000);
+  assert.equal(formatTurnDeadline(deadline,5000+serverClockOffset(new Date(10000).toUTCString(),5000)),'남은 시간 15초');
+});
+
+test('real deadline painter ticks without a new frame and announces urgency once', async()=>{
+  const fs=await import('node:fs'),vm=await import('node:vm');
+  const {formatTurnDeadline}=await import('../server/public/table-controls.js');
+  const source=fs.readFileSync(new URL('../server/public/app.js',import.meta.url),'utf8');
+  const painter=source.slice(source.indexOf('function paintTurnDeadline()'),source.indexOf('function renderSnapshot(snap)'));
+  const node=()=>({textContent:'',hidden:false,classList:{toggle(name,value){this[name]=value;}}});
+  const label=node(),plate=node();let announced=0,clock=1000,interval;
+  const announcement={set textContent(_value){announced++;}};
+  const ui={turnDeadline:{decisionId:'d1',at:new Date(12000).toISOString()}};
+  const context={ui,serverOffsetMs:0,announcedDeadline:null,formatTurnDeadline,
+    Date:{now:()=>clock,parse:Date.parse},Math,
+    $:id=>id==='turn-deadline'?label:announcement,
+    document:{querySelectorAll:()=>[plate]},setInterval:(fn,ms)=>{assert.equal(interval,undefined);assert.equal(ms,1000);interval=fn;}};
+  vm.runInNewContext(painter,context);assert.equal(typeof interval,'function');
+  interval();assert.equal(label.textContent,'남은 시간 11초');assert.equal(plate.textContent,label.textContent);assert.equal(announced,0);
+  clock=2000;interval();assert.equal(announced,1);assert.equal(label.classList['is-urgent'],true);
+  clock=3000;interval();assert.equal(label.textContent,'남은 시간 9초');assert.equal(announced,1);
+  ui.turnDeadline=null;interval();assert.equal(label.hidden,true);assert.equal(plate.hidden,true);
+});

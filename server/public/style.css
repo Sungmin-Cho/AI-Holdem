@@ -1118,3 +1118,6 @@ main:has(.pre-action-hint:not([hidden])) { min-height: min-content; }
 @media (max-width: 900px) {
   main:has(.pre-action-hint:not([hidden])) { grid-template-rows: min-content minmax(190px, 32vh); }
 }
+
+.plate-deadline { display: block; font-size: .7rem; color: var(--text-muted, #b8c5d0); }
+#turn-deadline.is-urgent, .plate-deadline.is-urgent { color: #ffb86b; font-weight: 700; }

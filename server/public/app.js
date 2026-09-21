@@ -3,7 +3,7 @@ import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration } from './table-controls.js';
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset } from './table-controls.js';
 import { createActionController } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating} from './seat-format.js';
@@ -21,7 +21,9 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+const ui = { turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+let serverOffsetMs = 0;
+let announcedDeadline = null;
 let pendingAction = true;
 let revisionAtHintClear=-1;
 const hintState=createHintState();
@@ -427,6 +429,7 @@ function paintSeats(view) {
     plate.append(avatarWrap, info);
 
     plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    if (active) plate.append(el('span', 'plate-deadline'));
     const position = positions[seat.playerId];
     if (state.showButton || position) {
       const badge = el('span', `dealer-btn${position?.includes('SB') ? ' is-sb' : position === 'BB' ? ' is-bb' : ''}`, position ?? 'D');
@@ -984,6 +987,7 @@ function paint() {
   paintBoard(view);
   paintPots(view);
   paintSeats(view);
+  paintTurnDeadline();
   paintThinking(view);
   paintActionBar(view);
   paintHint();
@@ -1011,7 +1015,27 @@ function mergeAnnotationOntoCards(ann) {
   ui.training[at] = applyTrainingAnnotation(ui.training[at], ann);
 }
 
+function paintTurnDeadline() {
+  const deadline = ui.turnDeadline;
+  const text = formatTurnDeadline(deadline, Date.now() + serverOffsetMs);
+  const seconds = deadline ? Math.ceil((Date.parse(deadline.at) - Date.now() - serverOffsetMs) / 1000) : null;
+  const urgent = seconds !== null && seconds > 0 && seconds <= 10;
+  const label = $('turn-deadline');
+  if (label) {label.hidden = !text;label.textContent = text ?? '';label.classList.toggle('is-urgent', urgent);}
+  for (const node of document.querySelectorAll('.plate-deadline')) {
+    node.textContent = text ?? '';node.hidden = !text;node.classList.toggle('is-urgent', urgent);
+  }
+  const key = deadline ? `${deadline.decisionId}:${deadline.at}` : null;
+  if (!deadline) announcedDeadline = null;
+  if (urgent && announcedDeadline !== key) {
+    announcedDeadline = key;
+    $('turn-announcement').textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
+  }
+}
+setInterval(paintTurnDeadline, 1000);
+
 function renderSnapshot(snap) {
+  ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
   const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
   if (isSpectating(snap.view)) {
     actionController?.disconnect(); actionController = null;
@@ -1033,18 +1057,13 @@ function renderSnapshot(snap) {
   authenticatedStudyUrl = participantMode ? null : studyLink(snap.studyUrl);
   const study = $('study-open');
   study.hidden = !authenticatedStudyUrl;
-  const deadline = $('turn-deadline');
-  if (deadline) {
-    const text = formatTurnDeadline(snap.turnDeadline);
-    deadline.hidden = !text;
-    deadline.textContent = text ?? '';
-  }
   if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
   else study.removeAttribute('href');
   paint();
 }
 
 function render(m) {
+  ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, m.turnDeadline, ui.view, m.view ?? ui.view);
   ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
     const previous=new Map((ui.view?.seats??[]).map(s=>[s.playerId,s.out]));
@@ -1239,6 +1258,7 @@ async function getSnapshot({ signal } = {}) {
   const generation=hintState.capture();
   const response = await (appGameId ? appFetch('snapshot',{signal}) : fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal }));
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  serverOffsetMs = serverClockOffset(response.headers.get('Date'));
   const snapshot=await response.json();let canRestore=false;
   try{if(appGameId&&new URLSearchParams(location.search).get('terminal')==='1')return snapshot;const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
   hintRequests.set(snapshot,{generation,canRestore});return snapshot;
