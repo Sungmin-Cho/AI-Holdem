@@ -51,6 +51,7 @@ export async function runLobbyJourney(outDir) {
       "npx",
       [
         "--yes",
+        "--prefer-offline",
         "agent-browser@0.36.0",
         "--session",
         session,
@@ -62,7 +63,7 @@ export async function runLobbyJourney(outDir) {
     assert.equal(
       r.exitCode,
       0,
-      `${args[0]}: ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
+      `${args[0]} (timeout=${r.timedOut}, signal=${r.signal}, spawn=${r.spawnError}): ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
     );
     const result = JSON.parse(r.stdout);
     assert.notEqual(result.success, false, JSON.stringify(result));
@@ -151,6 +152,7 @@ export async function runLobbyJourney(outDir) {
         "document.querySelector('#table').contentDocument.querySelector('#action-status')?.textContent.length>0",
       ),
     );
+    // Keep authentication identity valid so the action reaches the real loop.
     // Damage only this owned fixture while an actual user action is pending.
     // The real loop fails and cleans up; restore the bytes before ordinary resume.
     await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
@@ -159,7 +161,7 @@ export async function runLobbyJourney(outDir) {
     const engineBeforeFault=fs.readFileSync(engineFile);
     const beforeFault=app.manager.snapshot();
     try {
-      fs.writeFileSync(engineFile,'{invalid-owned-fixture');
+      fs.writeFileSync(engineFile,JSON.stringify({...JSON.parse(engineBeforeFault),seats:null}));
       await evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold').click()");
       await state('error');
       assert.equal(app.manager.session,null);
