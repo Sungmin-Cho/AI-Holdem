@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -431,6 +432,10 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     if (result.userStore.unchanged) check('real-user-store-unchanged', true, { observedViewports: [] });
     result.cleanup = { pass: cleanupErrors.length === 0, errors: cleanupErrors };
     result.pass = !result.blocked && !result.error && result.pending.length === 0 && result.cleanup.pass && result.userStore.unchanged;
+    try {
+      finishJourney({ required: requiredJourneyChecks, recorded: result.checks.map(row => row.name),
+        failure: result.error || result.blocked ? new Error(result.error || result.blocked) : !result.cleanup.pass ? new Error(cleanupErrors.join('; ')) : null });
+    } catch (error) { result.pass = false; result.error ??= sanitize(error.message); }
     fs.writeFileSync(path.join(output, 'trace.json'), `${JSON.stringify(trace, null, 2)}\n`, { mode: 0o600 });
     fs.writeFileSync(path.join(output, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   }
@@ -493,9 +498,9 @@ if (direct && !browserCliEnabled()) {
   process.stdout.write('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT\n');
   process.exit(0);
 }
-else if (direct) {
+else if (direct && !selfTestJourney(requiredJourneyChecks)) {
   const args = parseJourneyArgs(process.argv.slice(2));
   const result = await runLearningJourney(args);
   process.stdout.write(`${JSON.stringify({ pass: result.pass, pending: result.pending, blocked: result.blocked, error: result.error })}\n`);
-  if (!result.pass) process.exitCode = 1;
+  finishJourney({ required: requiredJourneyChecks, recorded: result.checks.map(row => row.name), failure: result.pass ? null : new Error(result.error || result.blocked || 'JOURNEY_FAILED') });
 }

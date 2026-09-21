@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -260,12 +261,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     if(cleanupErrors.length) failure=new AggregateError([...(failure?[failure]:[]),...cleanupErrors],'UI journey or cleanup failed');
     else checks.push('owned-cleanup');
     const pending=requiredJourneyChecks.filter(n=>!checks.includes(n));
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
     fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure&&!pending.length,checks,pending,measurements,error:failure?.message,errors:failure instanceof AggregateError?failure.errors.map(e=>e.message):[],browser:'agent-browser@0.36.0',scope:'Real relay/public engine views; synthetic out, bet amounts and events; lifecycle covered separately by lobby journey'},null,2));
-    if(pending.length&&!failure)failure=Error(`Missing required checks: ${pending.join(', ')}`);
+
   }
-  if(failure)throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   if(!browserCliEnabled())console.log('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT');
-  else {const index=process.argv.indexOf('--out-dir');await runUiJourney(path.resolve(index<0?'output/playwright/ui-journey':process.argv[index+1]),{ci:process.argv.includes('--ci')});console.log('UI presentation journey PASS');}
+  else if (!selfTestJourney(requiredJourneyChecks)) {const index=process.argv.indexOf('--out-dir');await runUiJourney(path.resolve(index<0?'output/playwright/ui-journey':process.argv[index+1]),{ci:process.argv.includes('--ci')});console.log('UI presentation journey PASS');}
 }

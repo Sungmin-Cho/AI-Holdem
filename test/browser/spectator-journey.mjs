@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,13 +11,18 @@ import {createBrowserWorkspace,hashTree} from '../helpers/learning-browser-fixtu
 import {makeBrowser} from './multiplayer-journey.mjs';
 
 // Real production app, independent browser sessions, and actual UI actions.
-// No fixture deck, state writes, synthetic snapshots, or direct action API.
+// Seeded engine shuffle; no state writes, synthetic snapshots, or direct action API.
+export const requiredJourneyChecks = ["late-entry-all-cards", "player-cards-private", "spectator-no-actions", "spectator-reconnect", "folded-cards-visible", "automatic-elimination", "spectator-results", "eliminated-leave-host-rejoin", "next-game-spectator-retained", "host-seat-removal", "explicit-seat-request", "new-game-card-reset", "real-user-store-unchanged", "owned-cleanup"];
+
 export async function runSpectatorJourney(outDir) {
   fs.mkdirSync(outDir,{recursive:true});
   const workspace=createBrowserWorkspace();
   const before=hashTree(path.resolve('game'));
   const browsers=Object.fromEntries(['user','h1','h2','observer'].map(id=>[id,makeBrowser(`spectator-${id}-${randomUUID()}`)]));
   const checks=[];let app,failure;
+  const priorNodeOptions = process.env.NODE_OPTIONS;
+  const preload = new URL('../helpers/spectator-seeded-engine.mjs', import.meta.url).href;
+  process.env.NODE_OPTIONS = `${priorNodeOptions || ''} --import=${JSON.stringify(preload)}`;
   const evaluate=async(id,expr)=>{const data=await browsers[id](['eval',expr]);return data?.result??data;};
   const table=async(id,expr)=>evaluate(id,`(()=>{const doc=document.querySelector('#table')?.contentDocument;return doc?(${expr}):null;})()`);
   const wait=async(predicate,label)=>{
@@ -50,7 +56,12 @@ export async function runSpectatorJourney(outDir) {
     await join('h1','민준',href);await join('h2','서연',href);
     await click('user','#start');
     await wait(()=>app.manager.snapshot().state==='playing'&&!app.manager.snapshot().pendingRequestId,'start');
-    await pause();await join('observer','관전자',href);
+    await pause();
+    const seeded = engine();
+    assert.equal(seeded.handNo, 1);
+    assert.equal(seeded.button, 0);
+    assert.deepEqual(seeded.hand.holes, {h1:['3d','9c'],h2:['2d','7s'],user:['Qs','Kc']});
+    await join('observer','관전자',href);
     await wait(()=>watching('observer'),'late spectator');
     assert.equal(await table('observer',"doc.querySelectorAll('.seat-cards .card[aria-label]').length"),6);
     assert.equal(await table('h1',"doc.body.classList.contains('spectator-mode')"),false);
@@ -90,14 +101,15 @@ export async function runSpectatorJourney(outDir) {
     }
     await wait(()=>engine().seats.some(s=>s.out),'settled elimination');
     eliminated=engine().seats.find(s=>s.out);
+    assert.equal(eliminated.playerId,'h1','seeded scenario must eliminate a guest');
     assert.equal(engine().gameOver,false);
     await wait(()=>watching(eliminated.playerId),'automatic elimination spectator');
     assert.equal(await table(eliminated.playerId,"[...doc.querySelectorAll('.log-name')].some(node=>node.textContent==='나')"),false);
-    checks.push(`automatic-elimination-${eliminated.playerId}`);
+    checks.push('automatic-elimination');
     await pause();
     await browsers[eliminated.playerId](['screenshot',path.join(outDir,'eliminated-spectator.png')]);
-    const departed=eliminated.playerId==='user'?null:eliminated.playerId;
-    if(departed) {
+    const departed=eliminated.playerId;
+    {
       await click(departed,'#leave');
       await wait(()=>evaluate(departed,"!document.querySelector('#join-form').hidden"),'eliminated guest leaves');
     }
@@ -106,7 +118,7 @@ export async function runSpectatorJourney(outDir) {
     await resume();await end();
     await wait(()=>evaluate('observer',"document.querySelector('#final').hidden===false"),'observer results');
     checks.push('spectator-results');
-    if(departed) {
+    {
       const participant=app.manager.room.load().participants.find(row=>row.playerId===departed);
       await wait(()=>evaluate('user',"!document.querySelector('#seat-management').hidden"),'host seat management');
       await click('user',`[data-participant-id="${participant.participantId}"] [data-action="reissue"]`);
@@ -145,17 +157,27 @@ export async function runSpectatorJourney(outDir) {
     await browsers.user(['screenshot',path.join(outDir,'failure-host.png')]).catch(()=>{});
     await browsers.observer(['screenshot',path.join(outDir,'failure-observer.png')]).catch(()=>{});
   } finally {
-    await Promise.all(Object.values(browsers).map(b=>b(['close']).catch(()=>{})));
-    await app?.close();
-    const study=await inspectStudyService(workspace.root);
-    if(study.status==='running')await stopStudyService(workspace.root,{expectedInstanceId:study.instanceId});
-    assert.equal(hashTree(path.resolve('game')),before);checks.push('real-user-store-unchanged');
-    workspace.close();checks.push('owned-cleanup');
-    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,error:failure?.stack},null,2));
+    const cleanup = await cleanupJourney({ failure, steps: [
+      ...Object.values(browsers).map(browser => () => browser(['close'])),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(workspace.root);
+        if (study.status === 'running') await stopStudyService(workspace.root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(path.resolve('game')), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = priorNodeOptions;
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
+    fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure,checks,cleanupErrors:cleanup.errors.map(error=>error.message),error:failure?.stack},null,2));
   }
-  if(failure)throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if(!process.env.NODE_TEST_CONTEXT&&process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  const i=process.argv.indexOf('--out-dir');if(i<0)throw Error('--out-dir required');
-  await runSpectatorJourney(path.resolve(process.argv[i+1]));console.log('Spectator browser journey PASS');
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i=process.argv.lastIndexOf('--out-dir');if(i<0)throw Error('--out-dir required');
+    await runSpectatorJourney(path.resolve(process.argv[i+1]));console.log('Spectator browser journey PASS');
+  }
 }

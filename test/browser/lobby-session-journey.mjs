@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -278,16 +279,19 @@ export async function runLobbyJourney(outDir) {
       await browser(["screenshot", path.join(outDir, "failure.png")]);
     } catch {}
   } finally {
-    await browser(["close"]).catch(() => {});
-    if (outdatedServer) await new Promise(resolve => outdatedServer.close(resolve));
-    await app?.close();
-    const study = await inspectStudyService(root);
-    if (study.status === "running")
-      await stopStudyService(root, { expectedInstanceId: study.instanceId });
-    assert.equal(hashTree(userStore), before);
-    check("real-user-store-unchanged");
-    workspace.close();
-    check("owned-cleanup");
+    const cleanup = await cleanupJourney({ failure, steps: [
+      () => browser(['close']),
+      () => outdatedServer && new Promise(resolve => outdatedServer.close(resolve)),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
     const result = {
       schemaVersion: 1,
       pass: !failure && requiredJourneyChecks.every((x) => checks.includes(x)),
@@ -296,21 +300,24 @@ export async function runLobbyJourney(outDir) {
       checks,
       pending: requiredJourneyChecks.filter((x) => !checks.includes(x)),
       error: failure?.message,
+      cleanupErrors: cleanup.errors.map(error => error.message),
     };
     fs.writeFileSync(
       path.join(outDir, "result.json"),
       JSON.stringify(result, null, 2),
     );
   }
-  if (failure) throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if (
   !process.env.NODE_TEST_CONTEXT &&
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  const i = process.argv.indexOf("--out-dir");
-  if (i < 0) throw new Error("--out-dir required");
-  await runLobbyJourney(path.resolve(process.argv[i + 1]));
-  console.log("Lobby browser journey PASS");
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i = process.argv.lastIndexOf("--out-dir");
+    if (i < 0) throw new Error("--out-dir required");
+    await runLobbyJourney(path.resolve(process.argv[i + 1]));
+    console.log("Lobby browser journey PASS");
+  }
 }
