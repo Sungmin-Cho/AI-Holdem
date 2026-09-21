@@ -72,18 +72,20 @@ export async function runLobbyJourney(outDir) {
     return data?.result ?? data;
   };
   const check = (name) => checks.push(name);
-  const wait = async (predicate) => {
-    for (let i = 0; i < 200; i++) {
+  const wait = async (predicate, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (await predicate()) return;
       await new Promise((r) => setTimeout(r, 100));
     }
     throw new Error("journey state timeout " + app.manager.snapshot().state);
   };
-  const state = (expected) =>
+  const state = (expected, timeoutMs) =>
     wait(
       () =>
         app.manager.snapshot().state === expected &&
         !app.manager.snapshot().pendingRequestId,
+      timeoutMs,
     );
   const click = async (selector) => {
     await browser(["snapshot", "-i"]);
@@ -300,7 +302,8 @@ export async function runLobbyJourney(outDir) {
       const pausedState=hashTree(app.manager.current.sessionDir);
       await new Promise(resolve=>setTimeout(resolve,500));assert.equal(hashTree(app.manager.current.sessionDir),pausedState);
       check('pause-during-ai-interval');
-      await click('#resume');await state('completed');
+      // Four paced hands plus finalization can exceed the ordinary UI wait on CI.
+      await click('#resume');await state('completed', 60000);
       assert.ok(holds.has(1)&&advances.has(2));
       assert.ok(advances.get(2)>=Date.parse(holds.get(1).until),'next hand preceded server hold deadline');
       check('hand-result-hold-respected');
