@@ -436,14 +436,16 @@ function paintSeats(view) {
     );
     plate.append(avatarWrap, info);
 
-    plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    const statusGroup=el('span','plate-status');
+    statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    plate.append(statusGroup);
     if (active) plate.append(el('span', 'plate-deadline'));
     const lastAction = lastActions[seat.playerId];
     if (lastAction) {
       plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
       const badge = el('span', 'plate-action', lastAction.label);
       if (lastAction.amount != null) badge.append(el('span','plate-action-amount', ` ${formatAmount(lastAction.amount,view.blinds?.[1],displayUnit).primary}`));
-      plate.append(badge);
+      statusGroup.append(badge);
     }
     const position = positions[seat.playerId];
     if (state.showButton || position) {
