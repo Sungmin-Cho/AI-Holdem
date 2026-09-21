@@ -53,6 +53,7 @@ async function api(url, options = {}) {
     });
   return data;
 }
+let interruptBusy=false;
 function render() {
   if (!snapshot) return;
   const s = snapshot.state;
@@ -61,6 +62,10 @@ function render() {
   viewingRecord=!!(!selecting && terminal && snapshot.gameId);
 
   $("table").inert = (!["playing","finalizing","completed","ended"].includes(s)) || Boolean(document.querySelector('dialog[open]'));
+  const interruptible=['playing','pausing'].includes(s) && snapshot.pendingDecision?.status==='running' && snapshot.pendingDecision.softWait===true;
+  $('interrupt-decision').hidden=!interruptible;
+  $('interrupt-decision').disabled=interruptBusy;
+
   $("status").textContent = labels[s] ?? s;
   if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
@@ -299,6 +304,17 @@ function chooseMode() {
   render();
   $("ai-count").focus();
 }
+$('interrupt-decision').onclick=async()=>{
+  if(interruptBusy || !snapshot?.pendingDecision)return;
+  const request={expectedGameId:snapshot.gameId,gameEpoch:snapshot.gameEpoch,decisionId:snapshot.pendingDecision.decisionId,generation:snapshot.pendingDecision.generation};
+  interruptBusy=true;render();
+  try {
+    const result=await api('/api/app/interrupt-decision',{method:'POST',body:JSON.stringify(request),timeoutMs:30000});
+    if(snapshot.gameId===request.expectedGameId)$('error').textContent=result.interrupted?'결정을 중단했습니다. 재시도하거나 게임을 종료할 수 있습니다.':'중단 완료를 확인하지 못했습니다. 현재 결정 상태를 확인하세요.';
+    await refresh();
+  } catch(error){showError(error);}
+  finally {interruptBusy=false;render();}
+};
 $("menu").onclick = () =>
   snapshot.state === "paused"
     ? $("pause-dialog").showModal()

@@ -475,6 +475,22 @@ export async function startAppServer({
       }
       const summaryMatch=/^\/api\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
       if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
+      if(pathname==='/api/app/interrupt-decision') {
+        if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+        const body=await bodyOf(req);
+        if(!body || Array.isArray(body) || Object.keys(body).length!==4 ||
+          !['expectedGameId','gameEpoch','decisionId','generation'].every(key=>Object.hasOwn(body,key)) ||
+          typeof body.expectedGameId!=='string' || typeof body.gameEpoch!=='string' ||
+          typeof body.decisionId!=='string' || !body.decisionId || !Number.isSafeInteger(body.generation) || body.generation<1) {
+          json(res,400,{code:'BAD_COMMAND'});return;
+        }
+        const snapshot=manager.snapshot();
+        if(manager.current?.gameId!==body.expectedGameId || snapshot.gameEpoch!==body.gameEpoch || !manager.session) {
+          json(res,409,{code:'STALE_GAME'});return;
+        }
+        const {gameEpoch,decisionId,generation}=body;
+        json(res,200,await manager.session.loop.interruptDecision({gameEpoch,decisionId,generation}));return;
+      }
       const skipMatch = /^\/api\/game\/([0-9a-f-]{36})\/skip-result$/.exec(pathname);
       if (skipMatch) {
         if (req.method !== "POST") { json(res, 405, {code:"METHOD_NOT_ALLOWED"}); return; }

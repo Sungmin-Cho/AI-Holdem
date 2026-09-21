@@ -243,7 +243,7 @@ export function createSessionManager({
       setup: currentSetup(),
       defaultSetup,
       pendingDecision: pendingDecision ? {
-        decisionId: pendingDecision.decisionId, status: pendingDecision.status,
+        decisionId: pendingDecision.decisionId, generation:pendingDecision.generation, status: pendingDecision.status,
         code: pendingDecision.code ?? null, softWait: pendingDecision.softWait === true,
         closeConfirmed: pendingDecision.closeConfirmed === true,
         diagnostics: diagnostics ? {detail:diagnostics.detail ?? null, corrections:diagnostics.corrections,

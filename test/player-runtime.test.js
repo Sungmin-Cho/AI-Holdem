@@ -2287,3 +2287,44 @@ test('legacy three-argument argvBuilder remains compatible with player model arg
     assert.ok(calls.every(c => c.model === 'sonnet' && c.sessionId === sessionId));
   } finally { f.cleanup(); }
 });
+
+test('decision abort confirms a real child close before returning INTERRUPTED',async t=>{
+  const fake=fakeRuntime('claude',{default:{delayMs:5000,reply:'ready'}});t.after(()=>fake.cleanup());
+  const controller=new AbortController();
+  const pending=fake.rt.decide({playerId:'p1',sessionId:crypto.randomUUID(),message:'interrupt me',timeoutMs:1000,signal:controller.signal});
+  setTimeout(()=>controller.abort(),100);
+  await assert.rejects(pending,{code:'INTERRUPTED'});assert.deepEqual(fake.kills,['SIGKILL']);
+  for(const call of fake.calls())assert.equal(await waitDead(call.pid),true,'interrupted child must be dead');
+  assert.ok(fake.calls().length>0);
+  await fake.rt.dispose();
+});
+test('already aborted player decision does not spawn a child',async t=>{
+  const fake=fakeRuntime();t.after(()=>fake.cleanup());const controller=new AbortController();controller.abort();
+  await assert.rejects(fake.rt.decide({playerId:'p1',sessionId:crypto.randomUUID(),message:'never spawn',signal:controller.signal}),{code:'INTERRUPTED'});
+  assert.equal(fake.calls().length,0);await fake.rt.dispose();
+});
+test('warmup honors the same abort signal and confirms close',async t=>{
+  const fake=fakeRuntime('claude',{default:{delayMs:5000,reply:'ready'}});t.after(()=>fake.cleanup());const controller=new AbortController();
+  const pending=fake.rt.warmup({playerId:'p1',prompt:'ready',timeoutMs:1000,signal:controller.signal});setTimeout(()=>controller.abort(),100);
+  await assert.rejects(pending,{code:'INTERRUPTED'});assert.deepEqual(fake.kills,['SIGKILL']);await fake.rt.dispose();
+});
+test('abort after a successful child response neither kills nor discards it',async t=>{
+  const fake=fakeRuntime('claude',{default:{reply:'ready'}});t.after(()=>fake.cleanup());const controller=new AbortController();
+  const result=await fake.rt.decide({playerId:'p1',sessionId:crypto.randomUUID(),message:'ready',signal:controller.signal});controller.abort();
+  assert.equal(result.raw,'ready');assert.deepEqual(fake.kills,[]);await fake.rt.dispose();
+});
+
+test('interrupt cannot claim child closure when signaling fails',async()=>{
+ const controller=new AbortController();
+ const runtime=createPlayerRuntime('claude',{exec:()=>({pid:123,kill:()=>false,done:new Promise(()=>{})}),terminateKillWaitMs:10});
+ const pending=runtime.decide({playerId:'p1',sessionId:crypto.randomUUID(),message:'wait',timeoutMs:1000,signal:controller.signal});controller.abort();
+ await assert.rejects(pending,{code:'CHILD_SIGNAL_FAILED'});
+});
+
+test('interrupt accepts a queued close even when the exit-to-close race makes kill return false',async()=>{
+ const controller=new AbortController();let close;
+ const closed=new Promise(resolve=>{close=resolve;});
+ const runtime=createPlayerRuntime('claude',{exec:()=>({pid:123,kill:()=>{setTimeout(close,5);return false;},closed,done:new Promise(()=>{})}),terminateKillWaitMs:100});
+ const pending=runtime.decide({playerId:'p1',sessionId:crypto.randomUUID(),message:'wait',timeoutMs:1000,signal:controller.signal});
+ controller.abort();await assert.rejects(pending,{code:'INTERRUPTED'});await runtime.dispose();
+});

@@ -15,6 +15,7 @@ export function playerBudget(input = {}) {
 }
 
 export function playerFailureCategory(code) {
+  if (code === 'INTERRUPTED') return 'interrupted';
   if (code === 'TIMEOUT') return 'timeout';
   if (['CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'IDENTITY_UNAVAILABLE'].includes(code)) return 'termination';
   if (['NO_SESSION', 'SESSION_NOT_FOUND', 'SESSION_EXPIRED'].includes(code)) return 'session';

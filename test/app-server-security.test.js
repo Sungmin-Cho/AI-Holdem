@@ -110,3 +110,20 @@ test('only terminal games return SESSION_INACTIVE; missing active relay files re
   state='playing';manager.session={loop:{serverPid:process.pid}};
   const response=await request();assert.equal(response.status,503);assert.equal((await response.json()).code,'RELAY_UNAVAILABLE');
 });
+
+test('interrupt endpoint is host-only, identity-bound, and available while pause occupies the journal',async t=>{
+  const {startAppServer}=await import('../tools/app-server.js');
+  const root=createOwnedTempDir('interrupt-api'),gameId='00000000-0000-4000-8000-000000000001',epoch='ab'.repeat(32);
+  let answer,calls=0;const manager={current:{gameId},snapshot:()=>({gameId,gameEpoch:epoch,state:'pausing',pendingRequestId:'pause'}),
+    session:{loop:{interruptDecision:identity=>{calls++;assert.equal(identity.generation,3);return new Promise(resolve=>{answer=resolve;});}}},command(){throw Error('journal must not be used');}};
+  const app=await startAppServer({manager,token:'host',storeDir:root,publicPort:0});t.after(()=>app.close());
+  const payload={expectedGameId:gameId,gameEpoch:epoch,decisionId:'d-1',generation:3};
+  const send=(body=payload,headers={})=>fetch(app.origin+'/api/app/interrupt-decision',{method:'POST',headers:{authorization:'Bearer host',origin:app.origin,'content-type':'application/json',...headers},body:JSON.stringify(body)});
+  assert.equal((await send(payload,{authorization:''})).status,401);assert.equal((await send(payload,{origin:'https://evil.test'})).status,403);
+  assert.equal((await fetch(app.publicOrigin+'/api/app/interrupt-decision',{method:'POST',headers:{authorization:'Bearer host'},body:JSON.stringify(payload)})).status,404);
+  assert.equal((await send({...payload,gameEpoch:'old'})).status,409);
+  for(const body of [{...payload,generation:0},{...payload,extra:true},{...payload,decisionId:''}])assert.equal((await send(body)).status,400);
+  let settled=false;const request=send().then(async response=>{settled=true;return response.json();});
+  for(let i=0;i<100&&!answer;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(calls,1);assert.equal(settled,false);answer({interrupted:true});assert.deepEqual(await request,{interrupted:true});
+});

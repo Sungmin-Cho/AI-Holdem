@@ -14945,3 +14945,110 @@ async function assert205UnconfirmedCommand(gameDir, command) {
   await assert.rejects(execFileAsync(command.program, command.args, { encoding: 'utf8', timeout: 5_000 }), (error) => JSON.parse(error.stdout.trim()).code === 'USAGE');
   assert.deepEqual(fs.readFileSync(path.join(gameDir, '.coach-authority.json')), before);
 }
+
+test('interruptDecision is identity-bound and waits for confirmed attempt outcome', {timeout:20000*WIN32_SCALE},async t=>{
+  let closed=false,loop,gameDir,beforeSoft;
+  const adapter=makeAdapter({onDecide:({signal})=>new Promise((resolve,reject)=>{
+    const pending=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+    beforeSoft=loop.interruptDecision({gameEpoch:pending.gameEpoch,decisionId:pending.decisionId,generation:pending.generation});
+    const timer=setTimeout(()=>reject(Object.assign(new Error('timeout'),{code:'TIMEOUT'})),1500);
+    signal?.addEventListener('abort',()=>{clearTimeout(timer);setTimeout(()=>{closed=true;reject(Object.assign(new Error('interrupted'),{code:'INTERRUPTED'}));},50);},{once:true});
+  })});
+  ({gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:200,hardMs:2000}}}));
+  assert.equal(typeof loop.interruptDecision,'function');
+  const running=loop.run();const recovered=assert.rejects(running,{code:'PLAYER_RECOVERY_REQUIRED'});
+  await waitFor(()=>readJson(path.join(gameDir,'loop-state.json')).pendingDecision?.softWait===true,'no soft wait');
+  const pending=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  const identity={gameEpoch:pending.gameEpoch,decisionId:pending.decisionId,generation:pending.generation};
+  assert.deepEqual(await loop.interruptDecision({...identity,generation:identity.generation+1}),{interrupted:false});
+  assert.deepEqual(await loop.interruptDecision({...identity,decisionId:'stale'}),{interrupted:false});
+  assert.deepEqual(await loop.interruptDecision({...identity,gameEpoch:'stale'}),{interrupted:false});
+  let settled=false;const answer=loop.interruptDecision(identity).then(value=>{settled=true;return value;});
+  await Promise.resolve();assert.equal(settled,false);assert.equal(closed,false);
+  assert.deepEqual(await answer,{interrupted:true});await recovered;assert.equal(closed,true);
+  assert.deepEqual(await beforeSoft,{interrupted:false});
+  const after=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  assert.equal(after.code,'INTERRUPTED');assert.equal(after.category,'interrupted');assert.equal(after.softWait,false);assert.equal(after.closeConfirmed,true);assert.equal(after.status,'recovery_required');
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
+  assert.deepEqual(await loop.interruptDecision(identity),{interrupted:false});
+});
+test('a valid response wins an interrupt racing before proposedAction commit', {timeout:20000*WIN32_SCALE},async t=>{
+  let loop,gameDir,answer;
+  const adapter=makeAdapter({onDecide:async({message})=>{
+    await new Promise(resolve=>setTimeout(resolve,50));
+    const pending=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+    answer=loop.interruptDecision({gameEpoch:pending.gameEpoch,decisionId:pending.decisionId,generation:pending.generation});
+    return {raw:JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})};
+  }});
+  ({gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:2000}}}));
+  await runUntilUserBoundary(loop,gameDir);
+  assert.deepEqual(await answer,{interrupted:false});
+  assert.equal(readJson(path.join(gameDir,'loop-state.json')).pendingDecision,undefined);
+  assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
+});
+
+test('interruptDecision covers repair warmup, fresh warmup and correction children', {timeout:60000*WIN32_SCALE},async t=>{
+  for(const stage of ['repair','fresh','correction'])await t.test(stage,async st=>{
+    let entered=false,closed=false,armed=false,oldIdentity;
+    const waitForAbort=({signal})=>new Promise((resolve,reject)=>{
+      entered=true;
+      const timer=setTimeout(()=>reject(Object.assign(Error('missing interrupt signal'),{code:'TIMEOUT'})),5000*WIN32_SCALE);
+      const abort=()=>{clearTimeout(timer);closed=true;reject(Object.assign(Error('interrupted'),{code:'INTERRUPTED'}));};
+      if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+    });
+    const adapter=makeAdapter({
+      onWarmup:input=>armed&&stage!=='correction'?waitForAbort(input):undefined,
+      onDecide:async(input,count)=>{
+        if(stage==='repair')throw Object.assign(Error('restore failed'),{code:'CLI_FAILED'});
+        if(stage==='correction'&&count===2)return waitForAbort(input);
+        return {raw:'invalid'};
+      },
+    });
+    let {gameDir,loop}=await setupAiFirst(st,{adapter,loopOpts:{playerBudget:{softMs:20,hardMs:8000*WIN32_SCALE}}});
+    if(stage==='repair') {
+      await loop.requestStop();
+      loop=createGameLoop({gameDir,resolver:resolverFor(adapter),opts:{port:0,waitMs:0,playerBudget:{softMs:20,hardMs:8000*WIN32_SCALE}}});
+      st.after(()=>loop.requestStop().catch(()=>{}));await loop.resume();
+    } else if(stage==='fresh') {
+      await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+      const prior=loop.pendingDecision;oldIdentity={gameEpoch:prior.gameEpoch,decisionId:prior.decisionId,generation:prior.generation};
+      await loop.retryDecision(prior.decisionId,{freshAuthorization:{source:'app',requestId:'interrupt-fresh'}});
+    }
+    armed=true;
+    const running=loop.run(),recovered=assert.rejects(running,{code:'PLAYER_RECOVERY_REQUIRED'});
+    await waitFor(()=>entered&&loop.pendingDecision?.softWait===true,'interrupt child not ready',6000*WIN32_SCALE);
+    const {gameEpoch,decisionId,generation}=loop.pendingDecision;
+    if(oldIdentity){assert.ok(generation>oldIdentity.generation);assert.deepEqual(await loop.interruptDecision(oldIdentity),{interrupted:false});assert.equal(closed,false);}
+    assert.deepEqual(await loop.interruptDecision({gameEpoch,decisionId,generation}),{interrupted:true});
+    await recovered;assert.equal(closed,true);assert.equal(loop.pendingDecision.code,'INTERRUPTED');
+    assert.equal(loop.pendingDecision.closeConfirmed,true);
+    assert.equal(readJson(path.join(gameDir,'state.json')).hand.actions.length,0);
+  });
+});
+
+test('interrupt before correction dispatch does not count an unstarted correction child', {timeout:20000*WIN32_SCALE},async t=>{
+ let loop,gameDir,answer,calls=0;
+ const adapter=makeAdapter({onDecide:async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,100));return {raw:'invalid'};}});
+ ({gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:10,hardMs:5000},log:entry=>{
+  if(entry.event==='player-correction'){
+   const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+   answer=loop.interruptDecision({gameEpoch:p.gameEpoch,decisionId:p.decisionId,generation:p.generation});
+  }
+ }}}));
+ await assert.rejects(loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
+ assert.deepEqual(await answer,{interrupted:true});assert.equal(calls,1);
+ const pending=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+ assert.equal(pending.code,'INTERRUPTED');assert.equal(pending.diagnostics.callNo,1);assert.equal(pending.diagnostics.corrections,0);
+});
+
+test('interrupt after proposedAction commit cannot replace the accepted action', {timeout:20000*WIN32_SCALE},async t=>{
+ let loop,gameDir,answer;
+ ({gameDir,loop}=await setupAiFirst(t,{adapter:makeAdapter(),loopOpts:{onEngineInvoke:args=>{
+  if(args[0]==='step'&&args[1]==='p1'){
+   const p=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+   if(p?.proposedAction)answer=loop.interruptDecision({gameEpoch:p.gameEpoch,decisionId:p.decisionId,generation:p.generation});
+  }
+ }}}));
+ await runUntilUserBoundary(loop,gameDir);assert.ok(answer);assert.deepEqual(await answer,{interrupted:false});
+ assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
+});

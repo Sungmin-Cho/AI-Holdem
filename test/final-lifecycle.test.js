@@ -10,7 +10,7 @@ function elements(){
 }
 test('actual lobby retains the terminal document then clears record layout for a new start',()=>{
  const dom=elements(),source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
- const context={...dom,URLSearchParams,snapshot:null,selecting:false,viewingRecord:false,frameId:null,busy:false,rejoinFor:null,labels:{},errorMessages:{}};
+ const context={...dom,URLSearchParams,snapshot:null,selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,rejoinFor:null,labels:{},errorMessages:{}};
  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function render()'),source.indexOf('let refreshFailures=')),context);
  const render=state=>{context.snapshot={state,gameId:'one',gameEpoch:'epoch',allowedCommands:[]};context.render();};
  render('playing');const src=dom.$('table').src;assert.ok(src);assert.equal(src.includes('terminal'),false);
