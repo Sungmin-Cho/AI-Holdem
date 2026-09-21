@@ -63,6 +63,7 @@ const SHARED_ASSETS = [
   "assistance.js",
   "deal-selection.js",
   "game-setup.js",
+  "pace.js",
   "player-budget.js",
 ];
 const ASSET_TYPES = {
@@ -427,6 +428,22 @@ export async function startAppServer({
       if (req.method === "POST" && pathname === "/api/stop") {
         json(res, 202, { ok: true });
         setImmediate(onStop);
+        return;
+      }
+      const skipMatch = /^\/api\/game\/([0-9a-f-]{36})\/skip-result$/.exec(pathname);
+      if (skipMatch) {
+        if (req.method !== "POST") { json(res, 405, {code:"METHOD_NOT_ALLOWED"}); return; }
+        const snapshot = manager.snapshot();
+        if (manager.current?.gameId !== skipMatch[1] ||
+            req.headers["x-game-epoch"] !== snapshot.gameEpoch || !manager.session) {
+          json(res, 409, {code:"STALE_GAME"}); return;
+        }
+        const body = await bodyOf(req);
+        if (!body || Array.isArray(body) || Object.keys(body).length !== 1 ||
+            !Number.isSafeInteger(body.handNo) || body.handNo < 1) {
+          json(res, 400, {code:"BAD_COMMAND"}); return;
+        }
+        json(res, 200, manager.session.loop.skipHandResult(body.handNo));
         return;
       }
       const match =

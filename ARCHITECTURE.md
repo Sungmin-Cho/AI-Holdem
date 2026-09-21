@@ -162,3 +162,11 @@ Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축�
 공개 리스너는 앱 서버만 띄운다(기본 `0.0.0.0:8899`, `--public-port`/`--public-host`, `--tls-cert`/`--tls-key`). 참가 라우트(`/join`, `/api/join`, `/api/p/*`) 외는 404다. 주소당 연결 32·전체 128, 같은 주소의 `/api/join`은 분당 10을 넘으면 429, 참가자 SSE는 좌석당 4다. relay history는 바이트 예산으로 자르고, 참가자 프레임은 메모리 링(200)이며 영속 `ui-snapshot.json` history에는 `views`가 없다.
 
 명령은 부작용 전에 `.app/commands/<requestId>.json`에 저장한다. 동일 payload 재전송은 CAS보다 먼저 같은 receipt를 반환한다. 새 게임은 락 획득 후 UUID/selectionVersion을 예약하고 staging init 완료 hash를 남긴 뒤 current를 교체한다. crash 복구에서 불완전한 staging은 보존하고 `RECOVERY_REQUIRED`로 닫는다. 게임이 복원되면 자동 플레이하지 않고 paused 상태로 대기한다. 구현·검증 근거는 `docs/implementation/lobby-session-*.md`에 있다.
+
+### 진행 속도와 결과 대기
+
+`shared/pace.js`의 프리셋을 game-loop가 적용한다. policy 결정 전에 액션 간격을 기다리고, 마지막 액션 게시 뒤 다음 `--new-hand` 전에 결과 대기를 기다린다. 두 대기는 별도 AbortController를 쓰며 반환 직후 stop/pause를 다시 확인한다. pause는 현재 결과 대기를 소진한 것으로 취급한다.
+
+`resultHold {handNo,startAt,until,runoutStepMs,runoutStreets}`는 `turnDeadline`과 같은 envelope 층의 절대 시각 메타데이터다. relay는 검증·보관·전달만 하며, 부가 게시와 같은 완료 핸드 재게시에도 유지하고 새 핸드에는 지운다. 스냅샷과 영속 파일에도 들어가므로 재접속자의 기준 시각이 같다. 지난 `until`은 무해하다. 게시 재시도는 최초 시각을 유지한다.
+
+호스트 전용 `POST /api/game/:id/skip-result`는 게임 epoch와 handNo를 검사한다. 이는 durable 게임 명령이 아닌 활성 타이머 해제이므로 명령 저널 밖에 있고, 현재 결과 대기만 끊으며 policy 간격에는 영향을 주지 않는다. 사람 좌석이 둘 이상이면 적용하지 않는다.

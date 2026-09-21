@@ -98,6 +98,7 @@ export async function runMultiplayerJourney(outDir) {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       publicPort: 0,
     });
+    app.manager.setPrefill({pace:'instant'});
     assert.ok(app.publicPort, "public listener did not bind");
     await host(["open", app.url]);
     await host(["set", "viewport", "1280", "900"]);
@@ -194,12 +195,17 @@ export async function runMultiplayerJourney(outDir) {
     );
     await wait(async () => Number(await tableHeight(guestA)) >= 400, "guest A table fills the viewport");
     check("guest-table-viewport");
-    const hostHtml = await tableText(host);
-    const bHtml = await tableText(guestB);
-    for (const card of hidden) {
-      assert.equal(hostHtml.includes(card), false, `host DOM leaked ${card}`);
-      assert.equal(bHtml.includes(card), false, `guest B DOM leaked ${card}`);
-    }
+    // cardNode renders faces and Korean aria labels, not raw two-character
+    // codes. A whole-document substring can instead match a capability token.
+    const guestCardVisibility = browser => evaluate(browser)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      const seat=doc?.querySelector('.seat[data-player-id="h1"]');
+      return {backs:seat?.querySelectorAll('.card--back').length,
+        faces:seat?.querySelectorAll('.card[role="img"]').length};
+    })()`);
+    assert.deepEqual(await guestCardVisibility(host),{backs:2,faces:0});
+    assert.deepEqual(await guestCardVisibility(guestB),{backs:2,faces:0});
+    assert.deepEqual(await guestCardVisibility(guestA),{backs:0,faces:2});
     check("guest-cards-hidden-from-others");
 
     await wait(

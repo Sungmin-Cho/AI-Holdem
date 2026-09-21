@@ -14,6 +14,7 @@ export {
   NARRATION_CODES,
   validateViewsAgainstEngine,
   validateTurnDeadline,
+  validateResultHold,
   validateEventsAgainstEngine,
   validateMessages,
   hostTextFieldsOf,

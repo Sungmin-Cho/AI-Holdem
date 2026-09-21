@@ -165,6 +165,22 @@ export function validateViewsAgainstEngine(views, { players, engineState, view }
   return views;
 }
 
+export function validateResultHold(hold, view) {
+  if (hold === undefined || hold === null) return hold;
+  const keys = ['handNo', 'startAt', 'until', 'runoutStepMs', 'runoutStreets'];
+  if (!isPlain(hold) || ![Object.prototype, null].includes(Object.getPrototypeOf(hold))
+    || Object.keys(hold).length !== keys.length || !keys.every(key => Object.hasOwn(hold, key))
+    || !Number.isSafeInteger(hold.handNo) || hold.handNo < 1
+    || typeof hold.startAt !== 'string' || typeof hold.until !== 'string'
+    || !Number.isFinite(Date.parse(hold.startAt)) || !Number.isFinite(Date.parse(hold.until))
+    || Date.parse(hold.until) < Date.parse(hold.startAt)
+    || Date.parse(hold.until) - Date.parse(hold.startAt) > 60000
+    || !int(hold.runoutStepMs) || hold.runoutStepMs < 0 || hold.runoutStepMs > 5000
+    || !int(hold.runoutStreets) || hold.runoutStreets < 0 || hold.runoutStreets > 3
+    || view?.handInProgress !== false || view.handNo !== hold.handNo) fail('BAD_RESULT_HOLD');
+  return hold;
+}
+
 export function validateTurnDeadline(turnDeadline, nextDecision) {
   if (turnDeadline === undefined || turnDeadline === null) return turnDeadline;
   if (!isPlain(turnDeadline) || typeof turnDeadline.decisionId !== 'string'
@@ -357,6 +373,7 @@ export function projectForSeat(payload, seat) {
   if (payload.events !== undefined) projected.events = payload.events;
   if (payload.messages !== undefined) projected.messages = payload.messages;
   if (payload.turnDeadline !== undefined) projected.turnDeadline = payload.turnDeadline;
+  if (payload.resultHold !== undefined) projected.resultHold = payload.resultHold;
   return projected;
 }
 

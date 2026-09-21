@@ -1,7 +1,9 @@
 // Browser-safe settings. CLI and lobby profiles deliberately differ for tournament.
 import { playerBudget } from './player-budget.js';
+import { PACE_PRESETS } from './pace.js';
 export const SETUP_KEYS = Object.freeze([
   "mode",
+  "pace",
   "aiCount",
   "opponentRuntime",
   "stack",
@@ -59,6 +61,7 @@ export function normalizeSetup(input = {}) {
     throw setupError("setup");
   for (const key of Object.keys(input))
     if (!SETUP_KEYS.includes(key)) throw setupError(key);
+  if (input.pace !== undefined && !Object.hasOwn(PACE_PRESETS, input.pace)) throw setupError('pace');
   const value = {
     mode: "cash-training",
     aiCount: 5,

@@ -32,6 +32,7 @@ import {
   validatePrivateEngineState,
   validateViewsAgainstEngine,
   validateTurnDeadline,
+  validateResultHold,
   validateEventsAgainstEngine,
   validateMessages,
   assertHostText,
@@ -102,6 +103,7 @@ function emptyState() {
     views: undefined,
     decision: null,
     turnDeadline: null,
+    resultHold: null,
     spectatorView: null,
     projectionAnchor: null,
   };
@@ -682,6 +684,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       views,
       decision,
       turnDeadline: raw.turnDeadline ?? null,
+      resultHold: validateResultHold(raw.resultHold, raw.view) ?? null,
       ...restoreViewerProjection(engineState, raw),
     };
   } catch (error) {
@@ -863,7 +866,7 @@ export function publicSnapshot(state, hint = null, seat = HOST_ID) {
     return {revision:state.revision, view:state.spectatorView ?? null,
       viewerRole:state.spectatorView?.viewerRole ?? 'unavailable',
       ...(!state.spectatorView ? {code:'VIEW_NOT_READY'} : {}),
-      log:state.log, turnDeadline:state.turnDeadline ?? null};
+      log:state.log, turnDeadline:state.turnDeadline ?? null, resultHold:state.resultHold ?? null};
   }
   if (seat && seat !== HOST_ID) {
     return {
@@ -871,6 +874,7 @@ export function publicSnapshot(state, hint = null, seat = HOST_ID) {
       view: state.views?.[seat] ?? null,
       log: state.log,
       turnDeadline: state.turnDeadline ?? null,
+    resultHold: state.resultHold ?? null,
       viewerRole: viewerRole(state.view, seat),
     };
   }
@@ -889,6 +893,7 @@ function hostSnapshot(state, hint = null) {
     training: state.training ?? [],
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
     turnDeadline: state.turnDeadline ?? null,
+    resultHold: state.resultHold ?? null,
     viewerRole: viewerRole(state.view, HOST_ID),
   };
   if (state.review !== undefined) snap.review = state.review;
@@ -925,6 +930,7 @@ function persistUiStateAtomic(owner, state) {
     handReplays: state.handReplays ?? {},
     decision: state.decision ?? null,
     turnDeadline: state.turnDeadline ?? null,
+    resultHold: state.resultHold ?? null,
     projectionAnchor: state.projectionAnchor ?? null,
   };
   if (state.review !== undefined) file.review = state.review;
@@ -1266,6 +1272,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       ? state.decision
       : nextDecisionFromViews(body.views ?? { [HOST_ID]: body.view });
     try {
+      if (body.resultHold !== undefined) validateResultHold(body.resultHold, body.view);
       const players = readPlayers(root);
       const multi = sessionHasParticipants(players);
       if (multi) {
@@ -1312,6 +1319,9 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       turnDeadline: body.view !== undefined
         ? (body.turnDeadline ?? (nextDecision?.decisionId === state.decision?.decisionId ? state.turnDeadline : null))
         : state.turnDeadline,
+      resultHold: body.view !== undefined
+        ? (body.resultHold ?? (state.resultHold?.handNo === body.view.handNo && body.view.handInProgress === false ? state.resultHold : null))
+        : state.resultHold,
       log: state.log,
       coach: state.coach,
       training: state.training ?? [],
@@ -1339,6 +1349,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       next.projectionAnchor = projection?.projectionAnchor ?? null;
     }
     if (next.turnDeadline !== undefined && next.turnDeadline !== null) payload.turnDeadline = next.turnDeadline;
+    if (next.resultHold !== undefined && next.resultHold !== null) payload.resultHold = next.resultHold;
     if (Array.isArray(body.events) && body.events.length) {
       next.log = [...next.log, ...body.events];
       payload.events = body.events;

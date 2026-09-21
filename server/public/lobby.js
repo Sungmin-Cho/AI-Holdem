@@ -348,6 +348,7 @@ function setupFromForm() {
         "dealBias",
         "showdownPolicy",
         "replayReveal",
+        "pace",
       ].map((k) => [k, data.get(k)]),
     );
   for (const k of [

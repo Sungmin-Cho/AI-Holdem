@@ -20,3 +20,6 @@ LLM 모드의 플레이어와 LLM 코치·evaluator·종합자는 사이드카�
 - **Codex:** 공식 저장소 스킬 경로는 `.agents/skills/`(CWD부터 리포 루트까지 스캔). 이 머신 `~/.codex/`에는 프로젝트 스킬 오버라이드가 없다. 일부 문서의 `.codex/skills/`는 심볼릭 디렉터리를 무시하므로 브리지 링크를 두지 않는다 — 이 포인터가 Codex 산출물이다.
 - **Grok:** `.grok/skills/start-game` → 같은 정본 심볼릭 링크. Grok는 `.agents/skills/`도 네이티브 스캔한다.
 - **Windows:** `core.symlinks=false`면 위 링크가 일반 파일/빈 경로로 풀릴 수 있다. git config를 바꾸지 말고 정본 `.agents/skills/start-game/SKILL.md`를 읽는다. 사이드카 identity는 POSIX `ps`/`lsof`가 아니라 플랫폼 어댑터다.
+
+
+새 로비 게임의 진행 속도는 `normal`(보통)이며, 즉시/빠름/보통/느림을 선택한다. resume과 같은 설정 재시작은 저장된 `pace`를 유지하고 기록이 없는 예전 게임은 `instant`다. legacy CLI의 `--pace`는 명시한 값만 적용한다.

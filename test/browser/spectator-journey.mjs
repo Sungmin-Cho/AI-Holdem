@@ -45,6 +45,7 @@ export async function runSpectatorJourney(outDir) {
   const end=async()=>{await pause();await click('user','#end');await click('user','#confirm-yes');await wait(()=>['ended','completed'].includes(app.manager.snapshot().state),'end');};
   try {
     app=await startAppService(workspace.root,{resolver:async()=>({player:null,upper:null,notices:[]}),publicPort:0});
+    app.manager.setPrefill({pace:'instant'});
     await browsers.user(['open',app.url]);await browsers.user(['set','viewport','1280','1000']);
     await wait(()=>evaluate('user',"document.querySelector('#status')?.textContent==='로비'"),'lobby');
     await browsers.user(['snapshot','-i']);

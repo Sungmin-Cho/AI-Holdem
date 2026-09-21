@@ -225,3 +225,10 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 관찰 지점: `$SESSION_DIR/loop-state.json`(phase·port·sessionToken·notices·metrics·halt·finishedAt), `$SESSION_DIR/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태와 게시 경로는 딜러가 열지 않는다.
 
 새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
+
+
+## 진행 속도
+
+새 로비 게임의 진행 속도는 보통(`normal`)이다. 사용자는 즉시/빠름/보통/느림을 고를 수 있다. 기록된 `pace`는 재개·같은 설정 재시작에서도 유지하며, 기록이 없는 예전 게임은 즉시(`instant`)다. legacy CLI는 `--pace instant|fast|normal|slow`를 받는다. 일시정지 후 남은 결과 대기를 다시 기다리지 않는다. 사람 좌석이 하나일 때만 현재 핸드 결과 대기를 건너뛴다.
+
+이 기능을 revert할 때는 게임을 먼저 종료하고 해당 세션 `.app-setup.json`의 `pace` 키를 제거한다. 진행 중인 게임의 설정을 임의로 바꾸지 않는다.
