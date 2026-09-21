@@ -486,7 +486,7 @@ test(
 test('published human deadline equals enforcement and only explicit resume renews it', {timeout:process.platform==='win32'?300000:30000}, async t=>{
   const root=createOwnedTempDir('holdem-deadline');
   const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
-    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:process.platform==='win32'?15000:5000,waitMs:60000}});
+    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:15000,waitMs:60000}});
   t.after(()=>loop.requestStop());
   await loop.bootstrap({ai:1,mode:'cash-training',hands:2,opponentRuntime:'policy'});
   withMutation(root,state=>{state.button=(state.seats.findIndex(s=>s.playerId==='user')+state.seats.length-1)%state.seats.length;return {state};});
@@ -520,7 +520,8 @@ test('published human deadline equals enforcement and only explicit resume renew
   assert.equal(resumed.decisionId,first.decisionId);
   assert.ok(resumed.deadlineAt>first.deadlineAt);
   assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),resumed.deadlineAt);
-  await sleep(50);
+  await sleep(750);
   assert.equal(read('ui-snapshot.json').view.legal.decisionId,first.decisionId);
+  assert.equal(read('ui-snapshot.json').log.some(event=>/^TIMEOUT_/.test(event.code??'')),false);
   await loop.pause();
 });

@@ -3384,8 +3384,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
             if (resultHoldState === registeredHold) resultHoldState = null;
             hold = null;
-            const recoveryFlags = flags.filter((flag, index) => flag !== '--retry' && flag !== '--view-only'
-              && flag !== '--result-hold' && flags[index - 1] !== '--result-hold');
+            const recoveryFlags = flags.filter((flag,index) => flag !== '--retry' && flag !== '--view-only'
+              && flag !== '--result-hold' && flags[index-1] !== '--result-hold'
+              && flag !== '--turn-deadline' && flags[index-1] !== '--turn-deadline' && !String(flag).startsWith('--turn-deadline='));
+            const recoveredDeadline=humanDeadline(synchronized.next);
+            if(recoveredDeadline)recoveryFlags.push('--turn-deadline',`${recoveredDeadline.decisionId}:${new Date(recoveredDeadline.deadlineAt).toISOString()}`);
             currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
             args = currentArgs;
             resolvingPending = false;

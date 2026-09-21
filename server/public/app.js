@@ -24,6 +24,7 @@ const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise
 const ui = { turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
+let renderedDeadlineKey = null;
 let pendingAction = true;
 let revisionAtHintClear=-1;
 const hintState=createHintState();
@@ -1026,10 +1027,14 @@ function paintTurnDeadline() {
     node.textContent = text ?? '';node.hidden = !text;node.classList.toggle('is-urgent', urgent);
   }
   const key = deadline ? `${deadline.decisionId}:${deadline.at}` : null;
-  if (!deadline) announcedDeadline = null;
+  if (renderedDeadlineKey !== key) {
+    renderedDeadlineKey=key;announcedDeadline=null;
+    const announcement=$('turn-announcement');if(announcement)announcement.textContent='';
+  }
   if (urgent && announcedDeadline !== key) {
     announcedDeadline = key;
-    $('turn-announcement').textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
+    const announcement=$('turn-announcement');
+    if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
   }
 }
 setInterval(paintTurnDeadline, 1000);
@@ -1256,9 +1261,10 @@ let booted = false;
 let opening = false;
 async function getSnapshot({ signal } = {}) {
   const generation=hintState.capture();
+  const requestedAt=Date.now();
   const response = await (appGameId ? appFetch('snapshot',{signal}) : fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal }));
   if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
-  serverOffsetMs = serverClockOffset(response.headers.get('Date'));
+  serverOffsetMs = serverClockOffset(response.headers.get('Date'),Date.now(),requestedAt);
   const snapshot=await response.json();let canRestore=false;
   try{if(appGameId&&new URLSearchParams(location.search).get('terminal')==='1')return snapshot;const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
   hintRequests.set(snapshot,{generation,canRestore});return snapshot;
