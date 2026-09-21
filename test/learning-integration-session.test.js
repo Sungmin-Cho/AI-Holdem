@@ -471,9 +471,10 @@ test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated
   assert.match(captureCliRelay(gameDir).args, /--port 0(?: |$)/);
   assert.equal((await relayRequest(lock, '/api/snapshot')).status, 200);
   await waitValue(async () => (await relayRequest(lock, '/api/snapshot')).body.view?.legal?.toAct === 'user');
-  // Deliberately leave the protected wait unresolved to exercise failure cleanup.
+  // Explicitly exercise forced cleanup: a visible user turn does not prove the
+  // CLI has entered its protected wait, so graceful shutdown can still win.
   // The default20 journey separately proves graceful delivery and once-only resume.
-  await cleanupCli(cli, gameDir);
+  await cleanupCli(cli, gameDir, { force: true });
   assert.equal(cli.child.signalCode, 'SIGKILL');
   assert.throws(() => process.kill(lock.serverPid, 0), (error) => error.code === 'ESRCH');
   assert.equal((await inspectStudyService(storeDir)).status, 'running');
