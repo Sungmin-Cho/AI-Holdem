@@ -66,7 +66,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     trace.push({ operation: args[0], args: args.slice(1).map(sanitize), viewport,
       exitCode: receipt.exitCode, signal: receipt.signal, timedOut: receipt.timedOut,
       stdoutSha256: createHash('sha256').update(sanitize(receipt.stdout)).digest('hex'), stderr: sanitize(receipt.stderr) });
-    assert.equal(receipt.exitCode, 0, `agent-browser ${args[0]} failed`);
+    assert.equal(receipt.exitCode, 0, `agent-browser ${args[0]} failed: ${sanitize(receipt.stdout).slice(0, 3000)}`);
     assert.equal(receipt.timedOut, false); assert.equal(receipt.signal, null);
     if (!json) return receipt.stdout;
     const response = JSON.parse(receipt.stdout);
@@ -244,8 +244,18 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
         && card.contains(document.activeElement) && document.activeElement.dataset.focus === 'practice';
     })()`));
     await browser(['click','#tab-log']);
-    await browser(['wait','#log-list .replay-open:not([disabled])']);
-    await browser(['focus','#log-list .replay-open:not([disabled])']);
+    // reachUserTurn may finish hands before the user ever acts. Those replays
+    // legitimately have no learning card; exercise the hand whose real action
+    // and training pipeline this journey completed above.
+    const replaySnapshot = await fixture.snapshot();
+    const replayHandNo = firstSnapshot.view.handNo;
+    assert.ok(replaySnapshot.training.some(item => item.handNo === replayHandNo
+      && item.decisionId === firstLegal.decisionId && item.evaluationId));
+    const replayLogIndex = replaySnapshot.log.findIndex(item => item.type === 'hand_start' && item.handNo === replayHandNo);
+    assert.ok(replayLogIndex >= 0);
+    const replaySelector = `#log-list [data-log-index="${replayLogIndex}"] .replay-open:not([disabled])`;
+    await browser(['wait',replaySelector]);
+    await browser(['focus',replaySelector]);
     assert.equal(await evaluate(`(()=>{const index=document.activeElement.closest('[data-log-index]').dataset.logIndex;const select=document.querySelector('#display-unit');select.value='chips';select.dispatchEvent(new Event('change'));return document.activeElement.closest('[data-log-index]')?.dataset.logIndex===index;})()`),true);
     await browser(['press','Enter']);
     await browser(['wait','#replay-body .replay-study']);
@@ -421,6 +431,13 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     if (result.pending.some((name) => name !== 'real-user-store-unchanged')) result.blocked = 'COMBINED_BACKEND_SCENARIOS_PENDING';
   } catch (error) {
     result.error = sanitize(error.message);
+    if (browserStarted) {
+      try {
+        const detail=await evaluate("({focus:document.activeElement?.className,focusedLogIndex:document.activeElement?.closest('[data-log-index]')?.dataset.logIndex,replayHidden:document.querySelector('#replay-overlay')?.hidden,replayTitle:document.querySelector('#replay-title')?.textContent,replayStudyCount:document.querySelectorAll('#replay-body .replay-study').length})");
+        fs.writeFileSync(path.join(output,'failure-ui.json'),sanitize(JSON.stringify(detail,null,2)),{mode:0o600});
+        await browser(['screenshot',path.join(output,'failure.png')]);
+      } catch { /* Preserve the original failure even if the browser is unavailable. */ }
+    }
   } finally {
     const cleanupErrors = [];
     if (browserStarted) try { await browser(['close']); } catch (error) { cleanupErrors.push(sanitize(error.message)); }
