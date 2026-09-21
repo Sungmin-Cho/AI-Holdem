@@ -46,15 +46,19 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 
 | 런타임 | 격리 수단 | 한계 |
 |---|---|---|
-| `claude` | `--restricted` + probe stream 감사(`init.plugins` 빈 배열, hook 이벤트 0) | managed/`--settings` SessionEnd hook은 스트림에 없어 탐지하지 못한다 |
+| `claude` | `--safe-mode --restricted` + probe stream 감사(`init.plugins` 빈 배열, hook 이벤트 0) | managed/`--settings` SessionEnd hook은 스트림에 없어 탐지하지 못한다 |
 | `codex` | `exec --ignore-user-config` + `--disable hooks` | 실행 중 감사 스트림이 없다. 플래그 의미 변경은 자동으로 알 수 없다 |
 | `grok` | 스토어별 격리 홈 + `inspect --json`·세션 기록 감사 + `--disallowed-tools`/`--deny`(도구 표면 `[read_file]`, 호출은 전부 거부) | Windows 미지원(fail-closed). 격리 홈은 스토어별 약 14 MB(`~/.ai-holdem/runtime-home/`, 지워도 다음 기동에서 재생성). 도구 목록은 이름 기반이라 새 기본 도구가 생기면 표면 감사로 탈락한다. 읽기 차단은 권한 계층이지 OS 샌드박스가 아니다. 부트 1–2분(카나리 거부 왕복 각 25–50 s). 같은 uid 프로세스의 홈 변조는 위협 모델 밖. API 키 env 인증은 미지원 |
 
 | 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 워치독 1차/재전송 |
 |---|---|---|---|
-| `claude` | `haiku` | `opus` | 25s / 15s |
+| `claude` | `sonnet --effort medium` | `opus` | 25s / 15s |
 | `codex` | `gpt-5.6-luna` | `gpt-5.6-sol` | 25s / 15s |
 | `grok` | `grok-4.6` | `grok-4.6` | 60s / 30s |
+
+Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측).
+
+LLM 모드 진행 중 게임은 업그레이드 전에 끝낼 것. 새 Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
 
 기본 런타임은 `/start-game`을 실행한 호스트이고, 딜러가 `--player-runtime`으로 명시한다. policy 모드는 상위 모델만 검사하고 LLM 플레이어 probe·세션을 만들지 않는다. llm 모드에서는 플레이어 모델 왕복이나 컨테인먼트 검증에 실패하면 폴백 사다리(claude → codex → grok)가 돌며, 모두 부적격일 때 `NO_PLAYER_RUNTIME`으로 기동을 중단한다. 상위 모델만 없으면 LLM 설명을 제공할 수 없음을 알린다.
 

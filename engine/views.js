@@ -1,3 +1,4 @@
+import { evaluate7 } from './evaluator.js';
 import { blindsForLevel, legalFor } from './hand.js';
 import { seatedFromButton, positionsOf } from './positions.js';
 import { buildPots } from './sidepots.js';
@@ -140,7 +141,27 @@ function completedHandObservation(state) {
   ];
 }
 
-export function turnSummary(state, playerId) {
+function decisionAid(state, playerId, legal, view, evaluate) {
+  try {
+    const hand = state.hand;
+    const me = state.seats.find(seat => seat.playerId === playerId);
+    const opponents = state.seats.filter(seat => seat.playerId !== playerId && !seat.out && !hand.folded.includes(seat.playerId));
+    const bb = view.blinds[1];
+    const remainingEffectiveStack = Math.min(me.stack, Math.max(0, ...opponents.map(seat => seat.stack)));
+    const partialCall = hand.currentBet - (hand.bets[playerId] ?? 0) > me.stack;
+    const call = legal.callAmount;
+    const parts = [partialCall ? '부분 올인 콜(필요 승률 생략)' : call === 0 ? '콜 비용 없음'
+      : `필요 승률 ${Math.round(100 * call / (legal.potTotal + call))}% (콜 ${call} / 최종 팟 ${legal.potTotal + call})`,
+    `내 스택 ${(me.stack / bb).toFixed(1)}BB`, `유효 잔여 스택 ${(remainingEffectiveStack / bb).toFixed(1)}BB`];
+    if (legal.potTotal > 0) parts.push(`SPR ${(remainingEffectiveStack / legal.potTotal).toFixed(1)}`);
+    parts.push(`남은 상대 ${opponents.length}명(올인 ${opponents.filter(seat => hand.allIn.includes(seat.playerId)).length}명)`);
+    const cards = [...view.myCards, ...view.board];
+    if (cards.length >= 5) parts.push(`현재 메이드: ${evaluate(cards).name}`);
+    return `판단 보조: ${parts.join(' | ')}`;
+  } catch { return null; } // Optional advice must never prevent the policy/LLM turn.
+}
+
+export function turnSummary(state, playerId, { evaluate = evaluate7 } = {}) {
   const legal = legalFor(state);
   if (legal.handOver || legal.toAct !== playerId) return null;
 
@@ -186,6 +207,7 @@ export function turnSummary(state, playerId) {
     `팟: ${pots} | 블라인드 ${sb}/${bb} | 내 이번 스트리트 베팅: ${hand?.bets?.[playerId] ?? 0}`,
     `생존자: ${survivors.join(' / ')}`,
     `이번 핸드 공개 액션: ${actions.length ? actions.join(' → ') : '없음'}`,
+    ...[decisionAid(state, playerId, legal, view, evaluate)].filter(Boolean),
     `가능한 액션: ${choices.join(' / ')}`,
     `legal 수치: canCheck=${legal.canCheck} callAmount=${legal.callAmount} canRaise=${legal.canRaise} minRaiseTo=${legal.minRaiseTo} maxRaiseTo=${legal.maxRaiseTo} currentBet=${hand.currentBet ?? 0}`,
   ];
@@ -194,7 +216,7 @@ export function turnSummary(state, playerId) {
   }
   const observation = completedHandObservation(state);
   if (observation) lines.push(...observation);
-  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?,"reason":"한 줄 사유(선택)"}`);
+  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","reason":"한 줄 사유(선택)","action":"fold|check|call|raise","amount":숫자?}`);
   return lines.join('\n');
 }
 

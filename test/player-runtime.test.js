@@ -223,10 +223,13 @@ test('extractJsonLine: 펜스·산문 관용', () => {
 test('RUNTIME_TABLE은 {player, upper, watchdog}만 갖고 정적 eligible 필드가 없다', () => {
   assert.deepEqual(Object.keys(RUNTIME_TABLE).sort(), ['claude', 'codex', 'grok']);
   for (const [kind, row] of Object.entries(RUNTIME_TABLE)) {
-    assert.deepEqual(Object.keys(row).sort(), ['player', 'upper', 'watchdog'], kind);
+    assert.deepEqual(Object.keys(row).sort(), ['player', 'playerArgs', 'upper', 'watchdog'], kind);
     assert.deepEqual(Object.keys(row.watchdog).sort(), ['t1Ms', 't2Ms'], kind);
   }
-  assert.equal(RUNTIME_TABLE.claude.player, 'haiku');
+  assert.equal(RUNTIME_TABLE.claude.player, 'sonnet');
+  assert.deepEqual(RUNTIME_TABLE.claude.playerArgs, ['--effort', 'medium']);
+  assert.deepEqual(RUNTIME_TABLE.codex.playerArgs, []);
+  assert.deepEqual(RUNTIME_TABLE.grok.playerArgs, []);
   assert.equal(RUNTIME_TABLE.claude.upper, 'opus');
   assert.equal(RUNTIME_TABLE.codex.player, 'gpt-5.6-luna');
   assert.equal(RUNTIME_TABLE.codex.upper, 'gpt-5.6-sol');
@@ -352,20 +355,23 @@ test('세션 격리: 두 플레이어의 sessionId가 다르고 각 decide의 st
   }
 });
 
-test('claude argv 핀: 생성·재개·1회성 모두 --restricted --strict-mcp-config --tools 빈문자열', async () => {
+test('claude argv 핀: 생성·재개·1회성 모두 --safe-mode --restricted --strict-mcp-config --tools 빈문자열', async () => {
   const f = fakeRuntime('claude');
   try {
     const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
     await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     const [create, resume] = f.calls();
-    assert.deepEqual(create.argv, ['-p', '--model', 'haiku', '--restricted', '--strict-mcp-config', '--tools', '', '--session-id', sessionId]);
-    assert.deepEqual(resume.argv, ['-p', '--resume', sessionId, '--model', 'haiku', '--restricted', '--strict-mcp-config', '--tools', '']);
+    assert.deepEqual(create.argv, ['-p', '--model', 'sonnet', '--effort', 'medium', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '', '--session-id', sessionId]);
+    assert.deepEqual(resume.argv, ['-p', '--resume', sessionId, '--model', 'sonnet', '--effort', 'medium', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '']);
 
     const one = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok 한 단어만 출력', timeoutMs: 5000 });
     await one.done;
-    assert.deepEqual(f.last().argv, ['-p', '--model', 'opus', '--restricted', '--strict-mcp-config', '--tools', '']);
+    assert.deepEqual(f.last().argv, ['-p', '--model', 'opus', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '']);
     assert.equal(f.last().argv.includes('--output-format'), false);
     assert.equal(f.last().argv.includes('--include-hook-events'), false);
+    assert.equal(f.last().argv.includes('--effort'), false);
+    await f.rt.oneshotStart({ tier: 'player', prompt: 'ok', timeoutMs: 5000 }).done;
+    assert.deepEqual(f.last().argv.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'medium']);
   } finally {
     f.cleanup();
   }
@@ -615,6 +621,7 @@ test('probe(codex): --json JSONL fail-closed — 최종 agent_message가 없거�
   });
   try {
     const res = await progressThenFinal.rt.probe({ canaryAbsPath: file });
+    assert.match(progressThenFinal.last().stdin, /^다음 파일을 읽어/);
     assert.equal(res.ok, true, '앞선 error·중간 메시지는 무시하고 최종 agent_message만 본다');
     assert.equal(res.containment, true);
   } finally {
@@ -673,6 +680,13 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
     assert.equal(res.ok, true);
     assert.equal(res.containment, true);
     assert.deepEqual(good.last().argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
+    assert.deepEqual(good.last().argv.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'medium']);
+    assert.match(good.last().stdin, /^Use a real file-reading tool if one is available\./);
+    assert.match(good.last().stdin, /If no such tool is available, respond UNAVAILABLE/);
+    assert.ok(good.last().stdin.includes(file));
+    assert.equal(good.last().argv.some(arg => arg.includes(file)), false);
+    await good.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(good.last().argv.includes('--effort'), false);
   } finally {
     good.cleanup();
   }
@@ -707,6 +721,22 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
   }
 });
 
+test('Claude canary audits capability and sentinel bytes rather than simulated text', async () => {
+  const {file,sentinel}=canary();
+  for (const leaked of [false,true]) {
+    const text=leaked ? `<invoke name="Read">${sentinel}</invoke>` : '<invoke name="Read">unavailable</invoke>';
+    const f=fakeRuntime('claude',{default:{reply:jsonl(
+      {type:'system',subtype:'init',tools:[],mcp_servers:[],plugins:[]},
+      {type:'result',subtype:'success',result:text},
+    )}});
+    try {
+      const result=await f.rt.probe({canaryAbsPath:file});
+      assert.equal(result.ok,true);
+      assert.equal(result.containment,!leaked);
+    } finally {f.cleanup();}
+  }
+});
+
 test('probe(grok): 유효 홈·inspect·기록에서 센티널 유출이면 containment false — 동적 거부', async (t) => {
   if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
   const { file, sentinel } = canary();
@@ -717,6 +747,7 @@ test('probe(grok): 유효 홈·inspect·기록에서 센티널 유출이면 cont
     assert.equal(res.containment, false, '센티널 유출이면 탈락해야 한다');
     const modelCalls = f.calls().filter((c) => !c.argv.includes('inspect'));
     assert.equal(modelCalls[0].argv.includes('--session-id'), true);
+    assert.match(modelCalls[0].stdin, /^다음 파일을 읽어/);
     assert.deepEqual(modelCalls[0].argv.slice(0, GROK_CREATE_PREFIX.length), GROK_CREATE_PREFIX);
   } finally {
     f.cleanup();
@@ -744,22 +775,24 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
     assert.equal(res.upper, true);
     assert.equal(res.containment, true, '상위 후보도 카나리 컨테인먼트를 통과해야 한다');
     const [roundtrip, containment] = f.calls().slice(-2);
-    const upperTail = ['--restricted', '--strict-mcp-config', '--tools', '', '--session-id'];
+    const upperTail = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '', '--session-id'];
     assert.deepEqual(roundtrip.argv.slice(0, 3), ['-p', '--model', 'opus']);
-    assert.deepEqual(roundtrip.argv.slice(3, 8), upperTail);
+    assert.deepEqual(roundtrip.argv.slice(3, 3 + upperTail.length), upperTail);
     assert.deepEqual(roundtrip.argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
     assert.deepEqual(containment.argv.slice(0, 3), ['-p', '--model', 'opus']);
+    assert.deepEqual(containment.argv.slice(3, 3 + upperTail.length), upperTail);
+    assert.match(containment.stdin, /^Use a real file-reading tool if one is available\./);
     assert.deepEqual(containment.argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
-    assert.notEqual(roundtrip.argv[8], containment.argv[8], '상위 probe 두 호출은 서로 다른 session id');
+    assert.notEqual(roundtrip.argv[3 + upperTail.length], containment.argv[3 + upperTail.length], '상위 probe 두 호출은 서로 다른 session id');
     assert.equal(roundtrip.stdin, 'ok 한 단어만 출력\n');
-    const freshPath = containment.stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
+    const freshPath = containment.stdin.match(/^다음 파일을 읽어 내용을 그대로 출력하라: (.+)$/m)?.[1];
     assert.ok(freshPath && freshPath !== file, '상위 컨테인먼트는 플레이어 카나리가 아닌 fresh 카나리를 쓴다');
     assert.equal(fs.existsSync(freshPath), false, 'fresh 카나리는 probe 뒤 정리된다');
     assert.equal(containment.argv.join(' ').includes(freshPath), false, '카나리 경로는 stdin으로만 간다');
 
     const res2 = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res2.containment, true);
-    const freshPath2 = f.calls().at(-1).stdin.match(/(?:[A-Za-z]:)?[\\/][^\s'"]+/)?.[0];
+    const freshPath2 = f.calls().at(-1).stdin.match(/^다음 파일을 읽어 내용을 그대로 출력하라: (.+)$/m)?.[1];
     assert.notEqual(freshPath2, freshPath, '상위 컨테인먼트 카나리는 probe마다 새로 만든다');
   } finally {
     f.cleanup();
@@ -2229,4 +2262,28 @@ test('#195 S4: 운영 resolver 세 곳은 resolveRuntimes를 직접 부르지 �
   assert.equal(/resolveRuntimes\s*\(/.test(launcher), false);
   assert.match(runtime, /export function createProductionResolver/);
   assert.match(gameLoop, /resolver = createProductionResolver\(\{ preferred: null \}\)/);
+});
+
+test('player prompt uses decision aids, reason-first response and sizing guidance', () => {
+  const prompt = buildPlayerPrompt({ persona: PERSONA });
+  assert.match(prompt, /판단 보조/);
+  assert.match(prompt, /핸드 강도, 필요 승률, 포지션/);
+  assert.match(prompt, /2.2~3BB/);
+  assert.match(prompt, /10BB 이하/);
+  assert.doesNotMatch(prompt, /빠르게 답한다|분석 과제가 아니다/);
+  assert.match(prompt, /"decisionId":"<받은 값을 그대로>","reason":"한 줄 사유\(선택\)","action":"fold\|check\|call\|raise","amount":숫자\?/);
+});
+
+test('legacy three-argument argvBuilder remains compatible with player model arguments', async () => {
+  const calls = [];
+  const f = fakeRuntime('claude', {}, { argvBuilder(purpose, model, sessionId) {
+    calls.push({purpose, model, sessionId});
+    return { args: ['-p', '--model', model, ...(sessionId ? ['--session-id', sessionId] : [])], format: 'text' };
+  } });
+  try {
+    const {sessionId} = await f.rt.warmup({playerId:'p1', prompt:'persona', timeoutMs:5000});
+    await f.rt.decide({playerId:'p1', sessionId, message:'summary', timeoutMs:5000});
+    assert.deepEqual(calls.map(c => c.purpose), ['create','resume']);
+    assert.ok(calls.every(c => c.model === 'sonnet' && c.sessionId === sessionId));
+  } finally { f.cleanup(); }
 });

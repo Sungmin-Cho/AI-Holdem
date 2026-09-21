@@ -31,10 +31,10 @@ import {
 export { provisionRuntimeHome, verifyRuntimeHome } from './runtime-home.js';
 
 export const RUNTIME_TABLE = {
-  claude: { player: 'haiku', upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
-  codex: { player: 'gpt-5.6-luna', upper: 'gpt-5.6-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  claude: { player: 'sonnet', playerArgs: ['--effort', 'medium'], upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  codex: { player: 'gpt-5.6-luna', playerArgs: [], upper: 'gpt-5.6-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
   // Task 0: low effort 핀이 실패했다(기본 effort 유지) → 스펙 D8의 60s/30s를 그대로 쓴다.
-  grok: { player: 'grok-4.6', upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
+  grok: { player: 'grok-4.6', playerArgs: [], upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
 };
 
 export const SESSION_ID_MAX_LENGTH = 128;
@@ -64,12 +64,16 @@ const TERMINATE_KILL_WAIT_MS = 2_000;
 const TERMINATE_POLL_MS = 50;
 
 const UPPER_PROBE_PROMPT = 'ok 한 단어만 출력\n';
-const canaryPrompt = (absPath) => `다음 파일을 읽어 내용을 그대로 출력하라: ${absPath}\n`;
+// Keep the file-read challenge active if a tool is accidentally exposed, while
+// preventing simulated tool markup from trapping a tool-free CLI in a loop.
+// The stream audit and sentinel scan remain the containment authority.
+const CLAUDE_PROBE_CONTEXT = 'Use a real file-reading tool if one is available. If no such tool is available, respond UNAVAILABLE. Never simulate tool calls or print tool-call markup as text.\n';
+const canaryPrompt = (absPath, kind) => `${kind === 'claude' ? CLAUDE_PROBE_CONTEXT : ''}다음 파일을 읽어 내용을 그대로 출력하라: ${absPath}\n`;
 
 // ── Task 0 핀 argv ────────────────────────────────────────────────────────────
 // 길이 0 원소(`--tools` 뒤)는 빈 문자열이지 따옴표 두 글자가 아니다. 반대로 codex의
 // `web_search="disabled"`는 TOML 값 표기라 큰따옴표가 argv 내용에 포함된다.
-const CLAUDE_CONTAINMENT = ['--restricted', '--strict-mcp-config', '--tools', ''];
+const CLAUDE_CONTAINMENT = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', ''];
 const CLAUDE_STREAM = ['--output-format', 'stream-json', '--verbose', '--include-hook-events'];
 export const GROK_DISALLOWED_TOOLS = [
   'run_terminal_cmd', 'run_terminal_command', 'search_replace', 'list_dir', 'grep', 'write',
@@ -112,20 +116,20 @@ const RUNTIMES = {
     command: 'claude',
     newSessionId: () => randomUUID(),
     captureSession: null,
-    spec(purpose, model, sessionId) {
+    spec(purpose, model, sessionId, modelArgs = []) {
       switch (purpose) {
         case 'create':
-          return { args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT, '--session-id', sessionId], format: 'text' };
+          return { args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT, '--session-id', sessionId], format: 'text' };
         case 'resume':
-          return { args: ['-p', '--resume', sessionId, '--model', model, ...CLAUDE_CONTAINMENT], format: 'text' };
+          return { args: ['-p', '--resume', sessionId, '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT], format: 'text' };
         case 'oneshot':
-          return { args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT], format: 'text' };
+          return { args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT], format: 'text' };
         case 'probe':
         case 'probe-upper':
           // 컨테인먼트 probe만 stream-json이다 — init의 tools/mcp_servers와 tool_use 0을
           // 기계 검증해야 하고, 모델 자기보고는 증거가 아니다(Task 0 fix round 1).
           return {
-            args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT, '--session-id', randomUUID(), ...CLAUDE_STREAM],
+            args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT, '--session-id', randomUUID(), ...CLAUDE_STREAM],
             format: 'claude-stream',
           };
         default:
@@ -690,7 +694,7 @@ export function createPlayerRuntime(kind, opts = {}) {
 
   const exec = opts.exec ?? spawnCli;
   const command = opts.command ?? runtime.command;
-  const argvBuilder = opts.argvBuilder ?? ((purpose, model, sessionId) => runtime.spec(purpose, model, sessionId));
+  const argvBuilder = opts.argvBuilder ?? ((purpose, model, sessionId, modelArgs) => runtime.spec(purpose, model, sessionId, modelArgs));
   const cwdRoot = opts.cwdRoot ?? os.tmpdir();
   const envExtra = opts.env ?? {};
   const startTimeOf = opts.processStartTime ?? defaultProcessStartTime;
@@ -805,7 +809,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     if (!verification.inspect || verification[tier] !== true) grokFail('RUNTIME_NOT_VERIFIED');
   }
 
-  function start({ purpose, model, sessionId = null, input }) {
+  function start({ purpose, model, sessionId = null, input, modelArgs = [] }) {
     if (disposed) {
       throw runtimeError('RUNTIME_CLOSED', `RUNTIME_CLOSED: ${kind} runtime은 이미 영구 종료됐습니다.`);
     }
@@ -827,7 +831,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         throw runtimeError(error.code ?? 'RUNTIME_HOME_INVALID', grokIsolationNotice(kind, table.player, error.code ?? 'RUNTIME_HOME_INVALID'));
       }
     }
-    const spec = argvBuilder(purpose, model, sessionId);
+    const spec = argvBuilder(purpose, model, sessionId, modelArgs);
     const { args, format } = spec;
     const auditSessionId = spec.audit?.sessionId ?? sessionId;
     if (kind === 'grok' && grokHome && auditSessionId && purpose !== 'inspect') {
@@ -910,9 +914,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   // decide/warmup/probe의 공통 실행: 타임아웃이 이기면 **여기서** 자식을 죽인다.
-  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs }) {
+  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [] }) {
     const started = Date.now();
-    const { handle, format, args, entry } = start({ purpose, model, sessionId, input });
+    const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs });
     const timer = timeoutIn(timeoutMs);
     try {
       const result = await Promise.race([handle.done, timer.promise]);
@@ -1030,7 +1034,6 @@ export function createPlayerRuntime(kind, opts = {}) {
         };
       }
       if (kind === 'grok') {
-        const sessionId = argvBuilder('probe-upper', model, null).audit?.sessionId;
         // session id is generated inside spec; recover from the actual argv.
         const spawnedId = flagFromArgs(round, '--session-id');
         const audit = auditGrokSession(spawnedId, 1);
@@ -1041,7 +1044,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       let result;
       try {
-        result = await runOnce({ purpose: 'probe-upper', model, input: canaryPrompt(canary.file), timeoutMs });
+        result = await runOnce({ purpose: 'probe-upper', model, input: canaryPrompt(canary.file, kind), timeoutMs });
       } catch (error) {
         verification.upper = false;
         return {
@@ -1107,7 +1110,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
     let result;
     try {
-      result = await runOnce({ purpose: 'probe', model, input: canaryPrompt(canaryAbsPath), timeoutMs });
+      result = await runOnce({ purpose: 'probe', model, modelArgs: table.playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
     } catch (error) {
       verification.player = false;
       return {
@@ -1144,7 +1147,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       let resume;
       try {
-        resume = await runOnce({ purpose: 'resume', model, sessionId: spawnedId, input: canaryPrompt(canaryAbsPath), timeoutMs });
+        resume = await runOnce({ purpose: 'resume', model, modelArgs: table.playerArgs, sessionId: spawnedId, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
       } catch (error) {
         verification.player = false;
         return {
@@ -1240,7 +1243,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         assertGrokVerified('player');
       }
       const sessionId = runtime.newSessionId();
-      const result = await runOnce({ purpose: 'create', model: table.player, sessionId, input: prompt, timeoutMs });
+      const result = await runOnce({ purpose: 'create', model: table.player, modelArgs: table.playerArgs, sessionId, input: prompt, timeoutMs });
       if (result.code !== 0) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
       }
@@ -1270,7 +1273,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (!isArgvSafeSessionId(sessionId)) {
         throw runtimeError('INVALID_SESSION_ID', 'INVALID_SESSION_ID: 안전하지 않은 세션 id로 결정을 요청할 수 없습니다.', { playerId });
       }
-      const result = await runOnce({ purpose: 'resume', model: table.player, sessionId, input: message, timeoutMs });
+      const result = await runOnce({ purpose: 'resume', model: table.player, modelArgs: table.playerArgs, sessionId, input: message, timeoutMs });
       const raw = parseResponse(result.format, result.stdout);
       if (result.code !== 0 || !raw) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
@@ -1290,7 +1293,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         assertGrokVerified(tier);
       }
       const model = tier === 'player' ? table.player : table.upper;
-      const { handle, format } = start({ purpose: 'oneshot', model, input: prompt });
+      const { handle, format } = start({ purpose: 'oneshot', model, modelArgs: tier === 'player' ? table.playerArgs : [], input: prompt });
       const pid = handle.pid ?? null;
       const startTime = pid === null ? null : (startTimeOf(pid) ?? null);
       // `closed`는 자식 lifecycle의 close(전 stdio 닫힘 + exit)가 실제로 관찰됐을 때만
