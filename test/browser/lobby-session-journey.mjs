@@ -21,6 +21,7 @@ export const requiredJourneyChecks = [
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
+  "host-iframe-survives-error-resume",
   "setup-back-no-resume",
   "menu-close-reopen",
   "restart-new-id",
@@ -150,6 +151,26 @@ export async function runLobbyJourney(outDir) {
         "document.querySelector('#table').contentDocument.querySelector('#action-status')?.textContent.length>0",
       ),
     );
+    // Damage only this owned fixture while an actual user action is pending.
+    // The real loop fails and cleans up; restore the bytes before ordinary resume.
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    await evaluate("window.__recoveryDocument=document.querySelector('#table').contentDocument");
+    const engineFile=path.join(app.manager.current.sessionDir,'state.json');
+    const engineBeforeFault=fs.readFileSync(engineFile);
+    const beforeFault=app.manager.snapshot();
+    try {
+      fs.writeFileSync(engineFile,'{invalid-owned-fixture');
+      await evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold').click()");
+      await state('error');
+      assert.equal(app.manager.session,null);
+      const unavailable=await fetch(`${app.origin}/api/game/${beforeFault.gameId}/events`,{headers:{authorization:`Bearer ${app.token}`,'x-game-epoch':beforeFault.gameEpoch}});
+      assert.equal(unavailable.status,503);assert.equal((await unavailable.json()).code,'SESSION_UNAVAILABLE');
+    } finally {fs.writeFileSync(engineFile,engineBeforeFault);}
+    await click('#recover');await state('playing');
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
+    assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
+    check('host-iframe-survives-error-resume');
     await click("#menu");
     await state("paused");
     const paused = hashTree(app.manager.current.sessionDir);
