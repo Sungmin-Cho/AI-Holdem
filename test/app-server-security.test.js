@@ -98,3 +98,15 @@ test('skip-result is a host-only, epoch-bound timer operation outside the comman
   assert.equal((await send()).status,409);
   assert.deepEqual(calls,[7,7,6]);
 });
+
+test('only terminal games return SESSION_INACTIVE; missing active relay files remain retryable',async t=>{
+  const {startAppServer}=await import('../tools/app-server.js');
+  const root=createOwnedTempDir('transport-status'),gameId='00000000-0000-4000-8000-000000000001',epoch='a'.repeat(64),token='test-host';
+  let state='error';const manager={current:{gameId,sessionDir:root},session:null,snapshot:()=>({gameId,gameEpoch:epoch,state})};
+  const app=await startAppServer({manager,token,storeDir:root,publicPort:0});t.after(()=>app.close());
+  const request=()=>fetch(`${app.origin}/api/game/${gameId}/events`,{headers:{authorization:`Bearer ${token}`,'x-game-epoch':epoch}});
+  for(state of ['error','starting','playing','paused','finalizing']) {const response=await request();assert.equal(response.status,503);assert.equal((await response.json()).code,'SESSION_UNAVAILABLE');}
+  for(state of ['ended','completed']) {const response=await request();assert.equal(response.status,409);assert.equal((await response.json()).code,'SESSION_INACTIVE');}
+  state='playing';manager.session={loop:{serverPid:process.pid}};
+  const response=await request();assert.equal(response.status,503);assert.equal((await response.json()).code,'RELAY_UNAVAILABLE');
+});

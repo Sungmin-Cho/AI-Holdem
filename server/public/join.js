@@ -42,6 +42,7 @@ async function poll() {
     const res = await fetch('/api/p/state', { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error('offline');
     fails = 0;
+    if($('join-error').dataset.kind==='offline'){$('join-error').textContent='';delete $('join-error').dataset.kind;}
     const state = await res.json();
     latest = state;
     $('member-controls').hidden = false;
@@ -80,10 +81,11 @@ async function poll() {
     }
   } catch {
     fails += 1;
-    if (fails >= 5) $('join-error').textContent = '세션이 닫혔거나 호스트가 오프라인입니다';
+    if (fails >= 5){$('join-error').dataset.kind='offline';$('join-error').textContent = '세션이 닫혔거나 호스트가 오프라인입니다';}
   } finally {polling=false;}
 }
 $('join-form').onsubmit = async (event) => {
+  delete $('join-error').dataset.kind;
   event.preventDefault();
   $('join-error').textContent = '';
   const res = await fetch('/api/join', {
@@ -101,6 +103,7 @@ $('join-form').onsubmit = async (event) => {
   await poll();
 };
 $('leave')?.addEventListener('click', async () => {
+  delete $('join-error').dataset.kind;
   const token = sessionStorage.getItem('holdem-participant-token');
   const response = await fetch('/api/p/leave', { method: 'POST', headers: { authorization: `Bearer ${token}` } });
   if (!response.ok) { $('join-error').textContent='지금은 나갈 수 없습니다. 잠시 후 다시 시도하세요.';return; }
@@ -108,6 +111,7 @@ $('leave')?.addEventListener('click', async () => {
   location.reload();
 });
 $('seat-request')?.addEventListener('click', async () => {
+  delete $('join-error').dataset.kind;
   if (!latest) return;
   const response = await fetch('/api/p/seat-request', {method:'POST',headers:{
     authorization:`Bearer ${sessionStorage.getItem('holdem-participant-token')}`,'content-type':'application/json'},

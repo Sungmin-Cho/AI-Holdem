@@ -253,15 +253,18 @@ export async function startAppServer({
         );
         return;
       }
-      json(res, 409, { code: "SESSION_INACTIVE" });
+      const terminal=["ended","completed"].includes(snapshot.state);
+      json(res, terminal?409:503, { code: terminal?"SESSION_INACTIVE":"SESSION_UNAVAILABLE" });
       return;
     }
-    const lock = JSON.parse(
-      fs.readFileSync(path.join(current.sessionDir, "lock.json")),
-    );
-    const engine = JSON.parse(
-      fs.readFileSync(path.join(current.sessionDir, "state.json")),
-    );
+    let lock,engine;
+    try {
+      lock=JSON.parse(fs.readFileSync(path.join(current.sessionDir,"lock.json")));
+      engine=JSON.parse(fs.readFileSync(path.join(current.sessionDir,"state.json")));
+    } catch(error) {
+      if(error.code==='ENOENT'){json(res,503,{code:'RELAY_UNAVAILABLE'});return;}
+      throw error;
+    }
     if (
       lock.serverPid !== manager.session.loop.serverPid ||
       lock.sessionToken !== engine.sessionToken ||

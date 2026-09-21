@@ -1,10 +1,10 @@
-import {appGameId, appEpoch, appFetch, eventStream, participantMode, authToken} from './app-transport.js';
+import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset } from './table-controls.js';
-import { createActionController } from './action-controller.js';
+import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
@@ -22,7 +22,7 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+const ui = { sessionEnded: false, handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
 let renderedDeadlineKey = null;
@@ -199,10 +199,10 @@ function handsUntilLevel(view) {
   return every - ((view.handNo - 1) % every);
 }
 
-function setConn(on) {
+function setConn(on, text = null) {
   if(!on)hideHint();
   const box = $('conn');
-  $('conn-text').textContent = on ? '연결됨' : '재접속 중…';
+  $('conn-text').textContent = text ?? (on ? '연결됨' : '재접속 중…');
   box.classList.toggle('on', on);
   box.classList.toggle('off', !on);
 }
@@ -591,10 +591,15 @@ function syncRaisePanel(legal) {
   $('raise-range').textContent = `이번 스트리트 총액 · 최소 ${amountText(legal.minRaiseTo)} · 최대 ${amountText(legal.maxRaiseTo)}`;
 }
 
+function paintEndedControls() {
+  pendingAction=true;
+  $('action-status').textContent='종료된 게임 기록입니다.';
+  for(const id of ['action-bar','action-reconcile','action-retry','action-notice'])$(id).hidden=true;
+}
 function paintActionBar(view) {
   const bar = $('action-bar');
   const legal = view?.legal;
-  const mine = Boolean(legal) && !view?.gameOver && !isSpectating(view);
+  const mine = Boolean(legal) && !view?.gameOver && !ui.sessionEnded && !isSpectating(view);
   bar.hidden = !mine;
   if (!mine) return;
   const hero=view.seats?.find(s=>s.playerId===viewerId(view));
@@ -1319,12 +1324,15 @@ const token = appGameId ? authToken() : new URLSearchParams(location.search).get
 let revision = 0;
 const buffer = [];
 let booted = false;
-let opening = false;
+let openingAttempt = 0;
 async function getSnapshot({ signal } = {}) {
   const generation=hintState.capture();
   const requestedAt=Date.now();
   const response = await (appGameId ? appFetch('snapshot',{signal}) : fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal }));
-  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  if (!response.ok) {
+    const body=await response.json().catch(()=>({}));
+    throw Object.assign(new Error('AUTHORITY_UNAVAILABLE'),{code:body.code??(response.status>=500?'RELAY_UNAVAILABLE':'NETWORK_ERROR')});
+  }
   serverOffsetMs = serverClockOffset(response.headers.get('Date'),Date.now(),requestedAt);
   const snapshot=await response.json();let canRestore=false;
   try{if(appGameId&&new URLSearchParams(location.search).get('terminal')==='1')return snapshot;const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
@@ -1332,7 +1340,10 @@ async function getSnapshot({ signal } = {}) {
 }
 async function getStatus({ signal } = {}) {
   const response = await (appGameId ? appFetch('action-status',{signal}) : fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal }));
-  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  if (!response.ok) {
+    const body=await response.json().catch(()=>({}));
+    throw Object.assign(new Error('AUTHORITY_UNAVAILABLE'),{code:body.code??(response.status>=500?'RELAY_UNAVAILABLE':'NETWORK_ERROR')});
+  }
   return response.json();
 }
 async function legacyGameEpoch(value) {
@@ -1364,8 +1375,10 @@ async function initializeController() {
       renderSnapshot(snapshot); revision = snapshot.revision;
     },
     onState: (state) => {
+      if(ui.sessionEnded){paintEndedControls();return;}
       pendingAction = state.disabled;
       $('action-status').textContent = state.message;
+      const notice=$('action-notice');if(notice){notice.textContent=formatActionNotice(state.notice);notice.hidden=!notice.textContent;}
       $('action-retry').hidden = !state.canRetry;
       $('action-retry').disabled = !state.canRetry;
       $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(state.phase);
@@ -1403,24 +1416,48 @@ else {
       setConn(false); actionController?.disconnect();
     }
   };
-  es.onopen = async () => {
-    if (opening) return;
-    opening = true;
+  es.onopen = async ({signal} = {}) => {
+    const attempt=++openingAttempt;
+    const current=()=>!signal?.aborted && attempt===openingAttempt && !ui.sessionEnded;
     try {
-      const snapshot = await getSnapshot();
+      const snapshot = await getSnapshot({signal});
+      if(!current())return;
       if (isSpectating(snapshot.view)) {if(snapshot.revision >= revision){renderSnapshot(snapshot);revision = snapshot.revision;}}
       else {
         if (!actionController) await initializeController();
+        if(!current())return;
         await actionController.connect(snapshot);
       }
+      if(!current())return;
       booted = true; setConn(true);
       for (const msg of buffer.splice(0)) applyMessage(msg);
     } catch {
+      if(!current())return;
       booted = false; setConn(false); actionController?.disconnect();
       $('action-status').textContent = '현재 상태를 불러오지 못했습니다. 연결 또는 접속 링크를 확인하세요.';
-    } finally { opening = false; }
+    }
   };
   es.onerror = () => { booted = false; setConn(false); actionController?.disconnect(); };
+  if(appGameId) {
+    es.onretry=attempt=>setConn(false,`재접속 중… (${attempt}번째)`);
+    es.onfatal=async(code,{signal})=>{
+      ++openingAttempt;booted=false;clearInterval(poll);actionController?.disconnect();
+      if(code==='SESSION_INACTIVE') {
+        try {
+          const snapshot=await recoverFinalSnapshot({getSnapshot,signal});
+          if(signal.aborted)return;
+          if(snapshot && snapshot.revision>=revision){renderSnapshot(snapshot);revision=snapshot.revision;}
+        } catch { /* Rendering failure must not undo authoritative termination. */ }
+        finally {
+          if(!signal.aborted){
+            ui.sessionEnded=true;
+            try {paint();} finally {paintEndedControls();setConn(false,'게임 종료');}
+          }
+        }
+      } else setConn(false,'게임 연결이 종료되었습니다');
+    };
+  }
+
   const poll = setInterval(() => {
     if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(actionController.state.phase)) void actionController.reconcile();
   }, 2500);

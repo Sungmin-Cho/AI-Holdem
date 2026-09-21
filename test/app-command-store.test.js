@@ -410,12 +410,19 @@ test(
     assert.equal((await settle(manager, start.requestId)).status, "failed");
     assert.ok(manager.snapshot().gameId);
     assert.equal(manager.snapshot().state, "error");
+    assert.equal(manager.session,null);
+    const {startAppServer}=await import('../tools/app-server.js');
+    const app=await startAppServer({manager,token:'recovery-transport',storeDir:root,publicPort:0});t.after(()=>app.close());
+    const gameBefore=manager.snapshot();
+    const response=await fetch(`${app.origin}/api/game/${gameBefore.gameId}/events`,{headers:{authorization:'Bearer recovery-transport','x-game-epoch':gameBefore.gameEpoch}});
+    assert.equal(response.status,503);assert.equal((await response.json()).code,'SESSION_UNAVAILABLE');
     fail = false;
     const resume = payload(manager, "resume");
     manager.command(resume);
     const recovered = await settle(manager, resume.requestId);
     assert.equal(recovered.status, "succeeded", recovered.error);
     assert.equal(manager.snapshot().state, "playing");
+    assert.equal(manager.snapshot().gameId,gameBefore.gameId);
   },
 );
 test(

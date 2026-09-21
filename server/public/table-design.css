@@ -194,7 +194,7 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
   .pot-label {font-size:11px;}
   .pot-amount {font-size:18px;}
   .pots .amount-secondary {display:none;}
-  .action-feedback,#action-status,.idle-hint,.thinking {margin:0;}
+  .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
   .action-feedback {min-height:18px;}
   .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) {display:none;}
   /* Reserve the compact controls and status line across turns; errors and
@@ -300,3 +300,7 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 
 .plate-status {display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;}
+@media(max-width:600px) {
+  .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding-bottom:max(8px,env(safe-area-inset-bottom));}
+  .stage {padding-bottom:calc(140px + env(safe-area-inset-bottom));}
+}

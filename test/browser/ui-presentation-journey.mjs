@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -137,6 +137,10 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     view=ownView;await publish();checks.push('bet-owner-spacing');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    const sticky=await evaluate(`(()=>{scrollTo(0,0);const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect();return {position:getComputedStyle(a).position,bottom:r.bottom,top:r.top,height:innerHeight,plates:[...document.querySelectorAll('.seat .plate')].every(n=>{const p=n.getBoundingClientRect();return p.bottom<=r.top||p.top>=r.bottom;})}})()`);
+    assert.equal(sticky.position,'sticky');assert.ok(sticky.bottom<=sticky.height+1,JSON.stringify(sticky));assert.ok(sticky.top>=0);assert.equal(sticky.plates,true);
+    checks.push('mobile-action-bar-sticky');
+
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
     await browser(['fill','#intent-note','fixture intention']);

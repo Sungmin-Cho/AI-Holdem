@@ -360,3 +360,27 @@ test('Date-header offset accounts for rounding and round-trip midpoint',async()=
   const v={toAct:'user',handNo:1,handInProgress:true,legal:{decisionId:'d2'}};
   assert.equal(retainTurnDeadline(d,undefined,v,v),null);
 });
+
+test('action notice survives reconcile without changing authority and clears on success',async()=>{
+  let response={ok:false,code:'GAME_PAUSED'};const f=fixture({post:()=>response});await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  assert.deepEqual(f.controller.state.notice,{code:'GAME_PAUSED'});
+  assert.equal(f.controller.state.phase,'unreceived');assert.equal(f.controller.state.disabled,true);
+  const requestId=f.controller.state.requestId;await f.controller.reconcile();
+  assert.equal(f.controller.state.notice.code,'GAME_PAUSED');assert.equal(f.controller.state.requestId,requestId);
+  response={ok:true};await f.controller.retry();assert.equal(f.controller.state.notice,null);
+  assert.equal(f.sent.length,2);assert.equal(f.sent[0].requestId,f.sent[1].requestId);
+});
+test('asynchronous rejected receipt exposes a bounded reason as an informational notice',async()=>{
+  const f=fixture();await f.controller.connect(f.snapshot);await f.controller.send('call');
+  f.setStatus({ok:true,decisionId:legal.decisionId,requestId:f.sent[0].requestId,phase:'rejected',reason:'ILLEGAL_ACTION'});
+  await f.controller.reconcile();assert.equal(f.controller.state.phase,'rejected');assert.equal(f.controller.state.disabled,false);
+  assert.deepEqual(f.controller.state.notice,{code:'ILLEGAL_ACTION'});
+  f.controller.observe({legal:{...legal,decisionId:'d-2-preflop-1'}});assert.equal(f.controller.state.notice,null);
+});
+test('action notice formatter maps expected failures without displaying raw error text',async()=>{
+  const {formatActionNotice}=await import('../server/public/action-controller.js');
+  assert.equal(typeof formatActionNotice,'function');assert.match(formatActionNotice({code:'GAME_PAUSED'}),/일시정지/);
+  assert.match(formatActionNotice({code:'ILLEGAL_ACTION'}),/가능한/);
+  assert.doesNotMatch(formatActionNotice({code:'arbitrary private value'}),/arbitrary/);
+});
