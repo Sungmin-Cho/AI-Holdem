@@ -126,9 +126,9 @@ function rememberProved(file) {
 // descriptor's absence. A path that is gone is absent, not unproven. Re-prove for
 // as long as the listing keeps changing under the proof; only a listing that held
 // still across a proof makes an unproven path final. The bound is the number of
-// candidates: a listing can only change that many times before it is empty.
+// candidates plus a small retry allowance. Replacements can keep changing the
+// identity at one pathname, so exhausting this fixed cap always fails closed.
 function proveEntries(candidates, phase, prove = arePrivatePaths) {
-  const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
   // A symlink is never a private path, and every read of one is refused on
   // its own. Listing it here would veto the whole transaction instead — an
   // owner could not release its own lock beside a symlinked descriptor.
@@ -137,9 +137,15 @@ function proveEntries(candidates, phase, prove = arePrivatePaths) {
   let transportTries = 0;
   for (let attempt = 0; attempt <= candidates.length + 3; attempt += 1) {
     reasons = [];
-    if (prove(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
+    // Release/reacquire can restore the same paths while a Windows ACL child
+    // still observes the retired lock. Re-prove the replacement identity.
+    const before = presentListing(candidates);
+    entries = candidates.filter(({ file }) => present(file));
+    const proved = prove(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } });
+    const after = presentListing(candidates);
+    if (proved && after === before) return entries;
     const relisted = candidates.filter(({ file }) => present(file));
-    const listingChanged = listing(relisted) !== listing(entries);
+    const listingChanged = after !== before;
     const transport = reasons.some((reason) => /powershell:.*error=ETIMEDOUT/.test(reason));
     if (listingChanged) entries = relisted;
     else if (transport && transportTries < 3) transportTries += 1;

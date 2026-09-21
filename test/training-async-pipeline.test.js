@@ -268,6 +268,9 @@ function envelopeFromPublishArgs(args) {
 test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const explainCalls = [];
+  const explainGate = {};
+  explainGate.promise = new Promise(resolve => { explainGate.release = resolve; });
+  t.after(() => explainGate.release());
   const logs = [];
   const loop = createGameLoop({
     gameDir,
@@ -280,7 +283,7 @@ test('turn loop does not wait on training; machine UI arrives before explanation
       log: (record) => logs.push(record),
       training: {
         evaluate: makeEvaluate(),
-        explain: makeExplain({ delayMs: 5_000, calls: explainCalls }),
+        explain: makeExplain({ gate: explainGate.promise, calls: explainCalls }),
       },
     },
   });
@@ -306,14 +309,9 @@ test('turn loop does not wait on training; machine UI arrives before explanation
       return state.handNo >= 2 || state.phase === 'finalizing' || state.phase === 'done';
     },
   });
-  const nextHandAt = Date.now();
   assert.ok(hand1DoneAt.t, 'hand 1 did not complete');
-  const nextHandBudgetMs = process.platform === 'win32' ? 2_500 : 1_000;
-  assert.equal(
-    nextHandAt - hand1DoneAt.t < nextHandBudgetMs,
-    true,
-    `next hand waited on training (${nextHandAt - hand1DoneAt.t}ms)`,
-  );
+  // The next hand has started while explanation completion is still gated.
+  // This proves independence without conflating CI scheduling with training wait.
 
   await waitFor(() => (
     Object.values(createTrainingControl().loadAuthority(gameDir)?.items ?? {})[0] ?? null
@@ -326,6 +324,7 @@ test('turn loop does not wait on training; machine UI arrives before explanation
   assert.equal(first.explanation, undefined);
   assert.equal((machine.trainingAnnotations ?? []).length, 0);
 
+  explainGate.release();
   const withExplain = await waitFor(async () => {
     const snap = await snapshotOf(gameDir);
     const ann = (snap.trainingAnnotations ?? []).find((row) => row.field === 'explanation');

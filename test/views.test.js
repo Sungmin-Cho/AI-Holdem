@@ -1,3 +1,4 @@
+import { legalFromMessage } from '../tools/player-decision.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -409,4 +410,78 @@ test('#194 legal summary distinguishes unopened streets from the BB option', asy
   assert.equal(legalFromMessage(message).currentBet, 0);
   assert.match(message, /raise \d+~\d+ \(이 스트리트 첫 베팅도 raise\)/);
   assert.equal(legalFromMessage(message.replace(/ currentBet=0/, '')).currentBet, null);
+});
+
+function adviceLine(state, options) {
+  const summary = turnSummary(state, legalFor(state).toAct, options);
+  const lines = summary.split('\n');
+  const rows = lines.filter(line => line.startsWith('판단 보조:'));
+  assert.equal(rows.length, 1);
+  assert.equal(lines.indexOf(rows[0]), lines.findIndex(line => line.startsWith('이번 핸드 공개 액션:')) + 1);
+  assert.equal(lines[lines.indexOf(rows[0]) + 1].startsWith('가능한 액션:'), true);
+  assert.doesNotMatch(rows[0], /\d[shdc]|[TJQKA][shdc]|talk|\bnote\b|out:|handInProgress|canCheck=true|legal 수치:|decisionId: /);
+  assert.ok(summary.length < 6000);
+  const legal = legalFor(state);
+  assert.equal(summary.match(/decisionId: (\S+)/)[1], legal.decisionId);
+  assert.equal(legalFromMessage(summary).callAmount, legal.callAmount);
+  assert.equal(legalFromMessage(summary).maxRaiseTo, legal.maxRaiseTo);
+  return rows[0];
+}
+
+test('decision aid covers streets, table sizes and public-only invariance', () => {
+  for (const count of [2, 3, 9]) {
+    let state = createGame({ aiCount: count - 1 });
+    state = startHand(state, { deck: fixedDeck() }).state;
+    const seen = new Set();
+    while (!legalFor(state).handOver) {
+      const legal = legalFor(state);
+      const line = adviceLine(state);
+      seen.add(state.hand.street);
+      assert.equal(line.includes('현재 메이드:'), state.hand.board.length >= 3);
+      assert.equal(line.includes('콜 비용 없음'), legal.callAmount === 0);
+      const changed = structuredClone(state);
+      for (const id of Object.keys(changed.hand.holes)) if (id !== legal.toAct) changed.hand.holes[id] = ['PRIVATE_CARD_SENTINEL'];
+      assert.equal(turnSummary(changed, legal.toAct), turnSummary(state, legal.toAct));
+      state = applyAction(state, legal.toAct, legal.canCheck ? 'check' : 'call').state;
+    }
+    assert.deepEqual([...seen], ['preflop', 'flop', 'turn', 'river']);
+  }
+});
+
+test('decision aid computes capped call, BB, effective remaining stack and SPR', () => {
+  const state = setup3(5000, 5000, 5000);
+  const line = adviceLine(state);
+  assert.match(line, /필요 승률 40% \(콜 50 \/ 최종 팟 125\)/);
+  assert.match(line, /내 스택 100.0BB/);
+  assert.match(line, /유효 잔여 스택 99.5BB/);
+  assert.match(line, /SPR 66.3/);
+  assert.match(line, /남은 상대 2명\(올인 0명\)/);
+  state.seats[0].stack = 10;
+  assert.match(adviceLine(state), /부분 올인 콜\(필요 승률 생략\)/);
+  assert.doesNotMatch(adviceLine(state), /\d+%/);
+  state.hand.allIn = ['p1']; state.seats[1].stack = 0;
+  assert.match(adviceLine(state), /남은 상대 2명\(올인 1명\)/);
+});
+
+test('decision aid evaluator failure omits only that line on the actual summary path', () => {
+  let state = setup3(5000, 5000, 5000);
+  while (state.hand.street !== 'river') {
+    const legal = legalFor(state); state = applyAction(state, legal.toAct, legal.canCheck ? 'check' : 'call').state;
+  }
+  let calls = 0;
+  const summary = turnSummary(state, legalFor(state).toAct, { evaluate: () => { calls++; throw new Error('fixture'); } });
+  assert.equal(calls, 1);
+  assert.doesNotMatch(summary, /판단 보조:/);
+  assert.match(summary, /가능한 액션:/);
+  assert.match(summary, /"decisionId":"[^"\n]+","reason":"한 줄 사유\(선택\)","action":"fold\|check\|call\|raise","amount":숫자\?/);
+});
+
+test('decision aid omits SPR for an empty pot and never evaluates preflop', () => {
+  const state = setup3(5000, 5000, 5000);
+  state.hand.contribs = {user:0,p1:0,p2:0};
+  state.hand.bets = {user:0,p1:0,p2:0};
+  state.hand.currentBet = 0;
+  const line = adviceLine(state, {evaluate: () => assert.fail('preflop evaluation')});
+  assert.match(line, /콜 비용 없음/);
+  assert.doesNotMatch(line, /SPR|현재 메이드/);
 });

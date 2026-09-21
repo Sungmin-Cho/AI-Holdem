@@ -4417,7 +4417,7 @@ test('user VERSION_MISMATCH republishes the authoritative decision with narratio
   await stopRun(loop, running);
 });
 
-test('REQ-007: a moved engine decision consumes a VERSION_MISMATCH receipt without another effect', { timeout: 20_000 }, async (t) => {
+test('REQ-007: a moved engine decision consumes a VERSION_MISMATCH receipt without another effect', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t);
   const running = startRun(loop);
   const { lock, snapshot } = await waitForUserSnapshot(gameDir);
@@ -4430,7 +4430,7 @@ test('REQ-007: a moved engine decision consumes a VERSION_MISMATCH receipt witho
   assert.equal((await postUserAction(lock, { ...action, requestId: 'moved-decision' })).status, 200);
   const receiptFile = path.join(gameDir, 'ui-action-receipt.json');
   await waitWhileRunning(running, () => fs.existsSync(receiptFile) && readJson(receiptFile).phase === 'consumed',
-    'moved decision did not consume the stale receipt');
+    'moved decision did not consume the stale receipt', 3_000 * WIN32_SCALE);
   assert.equal(readJson(receiptFile).reason, 'VERSION_MISMATCH');
   await stopRun(loop, running);
   const after = readJson(path.join(gameDir, 'state.json'));
@@ -9866,9 +9866,17 @@ test('S2 mixed review sends eligible hands only and retains deterministic exclud
   archive.endStacks = { user: 'UNAVAILABLE_OUTCOME_SENTINEL' };
   fs.writeFileSync(archiveFile, JSON.stringify(archive));
   const upper = makeCoachAdapter();
-  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
-  await loop.resume();
-  assert.equal((await loop.run()).phase, 'done');
+  const logs = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, stateOverrides: { handNo: 2 }, loopOpts: { log: (entry) => logs.push(entry) },
+  });
+  try {
+    await loop.resume();
+    assert.equal((await loop.run()).phase, 'done');
+  } catch (error) {
+    t.diagnostic(JSON.stringify({ code: error.code, events: logs, loopState: readJson(path.join(gameDir, 'loop-state.json')) }));
+    throw error;
+  }
   assert.equal(upper.evaluatorStarts.length, 1);
   assert.equal(upper.synthesizerStarts.length, 1);
   assert.doesNotMatch(upper.evaluatorStarts[0].prompt, /d-1-preflop-0|UNAVAILABLE_OUTCOME_SENTINEL|"processStatus":"unavailable"/);
@@ -13333,8 +13341,8 @@ test('#192 S6: 영구히 unknown인 persisted identity를 반복 재개해도 cl
   await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
 
   const loopOpts = {
-    finalizeBudgetMs: 2_200,
-    finalizeCutoffLeadMs: 1_100,
+    finalizeBudgetMs: 2_200 * WIN32_SCALE,
+    finalizeCutoffLeadMs: 1_100 * WIN32_SCALE,
     processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
     signalProcess: (pid, signal) => { if (pid !== orphan.pid) process.kill(pid, signal); },
   };
