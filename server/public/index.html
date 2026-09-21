@@ -47,11 +47,13 @@
           </div>
           <div id="bets" class="bets" aria-hidden="true"></div>
           <div id="seats" class="seats"></div>
+          <aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden></aside>
         </div>
       </div>
 
       <div class="action-area">
-        <p id="thinking" class="thinking" hidden aria-live="polite"></p>
+        <p id="thinking" class="thinking" hidden></p>
+      <span id="thinking-announcement" class="sr-only" aria-live="polite"></span>
         <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
         <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 확인</button></div>
 

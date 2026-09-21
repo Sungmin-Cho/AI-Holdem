@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -40,7 +40,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','table-design.css','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','table-design.css','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
@@ -81,7 +81,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       assert.ok(fit.bottom<=height&&fit.top>=0,JSON.stringify(fit));
       assert.equal(fit.plates,true,JSON.stringify(fit));
       assert.equal(fit.overlap,false,JSON.stringify(fit));
-      const spacing=await evaluate(`(()=>{const shapes=[...document.querySelectorAll('.seat .plate,.seat .card,.seat .dealer-btn')].filter(n=>n.getClientRects().length).map(n=>({player:n.closest('.seat').dataset.playerId,...n.getBoundingClientRect().toJSON()}));let minGap=Infinity;for(let i=0;i<shapes.length;i++)for(let j=i+1;j<shapes.length;j++){const a=shapes[i],b=shapes[j];if(a.player!==b.player)minGap=Math.min(minGap,Math.hypot(Math.max(a.left-b.right,b.left-a.right,0),Math.max(a.top-b.bottom,b.top-a.bottom,0)));}const hero=document.querySelector('.seat.is-hero'),cards=[...hero.querySelectorAll('.card--hero')].map(n=>n.getBoundingClientRect());return {minGap,cardToPlate:hero.querySelector('.plate').getBoundingClientRect().top-Math.max(...cards.map(r=>r.bottom))}})()`);
+      const spacing=await evaluate(`(()=>{const shapes=[...document.querySelectorAll('.seat .plate,.seat .card,.seat .dealer-btn')].filter(n=>n.getClientRects().length).map(n=>({player:n.closest('.seat').dataset.playerId,kind:n.className,...n.getBoundingClientRect().toJSON()}));let minGap=Infinity,closest=null;for(let i=0;i<shapes.length;i++)for(let j=i+1;j<shapes.length;j++){const a=shapes[i],b=shapes[j];if(a.player!==b.player){const gap=Math.hypot(Math.max(a.left-b.right,b.left-a.right,0),Math.max(a.top-b.bottom,b.top-a.bottom,0));if(gap<minGap){minGap=gap;closest=[a,b];}}}const hero=document.querySelector('.seat.is-hero'),cards=[...hero.querySelectorAll('.card--hero')].map(n=>n.getBoundingClientRect());return {minGap,closest,cardToPlate:hero.querySelector('.plate').getBoundingClientRect().top-Math.max(...cards.map(r=>r.bottom))}})()`);
       assert.ok(spacing.minGap>=8,JSON.stringify({width,height,spacing}));
       assert.ok(spacing.cardToPlate>=8,JSON.stringify({width,height,spacing}));
       await browser(['screenshot',path.join(outDir,`desktop-fit-${width}-${height}.png`)]);
@@ -252,6 +252,45 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#cash-reset-note').hidden"),false);
     assert.match(await evaluate("document.querySelector('#participants-summary').textContent"),/^참가자 3명$/);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out,.seat .dealer-btn,.seat .is-allin,.seat .card--back').length"),0);checks.push('cash-reset');
+    assert.equal(await evaluate("document.querySelector('#hand-result').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#hand-result').textContent"),/상대 전원 폴드/);
+    checks.push('hand-result-banner');
+    assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
+    checks.push('last-action-badge');
+    await evaluate("window.__resultNode=document.querySelector('#hand-result').firstChild");
+    await publish([],{view:undefined});
+    assert.equal(await evaluate("window.__resultNode===document.querySelector('#hand-result').firstChild"),true);
+    checks.push('hand-result-survives-side-frames');
+    let runout=createGame({mode:'cash-training',aiCount:2,startStack:100,levelEvery:null,handLimit:202});runout.handNo=200;
+    const runoutDeal=startHand(runout,{deck:fixedDeck()});runout=runoutDeal.state;view=userView(runout);await publish(runoutDeal.events);
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>{const r=document.querySelector('#hand-result');window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!r.hidden});},50)");
+    let finalEvents;
+    while(!legalFor(runout).handOver){
+      const legal=legalFor(runout);const action=legal.canRaise?'raise':legal.canCheck?'check':'call';
+      const step=applyAction(runout,legal.toAct,action,action==='raise'?legal.maxRaiseTo:undefined);runout=step.state;view=userView(runout);
+      if(legalFor(runout).handOver)finalEvents=step.events;else await publish(step.events);
+    }
+    const count=finalEvents.filter(row=>row.type==='street').length;assert.equal(count,3,'preflop all-in must exercise all three streets');
+    const start=Date.now()+1000;
+    const hold={handNo:view.handNo,startAt:new Date(start).toISOString(),until:new Date(start+25000).toISOString(),runoutStepMs:5000,runoutStreets:count};
+    await publish(finalEvents,{resultHold:hold});
+    await evaluate("window.__stages=[]");
+    await new Promise(resolve=>setTimeout(resolve,6500));
+    const beforeReload=await evaluate("clearInterval(window.__stageTimer);({stages:window.__stages,cards:document.querySelectorAll('#board .card[role=img]').length})");
+    assert.equal(beforeReload.cards,3,'flop stage before reconnect');
+    await browser(['reload']);await browser(['wait','#board .card[role=img]']);
+    const afterReload=await evaluate("({cards:document.querySelectorAll('#board .card[role=img]').length,hidden:document.querySelector('#hand-result').hidden})");
+    assert.ok(afterReload.cards>=3 && afterReload.cards<5 && afterReload.hidden,'reconnect preserves current runout position');
+    checks.push('hand-result-reconnect');
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!document.querySelector('#hand-result').hidden}),50)");
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,start+count*5000+750-Date.now())));
+    const stages=[...beforeReload.stages,...await evaluate("clearInterval(window.__stageTimer);window.__stages")];
+    assert.ok(stages.some(row=>row.cards===3&&!row.visible),JSON.stringify(stages));
+    assert.ok(stages.some(row=>row.cards===4&&!row.visible),JSON.stringify(stages));
+    assert.ok(stages.some(row=>row.cards===5&&row.visible),JSON.stringify(stages));
+    assert.match(await evaluate("document.querySelector('.hand-result-countdown').textContent"),/다음 핸드 [0-9]+초/);
+    checks.push('runout-staged');
+
   } catch(error) {failure=error;try{await browser(['screenshot',path.join(outDir,'failure.png')]);}catch{}}
   finally {
     const cleanupErrors=[];

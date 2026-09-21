@@ -1,3 +1,4 @@
+import {actionVerbs} from './replay-format.js';
 /** No private cards or replay objects are accepted by this state projector. */
 export const viewerId = view => Object.hasOwn(view ?? {}, 'viewer') ? view.viewer : 'user';
 export const isSpectating = view => viewerId(view) === null && Object.hasOwn(view ?? {}, 'holeCardsByPlayerId');
@@ -49,4 +50,24 @@ export function blindPositions(view) {
   const next = offset => live[(at + offset) % live.length].playerId;
   if (live.length === 2) return {[next(0)]: 'D/SB', [next(1)]: 'BB'};
   return {[next(0)]: 'D', [next(1)]: 'SB', [next(2)]: 'BB'};
+}
+
+
+export function lastActionsBySeat(log) {
+  const rows=Array.isArray(log)?log:[];
+  const verbs=actionVerbs(rows);
+  const labels={check:'체크',call:'콜',fold:'폴드',bet:'벳',raise:'레이즈'};
+  let actions={};
+  for(const event of rows) {
+    if(event.type==='hand_start' || event.type==='street')actions={};
+    else if(event.type==='blinds_posted') {
+      (event.posts??[]).forEach((post,index)=>{actions[post.playerId]={label:index===0?'SB':'BB',amount:post.amount};});
+    } else if(event.type==='action') {
+      const verb=verbs.get(event);
+      if(!labels[verb])continue;
+      actions[event.playerId]={label:event.allIn?'올인':labels[verb],
+        amount:['bet','raise'].includes(verb) && Number.isSafeInteger(event.amount)?event.amount:null};
+    }
+  }
+  return actions;
 }

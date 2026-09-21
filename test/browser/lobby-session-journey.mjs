@@ -31,6 +31,9 @@ export const requiredJourneyChecks = [
   "keyboard-mobile",
   "real-user-store-unchanged",
   "owned-cleanup",
+  "hand-result-hold-respected",
+  "pause-during-ai-interval",
+  "skip-advances",
 ];
 export async function runLobbyJourney(outDir) {
   fs.mkdirSync(outDir, { recursive: true });
@@ -69,18 +72,20 @@ export async function runLobbyJourney(outDir) {
     return data?.result ?? data;
   };
   const check = (name) => checks.push(name);
-  const wait = async (predicate) => {
-    for (let i = 0; i < 200; i++) {
+  const wait = async (predicate, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (await predicate()) return;
       await new Promise((r) => setTimeout(r, 100));
     }
     throw new Error("journey state timeout " + app.manager.snapshot().state);
   };
-  const state = (expected) =>
+  const state = (expected, timeoutMs) =>
     wait(
       () =>
         app.manager.snapshot().state === expected &&
         !app.manager.snapshot().pendingRequestId,
+      timeoutMs,
     );
   const click = async (selector) => {
     await browser(["snapshot", "-i"]);
@@ -264,6 +269,50 @@ export async function runLobbyJourney(outDir) {
     await browser(['frame','#table']);await browser(['snapshot','-i']);await browser(['click','#review-close']);await browser(['frame','main']);
     check("completed-review-reload");
     await browser(["screenshot", path.join(outDir, "completed.png")]);
+    // Exercise real app -> loop pacing, not a mocked skip method.
+    await click('#result-modes');
+    await evaluate("document.querySelector('details').open=true");
+    await browser(['fill','input[name="hands"]','4']);
+    await browser(['select','[name="pace"]','fast']);
+    await browser(['select','#ai-count','1']);
+    await evaluate(`(() => {
+      window.__pace={paused:false,skipClicked:false};
+      window.__paceDriver=setInterval(()=>{
+        const doc=document.querySelector('#table')?.contentDocument;if(!doc)return;
+        if(document.querySelector('#status')?.textContent!=='게임 중')return;
+        const thinking=doc.querySelector('#thinking'),menu=document.querySelector('#menu');
+        if(!window.__pace.paused && thinking && !thinking.hidden && !menu.disabled){window.__pace.paused=true;menu.click();return;}
+        const result=doc.querySelector('#hand-result'),skip=doc.querySelector('.hand-result-skip');
+        if(result?.dataset.handNo==='2' && !result.hidden && skip && !skip.hidden && !skip.disabled){window.__pace.skipClicked=true;skip.click();}
+        const button=['#btn-check','#btn-call','#btn-fold'].map(id=>doc.querySelector(id)).find(node=>node&&!node.disabled&&!node.hidden);
+        if(button)button.click();
+      },30);
+    })()`);
+    const holds=new Map(),advances=new Map();let lastHand=0;
+    const paceWatch=setInterval(()=>{
+      try {
+        const snap=JSON.parse(fs.readFileSync(path.join(app.manager.current.sessionDir,'ui-snapshot.json')));
+        if(snap.resultHold&&!holds.has(snap.resultHold.handNo))holds.set(snap.resultHold.handNo,snap.resultHold);
+        const hand=readEngine().handNo;
+        if(hand>lastHand){advances.set(hand,Date.now());lastHand=hand;}
+      } catch {}
+    },20);
+    try {
+      await click('#start');await state('paused');
+      const pausedState=hashTree(app.manager.current.sessionDir);
+      await new Promise(resolve=>setTimeout(resolve,500));assert.equal(hashTree(app.manager.current.sessionDir),pausedState);
+      check('pause-during-ai-interval');
+      // Four paced hands plus finalization can exceed the ordinary UI wait on CI.
+      await click('#resume');await state('completed', 60000);
+      assert.ok(holds.has(1)&&advances.has(2));
+      assert.ok(advances.get(2)>=Date.parse(holds.get(1).until),'next hand preceded server hold deadline');
+      check('hand-result-hold-respected');
+      assert.equal(await evaluate('window.__pace.skipClicked'),true);
+      assert.ok(holds.has(2)&&advances.has(3));
+      assert.ok(advances.get(3)<Date.parse(holds.get(2).until),'skip did not shorten the active wait');
+      check('skip-advances');
+    } finally {clearInterval(paceWatch);await evaluate('clearInterval(window.__paceDriver)');}
+
   } catch (error) {
     failure = error;
     try {
