@@ -28,6 +28,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   let request = null;
   let phase = 'unknown';
   let errorCode = null;
+  let notice = null;
   let revision = 0;
   let inflight = null;
   let viewRevision = 0;
@@ -41,6 +42,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   const currentId = () => view?.legal?.decisionId ?? null;
   const state = () => Object.freeze({ phase, requestId: request?.requestId ?? null,
     decisionId: currentId(), canRetry: Boolean(request && request.decisionId === currentId() && !view?.gameOver && !sendingCount && !knownReceipt && ['unreceived', 'unknown'].includes(phase)), disabled: !currentId() || Boolean(view?.gameOver) || WAITING.has(phase),
+    notice: notice ? Object.freeze({...notice}) : null,
     message: phase === 'idle' && !currentId() ? (view?.gameOver ? '게임이 끝났습니다. 학습실에서 복습을 이어갈 수 있습니다.' : '다른 플레이어의 차례를 기다리고 있습니다.') : (MESSAGES[errorCode === 'STORAGE' ? 'storage' : phase] ?? MESSAGES.unknown), errorCode });
   const emit = () => { const next = state(); onState(next); return next; };
   const setPhase = (next, code = null) => { phase = next; errorCode = code; return emit(); };
@@ -76,7 +78,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   }
   function persist(next) {
     try { storage.setItem(key, JSON.stringify(next)); capture(next); return true; }
-    catch { setPhase('unknown', 'STORAGE'); return false; }
+    catch { notice={code:'STORAGE'};setPhase('unknown', 'STORAGE'); return false; }
   }
   async function bounded(fn) {
     const controller = new AbortController();
@@ -104,6 +106,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         if (Number.isInteger(snapshot.revision) && snapshot.revision < viewRevision) throw new Error('STALE_SNAPSHOT');
         const decisionId = snapshot.view?.legal?.decisionId ?? null;
         if (receipt.decisionId !== decisionId) throw new Error('STALE_STATUS');
+        if(decisionId!==currentId())notice=null;
         view = snapshot.view;
         if (Number.isInteger(snapshot.revision)) viewRevision = snapshot.revision;
         // An unreceived server read cannot replace an unread local intent.
@@ -124,6 +127,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         if (receipt.phase === 'rejected') {
           if (request && receipt.requestId !== request.requestId) throw new Error('RECEIPT_MISMATCH');
           release();
+          notice={code:['STALE_DECISION','ILLEGAL_ACTION','VERSION_MISMATCH'].includes(receipt.reason)?receipt.reason:'ACTION_REJECTED'};
           return setPhase('rejected');
         }
         rememberReceipt(receipt);
@@ -138,9 +142,10 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   return {
     get state() { return state(); },
     async connect(snapshot) {
+      if((snapshot?.view?.legal?.decisionId??null)!==currentId())notice=null;
       view = snapshot?.view ?? null;
       if (Number.isInteger(snapshot?.revision)) viewRevision = Math.max(viewRevision, snapshot.revision);
-      try { load(); } catch (error) { return setPhase('unknown', error.message); }
+      try { load(); } catch (error) {return setPhase('unknown', error.message); }
       return reconcile();
     },
     observe(nextView, { revision: nextRevision } = {}) {
@@ -151,7 +156,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
       const before = currentId();
       view = nextView;
       if (currentId() !== closedDecisionId) closedDecisionId = null;
-      if (currentId() !== before) { setPhase('unknown'); void reconcile(); }
+      if (currentId() !== before) { notice=null;setPhase('unknown'); void reconcile(); }
       else emit();
     },
     disconnect() { ++revision; return setPhase('unknown'); },
@@ -186,6 +191,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         // Observe a late settlement even after the timeout race has ended, but
         // never resurrect a request terminalized by rejection/advancement.
         if (stillCurrent() && response?.ok === true) {
+          notice=null;
           if (!knownReceipt || knownReceipt.requestId === captured.requestId) {
             rememberReceipt({ decisionId: captured.decisionId, requestId: captured.requestId, phase: 'accepted' });
           }
@@ -194,6 +200,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         return response;
       });
       if (stillCurrent() && result?.ok !== true) {
+        notice={code:result?.code??'NETWORK_ERROR'};
         if (result && ['DECISION_CLOSED', 'STALE_DECISION'].includes(result.code)) {
           closedDecisionId = captured.decisionId;
           release();
@@ -202,8 +209,30 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         await reconcile();
       }
     } catch (error) {
-      if (stillCurrent()) { errorCode = error.message; await reconcile(); }
+      if (stillCurrent()) { notice={code:error.code??error.message};errorCode = error.message; await reconcile(); }
     } finally { sendingCount -= 1; emit(); }
     return state();
   }
+}
+
+const NOTICE_MESSAGES={
+  GAME_PAUSED:'게임이 일시정지 중입니다. 재개한 뒤 행동하세요.',
+  NOT_YOUR_TURN:'지금은 내 차례가 아닙니다.',
+  DECISION_CLOSED:'이 차례는 이미 끝났습니다. 다음 차례를 기다려 주세요.',
+  STALE_DECISION:'차례가 바뀌었습니다. 현재 화면을 확인하세요.',
+  BAD_ACTION:'현재 가능한 액션과 금액을 확인하세요.',
+  ILLEGAL_ACTION:'현재 가능한 액션과 금액을 확인하세요.',
+  ACTION_REJECTED:'액션이 거절됐습니다. 현재 가능한 액션을 확인하세요.',
+  ACTION_ALREADY_RECEIVED:'이미 액션을 접수했습니다. 처리를 기다려 주세요.',
+  RATE_LIMIT:'요청이 많습니다. 잠시 후 다시 확인하세요.',
+  SESSION_INACTIVE:'게임이 종료되었습니다.',
+  STALE_GAME:'게임이 변경됐습니다. 로비에서 현재 게임을 확인하세요.',
+  VERSION_MISMATCH:'상태가 바뀌어 다시 맞추고 있습니다.',
+  RELAY_UNAVAILABLE:'게임 연결을 복구하고 있습니다. 잠시 기다려 주세요.',
+  SESSION_UNAVAILABLE:'게임 연결을 복구하고 있습니다. 잠시 기다려 주세요.',
+  STORAGE:'복구 정보를 저장할 수 없습니다. 브라우저 저장 공간을 확인하세요.',
+};
+export function formatActionNotice(notice) {
+  if (!notice) return '';
+  return Object.hasOwn(NOTICE_MESSAGES, notice.code) ? NOTICE_MESSAGES[notice.code] : '요청 결과를 확인하지 못했습니다. 연결 상태를 확인해 주세요.';
 }

@@ -315,7 +315,8 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
     status(currentDecision) {
       const row = read();
       const current = row?.decisionId === currentDecision ? row : null;
-      return { ok: true, decisionId: currentDecision, requestId: current?.requestId ?? null, phase: current?.phase ?? 'unreceived' };
+      return { ok: true, decisionId: currentDecision, requestId: current?.requestId ?? null, phase: current?.phase ?? 'unreceived',
+        ...(current?.phase==='rejected' && ['STALE_DECISION','ILLEGAL_ACTION','VERSION_MISMATCH'].includes(current.reason)?{reason:current.reason}:{}) };
     },
   };
 }

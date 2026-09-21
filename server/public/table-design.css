@@ -194,7 +194,7 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
   .pot-label {font-size:11px;}
   .pot-amount {font-size:18px;}
   .pots .amount-secondary {display:none;}
-  .action-feedback,#action-status,.idle-hint,.thinking {margin:0;}
+  .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
   .action-feedback {min-height:18px;}
   .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) {display:none;}
   /* Reserve the compact controls and status line across turns; errors and
@@ -300,3 +300,21 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 
 .plate-status {display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;}
+#action-options-toggle {display:none;}
+@media(max-width:600px) {
+  .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));gap:6px;}
+  .action-bar:not(.options-expanded) {display:grid;grid-template-columns:1fr 1fr 1.5fr;}
+  .action-summary {grid-column:1/-1;font-size:11px;line-height:1.25;}
+  .action-bar:not(.options-expanded) .raise-panel,.action-bar:not(.options-expanded) .intent-note-wrap {display:none;}
+  .action-bar:not(.options-expanded) .act-group {display:contents;}
+  .action-bar:not(.options-expanded) .btn {width:auto;min-width:0;height:44px;min-height:44px;padding:4px;}
+  #action-options-toggle {display:flex;grid-column:3;grid-row:3;font-size:11px;}
+  .action-bar:not(.options-expanded) #btn-raise,.action-bar:not(.options-expanded) #btn-allin-only {grid-column:3;grid-row:2;}
+  .action-bar.options-expanded {position:relative;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table,.stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table.is-crowded {height:250px;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table-wrap {padding:12px 0 52px;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:not(.is-hero) .seat-cards {display:none;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate {padding:3px 4px;gap:1px;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {display:none;}
+  .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
+}

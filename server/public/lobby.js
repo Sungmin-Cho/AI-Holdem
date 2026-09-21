@@ -195,8 +195,10 @@ function render() {
       `/table?${new URLSearchParams({ appGame: snapshot.gameId, epoch: snapshot.gameEpoch })}`;
   }
 }
+let refreshFailures=0;
 async function refresh() {
   snapshot = await api("/api/app");
+  refreshFailures=0;
   if (!appliedDefaults && snapshot.defaultSetup) {
     const defaults = snapshot.defaultSetup;
     for (const [key, value] of Object.entries(defaults)) {
@@ -462,5 +464,5 @@ $("room-close")?.addEventListener("click", () => roomOp("close"));
 await recoverCommand();
 setInterval(() => {
   if (!busy)
-    void (commands.pending ? recoverCommand() : refresh().catch(showError));
+    void (commands.pending ? recoverCommand() : refresh().catch(error=>{if(++refreshFailures>=3){$("status").textContent="로비 재접속 중…";showError(error);}}));
 }, 1000);

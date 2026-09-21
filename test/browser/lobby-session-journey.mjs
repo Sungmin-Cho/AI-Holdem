@@ -21,6 +21,7 @@ export const requiredJourneyChecks = [
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
+  "host-iframe-survives-error-resume",
   "setup-back-no-resume",
   "menu-close-reopen",
   "restart-new-id",
@@ -50,6 +51,7 @@ export async function runLobbyJourney(outDir) {
       "npx",
       [
         "--yes",
+        "--prefer-offline",
         "agent-browser@0.36.0",
         "--session",
         session,
@@ -61,7 +63,7 @@ export async function runLobbyJourney(outDir) {
     assert.equal(
       r.exitCode,
       0,
-      `${args[0]}: ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
+      `${args[0]} (timeout=${r.timedOut}, signal=${r.signal}, spawn=${r.spawnError}): ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
     );
     const result = JSON.parse(r.stdout);
     assert.notEqual(result.success, false, JSON.stringify(result));
@@ -150,6 +152,27 @@ export async function runLobbyJourney(outDir) {
         "document.querySelector('#table').contentDocument.querySelector('#action-status')?.textContent.length>0",
       ),
     );
+    // Keep authentication identity valid so the action reaches the real loop.
+    // Damage only this owned fixture while an actual user action is pending.
+    // The real loop fails and cleans up; restore the bytes before ordinary resume.
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    await evaluate("window.__recoveryDocument=document.querySelector('#table').contentDocument");
+    const engineFile=path.join(app.manager.current.sessionDir,'state.json');
+    const engineBeforeFault=fs.readFileSync(engineFile);
+    const beforeFault=app.manager.snapshot();
+    try {
+      fs.writeFileSync(engineFile,JSON.stringify({...JSON.parse(engineBeforeFault),seats:null}));
+      await evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold').click()");
+      await state('error');
+      assert.equal(app.manager.session,null);
+      const unavailable=await fetch(`${app.origin}/api/game/${beforeFault.gameId}/events`,{headers:{authorization:`Bearer ${app.token}`,'x-game-epoch':beforeFault.gameEpoch}});
+      assert.equal(unavailable.status,503);assert.equal((await unavailable.json()).code,'SESSION_UNAVAILABLE');
+    } finally {fs.writeFileSync(engineFile,engineBeforeFault);}
+    await click('#recover');await state('playing');
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
+    assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
+    check('host-iframe-survives-error-resume');
     await click("#menu");
     await state("paused");
     const paused = hashTree(app.manager.current.sessionDir);
