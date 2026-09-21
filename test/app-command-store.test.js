@@ -493,17 +493,18 @@ test("lobby notices an external loop owner has exited", async () => {
 
 for (const pace of [undefined, 'normal']) {
   test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
+    const expectSuccess=async requestId=>{const receipt=await settle(manager,requestId);assert.equal(receipt.status,'succeeded',JSON.stringify({requestId,status:receipt.status,error:receipt.error}));};
     const root=createOwnedTempDir('lobby-pace');
     let manager=createSessionManager({storeDir:root,resolver});
     t.after(()=>manager.close());
     await manager.initialize();
     const start={...payload(manager),setup:{aiCount:1,hands:2,...(pace?{pace}:{})}};
-    manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');
-    let pause=payload(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
+    manager.command(start);await expectSuccess(start.requestId);
+    let pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
     assert.equal(manager.snapshot().setup.pace,pace);
     await manager.close();
     manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
-    const resume=payload(manager,'resume');manager.command(resume);assert.equal((await settle(manager,resume.requestId)).status,'succeeded');
+    const resume=payload(manager,'resume');manager.command(resume);await expectSuccess(resume.requestId);
     const dir=manager.current.sessionDir;let holdSeen=false;const decisions=new Set();
     const deadline=Date.now()+(process.platform==='win32'?120000:20000);
     while(Date.now()<deadline) {
@@ -525,8 +526,8 @@ for (const pace of [undefined, 'normal']) {
     }
     assert.ok(JSON.parse(fs.readFileSync(path.join(dir,'state.json'))).handNo>=2);
     assert.equal(holdSeen,pace==='normal');
-    pause=payload(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
-    const restart=payload(manager,'restart');manager.command(restart);assert.equal((await settle(manager,restart.requestId)).status,'succeeded');
+    pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
+    const restart=payload(manager,'restart');manager.command(restart);await expectSuccess(restart.requestId);
     assert.notEqual(manager.current.sessionDir,dir);
     assert.equal(manager.snapshot().setup.pace,pace);
   });
