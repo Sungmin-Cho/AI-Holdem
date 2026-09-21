@@ -3269,7 +3269,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     readJsonOptional(coachSnapshotPath, 'UI_SNAPSHOT')?.view?.gameOver === true
   );
 
-  const ensureGameOverViewPublished = async () => {
+  const ensureGameOverViewPublished = async ({ recover = true } = {}) => {
+    const publish = recover ? executePublish : runPublish;
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     if (engine?.gameOver !== true) return;
     for (let step = 0; step < 4; step += 1) {
@@ -3277,18 +3278,37 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         if (fs.existsSync(publishAttemptPath)) {
           if (!fs.existsSync(turnPath)) writeJsonAtomic(turnPath, { ok: true });
-          await executePublish(['--from', turnPath, '--retry']);
+          await publish(['--from', turnPath, '--retry']);
           continue;
         }
         const envelope = await runCli(['step']);
         writeJsonAtomic(turnPath, envelope);
-        await executePublish(['--from', turnPath, '--view-only']);
+        await publish(['--from', turnPath, '--view-only']);
       } catch (error) {
         if (error.code === 'ATTEMPT_PENDING') continue;
         appendNotice(`gameOver 뷰 게시 실패: ${error.code ?? 'ERROR'}`);
         return;
       }
     }
+  };
+
+  const publishAbortEndView = async () => {
+    let pin;
+    try {
+      const engine=readJsonOptional(engineStatePath,'ENGINE_STATE');
+      if(engine?.result!=='abort' || engine.gameOver!==true || !serverIdentity || !serverPid)return;
+      pin=openServerLockPin();
+      if(!pin)return;
+      const lock=assertPinnedServerLock(pin);
+      if(lock.sessionToken!==engine.sessionToken || lock.serverPid!==serverPid ||
+        serverIdentity.pid!==serverPid || startTimeOf(serverPid)!==serverIdentity.startTime || !processAlive(serverPid))return;
+      await assertServerBinding(lock);
+      assertPinnedServerLock(pin);
+      if(startTimeOf(serverPid)!==serverIdentity.startTime)return;
+      await ensureGameOverViewPublished({ recover: false });
+    } catch(error) {
+      appendNotice(`중도 종료 뷰 게시를 생략했습니다: ${error.code??'ERROR'}`);
+    } finally {closeServerLockPin(pin);}
   };
 
   const humanDeadline = (next, { renew = false } = {}) => {
@@ -6711,6 +6731,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await runCli(['end','--result','abort','--operation-id',terminalOperation]);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,endedAt:isoNow(now)});
       await retryControlWrite(()=>control.set('aborted'));
+      await publishAbortEndView();
       await requestStop();
       return null;
     }
@@ -7349,6 +7370,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await adoptAbortedRelay(engineState);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
     } finally {unit.finish();}
+    await publishAbortEndView();
     await requestStop();
     return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
   };
@@ -7399,6 +7421,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else writeLoopState({aborting:undefined});
     } finally {unit.finish();}
     if (checkpoint.mode==='abort') {
+      await publishAbortEndView();
       await requestStop();
       return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
     }

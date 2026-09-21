@@ -8,6 +8,8 @@ import os from "node:os";
 import { loadUiState, publicSnapshot } from "../server/server.js";
 import { ensureStudyService } from "./study-service.js";
 import { createRoomManager } from "./room-manager.js";
+import { createSessionSummaryCache } from "./session-summary.js";
+import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
@@ -108,6 +110,7 @@ export async function startAppServer({
   tlsCert = null,
   tlsKey = null,
   onStop = () => {},
+  summaryCache = createSessionSummaryCache(),
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
@@ -177,6 +180,43 @@ export async function startAppServer({
     sseByParticipant.delete(participantId);
   }
   room.addRevokeListener?.((event) => revokeParticipant(event.participantId));
+  const summaries = summaryCache;
+  const summaryRequests = new Map();
+  const summaryStates = new Set(['finalizing','completed','ended']);
+  let summaryGameId = manager.current?.gameId;
+  const summaryInput = () => ({gameId:manager.current.gameId,sessionDir:manager.current.sessionDir});
+  function stateChanged(snapshot) {
+    if (summaryGameId !== snapshot.gameId) {
+      summaries.clear(); summaryRequests.clear(); summaryGameId=snapshot.gameId;
+    }
+    if (summaryStates.has(snapshot.state) && manager.current?.gameId===snapshot.gameId) {
+      void summaries.get(summaryInput()).catch(()=>{});
+    }
+  }
+  async function serveSummary(req,res,gameId,authenticate=null) {
+    if (req.method !== 'GET') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+    const snapshot=manager.snapshot();
+    if(manager.current?.gameId!==gameId || req.headers['x-game-epoch']!==snapshot.gameEpoch) {
+      json(res,409,{code:'STALE_GAME'});return;
+    }
+    if(!summaryStates.has(snapshot.state)){json(res,409,{code:'SESSION_ACTIVE'});return;}
+    if(authenticate) {
+      const key=req.headers.authorization,now=Date.now();
+      for(const [value,time] of summaryRequests)if(now-time>=2000)summaryRequests.delete(value);
+      if(summaryRequests.has(key)){json(res,429,{code:'RATE_LIMIT'});return;}
+      summaryRequests.set(key,now);
+    }
+    try {
+      const summary=await summaries.get(summaryInput());
+      // A cold build yields. Recheck room credentials and game identity before disclosure.
+      if(authenticate)authenticate();
+      const latest=manager.snapshot();
+      if(manager.current?.gameId!==gameId || latest.gameEpoch!==snapshot.gameEpoch || !summaryStates.has(latest.state)) {
+        json(res,409,{code:'STALE_GAME'});return;
+      }
+      json(res,200,summary);
+    } catch(error){const code=['UNAUTHORIZED','NOT_SEATED'].includes(error.code)?error.code:'SUMMARY_UNAVAILABLE';json(res,code==='UNAUTHORIZED'?401:code==='NOT_SEATED'?409:503,{code});}
+  }
   const committedCache = new Map();
   const readCommitFile = name => {
     const file = path.join(manager.current.sessionDir, name);
@@ -433,6 +473,8 @@ export async function startAppServer({
         setImmediate(onStop);
         return;
       }
+      const summaryMatch=/^\/api\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
+      if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
       const skipMatch = /^\/api\/game\/([0-9a-f-]{36})\/skip-result$/.exec(pathname);
       if (skipMatch) {
         if (req.method !== "POST") { json(res, 405, {code:"METHOD_NOT_ALLOWED"}); return; }
@@ -538,12 +580,15 @@ export async function startAppServer({
               const engine = JSON.parse(
                 fs.readFileSync(path.join(manager.current.sessionDir, "state.json")),
               );
+              const ranking=rankPlayers({summary:summaries.peek(snap.gameId),view:{seats:engine.seats,mode:engine.config?.mode,sessionNet:engine.sessionNet}});
+              const byId=new Map(ranking.map(row=>[row.playerId,row]));
               final = {
                 stacks: (engine.seats ?? []).map((seat) => ({
                   playerId: seat.playerId,
                   name: seat.name,
                   stack: seat.stack,
                   out: seat.out === true,
+                  ...(Number.isSafeInteger(byId.get(seat.playerId)?.net)?{net:byId.get(seat.playerId).net,rank:byId.get(seat.playerId).rank}:{}),
                 })),
                 result: engine.result ?? null,
                 winnerId: engine.winnerId ?? null,
@@ -598,6 +643,17 @@ export async function startAppServer({
           json(res, error.code === "UNAUTHORIZED" ? 401 : error.code === "ROOM_LOCKED" ? 409 : 404, { code: error.code ?? "UNAUTHORIZED" });
         }
         return;
+      }
+      const publicSummary=/^\/api\/p\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
+      if(publicSummary) {
+        const authenticate=()=>{
+          const me=participantAuth();
+          if(me.roomRole!=='spectator' && (!me.playerId || me.boundGameId!==manager.current?.gameId))throw Object.assign(new Error(),{code:'NOT_SEATED'});
+          return me;
+        };
+        try {const me=authenticate();room.touch(me.participantId);attachResponse(me.participantId,res);}
+        catch(error){json(res,error.code==='UNAUTHORIZED'?401:409,{code:error.code??'UNAUTHORIZED'});return;}
+        await serveSummary(req,res,publicSummary[1],authenticate);return;
       }
       const pMatch =
         /^\/api\/p\/game\/([0-9a-f-]{36})\/(snapshot|events|action-status|action)$/.exec(
@@ -666,7 +722,9 @@ export async function startAppServer({
       publicServer.listen(publicPort, publicListen, resolve);
     });
   }
+  stateChanged(manager.snapshot());
   return {
+    stateChanged,
     server,
     origin,
     publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
