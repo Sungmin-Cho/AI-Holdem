@@ -37,3 +37,13 @@ test('fresh retry has a separate confirmation explaining seat memory loss',()=>{
   assert.match(js,/RETRY_NOT_APPLIED:/);
   assert.match(js,/재시도를 다시 선택/);
 });
+
+test('new lobby games explicitly select normal pace with four Korean labels', () => {
+  const html=read('lobby.html'),js=read('lobby.js');
+  assert.match(html, /<select name="pace">/);
+  for(const [value,label] of [['instant','즉시'],['fast','빠름'],['normal','보통'],['slow','느림']]) {
+    assert.match(html,new RegExp(`<option value="${value}"[^>]*>${label}</option>`));
+  }
+  assert.match(html, /<option value="normal" selected>/);
+  assert.match(js, /"pace",/);
+});

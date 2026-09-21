@@ -97,6 +97,7 @@ export async function runLobbyJourney(outDir) {
     app = await startAppService(root, {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
     });
+    app.manager.setPrefill({pace:'instant'});
     // Reproduce an already-running server whose allowlist predates the UI update.
     outdatedServer = http.createServer(async (req, res) => {
       if (req.url === '/shared/game-setup.js') {

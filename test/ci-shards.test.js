@@ -71,7 +71,7 @@ test('run argv includes concurrency 1 and the 45-minute file timeout', () => {
 test('#206 named partitions reserve headroom for Windows recovery', () => {
   assert.deepEqual(new Set(Object.keys(NAMED)), new Set(['study-a', 'study-b', 'learning-a', 'learning-b', 'loop', 'loop-b', 'recovery']));
   assert.deepEqual(NAMED.loop, ['game-loop.test.js']);
-  assert.deepEqual(NAMED['loop-b'], ['game-loop-multiplayer.test.js']);
+  assert.deepEqual(NAMED['loop-b'], ['game-loop-multiplayer.test.js', 'pace-loop.test.js']);
   assert.deepEqual(NAMED.recovery, ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js', 'relay-seat-scoping.test.js']);
   assert.deepEqual(NAMED['study-a'], ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js']);
   assert.deepEqual(NAMED['study-b'], ['study-service-recovery.test.js', 'room-manager.test.js']);

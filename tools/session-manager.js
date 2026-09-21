@@ -334,6 +334,7 @@ export function createSessionManager({
         controlProtocolVersion: 1,
         startPaused: recover,
         appSetup: setup,
+        pace: setup?.pace ?? "instant",
         actionTimeoutMs: actionTimeoutMsFor(setup),
       },
       onReserve: (previous) => {
@@ -369,6 +370,7 @@ export function createSessionManager({
     return true;
   }
   async function recoverPaused() {
+    const setup = readSetupFile();
     const launched = await launchTracked(
       { storeDir: root, resume: true, port: 0, playerRuntime },
       {
@@ -383,7 +385,8 @@ export function createSessionManager({
         loopOptions: {
           controlProtocolVersion: 1,
           startPaused: true,
-          actionTimeoutMs: actionTimeoutMsFor(readSetupFile()),
+          actionTimeoutMs: actionTimeoutMsFor(setup),
+          pace: setup?.pace ?? "instant",
         },
       },
     );

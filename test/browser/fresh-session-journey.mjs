@@ -29,7 +29,7 @@ export async function runFreshSessionJourney(outDir) {
   const click=selector=>browser(['click',selector]);
   try {
     app=await startAppService(root,{resolver:async()=>({player:adapter,upper:null,notices:[]})});
-    app.manager.setPrefill({aiCount:5,opponentRuntime:'llm',playerSoftMs:100,playerHardMs:1000});
+    app.manager.setPrefill({pace:'instant',aiCount:5,opponentRuntime:'llm',playerSoftMs:100,playerHardMs:1000});
     await browser(['open',app.url]);
     await wait(()=>evaluate("!document.querySelector('#start').disabled"));
     await click('#start');

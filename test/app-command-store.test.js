@@ -490,3 +490,45 @@ test("lobby notices an external loop owner has exited", async () => {
   assert.ok(manager.snapshot().allowedCommands.includes("resume"));
   await manager.close();
 });
+
+for (const pace of [undefined, 'normal']) {
+  test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
+    const expectSuccess=async requestId=>{const receipt=await settle(manager,requestId);assert.equal(receipt.status,'succeeded',JSON.stringify({requestId,status:receipt.status,error:receipt.error}));};
+    const root=createOwnedTempDir('lobby-pace');
+    let manager=createSessionManager({storeDir:root,resolver});
+    t.after(()=>manager.close());
+    await manager.initialize();
+    const start={...payload(manager),setup:{aiCount:1,hands:2,...(pace?{pace}:{})}};
+    manager.command(start);await expectSuccess(start.requestId);
+    let pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
+    assert.equal(manager.snapshot().setup.pace,pace);
+    await manager.close();
+    manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
+    const resume=payload(manager,'resume');manager.command(resume);await expectSuccess(resume.requestId);
+    const dir=manager.current.sessionDir;let holdSeen=false;const decisions=new Set();
+    const deadline=Date.now()+(process.platform==='win32'?120000:20000);
+    while(Date.now()<deadline) {
+      const snap=JSON.parse(fs.readFileSync(path.join(dir,'ui-snapshot.json')));
+      if(snap.resultHold) {
+        holdSeen=true;assert.equal(pace,'normal');
+        assert.equal(Date.parse(snap.resultHold.until)-Date.parse(snap.resultHold.startAt),3500+800*snap.resultHold.runoutStreets);
+        manager.session.loop.skipHandResult(snap.resultHold.handNo);
+      }
+      if(snap.view.handNo>=2)break;
+      const legal=snap.view.legal;
+      if(snap.view.toAct==='user' && legal?.decisionId && !decisions.has(legal.decisionId)) {
+        const lock=JSON.parse(fs.readFileSync(path.join(dir,'lock.json')));
+        const response=await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({token:lock.sessionToken,decisionId:legal.decisionId,requestId:randomUUID(),action:legal.canCheck?'check':'fold'})});
+        assert.equal(response.ok,true);decisions.add(legal.decisionId);
+      }
+      await new Promise(r=>setTimeout(r,10));
+    }
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dir,'state.json'))).handNo>=2);
+    assert.equal(holdSeen,pace==='normal');
+    pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
+    const restart=payload(manager,'restart');manager.command(restart);await expectSuccess(restart.requestId);
+    assert.notEqual(manager.current.sessionDir,dir);
+    assert.equal(manager.snapshot().setup.pace,pace);
+  });
+}

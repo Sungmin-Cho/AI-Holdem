@@ -43,7 +43,7 @@ export async function runRecoveryExitJourney(outDir) {
     for(const kind of ['restart','end']) {
       app=await startAppService(root,{resolver});
       if(kind==='restart') {
-        app.manager.setPrefill({aiCount:5,opponentRuntime:'llm',playerSoftMs:1000,playerHardMs:10000});
+        app.manager.setPrefill({pace:'instant',aiCount:5,opponentRuntime:'llm',playerSoftMs:1000,playerHardMs:10000});
         await openAndVerify();
         await wait(()=>evaluate("!document.querySelector('#start').disabled"));await click('#start');
       } else {

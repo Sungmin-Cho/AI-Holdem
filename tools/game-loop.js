@@ -10,6 +10,7 @@ import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
 import { cliModeDefaults } from '../shared/game-setup.js';
+import { paceFor } from '../shared/pace.js';
 import {checkDealBiasResume} from '../shared/deal-selection.js';
 import { playerBudget, playerFailureCategory } from '../shared/player-budget.js';
 import { createSessionControl, retryControlWrite } from './session-control.js';
@@ -652,6 +653,7 @@ export function parseGameLoopArgs(argv) {
     ['--player-runtime', 'playerRuntime'],
     ['--practice-focus-file', 'practiceFocusFile'],
     ['--mode', 'mode'],
+    ['--pace', 'pace'],
     ['--stack-bb', 'stackBb'],
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
@@ -700,6 +702,7 @@ export function parseGameLoopArgs(argv) {
   if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
     throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
   }
+  try { paceFor(parsed); } catch { throw codedError('USAGE', '--pace는 instant, fast, normal 또는 slow입니다.'); }
   if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
     throw codedError('USAGE', '--solver는 [a-z0-9-] 64자 이내 adapterId입니다.');
   }
@@ -833,6 +836,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const root = path.resolve(gameDir);
   const lockRoot = path.resolve(lockDir);
   const now = opts.now ?? (() => new Date());
+  const pace = paceFor(opts);
+  const paceNow = () => new Date(now()).getTime();
   const requestedPort = opts.port ?? 8877;
   const pollMs = opts.pollMs ?? 20;
   // 아래 셋은 전부 "정상인데 느린" 기기에 대한 인내심이지 지연 예산이 아니다. 이
@@ -964,6 +969,36 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let recoveringControl = false;
   let pauseRequested = !!opts.startPaused;
   let waitController = null;
+  let resultHoldState = null;
+  let resultHoldController = null;
+  let policyPaceController = null;
+  let lastPlayPublishAt = null;
+  const paceSleep = async (ms, kind) => {
+    if (ms <= 0 || stopRequested || pauseRequested) return;
+    const controller = new AbortController();
+    if (kind === 'result') resultHoldController = controller;
+    else policyPaceController = controller;
+    try {
+      if (opts.paceSleep) await opts.paceSleep(ms, { signal: controller.signal, kind });
+      else await new Promise(resolve => {
+        const finish = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolve(); };
+        const timer = setTimeout(finish, ms);
+        controller.signal.addEventListener('abort', finish, { once: true });
+        if (controller.signal.aborted) finish();
+      });
+    } finally {
+      if (resultHoldController === controller) resultHoldController = null;
+      if (policyPaceController === controller) policyPaceController = null;
+    }
+  };
+  const skipHandResult = handNo => {
+    if (!resultHoldState || resultHoldState.handNo !== handNo || stopRequested
+      || (readJsonOptional(playersPath, 'PLAYERS') ?? []).filter(isHumanSeat).length !== 1) return { skipped: false };
+    resultHoldState.skipped = true;
+    resultHoldController?.abort();
+    return { skipped: true };
+  };
+
   let parkWake = null;
   let pauseCompletion = null;
   let resolvePause = null;
@@ -3263,6 +3298,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시를 시작하지 않습니다.');
     }
     envelope = await prepareHintEnvelope(envelope);
+    let hold = null;
+    if (envelope.handOver === true && !envelope.gameOver && !flags.includes('--view-only') && !flags.includes('--retry')) {
+      const events = envelope.events ?? [];
+      const runoutStreets = events.some(event => event.type === 'showdown' || event.type === 'pot_award')
+        ? events.filter(event => event.type === 'street').length : 0;
+      const start = paceNow();
+      const until = start + pace.handResultDwellMs + runoutStreets * pace.runoutStepMs;
+      if (until > start) {
+        hold = { handNo: envelope.view?.handNo ?? envelope.handNo, startAt: new Date(start).toISOString(), until: new Date(until).toISOString(), runoutStepMs: pace.runoutStepMs, runoutStreets };
+        flags = [...flags, '--result-hold', [hold.handNo, hold.startAt, hold.until, hold.runoutStepMs, hold.runoutStreets].join('|')];
+      }
+    }
     writeJsonAtomic(turnPath, envelope);
     const timeoutMs = Number(opts.actionTimeoutMs) || 0;
     const hasDeadline = flags.some((flag) => flag === '--turn-deadline' || String(flag).startsWith('--turn-deadline'));
@@ -3274,92 +3321,105 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let resolvingPending = false;
     const recovered = new Set();
     let out;
-    for (;;) {
-      try {
-        // A retry with a still-present record publishes the old exact body; once that
-        // succeeds the current transition must still publish. If the record vanished
-        // before invocation, --retry publishes the current turn itself and is terminal.
-        const resolvingRecordedBody = resolvingPending
-          && fs.existsSync(path.join(root, '.publish-attempt.json'));
-        out = await executePublish(args);
-        if (resolvingPending && resolvingRecordedBody) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        break;
-      } catch (error) {
-        const code = error.code;
-        if (code === 'NO_ATTEMPT' && resolvingPending) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        if (recovered.has(code)) throw error;
-        if (code === 'ATTEMPT_PENDING') {
-          recovered.add(code);
-          assertNotStopping();
-          await opts.attemptPendingCheckpoint?.();
-          assertNotStopping();
-          resolvingPending = true;
-          args = ['--from', turnPath, '--retry'];
-          continue;
-        }
-        if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
-          recovered.add(code);
-          assertNotStopping();
-          const pendingPath = path.join(root, '.publish-attempt.json');
-          try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    // Register before invoking the publisher: the browser can receive the hold
+    // before its ACK returns. Keep any skip/pause admitted in that interval.
+    const registeredHold = hold ? { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested } : null;
+    if (registeredHold) resultHoldState = registeredHold;
+    try {
+      for (;;) {
+        try {
+          // A retry with a still-present record publishes the old exact body; once that
+          // succeeds the current transition must still publish. If the record vanished
+          // before invocation, --retry publishes the current turn itself and is terminal.
+          const resolvingRecordedBody = resolvingPending
+            && fs.existsSync(path.join(root, '.publish-attempt.json'));
+          out = await executePublish(args);
+          if (resolvingPending && resolvingRecordedBody) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          const synchronized = await runCli(['step']);
-          assertNotStopping();
-          writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
-          const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
-          if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
-          const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
-          currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
-          args = currentArgs;
-          resolvingPending = false;
-          log('publish-recovery', { code, mode: 'view-only-resync' });
-          continue;
-        }
-        if (code === 'BAD_SNAPSHOT') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          const snapshotPath = path.join(root, 'ui-snapshot.json');
-          try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+          break;
+        } catch (error) {
+          const code = error.code;
+          if (code === 'NO_ATTEMPT' && resolvingPending) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'snapshot-rebuild' });
-          continue;
+          if (recovered.has(code)) throw error;
+          if (code === 'ATTEMPT_PENDING') {
+            recovered.add(code);
+            assertNotStopping();
+            await opts.attemptPendingCheckpoint?.();
+            assertNotStopping();
+            resolvingPending = true;
+            args = ['--from', turnPath, '--retry'];
+            continue;
+          }
+          if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
+            recovered.add(code);
+            assertNotStopping();
+            const pendingPath = path.join(root, '.publish-attempt.json');
+            try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            const synchronized = await runCli(['step']);
+            assertNotStopping();
+            writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
+            const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
+            if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
+            if (resultHoldState === registeredHold) resultHoldState = null;
+            hold = null;
+            const recoveryFlags = flags.filter((flag, index) => flag !== '--retry' && flag !== '--view-only'
+              && flag !== '--result-hold' && flags[index - 1] !== '--result-hold');
+            currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
+            args = currentArgs;
+            resolvingPending = false;
+            log('publish-recovery', { code, mode: 'view-only-resync' });
+            continue;
+          }
+          if (code === 'BAD_SNAPSHOT') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            const snapshotPath = path.join(root, 'ui-snapshot.json');
+            try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'snapshot-rebuild' });
+            continue;
+          }
+          if (code === 'PUBLISH_ID_REUSED') {
+            recovered.add(code);
+            assertNotStopping();
+            appendNotice('publishId 재사용 감지: 새 id로 재게시');
+            log('publish-recovery', { code, mode: 'fresh-id-republish' });
+            continue;
+          }
+          if (code === 'LOCK_TIMEOUT') {
+            recovered.add(code);
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'retry-once' });
+            continue;
+          }
+          if (code === 'NO_LOCK') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'server-lock-rebuild' });
+            continue;
+          }
+          throw error;
         }
-        if (code === 'PUBLISH_ID_REUSED') {
-          recovered.add(code);
-          assertNotStopping();
-          appendNotice('publishId 재사용 감지: 새 id로 재게시');
-          log('publish-recovery', { code, mode: 'fresh-id-republish' });
-          continue;
-        }
-        if (code === 'LOCK_TIMEOUT') {
-          recovered.add(code);
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'retry-once' });
-          continue;
-        }
-        if (code === 'NO_LOCK') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'server-lock-rebuild' });
-          continue;
-        }
-        throw error;
       }
+    } catch (error) {
+      if (resultHoldState === registeredHold) resultHoldState = null;
+      throw error;
     }
+    if (envelope.view !== undefined && !flags.includes('--view-only') && !flags.includes('--retry')) lastPlayPublishAt = paceNow();
     const patch = {};
     if (Number.isInteger(out.publishId)) patch.lastPublishId = out.publishId;
     if (Number.isInteger(out.handNo)) patch.handNo = out.handNo;
@@ -6516,6 +6576,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if(stopRequested)return {state:'stopped'};
       if(readLoopState()?.phase!=='playing')return {state:'finalizing'};
       pauseRequested=true;
+      if (resultHoldState) resultHoldState.skipped = true;
+      resultHoldController?.abort();
+      policyPaceController?.abort();
       const ack=new Promise(resolve=>{resolvePause=resolve;});
       waitController?.abort();
       return ack;
@@ -6851,6 +6914,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
+    resultHoldController?.abort();
+    policyPaceController?.abort();
     waitController?.abort();
     parkWake?.();
     resolvePause?.({state:"stopped"});
@@ -7796,8 +7861,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           return await runFinalization();
         }
         if (stopRequested) break;
+        if (resultHoldState && !resultHoldState.skipped) {
+          await paceSleep(Math.max(0, resultHoldState.until - paceNow()), 'result');
+          if (stopRequested) break;
+          out = await pauseBarrier(out);
+          if (stopRequested || out === null) break;
+        }
         out = await pauseBarrier(out);
         if (stopRequested || out === null) break;
+        resultHoldState = null;
         out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
           const narration = started.events?.find((event) => event.type === 'level_up');
           return narration
@@ -7821,6 +7893,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('BAD_NEXT', '다음 행동자 계약이 ai/user가 아닙니다.');
       }
 
+      if (opponentRuntimeOf() === 'policy' && pace.aiActionIntervalMs > 0 && lastPlayPublishAt !== null) {
+        await paceSleep(Math.max(0, pace.aiActionIntervalMs - (paceNow() - lastPlayPublishAt)), 'policy');
+        if (stopRequested) break;
+        out = await pauseBarrier(out);
+        if (stopRequested || out === null) break;
+        if (out.handOver || out.next?.kind !== 'ai') continue;
+      }
       const next = out.next;
       let decision;
       try {
@@ -7887,7 +7966,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     resume,
     run,
     coachPipeline,
-    pause, resumePlay, retryDecision, endGame,
+    pause, resumePlay, retryDecision, endGame, skipHandResult,
     get pendingDecision() { return readLoopState()?.pendingDecision ?? null; },
     get playState() { return control?.read().playState ?? null; },
     requestStop,
@@ -7935,7 +8014,7 @@ export async function initializePreparedSession(gameDir, args) {
 }
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
-  loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+  loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
     ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),

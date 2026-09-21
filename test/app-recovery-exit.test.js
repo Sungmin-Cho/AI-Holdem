@@ -14,6 +14,7 @@ import {initializePreparedSession} from '../tools/game-loop.js';
 import {resolveSessionReference} from '../tools/reference-source.js';
 import {sealPreparation} from '../tools/session-preparation.js';
 import {setupToArgs} from '../shared/game-setup.js';
+import {inspectStudyService,stopStudyService} from '../tools/study-service.js';
 
 const TIMEOUT=process.platform==='win32'?300000:30000;
 const body=(manager,kind)=>{const s=manager.snapshot();return {requestId:randomUUID(),kind,
@@ -50,7 +51,15 @@ async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=n
   let calls=0;
   const resolver=resolverOverride??(async()=>{calls++;return {player:null,upper:null,notices:[]};});
   let manager=createSessionManager({storeDir:root,resolver});
-  t.after(()=>manager.close());
+  t.after(async()=>{
+    try { await manager.close(); }
+    finally {
+      // App shutdown deliberately preserves study. Each owned test store must
+      // stop its service instead of accumulating Windows proof children.
+      const study=await inspectStudyService(root);
+      if(study.status==='running') await stopStudyService(root,{expectedInstanceId:study.instanceId});
+    }
+  });
   await manager.initialize();
   const start={...body(manager,'start'),setup:{aiCount:1,opponentRuntime:'policy'}};
   manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');

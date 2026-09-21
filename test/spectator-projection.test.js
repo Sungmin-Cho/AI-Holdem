@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import {setTimeout as delay} from 'node:timers/promises';
 import {createGame,startHand,applyAction,legalFor} from '../engine/hand.js';
 import {newDeck} from '../engine/cards.js';
@@ -38,10 +39,10 @@ async function fixture(t,{fault}={}) {
   // for initialization (no timer guess or weakening of atomic state writes).
   assert.equal((await request('snapshot')).status,200);
   let publishId=0;
-  const publish=async(engine=state,events=[])=>{
+  const publish=async(engine=state,events=[],extra={})=>{
     saveState(dir,engine);
     const views=Object.fromEntries(['user','h1'].map(id=>[id,viewFor(engine,id)]));
-    return request('publish',{body:{token:TOKEN,publishId:++publishId,viewFor:'user',view:views.user,views,events}});
+    return request('publish',{body:{token:TOKEN,publishId:++publishId,viewFor:'user',view:views.user,views,events,...extra}});
   };
   return {dir,state,relay,request,publish};
 }
@@ -260,3 +261,39 @@ for(const seat of ['user','h1']) {
     controller.abort();
   });
 }
+
+test('published result hold reaches every audience and the real snapshot message adapter',async t=>{
+  let loseAck=false;
+  const f=await fixture(t,{fault:stage=>{if(loseAck && stage==='after-ui-commit'){loseAck=false;throw new Error('lost ack');}}});let state=f.state,publishId=1;
+  const hold={handNo:1,startAt:'2026-01-01T00:00:00.000Z',until:'2026-01-01T00:00:03.500Z',runoutStepMs:800,runoutStreets:0};
+  assert.equal((await f.publish(state)).status,200);
+  while(!legalFor(state).handOver) {
+    const step=applyAction(state,legalFor(state).toAct,'fold');state=step.state;
+    const completed=legalFor(state).handOver;loseAck=completed;publishId++;
+    const published=await f.publish(state,step.events,completed?{resultHold:hold}:{});
+    assert.equal(published.status,completed?500:200,JSON.stringify(published.body));
+    if(completed) {
+      const retry=await f.request('publish',{body:{token:TOKEN,publishId,viewFor:'user',view:viewFor(state,'user'),
+        views:Object.fromEntries(['user','h1'].map(id=>[id,viewFor(state,id)])),events:step.events,resultHold:hold}});
+      assert.equal(retry.status,200);assert.equal(retry.body.applied,false);
+    }
+  }
+  assert.equal((await f.request('publish',{body:{token:TOKEN,publishId:++publishId,messages:[]}})).status,200);
+  for(const seat of ['user','h1',SPECTATOR_ID]) {
+    const snap=await f.request('snapshot',{seat});assert.equal(snap.status,200);
+    assert.deepEqual(snap.body.resultHold,hold);
+  }
+  const controller=new AbortController();t.after(()=>controller.abort());
+  const response=await fetch(`http://127.0.0.1:${f.relay.port}/api/events?token=${TOKEN}&after=999999`,{
+    headers:{'x-seat':SPECTATOR_ID},signal:controller.signal});
+  const reader=response.body.getReader();let text='';
+  while(!text.includes('"resultHold"'))text+=new TextDecoder().decode((await reader.read()).value);
+  controller.abort();
+  const payload=JSON.parse(text.split('\n').find(line=>line.startsWith('data:')).slice(5));
+  const source=fs.readFileSync(new URL('../server/public/app.js',import.meta.url),'utf8');
+  const adapter=source.slice(source.indexOf('function applyMessage(m) {'),source.indexOf('if (!token) showBootError'));
+  const seen=[];const context={revision:0,booted:true,actionController:null,setConn:()=>{},render:()=>assert.fail('snapshot expected'),renderSnapshot:snap=>seen.push(snap.resultHold)};
+  vm.runInNewContext(adapter+'\nthis.deliver=applyMessage;',context);
+  context.deliver({revision:payload.snapshot.revision,...payload});
+  assert.deepEqual(seen,[hold]);
+});

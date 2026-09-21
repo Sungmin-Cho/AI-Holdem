@@ -54,7 +54,7 @@ function bail(code, message) {
 function parseArgs(argv) {
   const out = {
     gameDir: 'game', from: null, narrations: [], narrationCodes: [],
-    turnDeadline: null,
+    turnDeadline: null, resultHold: null,
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
     printGameEpoch: false, deadlineMonotonicNs: null, actionAckFile: null,
@@ -91,6 +91,12 @@ function parseArgs(argv) {
       const at = raw.indexOf(':');
       if (at < 1) bail('USAGE', '--turn-deadline은 <decisionId>:<iso> 형식입니다.');
       out.turnDeadline = { decisionId: raw.slice(0, at), at: raw.slice(at + 1) };
+    }
+    else if (arg === '--result-hold') {
+      const parts = needsValue(arg).split('|');
+      if (parts.length !== 5) bail('USAGE', '--result-hold 형식이 올바르지 않습니다.');
+      const [handNo, startAt, until, runoutStepMs, runoutStreets] = parts;
+      out.resultHold = { handNo: Number(handNo), startAt, until, runoutStepMs: Number(runoutStepMs), runoutStreets: Number(runoutStreets) };
     }
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
@@ -189,6 +195,7 @@ function buildBody(envelope, opts) {
     if (envelope.hint !== undefined) body.hint = envelope.hint === null ? null : projectHint(envelope.hint);
   }
   if (opts.turnDeadline) body.turnDeadline = opts.turnDeadline;
+  if (opts.resultHold) body.resultHold = opts.resultHold;
   // Tells the server this republish re-shows a state rather than acknowledging an
   // action, so a user action whose response was lost survives a dealer's resume.
   if (opts.viewOnly) body.viewOnly = true;
