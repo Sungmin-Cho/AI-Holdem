@@ -81,15 +81,26 @@ test(`pace ${scenario.pace ?? 'legacy'} preserves publish timing with ${scenario
 });
 }
 
-async function managedPaceFixture(t, targetKind, {multi=false,afterHand=0,beforeWait=null}={}) {
+async function managedPaceFixture(t, targetKind, {multi=false,afterHand=0,beforeWait=null,publishFailure=false}={}) {
   const root=createOwnedTempDir('holdem-pace-controls');
   let clock=Date.now(),first=true,enteredResolve;
   const entered=new Promise(resolve=>{enteredResolve=resolve;});
   const waits=[];
   const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),opts:{
     port:0,controlProtocolVersion:1,opponentRuntime:'policy',pace:'normal',now:()=>new Date(clock),
+    onPublishInvoke:args=>{
+      if(publishFailure && args.includes('--result-hold')) {
+        const handNo=Number(args[args.indexOf('--result-hold')+1].split('|')[0]);
+        enteredResolve({handNo});
+        throw Object.assign(Error('publisher retry exhausted'),{code:'LOCK_TIMEOUT'});
+      }
+      if(!['publish-skip','publish-pause'].includes(beforeWait) || !first || !args.includes('--result-hold'))return;
+      first=false;
+      const handNo=Number(args[args.indexOf('--result-hold')+1].split('|')[0]);
+      enteredResolve({handNo,operation:beforeWait==='publish-skip'?loop.skipHandResult(handNo):loop.pause()});
+    },
     onCoachInvoke:args=>{
-      if(!beforeWait || !first || !args.includes('heartbeat'))return;
+      if(!['skip','pause'].includes(beforeWait) || !first || !args.includes('heartbeat'))return;
       const snapshot=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json')));
       if(!snapshot.resultHold || snapshot.view?.handInProgress)return;
       first=false;
@@ -129,7 +140,7 @@ async function managedPaceFixture(t, targetKind, {multi=false,afterHand=0,before
     } catch {} finally {posting=false;}
   },20);
   const running=loop.run();running.catch(()=>{});
-  t.after(async()=>{clearInterval(timer);await loop.requestStop();await running;});
+  t.after(async()=>{clearInterval(timer);await loop.requestStop();await running.catch(error=>{if(!publishFailure || error.code!=='LOCK_TIMEOUT')throw error;});});
   return {root,loop,running,entered,waits};
 }
 
@@ -195,3 +206,26 @@ for(const operation of ['skip','pause']) {
     assert.equal(f.waits.some(w=>w.kind==='result' && w.handNo===entered.handNo),false);
   });
 }
+
+test('skip before hand-end publisher ACK survives result wait registration', {timeout:60000},async t=>{
+ const f=await managedPaceFixture(t,'result',{beforeWait:'publish-skip'});
+ const entered=await f.entered;
+ assert.deepEqual(entered.operation,{skipped:true});
+ await f.running;
+ assert.equal(f.waits.some(w=>w.kind==='result'&&w.handNo===entered.handNo),false);
+});
+
+test('failed repeated publisher recovery clears the registered hold', {timeout:60000},async t=>{
+ const f=await managedPaceFixture(t,'result',{publishFailure:true});
+ const entered=await f.entered;
+ await assert.rejects(f.running,{code:'LOCK_TIMEOUT'});
+ assert.deepEqual(f.loop.skipHandResult(entered.handNo),{skipped:false});
+});
+test('pause before hand-end publisher ACK survives result wait registration', {timeout:60000},async t=>{
+ const f=await managedPaceFixture(t,'result',{beforeWait:'publish-pause'});
+ const entered=await f.entered;
+ await entered.operation;
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.root,'state.json'))).handNo,entered.handNo);
+ await f.loop.resumePlay();await f.running;
+ assert.equal(f.waits.some(w=>w.kind==='result'&&w.handNo===entered.handNo),false);
+});

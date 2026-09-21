@@ -3321,95 +3321,104 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let resolvingPending = false;
     const recovered = new Set();
     let out;
-    for (;;) {
-      try {
-        // A retry with a still-present record publishes the old exact body; once that
-        // succeeds the current transition must still publish. If the record vanished
-        // before invocation, --retry publishes the current turn itself and is terminal.
-        const resolvingRecordedBody = resolvingPending
-          && fs.existsSync(path.join(root, '.publish-attempt.json'));
-        out = await executePublish(args);
-        if (resolvingPending && resolvingRecordedBody) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        break;
-      } catch (error) {
-        const code = error.code;
-        if (code === 'NO_ATTEMPT' && resolvingPending) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        if (recovered.has(code)) throw error;
-        if (code === 'ATTEMPT_PENDING') {
-          recovered.add(code);
-          assertNotStopping();
-          await opts.attemptPendingCheckpoint?.();
-          assertNotStopping();
-          resolvingPending = true;
-          args = ['--from', turnPath, '--retry'];
-          continue;
-        }
-        if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
-          recovered.add(code);
-          assertNotStopping();
-          const pendingPath = path.join(root, '.publish-attempt.json');
-          try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    // Register before invoking the publisher: the browser can receive the hold
+    // before its ACK returns. Keep any skip/pause admitted in that interval.
+    const registeredHold = hold ? { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested } : null;
+    if (registeredHold) resultHoldState = registeredHold;
+    try {
+      for (;;) {
+        try {
+          // A retry with a still-present record publishes the old exact body; once that
+          // succeeds the current transition must still publish. If the record vanished
+          // before invocation, --retry publishes the current turn itself and is terminal.
+          const resolvingRecordedBody = resolvingPending
+            && fs.existsSync(path.join(root, '.publish-attempt.json'));
+          out = await executePublish(args);
+          if (resolvingPending && resolvingRecordedBody) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          const synchronized = await runCli(['step']);
-          assertNotStopping();
-          writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
-          const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
-          if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
-          hold = null;
-          const recoveryFlags = flags.filter((flag, index) => flag !== '--retry' && flag !== '--view-only'
-            && flag !== '--result-hold' && flags[index - 1] !== '--result-hold');
-          currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
-          args = currentArgs;
-          resolvingPending = false;
-          log('publish-recovery', { code, mode: 'view-only-resync' });
-          continue;
-        }
-        if (code === 'BAD_SNAPSHOT') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          const snapshotPath = path.join(root, 'ui-snapshot.json');
-          try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+          break;
+        } catch (error) {
+          const code = error.code;
+          if (code === 'NO_ATTEMPT' && resolvingPending) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'snapshot-rebuild' });
-          continue;
+          if (recovered.has(code)) throw error;
+          if (code === 'ATTEMPT_PENDING') {
+            recovered.add(code);
+            assertNotStopping();
+            await opts.attemptPendingCheckpoint?.();
+            assertNotStopping();
+            resolvingPending = true;
+            args = ['--from', turnPath, '--retry'];
+            continue;
+          }
+          if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
+            recovered.add(code);
+            assertNotStopping();
+            const pendingPath = path.join(root, '.publish-attempt.json');
+            try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            const synchronized = await runCli(['step']);
+            assertNotStopping();
+            writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
+            const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
+            if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
+            if (resultHoldState === registeredHold) resultHoldState = null;
+            hold = null;
+            const recoveryFlags = flags.filter((flag, index) => flag !== '--retry' && flag !== '--view-only'
+              && flag !== '--result-hold' && flags[index - 1] !== '--result-hold');
+            currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
+            args = currentArgs;
+            resolvingPending = false;
+            log('publish-recovery', { code, mode: 'view-only-resync' });
+            continue;
+          }
+          if (code === 'BAD_SNAPSHOT') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            const snapshotPath = path.join(root, 'ui-snapshot.json');
+            try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'snapshot-rebuild' });
+            continue;
+          }
+          if (code === 'PUBLISH_ID_REUSED') {
+            recovered.add(code);
+            assertNotStopping();
+            appendNotice('publishId 재사용 감지: 새 id로 재게시');
+            log('publish-recovery', { code, mode: 'fresh-id-republish' });
+            continue;
+          }
+          if (code === 'LOCK_TIMEOUT') {
+            recovered.add(code);
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'retry-once' });
+            continue;
+          }
+          if (code === 'NO_LOCK') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'server-lock-rebuild' });
+            continue;
+          }
+          throw error;
         }
-        if (code === 'PUBLISH_ID_REUSED') {
-          recovered.add(code);
-          assertNotStopping();
-          appendNotice('publishId 재사용 감지: 새 id로 재게시');
-          log('publish-recovery', { code, mode: 'fresh-id-republish' });
-          continue;
-        }
-        if (code === 'LOCK_TIMEOUT') {
-          recovered.add(code);
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'retry-once' });
-          continue;
-        }
-        if (code === 'NO_LOCK') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'server-lock-rebuild' });
-          continue;
-        }
-        throw error;
       }
+    } catch (error) {
+      if (resultHoldState === registeredHold) resultHoldState = null;
+      throw error;
     }
-    if (hold) resultHoldState = { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested };
     if (envelope.view !== undefined && !flags.includes('--view-only') && !flags.includes('--retry')) lastPlayPublishAt = paceNow();
     const patch = {};
     if (Number.isInteger(out.publishId)) patch.lastPublishId = out.publishId;
