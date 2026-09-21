@@ -203,3 +203,52 @@ test('after-proof failure on a thrown body keeps the caller error code', () => {
     assert.equal(n, 2);
   } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
 });
+
+test('a lock replaced at the same path during a failed ACL proof is re-proved', () => {
+  const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');
+  fs.mkdirSync(lock);let calls=0;
+  try {
+    const prove=(entries,{onUnproven})=>{
+      calls++;
+      if(calls===1) {
+        fs.renameSync(lock,path.join(ctx.root,'retired-lock'));
+        fs.mkdirSync(lock);
+        onUnproven('powershell:status=1 error=none stderr=Get-Acl Cannot find path');
+        return false;
+      }
+      assert.ok(entries.some(entry=>entry.file===lock));return true;
+    };
+    assert.equal(aclTransaction(ctx,()=>42,{platform:'win32',prove}),42);
+    assert.equal(calls,3,'replacement before-proof must succeed before final after-proof');
+  } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('same-path replacement never bypasses a failing replacement ACL proof', () => {
+  const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+  try {
+    const prove=()=>{calls++;if(calls===1){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);}return false;};
+    assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});
+    assert.equal(calls,2);
+  } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+
+test('successful proof of a retired lock cannot authorize its unproved replacement',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{calls++;if(calls===1){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);return true;}return false;};
+  assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});assert.equal(calls,2);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('replacing the same lock on every proof exhausts the fixed retry cap',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{fs.renameSync(lock,path.join(ctx.root,`retired-${++calls}`));fs.mkdirSync(lock);return false;};
+  assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});assert.equal(calls,11);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('client after-proof re-proves a replacement rather than trusting the retired identity',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{calls++;if(calls===2){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);return false;}return true;};
+  assert.equal(withClientAclScope(()=>aclTransaction(ctx,()=>42,{platform:'win32',prove}),{platform:'win32',prove}),42);assert.equal(calls,3);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
