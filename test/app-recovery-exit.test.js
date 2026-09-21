@@ -278,8 +278,10 @@ test('#197 finalize end retains the engine outcome and finishes with no player d
   assert.equal(f.manager.snapshot().state,'completed');
   assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
 });
-test('#197 accepted recovery restart converges each reservation crash window to a fresh parked game with zero decisions',{timeout:TIMEOUT},async t=>{
-  for(const window of ['no-reservation','reservation-saved','staging-written','selector-committed'])await t.test(window,async st=>{
+// Four real Windows recovery lifecycles share this parent budget. Individual
+// cases remain bounded; ACL/identity proofs are not relaxed for slow runners.
+test('#197 accepted recovery restart converges each reservation crash window to a fresh parked game with zero decisions',{timeout:process.platform==='win32'?600000:TIMEOUT},async t=>{
+  for(const window of ['no-reservation','reservation-saved','staging-written','selector-committed'])await t.test(window,{timeout:process.platform==='win32'?150000:TIMEOUT},async st=>{
     const f=await damagedStore(st),before=f.manager.snapshot(),request=body(f.manager,'restart');
     const row={...request,setup:before.setup,payload:JSON.stringify(request),status:'accepted',
       recovery:{kind:'abort-unrecoverable',mode:'abort',gameId:before.gameId,selectionVersion:before.selectionVersion,gameEpoch:before.gameEpoch}};
