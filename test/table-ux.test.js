@@ -336,8 +336,8 @@ test('real deadline painter ticks without a new frame and announces urgency once
   const label=node(),plate=node();let announced=0,clock=1000,interval;
   const announcements=[];
   const announcement={set textContent(value){announcements.push(value);if(value)announced++;}};
-  const ui={turnDeadline:{decisionId:'d1',at:new Date(12000).toISOString()}};
-  const context={ui,serverOffsetMs:0,announcedDeadline:null,renderedDeadlineKey:null,formatTurnDeadline,
+  const ui={view:{viewer:'user',toAct:'user'},turnDeadline:{decisionId:'d1',at:new Date(12000).toISOString()}};
+  const context={ui,viewerId:view=>Object.hasOwn(view??{},'viewer')?view.viewer:'user',serverOffsetMs:0,announcedDeadline:null,renderedDeadlineKey:null,formatTurnDeadline,
     Date:{now:()=>clock,parse:Date.parse},Math,
     $:id=>id==='turn-deadline'?label:announcement,
     document:{querySelectorAll:()=>[plate]},setInterval:(fn,ms)=>{assert.equal(interval,undefined);assert.equal(ms,1000);interval=fn;}};
@@ -349,6 +349,8 @@ test('real deadline painter ticks without a new frame and announces urgency once
   assert.equal(announcements.at(-1),'');
   ui.turnDeadline={decisionId:'d2',at:new Date(13000).toISOString()};interval();
   assert.equal(announced,2);assert.equal(announcements.at(-2),'');
+  ui.view={viewer:null,toAct:'h1'};ui.turnDeadline={decisionId:'d3',at:new Date(13000).toISOString()};interval();
+  assert.equal(announced,2);assert.equal(plate.hidden,false);
 });
 
 test('Date-header offset accounts for rounding and round-trip midpoint',async()=>{

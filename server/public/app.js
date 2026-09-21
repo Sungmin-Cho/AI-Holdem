@@ -1018,8 +1018,9 @@ function mergeAnnotationOntoCards(ann) {
 
 function paintTurnDeadline() {
   const deadline = ui.turnDeadline;
-  const text = formatTurnDeadline(deadline, Date.now() + serverOffsetMs);
-  const seconds = deadline ? Math.ceil((Date.parse(deadline.at) - Date.now() - serverOffsetMs) / 1000) : null;
+  const now=Date.now()+serverOffsetMs;
+  const text = formatTurnDeadline(deadline, now);
+  const seconds = deadline ? Math.ceil((Date.parse(deadline.at) - now) / 1000) : null;
   const urgent = seconds !== null && seconds > 0 && seconds <= 10;
   const label = $('turn-deadline');
   if (label) {label.hidden = !text;label.textContent = text ?? '';label.classList.toggle('is-urgent', urgent);}
@@ -1031,7 +1032,7 @@ function paintTurnDeadline() {
     renderedDeadlineKey=key;announcedDeadline=null;
     const announcement=$('turn-announcement');if(announcement)announcement.textContent='';
   }
-  if (urgent && announcedDeadline !== key) {
+  if (urgent && viewerId(ui.view) === ui.view?.toAct && announcedDeadline !== key) {
     announcedDeadline = key;
     const announcement=$('turn-announcement');
     if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
