@@ -1,3 +1,6 @@
+import {finalScreen} from './final-summary.js';
+import {paintFinalPanel} from './final-panel.js';
+import {buildHandResult} from './hand-result.js';
 import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
@@ -1010,30 +1013,59 @@ function closeReplay() {
   if(dialogs.active===overlay)dialogs.close();
 }
 
+const terminalRecord=new URLSearchParams(location.search).get('terminal')==='1';
+let finalSummary=null,summaryStarted=false,finalPanelKey=null,reviewSeen;
+async function loadFinalSummary() {
+  if(summaryStarted || !appGameId)return;
+  summaryStarted=true;
+  for(let attempt=0;attempt<4;attempt++) {
+    if(attempt)await new Promise(resolve=>setTimeout(resolve,2500));
+    try {
+      const response=await appFetch('summary',{signal:AbortSignal.timeout(8000)});
+      if(!response.ok)throw new Error('SUMMARY_UNAVAILABLE');
+      finalSummary=await response.json();paintReview(ui.view);return;
+    } catch { /* Bounded retry, then the public view remains the fallback. */ }
+  }
+}
 function paintReview(view) {
-  const overlay = $('review-overlay');
-  $('review-reopen').hidden = !ui.review;
-  const dismissed = overlay.dataset.dismissed === 'true';
-  const show = Boolean(view?.gameOver && ui.review) && !dismissed && (!dialogs.active || dialogs.active===overlay);
-  overlay.hidden = !show;
-  if (!show) {
-    if(dialogs.active===overlay)dialogs.close();
-    return;
-  }
+  const state=finalScreen({view,sessionEnded:ui.sessionEnded,terminal:terminalRecord,review:ui.review});
+  const overlay=$('review-overlay'),reopen=$('review-reopen');
+  reopen.hidden=!state.open;
+  reopen.textContent='최종 결과 다시 열기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
+  if(state.open)void loadFinalSummary();
+  const show=state.open && overlay.dataset.dismissed!=='true' && (!dialogs.active || dialogs.active===overlay);
+  overlay.hidden=!show;
+  if(!show){if(dialogs.active===overlay)dialogs.close();return;}
+  reviewSeen=ui.review;
   if(dialogs.active!==overlay)dialogs.open(overlay,()=>{overlay.dataset.dismissed='true';dialogs.close();});
-  const result = $('review-result');
-  result.textContent = view.result === 'win' ? '우승'
-    : view.result === 'lose' ? '패배'
-      : view.result === 'completed' ? '세션 완료'
-        : '';
-  result.classList.toggle('is-win', view.result === 'win');
-  result.classList.toggle('is-lose', view.result === 'lose');
-  const review = $('review-body');
-  if (review._source !== ui.review) {
-    const scroll = review.scrollTop;
-    review.innerHTML = renderMarkdown(reviewBody(ui.review));
-    review._source = ui.review; review.scrollTop = scroll;
+  const result=$('review-result');
+  const title=view?.result==='win'?'우승':view?.result==='lose'?'패배':view?.result==='abort'?'중도 종료':'세션 완료';
+  result.textContent=title+(Number.isSafeInteger(finalSummary?.handCount)?` · 완료 ${finalSummary.handCount}핸드`:'');
+  result.classList.toggle('is-win',view?.result==='win');result.classList.toggle('is-lose',view?.result==='lose');
+  const spectator=isSpectating(view),viewer=spectator?null:viewerId(view);
+  const key=JSON.stringify([finalSummary,view?.handNo,view?.seats,view?.sessionNet,viewer]);
+  if(key!==finalPanelKey){
+    finalPanelKey=key;
+    paintFinalPanel($('final-summary'),{summary:finalSummary,view,viewer,
+      onReplay:participantMode||spectator?null:handNo=>{if(!ui.handReplays[handNo])return;overlay.dataset.dismissed='true';dialogs.close();openReplay(handNo);},
+      canReplay:handNo=>!!ui.handReplays[handNo]});
+    const last=$('final-last-hand');last.replaceChildren();
+    const hand=buildHandResult({log:ui.log,view:view?{...view,gameOver:false}:view,viewer,prior:null});
+    last.hidden=!hand;
+    if(hand){const heading=document.createElement('h2');heading.textContent='마지막 핸드';last.append(heading);
+      for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} · ${winner.total}${winner.handName?' · '+winner.handName:''}`;last.append(row);}}
   }
+  const section=$('final-review-section');section.hidden=participantMode||spectator;
+  const review=$('review-body');
+  const source=ui.review??state.review;
+  if(review._source!==source){
+    const scroll=review.scrollTop;
+    if(ui.review)review.innerHTML=renderMarkdown(reviewBody(ui.review));
+    else review.textContent=state.review==='pending'?'종합 리뷰 생성 중… 보통 1~4분':'종합 리뷰가 없습니다';
+    review._source=source;review.scrollTop=scroll;
+  }
+  const study=$('final-study');study.hidden=!authenticatedStudyUrl||participantMode||spectator;
+  if(!study.hidden)study.href=authenticatedStudyUrl;
 }
 
 function paint() {
@@ -1309,6 +1341,7 @@ $('replay-close')?.addEventListener('click', () => {
 $('replay-overlay')?.addEventListener('click', (ev) => {
   if (ev.target === $('replay-overlay')) closeReplay();
 });
+$('final-log').addEventListener('click',()=>{ $('review-overlay').dataset.dismissed='true';dialogs.close();selectTab('log');});
 $('review-close').addEventListener('click', () => {
   const overlay = $('review-overlay');
   overlay.dataset.dismissed = 'true';

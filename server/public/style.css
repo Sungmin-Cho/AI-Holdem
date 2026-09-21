@@ -1123,3 +1123,5 @@ main:has(.pre-action-hint:not([hidden])) { min-height: min-content; }
 #turn-deadline.is-urgent, .plate-deadline.is-urgent { color: #ffb86b; font-weight: 700; }
 
 .plate-deadline[hidden] {display:none;}
+
+.final-content{overflow:auto;min-height:0;padding:0 1.5rem 1.5rem}.final-content h2{font-size:1rem;margin-top:1.2rem}.final-ranking{width:100%;border-collapse:collapse;text-align:left}.final-ranking th,.final-ranking td{padding:.45rem;border-bottom:1px solid #ffffff20}.final-chart{display:block;width:100%;max-width:32rem;height:8rem;color:var(--gold,#d6b35d);fill:currentColor}.final-links{display:flex;gap:1rem;align-items:center;margin-top:1rem}

@@ -57,7 +57,10 @@ function render() {
   if (!snapshot) return;
   const s = snapshot.state;
   const paused = s === "paused";
-  $("table").inert = (!viewingRecord && s !== "playing") || Boolean(document.querySelector('dialog[open]'));
+  const terminal=['completed','ended'].includes(s);
+  if(!selecting && terminal && snapshot.gameId)viewingRecord=true;
+
+  $("table").inert = (!["playing","finalizing","completed","ended"].includes(s)) || Boolean(document.querySelector('dialog[open]'));
   $("status").textContent = labels[s] ?? s;
   if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
@@ -180,19 +183,11 @@ function render() {
   for (const id of ["resume", "restart", "modes", "end"])
     $(id).disabled = busy || !paused;
   if (!paused) $("pause-dialog").close();
-  if (
-    !snapshot.gameId ||
-    (["ended", "completed"].includes(s) && !viewingRecord)
-  ) {
-    frameId = null;
-    $("table").removeAttribute("src");
-  } else if (
-    frameId !== snapshot.gameId &&
-    ["playing", "paused", "pausing"].includes(s)
-  ) {
-    frameId = snapshot.gameId;
-    $("table").src =
-      `/table?${new URLSearchParams({ appGame: snapshot.gameId, epoch: snapshot.gameEpoch })}`;
+  if (!snapshot.gameId || (selecting && terminal)) {
+    frameId=null;$("table").removeAttribute('src');
+  } else if (frameId!==snapshot.gameId && ['playing','paused','pausing','stopping','finalizing','completed','ended'].includes(s)) {
+    frameId=snapshot.gameId;
+    $("table").src=`/table?${new URLSearchParams({appGame:snapshot.gameId,epoch:snapshot.gameEpoch,...(terminal?{terminal:'1'}:{})})}`;
   }
 }
 let refreshFailures=0;
@@ -299,6 +294,7 @@ $("confirm-no").onclick = () => {
 };
 function chooseMode() {
   selecting = true;
+  viewingRecord = false;
   $("pause-dialog").close();
   render();
   $("ai-count").focus();
@@ -401,8 +397,10 @@ $("review").onclick = () => {
   $("table").inert = false;
   $("game").hidden = false;
   document.body.classList.add('has-game');
-  $("table").src =
-    `/table?${new URLSearchParams({ appGame: snapshot.gameId, epoch: snapshot.gameEpoch, terminal: "1" })}`;
+  if(frameId!==snapshot.gameId || !$("table").getAttribute('src')) {
+    frameId=snapshot.gameId;
+    $("table").src=`/table?${new URLSearchParams({appGame:snapshot.gameId,epoch:snapshot.gameEpoch,terminal:'1'})}`;
+  }
 };
 $("study").onclick = async () => {
   const tab = window.open("about:blank", "_blank");
@@ -422,9 +420,9 @@ $("study").onclick = async () => {
   }
 };
 for(const dialog of document.querySelectorAll('dialog')) {
-  dialog.addEventListener('close',()=>{if(snapshot)$('table').inert=(!viewingRecord&&snapshot.state!=='playing')||Boolean(document.querySelector('dialog[open]'));});
+  dialog.addEventListener('close',()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));});
 }
-new MutationObserver(()=>{if(snapshot)$('table').inert=(!viewingRecord&&snapshot.state!=='playing')||Boolean(document.querySelector('dialog[open]'));}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+new MutationObserver(()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
 form.onchange();
 await refresh().catch(showError);
 async function recoverCommand() {

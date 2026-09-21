@@ -130,6 +130,7 @@ export async function startAppService(
       instanceId,
       playerRuntime,
       resolver,
+      onChange: snapshot => server?.stateChanged(snapshot),
     });
     server = await startAppServer({
       manager,

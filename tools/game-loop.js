@@ -3291,6 +3291,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const publishAbortEndView = async () => {
+    let pin;
+    try {
+      const engine=readJsonOptional(engineStatePath,'ENGINE_STATE');
+      if(engine?.result!=='abort' || engine.gameOver!==true || !serverIdentity || !serverPid)return;
+      pin=openServerLockPin();
+      if(!pin)return;
+      const lock=assertPinnedServerLock(pin);
+      if(lock.sessionToken!==engine.sessionToken || lock.serverPid!==serverPid ||
+        serverIdentity.pid!==serverPid || startTimeOf(serverPid)!==serverIdentity.startTime || !processAlive(serverPid))return;
+      await assertServerBinding(lock);
+      assertPinnedServerLock(pin);
+      if(startTimeOf(serverPid)!==serverIdentity.startTime)return;
+      await ensureGameOverViewPublished();
+    } catch(error) {
+      appendNotice(`중도 종료 뷰 게시를 생략했습니다: ${error.code??'ERROR'}`);
+    } finally {closeServerLockPin(pin);}
+  };
+
   const humanDeadline = (next, { renew = false } = {}) => {
     const timeoutMs = Number(opts.actionTimeoutMs) || 0;
     if (timeoutMs <= 0 || next?.kind !== 'user') return null;
@@ -6711,6 +6730,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await runCli(['end','--result','abort','--operation-id',terminalOperation]);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,endedAt:isoNow(now)});
       await retryControlWrite(()=>control.set('aborted'));
+      await publishAbortEndView();
       await requestStop();
       return null;
     }
@@ -7349,6 +7369,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await adoptAbortedRelay(engineState);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
     } finally {unit.finish();}
+    await publishAbortEndView();
     await requestStop();
     return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
   };
@@ -7399,6 +7420,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else writeLoopState({aborting:undefined});
     } finally {unit.finish();}
     if (checkpoint.mode==='abort') {
+      await publishAbortEndView();
       await requestStop();
       return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
     }
