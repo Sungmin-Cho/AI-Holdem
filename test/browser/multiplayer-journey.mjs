@@ -46,7 +46,7 @@ export function makeBrowser(session) {
   return async (args) => {
     const r = await runOwnedCommand(
       "npx",
-      ["--yes", "agent-browser@0.36.0", "--session", session, "--json", ...args],
+      ["--yes", "--prefer-offline", "agent-browser@0.36.0", "--session", session, "--json", ...args],
       { timeoutMs: 45_000 },
     );
     assert.equal(
@@ -247,14 +247,18 @@ export async function runMultiplayerJourney(outDir) {
     check("guest-action-insecure-context");
     for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
       const doc=document.querySelector('#table')?.contentDocument;
-      if(doc?.querySelector('#hand-result')?.hidden===false){clearInterval(window.__handDriver);return;}
+      if(doc?.querySelector('#hand-result')?.hidden===false){
+        window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true};
+        clearInterval(window.__handDriver);return;
+      }
       const button=['#btn-check','#btn-fold','#btn-call'].map(id=>doc?.querySelector(id)).find(el=>el&&!el.disabled&&!el.hidden);
       button?.click();
     },60)`);
-    await wait(()=>evaluate(guestA)("document.querySelector('#table')?.contentDocument.querySelector('#hand-result')?.hidden===false"),'actual multiplayer hand result');
+    // Observe each client at its rendered result frame, before the next hand
+    // legitimately removes the banner while other browser commands run.
     for(const browser of [host,guestA,guestB]){
-      await evaluate(browser)('clearInterval(window.__handDriver)');
-      assert.equal(await evaluate(browser)("document.querySelector('#table')?.contentDocument.querySelector('.hand-result-skip')?.hidden"),true);
+      await wait(()=>evaluate(browser)('Boolean(window.__handResultCheck)'), 'each client receives hand result');
+      assert.equal(await evaluate(browser)('window.__handResultCheck.skipHidden'),true);
     }
     check('skip-hidden-multi');
 
