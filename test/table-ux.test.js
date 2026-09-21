@@ -309,3 +309,54 @@ test('turnDeadline and structured narration formatters are pure', () => {
   assert.equal(formatNarration({ code: 'LEVEL_UP', params: { sb: 50, bb: 100 } }), '블라인드가 50/100로 올랐습니다.');
   assert.equal(formatNarration({ text: '레거시 문구' }), '레거시 문구');
 });
+
+test('turn deadline state follows actor and decision identity for every audience', async () => {
+  const {retainTurnDeadline,serverClockOffset}=await import('../server/public/table-controls.js');
+  const deadline={decisionId:'d1',at:new Date(25000).toISOString()};
+  const view={viewer:'user',toAct:'user',handNo:1,handInProgress:true,legal:{decisionId:'d1'}};
+  assert.deepEqual(retainTurnDeadline(null,deadline,null,view),deadline);
+  assert.deepEqual(retainTurnDeadline(deadline,undefined,view,view),deadline);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,toAct:'h1'}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,handNo:2}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,handInProgress:false}),null);
+  assert.equal(retainTurnDeadline(deadline,undefined,view,{...view,legal:{decisionId:'d2'}}),null);
+  assert.deepEqual(retainTurnDeadline(null,deadline,null,{...view,viewer:'h1',legal:null}),deadline);
+  assert.equal(serverClockOffset(null,5000),0);
+  assert.equal(serverClockOffset('bad',5000),0);
+  assert.equal(serverClockOffset(new Date(10000).toUTCString(),5000),5500);
+  assert.equal(formatTurnDeadline(deadline,5000+serverClockOffset(new Date(10000).toUTCString(),5000)),'남은 시간 15초');
+});
+
+test('real deadline painter ticks without a new frame and announces urgency once', async()=>{
+  const fs=await import('node:fs'),vm=await import('node:vm');
+  const {formatTurnDeadline}=await import('../server/public/table-controls.js');
+  const source=fs.readFileSync(new URL('../server/public/app.js',import.meta.url),'utf8');
+  const painter=source.slice(source.indexOf('function paintTurnDeadline()'),source.indexOf('function renderSnapshot(snap)'));
+  const node=()=>({textContent:'',hidden:false,classList:{toggle(name,value){this[name]=value;}}});
+  const label=node(),plate=node();let announced=0,clock=1000,interval;
+  const announcements=[];
+  const announcement={set textContent(value){announcements.push(value);if(value)announced++;}};
+  const ui={view:{viewer:'user',toAct:'user'},turnDeadline:{decisionId:'d1',at:new Date(12000).toISOString()}};
+  const context={ui,viewerId:view=>Object.hasOwn(view??{},'viewer')?view.viewer:'user',serverOffsetMs:0,announcedDeadline:null,renderedDeadlineKey:null,formatTurnDeadline,
+    Date:{now:()=>clock,parse:Date.parse},Math,
+    $:id=>id==='turn-deadline'?label:announcement,
+    document:{querySelectorAll:()=>[plate]},setInterval:(fn,ms)=>{assert.equal(interval,undefined);assert.equal(ms,1000);interval=fn;}};
+  vm.runInNewContext(painter,context);assert.equal(typeof interval,'function');
+  interval();assert.equal(label.textContent,'남은 시간 11초');assert.equal(plate.textContent,label.textContent);assert.equal(announced,0);
+  clock=2000;interval();assert.equal(announced,1);assert.equal(label.classList['is-urgent'],true);
+  clock=3000;interval();assert.equal(label.textContent,'남은 시간 9초');assert.equal(announced,1);
+  ui.turnDeadline=null;interval();assert.equal(label.hidden,true);assert.equal(plate.hidden,true);
+  assert.equal(announcements.at(-1),'');
+  ui.turnDeadline={decisionId:'d2',at:new Date(13000).toISOString()};interval();
+  assert.equal(announced,2);assert.equal(announcements.at(-2),'');
+  ui.view={viewer:null,toAct:'h1'};ui.turnDeadline={decisionId:'d3',at:new Date(13000).toISOString()};interval();
+  assert.equal(announced,2);assert.equal(plate.hidden,false);
+});
+
+test('Date-header offset accounts for rounding and round-trip midpoint',async()=>{
+  const {serverClockOffset,retainTurnDeadline}=await import('../server/public/table-controls.js');
+  assert.equal(serverClockOffset(new Date(10000).toUTCString(),10600,10400),0);
+  const d={decisionId:'d1',at:new Date(20000).toISOString()};
+  const v={toAct:'user',handNo:1,handInProgress:true,legal:{decisionId:'d2'}};
+  assert.equal(retainTurnDeadline(d,undefined,v,v),null);
+});

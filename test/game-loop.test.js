@@ -2075,7 +2075,7 @@ test('#195 S4: player-sessions bind runtimeHomeId on create and reuse', { timeou
   assert.equal(readJson(path.join(gameDir, '.player-sessions.json')).p1.runtimeHomeId, 'home-B');
 });
 
-test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 }, async (t) => {
+test('bootstrap owns lock before init, writes initial state before resolver, then starts a healthy child server and warms players in parallel', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const focusSource = path.join(os.tmpdir(), `holdem-focus-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(focusSource, JSON.stringify({ focus: 'river bluff-catch' }));
@@ -4016,7 +4016,7 @@ test('nested ATTEMPT_PENDING retry errors re-enter the bounded publish matrix wi
       if (outcome.type === 'continued') await stopRun(loopRef, running);
 
       assert.equal(checkpointCalls, 1, `${scenario.code} did not cross the nested retry checkpoint exactly once`);
-      assert.equal(outcome.type, 'continued', `${scenario.code} escaped instead of re-entering the matrix`);
+      assert.equal(outcome.type, 'continued', `${scenario.code} escaped instead of re-entering the matrix: ${JSON.stringify({code:outcome.error?.code,message:outcome.error?.message,details:outcome.error?.details})}`);
       const expectedArgs = scenario.expectedSuffixes.map((suffix) => ['--from', turnPath, ...suffix]);
       assert.deepEqual(invocations.slice(0, expectedArgs.length).map((entry) => entry.args), expectedArgs);
       scenario.assertNested(invocations[1], seedRaw);

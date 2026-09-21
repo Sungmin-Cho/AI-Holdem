@@ -482,3 +482,46 @@ test(
     await running;
   },
 );
+
+test('published human deadline equals enforcement and only explicit resume renews it', {timeout:process.platform==='win32'?300000:30000}, async t=>{
+  const root=createOwnedTempDir('holdem-deadline');
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:15000,waitMs:60000}});
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,opponentRuntime:'policy'});
+  withMutation(root,state=>{state.button=(state.seats.findIndex(s=>s.playerId==='user')+state.seats.length-1)%state.seats.length;return {state};});
+  const running=loop.run();running.catch(()=>{});t.after(async()=>{await loop.requestStop();await running.catch(error=>{if(!['CHILD_FAILED','STOPPING'].includes(error.code))throw error;});});
+  const read=name=>JSON.parse(fs.readFileSync(path.join(root,name)));
+  const limit=Date.now()+10000;
+  while(Date.now()<limit) {try{if(read('ui-snapshot.json').turnDeadline && read('loop-state.json').humanTurn)break;}catch{}await sleep(10);}
+  const first=read('loop-state.json').humanTurn;
+  assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),first.deadlineAt);
+  const lock=read('lock.json');
+  for(let attempt=0;attempt<2;attempt++) {
+    const requestId=`illegal-deadline-${attempt}`;
+    const response=await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({token:lock.sessionToken,decisionId:first.decisionId,requestId,action:'raise',amount:1})});
+    assert.equal(response.ok,true);
+    let status;
+    const rejectedBy=Date.now()+3000;
+    do {
+      status=await (await fetch(`http://127.0.0.1:${lock.port}/api/action-status?token=${lock.sessionToken}`)).json();
+      if(status.requestId===requestId && status.phase==='rejected')break;
+      await sleep(10);
+    } while(Date.now()<rejectedBy);
+    assert.equal(status.phase,'rejected');
+    assert.deepEqual(read('loop-state.json').humanTurn,first);
+    assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),first.deadlineAt);
+  }
+  await loop.pause();
+  await sleep(Math.max(0,first.deadlineAt-Date.now()+50));
+  await loop.resumePlay();
+  const resumed=read('loop-state.json').humanTurn;
+  assert.equal(resumed.decisionId,first.decisionId);
+  assert.ok(resumed.deadlineAt>first.deadlineAt);
+  assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),resumed.deadlineAt);
+  await sleep(750);
+  assert.equal(read('ui-snapshot.json').view.legal.decisionId,first.decisionId);
+  assert.equal(read('ui-snapshot.json').log.some(event=>/^TIMEOUT_/.test(event.code??'')),false);
+  await loop.pause();
+});

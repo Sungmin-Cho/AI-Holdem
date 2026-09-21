@@ -3291,6 +3291,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const humanDeadline = (next, { renew = false } = {}) => {
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    if (timeoutMs <= 0 || next?.kind !== 'user') return null;
+    let humanTurn = readLoopState()?.humanTurn;
+    if (renew || !humanTurn || humanTurn.decisionId !== next.decisionId) {
+      humanTurn = {decisionId:next.decisionId, playerId:next.toAct, deadlineAt:Date.now()+timeoutMs};
+      writeLoopState({humanTurn});
+    }
+    return humanTurn;
+  };
+
   const publishEnvelope = async (envelope, flags = []) => {
     // §9.2 (3): the cutoff stops new play-time publishers locally, before the authority
     // flag exists. Coach seals keep flowing through executeCoachPublish under a deadline.
@@ -3313,8 +3324,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     writeJsonAtomic(turnPath, envelope);
     const timeoutMs = Number(opts.actionTimeoutMs) || 0;
     const hasDeadline = flags.some((flag) => flag === '--turn-deadline' || String(flag).startsWith('--turn-deadline'));
-    if (timeoutMs > 0 && envelope.next?.kind === 'user' && !flags.includes('--view-only') && !hasDeadline) {
-      flags = ['--turn-deadline', `${envelope.next.decisionId}:${new Date(Date.now() + timeoutMs).toISOString()}`, ...flags];
+    if (timeoutMs > 0 && envelope.next?.kind === 'user' && !hasDeadline) {
+      const deadline = humanDeadline(envelope.next);
+      flags = ['--turn-deadline', `${deadline.decisionId}:${new Date(deadline.deadlineAt).toISOString()}`, ...flags];
     }
     let currentArgs = ['--from', turnPath, ...flags];
     let args = currentArgs;
@@ -3372,8 +3384,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
             if (resultHoldState === registeredHold) resultHoldState = null;
             hold = null;
-            const recoveryFlags = flags.filter((flag, index) => flag !== '--retry' && flag !== '--view-only'
-              && flag !== '--result-hold' && flags[index - 1] !== '--result-hold');
+            const recoveryFlags = flags.filter((flag,index) => flag !== '--retry' && flag !== '--view-only'
+              && flag !== '--result-hold' && flags[index-1] !== '--result-hold'
+              && flag !== '--turn-deadline' && flags[index-1] !== '--turn-deadline' && !String(flag).startsWith('--turn-deadline='));
+            const recoveredDeadline=humanDeadline(synchronized.next);
+            if(recoveredDeadline)recoveryFlags.push('--turn-deadline',`${recoveredDeadline.decisionId}:${new Date(recoveredDeadline.deadlineAt).toISOString()}`);
             currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
             args = currentArgs;
             resolvingPending = false;
@@ -6544,15 +6559,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const timeoutMs = Number(opts.actionTimeoutMs) || 0;
     let waitFor = drain ? 0 : waitMs;
     if (!drain && timeoutMs > 0 && current.next?.kind === 'user') {
-      let humanTurn = readLoopState()?.humanTurn;
-      if (!humanTurn || humanTurn.decisionId !== current.next.decisionId) {
-        humanTurn = {
-          decisionId: current.next.decisionId,
-          playerId: current.next.toAct,
-          deadlineAt: Date.now() + timeoutMs,
-        };
-        writeLoopState({ humanTurn });
-      }
+      const humanTurn = humanDeadline(current.next);
       waitFor = Math.max(0, Math.min(waitMs, humanTurn.deadlineAt - Date.now()));
     }
     const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(waitFor)});
@@ -6592,9 +6599,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     const current = await runCli(['step']);
     await retryControlWrite(()=>control.set('playing', {pauseIntent:false, closedDecisionId:null}));
-    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
-    const deadlineFlags = timeoutMs > 0 && current.next?.kind === 'user'
-      ? ['--turn-deadline', `${current.next.decisionId}:${new Date(Date.now() + timeoutMs).toISOString()}`]
+    const deadline = humanDeadline(current.next, {renew:true});
+    const deadlineFlags = deadline
+      ? ['--turn-deadline', `${deadline.decisionId}:${new Date(deadline.deadlineAt).toISOString()}`]
       : [];
     await publishEnvelope(current, ['--view-only', ...deadlineFlags]);
     assertNotStopping();
