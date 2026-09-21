@@ -1219,7 +1219,9 @@ async function waitFor(predicate, message, timeoutMs = 3_000 * WIN32_SCALE) {
   assert.fail(message);
 }
 
-async function waitForUserSnapshot(gameDir, timeoutMs = 3_000 * WIN32_SCALE) {
+// Real CLI publish/new-hand hops can exceed three seconds on a busy host.
+// This is an arrival bound, not a product latency assertion.
+async function waitForUserSnapshot(gameDir, timeoutMs = 5_000 * WIN32_SCALE) {
   return waitFor(async () => {
     const lock = readJson(path.join(gameDir, 'lock.json'));
     const response = await fetch(
@@ -2028,7 +2030,7 @@ function flagValue(args, flag) {
 
 async function runUntilUserBoundary(loop, gameDir) {
   const running = startRun(loop);
-  await waitForUserSnapshot(gameDir);
+  await waitWhileRunning(running, () => waitForUserSnapshot(gameDir), 'user boundary was not reached');
   await stopRun(loop, running);
 }
 
