@@ -6,10 +6,11 @@ import { formatReplay, actionVerbs } from './replay-format.js';
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset } from './table-controls.js';
 import { createActionController } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
-import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating} from './seat-format.js';
+import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
+import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -21,10 +22,12 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+const ui = { handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
 let renderedDeadlineKey = null;
+let thinkingTurn = null;
+let skipHiddenForHand = null;
 let pendingAction = true;
 let revisionAtHintClear=-1;
 const hintState=createHintState();
@@ -293,8 +296,11 @@ function paintTop(view) {
 
 function paintBoard(view) {
   const board = $('board');
-  board.replaceChildren();
   const cards = view?.board ?? [];
+  const signature = JSON.stringify(cards);
+  if (board.dataset.cards === signature) return;
+  board.dataset.cards = signature;
+  board.replaceChildren();
   for (let i = 0; i < 5; i += 1) {
     board.append(cards[i] ? cardNode(cards[i]) : cardNode(null, { slot: true }));
   }
@@ -386,6 +392,7 @@ function paintSeats(view) {
   const { map: revealed, mucks } = revealedCards();
   const n = seats.length;
   const positions = blindPositions(view);
+  const lastActions = lastActionsBySeat(ui.log);
 
   for (let i = 0; i < n; i += 1) {
     const seat = seats[(userIdx + i) % n];
@@ -431,6 +438,13 @@ function paintSeats(view) {
 
     plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
     if (active) plate.append(el('span', 'plate-deadline'));
+    const lastAction = lastActions[seat.playerId];
+    if (lastAction) {
+      plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
+      const badge = el('span', 'plate-action', lastAction.label);
+      if (lastAction.amount != null) badge.append(el('span','plate-action-amount', ` ${formatAmount(lastAction.amount,view.blinds?.[1],displayUnit).primary}`));
+      plate.append(badge);
+    }
     const position = positions[seat.playerId];
     if (state.showButton || position) {
       const badge = el('span', `dealer-btn${position?.includes('SB') ? ' is-sb' : position === 'BB' ? ' is-bb' : ''}`, position ?? 'D');
@@ -465,21 +479,59 @@ function paintSeats(view) {
 function paintThinking(view) {
   const box = $('thinking');
   const idle = $('idle-hint');
-  if (!view) {
-    box.hidden = true;
-    idle.hidden = false;
-    idle.textContent = '게임을 기다리는 중…';
-    return;
-  }
-  idle.hidden = true;
-  if (view.toAct && view.toAct !== viewerId(view) && !view.gameOver) {
-    box.hidden = false;
-    box.textContent = `${playerName(view.toAct)} 생각 중…`;
-    return;
-  }
-  box.hidden = true;
-  box.textContent = '';
+  idle.hidden = !!view;
+  if (!view) idle.textContent = '게임을 기다리는 중…';
+  const actor = view?.seats?.find(seat=>seat.playerId===view.toAct);
+  const active = view?.handInProgress === true && !view.gameOver && actor?.kind === 'ai';
+  if (!active) {thinkingTurn=null;box.hidden=true;box.textContent='';$('thinking-announcement').textContent='';return;}
+  const actionCount=(ui.log??[]).filter(event=>event.type==='action').length;
+  const key = `${view.handNo}:${view.street}:${view.toAct}:${actionCount}`;
+  if (thinkingTurn?.key !== key) thinkingTurn={key,start:Date.now()};
+  const seconds=Math.max(0,Math.floor((Date.now()-thinkingTurn.start)/1000));
+  box.hidden=false;
+  const text=`${playerName(view.toAct)} 생각 중… ${seconds}초${seconds>=25?' · 오래 걸리고 있습니다':''}`;
+  if(box.textContent!==text)box.textContent=text;
+  const announcement=`${playerName(view.toAct)} 생각 중${seconds>=25?' · 오래 걸리고 있습니다':''}`;
+  if($('thinking-announcement').textContent!==announcement)$('thinking-announcement').textContent=announcement;
 }
+
+function paintHandResult(handNo = ui.handResult?.handNo) {
+  if (handNo !== ui.handResult?.handNo) return;
+  const box=$('hand-result'),result=ui.handResult,view=ui.view;
+  const frame=handResultFrame({result,hold:ui.resultHold,log:ui.log,view,
+    now:Date.now()+serverOffsetMs,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches});
+  paintBoard({...view,board:frame.board});
+  const winners=new Set(frame.visible ? result?.winners.map(row=>row.playerId) : []);
+  for(const seat of document.querySelectorAll('.seat'))seat.classList.toggle('is-winner',winners.has(seat.dataset.playerId));
+  box.hidden=!frame.visible;
+  if(!result) {box.replaceChildren();delete box.dataset.handNo;return;}
+  if(!frame.visible)return;
+  if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
+    box.dataset.handNo=String(result.handNo);box.dataset.unit=displayUnit;box.replaceChildren();
+    box.append(el('strong','','핸드 '+result.handNo+' 결과'));
+    for(const winner of result.winners)box.append(el('div','',`${playerName(winner.playerId)} +${amountText(winner.total)} · ${winner.handName ?? (result.kind==='uncontested'?'상대 전원 폴드':'쇼다운 승리')}`));
+    if(result.pots.length>1)for(const pot of result.pots)box.append(el('div','hand-result-pot',`${pot.potIndex===0?'메인 팟':`사이드 팟 ${pot.potIndex}`} · ${pot.winners.map(row=>`${playerName(row.playerId)} +${amountText(row.share)}`).join(', ')}`));
+    if(result.myNet!==null)box.append(el('div','',`나: ${amountText(result.myNet,view.blinds?.[1],true)}`));
+    const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');box.append(counter);
+    const skip=el('button','btn btn-ghost hand-result-skip','건너뛰기');skip.type='button';
+    skip.onclick=async()=>{
+      const captured=result.handNo;const hadFocus=document.activeElement===skip;skip.disabled=true;
+      try {
+        const response=await appFetch('skip-result',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handNo:captured})});
+        const body=await response.json();
+        if(!response.ok || body.skipped!==true)throw Error('SKIP_UNAVAILABLE');
+      } catch { /* Both rejection and success hide this hand's skip control. */ }
+      finally {if(ui.handResult?.handNo===captured){skip.hidden=true;skipHiddenForHand=captured;if(hadFocus)$('tab-log').focus();}}
+    };
+    box.append(skip);
+  }
+  const countdown=box.querySelector('.hand-result-countdown');
+  const text=frame.remainingSeconds===null?'':`다음 핸드 ${frame.remainingSeconds}초`;
+  if(countdown.textContent!==text)countdown.textContent=text;
+  box.querySelector('.hand-result-skip').hidden=!(appGameId && !participantMode && !isSpectating(view)
+    && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
+}
+setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
 
 function writeAmountField(value) {
   const input = $('raise-amount');
@@ -974,6 +1026,8 @@ function paintReview(view) {
 
 function paint() {
   const view = ui.view;
+  ui.handPrior=captureHandPrior(ui.handPrior,{view,log:ui.log,viewer:viewerId(view)});
+  ui.handResult=updateHandResult(ui.handResult,{view,log:ui.log,viewer:viewerId(view),prior:ui.handPrior});
   const spectator = isSpectating(view);
   document.body.classList.toggle('spectator-mode', spectator);
   const banner = $('spectator-banner');
@@ -985,9 +1039,9 @@ function paint() {
   }
   if (spectator && ['coach','training'].includes(selectedTab)) selectTab('log');
   paintTop(view);
-  paintBoard(view);
   paintPots(view);
   paintSeats(view);
+  paintHandResult();
   paintTurnDeadline();
   paintThinking(view);
   paintActionBar(view);
@@ -1038,9 +1092,10 @@ function paintTurnDeadline() {
     if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
   }
 }
-setInterval(paintTurnDeadline, 1000);
+setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);}, 1000);
 
 function renderSnapshot(snap) {
+  ui.resultHold=snap.resultHold ?? null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
   const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
   if (isSpectating(snap.view)) {
@@ -1069,6 +1124,8 @@ function renderSnapshot(snap) {
 }
 
 function render(m) {
+  if(m.resultHold!==undefined)ui.resultHold=m.resultHold;
+  else if(m.view && (m.view.handInProgress || m.view.handNo!==ui.resultHold?.handNo))ui.resultHold=null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, m.turnDeadline, ui.view, m.view ?? ui.view);
   ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
@@ -1229,7 +1286,7 @@ document.querySelector('.tabs').addEventListener('keydown',ev=>{
 $('display-unit').value=displayUnit;
 $('display-unit').addEventListener('change',ev=>{
   displayUnit=ev.target.value==='chips'?'chips':'bb';writePreference(displayUnit);
-  paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
+  paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintHandResult();paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
 });
 $('seat-close').addEventListener('click',()=>dialogs.close());
 $('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list').scrollHeight;$('log-list')._unread=0;$('log-new').hidden=true;});

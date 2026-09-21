@@ -50,6 +50,8 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
     assert.equal(js.status, 200);
     assert.match(js.text, /formatTrainingCard/);
+    const resultJs=await req(srv.port,'/hand-result.js',{token:'tok-mod'});
+    assert.equal(resultJs.status,200);assert.match(resultJs.text,/export function buildHandResult/);
     const replayJs = await req(srv.port, '/replay-format.js', { token: 'tok-mod' });
     assert.equal(replayJs.status, 200);
     assert.match(replayJs.text, /formatReplay/);

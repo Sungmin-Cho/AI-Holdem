@@ -21,6 +21,7 @@ export const requiredJourneyChecks = [
   "name-taken",
   "two-guests-start",
   "guest-table-booted",
+  "skip-hidden-multi",
   "guest-table-viewport",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
@@ -99,7 +100,7 @@ export async function runMultiplayerJourney(outDir) {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       publicPort: 0,
     });
-    app.manager.setPrefill({pace:'instant'});
+    app.manager.setPrefill({pace:'normal'});
     assert.ok(app.publicPort, "public listener did not bind");
     await host(["open", app.url]);
     await host(["set", "viewport", "1280", "900"]);
@@ -144,7 +145,7 @@ export async function runMultiplayerJourney(outDir) {
     );
 
     await click(host, "summary");
-    await host(["fill", 'input[name="hands"]', "1"]);
+    await host(["fill", 'input[name="hands"]', "4"]);
     await click(host, "#start");
     await wait(
       () => app.manager.snapshot().state === "playing" && !app.manager.snapshot().pendingRequestId,
@@ -244,6 +245,19 @@ export async function runMultiplayerJourney(outDir) {
       "guest A action",
     );
     check("guest-action-insecure-context");
+    for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
+      const doc=document.querySelector('#table')?.contentDocument;
+      if(doc?.querySelector('#hand-result')?.hidden===false){clearInterval(window.__handDriver);return;}
+      const button=['#btn-check','#btn-fold','#btn-call'].map(id=>doc?.querySelector(id)).find(el=>el&&!el.disabled&&!el.hidden);
+      button?.click();
+    },60)`);
+    await wait(()=>evaluate(guestA)("document.querySelector('#table')?.contentDocument.querySelector('#hand-result')?.hidden===false"),'actual multiplayer hand result');
+    for(const browser of [host,guestA,guestB]){
+      await evaluate(browser)('clearInterval(window.__handDriver)');
+      assert.equal(await evaluate(browser)("document.querySelector('#table')?.contentDocument.querySelector('.hand-result-skip')?.hidden"),true);
+    }
+    check('skip-hidden-multi');
+
 
     await click(host, "#menu");
     await wait(

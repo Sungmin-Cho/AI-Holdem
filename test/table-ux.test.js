@@ -340,7 +340,7 @@ test('real deadline painter ticks without a new frame and announces urgency once
   const context={ui,viewerId:view=>Object.hasOwn(view??{},'viewer')?view.viewer:'user',serverOffsetMs:0,announcedDeadline:null,renderedDeadlineKey:null,formatTurnDeadline,
     Date:{now:()=>clock,parse:Date.parse},Math,
     $:id=>id==='turn-deadline'?label:announcement,
-    document:{querySelectorAll:()=>[plate]},setInterval:(fn,ms)=>{assert.equal(interval,undefined);assert.equal(ms,1000);interval=fn;}};
+    paintThinking:()=>{},document:{querySelectorAll:()=>[plate]},setInterval:(fn,ms)=>{assert.equal(interval,undefined);assert.equal(ms,1000);interval=fn;}};
   vm.runInNewContext(painter,context);assert.equal(typeof interval,'function');
   interval();assert.equal(label.textContent,'남은 시간 11초');assert.equal(plate.textContent,label.textContent);assert.equal(announced,0);
   clock=2000;interval();assert.equal(announced,1);assert.equal(label.classList['is-urgent'],true);

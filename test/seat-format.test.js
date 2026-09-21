@@ -76,3 +76,20 @@ test('engine actions and both table layouts advance clockwise; heads-up reverses
     assert.equal(legalFor(state).toAct,n===2?posts[1]:posts[0]);
   }
 });
+
+test('last action badges track blinds, current street bets, raises and all-in without card data',async()=>{
+  const {lastActionsBySeat}=await import('../server/public/seat-format.js');
+  const log=[{type:'hand_start',handNo:1},{type:'blinds_posted',posts:[{playerId:'user',amount:25},{playerId:'p1',amount:50}]}];
+  assert.deepEqual(lastActionsBySeat(log),{user:{label:'SB',amount:25},p1:{label:'BB',amount:50}});
+  log.push({type:'action',playerId:'user',action:'call',street:'preflop'});
+  assert.deepEqual(lastActionsBySeat(log).user,{label:'콜',amount:null});
+  log.push({type:'street',street:'flop',board:['As','Kh','Qc']});
+  assert.deepEqual(lastActionsBySeat(log),{});
+  log.push({type:'action',playerId:'user',action:'raise',street:'flop',amount:100});
+  assert.deepEqual(lastActionsBySeat(log).user,{label:'벳',amount:100});
+  log.push({type:'action',playerId:'p1',action:'raise',street:'flop',amount:300,allIn:true});
+  assert.deepEqual(lastActionsBySeat(log).p1,{label:'올인',amount:300});
+  log.push({type:'action',playerId:'user',action:'fold',street:'flop'});
+  assert.deepEqual(lastActionsBySeat(log).user,{label:'폴드',amount:null});
+  log.push({type:'hand_start',handNo:2});assert.deepEqual(lastActionsBySeat(log),{});
+});

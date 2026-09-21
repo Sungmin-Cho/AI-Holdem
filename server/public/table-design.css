@@ -287,3 +287,14 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
   .table.is-crowded .seat[data-bet-band="top"][data-side="left"] .bet-marker {left:calc(50% + 16px);}
   .table.is-crowded .seat[data-bet-band="top"][data-side="right"] .bet-marker {left:calc(50% - 16px);}
 }
+
+/* Result stays non-modal and leaves table controls reachable. */
+.hand-result {position:absolute;z-index:8;left:50%;top:45%;transform:translate(-50%,-50%);max-width:min(90vw,30rem);padding:1rem 1.4rem;border:1px solid var(--gold,#c6a66b);border-radius:1rem;background:rgba(20,30,28,.96);color:#fff;text-align:center;pointer-events:none;box-shadow:0 8px 32px #0008;}
+.hand-result[hidden] {display:none;}
+.hand-result button {pointer-events:auto;display:block;margin:.4rem auto 0;}
+.hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
+.hand-result-pot {font-size:.85em;}
+.seat.is-winner .plate {outline:2px solid var(--gold,#c6a66b);box-shadow:0 0 14px #c6a66b80;}
+.plate-action {font-size:.65rem;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--gold,#c6a66b);}
+@media(max-width:600px) {.plate-action-amount {display:none;}.hand-result {font-size:.82rem;padding:.65rem;}}
+@media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
