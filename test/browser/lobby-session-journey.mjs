@@ -169,6 +169,14 @@ export async function runLobbyJourney(outDir) {
       const unavailable=await fetch(`${app.origin}/api/game/${beforeFault.gameId}/events`,{headers:{authorization:`Bearer ${app.token}`,'x-game-epoch':beforeFault.gameEpoch}});
       assert.equal(unavailable.status,503);assert.equal((await unavailable.json()).code,'SESSION_UNAVAILABLE');
     } finally {fs.writeFileSync(engineFile,engineBeforeFault);}
+    // The manager reaches error before the browser's polling render does. Wait
+    // for the actual recovery control to own its click point after layout.
+    await wait(()=>evaluate(`(() => {
+      const button=document.querySelector('#recover');
+      if(!button || button.hidden || button.disabled || document.body.classList.contains('has-game'))return false;
+      const r=button.getBoundingClientRect();
+      return r.width>0 && r.height>0 && button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+    })()`));
     await click('#recover');await state('playing');
     await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
     assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);

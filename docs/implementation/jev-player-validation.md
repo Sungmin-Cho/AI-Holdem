@@ -95,3 +95,6 @@ R2/R3 모두 `verify-evidence --require-receipt-guard --expect-fingerprint --exp
 - 멀티플레이어 browser journey의 두 참가자 viewport를 1280×600으로 고정해 이 조건을 지속적으로 검사한다.
 - 수정 후 multiplayer browser PASS, UI public contract 4 PASS. 기존 사용자 store 보존 및 소유 서비스 cleanup도 PASS.
 - 최초 로그 `/tmp/jev-ci-ui-first.log`, 다운로드 증거 `/tmp/jev-ci-ui-evidence`, GitHub artifact `10675883508`(run `35683836404`)을 보존했다. 이후 최종 commit에서 전체 원격 CI를 새로 실행한다.
+
+
+두 번째 원격 UI 실행(run `35684612635`, job `106608913079`)은 JEV/관전자 여정 통과 후 기존 로비의 `#recover` 클릭에서 실패했다. 브라우저는 클릭 지점이 header에 가려졌다고 보고했으나 후속 스크린샷에서는 복구 화면이 정상 표시됐다. 테스트가 manager의 error 상태만 기다리고 브라우저 polling render를 기다리지 않는 경합을 확인해, 실제 복구 버튼의 표시·클릭 지점 소유를 기다린 뒤 기존 브라우저 클릭을 수행하도록 보완했다. 제품 경로 변경이나 강제 DOM 클릭으로 우회하지 않았다. 수정 후 전체 lobby browser journey PASS. 최초 로그 `/tmp/jev-ci-ui-second.log`와 `/tmp/jev-ci-ui-second-evidence`를 보존했다.
