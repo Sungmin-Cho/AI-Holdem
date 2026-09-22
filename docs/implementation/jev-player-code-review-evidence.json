@@ -1,0 +1,993 @@
+{
+  "author": "gpt-6-astra",
+  "router_version": "1.14.0",
+  "baseline_commit": "3a647c09780afe2971b7a4bf3097b52002db151c",
+  "author_disposition": "See jev-player-validation.md; reviewer tokens are not author approval.",
+  "rounds": [
+    {
+      "round": "r1",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "50cdc48c98c77bee824c47f0e38d0da6c6f264ce27f5fbad7f9b8041bcb75148",
+        "decision_fingerprint": "7519aecb9bcdb4ae3847fd4b16a16cbeb20087d374ea1d6ada448fc2cd23d08a",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6-astra",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "above",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude",
+          "openai"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "gpt-5.6-sol"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": true,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [
+          "grok-4.6"
+        ],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "d715b784c841a93f76cb87da6242dda53fa227037184aac79e9db75cb72068a0",
+          "author_model_ids": [
+            "gpt-6-astra"
+          ],
+          "author_families": []
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "gpt-5.6-sol",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied."
+      },
+      "source_sha256": "d715b784c841a93f76cb87da6242dda53fa227037184aac79e9db75cb72068a0",
+      "reviews": [
+        {
+          "receipt": {
+            "attempt_id": "r1-reviewer-1",
+            "seat": "reviewer-1",
+            "runtime": "codex",
+            "model_id": "claude-opus-5",
+            "effort_native": "high",
+            "permission_mode": "dontAsk",
+            "decision_fingerprint": "7519aecb9bcdb4ae3847fd4b16a16cbeb20087d374ea1d6ada448fc2cd23d08a",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.to_claude",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "claude",
+              "-p",
+              "--model",
+              "claude-opus-5",
+              "--effort",
+              "high",
+              "--permission-mode",
+              "dontAsk",
+              "--strict-mcp-config",
+              "--tools",
+              "",
+              "--output-format",
+              "json"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "6c7a7a8f296c3a0483aadb972ae3a54780ec22625ebdaa2605617b13e185c88d",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "ef5041118f242311c9eeb77239d20141d037798187cdf673c81d20d3548c5443",
+            "output_schema": "review",
+            "output_envelope": "claude-print-json-v1",
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 37461,
+              "process_group_id": 37461,
+              "supervisor_pid": 37455
+            },
+            "timing": {
+              "started_at": "2026-09-22T02:49:34Z",
+              "deadline_at": "2026-09-22T02:59:34Z",
+              "finished_at": "2026-09-22T02:59:35Z",
+              "launch_anchor_at": "2026-09-22T02:49:34Z"
+            },
+            "result": {
+              "state": "TIMED_OUT",
+              "exit_status": null,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r1-reviewer-1.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r1-reviewer-1.stderr",
+              "output_sha256": null,
+              "schema_valid": null,
+              "verdict": null,
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": {
+                "parse_ok": false,
+                "stop_reason": null,
+                "session_id": null,
+                "served_models": null,
+                "error_type": null,
+                "usage": null
+              },
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": ""
+        },
+        {
+          "receipt": {
+            "attempt_id": "r1-reviewer-2",
+            "seat": "reviewer-2",
+            "runtime": "codex",
+            "model_id": "gpt-5.6-sol",
+            "effort_native": "high",
+            "permission_mode": "read-only",
+            "decision_fingerprint": "7519aecb9bcdb4ae3847fd4b16a16cbeb20087d374ea1d6ada448fc2cd23d08a",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.native",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "codex",
+              "-c",
+              "mcp_servers={}",
+              "--disable",
+              "shell_tool",
+              "--disable",
+              "apps",
+              "--disable",
+              "plugins",
+              "--disable",
+              "hooks",
+              "exec",
+              "--ignore-user-config",
+              "-m",
+              "gpt-5.6-sol",
+              "-c",
+              "model_reasoning_effort=high",
+              "-s",
+              "read-only",
+              "--skip-git-repo-check",
+              "-"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "9850ac990a3cd70750a6a7e0bd7fc0cbbc751c99f913d7d01027788269053d73",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "ef5041118f242311c9eeb77239d20141d037798187cdf673c81d20d3548c5443",
+            "output_schema": "review",
+            "output_envelope": null,
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 37460,
+              "process_group_id": 37460,
+              "supervisor_pid": 37456
+            },
+            "timing": {
+              "started_at": "2026-09-22T02:49:34Z",
+              "deadline_at": "2026-09-22T02:59:34Z",
+              "finished_at": "2026-09-22T02:57:11Z",
+              "launch_anchor_at": "2026-09-22T02:49:34Z"
+            },
+            "result": {
+              "state": "INVALID_OUTPUT",
+              "exit_status": 0,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r1-reviewer-2.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r1-reviewer-2.stderr",
+              "output_sha256": "9e2da3c16736095db4f059aec1ef709bebe520bf94235fc555bf2fa7b7fc83c4",
+              "schema_valid": false,
+              "verdict": null,
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": null,
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": "=== REVIEW ===\nverdict: REQUEST_CHANGES\nconfidence: 0.96\n\nfindings:\n\n1. HIGH — tools/game-loop.js:2513, 2523-2534, 7730-7745\nConcrete trigger: JEV returns an action, proposedAction is persisted with closeConfirmed:true, and the engine step durably applies it but the CLI response is lost or fails to parse. The catch path rewrites closeConfirmed:false with JEV_ENGINE_APPLY_UNCONFIRMED. On restart, reconciliation requires closeConfirmed === true, so it ignores the exact matching applied action and leaves the decision unsafe permanently. The app then offers no commands, and endGame also rejects.\nSuggested fix: keep HTTP-request closure separate from engine-application certainty. Do not clear closeConfirmed after proposedAction is durable. For v3 recovery, clear pendingDecision when the engine contains the exact decision/player/action/amount match regardless of the apply receipt; otherwise retain unsafe and never retry the proposal.\n\n2. MEDIUM — shared/jev-pending.js; tools/game-loop.js:6766-6812, 2442-2452\nConcrete trigger: a damaged v3 record with status recovery_required, retryable:true, closeConfirmed:true, and proposedAction passes validJevPending. retryDecision accepts it, changes it to retry_authorized, and decideWithJev starts another generation and potentially another HTTP request. This violates the rule that retry is allowed only when no proposedAction exists.\nSuggested fix: explicitly reject proposedAction in retryDecision and enforce semantic state combinations in validJevPending. recovery_required/retry_authorized must not be retryable when proposedAction exists; such records should fail closed as unsafe.\n\nmissing_tests:\n\n1. Fault-inject an engine step that commits state and then loses its response; restart must reconcile the exact proposed action and must not invoke JEV again.\n2. Test every crash boundary around proposedAction persistence, engine mutation, CLI response, and pendingDecision clearing.\n3. Test malformed v3 state combinations, especially retryable recovery records containing proposedAction.\n4. Test late settlement followed by shutdown/reopen, confirming lock retention and exactly one explicit retry authorization.\n5. Add boundary tests for the hundredth-probability amendment across every candidate count. The n × 0.005 + 1e-6 envelope is mathematically defensible for independently rounded hundredths, preserves the maximum-choice requirement, and does not normalize; I found no correctness defect in that amendment itself.\n6. Verify the package lock is updated for @typesafe-ai/sdk. The supplied diff adds npm ci and a dependency but shows no lockfile evidence.\n\nuncertainties:\n\n1. The supplied evidence does not include package-lock.json, so npm ci compatibility cannot be confirmed.\n2. engine/game-archive.js still defaults omitted runtime to llm. The lobby visibly defaults to policy, but normalizeSetup/applyModeDefaults are not fully shown; therefore the policy-default contract cannot be confirmed for every new-game entrypoint.\n3. Stable aliases rely on publicSeats retaining deterministic seat order and containing every prior-action actor. The decision-peek schema guaranteeing those properties is not included.\n"
+        }
+      ]
+    },
+    {
+      "round": "r2",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "e5f8ebc21e9c0abffeb5dc71a306777a97dee681b50aa1013061848b39c9194f",
+        "decision_fingerprint": "cf80f8e9b93fc2c53ebad3b304bb157d6f2e1645e6c6eb910d40a8165c923973",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6-astra",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "above",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude",
+          "openai"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "gpt-5.6-sol"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": true,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [
+          "grok-4.6"
+        ],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "8cb406c689841a4cd072456a2db85b8bff3899623af2f3ac4db82c663894474c",
+          "author_model_ids": [
+            "gpt-6-astra"
+          ],
+          "author_families": []
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "gpt-5.6-sol",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied."
+      },
+      "source_sha256": "8cb406c689841a4cd072456a2db85b8bff3899623af2f3ac4db82c663894474c",
+      "reviews": [
+        {
+          "receipt": {
+            "attempt_id": "r2-reviewer-1",
+            "seat": "reviewer-1",
+            "runtime": "codex",
+            "model_id": "claude-opus-5",
+            "effort_native": "high",
+            "permission_mode": "dontAsk",
+            "decision_fingerprint": "cf80f8e9b93fc2c53ebad3b304bb157d6f2e1645e6c6eb910d40a8165c923973",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.to_claude",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "claude",
+              "-p",
+              "--model",
+              "claude-opus-5",
+              "--effort",
+              "high",
+              "--permission-mode",
+              "dontAsk",
+              "--strict-mcp-config",
+              "--tools",
+              "",
+              "--output-format",
+              "json"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "9bd92860c166afcf5a491aa81053923084675b0c8d641ad787eb56dcae1efef6",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "c375a48498c2f5d8ddc703a36552ddd26b78c2a3720d99189296283ca64086cd",
+            "output_schema": "review",
+            "output_envelope": "claude-print-json-v1",
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 64750,
+              "process_group_id": 64750,
+              "supervisor_pid": 64746
+            },
+            "timing": {
+              "started_at": "2026-09-22T03:01:21Z",
+              "deadline_at": "2026-09-22T03:16:21Z",
+              "finished_at": "2026-09-22T03:11:16Z",
+              "launch_anchor_at": "2026-09-22T03:01:21Z"
+            },
+            "result": {
+              "state": "SUCCEEDED",
+              "exit_status": 0,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r2-reviewer-1.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r2-reviewer-1.stderr",
+              "output_sha256": "50f528c3f7ebe9dbc656c34c49925dc7880a582f5f9e850726a7fa8f1d80d1fa",
+              "schema_valid": true,
+              "verdict": "PASS_WITH_CHANGES",
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": {
+                "parse_ok": true,
+                "stop_reason": "end_turn",
+                "session_id": "b975bdaf-4c6a-46da-a032-78b267f718a9",
+                "served_models": [
+                  "claude-opus-5"
+                ],
+                "error_type": "success",
+                "usage": {
+                  "input_tokens": 2,
+                  "cache_creation_input_tokens": 56273,
+                  "cache_read_input_tokens": 3166,
+                  "output_tokens": 45380
+                }
+              },
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": "{\"duration_api_ms\":582671,\"stop_reason\":\"end_turn\",\"session_id\":\"b975bdaf-4c6a-46da-a032-78b267f718a9\",\"total_cost_usd\":1.6988229999999997,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":56273,\"cache_read_input_tokens\":3166,\"output_tokens\":45380,\"output_tokens_details\":{\"thinking_tokens\":38326},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":56273,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"not_available\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":45380,\"cache_read_input_tokens\":3166,\"cache_creation_input_tokens\":56273,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":56273},\"type\":\"message\"}],\"speed\":\"standard\"},\"modelUsage\":{\"claude-opus-5\":{\"inputTokens\":2,\"outputTokens\":45380,\"cacheReadInputTokens\":3166,\"cacheCreationInputTokens\":56273,\"webSearchRequests\":0,\"costUSD\":1.6988229999999997,\"contextWindow\":1000000,\"maxOutputTokens\":64000,\"thinkingTokens\":38326,\"canonicalModel\":\"claude-opus-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"=== REVIEW ===\\nverdict: PASS_WITH_CHANGES\\nconfidence: 0.72\\n\\n핵심 계약(전 AI 좌석 JEV·인간 경로 불변, SDK 고정/지연로딩/공식 URL/자동 재시도 없음/원문 오류 미기록, 액터 홀카드+별칭 공개상태만 송출, projection 이전 pending 내구화, expect-version step 이전 proposedAction 내구화, pause는 소유 결정 완주·stop/interrupt는 제안 이전 취소, v3 HTTP와 CLI 분리, 적용 확인 시 제안 정리·미해소 제안은 unsafe/무재시도, 미상 종료는 락 보존·late settlement는 명시 재시도만+전체 stop 반복, 타 플레이어 폴백 없음)은 코드상 모두 충족된다. 특히 \\\"이전에 지적된 제안 재추론/재조정\\\" 항목은 가정하지 않고 다음을 확인했다.\\n\\n- resume 재조정은 `applied && p.proposedAction && (schemaVersion===3 || closeConfirmed===true)` + 액션/금액 완전 일치일 때만 pending을 지운다. HTTP 종료 영수증과 무관하게 정리되고, 불일치면 `canRecover=false`로 unsafe(JEV_ENGINE_APPLY_UNCONFIRMED)에 머문다. 새 액션을 만들어내는 경로는 없다.\\n- `decideWithJev`의 진입 게이트는 previous가 `retry_authorized` 이고 `proposedAction`이 없을 때만 진행한다. retry 경로에서 기존 제안을 재사용하거나 재추론하지 않는다.\\n- 모든 상태 전이는 `commit()`을 통하고 `sameJevIdentity` + `ownedLockStillVerified()`를 매번 재검사한다. 세대는 `previous.generation+1`로 단조 증가한다.\\n- `validJevPending`이 `proposedAction`과 `retryable===true`/`recovery_required`/`retry_authorized`의 공존을 구조적으로 금지해, \\\"재시도 가능한 제안\\\"이라는 상태 자체가 만들어지지 않는다.\\n\\n확률 수용 개정안(진폭 n*0.005+1e-6, 양자화된 값에만 적용, 그 외 1e-6, 선택은 최대값·정규화 없음)도 타당하다고 판단한다. 값별 반올림 오차 상한이 0.005이므로 n개 합의 오차 봉투는 n*0.005가 수학적으로 정확한 상한이고, 선택은 원값 최대 비교라 합 드리프트에 영향받지 않으며 `probabilitySum`을 진단에 원본 그대로 남긴다. 다만 후보 수가 6이면 허용 편차가 ±3%까지 벌어지므로, 봉투에 절대 상한(예: `Math.min(n*0.005, 0.02)+1e-6`)을 겹쳐 두면 \\\"양자화\\\"를 가장한 심하게 어긋난 분포를 걸러낼 수 있다(선택 정확성에는 영향 없음, 어디까지나 건전성 신호).\\n\\n다음은 조치 가능한 결함이다.\\n\\n[MEDIUM] tools/game-loop.js `endGame` + tools/session-manager.js allowedCommands — unsafe 상태의 출구 없음\\n트리거: 제안 내구화 이후 `runCli(['step', ..., '--expect-version'])`가 실패(엔진 CLI 일시 실패·EPERM·디스크 오류)하면 pending은 `status:'unsafe', code:'JEV_ENGINE_APPLY_UNCONFIRMED'`가 된다. 그러면 session-manager는 `schemaVersion===3 && status==='unsafe' ? false`로 **모든** 명령을 걸러 `allowedCommands`가 빈 배열이 되고, `endGame`도 예외를 던진다. 즉 앱 안에서 재시도·종료·재시작 어느 것도 불가능하고 프로세스를 죽여 resume으로 재조정하는 수밖에 없다. 그런데 lobby.js가 이 상태에 표시하는 문구는 \\\"실행 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요\\\"로, 불가능한 행동을 지시한다.\\n수정: `endGame` 가드를 `code === 'JEV_REQUEST_CLOSE_UNCONFIRMED'` 인 경우로 한정하고(그 경우에만 미종료 HTTP가 남아 있으므로), `JEV_ENGINE_APPLY_UNCONFIRMED`에는 `kind === 'end'`를 허용한다. allowedCommands의 unsafe 분기도 `pendingDecision.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED' ? [] : kind === 'end'`로 나눈다. 아울러 `endGame`이 던지는 코드는 실제 pending의 code를 그대로 쓰고(현재는 무조건 JEV_REQUEST_CLOSE_UNCONFIRMED), lobby의 ENGINE_APPLY 문구를 \\\"앱 서비스를 종료한 뒤 다시 열어 복구하세요\\\"로 정정한다.\\n\\n[MEDIUM] tools/game-loop.js `decideWithJev` 런타임 선택 + tools/jev-runtime.js `JEV_RUNTIME_UNAVAILABLE`\\n트리거: `if (stopRequested || signal.aborted) throw INTERRUPTED` 체크를 통과한 직후에 `requestStop()`이 들어오면 `jevRuntime.dispose()`가 phase를 `'disposing'`으로 바꾼다. 이 값은 `decideWithJev`의 두 분기(`'disposed'`, `'idle'`) 어디에도 걸리지 않아 기존 인스턴스를 그대로 쓰고, `decide()`는 `jevError('JEV_RUNTIME_UNAVAILABLE')` (retryable 기본 false)를 던진다. catch에서 코드가 `JEV_`로 시작하므로 `recovery_required` + `retryable:false`로 내구화되고, requestStop의 pendingPatch는 `status==='running'`만 회복시키므로 그대로 남는다. 결과적으로 정지와 경합했을 뿐인 결정이 영구히 재시도 불가(종료 전용)가 된다.\\n수정: (a) `decideWithJev`의 catch에서 `stopRequested || signal.aborted`이면 코드/재시도성을 `INTERRUPTED`·`retryable:true`로 강제하거나, (b) `JEV_RUNTIME_UNAVAILABLE`을 retryable로 만들고 런타임 선택 분기를 `phase !== 'active' && phase !== 'closure_unconfirmed'`면 새 인스턴스 생성으로 바꾼다. (a)가 계약(정지는 제안 이전 취소, 재개 시 명시 재시도)에 더 부합한다.\\n\\n[MEDIUM] tools/jev-player.js `projectJevState` — archetype 의존이 비재시도 브릭이 됨\\n트리거: `player?.archetype`이 없거나 `styles`의 6개 키(TAG/LAG/Nit/CallingStation/Maniac/Trickster)와 철자가 다르면 `bad()` → `JEV_INPUT_INVALID`(retryable false)로 매 결정이 실패한다. JEV 경로는 `restorePlayers()`/`stampPlayerPolicies()`를 모두 건너뛰므로(resume의 `else if (opponentRuntimeOf()==='llm')`) players.json의 archetype 어휘를 보증하는 지점이 부트스트랩/재개 어디에도 없다. 어휘가 하나만 어긋나도 게임은 첫 AI 턴에서 종료 전용 상태가 된다.\\n수정: 부트스트랩/재개의 JEV preflight에서 players.json의 모든 AI 좌석 archetype이 `styles`에 있는지 검사해 `JEV_CONFIG_UNSUPPORTED`/설정 오류로 조기 실패시키고, 런타임에서는 미지의 archetype을 재시도 가능한 코드(예: `JEV_PLAYER_PROFILE_INVALID`, retryable true)로 분리한다.\\n\\n[LOW-MEDIUM] tools/jev-diagnostics.js `boundJevDiagnostics`가 writeLoopState 안에서 throw\\n트리거: loop-state의 `jevDiagnostics`가 손상(schemaVersion 변조, entries 비배열, dropped 음수)되면 `boundJevDiagnostics`가 예외를 던지고, 이 함수는 `writeLoopState`의 모든 호출 경로에 있으므로 복구 상태 기록·`stopping` 마커·`stoppedAt` 기록까지 전부 실패한다. `persistCleanupFailure`도 같은 경로를 쓰면 stop이 영구 실패하고 락이 물린다. resume의 pending 사전검증은 `jevDiagnostics`를 보지 않아 이 상태를 미리 잡지 못한다.\\n수정: 손상 시 예외 대신 `{schemaVersion:1, entries:[], dropped:<보존 가능한 값 또는 0>}`로 격리 리셋하고 `log('jev-diagnostics-quarantined', {...})`를 남긴다(진단은 부가 정보이지 생명주기 자산이 아니다). 또는 resume 초기 검증에 `jevDiagnostics` 형태 검사를 추가해 격리한다.\\n\\n[LOW] tools/game-loop.js `decideWithJev` — step 단계의 VERSION_MISMATCH를 unsafe로 분류\\n트리거: 제안 내구화 이후 `step --expect-version`이 `VERSION_MISMATCH`로 거절되면 첫 분기가 `!record.proposedAction` 때문에 건너뛰어져 `JEV_ENGINE_APPLY_UNCONFIRMED`(unsafe, 재시도 불가)가 된다. 그러나 expect-version 거절은 변이 이전의 확정적 거절이므로 \\\"적용 여부 불명\\\"이 아니다. 위 [MEDIUM] 1번과 겹쳐 UI 막다른 길로 이어진다.\\n수정: `error.code === 'VERSION_MISMATCH'`인 경우에는 `unsafe` 대신 `recovery_required` + `retryable:true` + `code:'STALE_PLAYER_DECISION'`로 분류하거나, 엔진이 expect-version 거절 시 무변이를 보장한다는 사실을 근거로 pending을 지우고 resync 경로(`jevResyncIdentity`)로 넘긴다. 엔진의 무변이 보장을 먼저 문서/테스트로 고정할 것.\\n\\n[LOW] tools/game-loop.js `resume({opponentRuntime})` 인자가 불일치 검증 증거에 빠짐\\n트리거: `resolveOpponentRuntime`에 넘기는 `explicit`는 `opts.opponentRuntime`뿐이라, `resume({opponentRuntime:'llm'})`을 jev 게임에 호출하면 `requestedOpponentRuntime`만 조용히 바뀌고 mismatch가 발생하지 않는다(해결값은 config 기준 'jev'라 동작은 안전하지만 호출자의 충돌 요청이 묵살된다).\\n수정: resume 인자를 evidence에 포함해 `resolveOpponentRuntime(engineState, {loop, setup, explicit: opponentRuntime ?? opts.opponentRuntime})`로 넘기고, 두 값이 모두 있으면서 다르면 기존대로 `OPPONENT_RUNTIME_MISMATCH`를 던진다.\\n\\n[LOW] tools/jev-player.js `buildJevCandidates` — `!canCheck && callAmount === 0`이면 무조건 폴드\\n트리거: 엔진이 `canCheck:false, callAmount:0, canRaise:false`를 보고하면 후보가 `[fold]` 하나가 되어 HTTP 없이 `jev_single_legal`로 폴드가 확정된다. 계약 위반 상태를 정상 결정으로 흡수한다.\\n수정: `if (!canCheck && call === 0 && !canRaise) bad();` 처럼 불변식을 명시적으로 위반 처리하고, `projectJevState`도 `legal`이 객체인지 먼저 확인한다(현재 `legal.toAct` 접근이 TypeError가 되어 `JEV_INPUT_INVALID` 비재시도로 떨어진다).\\n\\n[LOW] tools/jev-runtime.js `dispose()`의 `record.settled` 널 경합 및 타이머 unref\\n`Promise.race([record.settled, ...])`에서 `settled`가 아직 `null`이면 즉시 null로 resolve되어 `{closeConfirmed:true}`를 거짓 보고한다. 현재 코드 배치상 도달 불가하지만(두 대입 사이에 await 없음) 한 줄 방어(`record.settled ?? Promise.resolve()` 대신 `if (!record.settled) throw JEV_REQUEST_CLOSE_UNCONFIRMED`)로 고정해 두는 편이 리팩터링 내성이 있다. 또한 `graceTimer`/`deadline`에 `.unref?.()`를 붙이지 않아 정상 종료 후에도 최대 graceMs만큼 프로세스가 살아남을 수 있다.\\n\\n[LOW] 성능/자원: 결정마다 `createJevRuntime` 새 인스턴스 → `TypeSafeClient` 새로 생성(연결 재사용 없음), `boundJevDiagnostics`가 모든 `writeLoopState`마다 상태 전체를 한 번 더 `JSON.stringify`하고 예산이 찰 때까지 엔트리별 stringify를 수행(최대 수천 회/쓰기). 핸드당 쓰기 횟수가 많은 루프에서 누적 비용이 된다. 엔트리 바이트 길이를 기록해 캐시하거나, 엔트리 수/바이트가 변하지 않은 쓰기에서는 트리밍을 건너뛰도록 한다.\\n\\n[INFO] resume 경로에는 JEV preflight가 없다. 키/SDK가 사라진 상태로 재개하면 첫 결정에서 `JEV_API_KEY_MISSING`(retryable)로 떨어지는데, 환경변수는 재시도로 바뀌지 않으므로 사실상 무한 재시도 유도가 된다. bootstrap과 동일하게 `ai !== 0`일 때 resume에서도 preflight를 수행해 로비 오류 메시지(이미 `JEV_API_KEY_MISSING`/`JEV_SDK_UNAVAILABLE` 매핑 존재)를 즉시 보여주는 편이 낫다.\\n\\nmissing_tests\\n- unsafe(JEV_ENGINE_APPLY_UNCONFIRMED) 상태에서 `allowedCommands`가 비고 `endGame`이 거절되는 현재 동작의 회귀 테스트 자체가 없음 — 수정 후 \\\"end만 허용\\\" 계약으로 고정할 것.\\n- stop과 결정 시작의 경합(`phase==='disposing'` 중 decide 호출) → pending의 `retryable`이 true로 남는지.\\n- players.json archetype 누락/미지 값 → 부트스트랩 조기 실패(현재는 첫 결정에서 비재시도 실패).\\n- `boundJevDiagnostics`: 손상된 jevDiagnostics로 `writeLoopState`가 죽지 않는지, 예산 0(거대 metrics)일 때 dropped 누계 정확성, 4,999/5,000 경계 유지.\\n- 확률 수용 경계: 양자화 n개 합이 `n*0.005+1e-6` 바로 안/밖, 비양자화 값이 1e-6 밖이면 거절, 최대값이 아닌 choice 거절, `usage: null` 처리.\\n- v3 resume 매트릭스 전수: {running, retry_authorized, unsafe(CLOSE/APPLY)} × {proposedAction 유무} × {engine applied 일치/불일치} → 최종 status/closeConfirmed/retryable/code.\\n- step 단계 VERSION_MISMATCH(제안 이후)와 decision-peek 단계 VERSION_MISMATCH(제안 이전)의 분기 차이, 그리고 `jevResyncIdentity` 불일치 시 STALE 경로.\\n- late settlement: `cleanupError.code` 게이팅으로 requestStop이 정확히 한 번 더 전체 정리를 반복하는지, 그리고 엔진 턴이 이미 바뀐 경우 retry를 열지 않는지.\\n- `guardedFetch`: 비-api.typesafe.ai 오리진·리다이렉트 거절, SDK 래핑 후 코드 매핑.\\n- `buildJevCandidates`: min>max(올인만), 프리플랍 3bet/4bet 사이즈, 중복 사이즈 제거, `!canCheck && call===0`.\\n- `projectJevState` 24KB 상한 초과(9인 + 64액션 극단) 및 별칭 사상 실패.\\n- `resolveOpponentRuntime`: legacy(`config.opponentRuntime` 부재 + policySeed) 조합, setup/loop/pendingDecision 증거 불일치, jev 흔적만 있고 runtime이 아닌 경우.\\n- engine/cli.js `readJevConfig`: 심볼릭 링크, 4,097바이트, 비절대경로, `--opponent-runtime`이 jev가 아닌데 파일 지정.\\n\\nuncertainties\\n- `opponentRuntimeOf()`, `currentWatchdog()`, `runCli`, `readLoopState` 등 미제시 함수의 정확한 의미·loop-state 우선순위를 확인하지 못했다. 특히 `opponentRuntimeOf()`가 loop-state 미기록 시 무엇을 반환하는지에 따라 `requestStop`의 jev 분기(중단 취소·settled 대기)가 건너뛰어질 수 있다.\\n- `run()`이 `{kind:'recovery_required'}`를 어떻게 처리하는지(정지/대기) 미확인. unmanaged(legacy) 모드에서 v3 복구 상태가 바쁜 루프를 만들지 않는지 확인 필요.\\n- `loop-state`의 `jevDiagnostics`가 app-server/session-manager의 어떤 스냅샷에도 실려 나가지 않는지 전수 확인하지 못했다(제시된 프로젝션에는 없음). 참가자 스냅샷에 `pendingDecision.retryable`이 노출되는지도 마찬가지.\\n- 엔진의 `minRaiseTo`/`maxRaiseTo`, `step raise <N>` 인자, 아카이브 `action.amount`가 모두 \\\"이 스트리트 총액\\\" 의미로 일치하는지 확인하지 못했다. 하나라도 증분 의미라면 resume의 `applied.amount === p.proposedAction.amount` 재조정이 체계적으로 실패해 모든 크래시가 unsafe로 떨어진다.\\n- `step --expect-version` 거절이 무변이임을 엔진이 보장하는지(위 LOW 항목의 전제).\\n- `.jev-config.json` 경로는 CLI 로컬 플래그라 경로 탈출 위험은 낮다고 판단했으나(내용이 JEV_CONFIG와 완전 일치해야만 통과, 내용이 되돌아오지 않음), 이 플래그가 외부 입력에 연결되는 경로가 있다면 게임 디렉터리 내부로 제한할 것.\",\"ttft_ms\":475947,\"type\":\"result\",\"duration_ms\":582936,\"uuid\":\"d780d06f-7cf8-4b3f-b928-4f648d2574c9\",\"ttft_stream_ms\":1323,\"time_to_request_ms\":141,\"first_content_frame_ms\":1324,\"queued_turn_count\":0,\"result_index\":0}\n"
+        },
+        {
+          "receipt": {
+            "attempt_id": "r2-reviewer-2",
+            "seat": "reviewer-2",
+            "runtime": "codex",
+            "model_id": "gpt-5.6-sol",
+            "effort_native": "high",
+            "permission_mode": "read-only",
+            "decision_fingerprint": "cf80f8e9b93fc2c53ebad3b304bb157d6f2e1645e6c6eb910d40a8165c923973",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.native",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "codex",
+              "-c",
+              "mcp_servers={}",
+              "--disable",
+              "shell_tool",
+              "--disable",
+              "apps",
+              "--disable",
+              "plugins",
+              "--disable",
+              "hooks",
+              "exec",
+              "--ignore-user-config",
+              "-m",
+              "gpt-5.6-sol",
+              "-c",
+              "model_reasoning_effort=high",
+              "-s",
+              "read-only",
+              "--skip-git-repo-check",
+              "-"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "332e0396d274e1e6f82313f3e2ce95976ed912eb8cf3004a5b7ead875c4e3767",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "c375a48498c2f5d8ddc703a36552ddd26b78c2a3720d99189296283ca64086cd",
+            "output_schema": "review",
+            "output_envelope": null,
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 64751,
+              "process_group_id": 64751,
+              "supervisor_pid": 64747
+            },
+            "timing": {
+              "started_at": "2026-09-22T03:01:21Z",
+              "deadline_at": "2026-09-22T03:16:21Z",
+              "finished_at": "2026-09-22T03:07:16Z",
+              "launch_anchor_at": "2026-09-22T03:01:21Z"
+            },
+            "result": {
+              "state": "SUCCEEDED",
+              "exit_status": 0,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r2-reviewer-2.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r2-reviewer-2.stderr",
+              "output_sha256": "2b91192af3028086edb94e9816139795f5838db62fdd56eb8141e3a8a802a9c5",
+              "schema_valid": true,
+              "verdict": "FAIL",
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": null,
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": "=== REVIEW ===\nverdict: FAIL\nconfidence: 0.96\n\nfindings:\n- HIGH | tools/game-loop.js, decideWithJev.lateSettlement/requestStop | Trigger: a stop aborts an active JEV request, dispose reaches JEV_REQUEST_CLOSE_UNCONFIRMED, and the HTTP operation settles later. lateSettlement calls requestStop automatically, violating the explicit-retry-only contract. It is also timing-dependent: if the original stopPromise is still installed, requestStop merely returns that same failing promise, so no fresh cleanup pass occurs; if it has already been cleared, cleanup restarts automatically and may release the retained lock without an explicit retry. | Fix: lateSettlement should only durably record confirmed settlement and make retry available. Remove its requestStop call. A subsequent explicit stop retry must invoke a new, idempotent full cleanup pass after the prior stopPromise has settled and been cleared.\n\nmissing_tests:\n- Cover late HTTP settlement before cleanupError is persisted.\n- Cover settlement after cleanupError but before stopPromise is cleared.\n- Cover settlement after stopPromise is cleared.\n- In every case, assert the lock remains held until an explicit retry, no automatic cleanup retry occurs, and that explicit retry reruns the complete stop cleanup before releasing the lock.\n\nuncertainties:\n- Review was limited to the supplied current-code excerpts; surrounding app-service code may expose the explicit stop-retry operation, but it cannot remove the automatic and race-dependent call shown here.\n- The SDK’s retry-option behavior was not independently inspected, though both constructor and request paths explicitly request zero retries.\n"
+        }
+      ]
+    },
+    {
+      "round": "r3",
+      "route": {
+        "route_schema_version": 1,
+        "router_plugin_version": "1.14.0",
+        "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+        "request_sha256": "e96bc24c21e5b31db4899b0eb2b0a435be2d50bb41fd0af841c2f888f7d4dfd6",
+        "decision_fingerprint": "3db58f944c65e707d64e13ddd3190ec64b31d9cb57b4bb9e56d1a45138e2b38a",
+        "effective_policy": {
+          "minimum_capability_tier": null,
+          "minimum_effort": null,
+          "minimum_reviewers": null,
+          "minimum_provider_families": null,
+          "allowed_families": null
+        },
+        "host_seat_advisory": {
+          "declared": {
+            "model": "gpt-6-astra",
+            "effort": null
+          },
+          "policy_ask": {
+            "tier": 0,
+            "effort": "MAX",
+            "raised_by": [
+              "orchestrator_blast_high"
+            ]
+          },
+          "model_comparison": "above",
+          "effort_comparison": "undeclared",
+          "advisory": "none"
+        },
+        "worker_seat": {
+          "kind": "read_only",
+          "source": "declared",
+          "overrode_class_default": false,
+          "write_capable_families": [
+            "claude",
+            "openai"
+          ]
+        },
+        "selected_capability_tier": 2,
+        "selected_families": [
+          "claude",
+          "openai"
+        ],
+        "local_policy_applied": false,
+        "task_class": "REVIEW",
+        "complexity": 2,
+        "uncertainty": 1,
+        "blast_radius": 2,
+        "reversibility": 1,
+        "reasoning_centric": true,
+        "risk_score": 9,
+        "risk_band": "HIGH",
+        "execution_score": 8,
+        "execution_band": "EASY",
+        "band_overrides_applied": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "band_overrides_redundant": [
+          "critical_domain",
+          "concurrency_sensitive"
+        ],
+        "critical_flags": [
+          "security_sensitive",
+          "data_integrity_sensitive"
+        ],
+        "route_path": null,
+        "terminal": null,
+        "selected_role": "senior_engineer",
+        "selected_model": "claude-opus-5",
+        "selected_effort": "HIGH",
+        "selected_effort_effective": "HIGH",
+        "selected_effort_native": "high",
+        "review": {
+          "band": "HIGH",
+          "reviewers": [
+            "senior_engineer",
+            "principal_architect"
+          ],
+          "reviewer_models": [
+            "claude-opus-5",
+            "gpt-5.6-sol"
+          ],
+          "effort": "HIGH",
+          "independence_required": true,
+          "review_independence": "planned",
+          "required_checks": [],
+          "judge": null,
+          "judge_model": null,
+          "self_review_avoided": [],
+          "independence_compromised": false,
+          "judge_unavailable": false,
+          "review_depth_reduced": [],
+          "band_floor_unsatisfiable": false,
+          "compensating_reviewers": 0
+        },
+        "cross_family_review": true,
+        "fallbacks_applied": [],
+        "effort_ceiling_applied": [],
+        "fallback_compensations_applied": [],
+        "unavailable_models": [
+          "grok-4.6"
+        ],
+        "excluded_prior_failures": [],
+        "escalation_count": 0,
+        "retry_count": 0,
+        "routing_confidence": 0.95,
+        "routing_confidence_kind": "heuristic_policy_score",
+        "requires_human_confirmation": false,
+        "human_control_causes": [],
+        "human_confirmation_deferred": false,
+        "notes": [
+          "jointly allocated eligible models across the review and judge seats",
+          "review_context excludes declared source authors from every REVIEW-task seat; target identity is caller-declared",
+          "For review_context dispatch dispatch_seats exactly once each; selected_* aliases the lead reviewer, not an extra worker"
+        ],
+        "review_context": {
+          "target_sha256": "e84736a201ff7b3ba5e3e6fa27882fc4ca6035fb95a87670ff95193eacc8d3af",
+          "author_model_ids": [
+            "gpt-6-astra"
+          ],
+          "author_families": []
+        },
+        "dispatch_seats": [
+          {
+            "seat": "reviewer-1",
+            "role": "senior_engineer",
+            "model_id": "claude-opus-5",
+            "effort": "HIGH",
+            "effort_native": "high"
+          },
+          {
+            "seat": "reviewer-2",
+            "role": "principal_architect",
+            "model_id": "gpt-5.6-sol",
+            "effort": "HIGH",
+            "effort_native": "high"
+          }
+        ],
+        "rationale": "REVIEW scored 9/18 (c=2 u=1 b=2 r=1) -> band HIGH; execution 8/18 -> EASY. Overrides applied: critical_domain, concurrency_sensitive. Overrides that fired but were already satisfied: critical_domain, concurrency_sensitive. Critical-domain flags: security_sensitive, data_integrity_sensitive. Worker senior_engineer at HIGH effort. Review band HIGH: senior_engineer, principal_architect, independence_required=True, review_independence=planned. No fallbacks applied."
+      },
+      "source_sha256": "e84736a201ff7b3ba5e3e6fa27882fc4ca6035fb95a87670ff95193eacc8d3af",
+      "reviews": [
+        {
+          "receipt": {
+            "attempt_id": "r3-reviewer-1",
+            "seat": "reviewer-1",
+            "runtime": "codex",
+            "model_id": "claude-opus-5",
+            "effort_native": "high",
+            "permission_mode": "dontAsk",
+            "decision_fingerprint": "3db58f944c65e707d64e13ddd3190ec64b31d9cb57b4bb9e56d1a45138e2b38a",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.to_claude",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "claude",
+              "-p",
+              "--model",
+              "claude-opus-5",
+              "--effort",
+              "high",
+              "--permission-mode",
+              "dontAsk",
+              "--strict-mcp-config",
+              "--tools",
+              "",
+              "--output-format",
+              "json"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "035237887eda48873ee382682e379b501dd52382525ecc757db159c914a962e4",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "d5a27245717e0476177264c4c0f9556aaf90c6031df77844b335d07933e8fcce",
+            "output_schema": "review",
+            "output_envelope": "claude-print-json-v1",
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 8018,
+              "process_group_id": 8018,
+              "supervisor_pid": 7987
+            },
+            "timing": {
+              "started_at": "2026-09-22T03:15:07Z",
+              "deadline_at": "2026-09-22T03:30:07Z",
+              "finished_at": "2026-09-22T03:27:10Z",
+              "launch_anchor_at": "2026-09-22T03:15:07Z"
+            },
+            "result": {
+              "state": "SUCCEEDED",
+              "exit_status": 0,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r3-reviewer-1.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r3-reviewer-1.stderr",
+              "output_sha256": "009b05dfe52f8ebca59ed61d32e089c764cbb0bedface21cd407fa6cf873bf6d",
+              "schema_valid": true,
+              "verdict": "PASS_WITH_CHANGES",
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": {
+                "parse_ok": true,
+                "stop_reason": "end_turn",
+                "session_id": "23e88924-3684-4a74-b0e0-5bab3084fe31",
+                "served_models": [
+                  "claude-opus-5"
+                ],
+                "error_type": "success",
+                "usage": {
+                  "input_tokens": 2,
+                  "cache_creation_input_tokens": 58283,
+                  "cache_read_input_tokens": 3166,
+                  "output_tokens": 56200
+                }
+              },
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": "{\"duration_api_ms\":710060,\"stop_reason\":\"end_turn\",\"session_id\":\"23e88924-3684-4a74-b0e0-5bab3084fe31\",\"total_cost_usd\":1.989423,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":58283,\"cache_read_input_tokens\":3166,\"output_tokens\":56200,\"output_tokens_details\":{\"thinking_tokens\":47976},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":58283,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"not_available\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":56200,\"cache_read_input_tokens\":3166,\"cache_creation_input_tokens\":58283,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":58283},\"type\":\"message\"}],\"speed\":\"standard\"},\"modelUsage\":{\"claude-opus-5\":{\"inputTokens\":2,\"outputTokens\":56200,\"cacheReadInputTokens\":3166,\"cacheCreationInputTokens\":58283,\"webSearchRequests\":0,\"costUSD\":1.989423,\"contextWindow\":1000000,\"maxOutputTokens\":64000,\"thinkingTokens\":47976,\"canonicalModel\":\"claude-opus-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"=== REVIEW ===\\nverdict: PASS_WITH_CHANGES\\nconfidence: 0.62\\n\\n아래는 제공된 최종 소스와 통합 diff만을 근거로 한 검토다. 계약(모든 AI 좌석 JEV, 인간 불변, SDK pin/lazy/공식 URL/무재시도/원본 오류 미기록, actor 홀카드+별칭 공개상태만 송출, pending→projection 순서, proposedAction→expect-version step 순서, closure_unconfirmed 무조작, ENGINE_APPLY_UNCONFIRMED End-only, late settlement의 \\\"이미 요청된 stop\\\" 완결, 폴백 금지)은 코드에서 대부분 실제로 성립함을 확인했다. 특히 다음은 \\\"가정\\\" 없이 코드로 검증됨: 내구성 순서(writeLoopState(record) → runCli decision-peek/projection), proposedAction commit 후 step, resume의 정확 일치 재조정(sv3는 closeConfirmed 무관), lateSettlement가 `await stopPromise?.catch()` 뒤 closure-only cleanupError만 보고 `requestStop()` 전체 정리를 재호출하며 락을 직접 해제하지 않는 점, retry 경로가 추론/행동에만 한정되는 점, `retry:{maxRetries:0}`·`baseURL` 고정·`redirect:'error'`·origin 검사·logLevel off·no-op logger·lazy dynamic import·정확 버전 pin(+integrity).\\n\\nFINDINGS\\n\\n1) severity: high (조건부 blocking — 검증 필요)\\nfile: tools/game-loop.js (resolveForPhase/restore 경로, `opponentRuntimeOf() === 'llm'` 치환 4곳)\\ntrigger: 이번 변경 이전에 생성된 store는 `state.config.opponentRuntime`이 없다(`state.config.opponentRuntime = opponentRuntime` 라인이 이 diff에서 신규). 기존 코드는 `policyMode = opponentRuntimeOf()==='policy' || existingState.opponentRuntime==='policy'` 처럼 **부정 판정**만 썼는데(그리고 loop-state를 보조 증거로 썼는데), 새 코드는 `opponentRuntimeOf() === 'llm'` **긍정 판정**으로 바꿨다. `opponentRuntimeOf()`가 legacy config에서 `undefined`를 돌려줄 수 있으면 legacy LLM store 재개 시 (a) `createCanaryAndResolve('upper-only')`로 player adapter 미생성, (b) `haltNoPlayer` 미실행, (c) `restorePlayers()` 건너뜀 → 첫 AI 차례에 `decideWithWatchdog`가 NO_PLAYER_RUNTIME로 죽고, (d) `writeLoopState({opponentRuntime: opponentRuntimeOf()})`가 `undefined`이므로 writeLoopState의 undefined-삭제 규칙에 따라 loop-state의 `opponentRuntime` 키가 **지워진다**(기존 코드는 `existingState.opponentRuntime ?? 'llm'`로 보존했다). 작성자 노트의 \\\"original full suite identified two fixtures needing explicit persisted runtime\\\"는 정확히 이 증상의 신호로 읽힌다(코드가 아니라 픽스처를 고친 형태).\\nfix: `opponentRuntimeOf()`가 legacy에서 무엇을 반환하는지 확정하고, 반환값에 의존하지 말 것. resume에서 이미 계산한 `resolvedOpponentRuntime`(또는 `opponentRuntimeOf() ?? 'llm'`)을 단일 출처로 넘겨 4개 분기와 loop-state 기록에 모두 사용하고, legacy 픽스처(config·loop-state 모두 runtime 키 없음)로 재개 회귀 테스트를 추가. 픽스처에 runtime을 넣어 통과시킨 것이면 그 수정은 되돌려야 한다.\\n\\n2) severity: medium\\nfile: tools/game-loop.js (requestStop: `if (activeDecision?.identity.runtime === 'jev') await activeDecision.settled;`)\\ntrigger: 이 await는 `terminateActiveChildren()` **이전**에 놓여 있다. `decideWithJev`의 `settle()`은 finally에서만 호출되고, 그 함수는 `runCli(['decision-peek',...])`/`runCli(['step',...])` 자식에 매달릴 수 있다. `activeDecision.controller.abort()`는 JEV HTTP 신호만 끊고 runCli에는 signal이 전달되지 않는다. 따라서 엔진 CLI 자식이 멈추면(디스크 stall, 자식 교착) stop은 자식을 죽일 코드에 도달하기 전에 무한 대기한다 — 알 수 없는 종료가 아니라 \\\"영구 미완결 stop\\\"이고 락도 계속 점유된다.\\nfix: `await activeDecision.settled`를 `terminateActiveChildren()` **뒤로** 이동(최종 pendingPatch 계산은 그 아래 블록이라 순서 의존성이 없다). 또는 runCli에 abort signal을 전달. 단순 timeout race는 아직 살아있는 결정 위에 상태를 덮어쓸 수 있어 권하지 않는다. (`await inFlight.promise`의 유사 노출은 기존 코드지만, peek/사전 단계는 이번에 새로 생긴 노출이다.)\\n\\n3) severity: medium\\nfile: tools/jev-player.js (`projectJevState`의 `Object.hasOwn(styles, archetype)`, `publicSeats.length < 2 || > 9`, `positions` 열거) + tools/game-loop.js (preflight 위치)\\ntrigger: 이 세 입력 검증은 **이미 딜링이 끝난 핸드 도중**에 처음 실행되고, 실패 시 `JEV_INPUT_INVALID`(retryable=false) → session-manager가 `kind==='end'`만 허용 → 진행 중 게임이 End 외 선택지 없이 죽는다. 구체 트리거: (a) 좌석 총합 10 이상 설정(로비에서 aiCount 상한이 9좌석 미만으로 강제되지 않으면), (b) 엔진이 `positions` 화이트리스트에 없는 라벨(MP/HJ/LJ 등)을 short-handed/heads-up에서 내보내는 경우, (c) 페르소나 생성기가 6개 허용 archetype 밖 값을 하나라도 만드는 경우. `preflightJev`는 API 키/SDK만 보므로 이 중 어느 것도 사전에 잡지 못한다.\\nfix: 좌석 수·좌석별 archetype·position 어휘를 **bootstrap preflight(init/딜링 전)** 에서 검증해 로비 단계 오류로 만들 것. `shared/game-setup.js`에 JEV일 때 `aiCount + humanCount <= 9` 규칙 추가, `styles` 키 집합을 페르소나 생성기와 공유 상수로 묶고 등가성 테스트 추가, `positions`는 엔진 라벨 생성지점과 단일 출처화.\\n\\n4) severity: medium\\nfile: tools/game-loop.js (`lateSettlement`의 `` const decisionId = hand ? `d-${engine.handNo}-${hand.street}-${hand.actionIndex}` : null ``)\\ntrigger: decisionId 포맷을 엔진 밖에서 재구성한다. 엔진 생성 규칙이 바뀌거나(접두사·street 표기·index 기준) 이 문자열과 1바이트라도 다르면 이 가드가 항상 실패하고 lateSettlement는 조용히 반환한다. 그 결과 `unsafe/JEV_REQUEST_CLOSE_UNCONFIRMED` 상태가 영구 고정되는데, 이 코드에는 allowedCommands가 비어 있고 `endGame`도 `throw jevError(pending.code)`로 막혀 있어 **앱 프로세스를 죽이는 것 외에 어떤 복구 경로도 없다**. 실패 방향이 안전측이 아니라 교착측이다.\\nfix: decisionId 포맷터를 엔진과 공유 모듈로 추출해 lateSettlement가 그것을 호출하게 하고, 실엔진 상태로 \\\"재구성 == 엔진 발행 decisionId\\\" 등가성 테스트를 추가. 대안으로 engine-state에 decisionId를 직접 기록해 문자열 재구성을 없앨 것.\\n\\n5) severity: medium-low\\nfile: tools/game-loop.js (`initializePreparedSession`의 `path.join(gameDir, '.jev-config.json')`) vs engine/cli.js (`readJevConfig`의 `!path.isAbsolute(file)` → usage)\\ntrigger: `gameDir`이 상대 경로로 전달되는 호출(legacy CLI `--game-dir`/`--store-dir` 상대 경로)에서 `--jev-config-file`이 상대 경로가 되어 엔진이 `usage('invalid JEV config file')`로 init을 거부한다. 같은 함수의 `.participants.json`은 절대 경로 요구가 없어 비대칭이라 눈에 띄지 않는다.\\nfix: `path.resolve(gameDir, '.jev-config.json')` 사용(그리고 `prepareGameSession` 진입부에서 gameDir을 resolve).\\n\\n6) severity: low\\nfile: engine/cli.js (`readJevConfig`의 포괄 `catch { usage('invalid JEV config file'); }`)\\ntrigger: `validateJevConfig`가 던지는 `JEV_CONFIG_UNSUPPORTED`가 usage 오류로 삼켜진다. 로비는 `JEV_CONFIG_UNSUPPORTED`에 전용 문면(\\\"저장된 JEV 버전을 지원하는 앱이 필요합니다\\\")을 갖고 있는데, 엔진 경로로 들어온 버전 불일치는 그 문면에 도달하지 못한다.\\nfix: JSON/파일 오류는 usage로, `error.code === 'JEV_CONFIG_UNSUPPORTED'`는 코드 그대로 재던지기.\\n\\n7) severity: low\\nfile: tools/jev-runtime.js (`jevError('JEV_RUNTIME_UNAVAILABLE')`, `jevError('JEV_INPUT_INVALID')` in `decide`; `new sdk.TypeSafeClient(...)`/`sdk.choice(...)` 예외)\\ntrigger: 요청 전송 **이전**에만 발생할 수 있는 실패가 retryable=false로 분류된다. game-loop의 catch에서 `retryable: !unsafe && (cancelled || error.retryable === true)` → false → `recovery_required` 비재시도 → End-only. 클라이언트 생성이나 `sdk.choice` 예외는 `safeJevError`를 거치지 않아 raw 오류가 그대로 catch에 도달하고 `JEV_INPUT_INVALID`로 뭉개진다(코드는 살균되지만 원인 구분이 사라진다).\\nfix: 요청 송신 전 경로의 오류는 retryable=true로(닫힘 불확실성이 없으므로 안전), `new TypeSafeClient`/`choice` 호출도 try로 감싸 전용 코드(예: `JEV_SDK_UNAVAILABLE`)로 정규화.\\n\\n8) severity: low\\nfile: tools/jev-runtime.js (`guardedFetch`의 `throw jevError('JEV_REQUEST_REJECTED', true)`)\\ntrigger: origin 위반/리다이렉트 차단은 SDK 내부에서 잡혀 `catch (error) { throw safeJevError(error) }`를 통과하므로 `status`/`name`이 없어 `JEV_NETWORK_ERROR`로 재라벨된다. 보안상 의미 있는 \\\"요청 거부\\\"가 네트워크 오류로 보이고 운영자 문면도 달라진다.\\nfix: `safeJevError`에서 `error?.code?.startsWith('JEV_')`면 그대로 통과시키거나, guardedFetch 위반을 별 플래그(`{jevGuard:true}`)로 표시해 분류 유지.\\n\\n9) severity: low\\nfile: tools/jev-diagnostics.js\\ntrigger: (a) 바이트 예산으로 앞쪽 엔트리를 버릴 때 `dropped`만 올리고 `historyIncomplete`는 설정하지 않아, 손상 경로와 정상 절단 경로의 불완전성 표기가 불일치한다(소비자가 `historyIncomplete`만 보면 절단을 놓친다). (b) `boundJevDiagnostics`는 **모든** writeLoopState에서 전체 state를 `JSON.stringify`하고 보존 엔트리를 역순으로 다시 직렬화한다 — 결정마다 수 회 발생하는 write에서 O(entries) 비용이 붙는다(현 규모에선 무해하나 5,000 상한까지 자라면 write당 수백 KB 재직렬화).\\nfix: (a) `start > 0`이면 `historyIncomplete:true`도 설정. (b) 엔트리별 바이트 길이를 엔트리 추가 시점에 캐시하거나, `jevDiagnostics`가 실제로 커졌을 때만 예산 재계산.\\n\\n10) severity: low\\nfile: tools/game-loop.js (catch의 `unsafe = unconfirmed || !!record.proposedAction`)\\ntrigger: proposedAction 내구화 이후의 **모든** step 실패가 `JEV_ENGINE_APPLY_UNCONFIRMED`(End-only)로 귀결된다. 그런데 엔진이 mutation 이전에 결정적으로 거부하는 코드(`VERSION_MISMATCH`, 불법 액션류)는 \\\"적용되지 않음\\\"이 증명된 경우다. 후보 생성(`buildJevCandidates`)과 엔진 합법성 규칙이 한 군데라도 어긋나면(예: raise cap, all-in-for-less에서 `min > max`인데 엔진이 실제로는 raise 불가) 정상 핸드가 End-only로 끝난다.\\nfix: 엔진 오류 코드 중 \\\"mutation 전 거부\\\"가 보장된 집합을 화이트리스트로 두고 `unsafe`에서 제외(비재시도 `recovery_required`로 두어 End도 가능하지만 핸드 계속 여지를 남김). 동시에 (12)의 후보-합법성 property 테스트 추가.\\n\\n11) severity: low\\nfile: tools/game-loop.js (`endGame`의 `throw jevError(pending.code)`) / server/public/lobby.js (`errorMessages`)\\ntrigger: `JEV_REQUEST_CLOSE_UNCONFIRMED`(및 `JEV_TIMEOUT`, `JEV_INPUT_INVALID`, `BAD_FRESH_AUTHORIZATION` 등)는 로비 `errorMessages`에 없다. 또한 `jevError`는 `codedError`와 달리 한국어 메시지가 없어(message === code) HTTP 계층이 message를 전달하면 사용자에게 코드 문자열이 그대로 보인다.\\nfix: 이 경로는 `codedError('JEV_REQUEST_CLOSE_UNCONFIRMED', '…')`로 통일하고 로비 맵에 항목 추가.\\n\\n12) severity: informational\\nfile: tools/game-loop.js (`resume({ opponentRuntime })`)\\ntrigger: resume이 받은 `opponentRuntime`은 `opts.opponentRuntime`과의 교차검사와 `requestedOpponentRuntime` 갱신에만 쓰이고, 실제 판정은 `resolveOpponentRuntime(..., { explicit: opts.opponentRuntime })`이 한다. 즉 `opts.opponentRuntime`이 비어 있고 `resume({opponentRuntime:'jev'})`만 오면 인자는 엔진과 대조되지 않고 무시된다(계약상 \\\"미문서 인자\\\"이므로 결함은 아니나 죽은 경로다).\\nfix: 해당 인자를 제거하거나 `explicit: opponentRuntime ?? opts.opponentRuntime`으로 실제 증거에 편입.\\n\\nCONFIRMED-NOT-DEFECT (이전 지적의 수정 확인)\\n- lateSettlement: `await stopPromise?.catch(() => {})` 존재, 그 뒤 `ownedLockStillVerified()` 재확인 + `cleanupError.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED'`만 → `requestStop()` 전체 재실행. 락 직접 해제/추론 재개/타 오류 삼킴 없음. 또한 `stopPromise` 대입은 IIFE의 동기 프롤로그 직후라 lateSettlement가 `stopRequested=true`와 `stopPromise=null`을 동시에 관찰할 수 없다.\\n- resume 재조정: sv3는 `closeConfirmed` 무관·정확 일치만 pending 제거, 불일치 시 proposedAction 보유 → `unsafe/ENGINE_APPLY_UNCONFIRMED/retryable:false`(End-only), running/closure_unconfirmed·무proposedAction → `recovery_required/retryable:true`(프로세스 사망이 소켓 종료를 증명하고 HTTP엔 엔진 권능이 없으므로 타당), `recovery_required`의 비재시도 플래그·code 보존.\\n- abort→재라벨: 중단 시 SDK 오류가 `safeJevError`로 `JEV_NETWORK_ERROR`가 되지만 `await record.settled` 후 `revoked` 재검사로 `INTERRUPTED`/`JEV_TIMEOUT` + `closeConfirmed:true`로 정정되어 `interruptDecision`의 판정식과 일치한다.\\n- graceTimer 누수: `record.settled` 콜백이 항상 clear하고, 성공 경로에서 listener 제거보다 콜백이 먼저 큐잉되므로 사후 dangling 타이머로 phase가 `closure_unconfirmed`로 뒤집히는 경로는 재현 불가.\\n- `validJevPending`의 불변식(`proposedAction`은 running/unsafe + retryable≠true에서만)과 실제 writer 4곳(catch/requestStop pendingPatch/resume/retryDecision)이 모두 정합.\\n- projection 폐쇄 스키마: 화이트리스트 필드 + 좌석 별칭 + actor 홀카드만, priorActions 64건 절단, 24KB 상한. 다른 좌석 홀카드 유출 경로 없음. jevDiagnostics도 후보 키/확률뿐이며 session-manager 투영에는 포함되지 않는다.\\n\\nmissing_tests\\n- legacy store(engine config·loop-state 모두 `opponentRuntime` 없음) LLM 재개: player adapter 생성, `restorePlayers()` 호출, loop-state `opponentRuntime` 키 보존 — 픽스처에 runtime을 주입하지 않은 형태로.\\n- 페르소나 생성기 archetype 집합 ⊆ `Object.keys(styles)` 등가성, 그리고 JEV + 9좌석 초과 설정이 로비/preflight에서 거부되는지(현재는 첫 결정에서 End-only).\\n- 엔진 실상태로 lateSettlement의 decisionId 재구성 == 엔진 발행 decisionId(핸드 경계·street 전환·actionIndex 증가 각각).\\n- decision-peek 또는 step 자식이 응답하지 않는 상태에서 requestStop이 유한 시간에 완결되는지(현재는 `terminateActiveChildren` 이전 await).\\n- 상대 경로 gameDir로 JEV init.\\n- `boundJevDiagnostics` 바이트 예산 경로: baseBytes가 2MB−64KB에 근접/초과할 때 lifecycle write 성공 + `dropped` 누계 정확성 + 절단 시 불완전 표기.\\n- 엔진이 proposedAction을 결정적으로 거부(VERSION_MISMATCH/불법)했을 때의 분류, 그리고 `buildJevCandidates` 산출 후보 전부가 엔진 step에 수용되는지(min>max all-in, raise cap, currentBet=0 정규화 상태 포함) property 테스트.\\n- guardedFetch: 비 typesafe origin / 3xx 리다이렉트 → 기대 코드(현재는 NETWORK로 재라벨).\\n- 확률 수용: 6후보 합 0.97, 혼합 정밀도(0.333 포함), argmax 동률, 백분위가 아닌 값의 1e-6 경계.\\n- metrics `runtime:'jev'`/`outcome:'jev_accepted'|'jev_single_legal'`가 study/export/benchmark 소비자 스키마에서 수용되는지.\\n\\nuncertainties\\n- `opponentRuntimeOf()`, `runCli`(타임아웃/signal 수용 여부), `appendMetric`, `ALLOWED_COMMANDS`, `persistCleanupFailure`(저장 필드), `writeLoopState`의 undefined 삭제 이후 병합 규칙, `setupToArgs`(setup.opponentRuntime → args.opponentRuntime 매핑)의 실제 구현이 발췌에 없어 1·2·5·12 판정은 이 함수들의 계약에 의존한다. 특히 1번은 `opponentRuntimeOf()`가 legacy에서 `'llm'`로 정규화한다면 문서화 부족(긍정 판정 취약성) 수준으로 내려간다.\\n- `lobby.html`, `join.html`, `join.js`, `.agents/skills/start-game/SKILL.md`, 워크플로 변경분이 제공되지 않아 JEV 선택 UI·문면·CI 샤드 재배치는 검토하지 못했다.\\n- 엔진의 `decision-peek` 스냅샷 스키마(특히 `position` 어휘, `publicSeats` 최대 길이, `priorActions[].amount`의 raise-to/증분 의미), engine action 레코드의 `decisionId`/`amount` 표현이 제시되지 않아 3·4·10의 실현 가능성은 \\\"검증 필요\\\"이며 사변적 견고성 권고와 구분해 표시했다.\\n- `{kind:'recovery_required'}` 반환 시 run 루프가 항상 paused로 진입해 `end`가 허용되는지(ENGINE_APPLY_UNCONFIRMED의 End-only가 실제로 도달 가능한지)는 루프 발췌 범위 밖이다.\\n- `.app-setup.json`의 수명(같은 store에서 재시작 간 재사용 여부). 재사용되면 `resolveOpponentRuntime`의 4증거 엄격 일치가 과거 설정과 충돌해 `OPPONENT_RUNTIME_MISMATCH`로 재개를 막을 수 있으나, 세션별 디렉터리라면 무해하다.\",\"ttft_ms\":585719,\"type\":\"result\",\"duration_ms\":710320,\"uuid\":\"cd786218-9c74-4faf-a72c-f1a1d72a87da\",\"ttft_stream_ms\":2313,\"time_to_request_ms\":138,\"first_content_frame_ms\":2313,\"queued_turn_count\":0,\"result_index\":0}\n"
+        },
+        {
+          "receipt": {
+            "attempt_id": "r3-reviewer-2",
+            "seat": "reviewer-2",
+            "runtime": "codex",
+            "model_id": "gpt-5.6-sol",
+            "effort_native": "high",
+            "permission_mode": "read-only",
+            "decision_fingerprint": "3db58f944c65e707d64e13ddd3190ec64b31d9cb57b4bb9e56d1a45138e2b38a",
+            "policy_sha256": "78b8f3ce0814566b5795e264723c04c5447d7c975dfd604a75554541ee9cb2a3",
+            "transport_id": "codex.native",
+            "host_cli_version": null,
+            "observed_model_id": null,
+            "observed_model_source": "unavailable",
+            "argv": [
+              "codex",
+              "-c",
+              "mcp_servers={}",
+              "--disable",
+              "shell_tool",
+              "--disable",
+              "apps",
+              "--disable",
+              "plugins",
+              "--disable",
+              "hooks",
+              "exec",
+              "--ignore-user-config",
+              "-m",
+              "gpt-5.6-sol",
+              "-c",
+              "model_reasoning_effort=high",
+              "-s",
+              "read-only",
+              "--skip-git-repo-check",
+              "-"
+            ],
+            "receipt_guard": {
+              "mechanism": "darwin-sandbox-v1",
+              "profile_sha256": "0bcead23accd5fe7f8ebfbabcbd92c44fa3305a108052ee8c25757493515655d",
+              "protected_root": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts",
+              "phase": "launched"
+            },
+            "prompt_sha256": "d5a27245717e0476177264c4c0f9556aaf90c6031df77844b335d07933e8fcce",
+            "output_schema": "review",
+            "output_envelope": null,
+            "session_evidence": null,
+            "child_cwd": null,
+            "grok_home": null,
+            "seat_profile": null,
+            "require_single_linked_cwd": false,
+            "process": {
+              "pid": 8019,
+              "process_group_id": 8019,
+              "supervisor_pid": 7988
+            },
+            "timing": {
+              "started_at": "2026-09-22T03:15:07Z",
+              "deadline_at": "2026-09-22T03:30:07Z",
+              "finished_at": "2026-09-22T03:23:44Z",
+              "launch_anchor_at": "2026-09-22T03:15:07Z"
+            },
+            "result": {
+              "state": "SUCCEEDED",
+              "exit_status": 0,
+              "stdout_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r3-reviewer-2.stdout",
+              "stderr_path": "/private/var/folders/39/swv76yts4wd92zlf4blzq6ch0000gn/T/jev-code-review-4h9rptn3/receipts/r3-reviewer-2.stderr",
+              "output_sha256": "f4fa45c66c3e32aaba48fd1ad938b147fa9111101e3241a7655026a51f4dcc6a",
+              "schema_valid": true,
+              "verdict": "FAIL",
+              "verdict_recovered": false,
+              "termination_confirmed": true,
+              "envelope": null,
+              "invalid_reasons": null,
+              "artifacts": null,
+              "sandbox_events": null
+            }
+          },
+          "raw_stdout": "=== REVIEW ===\nverdict: FAIL\nconfidence: 0.94\n\nfindings:\n\n1.\nseverity: BLOCKING\nfile: tools/game-loop.js — requestStop, lateSettlement\nconcrete trigger: JEV disposal first fails with JEV_REQUEST_CLOSE_UNCONFIRMED, then any later cleanup operation also fails, such as adapter disposal, terminateActiveChildren, stopServer, canary deletion, or log closure. Every later failure is discarded by stopError ??= error, so persistCleanupFailure records only the JEV closure error. After HTTP settlement, lateSettlement consequently mistakes this for a closure-only failure and automatically invokes requestStop again. A transient or non-repeatable unrelated failure can then disappear from the second attempt, allowing the lock to be released without ever recording that failure.\nimpact: This violates the explicit requirement that automatic late-settlement cleanup proceed only for a closure-only cleanupError and never swallow unrelated cleanup failures. It can overstate successful full cleanup.\nfix: Accumulate all cleanup failures for each stop attempt. Persist an attempt-scoped closure-only marker only when JEV_REQUEST_CLOSE_UNCONFIRMED is the sole failure. The observer should await that exact attempt, verify ownership and the sole-failure marker, then invoke the full idempotent cleanup. Compound failures must remain durably visible and must not qualify for automatic settlement cleanup.\n\n2.\nseverity: MEDIUM\nfile: tools/jev-player.js — buildJevCandidates\nconcrete trigger: A malformed decision projection with canCheck:true and callAmount greater than zero passes validation. The generated menu offers check despite chips being owed. If selected, the proposal is durably stored, the engine rejects it, and game-loop conservatively enters JEV_ENGINE_APPLY_UNCONFIRMED, forcing End for an action that could never have been legal.\nfix: Reject the reciprocal inconsistency as JEV_INPUT_INVALID before generating candidates: canCheck must imply callAmount === 0, while !canCheck must imply callAmount > 0. Add corresponding raise-bound consistency checks where the engine contract permits them.\n\nmissing_tests:\n- Stop with simultaneous JEV closure-unconfirmed and each later cleanup failure class; verify no automatic cleanup occurs under a falsely closure-only receipt and no unrelated error is lost.\n- Stop retry after a compound failure whose unrelated component does not recur; verify the original failure cannot silently disappear.\n- canCheck:true with positive callAmount; verify zero HTTP calls, zero engine actions, and nonretryable input recovery.\n\nuncertainties:\n- The supplied excerpts omit persistCleanupFailure and cleanup helper internals. They could retain secondary failures elsewhere, but requestStop’s shown decision path consults only cleanupError.code and visibly discards secondary errors from stopError.\n- The engine may currently guarantee canCheck implies zero call amount. That reduces the second finding’s reach but does not remove the validation-boundary defect.\n"
+        }
+      ]
+    }
+  ],
+  "receipt_verification": {
+    "r2": {
+      "command": "dispatch_agent.py verify-evidence",
+      "exit_code": 0,
+      "ids": [
+        "r2-reviewer-1",
+        "r2-reviewer-2"
+      ],
+      "expected_count": 2,
+      "expected_fingerprint": "cf80f8e9b93fc2c53ebad3b304bb157d6f2e1645e6c6eb910d40a8165c923973",
+      "expected_models": [
+        "claude-opus-5",
+        "gpt-5.6-sol"
+      ],
+      "require_receipt_guard": true,
+      "stdout": "",
+      "stderr": ""
+    },
+    "r3": {
+      "command": "dispatch_agent.py verify-evidence",
+      "exit_code": 0,
+      "ids": [
+        "r3-reviewer-1",
+        "r3-reviewer-2"
+      ],
+      "expected_count": 2,
+      "expected_fingerprint": "3db58f944c65e707d64e13ddd3190ec64b31d9cb57b4bb9e56d1a45138e2b38a",
+      "expected_models": [
+        "claude-opus-5",
+        "gpt-5.6-sol"
+      ],
+      "require_receipt_guard": true,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "post_review_files": {
+    "tools/game-loop.js": "3cd246424d73a44d16664c37085d2f766c701401ca1c7208b936cae731a53c16",
+    "tools/jev-player.js": "c252ff5d000ac073b382f25ef7db456dcfc97f8e4b07167c36e63d19e34ac9b2",
+    "tools/jev-runtime.js": "6ad7239d416bd40d1c67a32922b02f3fa474824a125cf0958d502ad2e4363dc6",
+    "tools/jev-diagnostics.js": "8ffaaa246f484132d93f8f6b18f4a3dde3b18894b46b4b91206f7005b5fca47b",
+    "tools/session-manager.js": "95eb489e1a41dd2bf109137919aeee95069f1a0d22bf9d2186eb5d8b380f012a",
+    "shared/jev-pending.js": "1afc22c861ec6ad3057cc31358cef6a8b0d3e4b88ff5c0f3dd232acbe4fbecaa",
+    "shared/opponent-runtime.js": "5f775468af950199e788078298b9b7cb442d97e1c51465a38996ba993393a0f8",
+    "test/jev-loop.test.js": "71c5b4427993407a1a4bef2b3e73193f74af9d471a036703f4e17a41d1f837bd",
+    "test/jev-player.test.js": "0336dcb2ff5af591e862840d4dac15afdcd29a361230451cfb83de95edce89c6"
+  },
+  "post_review_changes": [
+    "R3 compound stop error retention and exact-attempt closure-only gate",
+    "R3 reciprocal check/call consistency validation",
+    "Regression tests for both accepted R3 findings",
+    "CI benchmark dependency install working-directory corrected to candidate; reviewed locally"
+  ]
+}

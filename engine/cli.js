@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { validateJevConfig } from '../shared/opponent-runtime.js';
 import { exposeHint } from './hint-exposure.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +23,7 @@ const BOOL_FLAGS = new Set(['force', 'force-default', 'redacted', 'new-hand', 'r
 const VALUE_FLAGS = new Set([
   'operation-id', 'game-dir', 'lock-dir', 'ai', 'stack', 'blinds', 'level-every',
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
-  'opponent-runtime', 'policy-meta',
+  'opponent-runtime', 'policy-meta', 'jev-config-file',
   'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id', 'deal-bias',
   'participants-file',
 ]);
@@ -269,6 +270,7 @@ function cmdInit(gameDir, flags) {
     hints: flags.hints,
     dealBias: flags['deal-bias'],
     opponentRuntime: parseOpponentRuntime(flags['opponent-runtime']),
+    jevConfig: readJevConfig(flags),
     showdownPolicy: parseShowdownPolicy(flags['showdown-policy']),
     replayReveal: parseReplayReveal(flags['replay-reveal']),
     participants,
@@ -494,9 +496,27 @@ function cmdEnd(gameDir, flags) {
   succeed(envelope);
 }
 
+function readJevConfig(flags) {
+  const file = flags['jev-config-file'];
+  if (file === undefined) return undefined;
+  if (flags['opponent-runtime'] !== 'jev' || !path.isAbsolute(file)) usage('invalid JEV config file');
+  let fd;
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) throw new Error();
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) throw new Error();
+    const buffer = Buffer.alloc(4097);
+    const size = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (size > 4096) throw new Error();
+    return validateJevConfig(JSON.parse(buffer.subarray(0, size).toString('utf8')));
+  } catch { usage('invalid JEV config file'); }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
 function parseOpponentRuntime(value) {
   if (value == null) return undefined;
-  if (value !== 'llm' && value !== 'policy') usage('--opponent-runtime는 llm 또는 policy입니다.');
+  if (!['llm', 'policy', 'jev'].includes(value)) usage('--opponent-runtime는 llm, policy 또는 jev입니다.');
   return value;
 }
 

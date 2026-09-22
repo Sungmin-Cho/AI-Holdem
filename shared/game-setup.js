@@ -83,7 +83,7 @@ export function normalizeSetup(input = {}) {
   value.playerHardMs = budget.hardMs;
   for (const [key, allowed] of Object.entries({
     mode: ["cash-training", "tournament"],
-    opponentRuntime: ["policy", "llm"],
+    opponentRuntime: ["policy", "llm", "jev"],
     hints: ["on", "off"],
     dealBias: ["off", "light", "strong"],
     showdownPolicy: ["open", "standard"],

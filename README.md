@@ -38,6 +38,18 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 6�
 
 legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /absolute/game --resume --abort-unrecoverable recovery-1`이다. operationId는 필수이며 `--retry-decision`과 함께 쓸 수 없다. `GAME_ENDED`이면 게임 실행을 다시 시작하지 않는다. audit retry 이벤트는 operationId/SHA 기준으로 반복될 수 있으므로 exactly-once라고 해석하지 않는다. `pendingDecision`, accepted 명령, 미완료 `aborting`/`abandonedPendingDecision` 체크포인트가 남아 있으면 구버전으로 내리지 말고 호환 버전에서 먼저 수렴시킨다. [복구 종료와 롤백 조건](docs/implementation/unrecoverable-recovery-exit.md)을 참고한다.
 
+## JEV 상대 플레이어
+
+상세 설정에서 **JEV 플레이어 (테이블 전체)**를 선택하면 모든 AI 좌석이 TypeSafe AI의 `jev-1.13.0`으로 행동한다. 인간 좌석과 기본 로컬 정책 모드는 그대로다. 개발 설치는 `npm ci`, 서버 환경은 `TYPESAFE_API_KEY`를 사용한다. legacy CLI는 `--opponent-runtime jev`이며 온라인 게임은 앱 로비에서 시작·재개한다.
+
+각 호출에는 행동하는 AI의 자기 패와 공개 보드·스택·액션만 보낸다. 이름, 참가자 ID, 다른 좌석의 패, 메모·채팅은 제외한다. 합법 액션/금액 후보 중 하나를 선택하며 자유 생성 설명이나 자동 정책 대체는 없다. 코치·종합 리뷰는 기존 상위 LLM 또는 사실 기반 피드백이다. JEV는 포커 solver나 GTO 정답이 아니다.
+
+응답 대기 예산과 일시정지·재시도는 로비에서 관리한다. 오래 기다림 알림 이후 **AI 응답 취소**가 가능하고, 일반 일시정지는 진행 중 결정을 한 번 마친 뒤 멈춘다. 원격 실패는 명시적 재시도 또는 종료를 기다리며 **새 LLM 세션**은 JEV에 해당하지 않는다. 키가 없어도 종료와 완료 화면은 이용할 수 있다. 확률·confidence·usage는 private `loop-state.jevDiagnostics`에만 보관하며 최근 최대 5,000건 및 256 KiB/전체 loop 파일 크기로 제한한다. `dropped`는 폐기 누계다. 실제 API의 0.01 단위 확률 반올림 오차만 제한적으로 허용하며 확률을 재정규화하지 않는다.
+
+`JEV_REQUEST_CLOSE_UNCONFIRMED`는 로컬 요청 종료를 확인하지 못했다는 뜻이다. 재시도·새 게임을 막고 락을 유지한다. 먼저 `npm run app:stop -- /absolute/store`를 실행한다. 실패하면 앱 descriptor와 app lock의 PID/startTime을 재검증한 뒤 해당 앱 소유 프로세스만 종료하고 사망을 확인해야 한다. 임의의 node 프로세스를 종료하거나 락 파일을 삭제하지 않는다. 이후 정상 앱 재개에서 미적용 HTTP 결정만 명시 재시도할 수 있다. 진행 중 JEV 저장소를 구버전으로 열지 말고 호환 버전에서 게임을 종료한 후 롤백한다.
+
+실제 provider를 쓰는 별도 검증은 `node test/browser/jev-live-play.mjs --live --out-dir output/playwright/jev-live`다. 기존 게임을 변경하지 않는 임시 저장소에서 2핸드, 최대 40회 호출하며 상위 코치 LLM은 끈다. 일반 CI는 외부 API를 호출하지 않는다.
+
 ## LLM은 어디에만 있나
 
 플레이어 결정·코치 노트·종합 리뷰 셋뿐이다. 전부 `tools/player-runtime.js`가 부르는 **무도구 CLI 자식**이고, 이 파일이 LLM을 부르는 유일한 표면이다. 플레이어는 CLI 세션 resume으로 대화 하나를 게임 내내 이어 가서 자기 페르소나를 기억한다. 프롬프트 정본은 `tools/player-prompt.md` 한 곳이고, 회신 규약은 "JSON 한 줄을 최종 출력으로"다.
@@ -93,7 +105,7 @@ npm run app -- /absolute/path/to/game --player-runtime codex
 npm run app:stop -- /absolute/path/to/game
 ```
 
-출력된 링크를 열어 모드(캐시 트레이닝/토너먼트)와 AI 1~8명을 고른 뒤 시작한다. 로비를 여는 것만으로 게임이나 LLM 호출이 시작되지는 않는다. 기본은 캐시·AI 5명·100BB·20핸드·로컬 정책이다. 로비 토너먼트도 로컬 정책을 기본으로 하며 LLM 상대는 상세 설정에서 선택한다. 학습실은 별도 창으로 열린다.
+출력된 링크를 열어 모드(캐시 트레이닝/토너먼트)와 AI 1~8명을 고른 뒤 시작한다. 로비를 여는 것만으로 게임이나 LLM 호출이 시작되지는 않는다. 기본은 캐시·AI 5명·100BB·20핸드·로컬 정책이다. 로비 토너먼트도 로컬 정책을 기본으로 하며 LLM/JEV 상대는 상세 설정에서 선택한다. 학습실은 별도 창으로 열린다.
 
 온라인 세션은 로비에서 세션을 열면 LAN 참가 링크(`http://<LAN IP>:8899/join?code=ABCD-EFGH`)가 생긴다. 기본은 암호화 없는 HTTP이며 포트포워딩·터널·인증서는 사용자 몫이다. 공개 포트는 `HOLDEM_PUBLIC_PORT` 또는 `--public-port`이고, 표시 호스트는 `--public-host`다. `--tls-cert`와 `--tls-key`를 함께 주면 HTTPS다. 같은 NAT 뒤에서는 여러 참가자가 한 주소로 보일 수 있다. 멀티 세션은 앱으로만 재개하고, 직접 CLI `--resume`은 거부한다. 롤백 전에는 게임을 종료하고 룸을 닫는다.
 

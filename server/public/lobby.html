@@ -55,14 +55,15 @@
             <select name="opponentRuntime">
               <option value="policy">로컬 정책 (빠른 시작)</option>
               <option value="llm">LLM 플레이어</option>
+              <option value="jev">JEV 플레이어 (테이블 전체)</option>
             </select></label
           >
           <label>진행 속도<select name="pace"><option value="instant">즉시</option><option value="fast">빠름</option><option value="normal" selected>보통</option><option value="slow">느림</option></select></label>
           <label>연습용 유리한 딜<select name="dealBias"><option value="off">끔 — 일반 딜</option><option value="light">약하게</option><option value="strong">강하게</option></select></label>
           <p>유리한 딜은 독립 평가·성향 표본에서 제외됩니다. 승리나 좋은 보드를 보장하지 않습니다.</p>
-          <div id="llm-settings" hidden><h2>AI 응답 대기</h2><p>LLM 모드는 AI 응답을 기다리므로 진행이 더 느릴 수 있습니다.</p>
+          <div id="llm-settings" hidden><h2>AI 응답 대기</h2><p>원격 AI 모드는 응답을 기다립니다. JEV 모드는 각 AI의 자기 패와 공개 플레이 정보를 TypeSafe AI로 전송합니다.</p>
           <label>오래 기다림 알림 (ms)<input name="playerSoftMs" type="number" min="1" value="25000" /></label>
-          <label>LLM 호출 최대 대기 (ms)<input name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>
+          <label>AI 호출 최대 대기 (ms)<input name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>
           <p>알림은 추론을 중단하지 않습니다. 최대 대기 초과 시 결정을 보존하고 재시도 또는 종료를 기다립니다.</p>
           <p id="llm-budget-help"></p></div><h2>게임 규칙</h2>
           <label
@@ -195,7 +196,7 @@
       <h2>게임 메뉴</h2>
       <p id="pause-message">일시정지 중입니다.</p>
       <button id="resume">계속하기</button
-      ><button id="retry-decision" hidden>LLM 결정 재시도</button
+      ><button id="retry-decision" hidden>AI 결정 재시도</button
       ><button id="retry-fresh-session" hidden>새 세션으로 재시도</button
       ><button id="restart">같은 설정으로 새 게임</button
       ><button id="modes">모드 선택</button><button id="end">게임 종료</button

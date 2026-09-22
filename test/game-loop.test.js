@@ -2121,6 +2121,7 @@ test('bootstrap owns lock before init, writes initial state before resolver, the
   assert.equal(fs.existsSync(canaryAbsPath), false, 'resolver canary must always be removed');
   const engine = readJson(path.join(gameDir, 'state.json'));
   assert.deepEqual(engine.config, {
+    opponentRuntime: 'llm',
     aiCount: 3,
     startStack: 700,
     blinds0: [10, 20],
@@ -9117,6 +9118,9 @@ for (const opponentRuntime of ['llm', 'policy']) {
   test(`#171: ${opponentRuntime} evaluator exhaustion publishes factual review and supports done resume`, { timeout: REVIEW_TEST_TIMEOUT }, async (t) => {
     const gameDir = tmpGame();
     const init = await seedFinishedGame(gameDir);
+    const configured = readJson(path.join(gameDir, 'state.json'));
+    configured.config.opponentRuntime = opponentRuntime;
+    fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify(configured));
     const upper = makeCoachAdapter({ evaluatorRounds: [{ raw: '확정 누수라고 판정한다.' }, { error: Object.assign(new Error('CLI failed'), { code: 'CLI_FAILED' }) }] });
     const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { opponentRuntime } });
     await loop.resume();
