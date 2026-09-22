@@ -85,3 +85,13 @@ R3: 위 판단과 수정된 코드/계약을 동일 artifact로 두 독립 좌�
   - resume({opponentRuntime}) 항목: **기각**. 실제 resume의 인자는 skipLock이며 bootstrap과 혼동한 지적이다.
 
 R2/R3 모두 `verify-evidence --require-receipt-guard --expect-fingerprint --expect-models` exit 0. R3 유효 판정은 FAIL + PASS_WITH_CHANGES이며 이를 두 승인으로 바꾸지 않는다. 저자는 재현 가능한 Sol 지적 두 건을 마지막 수정과 테스트로 해소했고, 조건부 Opus 지적을 위 증거로 판정했다. 리뷰 3라운드 후 추가 리뷰를 무한 반복하지 않으며 마지막 수정은 저자의 회귀 테스트 및 최종 CI로 검증한다. 원본 응답/receipt/수정 파일 해시는 [코드 리뷰 증거](jev-player-code-review-evidence.json)에 보존한다.
+
+
+## PR CI에서 발견한 화면 회귀
+
+첫 원격 Test run `35683836404`의 UI browser job `106606349535`에서 `guest A table fills the viewport`가 실패했다. JEV recovery/로비/관전자 여정은 통과한 뒤 기존 멀티플레이어 여정에서 실패했다. 원인은 참가 전 안내문과 비어 있는 provider 문단이 게임 중에도 세로 공간을 차지한 것이었다. CI의 낮은 viewport에서 iframe 높이가 400px 미만이 되는 실제 회귀로 판정했고 단순 재실행으로 덮지 않았다.
+
+- 참가 전 두 안내문은 게임 중에만 숨기고, 실제 JEV provider 표시는 간결하게 유지한다. 비어 있는 provider 문단은 공간을 차지하지 않는다.
+- 멀티플레이어 browser journey의 두 참가자 viewport를 1280×600으로 고정해 이 조건을 지속적으로 검사한다.
+- 수정 후 multiplayer browser PASS, UI public contract 4 PASS. 기존 사용자 store 보존 및 소유 서비스 cleanup도 PASS.
+- 최초 로그 `/tmp/jev-ci-ui-first.log`, 다운로드 증거 `/tmp/jev-ci-ui-evidence`, GitHub artifact `10675883508`(run `35683836404`)을 보존했다. 이후 최종 commit에서 전체 원격 CI를 새로 실행한다.

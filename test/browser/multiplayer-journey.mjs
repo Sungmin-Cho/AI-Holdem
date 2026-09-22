@@ -124,6 +124,7 @@ export async function runMultiplayerJourney(outDir) {
     check("lan-join-url");
 
     await guestA(["open", joinHref]);
+    await guestA(["set", "viewport", "1280", "600"]);
     await guestA(["fill", "#join-name", "민준"]);
     await click(guestA, "#join-submit");
     await wait(
@@ -132,6 +133,7 @@ export async function runMultiplayerJourney(outDir) {
     );
 
     await guestB(["open", joinHref]);
+    await guestB(["set", "viewport", "1280", "600"]);
     await guestB(["fill", "#join-name", "민준"]);
     await click(guestB, "#join-submit");
     await wait(
