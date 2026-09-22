@@ -1,4 +1,4 @@
-export const ABORTABLE_ERROR_CODES = Object.freeze(['BAD_PLAYER_RECOVERY', 'ROOM_UNBOUND']);
+export const ABORTABLE_ERROR_CODES = Object.freeze(['BAD_PLAYER_RECOVERY', 'ROOM_UNBOUND', 'INVALID_OPPONENT_RUNTIME', 'OPPONENT_RUNTIME_MISMATCH', 'JEV_CONFIG_UNSUPPORTED']);
 export const COMMANDS = Object.freeze([
   "start",
   "pause",

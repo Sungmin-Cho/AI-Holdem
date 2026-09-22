@@ -1,3 +1,4 @@
+import { JEV_CONFIG, validateJevConfig } from '../shared/opponent-runtime.js';
 import { validateDiagnostics, projectRejectionForSink, retryWillCorrect } from './player-decision.js';
 import fs from "node:fs";
 import {
@@ -217,7 +218,7 @@ export function createSessionManager({
     }
     let publicState = state;
     const pendingDecision = session?.loop.pendingDecision ?? null;
-    const diagnosticCheck = pendingDecision ? validateDiagnostics(pendingDecision.diagnostics, pendingDecision) : null;
+    const diagnosticCheck = pendingDecision?.schemaVersion === 3 ? {ok:true} : pendingDecision ? validateDiagnostics(pendingDecision.diagnostics, pendingDecision) : null;
     const diagnostics = diagnosticCheck?.ok && !pendingDecision.diagnosticsQuarantined ? pendingDecision.diagnostics : null;
     const rejection = diagnostics?.lastRejection ? projectRejectionForSink(diagnostics.lastRejection, pendingDecision) : null;
     if (session && state === 'playing' && session.loop.playState === 'paused') publicState = 'paused';
@@ -246,6 +247,7 @@ export function createSessionManager({
         decisionId: pendingDecision.decisionId, generation:pendingDecision.generation, status: pendingDecision.status,
         code: pendingDecision.code ?? null, softWait: pendingDecision.softWait === true,
         closeConfirmed: pendingDecision.closeConfirmed === true,
+        retryable: pendingDecision.schemaVersion === 3 ? pendingDecision.retryable === true : true,
         diagnostics: diagnostics ? {detail:diagnostics.detail ?? null, corrections:diagnostics.corrections,
           lastRejection:rejection ? {action:rejection.projection.action, amount:rejection.projection.amount ?? null, detail:rejection.detail} : null} : null,
         diagnosticsQuarantined: pendingDecision.diagnosticsQuarantined === true || !diagnosticCheck.ok,
@@ -255,7 +257,9 @@ export function createSessionManager({
       } : null,
       allowedCommands:
         closed || !initialized ? [] : (ALLOWED_COMMANDS[publicState] ?? []).filter((kind) =>
-          kind === 'retry-decision' ? pendingDecision?.status === 'recovery_required' && pendingDecision.closeConfirmed === true
+          pendingDecision?.schemaVersion === 3 && pendingDecision.status === 'unsafe' ? pendingDecision.code === 'JEV_ENGINE_APPLY_UNCONFIRMED' && kind === 'end'
+            : pendingDecision?.schemaVersion === 3 && pendingDecision.status === 'recovery_required' && !pendingDecision.retryable ? kind === 'end'
+            : kind === 'retry-decision' ? pendingDecision?.status === 'recovery_required' && pendingDecision.closeConfirmed === true
             : kind === 'resume' && publicState === 'paused' ? !pendingDecision
             : publicState === 'error' && ['end','restart'].includes(kind) ? !!recoveryExit && (kind!=='restart' || currentSetup()!==null) : true),
       pendingRequestId: pending?.requestId ?? null,
@@ -320,7 +324,7 @@ export function createSessionManager({
   }
   async function start(row, { recover = false } = {}) {
     const setup = row.setup;
-    const args = { ...setupToArgs(setup, root), port: 0, playerRuntime };
+    const args = { ...setupToArgs(setup, root), port: 0, playerRuntime, ...(row.jevConfig ? {jevConfig:validateJevConfig(row.jevConfig)} : {}) };
     const launched = await launchTracked(args, {
       resolver,
       onLoop: async (loop) => {
@@ -574,8 +578,14 @@ export function createSessionManager({
         throw err;
       }
     }
+    let jevConfig;
+    try {
+      if (setup?.opponentRuntime === 'jev') jevConfig = validateJevConfig(body.kind === 'restart'
+        ? read(path.join(current.sessionDir, 'state.json')).config.jev : JEV_CONFIG);
+    } catch (error) { if (roomLocked) safeUnlock(body.requestId); throw error; }
     const row = {
       ...normalized,
+      ...(jevConfig ? {jevConfig} : {}),
       setup,
       payload,
       roomLocked,

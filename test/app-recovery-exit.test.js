@@ -81,7 +81,7 @@ async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=n
 }
 
 test('#197 recovery exit gate follows engine/loop phases and exposes the wired exit commands',{timeout:TIMEOUT},async t=>{
-  assert.deepEqual(contract.ABORTABLE_ERROR_CODES,['BAD_PLAYER_RECOVERY','ROOM_UNBOUND']);
+  assert.deepEqual(contract.ABORTABLE_ERROR_CODES,['BAD_PLAYER_RECOVERY','ROOM_UNBOUND','INVALID_OPPONENT_RUNTIME','OPPONENT_RUNTIME_MISMATCH','JEV_CONFIG_UNSUPPORTED']);
   assert.equal(Object.isFrozen(contract.ABORTABLE_ERROR_CODES),true);
   for(const [phase,gameOver,mode] of [['playing',false,'abort'],['playing',true,'finalize'],['finalizing',true,'finalize']])await t.test(`${phase}-${gameOver}`,async st=>{
     const {manager}=await damagedStore(st,{phase,gameOver});

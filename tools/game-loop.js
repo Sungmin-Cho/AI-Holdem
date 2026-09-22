@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+import { JEV_CONFIG, validateJevConfig, validateOpponentRuntime, resolveOpponentRuntime } from '../shared/opponent-runtime.js';
+import { validJevPending, sameJevIdentity } from '../shared/jev-pending.js';
+import { boundJevDiagnostics } from './jev-diagnostics.js';
+import { createJevRuntime, preflightJev } from './jev-runtime.js';
+import { buildJevCandidates, projectJevState, jevError } from './jev-player.js';
 import {appendBoundedMetric} from '../shared/runtime-bounds.js';
 import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -593,7 +598,8 @@ export function engineInitFlags(args = {}) {
   if (args.mode !== undefined) extra.push('--mode', String(args.mode));
   if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
   if (args.hands !== undefined) extra.push('--hands', String(args.hands));
-  if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
+  if (args.opponentRuntime !== undefined) extra.push('--opponent-runtime', validateOpponentRuntime(args.opponentRuntime));
+  if (args.jevConfigFile) extra.push('--jev-config-file', args.jevConfigFile);
   if (args.showdownPolicy !== undefined) extra.push('--showdown-policy', String(args.showdownPolicy));
   if (args.hints !== undefined) extra.push('--hints',String(args.hints));
   if (args.dealBias !== undefined) extra.push('--deal-bias',String(args.dealBias));
@@ -700,8 +706,8 @@ export function parseGameLoopArgs(argv) {
   if (parsed.port !== undefined && (parsed.port < 0 || parsed.port > 65535)) {
     throw codedError('USAGE', '--port는 0..65535 정수여야 합니다.');
   }
-  if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
-    throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
+  if (parsed.opponentRuntime != null && !['llm', 'policy', 'jev'].includes(parsed.opponentRuntime)) {
+    throw codedError('USAGE', '--opponent-runtime는 llm, policy 또는 jev입니다.');
   }
   try { paceFor(parsed); } catch { throw codedError('USAGE', '--pace는 instant, fast, normal 또는 slow입니다.'); }
   if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
@@ -832,7 +838,7 @@ export function validatedUserAction(raw) {
 export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = createProductionResolver({ preferred: null }), opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
-  const requestedOpponentRuntime = opts.opponentRuntime === 'policy' ? 'policy' : 'llm';
+  let requestedOpponentRuntime = opts.opponentRuntime === undefined ? 'llm' : validateOpponentRuntime(opts.opponentRuntime);
 
   const root = path.resolve(gameDir);
   const lockRoot = path.resolve(lockDir);
@@ -1011,6 +1017,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return promise;
   };
   let stopPromise = null;
+  let stopAttemptSequence = 0;
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
@@ -1318,7 +1325,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete next[key];
     }
+    const quarantinedJevDiagnostics = boundJevDiagnostics(next);
     writeJsonAtomic(loopStatePath, next);
+    if (quarantinedJevDiagnostics) log('jev-diagnostics-quarantined', {});
     return next;
   };
 
@@ -2430,6 +2439,122 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     await active.settled;
     const outcome=readLoopState()?.pendingDecision;
     return {interrupted:!!(same(outcome) && outcome.status==='recovery_required' && outcome.code==='INTERRUPTED' && outcome.closeConfirmed===true)};
+  };
+  let jevRuntime = null;
+  let jevResyncIdentity = null;
+  const decideWithJev = async (next, stateVersion) => {
+    const previous = readLoopState()?.pendingDecision;
+    if (previous && (!validJevPending(previous) || previous.proposedAction || previous.status !== 'retry_authorized')) return {kind:'recovery_required'};
+    if (previous && (previous.decisionId !== next.decisionId || previous.stateVersion !== stateVersion
+      || previous.playerId !== next.toAct || previous.gameEpoch !== readLoopState().gameEpoch)) throw jevError('STALE_PLAYER_DECISION');
+    const budget = currentWatchdog(), startedAt = monotonicNow();
+    let record = {schemaVersion:3,runtime:'jev',executionKind:'http',gameEpoch:readLoopState().gameEpoch,
+      decisionId:next.decisionId,stateVersion,playerId:next.toAct,generation:(previous?.generation ?? 0)+1,
+      status:'running',budget,startedAt:isoNow(now)};
+    // Durability precedes even the fallible engine projection.
+    writeLoopState({pendingDecision:record,playerBudget:budget});
+    ownedPlayerAttempt = record;
+    const commit = patch => {
+      if (!sameJevIdentity(readLoopState()?.pendingDecision, record) || !ownedLockStillVerified()) throw jevError('STALE_PLAYER_DECISION');
+      record = {...record,...patch};
+      writeLoopState({pendingDecision:record});
+    };
+    let settle;
+    const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
+    activeDecision = active;
+    let httpStarted = false, softTimer, hardTimer, modelMs = 0;
+    const signal = active.controller.signal;
+    const lateSettlement = async () => {
+      const current = readLoopState()?.pendingDecision;
+      if (!ownedLockStillVerified() || !sameJevIdentity(current, record) || current.status !== 'unsafe'
+        || current.code !== 'JEV_REQUEST_CLOSE_UNCONFIRMED' || current.proposedAction) return;
+      // HTTP had no engine capability. Re-read the actual turn before allowing a retry.
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const hand = engine?.hand;
+      const decisionId = hand ? `d-${engine.handNo}-${hand.street}-${hand.actionIndex}` : null;
+      if (engine?.stateVersion !== record.stateVersion || decisionId !== record.decisionId
+        || engine.seats?.[hand?.toActIdx]?.playerId !== record.playerId
+        || gameEpochOf(engine.sessionToken) !== record.gameEpoch) return;
+      commit({status:'recovery_required',code:'INTERRUPTED',closeConfirmed:true,retryable:true,softWait:false});
+      if (stopRequested) {
+        // Settlement may precede the failed stop's persisted error. Wait for that
+        // whole attempt before retrying only its closure failure.
+        const stopAttempt = stopAttemptSequence;
+        await stopPromise?.catch(() => {});
+        const cleanup = readLoopState()?.cleanupError;
+        if (!stopPromise && stopAttemptSequence === stopAttempt && ownedLockStillVerified()
+          && cleanup?.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED'
+          && cleanup.details?.stopAttempt === stopAttempt && cleanup.details?.jevClosureOnly === true) await requestStop();
+      }
+    };
+    try {
+      softTimer = setTimeout(() => {
+        try { if (record.status === 'running' && !record.proposedAction) commit({softWait:true}); }
+        catch { active.controller.abort(); }
+      }, budget.softMs);
+      hardTimer = setTimeout(() => active.controller.abort(), budget.hardMs);
+      const peek = await runCli(['decision-peek','--for',next.toAct,'--expect-version',String(stateVersion)]);
+      const candidates = buildJevCandidates(peek.snapshot, peek.legal);
+      const player = (readJsonOptional(playersPath, 'PLAYERS') ?? []).find(p => p.playerId === next.toAct);
+      const state = projectJevState(peek.snapshot, peek.legal, player?.archetype);
+      if (stopRequested || signal.aborted) throw Object.assign(jevError('INTERRUPTED',true),{closeConfirmed:true});
+      let result;
+      if (candidates.length === 1) {
+        const candidate = candidates[0];
+        result = {action:{action:candidate.action,...(candidate.amount === undefined ? {} : {amount:candidate.amount})}};
+      } else {
+        if (!jevRuntime || jevRuntime.phase === 'disposed') jevRuntime = (opts.createJevRuntime ?? createJevRuntime)({onLateSettlement:lateSettlement});
+        // A fresh instance binds each generation's closure observer.
+        else if (jevRuntime.phase === 'idle') { await jevRuntime.dispose(); jevRuntime = (opts.createJevRuntime ?? createJevRuntime)({onLateSettlement:lateSettlement}); }
+        const remaining = Math.floor(budget.hardMs - (monotonicNow() - startedAt));
+        if (remaining <= 0) throw jevError('JEV_TIMEOUT',true);
+        const modelStarted = monotonicNow();
+        httpStarted = true;
+        try { result = await jevRuntime.decide({state,candidates,signal,timeoutMs:remaining}); }
+        finally { modelMs = Math.max(0,monotonicNow()-modelStarted); }
+      }
+      if (stopRequested || signal.aborted) throw Object.assign(jevError('INTERRUPTED',true),{closeConfirmed:true});
+      if (!sameJevIdentity(readLoopState()?.pendingDecision,record) || readLoopState().gameEpoch !== record.gameEpoch) throw jevError('STALE_PLAYER_DECISION');
+      if (result.diagnostics) {
+        const stored = readLoopState().jevDiagnostics ?? {schemaVersion:1,entries:[],dropped:0};
+        const entries = [...stored.entries,{...result.diagnostics,decisionId:record.decisionId,generation:record.generation,actor:state.actor,
+          questionVersion:JEV_CONFIG.questionVersion,candidateVersion:JEV_CONFIG.candidateVersion,projectionVersion:JEV_CONFIG.projectionVersion}];
+        const dropped = Math.max(0,entries.length-5000);
+        writeLoopState({jevDiagnostics:{schemaVersion:1,entries:entries.slice(-5000),dropped:stored.dropped+dropped,
+          ...(stored.historyIncomplete ? {historyIncomplete:true} : {})}});
+      }
+      commit({closeConfirmed:true,proposedAction:result.action});
+      clearTimeout(softTimer); clearTimeout(hardTimer);
+      const atomicUnit = beginAtomicTransition(), stepStarted = monotonicNow();
+      try {
+        const args = ['step',next.toAct,result.action.action];
+        if (result.action.action === 'raise') args.push(String(result.action.amount));
+        const envelope = await runCli([...args,'--expect-version',String(stateVersion)]);
+        writeLoopState({pendingDecision:undefined});
+        return {envelope,atomicUnit,startedAt,modelMs,parseMs:0,stepMs:Math.max(0,monotonicNow()-stepStarted),
+          outcome:candidates.length === 1 ? 'jev_single_legal' : 'jev_accepted'};
+      } catch (error) { atomicUnit.finish(); throw error; }
+    } catch (error) {
+      if (error.code === 'VERSION_MISMATCH' && !httpStarted && !record.proposedAction && sameJevIdentity(readLoopState()?.pendingDecision,record)) {
+        jevResyncIdentity = record;
+        throw error;
+      }
+      if (!sameJevIdentity(readLoopState()?.pendingDecision,record)) throw error;
+      const unconfirmed = error.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED';
+      const unsafe = unconfirmed || !!record.proposedAction;
+      const cancelled = !unsafe && (stopRequested || signal.aborted);
+      const code = unsafe ? (unconfirmed ? 'JEV_REQUEST_CLOSE_UNCONFIRMED' : 'JEV_ENGINE_APPLY_UNCONFIRMED')
+        : (monotonicNow()-startedAt >= budget.hardMs ? 'JEV_TIMEOUT' : cancelled ? 'INTERRUPTED' : error.code?.startsWith('JEV_') || error.code === 'INTERRUPTED' ? error.code : 'JEV_INPUT_INVALID');
+      commit({status:unsafe ? 'unsafe' : 'recovery_required',code,closeConfirmed:!!record.proposedAction || !unsafe,retryable:!unsafe && (cancelled || error.retryable === true),softWait:false});
+      appendMetric({runtime:'jev',playerId:record.playerId,decisionId:record.decisionId,outcome:code,
+        elapsedMs:Math.max(0,monotonicNow()-startedAt),modelMs,censored:code === 'JEV_TIMEOUT' || unconfirmed});
+      log('jev-decision-failed',{code,decisionId:record.decisionId,generation:record.generation});
+      return {kind:'recovery_required'};
+    } finally {
+      clearTimeout(softTimer); clearTimeout(hardTimer);
+      if (activeDecision === active) activeDecision = null;
+      settle();
+    }
   };
   const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
@@ -6658,17 +6783,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('INVALID_TRANSITION', '복구 대기 상태에서만 재시도할 수 있습니다.');
     }
     let pending = readLoopState()?.pendingDecision;
-    if (!pending || ![1, 2].includes(pending.schemaVersion) || pending.status !== 'recovery_required'
+    if (!pending || ![1, 2, 3].includes(pending.schemaVersion) || (pending.schemaVersion === 3 && (!validJevPending(pending) || !pending.retryable || pending.proposedAction)) || pending.status !== 'recovery_required'
       || pending.closeConfirmed !== true || pending.decisionId !== decisionId) {
       throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
     }
+    if (pending.schemaVersion === 3 && freshAuthorization !== null) throw codedError('BAD_FRESH_AUTHORIZATION', 'JEV에는 LLM 세션이 없습니다.');
     if (freshAuthorization !== null && (
       typeof freshAuthorization !== 'object'
       || Array.isArray(freshAuthorization)
       || !['app', 'legacy', 'api'].includes(freshAuthorization.source)
       || !(typeof freshAuthorization.requestId === 'string' || freshAuthorization.requestId === null)
     )) throw codedError('BAD_FRESH_AUTHORIZATION', '새 세션 재시도 권한이 올바르지 않습니다.');
-    const check = validateDiagnostics(pending.diagnostics, pending);
+    const check = pending.schemaVersion === 3 ? {ok:true} : validateDiagnostics(pending.diagnostics, pending);
     if (!check.ok) pending = quarantineDiagnostics(pending, check.reason);
     const current = await runCli(['step']);
     if (current.next?.decisionId !== pending.decisionId || current.next?.toAct !== pending.playerId
@@ -6711,6 +6837,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
   const endGame = async (operationId) => {
+    const pending = readLoopState()?.pendingDecision;
+    if (pending?.schemaVersion === 3 && pending.status === 'unsafe' && pending.code !== 'JEV_ENGINE_APPLY_UNCONFIRMED') throw jevError(pending.code);
     if (!managed || control?.read().playState !== 'paused') throw codedError('INVALID_TRANSITION','종료 전에 일시정지가 필요합니다.');
     await retryControlWrite(()=>control.set('stopping', {terminalIntent:{operationId,kind:'end'}}));
     assertNotStopping();
@@ -6966,13 +7094,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
+    if (activeDecision?.identity.runtime === 'jev') activeDecision.controller.abort();
     resultHoldController?.abort();
     policyPaceController?.abort();
     waitController?.abort();
     parkWake?.();
     resolvePause?.({state:"stopped"});
+    const stopAttempt = ++stopAttemptSequence;
     const attempt = (async () => {
-      let stopError = null;
+      const stopErrors = [];
       // #192 L2: even the "stopping" marker is a write into loop-state. An instance whose
       // loop lock was removed or replaced must not stamp it onto the state of whichever
       // instance owns the game now. Remember the loss so the final block below refuses too.
@@ -6984,9 +7114,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
           }
         } catch (error) {
-          stopError = error;
+          stopErrors.push(error);
         }
       }
+      if (jevRuntime) {
+        try { await jevRuntime.dispose(); } catch (error) { stopErrors.push(error); }
+      }
+      if (activeDecision?.identity.runtime === 'jev') await activeDecision.settled;
       const inFlight = atomicTransition;
       if (inFlight) {
         // The mutation and its matching publish are one recoverable unit. Its own
@@ -7029,7 +7163,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const undisposableCoachAdapter = hasCoachAdapterWithoutDispose || hasCoachAdapterWithUndeclaredConfirmation;
       const disposalResults = await Promise.allSettled([...adapterDisposals.values()]);
       const disposalFailure = disposalResults.find((result) => result.status === 'rejected');
-      if (disposalFailure) stopError ??= disposalFailure.reason;
+      for (const result of disposalResults) if (result.status === 'rejected') stopErrors.push(result.reason);
       // Coach work is nonblocking only with respect to the next hand. Shutdown still owns
       // every task until the upper adapter has cancelled it and its authority/file work settles.
       for (const handle of trainingAttempts.values()) {
@@ -7040,18 +7174,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         await terminateActiveChildren();
       } catch (error) {
-        stopError ??= error;
+        stopErrors.push(error);
       }
       try {
         await stopServer();
       } catch (error) {
-        stopError ??= error;
+        stopErrors.push(error);
       }
       if (!disposalFailure) adapters.clear();
       for (const canary of [...canaries]) {
         try { fs.unlinkSync(canary); } catch (error) {
           if (error.code !== 'ENOENT') {
-            stopError ??= error;
+            stopErrors.push(error);
             continue;
           }
         }
@@ -7063,10 +7197,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           fs.closeSync(logFd);
           logFd = null;
         } catch (error) {
-          stopError ??= error;
+          stopErrors.push(error);
         }
       }
-      if (stopError) {
+      if (stopErrors.length) {
+        let stopError = stopErrors[0];
+        if (jevRuntime) stopError = Object.assign(codedError(stopError.code ?? 'ERROR', stopError.message ?? 'Cleanup failed'), {
+          details: {...stopError.details, stopAttempt,
+            jevClosureOnly: stopErrors.length === 1 && stopError.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED',
+            stopFailures: stopErrors.map(error => ({code:error.code ?? 'ERROR'}))},
+        });
         throw persistCleanupFailure(stopError) ?? stopError;
       }
 
@@ -7129,7 +7269,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
               && ['gameEpoch','decisionId','generation'].every(key => pending[key] === ownedPlayerAttempt[key])
               && pending.status === 'running';
             pendingPatch = {pendingDecision: interrupted
-              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false}
+              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false, ...(pending.schemaVersion === 3 ? {retryable:true} : {})}
               : pending};
           }
           writeLoopState({
@@ -7187,6 +7327,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     hints,
     dealBias,
   } = {}) => {
+    if (opponentRuntime !== undefined) {
+      validateOpponentRuntime(opponentRuntime);
+      if (opts.opponentRuntime !== undefined && opponentRuntime !== opts.opponentRuntime) throw jevError('OPPONENT_RUNTIME_MISMATCH');
+      requestedOpponentRuntime = opponentRuntime;
+    }
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
     } else {
@@ -7222,6 +7367,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           log('profile-sweep-error', { code: error.code ?? 'ERROR' });
         }
       }
+      if (!preinitialized && (opponentRuntime ?? opponentRuntimeOf()) === 'jev' && ai !== 0) await (opts.jevPreflight ?? preflightJev)();
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
@@ -7256,6 +7402,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         metrics: [],
         metricsDropped: 0,
         playerBudget: undefined,
+        ...(opponentRuntimeOf() === 'jev' ? {jev: validateJevConfig(readJsonOptional(engineStatePath, 'ENGINE_STATE').config.jev), jevDiagnostics:{schemaVersion:1,entries:[],dropped:0}} : {}),
       });
       // #192 S4 E1: only an owner this instance itself just durably wrote counts —
       // writeLoopState throwing above (e.g. a write failure) leaves this line unreached.
@@ -7313,7 +7460,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           appendNotice(notice);
         }
       }
-      const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
+      const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
       const notices = [
@@ -7332,7 +7479,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         upperRuntime: upperAdapter?.kind ?? null,
         opponentRuntime: opponentRuntimeOf(),
       });
-      if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
+      if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
 
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
@@ -7342,7 +7489,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         practiceFocusFile,
         onNotice: appendNotice,
       });
-      if (!policyMode) await warmPlayers();
+      if (opponentRuntimeOf() === 'llm') await warmPlayers();
       const state = writeLoopState({ phase: 'playing' });
       log('bootstrap-playing', { port });
       return state;
@@ -7500,7 +7647,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
 
     const policyMode = opponentRuntimeOf() === 'policy' || existingState.opponentRuntime === 'policy';
-    const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
+    const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
     selectAdapters(resolved ?? {});
     const notices = [
       ...(Array.isArray(existingState.notices) ? existingState.notices : []),
@@ -7510,10 +7657,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       notices,
       playerRuntime: playerAdapter?.kind ?? null,
       upperRuntime: upperAdapter?.kind ?? null,
-      opponentRuntime: policyMode ? 'policy' : (existingState.opponentRuntime ?? 'llm'),
+      opponentRuntime: opponentRuntimeOf(),
       ...(existingState.halt?.code === 'NO_PLAYER_RUNTIME' && playerAdapter ? { halt: undefined } : {}),
     });
-    if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
+    if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
     const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
       ? existingState.port
       : requestedPort;
@@ -7529,7 +7676,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
       assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
-    } else {
+    } else if (opponentRuntimeOf() === 'llm') {
       await restorePlayers();
     }
     return writeLoopState({ phase: 'playing' });
@@ -7574,7 +7721,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // first hint capability await can enter shutdown and serialize its bytes.
       if (state?.phase !== 'done' && state?.pendingDecision) {
         const p = state.pendingDecision;
-        if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
+        if (![1, 2, 3].includes(p.schemaVersion) || (p.schemaVersion === 3 && !validJevPending(p)) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
           || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
           try {
             writeContained(root,['loop-state.unverified.json'],fs.readFileSync(loopStatePath),{mode:'create'});
@@ -7587,6 +7734,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
       }
+      const resolvedOpponentRuntime = resolveOpponentRuntime(engineState, { loop: state, setup: readJsonOptional(path.join(root, '.app-setup.json'), 'APP_SETUP'), explicit: opts.opponentRuntime });
       if ((engineState.config?.humanCount ?? 1) > 1 && !managed) {
         throw codedError('MULTIPLAYER_REQUIRES_APP', '멀티플레이어 세션은 앱으로만 재개합니다.');
       }
@@ -7605,11 +7753,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           p = withoutAuthorization;
           state = writeLoopState({pendingDecision:p});
         }
-        const check = validateDiagnostics(p.diagnostics, p);
+        const check = p.schemaVersion === 3 ? {ok:true} : validateDiagnostics(p.diagnostics, p);
         if (!check.ok) { p = quarantineDiagnostics(p, check.reason); state = readLoopState(); }
         const applied = [...(engineState.hand?.actions ?? []), ...(engineState.lastHand?.actions ?? [])]
           .find((action) => action.decisionId === p.decisionId && action.playerId === p.playerId);
-        if (applied && p.proposedAction && p.closeConfirmed === true
+        if (applied && p.proposedAction && (p.schemaVersion === 3 || p.closeConfirmed === true)
           && applied.action === p.proposedAction.action
           && (applied.action !== 'raise' || applied.amount === p.proposedAction.amount)) {
           state = writeLoopState({ pendingDecision: undefined });
@@ -7617,10 +7765,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         } else {
         // A persisted running child has no post-crash close receipt. Do not
         // convert parent death into permission to spawn another model call.
-        if (p.status === 'running') state = writeLoopState({ pendingDecision: { ...p, softWait: false,
+        if (p.schemaVersion === 3) {
+          const canRecover = !p.proposedAction && (p.status !== 'unsafe' || p.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED');
+          state = writeLoopState({pendingDecision:{...p,softWait:false,
+            status:canRecover ? 'recovery_required' : 'unsafe',closeConfirmed:canRecover || !!p.proposedAction,
+            retryable:canRecover && (p.status === 'recovery_required' ? p.retryable : true),
+            code:canRecover ? (p.status === 'recovery_required' ? p.code : 'INTERRUPTED') : 'JEV_ENGINE_APPLY_UNCONFIRMED'}});
+        } else if (p.status === 'running') state = writeLoopState({ pendingDecision: { ...p, softWait: false,
           status: p.closeConfirmed === true ? 'recovery_required' : 'unsafe',
           code: p.closeConfirmed === true ? 'INTERRUPTED' : 'CHILD_CLOSE_UNCONFIRMED' } });
-        if (p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
+        if (p.schemaVersion !== 3 && p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
         if (managed) pauseRequested = true;
         }
       }
@@ -7689,10 +7843,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           notices: resumeNotices,
           metrics: [],
           metricsDropped: 0,
-          opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
+          opponentRuntime: resolvedOpponentRuntime,
+          ...(resolvedOpponentRuntime === 'jev' ? { jev: validateJevConfig(engineState.config.jev), jevDiagnostics: {schemaVersion:1,entries:[],dropped:0} } : {}),
         });
       } else {
-        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
+        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices, opponentRuntime: resolvedOpponentRuntime });
       }
       // #192 S4 E1: same rule as bootstrap — only after the write above has actually
       // succeeded does this instance count `ownerSessionId` as its own issued owner. A
@@ -7752,7 +7907,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ? async () => {
             const persisted = await reclaimPersistedCoachWorkersForResume(
               Number(engineState.lastHand?.handNo ?? 0),
-              { policyMode: opponentRuntimeOf() === 'policy' },
+              { policyMode: opponentRuntimeOf() !== 'llm' },
             );
             if (!persisted.confirmed) throw haltForPlayingCoachRecovery(persisted);
             if (priorPlayingRecoveryHalt && persisted.authorityPresent !== true) {
@@ -7949,7 +8104,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('BAD_NEXT', '다음 행동자 계약이 ai/user가 아닙니다.');
       }
 
-      if (opponentRuntimeOf() === 'policy' && pace.aiActionIntervalMs > 0 && lastPlayPublishAt !== null) {
+      if (opponentRuntimeOf() !== 'llm' && pace.aiActionIntervalMs > 0 && lastPlayPublishAt !== null) {
         await paceSleep(Math.max(0, pace.aiActionIntervalMs - (paceNow() - lastPlayPublishAt)), 'policy');
         if (stopRequested) break;
         out = await pauseBarrier(out);
@@ -7961,12 +8116,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         decision = opponentRuntimeOf() === 'policy'
           ? await decideWithPolicy(next, out.stateVersion)
+          : opponentRuntimeOf() === 'jev' ? await decideWithJev(next, out.stateVersion)
           : await decideWithWatchdog(next, out.stateVersion);
       } catch (error) {
         if (stopRequested && error.code !== 'STOPPING') break;
         if (error.code !== 'VERSION_MISMATCH') throw error;
         const synchronized = await runCli(['step']);
-        writeLoopState({ pendingDecision: undefined });
+        if (opponentRuntimeOf() !== 'jev' || sameJevIdentity(readLoopState()?.pendingDecision, jevResyncIdentity)) {
+          writeLoopState({ pendingDecision: undefined });
+          jevResyncIdentity = null;
+        } else throw codedError('STALE_PLAYER_DECISION', 'JEV resync identity changed');
         log('version-resync', {
           staleDecisionId: next.decisionId,
           stateVersion: synchronized.stateVersion,
@@ -7987,7 +8146,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const metric = {
         playerId: next.toAct,
         decisionId: next.decisionId,
-        runtime: opponentRuntimeOf() === 'policy' ? 'policy' : playerAdapter.kind,
+        runtime: opponentRuntimeOf() === 'llm' ? playerAdapter.kind : opponentRuntimeOf(),
         outcome: decision.outcome,
         elapsedMs,
         modelMs: decision.modelMs,
@@ -8038,6 +8197,11 @@ export async function initializePreparedSession(gameDir, args) {
       if(error || caps?.preActionHints!==1 || caps?.hintContractVersion!==1) reject(codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability missing'));else resolve();
     }));
   }
+  if (args.opponentRuntime === 'jev') {
+    const file = path.join(gameDir, '.jev-config.json');
+    writeJsonAtomic(file, validateJevConfig(args.jevConfig ?? JEV_CONFIG));
+    args = { ...args, jevConfigFile: file };
+  }
   const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
   if (Array.isArray(args.participants) && args.participants.length >= 1) {
     const file = path.join(gameDir, '.participants.json');
@@ -8070,6 +8234,7 @@ export async function initializePreparedSession(gameDir, args) {
 }
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
+  if (!args.resume && args.opponentRuntime === 'jev' && args.ai !== 0) await (loopOptions.jevPreflight ?? preflightJev)();
   loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
     ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),

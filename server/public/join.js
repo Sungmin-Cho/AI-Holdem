@@ -66,6 +66,7 @@ async function poll() {
     if($('join-error').dataset.kind==='offline'){$('join-error').textContent='';delete $('join-error').dataset.kind;}
     const state = await res.json();
     latest = state;
+    $('ai-provider').textContent = state.game?.aiProvider === 'jev' ? '상대 AI: JEV · 공개 플레이 정보를 TypeSafe AI로 전송 중' : '';
     $('member-controls').hidden = false;
     const spectator = state.me.roomRole === 'spectator';
     const watching = spectator || state.me.viewerRole === 'spectator';

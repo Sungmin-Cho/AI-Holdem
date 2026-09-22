@@ -68,12 +68,13 @@ function render() {
 
   $("status").textContent = labels[s] ?? s;
   if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
-  if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'LLM이 계속 생각하고 있습니다';
+  if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'AI가 계속 생각하고 있습니다';
   const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
   $("pause-message").textContent = recovery
     ? (snapshot.pendingDecision.status === 'unsafe'
-      ? '자식 프로세스 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
-      : `LLM 결정을 보존했습니다 (${snapshot.pendingDecision.code ?? '복구 대기'}). 재시도하거나 종료하세요.`) : '일시정지 중입니다.';
+      ? snapshot.pendingDecision.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED' ? 'JEV 요청 종료를 확인하지 못했습니다. 앱 서비스를 종료한 뒤 다시 열어 복구하세요.' : snapshot.pendingDecision.code === 'JEV_ENGINE_APPLY_UNCONFIRMED' ? '액션 적용 여부를 확인할 수 없어 재시도할 수 없습니다. 게임을 종료하거나 앱 재개로 기록을 확인하세요.' : '실행 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
+      : snapshot.pendingDecision.retryable === false ? '입력 오류로 재시도할 수 없습니다. 게임을 종료하세요.'
+      : `AI 결정을 보존했습니다 (${snapshot.pendingDecision.code ?? '복구 대기'}). 재시도하거나 종료하세요.`) : '일시정지 중입니다.';
   if (recovery) {
     const pending = snapshot.pendingDecision;
     const d = pending.diagnostics;
@@ -86,7 +87,7 @@ function render() {
     if (pending.freshSessionAuthorized) $("pause-message").textContent = '새 세션으로 재시도 중';
     if (pending.diagnosticsQuarantined) $("pause-message").textContent += ' (진단 기록이 손상되어 격리됨)';
   }
-  $("retry-decision").hidden = !recovery;
+  $("retry-decision").hidden = !recovery || snapshot.pendingDecision?.retryable === false;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
   $("retry-fresh-session").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
@@ -219,7 +220,14 @@ async function refresh() {
   render();
 }
 const errorMessages = {
-  BAD_PLAYER_RECOVERY: '저장된 LLM 결정 기록을 검증할 수 없어 이어서 할 수 없습니다. 기록은 보존한 채 게임을 종료하거나 같은 설정으로 새 게임을 시작할 수 있습니다.',
+  JEV_API_KEY_MISSING: '서버에 TYPESAFE_API_KEY를 설정한 뒤 다시 시작하세요.',
+  JEV_SDK_UNAVAILABLE: '서버에서 npm ci로 JEV SDK를 설치하세요.',
+  JEV_CONFIG_UNSUPPORTED: '저장된 JEV 버전을 지원하는 앱이 필요합니다. 기록은 보존됩니다.',
+  OPPONENT_RUNTIME_MISMATCH: '저장된 상대 AI 방식과 요청 설정이 다릅니다.',
+  JEV_AUTH_FAILED: 'TypeSafe API 키 인증에 실패했습니다. 서버 키 설정을 확인하세요.',
+  JEV_RATE_LIMITED: 'TypeSafe 요청 한도에 도달했습니다. 잠시 후 재시도하세요.',
+  JEV_SERVICE_UNAVAILABLE: 'TypeSafe 서비스를 사용할 수 없습니다. 잠시 후 재시도하세요.',
+  BAD_PLAYER_RECOVERY: '저장된 AI 결정 기록을 검증할 수 없어 이어서 할 수 없습니다. 기록은 보존한 채 게임을 종료하거나 같은 설정으로 새 게임을 시작할 수 있습니다.',
   RETRY_NOT_APPLIED: '재시도 인가가 실행되기 전에 앱이 중단됐습니다. 필요하면 재시도를 다시 선택하세요.',
   INVALID_SETUP: "설정이 서로 맞지 않습니다. 인원, 스택, 핸드 수를 확인하세요.",
   TENDENCY_INSUFFICIENT:
@@ -389,13 +397,13 @@ function setupFromForm() {
   return setup;
 }
 function updateSetupSummary() {
-  $('llm-settings').hidden=form.elements.opponentRuntime.value!=='llm';
+  $('llm-settings').hidden=form.elements.opponentRuntime.value==='policy';
   $('llm-budget-help').textContent=`알림 ${Number(form.elements.playerSoftMs.value)/1000}초 · 호출 최대 ${Number(form.elements.playerHardMs.value)/60000}분`;
   try {
     const setup=normalizeSetup(setupFromForm());
     const bb=Number(setup.blinds.split('/')[1]);
     const amount=formatAmount(setup.stack??setup.stackBb*bb,bb);
-    $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
+    $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · ${{policy:'로컬 정책',llm:'LLM',jev:'JEV'}[setup.opponentRuntime]} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
     $('setup-assistance').textContent=[setup.dealBias!=='off'?'유리한 딜 · 평가 제외':null,setup.hints==='on'?'행동 전 힌트 켬':null,setup.showdownPolicy==='open'?'쇼다운 모두 공개':null,setup.replayReveal==='all'?'복기 카드 모두 공개':null].filter(Boolean).join(' · ');
   } catch(e) {$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
 }

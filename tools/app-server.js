@@ -621,6 +621,7 @@ export async function startAppServer({
               roomRole:me.roomRole, viewerGeneration:me.viewerGeneration,
               viewerRole:viewerRole(committedView(), me.roomRole === 'spectator' ? SPECTATOR_ID : me.playerId) },
             game: {
+              aiProvider: snap.setup?.opponentRuntime ?? null,
               gameId: snap.gameId,
               gameEpoch: snap.gameEpoch,
               state: snap.state === "lobby" ? "lobby" : snap.state,

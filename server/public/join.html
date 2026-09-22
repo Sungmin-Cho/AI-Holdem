@@ -12,6 +12,8 @@
     <main>
       <h1>테이블 참가</h1>
       <p>게임 시작 후에는 관전으로 입장합니다. 관전자에게는 모든 카드가 실시간 공개됩니다.</p>
+      <p>호스트가 JEV 모드를 선택하면 공개 플레이 정보와 각 AI의 자기 패가 TypeSafe AI로 전송됩니다. 참가자의 비공개 패와 이름은 전송하지 않습니다.</p>
+      <p id="ai-provider"></p>
       <form id="join-form">
         <label>참가 코드 <input id="join-code" name="code" required /></label>
         <label>이름 <input id="join-name" name="name" required maxlength="12" /></label>

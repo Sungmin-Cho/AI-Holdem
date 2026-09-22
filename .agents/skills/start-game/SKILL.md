@@ -236,3 +236,9 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 ### 결과 화면과 수동 제어
 
 단독 인간 호스트의 결과 건너뛰기는 `POST /api/game/:gameId/skip-result`, soft 대기 중 AI 취소는 `POST /api/app/interrupt-decision`을 웹 UI가 호출한다. 취소 뒤 종료 확인된 복구 상태에서 재시도한다. 종료 결과는 리뷰 대기와 독립적으로 먼저 표시되며 테이블을 유지한다. 종료 요약은 호스트 `GET /api/game/:gameId/summary`, 참가자 `GET /api/p/game/:gameId/summary`로 읽는다. 참가자 요약은 토큰당 2초 제한이며 모든 요청은 인증·현재 게임 세대와 종료 상태 검사를 받는다.
+
+## JEV 테이블 모드
+
+사용자가 JEV 상대를 요청하면 새 게임 로비의 상대 행동 방식을 `jev`로 지정한다. 모든 AI 좌석은 JEV, 인간 좌석은 그대로다. `--opponent-runtime jev`는 legacy CLI에도 전달할 수 있지만 새 게임 시작 정본은 앱 로비다. 서버 `TYPESAFE_API_KEY`를 사용하며 키 값을 출력하거나 클라이언트에 넣지 않는다. JEV 플레이어는 Node SDK 내부 HTTP이고 상위 코치/리뷰 CLI만 검사한다. AI 0이면 SDK/키 검사를 생략한다. 저장된 모델·입력/후보 버전은 재개·재시작에서 보존한다.
+
+원격 오류는 일시정지 후 명시적 재시도 또는 종료로 처리하며 자동 LLM/정책 대체가 없다. JEV에는 새 LLM 세션 재시도가 없다. `JEV_REQUEST_CLOSE_UNCONFIRMED`는 README의 소유 앱 프로세스 종료·사망 확인 절차를 따른다. 락 파일을 직접 지우거나 종료 미확인을 성공으로 보고하지 않는다. 기존 진행 중 JEV 게임은 호환 버전에서 종료한 뒤 downgrade한다.
