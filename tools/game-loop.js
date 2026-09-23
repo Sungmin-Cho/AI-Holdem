@@ -2466,9 +2466,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       writeLoopState({pendingDecision:next,...siblings});
       record = next;
     };
-    // Drawn before any response exists, so the provider cannot steer the class sample. The
-    // private sessionToken (clients only see its hash, gameEpoch) keeps players from predicting it.
-    const selectionUnit = deriveUnit('jev-selection-v1', readLoopState().sessionToken, record.decisionId, String(record.generation));
+    let selectionUnit;
     let settle;
     const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
     activeDecision = active;
@@ -2498,6 +2496,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     };
     try {
+      // Drawn before any response exists, so the provider cannot steer the class sample. The
+      // private sessionToken (clients only see its hash, gameEpoch) keeps players from predicting it.
+      selectionUnit = deriveUnit('jev-selection-v1', readLoopState().sessionToken, record.decisionId, String(record.generation));
       softTimer = setTimeout(() => {
         try { if (record.status === 'running' && !record.proposedAction) commit({softWait:true}); }
         catch { active.controller.abort(); }

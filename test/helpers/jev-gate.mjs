@@ -135,11 +135,11 @@ function judgeRun(run) {
   const diagnostics = run.loopState?.jevDiagnostics ?? { entries: [], dropped: 0 };
   const entries = diagnostics.entries ?? [];
   const v1Entries = entries.filter(e => !e.selection).length;
-  // Only the one hand after the last archived one may be unfinished (End keeps it out of the archive).
+  // Only the hand the engine itself reports as unfinished (End's .aborted-hand.json or a live hand)
+  // may lack an archive; every other unarchived entry is a missing record.
   const handOf = id => Number(String(id).split('-')[1]);
-  const lastArchived = Math.max(0, ...hands.map(h => h.handNo));
   const unarchived = entries.filter(e => !archived.has(e.decisionId));
-  const incomplete = new Set(unarchived.filter(e => handOf(e.decisionId) === lastArchived + 1).map(e => e.decisionId));
+  const incomplete = new Set(unarchived.filter(e => run.unfinishedHand != null && handOf(e.decisionId) === run.unfinishedHand).map(e => e.decisionId));
   const missingArchive = new Set(unarchived.filter(e => !incomplete.has(e.decisionId)).map(e => e.decisionId));
   const top = new Map();
   for (const e of entries) {
@@ -247,11 +247,13 @@ export function loadGateRun(dir) {
   const session = fs.existsSync(path.join(dir, 'session', 'state.json')) ? path.join(dir, 'session') : dir;
   const result = fs.existsSync(path.join(dir, 'result.json')) ? readJson(path.join(dir, 'result.json')) : {};
   const engine = readJson(path.join(session, 'state.json'));
+  const aborted = fs.existsSync(path.join(session, '.aborted-hand.json'));
   const handsDir = path.join(session, 'hands');
   const hands = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter(n => /^hand-.*\.json$/.test(n)).map(n => readJson(path.join(handsDir, n))) : [];
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
     loopState: readJson(path.join(session, 'loop-state.json')), players: readJson(path.join(session, 'players.json')),
-    requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null };
+    requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null,
+    unfinishedHand: aborted || engine.hand ? engine.handNo : null };
 }
 
 // `node --test` also loads this file from test/; only a direct invocation runs the CLI.
