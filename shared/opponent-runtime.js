@@ -1,9 +1,13 @@
 // Browser-safe persisted contract. Never infer a new runtime from a damaged descriptor.
 export const OPPONENT_RUNTIMES = Object.freeze(['policy', 'llm', 'jev']);
 export const JEV_CONFIG = Object.freeze({ schemaVersion: 1, model: 'jev-1.13.0',
-  questionVersion: 'poker-choice-v1', candidateVersion: 'legal-menu-v1', projectionVersion: 1 });
+  questionVersion: 'poker-choice-v2', candidateVersion: 'legal-menu-v2', projectionVersion: 2,
+  selectionVersion: 'class-sample-v1' });
 // Known older descriptors that a resume may roll forward to JEV_CONFIG exactly once.
-export const JEV_CONFIG_LEGACY = Object.freeze([]);
+export const JEV_CONFIG_LEGACY = Object.freeze([
+  Object.freeze({ schemaVersion: 1, model: 'jev-1.13.0',
+    questionVersion: 'poker-choice-v1', candidateVersion: 'legal-menu-v1', projectionVersion: 1 }),
+]);
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function sameDescriptor(value, reference) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -44,8 +48,7 @@ export function resolveOpponentRuntime(engine, { loop, setup, explicit } = {}) {
   }
   if (evidence.some(v => v !== runtime)) fail('OPPONENT_RUNTIME_MISMATCH');
   if (runtime === 'jev') {
-    validateJevConfig(config.jev);
-    if (loop?.jev !== undefined) validateJevConfig(loop.jev);
+    jevRollForwardOf(engine, loop);
   } else if (Object.hasOwn(config, 'jev') || loop?.jev !== undefined) fail('JEV_CONFIG_UNSUPPORTED');
   return runtime;
 }

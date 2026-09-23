@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { JEV_CONFIG, validateJevConfig, validateOpponentRuntime, resolveOpponentRuntime } from '../shared/opponent-runtime.js';
+import { JEV_CONFIG, validateJevConfig, validateOpponentRuntime, resolveOpponentRuntime, jevRollForwardOf } from '../shared/opponent-runtime.js';
 import { validJevPending, sameJevIdentity } from '../shared/jev-pending.js';
 import { boundJevDiagnostics } from './jev-diagnostics.js';
 import { createJevRuntime, preflightJev } from './jev-runtime.js';
-import { buildJevCandidates, projectJevState, jevError } from './jev-player.js';
+import { buildJevCandidates, projectJevState, jevError, selectJevAction } from './jev-player.js';
+import { deriveUnit } from '../training/policies/rng.js';
 import {appendBoundedMetric} from '../shared/runtime-bounds.js';
 import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -774,6 +775,10 @@ export function exitCodeFor(error) {
   if (error.code === 'NO_PLAYER_RUNTIME') return 4;
   return 5;
 }
+
+export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
+  ({questionVersion, candidateVersion, projectionVersion, ...(selectionVersion ? {selectionVersion} : {})});
 
 function isoNow(now) {
   const value = now();
@@ -2454,11 +2459,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // Durability precedes even the fallible engine projection.
     writeLoopState({pendingDecision:record,playerBudget:budget});
     ownedPlayerAttempt = record;
-    const commit = patch => {
+    // Sibling keys ride the same write; memory adopts the record only once it is durable.
+    const commit = (patch, siblings = {}) => {
       if (!sameJevIdentity(readLoopState()?.pendingDecision, record) || !ownedLockStillVerified()) throw jevError('STALE_PLAYER_DECISION');
-      record = {...record,...patch};
-      writeLoopState({pendingDecision:record});
+      const next = {...record,...patch};
+      writeLoopState({pendingDecision:next,...siblings});
+      record = next;
     };
+    // Drawn before any response exists, so the provider cannot steer the class sample.
+    const selectionUnit = deriveUnit('jev-selection-v1', record.gameEpoch, record.decisionId, String(record.generation));
     let settle;
     const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
     activeDecision = active;
@@ -2515,20 +2524,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (stopRequested || signal.aborted) throw Object.assign(jevError('INTERRUPTED',true),{closeConfirmed:true});
       if (!sameJevIdentity(readLoopState()?.pendingDecision,record) || readLoopState().gameEpoch !== record.gameEpoch) throw jevError('STALE_PLAYER_DECISION');
+      let chosen = result.action, siblings = {};
       if (result.diagnostics) {
+        const selected = (opts.selectJevAction ?? selectJevAction)({probabilities:result.diagnostics.probabilities,candidates,
+          unit:selectionUnit,apiChoice:result.diagnostics.apiChoice});
+        chosen = selected.action;
         const stored = readLoopState().jevDiagnostics ?? {schemaVersion:1,entries:[],dropped:0};
         const entries = [...stored.entries,{...result.diagnostics,decisionId:record.decisionId,generation:record.generation,actor:state.actor,
-          questionVersion:JEV_CONFIG.questionVersion,candidateVersion:JEV_CONFIG.candidateVersion,projectionVersion:JEV_CONFIG.projectionVersion}];
+          questionVersion:JEV_CONFIG.questionVersion,candidateVersion:JEV_CONFIG.candidateVersion,projectionVersion:JEV_CONFIG.projectionVersion,
+          selectionVersion:JEV_CONFIG.selectionVersion,selection:selected.selection}];
         const dropped = Math.max(0,entries.length-5000);
-        writeLoopState({jevDiagnostics:{schemaVersion:1,entries:entries.slice(-5000),dropped:stored.dropped+dropped,
-          ...(stored.historyIncomplete ? {historyIncomplete:true} : {})}});
+        siblings = {jevDiagnostics:{schemaVersion:1,entries:entries.slice(-5000),dropped:stored.dropped+dropped,
+          ...(stored.historyIncomplete ? {historyIncomplete:true} : {})}};
       }
-      commit({closeConfirmed:true,proposedAction:result.action});
+      // One write: the diagnostics entry exists exactly when its proposal is durable.
+      commit({closeConfirmed:true,proposedAction:chosen},siblings);
       clearTimeout(softTimer); clearTimeout(hardTimer);
       const atomicUnit = beginAtomicTransition(), stepStarted = monotonicNow();
       try {
-        const args = ['step',next.toAct,result.action.action];
-        if (result.action.action === 'raise') args.push(String(result.action.amount));
+        const args = ['step',next.toAct,chosen.action];
+        if (chosen.action === 'raise') args.push(String(chosen.amount));
         const envelope = await runCli([...args,'--expect-version',String(stateVersion)]);
         writeLoopState({pendingDecision:undefined});
         return {envelope,atomicUnit,startedAt,modelMs,parseMs:0,stepMs:Math.max(0,monotonicNow()-stepStarted),
@@ -7735,6 +7750,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       }
       const resolvedOpponentRuntime = resolveOpponentRuntime(engineState, { loop: state, setup: readJsonOptional(path.join(root, '.app-setup.json'), 'APP_SETUP'), explicit: opts.opponentRuntime });
+      // The loop copy decides: once it holds the current descriptor, nothing is recorded again.
+      const jevRoll = resolvedOpponentRuntime === 'jev' ? jevRollForwardOf(engineState, state) : null;
       if ((engineState.config?.humanCount ?? 1) > 1 && !managed) {
         throw codedError('MULTIPLAYER_REQUIRES_APP', '멀티플레이어 세션은 앱으로만 재개합니다.');
       }
@@ -7813,7 +7830,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ))
           : []),
         ...trainingMigrationNotices,
+        ...(jevRoll?.rolledForward ? [JEV_ROLL_FORWARD_NOTICE] : []),
       ])];
+      // Logged before the marker write: a crash in between leaves no marker, so the next
+      // resume records again (marker exactly once, log at least once).
+      if (jevRoll?.rolledForward) log('jev-config-rolled-forward', { from: jevVersions(jevRoll.from), to: jevVersions(jevRoll.config) });
+      // Conditional spread only: writeLoopState deletes keys whose patch value is undefined.
+      const jevRollPatch = jevRoll?.rolledForward
+        ? { jev: jevRoll.config, jevRolledForward: { from: jevRoll.from, at: isoNow(now) } } : {};
       if (trainingMigrationError) {
         const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
         const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
@@ -7844,10 +7868,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           metrics: [],
           metricsDropped: 0,
           opponentRuntime: resolvedOpponentRuntime,
-          ...(resolvedOpponentRuntime === 'jev' ? { jev: validateJevConfig(engineState.config.jev), jevDiagnostics: {schemaVersion:1,entries:[],dropped:0} } : {}),
+          ...(resolvedOpponentRuntime === 'jev' ? { jev: jevRoll.config, jevDiagnostics: {schemaVersion:1,entries:[],dropped:0}, ...jevRollPatch } : {}),
         });
       } else {
-        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices, opponentRuntime: resolvedOpponentRuntime });
+        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices, opponentRuntime: resolvedOpponentRuntime, ...jevRollPatch });
       }
       // #192 S4 E1: same rule as bootstrap — only after the write above has actually
       // succeeded does this instance count `ownerSessionId` as its own issued owner. A
