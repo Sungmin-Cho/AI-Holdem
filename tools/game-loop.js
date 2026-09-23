@@ -2466,8 +2466,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       writeLoopState({pendingDecision:next,...siblings});
       record = next;
     };
-    // Drawn before any response exists, so the provider cannot steer the class sample.
-    const selectionUnit = deriveUnit('jev-selection-v1', record.gameEpoch, record.decisionId, String(record.generation));
+    // Drawn before any response exists, so the provider cannot steer the class sample. The
+    // private sessionToken (clients only see its hash, gameEpoch) keeps players from predicting it.
+    const selectionUnit = deriveUnit('jev-selection-v1', readLoopState().sessionToken, record.decisionId, String(record.generation));
     let settle;
     const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
     activeDecision = active;
@@ -7830,14 +7831,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ))
           : []),
         ...trainingMigrationNotices,
-        ...(jevRoll?.rolledForward ? [JEV_ROLL_FORWARD_NOTICE] : []),
       ])];
-      // Logged before the marker write: a crash in between leaves no marker, so the next
-      // resume records again (marker exactly once, log at least once).
-      if (jevRoll?.rolledForward) log('jev-config-rolled-forward', { from: jevVersions(jevRoll.from), to: jevVersions(jevRoll.config) });
       // Conditional spread only: writeLoopState deletes keys whose patch value is undefined.
+      // The notice rides the same write as the marker it announces.
       const jevRollPatch = jevRoll?.rolledForward
-        ? { jev: jevRoll.config, jevRolledForward: { from: jevRoll.from, at: isoNow(now) } } : {};
+        ? { jev: jevRoll.config, jevRolledForward: { from: jevRoll.from, at: isoNow(now) },
+          notices: [...new Set([...resumeNotices, JEV_ROLL_FORWARD_NOTICE])] } : {};
       if (trainingMigrationError) {
         const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
         const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
@@ -7850,6 +7849,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
 
       const ownerSessionId = randomUUID();
+      // Logged before the marker write: a crash in between leaves no marker, so the next
+      // resume records again (marker exactly once, log at least once).
+      if (jevRoll?.rolledForward) log('jev-config-rolled-forward', { from: jevVersions(jevRoll.from), to: jevVersions(jevRoll.config) });
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({

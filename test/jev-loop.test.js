@@ -36,7 +36,9 @@ function assertRecomputed(dir){
  const ls=read(dir,'loop-state.json'),top=new Map(),actions=archivedActions(dir);
  for(const e of ls.jevDiagnostics.entries){if(!e.selection)continue;const prev=top.get(e.decisionId);if(!prev||e.generation>prev.generation)top.set(e.decisionId,e);}
  for(const [id,e] of top){
-  assert.equal(e.selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,id,String(e.generation)));
+  assert.equal(e.selection.unit,deriveUnit('jev-selection-v1',ls.sessionToken,id,String(e.generation)));
+  // Public inputs alone (gameEpoch is sent to every participant) must not reproduce the draw.
+  assert.notEqual(e.selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,id,String(e.generation)));
   const again=selectJevAction({probabilities:e.probabilities,candidates:candidatesOf(Object.keys(e.probabilities)),unit:e.selection.unit,apiChoice:e.apiChoice});
   assert.deepEqual(again.selection,e.selection);
   const applied=actions.filter(a=>a.decisionId===id&&a.playerId!=='user');assert.equal(applied.length,1,id);
@@ -96,8 +98,8 @@ test('soft wait interrupt pauses, requires explicit retry, fresh session denied 
  assert.equal(calls,2);assert.equal(read(dir,'state.json').hand.actions.filter(a=>a.decisionId===p.decisionId).length,1);
  const ls=read(dir,'loop-state.json'),retried=ls.jevDiagnostics.entries.filter(e=>e.decisionId===p.decisionId);
  assert.deepEqual(retried.map(e=>e.generation),[2]);
- assert.equal(retried[0].selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,p.decisionId,'2'));
- assert.notEqual(retried[0].selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,p.decisionId,'1'));
+ assert.equal(retried[0].selection.unit,deriveUnit('jev-selection-v1',ls.sessionToken,p.decisionId,'2'));
+ assert.notEqual(retried[0].selection.unit,deriveUnit('jev-selection-v1',ls.sessionToken,p.decisionId,'1'));
  await loop.requestStop();await running.catch(e=>{if(!['STOPPING','CHILD_FAILED'].includes(e.code))throw e;});
 });
 test('hard deadline preserves recoverable request, stop abort never applies response', {timeout:20000*SCALE},async t=>{

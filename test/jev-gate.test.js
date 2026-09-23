@@ -69,7 +69,7 @@ test('failures, truncation, missing samples and v1 entries make the run unjudgea
  const v1=cleanRun('V');v1.loopState.jevDiagnostics.entries.push({decisionId:'d-0-preflop-0',generation:1,probabilities:{fold:0,call:1}});
  const [f,t,d,s,v]=gateSessions([failed,truncated,dropped,small,v1]).perRun;
  for(const run of [f,t,d,s,v])assert.equal(run.one.pass,false,run.name);
- assert.ok(v.one.reasons.includes('v1 — ① 미적용'));assert.equal(v.one.incomplete,1);
+ assert.ok(v.one.reasons.includes('v1 — ① 미적용'));assert.ok(v.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')));
 });
 test('an entry of an unfinished hand is reported as incomplete and left out of the count',()=>{
  const run=cleanRun('I',MIN_DECISIONS,{entries:[{decisionId:'d-999-flop-3',generation:1,probabilities:{check:1},apiChoice:'check',selection:{rule:'class-sample-v1',unit:0.5,classMass:{check:1},pruned:[],sampled:'check',sizeRule:'weighted-median',selectedKey:'check',apiChoice:'check'}}],
@@ -114,4 +114,14 @@ test('live journey options keep the default opt-in contract and validate gate fl
  assert.deepEqual(parseLiveArgs(['--mode','tournament','--ai','6','--human-policy','check-fold','--max-requests','400','--wait-ms','1800000','--keep-store']),
   {hands:2,ai:6,mode:'tournament',maxRequests:400,waitMs:1800000,humanPolicy:'check-fold',keepStore:true});
  for(const argv of [['--mode','heads-up'],['--human-policy','raise'],['--max-requests','0'],['--mode','tournament','--hands','5']])assert.throws(()=>parseLiveArgs(argv));
+});
+test('missing archives and unrecorded archived decisions fail ①; single-legal skips do not',()=>{
+ const gap=cleanRun('G');gap.hands.splice(40,1);
+ const [g]=gateSessions([gap]).perRun;assert.equal(g.one.pass,false);assert.ok(g.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')),JSON.stringify(g.one.reasons));
+ const silent=cleanRun('M',MIN_DECISIONS+1);const id=silent.hands[40].actions[0].decisionId;
+ silent.loopState.jevDiagnostics.entries=silent.loopState.jevDiagnostics.entries.filter(e=>e.decisionId!==id);
+ silent.loopState.metrics=silent.loopState.metrics.filter(m=>m.decisionId!==id);
+ const [m]=gateSessions([silent]).perRun;assert.equal(m.one.pass,false);assert.ok(m.one.reasons.some(r=>r.startsWith('entry·single-legal 없는')),JSON.stringify(m.one.reasons));
+ silent.loopState.metrics.push({runtime:'jev',decisionId:id,outcome:'jev_single_legal'});
+ assert.equal(gateSessions([silent]).perRun[0].one.pass,true);
 });

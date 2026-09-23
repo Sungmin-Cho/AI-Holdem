@@ -8,6 +8,8 @@ import { eval5, compareScore } from '../../engine/evaluator.js';
 import { rankValue } from '../../engine/cards.js';
 import { selectJevAction } from '../../tools/jev-player.js';
 
+// perRun also bounds a run below the diagnostics byte cap (256 KiB ≈ 400 v2 entries); a run past
+// it would drop entries and make ① unjudgeable.
 export const GATE_BUDGET = Object.freeze({ total: 1200, perRun: 400, expectedRun: 200 });
 export const MIN_DECISIONS = 100;
 export const DEEP_BB = 40;
@@ -133,17 +135,26 @@ function judgeRun(run) {
   const diagnostics = run.loopState?.jevDiagnostics ?? { entries: [], dropped: 0 };
   const entries = diagnostics.entries ?? [];
   const v1Entries = entries.filter(e => !e.selection).length;
-  const incomplete = new Set(entries.filter(e => !archived.has(e.decisionId)).map(e => e.decisionId));
+  // Only the hand after the last archived one may be unfinished (End keeps it out of the archive).
+  const handOf = id => Number(String(id).split('-')[1]);
+  const lastArchived = Math.max(0, ...hands.map(h => h.handNo));
+  const unarchived = entries.filter(e => !archived.has(e.decisionId));
+  const incomplete = new Set(unarchived.filter(e => handOf(e.decisionId) > lastArchived).map(e => e.decisionId));
+  const missingArchive = new Set(unarchived.filter(e => !incomplete.has(e.decisionId)).map(e => e.decisionId));
   const top = new Map();
   for (const e of entries) {
-    if (!e.selection || incomplete.has(e.decisionId)) continue;
+    if (!e.selection || !archived.has(e.decisionId)) continue;
     const prev = top.get(e.decisionId);
     if (!prev || e.generation > prev.generation) top.set(e.decisionId, e);
   }
   const metrics = (run.loopState?.metrics ?? []).filter(m => m.runtime === 'jev');
   const failures = metrics.filter(m => !['jev_accepted', 'jev_single_legal'].includes(m.outcome));
-  const accepted = new Set(metrics.filter(m => m.outcome === 'jev_accepted' && !incomplete.has(m.decisionId)).map(m => m.decisionId));
+  const accepted = new Set(metrics.filter(m => m.outcome === 'jev_accepted' && archived.has(m.decisionId)).map(m => m.decisionId));
   const withEntry = [...archived.keys()].filter(id => top.has(id));
+  // Every archived AI decision is either a recorded selection or an explicit single-legal skip.
+  const singleLegal = new Set(metrics.filter(m => m.outcome === 'jev_single_legal').map(m => m.decisionId));
+  const unexplained = [...archived.keys()].filter(id => !top.has(id) && !singleLegal.has(id)
+    && !entries.some(e => e.decisionId === id && !e.selection));
   const recomputed = [...top.values()].filter(e => {
     const again = selectJevAction({ probabilities: e.probabilities, candidates: candidatesOf(e.probabilities),
       unit: e.selection.unit, apiChoice: e.apiChoice });
@@ -161,6 +172,8 @@ function judgeRun(run) {
   if (!(accepted.size === top.size && top.size === withEntry.length && withEntry.every(id => accepted.has(id))))
     reasons.push(`개수 불일치 accepted ${accepted.size} / entry ${top.size} / archive ${withEntry.length}`);
   if (recomputed !== top.size) reasons.push(`재계산 ${recomputed}/${top.size}`);
+  if (missingArchive.size) reasons.push(`아카이브 없는 완료 핸드 entry ${missingArchive.size}`);
+  if (unexplained.length) reasons.push(`entry·single-legal 없는 아카이브 AI 결정 ${unexplained.length}`);
   const one = { pass: reasons.length === 0, reasons, decisions: top.size, incomplete: incomplete.size, v1Entries,
     failures: failures.length, recomputed };
 
