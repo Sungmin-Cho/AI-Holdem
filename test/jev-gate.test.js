@@ -133,6 +133,11 @@ test('missing archives and unrecorded archived decisions fail ①; single-legal 
  const [m]=gateSessions([silent]).perRun;assert.equal(m.one.pass,false);assert.ok(m.one.reasons.some(r=>r.startsWith('entry·single-legal 없는')),JSON.stringify(m.one.reasons));
  silent.loopState.metrics.push({runtime:'jev',decisionId:id,outcome:'jev_single_legal'});
  assert.equal(gateSessions([silent]).perRun[0].one.pass,true);
+ // An accepted metric whose entry and archive are both gone is a missing record too.
+ const orphan=cleanRun('O');orphan.loopState.metrics.push({runtime:'jev',decisionId:'d-101-turn-7',outcome:'jev_accepted'});
+ assert.equal(gateSessions([orphan]).perRun[0].one.pass,false);
+ orphan.unfinishedHand=101;assert.equal(gateSessions([orphan]).perRun[0].one.pass,true,'the interrupted hand may hold an accepted metric without archive');
+ assert.equal(gateSessions([silent]).perRun[0].one.pass,true);
 });
 test('loadGateRun excuses only a hand the engine reports as interrupted',()=>{
  const write=(dir,name,value)=>{fs.mkdirSync(path.dirname(path.join(dir,name)),{recursive:true});fs.writeFileSync(path.join(dir,name),JSON.stringify(value));};

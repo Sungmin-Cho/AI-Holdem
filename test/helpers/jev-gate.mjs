@@ -149,7 +149,9 @@ function judgeRun(run) {
   }
   const metrics = (run.loopState?.metrics ?? []).filter(m => m.runtime === 'jev');
   const failures = metrics.filter(m => !['jev_accepted', 'jev_single_legal'].includes(m.outcome));
-  const accepted = new Set(metrics.filter(m => m.outcome === 'jev_accepted' && archived.has(m.decisionId)).map(m => m.decisionId));
+  // Every accepted metric outside the engine-reported unfinished hand must match an entry and an archive.
+  const accepted = new Set(metrics.filter(m => m.outcome === 'jev_accepted'
+    && !(run.unfinishedHand != null && handOf(m.decisionId) === run.unfinishedHand)).map(m => m.decisionId));
   const withEntry = [...archived.keys()].filter(id => top.has(id));
   // Every archived AI decision is either a recorded selection or an explicit single-legal skip.
   const singleLegal = new Set(metrics.filter(m => m.outcome === 'jev_single_legal').map(m => m.decisionId));
