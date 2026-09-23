@@ -1,4 +1,8 @@
 import { JEV_CONFIG } from '../shared/opponent-runtime.js';
+import { sampleWeighted } from '../training/policies/rng.js';
+
+// Decision-rule constants. Changing any value is a descriptor version change.
+export const PRUNE_FLOOR = 0.05;
 
 export function jevError(code, retryable = false) {
   return Object.assign(new Error(code), { code, retryable });
@@ -100,5 +104,40 @@ export function validateJevAnswer(response, candidates) {
   const chosen = candidates.find(c => c.key === answer.choice);
   return { action: { action: chosen.action, ...(chosen.amount === undefined ? {} : { amount: chosen.amount }) },
     diagnostics: { model: JEV_CONFIG.model, confidence: answer.confidence, probabilitySum,
-      probabilities: Object.fromEntries(keys.map(k => [k, answer.probabilities[k]])), usage } };
+      probabilities: Object.fromEntries(keys.map(k => [k, answer.probabilities[k]])), usage, apiChoice: answer.choice } };
+}
+
+const CLASS_ORDER = ['fold', 'check', 'call', 'raise'];
+// Sums of hundredths carry float noise; class masses are compared at 1e-9.
+const clean = n => Math.round(n * 1e9) / 1e9;
+// Executes validated probabilities: sample a class, then take the weighted-median raise size.
+export function selectJevAction({ probabilities, candidates, unit, apiChoice }) {
+  if (!Array.isArray(candidates) || candidates.length === 0 || !probabilities || typeof probabilities !== 'object'
+    || Array.isArray(probabilities) || Object.keys(probabilities).length !== candidates.length
+    || candidates.some(c => !c || !Object.hasOwn(probabilities, c.key) || !CLASS_ORDER.includes(c.action)
+      || typeof probabilities[c.key] !== 'number' || !Number.isFinite(probabilities[c.key])
+      || probabilities[c.key] < 0 || probabilities[c.key] > 1)
+    || typeof unit !== 'number' || !Number.isFinite(unit) || unit < 0 || unit >= 1
+    || typeof apiChoice !== 'string' || !candidates.some(c => c.key === apiChoice)) bad();
+  const classMass = {};
+  for (const cls of CLASS_ORDER) {
+    const members = candidates.filter(c => c.action === cls);
+    if (members.length) classMass[cls] = clean(members.reduce((sum, c) => sum + probabilities[c.key], 0));
+  }
+  const present = CLASS_ORDER.filter(cls => Object.hasOwn(classMass, cls));
+  const pruned = present.filter(cls => classMass[cls] < PRUNE_FLOOR);
+  const kept = present.filter(cls => classMass[cls] >= PRUNE_FLOOR);
+  const total = kept.reduce((sum, cls) => sum + classMass[cls], 0);
+  if (!kept.length || !(total > 0)) bad();
+  const sampled = sampleWeighted(kept.map(cls => ({ cls, frequency: classMass[cls] / total })), unit).cls;
+  let chosen;
+  if (sampled === 'raise') {
+    const raises = candidates.filter(c => c.action === 'raise').sort((a, b) => a.amount - b.amount);
+    const half = classMass.raise / 2;
+    let acc = 0;
+    chosen = raises.find(c => clean(acc += probabilities[c.key]) >= half) ?? raises.at(-1);
+  } else chosen = candidates.find(c => c.action === sampled);
+  return { action: { action: chosen.action, ...(chosen.amount === undefined ? {} : { amount: chosen.amount }) },
+    selection: { rule: 'class-sample-v1', unit, classMass, pruned, sampled, sizeRule: 'weighted-median',
+      selectedKey: chosen.key, apiChoice } };
 }

@@ -32,6 +32,11 @@ test('strict JEV response, diagnostics and pinned persisted model',()=>{
  const candidates=[{key:'fold',action:'fold'},{key:'call',action:'call'}];
  const response={model:JEV_CONFIG.model,answers:{action:{type:'choice',choice:'call',confidence:0.8,probabilities:{fold:0.2,call:0.8}}},usage:{input_tokens:5,output_tokens:1}};
  assert.deepEqual(validateJevAnswer(response,candidates).action,{action:'call'});
+ assert.equal(validateJevAnswer(response,candidates).diagnostics.apiChoice,'call');
+ const tie={...response,answers:{action:{...response.answers.action,choice:'fold',confidence:0,probabilities:{fold:0.5,call:0.5}}}};
+ assert.equal(validateJevAnswer(tie,candidates).diagnostics.apiChoice,'fold');
+ assert.equal(validateJevAnswer({...tie,answers:{action:{...tie.answers.action,choice:'call'}}},candidates).diagnostics.apiChoice,'call');
+ assert.deepEqual(Object.keys(validateJevAnswer(response,candidates).diagnostics),['model','confidence','probabilitySum','probabilities','usage','apiChoice']);
  for(const patch of [{probabilities:{fold:0.3,call:0.8}},{probabilities:{fold:0.2,call:0.8,extra:0}},{confidence:NaN},{choice:'fold'},{choice:'raise'}]) assert.throws(()=>validateJevAnswer({...response,answers:{action:{...response.answers.action,...patch}}},candidates),{code:'JEV_INVALID_RESPONSE'});
  const rounded={...response,answers:{action:{...response.answers.action,probabilities:{fold:0.2,call:0.79}}}};
  assert.equal(validateJevAnswer(rounded,candidates).diagnostics.probabilitySum,0.99);
