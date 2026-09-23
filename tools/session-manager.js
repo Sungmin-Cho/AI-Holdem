@@ -1,4 +1,4 @@
-import { JEV_CONFIG, validateJevConfig } from '../shared/opponent-runtime.js';
+import { JEV_CONFIG, rollForwardJevConfig, validateJevConfig } from '../shared/opponent-runtime.js';
 import { validateDiagnostics, projectRejectionForSink, retryWillCorrect } from './player-decision.js';
 import fs from "node:fs";
 import {
@@ -580,8 +580,10 @@ export function createSessionManager({
     }
     let jevConfig;
     try {
-      if (setup?.opponentRuntime === 'jev') jevConfig = validateJevConfig(body.kind === 'restart'
-        ? read(path.join(current.sessionDir, 'state.json')).config.jev : JEV_CONFIG);
+      // A same-setup restart is a new game: a known older descriptor starts on the current one.
+      if (setup?.opponentRuntime === 'jev') jevConfig = body.kind === 'restart'
+        ? rollForwardJevConfig(read(path.join(current.sessionDir, 'state.json')).config.jev).config
+        : validateJevConfig(JEV_CONFIG);
     } catch (error) { if (roomLocked) safeUnlock(body.requestId); throw error; }
     const row = {
       ...normalized,

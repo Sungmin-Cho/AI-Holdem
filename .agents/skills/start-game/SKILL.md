@@ -239,6 +239,6 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 
 ## JEV 테이블 모드
 
-사용자가 JEV 상대를 요청하면 새 게임 로비의 상대 행동 방식을 `jev`로 지정한다. 모든 AI 좌석은 JEV, 인간 좌석은 그대로다. `--opponent-runtime jev`는 legacy CLI에도 전달할 수 있지만 새 게임 시작 정본은 앱 로비다. 서버 `TYPESAFE_API_KEY`를 사용하며 키 값을 출력하거나 클라이언트에 넣지 않는다. JEV 플레이어는 Node SDK 내부 HTTP이고 상위 코치/리뷰 CLI만 검사한다. AI 0이면 SDK/키 검사를 생략한다. 저장된 모델·입력/후보 버전은 재개·재시작에서 보존한다.
+사용자가 JEV 상대를 요청하면 새 게임 로비의 상대 행동 방식을 `jev`로 지정한다. 모든 AI 좌석은 JEV, 인간 좌석은 그대로다. `--opponent-runtime jev`는 legacy CLI에도 전달할 수 있지만 새 게임 시작 정본은 앱 로비다. 서버 `TYPESAFE_API_KEY`를 사용하며 키 값을 출력하거나 클라이언트에 넣지 않는다. JEV 플레이어는 Node SDK 내부 HTTP이고 상위 코치/리뷰 CLI만 검사한다. AI 0이면 SDK/키 검사를 생략한다. 저장된 모델은 유지하고, 알려진 v1 질문·후보·투영 버전은 재개 시 v2로 roll-forward한다(loop-state 기록만, 화면 알림 없음).
 
 원격 오류는 일시정지 후 명시적 재시도 또는 종료로 처리하며 자동 LLM/정책 대체가 없다. JEV에는 새 LLM 세션 재시도가 없다. `JEV_REQUEST_CLOSE_UNCONFIRMED`는 README의 소유 앱 프로세스 종료·사망 확인 절차를 따른다. 락 파일을 직접 지우거나 종료 미확인을 성공으로 보고하지 않는다. 기존 진행 중 JEV 게임은 호환 버전에서 종료한 뒤 downgrade한다.
