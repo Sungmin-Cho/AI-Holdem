@@ -45,6 +45,12 @@ test('strict JEV response, diagnostics and pinned persisted model',()=>{
  assert.equal(validateJevAnswer(rounded,candidates).diagnostics.probabilitySum,0.99);
  assert.throws(()=>validateJevAnswer({...rounded,answers:{action:{...rounded.answers.action,probabilities:{fold:0.201,call:0.79}}}},candidates));
  assert.throws(()=>validateJevAnswer({...response,model:'jev-latest'},candidates),{code:'JEV_MODEL_MISMATCH'});
+ // Observed live: rounded hundredths may put the returned choice one hundredth below the maximum.
+ const six=['fold','call','raise_to_250','raise_to_375','raise_to_450','raise_to_600'].map(key=>key.startsWith('raise')?{key,action:'raise',amount:Number(key.slice(9))}:{key,action:key});
+ const live={model:JEV_CONFIG.model,answers:{action:{type:'choice',choice:'fold',confidence:0.13,probabilities:{raise_to_375:0.12,raise_to_250:0.09,raise_to_600:0.06,raise_to_450:0.28,call:0.18,fold:0.27}}}};
+ assert.equal(validateJevAnswer(live,six).diagnostics.apiChoice,'fold');
+ assert.throws(()=>validateJevAnswer({...live,answers:{action:{...live.answers.action,probabilities:{...live.answers.action.probabilities,fold:0.26,call:0.19}}}},six),{code:'JEV_INVALID_RESPONSE'});
+ assert.throws(()=>validateJevAnswer({...response,answers:{action:{...response.answers.action,choice:'fold',probabilities:{fold:0.4975,call:0.5025}}}},candidates),{code:'JEV_INVALID_RESPONSE'});
  assert.throws(()=>validateJevConfig({...JEV_CONFIG,extra:1}));
  assert.equal(resolveOpponentRuntime({config:{opponentRuntime:'jev',jev:JEV_CONFIG}}),'jev');
  assert.equal(resolveOpponentRuntime({config:{mode:'tournament'}}),'llm');

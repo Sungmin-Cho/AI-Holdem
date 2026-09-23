@@ -137,8 +137,10 @@ export function validateJevAnswer(response, candidates) {
   // Allow only its mathematical rounding envelope; do not normalize or resample.
   const hundredths = values.every(n => Math.abs(n * 100 - Math.round(n * 100)) < 1e-8);
   const sumTolerance = hundredths ? values.length * 0.005 + 1e-6 : 1e-6;
+  // Rounded values may reorder the true maximum by one hundredth (observed 0.27 choice vs 0.28).
+  const choiceTolerance = hundredths ? 0.01 + 1e-6 : 1e-6;
   if (Math.abs(probabilitySum - 1) > sumTolerance
-    || Math.max(...values) - answer.probabilities[answer.choice] > 1e-6) invalid();
+    || Math.max(...values) - answer.probabilities[answer.choice] > choiceTolerance) invalid();
   let usage = null;
   if (response.usage !== undefined) {
     if (!response.usage || ['input_tokens', 'output_tokens'].some(k => !Number.isSafeInteger(response.usage[k]) || response.usage[k] < 0)) invalid();
