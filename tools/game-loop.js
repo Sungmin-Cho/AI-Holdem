@@ -7897,8 +7897,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         } catch (error) {
           const code = error.code ?? 'TRAINING_OWNER_TAKEOVER_FAILED';
           const message = `training owner 교대를 완료할 수 없습니다 (${code}).`;
+          // Start from the notices just written, which may carry the roll-forward notice.
           const notices = [...new Set([
-            ...resumeNotices,
+            ...(Array.isArray(state.notices) ? state.notices : resumeNotices),
             `training owner halt: ${code}`,
           ])];
           state = writeLoopState({

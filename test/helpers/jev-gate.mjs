@@ -135,11 +135,11 @@ function judgeRun(run) {
   const diagnostics = run.loopState?.jevDiagnostics ?? { entries: [], dropped: 0 };
   const entries = diagnostics.entries ?? [];
   const v1Entries = entries.filter(e => !e.selection).length;
-  // Only the hand after the last archived one may be unfinished (End keeps it out of the archive).
+  // Only the one hand after the last archived one may be unfinished (End keeps it out of the archive).
   const handOf = id => Number(String(id).split('-')[1]);
   const lastArchived = Math.max(0, ...hands.map(h => h.handNo));
   const unarchived = entries.filter(e => !archived.has(e.decisionId));
-  const incomplete = new Set(unarchived.filter(e => handOf(e.decisionId) > lastArchived).map(e => e.decisionId));
+  const incomplete = new Set(unarchived.filter(e => handOf(e.decisionId) === lastArchived + 1).map(e => e.decisionId));
   const missingArchive = new Set(unarchived.filter(e => !incomplete.has(e.decisionId)).map(e => e.decisionId));
   const top = new Map();
   for (const e of entries) {

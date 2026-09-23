@@ -72,8 +72,8 @@ test('failures, truncation, missing samples and v1 entries make the run unjudgea
  assert.ok(v.one.reasons.includes('v1 — ① 미적용'));assert.ok(v.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')));
 });
 test('an entry of an unfinished hand is reported as incomplete and left out of the count',()=>{
- const run=cleanRun('I',MIN_DECISIONS,{entries:[{decisionId:'d-999-flop-3',generation:1,probabilities:{check:1},apiChoice:'check',selection:{rule:'class-sample-v1',unit:0.5,classMass:{check:1},pruned:[],sampled:'check',sizeRule:'weighted-median',selectedKey:'check',apiChoice:'check'}}],
-  metrics:[{runtime:'jev',decisionId:'d-999-flop-3',outcome:'jev_accepted'}]});
+ const run=cleanRun('I',MIN_DECISIONS,{entries:[{decisionId:'d-101-flop-3',generation:1,probabilities:{check:1},apiChoice:'check',selection:{rule:'class-sample-v1',unit:0.5,classMass:{check:1},pruned:[],sampled:'check',sizeRule:'weighted-median',selectedKey:'check',apiChoice:'check'}}],
+  metrics:[{runtime:'jev',decisionId:'d-101-flop-3',outcome:'jev_accepted'}]});
  const [r]=gateSessions([run]).perRun;assert.equal(r.one.pass,true,JSON.stringify(r.one.reasons));assert.equal(r.one.incomplete,1);
  const broken=cleanRun('B');broken.hands[0].actions[0].action=broken.hands[0].actions[0].action==='fold'?'call':'fold';
  assert.equal(gateSessions([broken]).perRun[0].one.pass,false,'an applied action that differs from the selection');
@@ -118,6 +118,9 @@ test('live journey options keep the default opt-in contract and validate gate fl
 test('missing archives and unrecorded archived decisions fail ①; single-legal skips do not',()=>{
  const gap=cleanRun('G');gap.hands.splice(40,1);
  const [g]=gateSessions([gap]).perRun;assert.equal(g.one.pass,false);assert.ok(g.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')),JSON.stringify(g.one.reasons));
+ // Missing archives at the end: only hand lastArchived+1 may be unfinished.
+ const tail=cleanRun('Z',MIN_DECISIONS+2);tail.hands.splice(-2,2);
+ const [z]=gateSessions([tail]).perRun;assert.equal(z.one.incomplete,1);assert.equal(z.one.pass,false);assert.ok(z.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')));
  const silent=cleanRun('M',MIN_DECISIONS+1);const id=silent.hands[40].actions[0].decisionId;
  silent.loopState.jevDiagnostics.entries=silent.loopState.jevDiagnostics.entries.filter(e=>e.decisionId!==id);
  silent.loopState.metrics=silent.loopState.metrics.filter(m=>m.decisionId!==id);
