@@ -34,7 +34,7 @@
 | 항목 | v1 결정 | 이유 |
 |---|---|---|
 | 연결 | Node 서버 내부 JS SDK 전용 어댑터 | Python/CLI 자식이나 LLM 세션 불필요 |
-| 선택 | 합법 액션+금액 후보에 대한 Choice 한 개, 반환 choice 사용 | 분포를 GTO 혼합 빈도로 오해하지 않음 |
+| 선택 | 합법 액션+금액 후보에 대한 Choice 한 개. 응답 검증은 v1 계약을 유지하고, 실행할 행동은 클라이언트가 검증된 확률의 행동 클래스를 시드로 추첨한다(v2 — §결정 규칙 v2) | API `choice`는 사이즈 수만큼 쪼개진 확률의 argmax 라벨이라 그대로 실행하면 레이즈가 과소 선택되고 혼합 전략이 없다. 추첨은 GTO 빈도의 주장이 아니다 |
 | low confidence | 유효 응답은 실행, 호스트 진단에만 기록 | 임의 임계값으로 과도한 폴드/LLM 전환 방지 |
 | 실패 | 일시정지 후 명시적 재시도/종료 | 자동 policy/LLM/check/fold 대체 없음 |
 | 자동 HTTP 재시도 | SDK `maxRetries: 0` | 중복 추론·숨은 대기 억제, 기존 명시적 복구 UX 사용 |
@@ -48,9 +48,9 @@
 
 ## 4. 모듈 경계와 데이터 흐름
 
-신규 `tools/jev-player.js`는 순수 함수 `projectJevState(snapshot, legal, archetype)`, `buildJevCandidates(snapshot, legal)`, `validateJevAnswer(response, candidates)`를 노출한다. 신규 `tools/jev-runtime.js`는 lazy SDK import, 서버 키 검사, `decide({state, candidates, signal, timeoutMs})`, `dispose()`를 제공한다. 클라이언트/fetch·시계는 테스트에서 주입 가능하다.
+신규 `tools/jev-player.js`는 순수 함수 `projectJevState(snapshot, legal, archetype)`, `buildJevCandidates(snapshot, legal)`, `validateJevAnswer(response, candidates)`, `selectJevAction({probabilities, candidates, unit, apiChoice})`를 노출한다. 런타임은 전송·검증까지만 하고 선택 규칙을 모른다. 신규 `tools/jev-runtime.js`는 lazy SDK import, 서버 키 검사, `decide({state, candidates, signal, timeoutMs})`, `dispose()`를 제공한다. 클라이언트/fetch·시계는 테스트에서 주입 가능하다.
 
-`game-loop`가 engine envelope identity 확정 → pending 저장 → decision-peek/projection/candidates → JEV 호출 → 응답/동일성 검증 → proposedAction 저장 → engine step → pending 제거 → 기존 publish를 소유한다. 엔진 legal과 `--expect-version`이 최종 실행 권한이다. JEV runtime에는 엔진 변경 API·파일 경로·state 전체를 주지 않는다.
+`game-loop`가 engine envelope identity 확정 → pending 저장 → decision-peek/projection/candidates → JEV 호출 → 응답/동일성 검증 → 선택 규칙 → 진단 entry와 proposedAction 단일 저장 → engine step → pending 제거 → 기존 publish를 소유한다. 엔진 legal과 `--expect-version`이 최종 실행 권한이다. JEV runtime에는 엔진 변경 API·파일 경로·state 전체를 주지 않는다.
 
 런타임별 능력은 아래 표로 명시하며 `!policyMode`를 `llm`의 뜻으로 사용하지 않는다.
 
@@ -76,41 +76,51 @@
 - 행동자 holeCards, 현재 공개 board; `publicSeats`의 합성 playerId/position/stack/bet/contribution/folded/allIn/out.
 - 공개 priorActions의 playerId/action/amount/street/currentBet/potTotal만. 현재 핸드 내 최신 64개, `historyTruncated`와 전체 개수; 이전 핸드 대화/리뷰 없음.
 - 검증된 legal 범위와 후보들의 정확한 action/raise-to/추가 투입 칩 설명, 허용된 영어 archetype 설명.
-- 코드로 계산한 call price `toCall/(potBefore+toCall)` (분모 0이면 0) 및 금액 단위 설명. equity·승률 추정은 v1 범위 밖이다.
+- 코드로 계산한 파생 숫자(projection v2): `bigBlind`, `actorStackBB`, `effectiveRemainingBB`, `seats[].stackBB`(소수 1자리)와 회수 가능 팟 기준 팟 오즈 `potOdds = toCall / (T + Σ_{상대} min(contribution, T))`(`T` = 행동자 기여 + toCall, 사이드팟 배제, toCall 0이면 0) 및 금액 단위 설명. equity·승률 추정은 범위 밖이다.
 
 나머지 필드는 금지: 다른 플레이어의 비공개 패, deck/seed, 미공개 미래 보드, 이름·채팅·note·reason·성향 원문, dealSelection, assistance, 경로, 세션 토큰, API 키. JSON 직렬화 후 24 KiB 상한(토큰 수 보장이 아닌 자체 보호 한도); 초과는 `JEV_INPUT_TOO_LARGE`로 재시도 불가 복구 대기(`retryable:false`)다. 동일 입력의 결정론적 실패는 반복 호출하지 않고 현재 게임 종료만 허용한다. 카드 표기는 코드에서 영문 rank/suit로 변환한다. `decisionId/gameEpoch/stateVersion/generation`은 로컬 적용용이며 전송할 필요가 없다.
 
 UI에는 “모든 AI가 JEV로 행동하며, 각 AI의 패와 공개 테이블 정보가 TypeSafe API로 전송됩니다.”를 선택 설명으로 표시한다. 온라인 참가자에게도 입장 전에 “호스트가 JEV를 선택하면 공개 좌석 정보와 플레이 액션이 TypeSafe로 전송됩니다. 참가자의 비공개 패·이름·계정 ID는 전송하지 않습니다.”를 표시한다. 호스트가 상대 방식을 정하며, 시작 시 잠긴 setup에서 파생한 공개 aiProvider=jev를 참가자 lobby/table에 표시한다. 입장 전 일반 고지와 실제 모드 표시를 함께 제공하고 별도 동의 체크박스/새 권한 체계는 만들지 않는다. API 키 입력 UI는 만들지 않는다. 게임 API·SSE·참가자 화면에 키나 원격 원문을 보내지 않는다.
 
-### 4.2 후보 생성 v1 (`legal-menu-v1`)
+### 4.2 후보 생성 (`legal-menu-v2`)
 
 모든 칩 계산은 safe integer로 검사하고 금액은 raise-to 총액이다. `legal.canCheck`이면 check, 아니면 fold와 call(callAmount>0)부터 만든다. free-fold는 후보에서 제외한다. 모든 결과는 실행 전 최신 legal로 다시 검증한다.
 
 - canRaise=false: raise 후보 없음.
 - canRaise=true이고 minRaiseTo>maxRaiseTo: 엔진이 허용하는 short all-in `maxRaiseTo` 하나.
-- 그 외 preflop: minRaiseTo, round(max(2.5*BB, 3*currentBet)), round(max(4*BB, 4*currentBet)), maxRaiseTo.
-- 그 외 postflop: minRaiseTo 및 `actorBet+toCall+round(f*(potBefore+toCall))`, f∈{1/3,2/3,1}, maxRaiseTo.
+- 그 외 preflop, 오픈되지 않은 팟(currentBet ≤ BB, 림프·헤즈업 블라인드 포함): minRaiseTo, round(2.5×BB), 3×BB, 4×BB.
+- 그 외 preflop, 레이즈 직면(currentBet > BB): minRaiseTo, round(2.5×currentBet), 3×currentBet, 4×currentBet.
+- 그 외 postflop: minRaiseTo 및 `actorBet+toCall+round(f*(potBefore+toCall))`, f∈{1/3,2/3,1}.
+- all-in(`maxRaiseTo`)은 (a) minRaiseTo>maxRaiseTo, (b) 유효 잔여 스택 ≤ 20BB, (c) maxRaiseTo ≤ 1.5 × (clamp 뒤 표준 사이즈 최댓값) 중 하나일 때만 후보다. 유효 잔여 스택 = `max(0, min(행동자 stack, max_{폴드·탈락 아닌 상대}(stack + bet) − 행동자 bet))`(올인 상대의 bet 포함). clamp로 maxRaiseTo에 닿은 표준 사이즈는 그대로 후보다.
 - 후보 금액을 [minRaiseTo,maxRaiseTo]로 clamp하고 중복 제거 후 오름차순. `raise_to_<integer>` 키를 사용한다. short all-in도 엔진 action은 `raise`; call all-in은 `call`이다.
 - 동일 금액의 이름만 다른 후보 금지. candidate 순서는 fold/check/call 다음 금액 오름차순으로 고정. 후보는 최대 7개(보통 더 적음).
 - 후보가 하나면 HTTP만 생략한다. 동일 pending → proposedAction durable commit → atomic transition/expect-version → 결과 reconcile/clear/publish 경로를 반드시 거쳐 실행하며 outcome=`jev_single_legal`; JEV 판단으로 집계하지 않는다.
 
-이는 유한한 베팅 메뉴를 가진 휴리스틱 플레이어다. 임의 금액 최적화나 solver와 동등한 행동 공간을 제공하지 않는다. 금액·정책 버전은 세션에 고정한다.
+이는 유한한 베팅 메뉴를 가진 휴리스틱 플레이어다. 임의 금액 최적화나 solver와 동등한 행동 공간을 제공하지 않는다. descriptor는 최초 저장에 고정되며 알려진 v1은 재개 시 roll-forward된다(loop-state 마커, §5).
 
 ### 4.3 질문과 응답
 
 하나의 영어 Choice 질문으로 “주어진 공개 상황, 자기 패, 플레이 스타일에서 지금 실행할 후보 하나”를 고른다. 후보 criteria에 실제 행동과 금액 의미를 설명한다. 질문 간 의존이나 Score의 소수 출력을 베팅 금액으로 보간하지 않는다.
 
-응답 수용 조건: 객체/정확한 answer 이름과 type, 등록된 choice, 후보와 정확히 같은 probabilities 키 집합, 유한한 각 확률 [0,1], 합 1±1e-6 (모든 값이 0.01 단위이면 후보 수 × 0.005 + 1e-6의 반올림 상한 적용), confidence [0,1], 응답 model이 저장된 model과 일치, choice가 최대 확률(tolerance 1e-6; 동률이면 반환 choice 허용). usage는 있으면 비음수 safe integer로 검증하고 없으면 unknown이다. 분포·confidence도 공식 응답 계약의 일부로 엄격 검증한다. 합법 choice라도 필수 진단 필드가 손상되면 중단하는 가용성 대가를 의도적으로 수용한다. 이를 추후 완화하려면 별도 설계 변경으로 다룬다. 형식 불량은 `JEV_INVALID_RESPONSE`, 모델 불일치는 `JEV_MODEL_MISMATCH`; silent normalization/재샘플링 없음.
+응답 수용 조건: 객체/정확한 answer 이름과 type, 등록된 choice, 후보와 정확히 같은 probabilities 키 집합, 유한한 각 확률 [0,1], 합 1±1e-6 (모든 값이 0.01 단위이면 후보 수 × 0.005 + 1e-6의 반올림 상한 적용), confidence [0,1], 응답 model이 저장된 model과 일치, choice가 최대 확률(tolerance 1e-6; 동률이면 반환 choice 허용). usage는 있으면 비음수 safe integer로 검증하고 없으면 unknown이다. 분포·confidence도 공식 응답 계약의 일부로 엄격 검증한다. 합법 choice라도 필수 진단 필드가 손상되면 중단하는 가용성 대가를 의도적으로 수용한다. 이를 추후 완화하려면 별도 설계 변경으로 다룬다. 형식 불량은 `JEV_INVALID_RESPONSE`, 모델 불일치는 `JEV_MODEL_MISMATCH`; 응답 확률 자체를 조용히 고치지 않는다.
+
+검증을 통과한 응답에서 API 라벨을 그대로 실행하지 않고 검증된 확률로 행동 클래스를 추첨한다(정규화는 클래스 질량에만, §결정 규칙 v2). 질문 지시문(`poker-choice-v2`)은 성향이 빈도만 바꾸고 핸드 서열·스택 깊이 원칙은 바꾸지 않는다고 명시한다.
 
 선택 후 `{action, amount?}`만 엔진 경계로 전달한다. reason은 만들지 않는다. probabilities/confidence는 private 진단이며 human-facing 전략 정답·승률로 노출하지 않는다.
 
 ## 5. 영속 설정과 호환성
 
-신규 게임의 `state.config.opponentRuntime`을 모든 모드에서 명시한다. JEV에는 `state.config.jev={schemaVersion:1,model:"jev-1.13.0",questionVersion:"poker-choice-v1",candidateVersion:"legal-menu-v1",projectionVersion:1}`을 최초 engine commit에 포함한다. 키/엔드포인트/원문은 저장하지 않는다.
+신규 게임의 `state.config.opponentRuntime`을 모든 모드에서 명시한다. JEV에는 `state.config.jev={schemaVersion:1,model:"jev-1.13.0",questionVersion:"poker-choice-v2",candidateVersion:"legal-menu-v2",projectionVersion:2,selectionVersion:"class-sample-v1"}`을 최초 engine commit에 포함한다. 키/엔드포인트/원문은 저장하지 않는다.
+
+알려진 v1 descriptor(재개 시 roll-forward 대상, `JEV_CONFIG_LEGACY`):
+
+```json
+{"schemaVersion":1,"model":"jev-1.13.0","questionVersion":"poker-choice-v1","candidateVersion":"legal-menu-v1","projectionVersion":1}
+```
 
 공유 `shared/opponent-runtime.js`가 descriptor 상수와 닫힌 validator를 소유한다. CLI `init --opponent-runtime jev`는 기본 상수를 사용하며, 선택적 `--jev-config-file <absolute-json-path>`로 지원 목록의 descriptor를 전달할 수 있다. 파일은 4 KiB 이하의 regular non-symlink JSON으로 읽고 extra key/미지원 모델·버전/잘못된 조합을 init mutation 전에 거부한다. JEV 아닌 모드에 이 flag를 주면 usage error. 설정 파일에는 비밀이 없다. `engineInitFlags`는 세 런타임을 명시적으로 전달하고 내부 전달된 descriptor가 있으면 준비된 session 디렉터리의 전용 파일을 사용한다. engine/game-archive.js도 최초 저장 전에 같은 validator를 사용한다.
 
-restart는 브라우저 setup에 새 임의 모델 입력을 허용하지 않는다. session-manager가 기존 engine.config.jev를 읽어 **서버 내부 command row의 `jevConfig`**로 고정하고, launcher의 내부 opts → init config 파일로 전달한다. command row 복구도 저장된 descriptor를 재사용한다. 신규 게임 row는 현재 기본 descriptor를 고정한다. 같은 설정 restart라도 지원이 제거된 descriptor는 거부하고 자동 업그레이드하지 않는다. P1은 이 producer→journal→launcher→engine 경로를 완결한다.
+restart는 브라우저 setup에 새 임의 모델 입력을 허용하지 않는다. session-manager가 기존 engine.config.jev를 읽어 **서버 내부 command row의 `jevConfig`**로 고정하고, launcher의 내부 opts → init config 파일로 전달한다. command row 복구도 저장된 descriptor를 재사용한다. 신규 게임 row는 현재 기본 descriptor를 고정한다. 같은 설정 restart는 새 게임이므로 알려진 v1 descriptor를 현재 descriptor로 시작하고, 모르는 descriptor는 `JEV_CONFIG_UNSUPPORTED`로 거부한다. 진행 중 store의 재개 roll-forward와 downgrade·완료 store 경계는 §결정 규칙 v2를 따른다. P1은 이 producer→journal→launcher→engine 경로를 완결한다.
 
 런타임 해석 표:
 
@@ -123,7 +133,7 @@ restart는 브라우저 setup에 새 임의 모델 입력을 허용하지 않는
 | 필드 부재인 legacy, loop runtime 없음, policySeed 존재 | policy; app setup/명시 flag가 다르면 충돌 |
 | 필드 부재인 legacy, loop runtime 없음, policySeed 없음 | 기존 legacy 기본 llm; app setup/명시 flag가 다르면 충돌 |
 
-여기서 legacy는 **config 객체 자체의 부재가 아니라 config.opponentRuntime 필드 부재**다. 과거 알 수 없는 loop runtime도 fail closed한다. 새 JEV descriptor는 완전한 exact shape와 지원 tuple이어야 하며 loop/app 내부 사본과도 deep-equal 검증한다. `OPPONENT_RUNTIME_MISMATCH`/`JEV_CONFIG_UNSUPPORTED`는 기록을 보존하고 자동 플레이를 막는다. 단 종료/abandon은 손상 config를 새 모델로 대체하지 않고 기존 안전 종료 경로를 사용한다.
+여기서 legacy는 **config 객체 자체의 부재가 아니라 config.opponentRuntime 필드 부재**다. 과거 알 수 없는 loop runtime도 fail closed한다. 새 JEV descriptor는 완전한 exact shape와 지원 tuple이어야 한다. loop 사본은 현재 descriptor 또는 알려진 v1이어야 하며(재개 시 v2로 갱신), 엔진 사본은 출생 descriptor로 남는다. 새 게임·CLI 설정 파일·앱 start row·부트스트랩은 현재 descriptor와 정확히 같아야 한다. `OPPONENT_RUNTIME_MISMATCH`/`JEV_CONFIG_UNSUPPORTED`는 기록을 보존하고 자동 플레이를 막는다. 단 종료/abandon은 손상 config를 새 모델로 대체하지 않고 기존 안전 종료 경로를 사용한다.
 
 `createGameLoop`의 policy-else-llm 기본값(835), resolveForPhase의 fallback(7513), loop-state 없는 resume의 policySeed 추정(7692)을 위 resolver 한 곳으로 대체한다. 코드가 만든 기본 인자는 사용자가 명시한 resume flag로 간주하지 않도록 explicitness를 parser부터 보존한다. loop-state 삭제 후 신규 JEV는 engine config에서 그대로 복원한다. completed/finalizing에서는 플레이어 SDK/키가 없어도 종료 표시·리뷰 복구 가능하다.
 
@@ -182,7 +192,7 @@ CLI LLM pending v1/v2의 `CHILD_CLOSE_UNCONFIRMED` 규칙은 유지한다. HTTP�
 - JEV는 upper-only resolver를 사용하고 player warm/restore/canary는 수행하지 않는다. upper가 없으면 기존 기계 피드백. coach reclaim/authority 정리는 non-LLM 경로에도 유지한다.
 - lobby select·setup summary·상태·재시도 문구는 JEV 지원. 원격 AI 대기 UI를 llm/jev 양쪽에 표시하고 “새 LLM 세션”은 llm에만 표시. 참가자는 retry/interrupt를 호출할 수 없다.
 - 공개 투영 가능한 기존 metrics에는 runtime=jev, outcome=jev_accepted/jev_single_legal 또는 실패 코드, modelMs/전체 지연/censored만 추가한다. 기존 5,000건/metricsDropped 의미를 유지한다.
-- 별도 `loop-state.jevDiagnostics={schemaVersion:1,entries:[],dropped:0}`에 safe model/version, decisionId, generation, 합성 actor alias, confidence, candidate key별 확률, usage(unknown 허용)를 저장한다. 최근 5,000개 entry, overflow는 dropped 증가. 이 필드는 loop-state 내부 전용이며 summary/SSE/export/replay/app snapshot에는 명시적으로 제외한다. raw state/request/response/키/패는 저장하지 않는다. loop.log에는 코드·latency·identity만 남기고 확률은 복제하지 않는다. loop-state 유실로 재구성되면 진단도 0부터이며 전체 이력이라고 주장하지 않는다.
+- 별도 `loop-state.jevDiagnostics={schemaVersion:1,entries:[],dropped:0}`에 safe model/version(question·candidate·projection·`selectionVersion`), decisionId, generation, 합성 actor alias, confidence, candidate key별 확률, usage(unknown 허용), API 라벨 `apiChoice`, 선택 기록 `selection`(`rule, unit, classMass, pruned, sampled, sizeRule, selectedKey, apiChoice`)을 저장한다. entry와 proposedAction은 같은 loop-state write의 형제 키다. 최근 5,000개 entry, overflow는 dropped 증가. 이 필드는 loop-state 내부 전용이며 summary/SSE/export/replay/app snapshot에는 명시적으로 제외한다. raw state/request/response/키/패는 저장하지 않는다. loop.log에는 코드·latency·identity만 남기고 확률은 복제하지 않는다. loop-state 유실로 재구성되면 진단도 0부터이며 전체 이력이라고 주장하지 않는다.
 
 
 ## 8. 수용 기준
@@ -190,7 +200,7 @@ CLI LLM pending v1/v2의 `CHILD_CLOSE_UNCONFIRMED` 규칙은 유지한다. HTTP�
 1. UI/CLI에서 JEV 선택, AI 전원 JEV, 인간 불변, policy 기본 유지.
 2. 모델 입력의 비공개 정보 차단 및 합법 금액/불완전 all-in/raise 권한 강제.
 3. 오류·취소·늦은 응답·중복 재시도에서 액션/칩 중복 변경 0.
-4. 재개·재시작·loop-state 유실에서 런타임/버전 고정, 불확실한 engine 적용은 unsafe. 단일 후보도 같은 engine commit/복구 계약을 준수한다.
+4. 재개·재시작·loop-state 유실에서 런타임은 고정되고, 알려진 v1 버전은 재개·재구성 시 v2로 roll-forward(마커 기록)하며 모르는 버전은 거부한다. 불확실한 engine 적용은 unsafe. 단일 후보도 같은 engine commit/복구 계약을 준수한다.
 5. 키/SDK 없어도 기존 모드, 종료 및 완료 화면 사용 가능.
 6. JEV 미사용 시 네트워크 호출 0; key/원문/확률의 host summary·참가자 API·SSE·export·replay·notice 유출 0.
 7. LLM v1/v2 복구와 policy/멀티플레이어/코치 기존 테스트 통과.
@@ -202,10 +212,23 @@ SDK 0.6.0의 실제 ESM import, Choice serialization/응답 parsing, fetch 주�
 
 ## 구현 중 실제 API 계약 보정 (2026-09-22)
 
-실제 브라우저 플레이에서 정상 HTTP 200/model pin/choice 최대값 응답이 probabilities 합 0.99를 반환했다. 값은 0.57,0.10,0,0.04,0.07,0.21로 모두 0.01 단위였다. [공식 Choice 문서](https://docs.typesafe.ai/primitives/choice)는 합 1을 설명하지만, 관측 응답은 항목별 반올림과 일치한다. 사용자의 구현 판단 위임에 따라 저자가 수용한 변경: 모든 값이 hundredth에 1e-8 이내로 놓일 때만 n×0.005+1e-6 합 오차를 허용한다. 그 외 정밀도는 기존 1e-6, 필수 키/범위/최대 choice/model/usage 검증은 유지한다. 재정규화·샘플링은 하지 않고 원래 합을 private diagnostics에 기록한다. 이 보정은 구현 독립 리뷰 대상으로 포함한다.
+실제 브라우저 플레이에서 정상 HTTP 200/model pin/choice 최대값 응답이 probabilities 합 0.99를 반환했다. 값은 0.57,0.10,0,0.04,0.07,0.21로 모두 0.01 단위였다. [공식 Choice 문서](https://docs.typesafe.ai/primitives/choice)는 합 1을 설명하지만, 관측 응답은 항목별 반올림과 일치한다. 사용자의 구현 판단 위임에 따라 저자가 수용한 변경: 모든 값이 hundredth에 1e-8 이내로 놓일 때만 n×0.005+1e-6 합 오차를 허용한다. 그 외 정밀도는 기존 1e-6, 필수 키/범위/최대 choice/model/usage 검증은 유지한다. 응답 합은 원본대로 private diagnostics에 기록하고, 선택은 v2 규칙(§결정 규칙 v2)을 따른다. 이 보정은 구현 독립 리뷰 대상으로 포함한다.
 
 사용자가 실제 테스트 플레이와 PR/merge를 추가 승인했다. 기존 합성 smoke 10회 한도와 별도로 실제 브라우저 게임은 실행당 40회 하드 한도, 2핸드로 제한한다. 처음 두 시도는 응답 합 검증 실패로 각각 7회/4회에서 중단했다. 기존 사용자 store는 사용하지 않는다.
 
 진단 크기 보정: 앱 private JSON reader의 기존 2 MiB 상한을 유지하기 위해 JEV diagnostics는 최대 5,000건 외에 256 KiB 및 전체 loop 파일의 64 KiB 여유를 적용한다. 매 loop-state 저장에서 오래된 entry부터 제거하고 dropped를 누적한다. 독립 리뷰와 테스트에서 이 경계를 확인한다.
 
 최종 복구 세부화: HTTP 종료 미확인은 모든 플레이 제어를 계속 막는다. 이미 HTTP가 끝나 제안이 저장된 ENGINE_APPLY_UNCONFIRMED는 명시 End만 허용하며 추론 재시도/새 게임은 막는다. End는 기존 엔진 트랜잭션과 전체 stop cleanup을 통과한다. 부가 진단이 손상되면 진단만 격리하고 historyIncomplete=true를 남기며 pending/engine authority는 그대로 검증한다. 종료 요청이 있던 late settlement observer는 먼저 기존 stopPromise가 실패·해제될 때까지 기다린 뒤 closure-only 오류일 때만 전체 cleanup을 재실행한다.
+
+## 결정 규칙 v2 (2026-09-22)
+
+v1 게임 3개(230결정)의 기록에서 런타임·후보·검증·적용 경로의 결함은 없었지만, 응답에서 행동을 고르는 규칙과 성향 문구가 문제였다. API `choice`는 후보별 확률의 argmax 라벨이다. 레이즈는 사이즈 3~4개로 확률이 쪼개지고 fold/call/all-in은 슬롯이 하나라 레이즈 클래스가 과소 선택되거나 all-in 슬롯이 이겼고(결정의 약 10%), 항상 argmax라 혼합 전략이 없었다. 성향 문구가 핸드 강도를 압도해 깊은 스택 올인 연쇄와 조기 탈락이 반복됐다. v2는 API 응답 계약 검증(`validateJevAnswer`)을 바꾸지 않고 "검증된 확률에서 무엇을 실행하느냐"와 입력·후보·문구를 바꾼다.
+
+- **선택 규칙 `class-sample-v1`**(`selectJevAction`): 후보 확률을 행동 클래스(fold/check/call/raise)별로 합산하고, 질량 0.05 미만 클래스를 뺀 나머지를 합 1로 맞춘 뒤 고정 순서 `[fold, check, call, raise]`로 추첨한다. 레이즈가 뽑히면 레이즈 후보를 금액 오름차순으로 놓고 누적 확률이 레이즈 질량의 절반에 처음 닿는 사이즈(확률 가중 중앙값)를 고른다. 추첨값은 응답 전에 `(gameEpoch, decisionId, generation)`에서 sha256으로 파생하므로 원격 응답이 추첨을 조종할 수 없고 기록만으로 재계산할 수 있다. 재시도(세대 +1)는 새 추첨이다. 선택 결과 하나가 pending `proposedAction`과 엔진 `step` 양쪽에 쓰인다. 후보가 하나면 HTTP도 선택도 없다.
+- **후보 메뉴 `legal-menu-v2`**(§4.2): 표준 사이즈 프리플랍 min/2.5×/3×/4×, 포스트플랍 min/⅓/⅔/pot. all-in은 min>max·유효 잔여 스택 20BB 이하·팟 사이즈 레이즈의 1.5배 이내일 때만 후보다.
+- **투영 `projectionVersion 2`**(§4.1): bb 환산 스택, 유효 잔여 스택, 회수 가능 팟 기준 `potOdds`. 전부 기존 허용 필드에서 파생한 숫자이며 새 원천 정보는 없다. 24 KiB 상한과 금지 필드는 그대로다.
+- **지시문 `poker-choice-v2`와 성향 문구**: 성향은 팟 참여·블러프·콜·레이즈 빈도만 바꾸고 핸드 서열은 바꾸지 않으며, 유효 잔여 스택 40BB 초과에서 가망 없는 핸드로 스택을 걸지 않고, 숏스택이나 매우 강한 핸드가 아니면 all-in보다 표준 사이즈를 선호하라고 지시한다. 6개 성향 문구는 허용 목록의 영어 상수다.
+- **진단**: entry에 `apiChoice`, `selection`, `selectionVersion`을 더한다(`jevDiagnostics.schemaVersion`은 1 유지). entry와 제안은 같은 write라 제안 없는 entry나 entry 없는 제안이 생기지 않는다. `selection`이 있는 entry의 각 decisionId에서 최고 generation entry의 `selectedKey`가 아카이브에 적용된 액션이다. 확률·추첨값·선택 기록은 loop-state 밖(앱 스냅샷·SSE·요약·export·replay·notice·log)으로 나가지 않는다.
+- **descriptor roll-forward**: 현재 descriptor는 §5의 v2다. 알려진 v1 descriptor(§5의 목록)로 진행 중인 store는 재개할 때 loop-state 사본만 v2로 한 번 갱신하고 `jevRolledForward {from, at}` 마커, notice 한 줄, `jev-config-rolled-forward` log를 남긴다. 판정 기준은 loop 사본이므로 두 번째 재개부터는 아무것도 기록하지 않는다. 엔진 `state.config.jev`와 핸드 아카이브·기존 진단 entry·pending은 바꾸지 않는다. 한 게임 안의 v1·v2 결정은 entry의 버전 필드로 구별한다. `loop-state.notices`는 현재 로비·참가자 화면에 표시되지 않는다(기록만). 모르는 descriptor는 v1과 같이 `JEV_CONFIG_UNSUPPORTED`다.
+- **downgrade·완료 store 경계**: v2 코드가 만든 store와 roll-forward한 진행 중 store는 v1 코드가 재개를 거부한다(End는 가능, v1에서 태어난 store의 같은 설정 재시작도 가능). abort로 끝난 store는 descriptor 검사 전에 종료 처리되어 어느 코드로도 열린다. 정상 완료된 store는 앱의 완료 화면·기록 보기가 되지만 v1 코드의 루프 재개는 거부된다. v1에서 태어나 loop-state를 잃은 store는 엔진 descriptor(v1)로 재구성되므로 v1 코드에서도 이어 갈 수 있다(결정 규칙만 다르고 저장 형식은 같아 손상은 없다). 되돌릴 때는 진행 중 JEV 게임을 v2 코드에서 End한 뒤 revert한다. 특히 v2에서 태어나 loop-state를 잃은 store는 v1 코드로 End할 수 없으므로 revert 전에 End한다.
+- 이 규칙과 상수(0.05·20BB·1.5×·가중 중앙값)는 휴리스틱이다. 값을 바꾸면 descriptor 버전을 올린다. 결과는 포커 실력·수익·GTO의 증명이 아니다.

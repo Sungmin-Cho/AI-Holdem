@@ -84,7 +84,7 @@ npm run app -- /absolute/path/to/game --player-runtime codex
 
 Set `TYPESAFE_API_KEY` in your shell before starting the app, then select **JEV 플레이어 (테이블 전체)** in advanced settings. If the app is already running, stop it and relaunch it from that environment. `npm ci` installs the pinned JavaScript SDK; Python is not required.
 
-Each request contains only the acting AI's own cards and public table state, using seat aliases. Other seats' hidden cards, participant names and IDs, chat, and intent notes are excluded. JEV chooses among legal action and amount candidates. Failed requests wait for explicit recovery instead of silently switching to local policy. Coaching still uses the optional LLM integration or factual feedback.
+Each request contains only the acting AI's own cards and public table state, using seat aliases. Other seats' hidden cards, participant names and IDs, chat, and intent notes are excluded. JEV chooses among legal action and amount candidates, and the app samples the action from the candidate probabilities. Failed requests wait for explicit recovery instead of silently switching to local policy. Coaching still uses the optional LLM integration or factual feedback.
 
 ## Play with friends
 
