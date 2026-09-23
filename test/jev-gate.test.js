@@ -1,6 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {gateSessions,hopeless,chen,isPremium,effectiveRemainingAt,runCap,mayRerun,MIN_DECISIONS} from './helpers/jev-gate.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
+import {gateSessions,hopeless,chen,isPremium,effectiveRemainingAt,runCap,mayRerun,loadGateRun,MIN_DECISIONS} from './helpers/jev-gate.mjs';
 import {selectJevAction} from '../tools/jev-player.js';
 
 const players=[{playerId:'user'},{playerId:'p1',archetype:'TAG'},{playerId:'p2',archetype:'Nit'}];
@@ -130,4 +133,14 @@ test('missing archives and unrecorded archived decisions fail ①; single-legal 
  const [m]=gateSessions([silent]).perRun;assert.equal(m.one.pass,false);assert.ok(m.one.reasons.some(r=>r.startsWith('entry·single-legal 없는')),JSON.stringify(m.one.reasons));
  silent.loopState.metrics.push({runtime:'jev',decisionId:id,outcome:'jev_single_legal'});
  assert.equal(gateSessions([silent]).perRun[0].one.pass,true);
+});
+test('loadGateRun excuses only a hand the engine reports as interrupted',()=>{
+ const write=(dir,name,value)=>{fs.mkdirSync(path.dirname(path.join(dir,name)),{recursive:true});fs.writeFileSync(path.join(dir,name),JSON.stringify(value));};
+ const store=({handNo,live=null,audit})=>{const dir=createOwnedTempDir('jev-gate-load');
+  write(dir,'state.json',{handNo,hand:live,config:{mode:'cash-training'}});write(dir,'loop-state.json',{metrics:[],jevDiagnostics:{schemaVersion:1,entries:[],dropped:0}});
+  write(dir,'players.json',players);write(dir,'hands/hand-0001.json',hand(1,[]));if(audit!==undefined)write(dir,'.aborted-hand.json',audit);return dir;};
+ assert.equal(loadGateRun(store({handNo:2,audit:{schemaVersion:1,hand:{street:'flop'},completedHands:1}})).unfinishedHand,2,'ended mid-hand');
+ assert.equal(loadGateRun(store({handNo:1,audit:{schemaVersion:1,hand:null,completedHands:1}})).unfinishedHand,null,'ended between hands');
+ assert.equal(loadGateRun(store({handNo:2,live:{street:'turn'}})).unfinishedHand,2,'live hand');
+ assert.equal(loadGateRun(store({handNo:1})).unfinishedHand,null,'completed');
 });

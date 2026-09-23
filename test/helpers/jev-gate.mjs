@@ -247,7 +247,9 @@ export function loadGateRun(dir) {
   const session = fs.existsSync(path.join(dir, 'session', 'state.json')) ? path.join(dir, 'session') : dir;
   const result = fs.existsSync(path.join(dir, 'result.json')) ? readJson(path.join(dir, 'result.json')) : {};
   const engine = readJson(path.join(session, 'state.json'));
-  const aborted = fs.existsSync(path.join(session, '.aborted-hand.json'));
+  // End between hands also writes the audit file, with hand:null — only an interrupted hand counts.
+  const audit = path.join(session, '.aborted-hand.json');
+  const aborted = fs.existsSync(audit) && readJson(audit).hand != null;
   const handsDir = path.join(session, 'hands');
   const hands = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter(n => /^hand-.*\.json$/.test(n)).map(n => readJson(path.join(handsDir, n))) : [];
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
