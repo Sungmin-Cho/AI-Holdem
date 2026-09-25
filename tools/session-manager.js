@@ -22,6 +22,7 @@ import {
 import { launchSession } from "./session-launcher.js";
 import { abortModeFor, validateAbortingCheckpoint } from './recovery-exit.js';
 import { createRoomManager } from "./room-manager.js";
+import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
 const read = readPrivateJson;
 const stable = (value) =>
@@ -57,7 +58,8 @@ export function createSessionManager({
     runPromise = null,
     pending = null,
     closed = false,
-    initialized = false;
+    initialized = false,
+    stateSince = new Date().toISOString();
   const setupFile = () =>
     current && path.join(current.sessionDir, ".app-setup.json");
   const readSetupFile = () => {
@@ -170,6 +172,7 @@ export function createSessionManager({
     }
   };
   const emit = (next, code = null) => {
+    if (next !== state) stateSince = new Date().toISOString();
     state = next;
     error = code;
     revision++;
@@ -234,6 +237,7 @@ export function createSessionManager({
       } catch {}
     }
     const recoveryExit=abortTarget();
+    const progress = lobbyProgress(publicState);
     return {
       instanceId,
       appRevision: revision,
@@ -265,7 +269,41 @@ export function createSessionManager({
       pendingRequestId: pending?.requestId ?? null,
       error,
       recoveryExit,
+      ...progress,
     };
+  }
+  // Additive host-only progress fields (/api/app). While starting, read only
+  // the launching loop: `current` still names the previous game until
+  // launchTracked returns, so its notices must not leak into the boot screen.
+  function lobbyProgress(publicState) {
+    const guard = (read) => { try { return read(); } catch { return null; } };
+    let boot = null, notices = null, pausing = null, upperStatus = null;
+    if (publicState === "starting") {
+      const loopBoot = guard(() => startingLoop?.bootStage ?? null);
+      const probe = loopBoot?.probe && ["claude", "codex", "grok"].includes(loopBoot.probe.runtime)
+        ? { tier: loopBoot.probe.tier === "upper" ? "upper" : "player", runtime: loopBoot.probe.runtime,
+          round: Number.isSafeInteger(loopBoot.probe.round) ? loopBoot.probe.round : 0,
+          ok: typeof loopBoot.probe.ok === "boolean" ? loopBoot.probe.ok : null,
+          elapsedMs: Number.isFinite(loopBoot.probe.elapsedMs) ? Math.max(0, Math.round(loopBoot.probe.elapsedMs)) : 0 }
+        : null;
+      boot = {
+        stage: loopBoot?.stage ?? "preparing",
+        startedAt: stateSince,
+        stageAt: loopBoot?.stageAt ?? stateSince,
+        ...(probe ? { probe } : {}),
+      };
+      notices = startingLoop ? guard(() => startingLoop.noticesProjected ?? null) : null;
+    } else if (current?.sessionDir) {
+      notices = guard(() => projectNotices(read(path.join(current.sessionDir, "loop-state.json")).notices));
+    }
+    if (publicState === "pausing" && session) {
+      pausing = { since: stateSince, waitingFor: guard(() => session.loop.pauseProgress ?? null) };
+    }
+    if (session && ["playing", "pausing", "paused", "finalizing"].includes(publicState)) {
+      const status = guard(() => session.loop.upperStatus ?? null);
+      upperStatus = ["probing", "ready", "unavailable"].includes(status) ? status : null;
+    }
+    return { boot, notices, pausing, upperStatus };
   }
   const save = (row) =>
     writeJsonAtomic(path.join(journalDir, `${row.requestId}.json`), row);

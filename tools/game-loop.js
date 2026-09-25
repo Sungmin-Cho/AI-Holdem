@@ -99,6 +99,7 @@ import {
   prepareSession,
   resolveCurrentSession,
 } from '../engine/session-catalog.js';
+import { projectNotices } from './notice-projection.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -1026,6 +1027,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
+  // Host lobby progress only (boot screen, coach chip); kept in memory, never
+  // written to loop-state.
+  let bootState = null;
+  let bootProbe = null;
+  let upperResolved = false;
+  const markBootStage = (stage) => {
+    const at = new Date().toISOString();
+    bootState = { stage, startedAt: bootState?.startedAt ?? at, stageAt: at };
+  };
   let studyPromise = null;
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
@@ -2033,6 +2043,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       canaryAbsPath,
       registerAdapter,
       lockRoot,
+      onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
+        bootProbe = { tier, runtime, round, ok, elapsedMs };
+        if (ok !== null) log('runtime-probe', bootProbe);
+      },
     }));
     resolverPromise = invocation;
     try {
@@ -2051,6 +2065,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const selectAdapters = (resolved) => {
     playerAdapter = resolved.player ?? null;
     upperAdapter = resolved.upper ?? null;
+    upperResolved = true;
     registerAdapter(playerAdapter);
     registerAdapter(upperAdapter);
   };
@@ -7363,6 +7378,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
+      markBootStage('sweep');
       let sweepNotices = [];
       let sweepFailed = 0;
       let sweepDetails = [];
@@ -7477,6 +7493,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           appendNotice(notice);
         }
       }
+      markBootStage('runtime-probe');
       const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
@@ -7498,6 +7515,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       });
       if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
 
+      markBootStage('relay');
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
       installPracticeFocus({
@@ -7506,8 +7524,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         practiceFocusFile,
         onNotice: appendNotice,
       });
-      if (opponentRuntimeOf() === 'llm') await warmPlayers();
+      if (opponentRuntimeOf() === 'llm') {
+        markBootStage('player-warmup');
+        await warmPlayers();
+      }
       const state = writeLoopState({ phase: 'playing' });
+      markBootStage('ready');
       log('bootstrap-playing', { port });
       return state;
     } catch (error) {
@@ -7625,6 +7647,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
         || existingState.opponentRuntime === 'policy';
+      markBootStage('runtime-probe');
       const resolved = await createCanaryAndResolve('upper-only');
       selectAdapters(resolved ?? {});
       const notices = [
@@ -7646,8 +7669,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         assertSelfOpponentsConsistent({ root, players });
         stampPlayerPolicies(root, { onNotice: appendNotice });
       }
+      markBootStage('relay');
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
-      return writeLoopState({ port });
+      const written = writeLoopState({ port });
+      markBootStage('ready');
+      return written;
     }
     if (phase === 'done') {
       await ensureStudyForOwner();
@@ -7664,6 +7690,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
 
     const policyMode = opponentRuntimeOf() === 'policy' || existingState.opponentRuntime === 'policy';
+    markBootStage('runtime-probe');
     const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
     selectAdapters(resolved ?? {});
     const notices = [
@@ -7681,6 +7708,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
       ? existingState.port
       : requestedPort;
+    markBootStage('relay');
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
     // #192 D6 (FO-3): persisted-coach reclaim is a playing-resume step, not a player-restore
@@ -7694,9 +7722,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
     } else if (opponentRuntimeOf() === 'llm') {
+      markBootStage('player-warmup');
       await restorePlayers();
     }
-    return writeLoopState({ phase: 'playing' });
+    const playing = writeLoopState({ phase: 'playing' });
+    markBootStage('ready');
+    return playing;
   };
 
   const resume = async ({ skipLock = false } = {}) => {
@@ -8215,6 +8246,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     requestStop,
     get stopping() { return stopRequested; },
     get serverPid() { return serverPid; },
+    // Host lobby read-only progress (tools/session-manager.js snapshot). No
+    // tokens, paths or PIDs: stage names, runtime names, counts and times.
+    get bootStage() {
+      return bootState ? { ...bootState, ...(bootProbe ? { probe: { ...bootProbe } } : {}) } : null;
+    },
+    get pauseProgress() {
+      const waiting = { coach: coachTasks.size, training: trainingTasks.size, evaluate: 0, solve: 0, explain: 0,
+        other: auxiliaryTasks.size, resolver: resolverPromise !== null };
+      for (const key of trainingAttempts.keys()) {
+        const kind = String(key).slice(String(key).lastIndexOf(':') + 1);
+        if (kind === 'evaluate' || kind === 'solve' || kind === 'explain') waiting[kind] += 1;
+      }
+      return waiting;
+    },
+    get upperStatus() {
+      if (resolverPromise !== null) return 'probing';
+      if (!upperResolved) return null;
+      return upperAdapter && !coachAdapterDisabled ? 'ready' : 'unavailable';
+    },
+    get noticesProjected() { return projectNotices(readLoopState()?.notices); },
   };
 }
 
