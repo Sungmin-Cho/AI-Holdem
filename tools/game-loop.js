@@ -108,6 +108,8 @@ const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const COACH_GENERATION_MS = 120_000;
+// A first attempt plus one replacement, with room for the coach CLI steps.
+const COACH_BACKLOG_WAIT_MS = 2 * COACH_GENERATION_MS + 10_000;
 const REVIEW_GENERATION_MS = 300_000;
 const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+내 성향 통계(?:[ \t]|$)/m,
@@ -4933,29 +4935,35 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--spawn-evidence', '1',
   ]);
 
-  // A fresh hand's coach that stops before reserving because play is pausing is
-  // kept here and started again on resume or at finalization entry. Otherwise a
-  // pause would leave the hand unreserved and the finalization cutoff would seal
-  // it unavailable even though the upper model is there.
-  const pauseDeferredCoachHands = new Set();
-  const coachSuspendedBeforeReserve = (handNo, descriptor) => {
+  // A coach that stops before spawning because play is pausing is kept here with
+  // its reserved descriptor (if it already had one — including descriptors a
+  // paused recovery handed over) and started again on resume or at finalization
+  // entry. Otherwise the hand would sit unspawned and the heartbeat or the
+  // finalization cutoff would seal it unavailable even though the upper model
+  // is there. Stop and cutoff still end the work as before.
+  const pauseDeferredCoach = new Map();
+  const deferCoachIfPaused = (handNo, descriptor) => {
     if (!coachWorkSuspended()) return false;
-    if (pauseRequested && !stopRequested && !finalizationCutoff && !descriptor) pauseDeferredCoachHands.add(handNo);
+    if (pauseRequested && !stopRequested && !finalizationCutoff) pauseDeferredCoach.set(handNo, descriptor ?? null);
     return true;
   };
   const relaunchPauseDeferredCoach = () => {
-    const hands = [...pauseDeferredCoachHands].sort((a, b) => a - b);
-    pauseDeferredCoachHands.clear();
-    for (const handNo of hands) launchCoachPipeline(handNo);
+    const entries = [...pauseDeferredCoach].sort(([a], [b]) => a - b);
+    pauseDeferredCoach.clear();
+    for (const [handNo, descriptor] of entries) launchCoachPipeline(handNo, descriptor ? { descriptor } : {});
   };
+  // Set once a coach task had to wait for the background probe; the last hand
+  // then lets that backlog finish before the finalization clock starts.
+  let coachProbeBacklog = false;
 
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
-    if (coachSuspendedBeforeReserve(handNo, initialDescriptor)) return;
+    if (deferCoachIfPaused(handNo, initialDescriptor)) return;
     if (resolverPromise) {
       // R2: finish the background probe first so this hand gets the LLM note, not
       // the upper-unavailable fallback. The task stays in coachTasks, so a pause
       // barrier waits for it; if play paused meanwhile, the check after capture
       // defers the hand to resume/finalization instead of reserving now.
+      coachProbeBacklog = true;
       await settleUpperResolution();
       if (stopRequested || finalizationCutoff) return;
     }
@@ -4993,12 +5001,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (typeof opts.coachCaptureCheckpoint === 'function') {
       await opts.coachCaptureCheckpoint({ handNo });
     }
-    if (coachSuspendedBeforeReserve(handNo, initialDescriptor)) return;
+    if (deferCoachIfPaused(handNo, initialDescriptor)) return;
     const denyDetailed = coachForbiddenDetailed(handNo);
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
-      if (coachSuspendedBeforeReserve(handNo, null)) return;
+      if (deferCoachIfPaused(handNo, null)) return;
       try {
         descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
       } catch (reserveError) {
@@ -5016,7 +5024,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return;
       }
     }
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo, descriptor)) return;
     const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     if (eligibleProcessInput(processInput).hands.length === 0) {
       await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
@@ -5059,7 +5067,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // later step in that same branch (e.g. fenceCurrentGeneration()) throws.
       let identityUnavailableReason = null;
       try {
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo, currentDescriptor)) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
           const checkpointResult = await opts.coachSpawnCheckpoint({ handNo, attempt });
           // #192 O4: narrow test seam — a real `pause()` winning the race while this
@@ -5087,7 +5095,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 S4 E1: also require that this exact instance is the one that minted
         // `owner` (`issuedOwners`), not merely that loop-state's `ownerSessionId` still
         // reads back the same string this coachPipeline call started with.
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo, currentDescriptor)) return;
         assertBeforeResultWaitCutoff();
         const spawnLoopState = readLoopState();
         if (spawnLoopState?.ownerSessionId !== owner || !issuedOwners.has(owner)) return;
@@ -8243,6 +8251,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           // R2: never let the background probe spend the finalization budget.
           await settleUpperResolution();
           if (stopRequested) break;
+          // Coach work a slow probe held back gets its own time (bounded by the
+          // coach generation limit) instead of the last hand's result-wait window.
+          if (coachProbeBacklog) {
+            await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), COACH_BACKLOG_WAIT_MS);
+            if (stopRequested) break;
+          }
           ensureFinalizationResultWaitCutoff();
         }
         launchTrainingPipeline(out.handNo);

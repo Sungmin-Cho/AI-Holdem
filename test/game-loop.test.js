@@ -5801,6 +5801,56 @@ test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 beg
   );
 });
 
+test('a paused recovery keeps the begin-owner coach descriptor and runs it on resume', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, waitMs: 0, controlProtocolVersion: 1 },
+  });
+  await first.bootstrap({ ai: 1, stack: 100 });
+  // Hand 1 ends on a real user decision, so its coach note needs the LLM.
+  putUserOnTheButton(gameDir);
+  const started = await cliJson(gameDir, ['step', '--new-hand']);
+  assert.equal(started.next.toAct, 'user');
+  await cliJson(gameDir, ['step', 'user', 'fold', '--expect-version', String(started.stateVersion)]);
+  const oldOwner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, oldOwner, 1, orphan);
+  await first.requestStop();
+
+  // The app reopens a paused game: begin-owner hands hand 1 back as a fresh
+  // descriptor while the loop starts paused. The coach must wait, not vanish.
+  const upper = makeCoachAdapter();
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), upper),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      pollMs: 10,
+      controlProtocolVersion: 1,
+      startPaused: true,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 200 * WIN32_SCALE,
+      resumeReclaimResidualMs: 5_000 * WIN32_SCALE,
+    },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  assert.equal((await resumed.resume()).phase, 'playing');
+  await waitUntilDead(orphan.pid);
+  const running = startRun(resumed);
+  await waitFor(() => resumed.playState === 'paused', 'recovered loop parks paused');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(upper.starts.length, 0, 'no coach spawns while the recovered game is paused');
+  await resumed.resumePlay();
+  const note = await waitForCoachNote(gameDir, 1, 15_000 * WIN32_SCALE);
+  assert.equal(note.unavailable, undefined);
+  assert.match(note.text, /기본 코치 응답/);
+  await stopRun(resumed, running);
+});
+
 test('playing resume은 완료 핸드가 있는데 coach authority가 없으면 fail closed한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({

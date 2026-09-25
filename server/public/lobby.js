@@ -541,7 +541,7 @@ form.onchange = () => {
   updateSetupSummary();
 };
 const OPPONENT_HELP = {
-  policy: "로컬 정책 AI가 즉시 결정합니다. 외부로 보내는 정보가 없고 가장 빨리 시작합니다.",
+  policy: "로컬 정책 AI가 즉시 결정해 가장 빨리 시작합니다. 상대의 행동 결정에는 외부 호출이 없습니다(코치·리뷰는 연결된 AI 모델을 씁니다).",
   llm: "LLM이 생각한 뒤 행동합니다. 결정마다 몇 초가 걸리고 판단 이유를 남깁니다.",
   jev: "외부 API(TypeSafe AI)로 모든 AI 좌석을 움직입니다. 서버에 API 키가 필요하며, 각 AI의 자기 패와 공개 플레이 정보를 전송합니다.",
 };
@@ -628,11 +628,15 @@ const FIELD_ERRORS = {
   totalSeats: '총 인원을 확인하세요.',
   mirrorSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
   exploitSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
+  playerSoftMs: '오래 기다림 알림은 1 이상이고 최대 대기보다 짧아야 합니다.',
+  playerHardMs: 'AI 호출 최대 대기는 오래 기다림 알림보다 길어야 합니다.',
+  'playerSoftMs/playerHardMs': 'AI 호출 최대 대기는 오래 기다림 알림보다 길어야 합니다.',
 };
-function fieldInput(field) {
-  if (field === 'stack' && new FormData(form).get('mode') === 'cash-training') return form.elements.cashStack;
-  const input = form.elements.namedItem(field) ?? (field === 'totalSeats' ? $('total-seats') : null);
-  return input && typeof input.setAttribute === 'function' ? input : null;
+function fieldInputs(field) {
+  if (field === 'stack' && new FormData(form).get('mode') === 'cash-training') return [form.elements.cashStack];
+  // A pair error ("playerSoftMs/playerHardMs") marks both inputs, focusing the first.
+  return String(field).split('/').map((name) => form.elements.namedItem(name) ?? (name === 'totalSeats' ? $('total-seats') : null))
+    .filter((input) => input && typeof input.setAttribute === 'function');
 }
 /** Shows the failing field inline (aria-invalid + message). Returns the input. */
 function markFieldError(error) {
@@ -641,16 +645,19 @@ function markFieldError(error) {
     node.removeAttribute('aria-describedby');
   }
   for (const node of document.querySelectorAll('#setup-form .field-error')) node.remove();
-  const input = error?.field ? fieldInput(error.field) : null;
-  if (!input) return null;
+  const inputs = error?.field ? fieldInputs(error.field) : [];
+  if (!inputs.length) return null;
   const message = document.createElement('p');
   message.className = 'ui-error field-error';
-  message.id = `field-error-${error.field}`;
+  message.id = `field-error-${String(error.field).replace(/[^a-zA-Z]/g, '-')}`;
   message.textContent = FIELD_ERRORS[error.field] ?? '이 값을 확인하세요.';
-  (input.closest('.ui-field, .ui-check') ?? input.parentElement).append(message);
-  input.setAttribute('aria-invalid', 'true');
-  input.setAttribute('aria-describedby', message.id);
-  return input;
+  const last = inputs.at(-1);
+  (last.closest('.ui-field, .ui-check') ?? last.parentElement).append(message);
+  for (const input of inputs) {
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', message.id);
+  }
+  return inputs[0];
 }
 form.addEventListener('input',updateSetupSummary);
 form.onsubmit = (e) => {

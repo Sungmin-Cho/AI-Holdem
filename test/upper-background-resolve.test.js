@@ -18,7 +18,10 @@ const VALID_REVIEW = [
   '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '상대 성향을 맞게 읽은 부분과 놓친 부분을 구분합니다.',
   '## 다음 게임에서 연습할 것', '팟 오즈 확인과 포지션별 오픈 범위를 연습합니다.',
 ].join('\n\n');
-const FINALIZE_BUDGET_MS = 30_000 * SCALE;
+const FINALIZE_BUDGET_MS = 8_000 * SCALE;
+const RESULT_WAIT_MS = 3_000 * SCALE;
+// Published coach note for a hand (what the player actually sees), if any.
+const publishedNote = (dir, handNo) => (readJson(path.join(dir, 'ui-snapshot.json')).coach ?? []).find((row) => row.handNo === handNo);
 const POLICY_GAME = { ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', opponentRuntime: 'policy' };
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -39,7 +42,7 @@ async function waitFor(predicate, message, timeoutMs = 15_000 * SCALE) {
   assert.fail(message);
 }
 
-function coachUpper() {
+function coachUpper({ coachDelayMs = 0 } = {}) {
   const starts = [];
   const coachHands = [];
   let disposed = 0;
@@ -59,7 +62,8 @@ function coachUpper() {
       const raw = stage === 'evaluator' ? '표본 30핸드 미만이므로 참고용입니다. 공개 정보 기준 과정 평가는 안정적이었습니다.'
         : stage === 'synthesizer' ? VALID_REVIEW
         : stage === 'explain' ? '{}' : JSON.stringify({ handNo, text: '기본 코치 응답' });
-      return { pid: 930_000 + starts.length, startTime: `r2-${starts.length}`, done: Promise.resolve({ raw }), async terminate() { return { confirmed: true }; } };
+      const done = stage === 'coach' && coachDelayMs > 0 ? sleep(coachDelayMs).then(() => ({ raw })) : Promise.resolve({ raw });
+      return { pid: 930_000 + starts.length, startTime: `r2-${starts.length}`, done, async terminate() { return { confirmed: true }; } };
     },
     async dispose() { disposed += 1; },
   };
@@ -93,7 +97,9 @@ function driveHuman(gameDir, isDone, actedHands = new Set()) {
 test('R2: the table opens before the probe; coach notes and finalization wait for it without spending the budget', { timeout: 180_000 * SCALE }, async (t) => {
   const gameDir = createOwnedTempDir('holdem-r2-coach');
   const gate = deferred();
-  const upper = coachUpper();
+  // Each coach note takes longer than the last hand's result-wait window, so a
+  // backlog squeezed into that window would be sealed unavailable.
+  const upper = coachUpper({ coachDelayMs: RESULT_WAIT_MS + 1_000 });
   const events = [];
   const records = [];
   let resolverCalls = 0;
@@ -110,12 +116,12 @@ test('R2: the table opens before the probe; coach notes and finalization wait fo
       // The probe below outlives this whole finalization budget; if waiting for it
       // spent the budget, finalization would abort. The result-wait share stays
       // roomy so a loaded machine still settles both coach notes before cutoff.
-      finalizeBudgetMs: FINALIZE_BUDGET_MS, finalizeCutoffLeadMs: 3_000 * SCALE,
+      finalizeBudgetMs: FINALIZE_BUDGET_MS, finalizeCutoffLeadMs: FINALIZE_BUDGET_MS - RESULT_WAIT_MS,
       log: (record) => { events.push(record.event); records.push(record); },
     },
   });
   t.after(() => { gate.resolve(); return loop.requestStop().catch(() => {}); });
-  const booted = await loop.bootstrap({ ...POLICY_GAME, hands: 2 });
+  const booted = await loop.bootstrap({ ...POLICY_GAME, hands: 5 });
   assert.equal(booted.phase, 'playing');
   assert.equal(booted.upperRuntime, null);
   assert.equal(resolverCalls, 1);
@@ -124,8 +130,9 @@ test('R2: the table opens before the probe; coach notes and finalization wait fo
   let finished = false;
   const running = loop.run().finally(() => { finished = true; });
   running.catch(() => {});
-  const driver = driveHuman(gameDir, () => finished);
-  await waitFor(() => readJson(path.join(gameDir, 'state.json')).gameOver === true, 'both hands did not finish');
+  const acted = new Set();
+  const driver = driveHuman(gameDir, () => finished, acted);
+  await waitFor(() => readJson(path.join(gameDir, 'state.json')).gameOver === true, 'the game did not finish');
   await sleep(FINALIZE_BUDGET_MS + 500);
   const waiting = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(waiting.phase, 'playing', 'finalization must not begin before the probe settles');
@@ -138,8 +145,15 @@ test('R2: the table opens before the probe; coach notes and finalization wait fo
   const done = await running;
   await driver;
   assert.equal(done.phase, 'done', JSON.stringify(done.halt ?? null));
-  assert.equal(upper.starts.filter((stage) => stage === 'coach').length, 2,
-    `both hands got an LLM coach note: ${JSON.stringify({ notices: done.notices, records: records.filter((r) => /coach|upper|final/.test(r.event)) })}`);
+  // Every hand before the last one where the human decided waited on the probe;
+  // each must end with the LLM note, not the unavailable seal.
+  const backlog = [...acted].filter((handNo) => handNo < 5);
+  assert.ok(backlog.length > 0, 'the human decided in at least one earlier hand');
+  for (const handNo of backlog) {
+    const note = publishedNote(gameDir, handNo);
+    assert.ok(note && !note.unavailable && /기본 코치 응답/.test(note.text ?? ''),
+      `hand ${handNo} note: ${JSON.stringify({ note, records: records.filter((r) => /coach|upper|final/.test(r.event)).slice(-20) })}`);
+  }
   assert.ok(done.notices.includes('r2 resolver notice'));
   assert.equal(done.notices.some((notice) => notice.includes('고정 코치 문구')), false);
   assert.equal(done.upperRuntime, 'coach-fake');
@@ -301,7 +315,10 @@ test('R2: a completed hand whose coach waits on the probe survives a pause and g
   manager.command(resume);
   assert.equal((await settle(resume.requestId)).status, 'succeeded');
   try {
-    await waitFor(() => upper.coachHands.includes(coachedHand), `hand ${coachedHand} coach note after resume`, 8_000 * SCALE);
+    await waitFor(() => {
+      const note = publishedNote(sessionDir, coachedHand);
+      return note && !note.unavailable && /기본 코치 응답/.test(note.text ?? '');
+    }, `hand ${coachedHand} LLM coach note published after resume`, 15_000 * SCALE);
   } catch (error) {
     const log = fs.readFileSync(path.join(sessionDir, 'loop.log'), 'utf8').split('\n').filter((line) => /coach|upper|pause|resume|hand-/.test(line)).slice(-40);
     throw new Error(`${error.message}\n${JSON.stringify({ starts: upper.starts, notices: readJson(path.join(sessionDir, 'loop-state.json')).notices })}\n${log.join('\n')}`);
@@ -339,4 +356,47 @@ test('the pause barrier drains follow-up work registered while it waits', async 
   const leftover = new Promise(() => {});
   await settleUntilIdle(() => (rounds++ === 0 ? [Promise.resolve()] : [leftover]), () => rounds > 1);
   assert.equal(rounds, 2);
+});
+
+test('a pause that lands after the coach reserved keeps that reservation and runs it on resume', { timeout: 60_000 * SCALE }, async (t) => {
+  const gameDir = createOwnedTempDir('holdem-coach-reserved-pause');
+  const upper = coachUpper();
+  let loop;
+  let pausedAtSpawn = null;
+  loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', controlProtocolVersion: 1,
+      // The first coach reaching its spawn point triggers a real pause and waits
+      // until the loop is pausing, so the reserved coach must stop before spawning.
+      coachSpawnCheckpoint: async ({ handNo, attempt }) => {
+        if (pausedAtSpawn !== null) return {};
+        pausedAtSpawn = { handNo, attempt, pause: loop.pause() };
+        pausedAtSpawn.pause.catch(() => {});
+        await waitFor(() => loop.playState === 'pausing', 'loop pausing');
+        return {};
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ...POLICY_GAME, hands: 20 });
+  await waitFor(() => loop.upperStatus === 'ready', 'upper resolved');
+  let finished = false;
+  const running = loop.run().finally(() => { finished = true; });
+  running.catch(() => {});
+  const driver = driveHuman(gameDir, () => finished || pausedAtSpawn !== null);
+  await waitFor(() => pausedAtSpawn !== null, 'a coach reached its spawn point', 30_000 * SCALE);
+  assert.equal((await pausedAtSpawn.pause).state, 'paused');
+  await driver;
+  assert.deepEqual(upper.coachHands, [], 'the reserved coach did not spawn while pausing');
+  const authority = path.join(gameDir, '.coach-authority.json');
+  const frozen = fs.readFileSync(authority, 'utf8');
+  await sleep(300);
+  assert.equal(fs.readFileSync(authority, 'utf8'), frozen, 'paused keeps the coach authority unchanged');
+  await loop.resumePlay();
+  await waitFor(() => {
+    const note = publishedNote(gameDir, pausedAtSpawn.handNo);
+    return note && !note.unavailable && /기본 코치 응답/.test(note.text ?? '');
+  }, `hand ${pausedAtSpawn.handNo} LLM note after resume`, 20_000 * SCALE);
 });
