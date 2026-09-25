@@ -232,7 +232,8 @@ export function createSessionManager({
       try { loopState = read(path.join(current.sessionDir, "loop-state.json")); } catch {}
     }
     if (session && state === "playing"
-      && ["finalizing", "review_generated", "review_published"].includes(loopState?.phase))
+      && (["finalizing", "review_generated", "review_published"].includes(loopState?.phase)
+        || session.loop.gameOverPending === true))
       publicState = "finalizing";
     const recoveryExit=abortTarget();
     const progress = lobbyProgress(publicState, loopState);

@@ -5801,7 +5801,7 @@ test('playing resume은 살아 있는 persisted coach를 회수한 뒤에만 beg
   );
 });
 
-test('a paused recovery keeps the begin-owner coach descriptor and runs it on resume', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+test('a paused recovery keeps the hand of a begin-owner coach and runs it on resume', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const first = createGameLoop({
     gameDir,
@@ -5849,6 +5849,35 @@ test('a paused recovery keeps the begin-owner coach descriptor and runs it on re
   assert.equal(note.unavailable, undefined);
   assert.match(note.text, /기본 코치 응답/);
   await stopRun(resumed, running);
+});
+
+test('a paused recovery that lands in finalization releases the pause and still runs its coach note', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'finalizing',
+    sessionToken: init.sessionToken,
+    gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: 'old-owner',
+    startedAt: '2026-08-30T00:00:00.000Z',
+    notices: [],
+    metrics: [],
+  }));
+  // The app reopens every saved game with startPaused; a finalizing game never
+  // parks, so the pause must not keep deferring the begin-owner coach work.
+  const upper = makeCoachAdapter();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: { port: 0, controlProtocolVersion: 1, startPaused: true },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  assert.equal((await loop.resume()).phase, 'finalizing');
+  assert.equal((await loop.run()).phase, 'done');
+  const note = (readJson(path.join(gameDir, 'ui-snapshot.json')).coach ?? []).find((row) => row.handNo === 1);
+  assert.ok(note, 'hand 1 has a coach note');
+  assert.equal(note.unavailable, undefined);
+  assert.match(note.text, /기본 코치 응답/);
 });
 
 test('playing resume은 완료 핸드가 있는데 coach authority가 없으면 fail closed한다', { timeout: 20_000 }, async (t) => {

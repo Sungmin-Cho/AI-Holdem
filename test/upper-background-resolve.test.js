@@ -18,7 +18,8 @@ const VALID_REVIEW = [
   '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '상대 성향을 맞게 읽은 부분과 놓친 부분을 구분합니다.',
   '## 다음 게임에서 연습할 것', '팟 오즈 확인과 포지션별 오픈 범위를 연습합니다.',
 ].join('\n\n');
-const FINALIZE_BUDGET_MS = 8_000 * SCALE;
+// Short result-wait window, roomy remainder for the post-cutoff steps.
+const FINALIZE_BUDGET_MS = 15_000 * SCALE;
 const RESULT_WAIT_MS = 3_000 * SCALE;
 // Published coach note for a hand (what the player actually sees), if any.
 const publishedNote = (dir, handNo) => (readJson(path.join(dir, 'ui-snapshot.json')).coach ?? []).find((row) => row.handNo === handNo);
@@ -358,7 +359,7 @@ test('the pause barrier drains follow-up work registered while it waits', async 
   assert.equal(rounds, 2);
 });
 
-test('a pause that lands after the coach reserved keeps that reservation and runs it on resume', { timeout: 60_000 * SCALE }, async (t) => {
+test('a pause that lands after the coach reserved keeps the hand and runs it on resume', { timeout: 60_000 * SCALE }, async (t) => {
   const gameDir = createOwnedTempDir('holdem-coach-reserved-pause');
   const upper = coachUpper();
   let loop;
@@ -399,4 +400,101 @@ test('a pause that lands after the coach reserved keeps that reservation and run
     const note = publishedNote(gameDir, pausedAtSpawn.handNo);
     return note && !note.unavailable && /기본 코치 응답/.test(note.text ?? '');
   }, `hand ${pausedAtSpawn.handNo} LLM note after resume`, 20_000 * SCALE);
+});
+
+test('a pause that meets the end of the game releases as finalizing and deferred coach work runs before the clock', { timeout: 120_000 * SCALE }, async (t) => {
+  const gameDir = createOwnedTempDir('holdem-r2-pause-at-end');
+  const gate = deferred();
+  const upper = coachUpper({ coachDelayMs: RESULT_WAIT_MS + 1_000 });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => { await gate.promise; return { player: null, upper, notices: [] }; },
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', controlProtocolVersion: 1,
+      finalizeBudgetMs: FINALIZE_BUDGET_MS, finalizeCutoffLeadMs: FINALIZE_BUDGET_MS - RESULT_WAIT_MS,
+    },
+  });
+  t.after(() => { gate.resolve(); return loop.requestStop().catch(() => {}); });
+  await loop.bootstrap({ ...POLICY_GAME, hands: 3 });
+  // Heads-up: the user holds the button (and acts first) in hands 1 and 3.
+  const statePath = path.join(gameDir, 'state.json');
+  const engine = readJson(statePath);
+  const userIdx = engine.seats.findIndex((seat) => seat.playerId === 'user');
+  engine.button = (userIdx + engine.seats.length - 1) % engine.seats.length;
+  fs.writeFileSync(statePath, JSON.stringify(engine));
+
+  let finished = false;
+  const running = loop.run().finally(() => { finished = true; });
+  running.catch(() => {});
+  const acted = new Set();
+  let pauseAtEnd = null;
+  const sent = new Set();
+  const driver = (async () => {
+    while (!finished && !pauseAtEnd) {
+      try {
+        const lock = readJson(path.join(gameDir, 'lock.json'));
+        const base = `http://127.0.0.1:${lock.port}`;
+        const snapshot = await (await fetch(`${base}/api/snapshot?token=${lock.sessionToken}`)).json();
+        const legal = snapshot.view?.legal;
+        if (legal?.toAct === 'user' && !sent.has(legal.decisionId)) {
+          sent.add(legal.decisionId);
+          acted.add(snapshot.view.handNo);
+          await fetch(`${base}/api/action?token=${lock.sessionToken}`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ decisionId: legal.decisionId, action: legal.canCheck ? 'check' : 'fold' }),
+          });
+          if (snapshot.view.handNo === 3) {
+            // The last action is received; the pause arrives before the loop
+            // applies it, so the pause barrier drains it and the game ends there.
+            pauseAtEnd = loop.pause();
+            pauseAtEnd.catch(() => {});
+          }
+        }
+      } catch { /* server restarting or terminal */ }
+      await sleep(20);
+    }
+  })();
+  await driver;
+  assert.ok(pauseAtEnd, 'the last hand reached a user decision');
+  await waitFor(() => readJson(statePath).gameOver === true, 'the game ended');
+  gate.resolve();
+  assert.equal((await pauseAtEnd).state, 'finalizing', 'a pause cannot park once the game is over');
+  assert.equal(loop.gameOverPending, true);
+  assert.equal((await loop.pause()).state, 'finalizing');
+  const done = await running;
+  assert.equal(done.phase, 'done', JSON.stringify(done.halt ?? null));
+  const backlog = [...acted].filter((handNo) => handNo < 3);
+  assert.ok(backlog.includes(1), 'hand 1 had a user decision');
+  for (const handNo of backlog) {
+    const note = publishedNote(gameDir, handNo);
+    assert.ok(note && !note.unavailable && /기본 코치 응답/.test(note.text ?? ''), `hand ${handNo} note: ${JSON.stringify(note)}`);
+  }
+});
+
+test('R2: while a finished game waits for the probe the app reports finalizing and offers no pause', { timeout: 60_000 * SCALE }, async (t) => {
+  const storeDir = createOwnedTempDir('holdem-r2-ending-state');
+  const gate = deferred();
+  const manager = createSessionManager({
+    storeDir,
+    resolver: async () => { await gate.promise; return { player: null, upper: null, notices: [] }; },
+  });
+  t.after(() => { gate.resolve(); return manager.close(); });
+  await manager.initialize();
+  const s0 = manager.snapshot();
+  const start = { requestId: randomUUID(), expectedInstanceId: s0.instanceId, expectedAppRevision: s0.appRevision,
+    expectedGameId: s0.gameId, expectedSelectionVersion: s0.selectionVersion, kind: 'start',
+    setup: { mode: 'cash-training', aiCount: 1, hands: 1, opponentRuntime: 'policy', hints: 'off', dealBias: 'off', pace: 'instant' } };
+  manager.command(start);
+  await waitFor(() => manager.receipt(start.requestId).status === 'succeeded', 'started');
+  const sessionDir = manager.current.sessionDir;
+  let done = false;
+  const driver = driveHuman(sessionDir, () => done);
+  await waitFor(() => readJson(path.join(sessionDir, 'state.json')).gameOver === true, 'game over');
+  done = true;
+  await driver;
+  const snap = await waitFor(() => (manager.snapshot().state === 'finalizing' ? manager.snapshot() : null), 'finalizing while the probe is open');
+  assert.deepEqual(snap.allowedCommands, []);
+  assert.equal(snap.upperStatus, 'probing');
+  gate.resolve();
+  await waitFor(() => manager.snapshot().state === 'completed', 'completed');
 });

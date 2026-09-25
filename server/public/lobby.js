@@ -577,9 +577,11 @@ function setupFromForm() {
         "pace",
       ].map((k) => [k, data.get(k)]),
     );
+  // The AI wait budget only exists for remote players; policy games use the
+  // server defaults (and their hidden inputs can never block a start).
+  const remote = data.get("opponentRuntime") !== "policy";
   for (const k of [
-    "playerSoftMs",
-    "playerHardMs",
+    ...(remote ? ["playerSoftMs", "playerHardMs"] : []),
     ...(roomIsLive()
       ? []
       : ["aiCount"]),
@@ -616,7 +618,7 @@ function updateSetupSummary() {
     $('details-value').textContent=`${setup.blinds} · ${amount.primary}${setup.hands?` · ${setup.hands}핸드`:''} · ${PACE_LABELS[setup.pace] ?? ''}`;
     if (validationShown) markFieldError(null);
     if ($('error').dataset.kind === 'setup') { $('error').textContent=''; $('error').dataset.kind=''; }
-  } catch(e) {if (validationShown) markFieldError(e);$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
+  } catch(e) {if (validationShown) markFieldError(e);$('setup-summary').textContent=`설정 확인 필요 · ${FIELD_ERRORS[e.field] ?? '입력값을 확인하세요.'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
 }
 const FIELD_ERRORS = {
   blinds: '블라인드는 "작은 블라인드/큰 블라인드" 숫자로 입력하세요. 예: 25/50',
@@ -628,12 +630,13 @@ const FIELD_ERRORS = {
   totalSeats: '총 인원을 확인하세요.',
   mirrorSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
   exploitSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
-  playerSoftMs: '오래 기다림 알림은 1 이상이고 최대 대기보다 짧아야 합니다.',
-  playerHardMs: 'AI 호출 최대 대기는 오래 기다림 알림보다 길어야 합니다.',
-  'playerSoftMs/playerHardMs': 'AI 호출 최대 대기는 오래 기다림 알림보다 길어야 합니다.',
+  'playerSoftMs/playerHardMs': '대기 시간은 1 이상의 정수(ms)이고, 최대 대기는 알림보다 길며 3,600,000ms(1시간) 이하여야 합니다.',
 };
 function fieldInputs(field) {
-  if (field === 'stack' && new FormData(form).get('mode') === 'cash-training') return [form.elements.cashStack];
+  // The total-chips check reports "stack" even when the stack was entered in BB.
+  if (field === 'stack' && new FormData(form).get('mode') === 'cash-training') {
+    return [form.elements.cashStackUnit.value === 'chips' ? form.elements.cashStack : form.elements.stackBb];
+  }
   // A pair error ("playerSoftMs/playerHardMs") marks both inputs, focusing the first.
   return String(field).split('/').map((name) => form.elements.namedItem(name) ?? (name === 'totalSeats' ? $('total-seats') : null))
     .filter((input) => input && typeof input.setAttribute === 'function');
