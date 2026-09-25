@@ -23,7 +23,8 @@
   text-rendering: optimizeLegibility;
 }
 .ui-page [hidden] { display: none !important; }
-.ui-page button, .ui-page input, .ui-page select, .ui-page textarea { font: inherit; color: inherit; }
+/* Zero specificity so component classes (.ui-btn--primary ink etc.) always win. */
+:where(.ui-page) :where(button, input, select, textarea) { font: inherit; color: inherit; }
 .ui-page :focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; }
 .ui-page h1, .ui-page h2, .ui-page h3, .ui-page p { margin: 0; }
 .ui-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -145,8 +146,8 @@
 .ui-choice input[type="radio"], .ui-choice input[type="checkbox"] { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
 .ui-choice:has(input:checked) { border: 2px solid var(--c-info); background: var(--c-info-soft); padding: calc(var(--sp-5) - 1px); }
 .ui-choice:has(input:focus-visible) { outline: 2px solid var(--c-focus); outline-offset: 2px; }
-.ui-choice__title { font-size: var(--fs-16); font-weight: 700; }
-.ui-choice__desc { font-size: var(--fs-13); color: var(--c-text-2); }
+.ui-choice__title { display: block; font-size: var(--fs-16); font-weight: 700; }
+.ui-choice__desc { display: block; margin-top: var(--sp-1); font-size: var(--fs-13); color: var(--c-text-2); }
 
 /* ---- Accordion ----------------------------------------------------------- */
 .ui-accordion { border: 1px solid var(--c-line-strong); border-radius: var(--r-panel); background: var(--c-surface-1); }

@@ -2,6 +2,8 @@ import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
 import {formatAmount} from './chip-format.js';
 import { uuid } from './uuid.js';
+import { createShellBridge } from './shell-bridge.js';
+import { renderQr, copyText } from './invite.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -17,6 +19,16 @@ let snapshot = null,
   frameId = null,
   confirmation = null,
   viewingRecord = false;
+// Local boot screen between "게임 시작" and the server's `starting` state, so the
+// click answers at once. Cleared when the command settles.
+let preparing = null;
+let qrFor = null;
+let roomShown = null;
+const shellBridge = createShellBridge({
+  frame: $("table"),
+  identity: () => (snapshot?.gameId && snapshot.gameEpoch ? { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch } : null),
+  onContext: paintContext,
+});
 const labels = {
   lobby: "로비",
   starting: "게임 준비 중",
@@ -142,7 +154,7 @@ function render() {
     remove.onclick=()=>roomOp('remove',{participantId:row.participantId}).catch(showError);
     item.append(rejoin,remove);return item;
   }));
-  if ($('live-observers')) $('live-observers').hidden = !room;
+  if ($('live-observers')) $('live-observers').hidden = !room || !['open','locked'].includes(room.status);
   for (const id of ['spectator-count','live-spectator-count']) if ($(id)) $(id).textContent=String(room?.spectators?.length ?? 0);
   for (const id of ['room-spectators','live-spectators']) {
     if (!$(id)) continue;
@@ -158,7 +170,8 @@ function render() {
     $("room-panel").hidden = !room;
     if (room) {
       $("join-code").textContent = room.joinCode ?? "";
-      $("room-status").textContent = room.status;
+      $("room-status").textContent = {open: "참가 대기 중", locked: "게임 중 · 참가 잠김", closed: "세션 닫힘"}[room.status] ?? room.status;
+      $("room-status").dataset.status = room.status;
       $("join-links").replaceChildren(
         ...(room.links ?? []).map((link) => {
           const item = document.createElement("li");
@@ -174,8 +187,16 @@ function render() {
         }),
       );
       $("room-close").disabled = room.status === "locked";
-      $("ai-count").hidden = true;
-    } else $("ai-count").hidden = false;
+      // A closed room keeps its status line, but the table size goes back to
+      // the AI count (a closed session has no participants to seat).
+      const roomLive = ["open", "locked"].includes(room.status);
+      $("room-panel").dataset.status = room.status;
+      $("ai-count").hidden = roomLive;
+      $("ai-count-field").hidden = roomLive;
+    } else {
+      $("ai-count").hidden = false;
+      $("ai-count-field").hidden = false;
+    }
   }
   $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
   $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
@@ -195,6 +216,8 @@ function render() {
     frameId=snapshot.gameId;
     $("table").src=`/table?${new URLSearchParams({appGame:snapshot.gameId,epoch:snapshot.gameEpoch,...(terminal?{terminal:'1'}:{})})}`;
   }
+  // Shell extras live outside render(): tests run this function alone in a VM.
+  if (typeof paintShell === "function") paintShell();
 }
 let refreshFailures=0;
 async function refresh() {
@@ -218,6 +241,136 @@ async function refresh() {
     form.onchange();
   }
   render();
+}
+const BOOT_ORDER = ["sweep", "runtime-probe", "relay", "player-warmup"];
+// Online mode only while a session is open or playing; a closed room object
+// lingers in the snapshot for its status line.
+const roomIsLive = () => ["open", "locked"].includes(snapshot?.room?.status);
+function paintShell() {
+  const s = snapshot.state;
+  const booting = !!preparing || s === "starting";
+  $("boot").hidden = !booting;
+  if (booting) {
+    $("setup").hidden = true;
+    $("result").hidden = true;
+    $("game").hidden = true;
+    document.body.classList.remove("has-game");
+    paintBoot();
+  }
+  $("status").classList.toggle("ui-sr-only", s === "lobby" && !booting);
+  $("coach-chip").hidden = snapshot.upperStatus !== "probing" || !document.body.classList.contains("has-game");
+  if (roomIsLive() !== roomShown) { roomShown = roomIsLive(); updateSetupSummary(); }
+  $("room-open").hidden = roomIsLive();
+  for (const id of ["join-code-block", "join-qr", "join-links", "join-copy", "room-rotate", "room-close"]) $(id).hidden = !roomIsLive();
+  paintNotices();
+  paintResultCard();
+  paintInvite();
+  if (!document.body.classList.contains("has-game")) paintContext(null);
+  else paintContext(shellBridge.context);
+}
+function paintBoot() {
+  const boot = snapshot.state === "starting" ? snapshot.boot : null;
+  const stage = boot?.stage === "preparing" || !boot?.stage ? "sweep" : boot.stage;
+  const opponent = preparing?.opponent ?? snapshot.setup?.opponentRuntime ?? form.elements.opponentRuntime.value;
+  const index = stage === "ready" ? BOOT_ORDER.length : Math.max(0, BOOT_ORDER.indexOf(stage));
+  for (const item of $("boot-steps").children) {
+    const step = item.dataset.step;
+    const at = BOOT_ORDER.indexOf(step);
+    item.hidden = (step === "runtime-probe" || step === "player-warmup") && opponent !== "llm" && stage !== step;
+    item.dataset.state = at < index ? "done" : at === index ? "active" : "waiting";
+  }
+  const probe = boot?.probe;
+  $("boot-probe").textContent = !probe ? ""
+    : probe.ok === null ? `${probe.runtime} 확인 중`
+    : probe.ok ? `${probe.runtime} 연결됨` : `${probe.runtime} 사용 불가 · 다음 런타임 확인`;
+  $("boot-hint").hidden = $("boot-steps").querySelector('[data-step="runtime-probe"]').hidden;
+  const started = Date.parse(boot?.startedAt ?? "") || preparing?.since || Date.now();
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  $("boot-elapsed").textContent = seconds >= 60 ? `${Math.floor(seconds / 60)}분 ${seconds % 60}초` : `${seconds}초`;
+}
+function noticeState(key) {
+  try { return sessionStorage.getItem(key); } catch { return null; }
+}
+function paintNotices() {
+  const notices = snapshot.notices;
+  const items = Array.isArray(notices?.items) ? notices.items : [];
+  const unclassified = Number.isSafeInteger(notices?.unclassified) ? notices.unclassified : 0;
+  const total = items.length + (unclassified > 0 ? 1 : 0);
+  $("notices").hidden = total === 0 || !!preparing || snapshot.state === "starting";
+  if (total === 0) return;
+  const level = items.some((item) => item.level === "error") ? "error" : items.some((item) => item.level === "warn") ? "warn" : "info";
+  $("notices").dataset.level = level;
+  $("notices-count").textContent = String(items.length + unclassified);
+  $("notices-title").textContent = level === "info" ? "알림" : "확인이 필요한 알림";
+  const key = `holdem.notices.v1:${snapshot.gameId ?? "lobby"}`;
+  const stored = noticeState(key);
+  const open = stored ? stored === "open" : level !== "info" && !document.body.classList.contains("has-game");
+  $("notices-toggle").setAttribute("aria-expanded", String(open));
+  $("notices-list").hidden = !open;
+  $("notices-list").replaceChildren(...items.map((item) => {
+    const li = document.createElement("li");
+    li.dataset.level = item.level;
+    li.textContent = item.count > 1 ? `${item.text} (${item.count}건)` : item.text;
+    return li;
+  }), ...(unclassified > 0 ? [Object.assign(document.createElement("li"), {
+    textContent: `진단 알림 ${unclassified}건 — 앱 로그에서 확인할 수 있어요.`,
+  })] : []));
+  const diagnostic = $("notices-list").lastElementChild;
+  if (unclassified > 0 && diagnostic) diagnostic.dataset.kind = "diagnostic";
+}
+$("notices-toggle").onclick = () => {
+  const open = $("notices-toggle").getAttribute("aria-expanded") !== "true";
+  try { sessionStorage.setItem(`holdem.notices.v1:${snapshot?.gameId ?? "lobby"}`, open ? "open" : "closed"); } catch { /* per-tab only */ }
+  $("notices-toggle").setAttribute("aria-expanded", String(open));
+  $("notices-list").hidden = !open;
+};
+const RESULT_PRIMARY = {
+  completed: ["result-restart", "review", "result-modes"],
+  ended: ["review", "result-restart", "result-modes"],
+  error: ["recover", "result-end", "result-restart"],
+  external: ["recover", "result-modes"],
+};
+function paintResultCard() {
+  const order = RESULT_PRIMARY[snapshot.state] ?? [];
+  const primary = order.find((id) => !$(id).hidden);
+  for (const id of ["review", "result-restart", "result-end", "result-modes", "recover"]) {
+    const button = $(id);
+    const danger = id === "result-end";
+    button.classList.toggle("ui-btn--primary", id === primary && !danger);
+    button.classList.toggle("ui-btn--secondary", id !== primary && !danger && id !== "result-modes");
+  }
+}
+function paintInvite() {
+  const link = roomIsLive() ? snapshot.room.links?.[0] ?? null : null;
+  if (link === qrFor) return;
+  qrFor = link;
+  $("join-copy-status").textContent = "";
+  $("join-copy-fallback").hidden = true;
+  if (!link) { $("join-qr").replaceChildren(); return; }
+  renderQr($("join-qr"), link);
+}
+function paintContext(context) {
+  const node = $("shell-context");
+  if (!context) { node.hidden = true; node.replaceChildren(); return; }
+  const parts = [];
+  const add = (label, value, className = "") => {
+    const span = document.createElement("span");
+    span.append(`${label} `);
+    const strong = document.createElement("span");
+    strong.className = `ui-num ${className}`.trim();
+    strong.textContent = value;
+    span.append(strong);
+    parts.push(span);
+  };
+  if (context.handNo !== null) add("핸드", context.handLimit ? `${context.handNo}/${context.handLimit}` : String(context.handNo));
+  if (context.blinds) add(context.level ? `레벨 ${context.level} ·` : "블라인드", `${context.blinds[0].toLocaleString("ko-KR")}/${context.blinds[1].toLocaleString("ko-KR")}`);
+  if (context.sessionNet !== null) {
+    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, "chips", true).primary;
+    add("손익", net, context.sessionNet > 0 ? "ui-pos" : context.sessionNet < 0 ? "ui-neg" : "");
+  }
+  if (context.conn !== "on") add("연결", context.conn === "retry" ? "재연결 중" : "종료");
+  node.replaceChildren(...parts);
+  node.hidden = parts.length === 0;
 }
 const errorMessages = {
   JEV_API_KEY_MISSING: '서버에 TYPESAFE_API_KEY를 설정한 뒤 다시 시작하세요.',
@@ -265,6 +418,9 @@ async function command(kind, setup, extra = {}) {
   if (busy) return;
   viewingRecord = false;
   busy = true;
+  if (["start", "replace-current", "restart"].includes(kind)) {
+    preparing = { since: Date.now(), opponent: setup?.opponentRuntime ?? snapshot.setup?.opponentRuntime ?? null };
+  }
   render();
   $("error").textContent = "";
   try {
@@ -284,9 +440,14 @@ async function command(kind, setup, extra = {}) {
     await refresh();
     if (snapshot.state === "paused") $("pause-dialog").showModal();
   } catch (e) {
+    const wasStart = preparing && kind === "start";
+    preparing = null;
     showError(e);
     await refresh().catch(() => {});
+    // A rejected start returns to the untouched form with focus on the button.
+    if (wasStart && !$("setup").hidden) $("start").focus();
   } finally {
+    preparing = null;
     busy = false;
     render();
   }
@@ -359,6 +520,29 @@ form.onchange = () => {
   $("seats").textContent = `나 1명 + AI ${count}명 = 총 ${count + 1}명`;
   updateSetupSummary();
 };
+const OPPONENT_HELP = {
+  policy: "로컬 정책 AI가 즉시 결정합니다. 외부로 보내는 정보가 없고 가장 빨리 시작합니다.",
+  llm: "LLM이 생각한 뒤 행동합니다. 결정마다 몇 초가 걸리고 판단 이유를 남깁니다.",
+  jev: "외부 API(TypeSafe AI)로 모든 AI 좌석을 움직입니다. 서버에 API 키가 필요하며, 각 AI의 자기 패와 공개 플레이 정보를 전송합니다.",
+};
+const PACE_LABELS = { instant: "즉시", fast: "빠름", normal: "보통", slow: "느림" };
+function paintSeatDots(total) {
+  const svg = $("seat-dots");
+  const ns = "http://www.w3.org/2000/svg";
+  const felt = document.createElementNS(ns, "ellipse");
+  felt.setAttribute("class", "felt");
+  for (const [key, value] of Object.entries({ cx: 60, cy: 32, rx: 44, ry: 20 })) felt.setAttribute(key, String(value));
+  const seats = Array.from({ length: total }, (_, index) => {
+    const angle = Math.PI / 2 + (index * 2 * Math.PI) / total;
+    const dot = document.createElementNS(ns, "circle");
+    dot.setAttribute("class", index === 0 ? "seat me" : "seat");
+    dot.setAttribute("cx", (60 + 54 * Math.cos(angle)).toFixed(1));
+    dot.setAttribute("cy", (32 + 26 * Math.sin(angle)).toFixed(1));
+    dot.setAttribute("r", "4.5");
+    return dot;
+  });
+  svg.replaceChildren(felt, ...seats);
+}
 function setupFromForm() {
   const data = new FormData(form),
     setup = Object.fromEntries(
@@ -376,7 +560,7 @@ function setupFromForm() {
   for (const k of [
     "playerSoftMs",
     "playerHardMs",
-    ...(snapshot?.room
+    ...(roomIsLive()
       ? []
       : ["aiCount"]),
     ...(setup.mode === "cash-training"
@@ -384,7 +568,7 @@ function setupFromForm() {
       : ["stack", "levelEvery"]),
   ])
     setup[k] = Number(data.get(k));
-  if (snapshot?.room) {
+  if (roomIsLive()) {
     setup.totalSeats = Number($("total-seats")?.value || 6);
     setup.hints = "off";
     setup.dealBias = "off";
@@ -398,6 +582,10 @@ function setupFromForm() {
 }
 function updateSetupSummary() {
   $('llm-settings').hidden=form.elements.opponentRuntime.value==='policy';
+  $('opponent-help').textContent=OPPONENT_HELP[form.elements.opponentRuntime.value] ?? '';
+  const roomSeats=roomIsLive() ? Number($('total-seats')?.value || 6) : null;
+  if (roomSeats) $('seats').textContent=`호스트 포함 총 ${roomSeats}명 · 빈 자리는 AI`;
+  paintSeatDots(roomSeats ?? Number($('ai-count').value)+1);
   $('llm-budget-help').textContent=`알림 ${Number(form.elements.playerSoftMs.value)/1000}초 · 호출 최대 ${Number(form.elements.playerHardMs.value)/60000}분`;
   try {
     const setup=normalizeSetup(setupFromForm());
@@ -405,6 +593,7 @@ function updateSetupSummary() {
     const amount=formatAmount(setup.stack??setup.stackBb*bb,bb);
     $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · ${{policy:'로컬 정책',llm:'LLM',jev:'JEV'}[setup.opponentRuntime]} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
     $('setup-assistance').textContent=[setup.dealBias!=='off'?'유리한 딜 · 평가 제외':null,setup.hints==='on'?'행동 전 힌트 켬':null,setup.showdownPolicy==='open'?'쇼다운 모두 공개':null,setup.replayReveal==='all'?'복기 카드 모두 공개':null].filter(Boolean).join(' · ');
+    $('details-value').textContent=`${setup.blinds} · ${amount.primary}${setup.hands?` · ${setup.hands}핸드`:''} · ${PACE_LABELS[setup.pace] ?? ''}`;
   } catch(e) {$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
 }
 form.addEventListener('input',updateSetupSummary);
@@ -483,6 +672,12 @@ $("room-open")?.addEventListener("click", () => roomOp("open", {
 $("room-rotate")?.addEventListener("click", () => roomOp("rotate-code"));
 $("live-room-rotate")?.addEventListener("click", () => roomOp("rotate-code").catch(showError));
 $("room-close")?.addEventListener("click", () => roomOp("close"));
+$("join-copy").addEventListener("click", async () => {
+  const link = snapshot?.room?.links?.[0];
+  if (!link) return;
+  const result = await copyText(link, { fallback: $("join-copy-fallback") });
+  $("join-copy-status").textContent = result === "copied" ? "링크를 복사했어요." : result === "selected" ? "선택된 링크를 복사해 전달하세요." : "복사하지 못했어요. 위 링크를 직접 전달하세요.";
+});
 await recoverCommand();
 setInterval(() => {
   if (!busy)
