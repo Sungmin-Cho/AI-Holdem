@@ -24,6 +24,9 @@ let snapshot = null,
 let preparing = null;
 let qrFor = null;
 let roomShown = null;
+let startingSeen = null;
+let bootShown = false;
+let validationShown = false;
 const shellBridge = createShellBridge({
   frame: $("table"),
   identity: () => (snapshot?.gameId && snapshot.gameEpoch ? { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch } : null),
@@ -249,7 +252,11 @@ const roomIsLive = () => ["open", "locked"].includes(snapshot?.room?.status);
 function paintShell() {
   const s = snapshot.state;
   const booting = !!preparing || s === "starting";
+  startingSeen = s === "starting" ? startingSeen ?? Date.now() : null;
   $("boot").hidden = !booting;
+  // Move focus to the boot screen once: the start button it came from is hidden.
+  if (booting && !bootShown) $("boot-title").focus({ preventScroll: true });
+  bootShown = booting;
   if (booting) {
     $("setup").hidden = true;
     $("result").hidden = true;
@@ -261,6 +268,8 @@ function paintShell() {
   $("coach-chip").hidden = snapshot.upperStatus !== "probing" || !document.body.classList.contains("has-game");
   if (roomIsLive() !== roomShown) { roomShown = roomIsLive(); updateSetupSummary(); }
   $("room-open").hidden = roomIsLive();
+  // Plain-http join links travel unencrypted; TLS sessions need no warning.
+  $("tls-warning").hidden = !roomIsLive() || snapshot.room.tls === true;
   for (const id of ["join-code-block", "join-qr", "join-links", "join-copy", "room-rotate", "room-close"]) $(id).hidden = !roomIsLive();
   paintNotices();
   paintResultCard();
@@ -284,7 +293,11 @@ function paintBoot() {
     : probe.ok === null ? `${probe.runtime} 확인 중`
     : probe.ok ? `${probe.runtime} 연결됨` : `${probe.runtime} 사용 불가 · 다음 런타임 확인`;
   $("boot-hint").hidden = $("boot-steps").querySelector('[data-step="runtime-probe"]').hidden;
-  const started = Date.parse(boot?.startedAt ?? "") || preparing?.since || Date.now();
+  // A service that predates the boot field reports no stages: show only the clock.
+  const legacy = snapshot.state === "starting" && !Object.hasOwn(snapshot, "boot");
+  $("boot-steps").hidden = legacy;
+  if (legacy) $("boot-hint").hidden = true;
+  const started = Date.parse(boot?.startedAt ?? "") || preparing?.since || startingSeen || Date.now();
   const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
   $("boot-elapsed").textContent = seconds >= 60 ? `${Math.floor(seconds / 60)}분 ${seconds % 60}초` : `${seconds}초`;
 }
@@ -295,12 +308,14 @@ function paintNotices() {
   const notices = snapshot.notices;
   const items = Array.isArray(notices?.items) ? notices.items : [];
   const unclassified = Number.isSafeInteger(notices?.unclassified) ? notices.unclassified : 0;
-  const total = items.length + (unclassified > 0 ? 1 : 0);
+  const omitted = Number.isSafeInteger(notices?.omitted) ? notices.omitted : 0;
+  const total = items.length + (unclassified > 0 ? 1 : 0) + (omitted > 0 ? 1 : 0);
   $("notices").hidden = total === 0 || !!preparing || snapshot.state === "starting";
   if (total === 0) return;
   const level = items.some((item) => item.level === "error") ? "error" : items.some((item) => item.level === "warn") ? "warn" : "info";
   $("notices").dataset.level = level;
-  $("notices-count").textContent = String(items.length + unclassified);
+  const itemCount = items.reduce((sum, item) => sum + (Number.isSafeInteger(item.count) && item.count > 0 ? item.count : 1), 0);
+  $("notices-count").textContent = String(itemCount + unclassified + omitted);
   $("notices-title").textContent = level === "info" ? "알림" : "확인이 필요한 알림";
   const key = `holdem.notices.v1:${snapshot.gameId ?? "lobby"}`;
   const stored = noticeState(key);
@@ -312,7 +327,9 @@ function paintNotices() {
     li.dataset.level = item.level;
     li.textContent = item.count > 1 ? `${item.text} (${item.count}건)` : item.text;
     return li;
-  }), ...(unclassified > 0 ? [Object.assign(document.createElement("li"), {
+  }), ...(omitted > 0 ? [Object.assign(document.createElement("li"), {
+    textContent: `그 밖의 알림 ${omitted}건`,
+  })] : []), ...(unclassified > 0 ? [Object.assign(document.createElement("li"), {
     textContent: `진단 알림 ${unclassified}건 — 앱 로그에서 확인할 수 있어요.`,
   })] : []));
   const diagnostic = $("notices-list").lastElementChild;
@@ -405,6 +422,7 @@ const errorMessages = {
     "사용 가능한 LLM 플레이어가 없습니다. 런타임 연결을 확인해 주세요.",
 };
 function showError(e) {
+  $("error").dataset.kind = e?.code === "INVALID_SETUP" ? "setup" : "";
   $("error").textContent =
     errorMessages[e.code] ?? errorMessages[e.message] ??
     "요청을 완료하지 못했습니다. 연결과 현재 게임 상태를 확인해 주세요.";
@@ -416,6 +434,7 @@ const commands = createLobbyCommandClient({
 });
 async function command(kind, setup, extra = {}) {
   if (busy) return;
+  let refocusStart = false;
   viewingRecord = false;
   busy = true;
   if (["start", "replace-current", "restart"].includes(kind)) {
@@ -440,16 +459,17 @@ async function command(kind, setup, extra = {}) {
     await refresh();
     if (snapshot.state === "paused") $("pause-dialog").showModal();
   } catch (e) {
-    const wasStart = preparing && kind === "start";
+    refocusStart = !!preparing && kind === "start";
     preparing = null;
     showError(e);
     await refresh().catch(() => {});
-    // A rejected start returns to the untouched form with focus on the button.
-    if (wasStart && !$("setup").hidden) $("start").focus();
   } finally {
     preparing = null;
     busy = false;
     render();
+    // A rejected start returns to the untouched form with focus on the button
+    // (only now is it enabled again).
+    if (refocusStart && !$("setup").hidden) $("start").focus();
   }
 }
 function confirm(fn) {
@@ -594,13 +614,55 @@ function updateSetupSummary() {
     $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · ${{policy:'로컬 정책',llm:'LLM',jev:'JEV'}[setup.opponentRuntime]} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
     $('setup-assistance').textContent=[setup.dealBias!=='off'?'유리한 딜 · 평가 제외':null,setup.hints==='on'?'행동 전 힌트 켬':null,setup.showdownPolicy==='open'?'쇼다운 모두 공개':null,setup.replayReveal==='all'?'복기 카드 모두 공개':null].filter(Boolean).join(' · ');
     $('details-value').textContent=`${setup.blinds} · ${amount.primary}${setup.hands?` · ${setup.hands}핸드`:''} · ${PACE_LABELS[setup.pace] ?? ''}`;
-  } catch(e) {$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
+    if (validationShown) markFieldError(null);
+    if ($('error').dataset.kind === 'setup') { $('error').textContent=''; $('error').dataset.kind=''; }
+  } catch(e) {if (validationShown) markFieldError(e);$('setup-summary').textContent=`설정 확인 필요 · ${e.field??'입력값'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
+}
+const FIELD_ERRORS = {
+  blinds: '블라인드는 "작은 블라인드/큰 블라인드" 숫자로 입력하세요. 예: 25/50',
+  stackBb: '시작 스택(BB)을 확인하세요.',
+  stack: '시작 스택(칩)을 확인하세요.',
+  hands: '핸드 수를 확인하세요.',
+  levelEvery: '블라인드 상승 주기를 확인하세요.',
+  aiCount: 'AI 플레이어 수를 확인하세요.',
+  totalSeats: '총 인원을 확인하세요.',
+  mirrorSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
+  exploitSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',
+};
+function fieldInput(field) {
+  if (field === 'stack' && new FormData(form).get('mode') === 'cash-training') return form.elements.cashStack;
+  const input = form.elements.namedItem(field) ?? (field === 'totalSeats' ? $('total-seats') : null);
+  return input && typeof input.setAttribute === 'function' ? input : null;
+}
+/** Shows the failing field inline (aria-invalid + message). Returns the input. */
+function markFieldError(error) {
+  for (const node of document.querySelectorAll('#setup-form [aria-invalid="true"]')) {
+    node.removeAttribute('aria-invalid');
+    node.removeAttribute('aria-describedby');
+  }
+  for (const node of document.querySelectorAll('#setup-form .field-error')) node.remove();
+  const input = error?.field ? fieldInput(error.field) : null;
+  if (!input) return null;
+  const message = document.createElement('p');
+  message.className = 'ui-error field-error';
+  message.id = `field-error-${error.field}`;
+  message.textContent = FIELD_ERRORS[error.field] ?? '이 값을 확인하세요.';
+  (input.closest('.ui-field, .ui-check') ?? input.parentElement).append(message);
+  input.setAttribute('aria-invalid', 'true');
+  input.setAttribute('aria-describedby', message.id);
+  return input;
 }
 form.addEventListener('input',updateSetupSummary);
 form.onsubmit = (e) => {
   e.preventDefault();
   const setup=setupFromForm();
-  try{normalizeSetup(setup);}catch(error){showError(error);form.querySelector('details').open=true;return;}
+  try{normalizeSetup(setup);}catch(error){
+    validationShown=true;showError(error);
+    const input=markFieldError(error);
+    if(input){input.closest('details')?.setAttribute('open','');input.focus();}
+    else form.querySelector('details').open=true;
+    return;
+  }
   if (snapshot.state === "paused")
     confirm(() => command("replace-current", setup));
   else command("start", setup);

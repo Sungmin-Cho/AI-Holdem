@@ -131,9 +131,9 @@ body.has-game > .notices { flex: none; max-width: none; margin: 0; padding: var(
 body.has-game > .notices .notices__list { position: absolute; z-index: var(--z-floating); width: max-content; max-width: min(560px, calc(100vw - 32px)); box-shadow: var(--sh-2); }
 /* On wide screens the in-game notices chip rides in the header row next to the
    brand instead of taking a row of table height. */
-@media (min-width: 1024px) {
-  body.has-game > .notices { position: absolute; top: 10px; left: 136px; z-index: var(--z-floating); padding: 0; border: 0; background: none; }
-}
+body.has-game > .notices { position: absolute; top: 10px; left: 136px; z-index: var(--z-floating); padding: 0; border: 0; background: none; }
+#boot-title:focus { outline: none; }
+.field-error { margin: 0; }
 body.has-game > #error:empty { display: none; }
 body.has-game > .lobby-error { flex: none; margin: 0; padding: var(--sp-1) var(--sp-4); max-width: none; }
 body.has-game #result {
@@ -167,5 +167,13 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
   .boot__card { padding: var(--sp-6); }
   .status-card { margin: var(--sp-6) var(--sp-4); }
   .invite { flex-direction: column; align-items: flex-start; }
-  body.has-game > .app-header { flex-wrap: nowrap; overflow-x: auto; }
+  /* In-game header on phones: one 52px row — spade, notice count, then the
+     controls. Brand text, status text and chip labels stay for screen readers. */
+  body.has-game > .app-header { flex-wrap: nowrap; min-height: 52px; padding: var(--sp-1) var(--sp-3); gap: var(--sp-2); }
+  body.has-game .brand strong,
+  body.has-game .app-status,
+  body.has-game .coach-chip__text,
+  body.has-game #notices-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  body.has-game > .notices { top: 8px; left: 40px; }
+  body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
 }

@@ -17,7 +17,7 @@
       <span class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C9.2 6.6 4.5 9.3 4.5 13.2 4.5 15.6 6.3 17.2 8.4 17.2 9.6 17.2 10.6 16.7 11.3 15.9 11.1 17.8 10.3 19.3 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.7 19.3 12.9 17.8 12.7 15.9 13.4 16.7 14.4 17.2 15.6 17.2 17.7 17.2 19.5 15.6 19.5 13.2 19.5 9.3 14.8 6.6 12 2Z" /></svg><strong>AI 홀덤</strong></span>
       <p id="shell-context" class="shell-context" hidden></p>
       <span class="header-spacer"></span>
-      <span id="coach-chip" class="ui-pill ui-pill--info" hidden><span class="ui-dot"></span>코치 연결 확인 중</span>
+      <span id="coach-chip" class="ui-pill ui-pill--info" hidden><span class="ui-dot"></span><span class="coach-chip__text">코치 연결 확인 중</span></span>
       <span id="status" role="status" class="app-status">연결 중</span
       ><button id="menu" class="ui-btn ui-btn--ghost" hidden>일시정지 · 메뉴</button
       ><button id="interrupt-decision" class="ui-btn ui-btn--danger" hidden>이 결정 중단</button
@@ -192,7 +192,7 @@
           <fieldset id="online-session" class="ui-card online-card">
             <legend class="ui-h3">친구와 함께 플레이</legend>
             <p class="ui-help">같은 네트워크의 친구가 참가 링크로 들어옵니다. 세션을 열면 인원은 총 인원 기준으로 바뀝니다.</p>
-            <p id="tls-warning" class="ui-banner ui-banner--warn">이 링크는 암호화되지 않습니다 — 참가 코드·카드가 경로상 노출될 수 있습니다</p>
+            <p id="tls-warning" class="ui-banner ui-banner--warn" hidden>이 링크는 암호화되지 않습니다 — 참가 코드·카드가 경로상 노출될 수 있습니다</p>
             <div class="online-fields">
               <label class="ui-field"><span class="ui-label">호스트 이름</span> <input class="ui-input" name="hostName" id="host-name" value="호스트" maxlength="12" /></label>
               <label class="ui-field"><span class="ui-label">총 인원</span>
@@ -244,7 +244,7 @@
     </main>
     <section id="boot" class="boot" hidden aria-labelledby="boot-title">
       <div class="ui-card boot__card">
-        <h1 id="boot-title" class="ui-h2">테이블을 준비하고 있습니다</h1>
+        <h1 id="boot-title" class="ui-h2" tabindex="-1">테이블을 준비하고 있습니다</h1>
         <div class="ui-progress" aria-hidden="true"></div>
         <ol id="boot-steps" class="ui-steps">
           <li data-step="sweep">설정 저장</li>

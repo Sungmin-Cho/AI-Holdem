@@ -99,10 +99,14 @@ test('a new iframe source clears the header before any message from the next doc
   assert.equal(frame.posted.at(-1).message.gameEpoch, 'ef'.repeat(32));
 });
 
-test('a table that loaded before the parent listened can ask for the announcement', () => {
+test('a table that loaded before the parent listened can ask for the announcement of its own game only', () => {
   const { win, frame } = setup();
+  const hello = { type: 'holdem:shell-hello', v: 1, ...GAME };
+  win.dispatch('message', { origin: ORIGIN, source: frame.contentWindow, data: hello });
+  win.dispatch('message', { origin: 'http://evil.example', source: frame.contentWindow, data: hello });
+  // The previous game's document (same WindowProxy after navigation) asks late.
+  win.dispatch('message', { origin: ORIGIN, source: frame.contentWindow, data: { ...hello, gameEpoch: 'cd'.repeat(32) } });
   win.dispatch('message', { origin: ORIGIN, source: frame.contentWindow, data: { type: 'holdem:shell-hello', v: 1 } });
-  win.dispatch('message', { origin: 'http://evil.example', source: frame.contentWindow, data: { type: 'holdem:shell-hello', v: 1 } });
   assert.equal(frame.posted.length, 1);
 });
 

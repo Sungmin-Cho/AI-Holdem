@@ -65,8 +65,13 @@ export function createShellBridge({ win = globalThis.window, frame, identity, on
   const onMessage = (event) => {
     if (event.origin !== win.location.origin) return;
     if (!frame.contentWindow || event.source !== frame.contentWindow) return;
-    // A table that started before the parent listened asks again.
-    if (event.data?.type === 'holdem:shell-hello' && event.data.v === 1) { announce(); return; }
+    // A table that started before the parent listened asks again, naming its own
+    // game: a document of the previous game must never learn the next one.
+    if (event.data?.type === 'holdem:shell-hello' && event.data.v === 1) {
+      const id = identity();
+      if (id && event.data.gameId === id.gameId && event.data.gameEpoch === id.gameEpoch) announce();
+      return;
+    }
     const clean = sanitizeContext(event.data);
     if (!clean) return;
     const id = identity();

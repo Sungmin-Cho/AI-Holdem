@@ -777,6 +777,18 @@ export function exitCodeFor(error) {
   return 5;
 }
 
+/** Waits until `pending()` is empty, re-reading it after every round: work that
+ * finishes during the wait can register follow-ups (an evaluation starting its
+ * solve), and the pause barrier must not declare `paused` while any of them can
+ * still write. Stops early once `stopped()` is true. */
+export async function settleUntilIdle(pending, stopped = () => false) {
+  for (;;) {
+    const current = pending();
+    if (current.length === 0 || stopped()) return;
+    await Promise.allSettled(current);
+  }
+}
+
 export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
 const UPPER_UNAVAILABLE_NOTICE = '상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.';
 const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
@@ -4921,12 +4933,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--spawn-evidence', '1',
   ]);
 
+  // A fresh hand's coach that stops before reserving because play is pausing is
+  // kept here and started again on resume or at finalization entry. Otherwise a
+  // pause would leave the hand unreserved and the finalization cutoff would seal
+  // it unavailable even though the upper model is there.
+  const pauseDeferredCoachHands = new Set();
+  const coachSuspendedBeforeReserve = (handNo, descriptor) => {
+    if (!coachWorkSuspended()) return false;
+    if (pauseRequested && !stopRequested && !finalizationCutoff && !descriptor) pauseDeferredCoachHands.add(handNo);
+    return true;
+  };
+  const relaunchPauseDeferredCoach = () => {
+    const hands = [...pauseDeferredCoachHands].sort((a, b) => a - b);
+    pauseDeferredCoachHands.clear();
+    for (const handNo of hands) launchCoachPipeline(handNo);
+  };
+
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
-    if (coachWorkSuspended()) return;
+    if (coachSuspendedBeforeReserve(handNo, initialDescriptor)) return;
     if (resolverPromise) {
       // R2: finish the background probe first so this hand gets the LLM note, not
       // the upper-unavailable fallback. The task stays in coachTasks, so a pause
-      // barrier keeps waiting for it exactly like any in-flight coach.
+      // barrier waits for it; if play paused meanwhile, the check after capture
+      // defers the hand to resume/finalization instead of reserving now.
       await settleUpperResolution();
       if (stopRequested || finalizationCutoff) return;
     }
@@ -4964,12 +4993,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (typeof opts.coachCaptureCheckpoint === 'function') {
       await opts.coachCaptureCheckpoint({ handNo });
     }
-    if (coachWorkSuspended()) return;
+    if (coachSuspendedBeforeReserve(handNo, initialDescriptor)) return;
     const denyDetailed = coachForbiddenDetailed(handNo);
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
-      if (coachWorkSuspended()) return;
+      if (coachSuspendedBeforeReserve(handNo, null)) return;
       try {
         descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
       } catch (reserveError) {
@@ -6625,6 +6654,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // R2: a background probe settles before any finalization budget starts.
     await settleUpperResolution();
     if (stopRequested) return readLoopState();
+    relaunchPauseDeferredCoach();
     // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
     // 번만 정한다. finalizing resume은 begin-owner 전에 이미 같은 값을 설치한다.
     const {
@@ -6897,6 +6927,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     pauseRequested = false;
     pauseCompletion = null;
     parkWake?.();
+    relaunchPauseDeferredCoach();
   };
   const retryDecision = async (decisionId, { freshAuthorization = null } = {}) => {
     if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
@@ -6986,9 +7017,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (drained.userAction && !drained.userAction.timeout) out = await handleUserTurn(drained);
     }
-    await Promise.allSettled([
-      ...coachTasks, ...trainingTasks, ...auxiliaryTasks, ...(resolverPromise ? [resolverPromise] : []),
-    ]);
+    await settleUntilIdle(
+      () => [...coachTasks, ...trainingTasks, ...auxiliaryTasks, ...(resolverPromise ? [resolverPromise] : [])],
+      () => stopRequested,
+    );
     if (stopRequested) return out;
     if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
       pauseRequested = false;
@@ -8225,6 +8257,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         launchCoachPipeline(out.handNo);
         if (ending) {
           pauseRequested=false;resolvePause?.({state:'finalizing'});resolvePause=null;
+          // Before the result-wait cutoff: hands whose coach a pause deferred.
+          relaunchPauseDeferredCoach();
           // §5 finalizing 1: handOver 분기가 이미 async로 띄운 마지막 핸드 generation을
           // 그대로 둔다. 여기서 reserve를 다시 부르면 그 prior가 discard된다.
           writeLoopState({ phase: 'finalizing', handNo: out.handNo });

@@ -225,19 +225,17 @@ export function createSessionManager({
     const diagnostics = diagnosticCheck?.ok && !pendingDecision.diagnosticsQuarantined ? pendingDecision.diagnostics : null;
     const rejection = diagnostics?.lastRejection ? projectRejectionForSink(diagnostics.lastRejection, pendingDecision) : null;
     if (session && state === 'playing' && session.loop.playState === 'paused') publicState = 'paused';
-    if (session && state === "playing") {
-      try {
-        const phase = read(
-          path.join(current.sessionDir, "loop-state.json"),
-        ).phase;
-        if (
-          ["finalizing", "review_generated", "review_published"].includes(phase)
-        )
-          publicState = "finalizing";
-      } catch {}
+    // One read serves the finalizing check and the notices projection (loop-state
+    // carries up to 5,000 metrics, so it is not free to parse twice per poll).
+    let loopState = null;
+    if (current?.sessionDir) {
+      try { loopState = read(path.join(current.sessionDir, "loop-state.json")); } catch {}
     }
+    if (session && state === "playing"
+      && ["finalizing", "review_generated", "review_published"].includes(loopState?.phase))
+      publicState = "finalizing";
     const recoveryExit=abortTarget();
-    const progress = lobbyProgress(publicState);
+    const progress = lobbyProgress(publicState, loopState);
     return {
       instanceId,
       appRevision: revision,
@@ -275,7 +273,7 @@ export function createSessionManager({
   // Additive host-only progress fields (/api/app). While starting, read only
   // the launching loop: `current` still names the previous game until
   // launchTracked returns, so its notices must not leak into the boot screen.
-  function lobbyProgress(publicState) {
+  function lobbyProgress(publicState, loopState) {
     const guard = (read) => { try { return read(); } catch { return null; } };
     let boot = null, notices = null, pausing = null, upperStatus = null;
     if (publicState === "starting") {
@@ -293,8 +291,8 @@ export function createSessionManager({
         ...(probe ? { probe } : {}),
       };
       notices = startingLoop ? guard(() => startingLoop.noticesProjected ?? null) : null;
-    } else if (current?.sessionDir) {
-      notices = guard(() => projectNotices(read(path.join(current.sessionDir, "loop-state.json")).notices));
+    } else if (loopState) {
+      notices = projectNotices(loopState.notices);
     }
     if (publicState === "pausing" && session) {
       pausing = { since: stateSince, waitingFor: guard(() => session.loop.pauseProgress ?? null) };
