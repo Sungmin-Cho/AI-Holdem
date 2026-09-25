@@ -778,6 +778,7 @@ export function exitCodeFor(error) {
 }
 
 export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+const UPPER_UNAVAILABLE_NOTICE = '상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.';
 const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
   ({questionVersion, candidateVersion, projectionVersion, ...(selectionVersion ? {selectionVersion} : {})});
 
@@ -2032,22 +2033,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopRequested) startAdapterDisposal(adapter);
   };
 
-  const createCanaryAndResolve = async (need) => {
-    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+  const invokeResolverWithCanary = async (need) => {
     const canaryAbsPath = path.join(root, `.runtime-canary-${randomUUID()}`);
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(canaryAbsPath, `SIDECAR_CANARY_${randomBytes(24).toString('hex')}`);
     canaries.add(canaryAbsPath);
-    const invocation = Promise.resolve().then(() => resolver({
-      need,
-      canaryAbsPath,
-      registerAdapter,
-      lockRoot,
-      onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
-        bootProbe = { tier, runtime, round, ok, elapsedMs };
-        if (ok !== null) log('runtime-probe', bootProbe);
-      },
-    }));
+    try {
+      return await Promise.resolve().then(() => resolver({
+        need,
+        canaryAbsPath,
+        registerAdapter,
+        lockRoot,
+        onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
+          bootProbe = { tier, runtime, round, ok, elapsedMs };
+          if (ok !== null) log('runtime-probe', bootProbe);
+        },
+      }));
+    } finally {
+      try { fs.unlinkSync(canaryAbsPath); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      canaries.delete(canaryAbsPath);
+    }
+  };
+
+  const createCanaryAndResolve = async (need) => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const invocation = invokeResolverWithCanary(need);
     resolverPromise = invocation;
     try {
       const resolved = await invocation;
@@ -2055,10 +2067,58 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return resolved;
     } finally {
       if (resolverPromise === invocation) resolverPromise = null;
-      try { fs.unlinkSync(canaryAbsPath); } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
+    }
+  };
+
+  // R2 (design §11.2): a new policy/JEV game opens the table while the upper-model
+  // probe runs. The probe, its merge into loop-state and adapter registration are
+  // one owned promise in `resolverPromise`, so stop, pause and finalization wait
+  // for all of it. Coach and explanation work wait for it before reading
+  // `upperAdapter`; a result that lands after stop is dropped (its adapter still
+  // closes through registerAdapter). Resume keeps the blocking probe: persisted
+  // coach reclaim scans runtime processes and resumed descriptors are already
+  // reserved, so neither may overlap a probe.
+  const startUpperResolveInBackground = () => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const gameEpoch = readLoopState()?.gameEpoch ?? null;
+    const sameLiveGame = () => {
+      if (stopRequested) return false;
+      try { return (readLoopState()?.gameEpoch ?? null) === gameEpoch; } catch { return false; }
+    };
+    const owned = (async () => {
+      let resolved;
+      try {
+        resolved = await invokeResolverWithCanary('upper-only');
+      } catch (error) {
+        if (!sameLiveGame()) return;
+        log('upper-resolve-error', { code: error.code ?? 'ERROR' });
+        resolved = { player: null, upper: null, notices: [UPPER_UNAVAILABLE_NOTICE] };
       }
-      canaries.delete(canaryAbsPath);
+      if (!sameLiveGame()) {
+        registerAdapter(resolved?.upper ?? null);
+        return;
+      }
+      upperAdapter = resolved?.upper ?? null;
+      upperResolved = true;
+      registerAdapter(upperAdapter);
+      const notices = Array.isArray(readLoopState()?.notices) ? [...readLoopState().notices] : [];
+      for (const notice of Array.isArray(resolved?.notices) ? resolved.notices : []) {
+        if (!notices.includes(notice)) notices.push(notice);
+      }
+      writeLoopState({ notices, upperRuntime: upperAdapter?.kind ?? null });
+      log('upper-resolved', { upperRuntime: upperAdapter?.kind ?? null });
+    })();
+    const tracked = owned.finally(() => {
+      if (resolverPromise === tracked) resolverPromise = null;
+    });
+    tracked.catch((error) => log('upper-resolve-merge-error', { code: error?.code ?? 'ERROR' }));
+    resolverPromise = tracked;
+  };
+
+  const settleUpperResolution = async () => {
+    const pending = resolverPromise;
+    if (pending) {
+      try { await pending; } catch { /* the owned promise logs and falls back */ }
     }
   };
 
@@ -3139,6 +3199,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         `${evaluation.evaluationId}:explain`,
         toRunnerHandle(trainingHooks.explain(evaluation)),
       );
+    }
+    if (resolverPromise) {
+      // R2: hold the explanation until the background probe settles. Terminating
+      // while waiting cancels the call before any child starts.
+      let cancelled = false;
+      let started = null;
+      const waiting = {
+        promise: settleUpperResolution().then(() => {
+          if (cancelled || stopRequested) return null;
+          started = explainForPipeline(evaluation);
+          return started.promise;
+        }),
+        terminate: async () => {
+          cancelled = true;
+          return started ? started.terminate() : { confirmed: true };
+        },
+      };
+      return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, waiting);
     }
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
       return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
@@ -4845,6 +4923,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
     if (coachWorkSuspended()) return;
+    if (resolverPromise) {
+      // R2: finish the background probe first so this hand gets the LLM note, not
+      // the upper-unavailable fallback. The task stays in coachTasks, so a pause
+      // barrier keeps waiting for it exactly like any in-flight coach.
+      await settleUpperResolution();
+      if (stopRequested || finalizationCutoff) return;
+    }
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const upperUsable = upperAdapter && typeof upperAdapter.oneshotStart === 'function';
@@ -6537,6 +6622,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         'finalize는 finalizing phase에서만 실행할 수 있습니다.',
       );
     }
+    // R2: a background probe settles before any finalization budget starts.
+    await settleUpperResolution();
+    if (stopRequested) return readLoopState();
     // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
     // 번만 정한다. finalizing resume은 begin-owner 전에 이미 같은 값을 설치한다.
     const {
@@ -6898,7 +6986,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (drained.userAction && !drained.userAction.timeout) out = await handleUserTurn(drained);
     }
-    await Promise.allSettled([...coachTasks, ...trainingTasks, ...auxiliaryTasks]);
+    await Promise.allSettled([
+      ...coachTasks, ...trainingTasks, ...auxiliaryTasks, ...(resolverPromise ? [resolverPromise] : []),
+    ]);
     if (stopRequested) return out;
     if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
       pauseRequested = false;
@@ -7493,8 +7583,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           appendNotice(notice);
         }
       }
-      markBootStage('runtime-probe');
-      const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
+      const backgroundUpper = opponentRuntimeOf() !== 'llm';
+      let resolved = null;
+      if (!backgroundUpper) {
+        markBootStage('runtime-probe');
+        resolved = await createCanaryAndResolve('player+upper');
+      }
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
       const notices = [
@@ -7506,7 +7600,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // 하지 않아 평가가 왜 비어 있는지 알 길이 없었다.
         ...(trainingOn ? [] : ['이 세션은 레거시 --game-dir라 training이 꺼져 있습니다. 학습 평가를 남기려면 --store-dir로 시작하세요.']),
       ];
-      selectAdapters(resolved ?? {});
+      if (resolved) selectAdapters(resolved);
       writeLoopState({
         notices,
         playerRuntime: playerAdapter?.kind ?? null,
@@ -7514,6 +7608,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         opponentRuntime: opponentRuntimeOf(),
       });
       if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
+      if (backgroundUpper) startUpperResolveInBackground();
 
       markBootStage('relay');
       const port = await ensureServer(initialized.sessionToken);
@@ -8112,7 +8207,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await checkArchivePending(out);
       if (out.handOver) {
         const ending = out.gameOver;
-        if (ending) ensureFinalizationResultWaitCutoff();
+        if (ending) {
+          // R2: never let the background probe spend the finalization budget.
+          await settleUpperResolution();
+          if (stopRequested) break;
+          ensureFinalizationResultWaitCutoff();
+        }
         launchTrainingPipeline(out.handNo);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {

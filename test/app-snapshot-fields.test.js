@@ -51,12 +51,21 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
   const upper = { kind: 'claude', async dispose() {} };
   const stagesAtResolve = [];
   let manager;
+  // Game 1 is a policy game (upper probe in the background); game 2 is an LLM
+  // game, whose probe still blocks the boot screen.
+  const player = { kind: 'claude',
+    async warmup({ playerId }) { return { sessionId: `session-${playerId}`, raw: 'ready' }; },
+    async decide(input) {
+      const decisionId = /decisionId:\s*([^\s]+)/.exec(input.message)?.[1];
+      return { raw: JSON.stringify({ decisionId, action: 'fold' }) };
+    },
+    async dispose() {} };
   const resolver = async ({ onProbe }) => {
     stagesAtResolve.push(manager.snapshot().boot?.stage);
     if (!gate) return { player: null, upper: null, notices: [PREVIOUS_GAME_NOTICE, RAW_SECRET] };
     onProbe?.({ tier: 'upper', runtime: 'claude', round: 0, ok: null, elapsedMs: 0 });
     await gate.promise;
-    return { player: null, upper, notices: [] };
+    return { player, upper, notices: [] };
   };
   const seen = [];
   manager = createSessionManager({ storeDir, resolver, onChange: (snap) => seen.push(snap) });
@@ -65,9 +74,10 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
 
   // Game 1: resolver returns an operator notice plus one that must never leak.
   await run(manager, 'start', { setup });
-  await until(() => manager.snapshot().state === 'playing', 'game 1 playing');
+  await until(() => manager.snapshot().state === 'playing' && manager.snapshot().upperStatus !== 'probing', 'game 1 playing');
   const first = manager.snapshot();
-  assert.deepEqual(stagesAtResolve, ['runtime-probe'], 'the resolver runs inside the runtime-probe stage');
+  assert.equal(stagesAtResolve.length, 1);
+  assert.notEqual(stagesAtResolve[0], 'runtime-probe', 'a policy game skips the blocking probe stage');
   assert.equal(manager.session.loop.bootStage.stage, 'ready');
   assert.ok(Date.parse(manager.session.loop.bootStage.startedAt) <= Date.parse(manager.session.loop.bootStage.stageAt));
   assert.equal(first.boot, null, 'boot is only present while starting');
@@ -92,12 +102,13 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
   let release;
   gate = { promise: new Promise((resolve) => { release = resolve; }) };
   seen.length = 0;
-  const body = { ...cas(manager, 'start'), setup };
+  const body = { ...cas(manager, 'start'), setup: { ...setup, aiCount: 1, opponentRuntime: 'llm' } };
   assert.equal(manager.command(body).status, 'accepted');
   const probing = await until(() => {
     const snap = manager.snapshot();
     return snap.state === 'starting' && snap.boot?.stage === 'runtime-probe' && snap.boot.probe ? snap : null;
   }, 'runtime-probe stage');
+  assert.equal(stagesAtResolve.at(-1), 'runtime-probe', 'an LLM game resolves inside the runtime-probe stage');
   assert.deepEqual(probing.boot.probe, { tier: 'upper', runtime: 'claude', round: 0, ok: null, elapsedMs: 0 });
   assert.equal(typeof probing.boot.startedAt, 'string');
   assert.ok(Date.parse(probing.boot.stageAt) >= Date.parse(probing.boot.startedAt));
@@ -113,7 +124,7 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
   const second = manager.snapshot();
   assert.equal(second.boot, null);
   assert.equal(second.upperStatus, 'ready');
-  assert.deepEqual(second.notices.items, []);
+  assert.deepEqual(second.notices.items.filter((item) => item.code === 'RUNTIME_CONTAINMENT_FAILED'), []);
   const stages = seen.filter((snap) => snap.state === 'starting').map((snap) => snap.boot.stage);
   assert.equal(stages[0], 'preparing');
   await run(manager, 'pause');
