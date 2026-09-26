@@ -188,3 +188,23 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
   body.has-game #notices-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
 }
+
+/* Help and display settings (design §3.4, §10.4). */
+.help-menu { position: relative; }
+.help-menu__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 160px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-card);
+  background: var(--c-surface-1);
+  box-shadow: var(--sh-3);
+}
+.help-menu__list[hidden] { display: none; }
+.help-menu__list .ui-btn { justify-content: flex-start; }
+.lobby-first { margin: var(--sp-1) 0 0; }
+.lobby-first .ui-btn { padding: 0; min-height: 32px; color: var(--c-info-text); }

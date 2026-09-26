@@ -27,7 +27,9 @@
       <span id="status" role="status" class="app-status">연결 중</span
       ><button id="menu" class="ui-btn ui-btn--ghost" hidden>일시정지 · 메뉴</button
       ><button id="interrupt-decision" class="ui-btn ui-btn--danger" hidden>이 결정 중단</button
-      ><button id="study" class="ui-btn ui-btn--quiet">학습 열기 ↗</button>
+      ><button id="study" class="ui-btn ui-btn--quiet">학습 열기 ↗</button
+      ><div class="help-menu"><button type="button" id="help-menu" class="ui-btn ui-btn--quiet" aria-expanded="false" aria-controls="help-menu-list">도움말·설정</button
+        ><div id="help-menu-list" class="help-menu__list" hidden><button type="button" id="open-help" class="ui-btn ui-btn--quiet">도움말</button><button type="button" id="open-display-settings" class="ui-btn ui-btn--quiet">표시 설정</button></div></div>
     </header>
     <main id="setup" class="lobby-setup">
       <form id="setup-form" class="lobby-grid" novalidate>
@@ -35,6 +37,7 @@
           <div class="lobby-intro">
             <h1 class="ui-h1">게임 시작</h1>
             <p class="ui-muted">모드와 AI 플레이어 수를 선택하세요. 실제 금전을 사용하지 않는 연습 게임입니다.</p>
+            <p class="lobby-first"><button type="button" id="open-rules" class="ui-btn ui-btn--quiet">처음이신가요? 규칙 둘러보기</button></p>
           </div>
           <fieldset class="lobby-section">
             <legend class="ui-label">게임 방식</legend>
@@ -169,7 +172,7 @@
               </section>
               <section id="llm-settings" class="detail-group" aria-labelledby="group-wait" hidden>
                 <h2 id="group-wait" class="ui-eyebrow">AI 응답 대기</h2>
-                <p class="ui-help">원격 AI 모드는 응답을 기다립니다. JEV 모드는 각 AI의 자기 패와 공개 플레이 정보를 TypeSafe AI로 전송합니다.</p>
+                <p class="ui-help" id="jev-transfer-help">원격 AI 모드는 응답을 기다립니다. JEV 모드는 각 AI의 자기 패와 공개 플레이 정보를 TypeSafe AI로 전송합니다.</p>
                 <div class="detail-fields">
                   <label class="ui-field"><span class="ui-label">오래 기다림 알림 (ms)</span><input class="ui-input ui-num" name="playerSoftMs" type="number" min="1" value="25000" /></label>
                   <label class="ui-field"><span class="ui-label">AI 호출 최대 대기 (ms)</span><input class="ui-input ui-num" name="playerHardMs" type="number" min="2" max="3600000" value="300000" /></label>

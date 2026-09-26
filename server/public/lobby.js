@@ -4,6 +4,8 @@ import {formatAmount, readPreference} from './chip-format.js';
 import { uuid } from './uuid.js';
 import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
+import { openHelp, helpButton } from './help-panel.js';
+import { openDisplaySettings } from './display-settings.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -399,6 +401,20 @@ function paintNotices() {
 window.addEventListener("storage", (event) => {
   if (event.key === "holdem.display-unit.v1" && document.body.classList.contains("has-game")) paintContext(shellBridge.context);
 });
+// The same choice made in this document's display settings.
+window.addEventListener("holdem:display-unit", () => {
+  if (document.body.classList.contains("has-game")) paintContext(shellBridge.context);
+});
+// Help and display settings: a small disclosure menu in the header.
+const helpMenu = $("help-menu"), helpList = $("help-menu-list");
+const setHelpMenu = (open) => { helpList.hidden = !open; helpMenu.setAttribute("aria-expanded", String(open)); };
+helpMenu.onclick = () => setHelpMenu(helpList.hidden);
+helpList.addEventListener("keydown", (event) => { if (event.key === "Escape") { setHelpMenu(false); helpMenu.focus(); } });
+document.addEventListener("click", (event) => { if (!helpList.hidden && !event.target.closest(".help-menu")) setHelpMenu(false); });
+$("open-help").onclick = () => { setHelpMenu(false); openHelp("rules"); };
+$("open-display-settings").onclick = () => { setHelpMenu(false); openDisplaySettings(); };
+$("open-rules").onclick = () => openHelp("rules");
+$("jev-transfer-help").append(helpButton("privacy", "외부 전송"));
 $("notices-toggle").onclick = () => {
   const open = $("notices-toggle").getAttribute("aria-expanded") !== "true";
   try { sessionStorage.setItem(`holdem.notices.v1:${snapshot?.gameId ?? "lobby"}`, open ? "open" : "closed"); } catch { /* per-tab only */ }

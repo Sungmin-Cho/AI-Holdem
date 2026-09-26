@@ -7,6 +7,9 @@ import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, me
 import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
+import { helpButton } from './help-panel.js';
+import { createOnboarding } from './onboarding.js';
+import { DISPLAY_KEYS } from './display-settings.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
@@ -106,6 +109,15 @@ function playAwardSoon(playerIds) {
   if (painting) pendingAward = playerIds;
   else motion.playAward(playerIds, { table: $('table') });
 }
+// First-turn guide: a card at the top of the side panel, outlines only.
+const onboarding = createOnboarding({
+  container: () => document.querySelector('aside.side'),
+  targets: {
+    seat: () => document.querySelector('.seat.is-hero .plate'),
+    actions: () => $('action-bar'),
+    side: () => document.querySelector('.side .tabs'),
+  },
+});
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -1474,6 +1486,10 @@ function paintFrame() {
     if (!keepingMotion) motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
     motionFrame = frame;
   }
+  onboarding.offer({
+    myTurn: !ui.sessionEnded && !spectator && Boolean(view?.legal) && view.legal.toAct === viewerId(view),
+    deadline: Boolean(ui.turnDeadline),
+  });
 }
 
 function upsertHandReplays(rows, replace) {
@@ -1737,6 +1753,26 @@ document.addEventListener('keydown', (ev) => {
   else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) toggleReplayPlayback();
   else return;
   ev.preventDefault();
+});
+// ⓘ beside the notices that the help drawer explains.
+$('learning-scope')?.after(helpButton('learning', '학습 수치의 의미'));
+$('replay-disclaimer')?.after(helpButton('privacy', '복기 공개 범위'));
+// Esc ends the first-turn guide when no dialog is open.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !onboarding.active || dialogs.active || document.querySelector('dialog[open]')) return;
+  onboarding.skip();
+});
+// Display settings changed here or in another document of this origin.
+const followUnit = (value) => {
+  displayUnit = value === 'chips' ? 'chips' : 'bb';
+  if ($('display-unit')) $('display-unit').value = displayUnit;
+  paint();
+};
+window.addEventListener('holdem:display-unit', (ev) => followUnit(ev.detail));
+window.addEventListener('holdem:onboarding-reset', () => onboarding.reset());
+window.addEventListener('storage', (ev) => {
+  if (ev.key === 'holdem.display-unit.v1') followUnit(readPreference());
+  if (ev.key === DISPLAY_KEYS.onboarding && ev.newValue === null) onboarding.reset();
 });
 $('replay-close')?.addEventListener('click', () => {
   closeReplay();

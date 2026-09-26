@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -61,7 +61,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     writeSecurityFixtures(workspace.root,{players:fixturePlayers,hands:[historical,handRecordFixture(2),settledHand,fullHand,sixHand],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js','help-panel.js','display-settings.js','onboarding.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
@@ -69,6 +69,17 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       assert.ok(view.legal);
       await publish(dealt.events);
       await browser(['open',`${origin}/?token=${token}`]);await ready();
+      if(!checks.includes('onboarding')) {
+        // First turn in this browser: the guide sits in the side panel, outlines the
+        // seat, leaves focus alone, ends on Esc and does not come back.
+        const guide=await evaluate("(()=>{const card=document.querySelector('aside.side .onboarding-card');return {card:!!card,inCard:!!card&&card.contains(document.activeElement),seat:!!document.querySelector('.seat.is-hero .plate.onboarding-focus'),step:card?.querySelector('.onboarding-count')?.textContent}})()");
+        assert.ok(guide.card&&!guide.inCard&&guide.seat&&guide.step==='처음 안내 1 / 3',JSON.stringify(guide));
+        await browser(['press','Escape']);
+        assert.equal(await evaluate("!!document.querySelector('.onboarding-card')||!!document.querySelector('.onboarding-focus')"),false);
+        await browser(['reload']);await ready();
+        assert.equal(await evaluate("!!document.querySelector('.onboarding-card')"),false,'seen once per browser');
+        checks.push('onboarding');
+      }
       for(const width of ci?[390,1440]:[360,390,768,1024,1440]) {
         await browser(['set','viewport',String(width),'900']);await browser(['snapshot','-i']);
         const metrics=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,size:parseFloat(getComputedStyle(n.querySelector('.amount-primary')).fontSize)}});const overlaps=[];for(let i=0;i<plates.length;i++)for(let j=i+1;j<plates.length;j++){const a=plates[i],b=plates[j];if(a.x<b.x+b.w-1&&a.x+a.w>b.x+1&&a.y<b.y+b.h-1&&a.y+a.h>b.y+1)overlaps.push([i,j]);}return {width:innerWidth,scroll:document.documentElement.scrollWidth,plates,overlaps};})()`);
@@ -362,6 +373,22 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       await browser(['press','Escape']);
     }
     checks.push('replay-crowded-layout');
+    // Help drawer from the learning notice's ⓘ, and the display settings from it.
+    await evaluate("document.querySelector('#learning-scope + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    assert.equal(await evaluate("document.activeElement?.id"),'help-learning-title');
+    await evaluate("document.querySelector('.help-display-open').click()");
+    await browser(['wait','#display-settings[open]']);
+    await evaluate("document.querySelector('#display-settings input[name=display-theme][value=c]').click()");
+    assert.equal(await evaluate("document.documentElement.dataset.theme"),'c');
+    await evaluate("document.querySelector('#display-settings input[name=display-theme][value=b]').click()");
+    assert.equal(await evaluate("!document.documentElement.hasAttribute('data-theme')"),true);
+    // Closed with their buttons: Esc on a native dialog under viewport emulation
+    // can hang headless Chrome (a harness issue; the dialog's own Esc still works).
+    await evaluate("document.querySelector('#display-settings .display-close').click()");
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.equal(await evaluate("!document.querySelector('dialog[open]')"),true);
+    checks.push('help-display');
     await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {
