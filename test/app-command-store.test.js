@@ -393,6 +393,12 @@ test(
   async (t) => {
     const root = createOwnedTempDir("lobby-bootstrap-failure");
     let fail = true;
+    // An LLM game still blocks on the runtime probe, so a probe failure fails
+    // bootstrap. (Policy games probe the upper model in the background and fall
+    // back instead of failing.)
+    const player = { kind: "fake",
+      async warmup({ playerId }) { return { sessionId: `session-${playerId}`, raw: "ready" }; },
+      async decide() { return { raw: "invalid" }; }, async dispose() {} };
     const manager = createSessionManager({
       storeDir: root,
       resolver: async () => {
@@ -400,12 +406,12 @@ test(
           throw Object.assign(new Error("probe failure"), {
             code: "NO_PLAYER_RUNTIME",
           });
-        return resolver();
+        return { player, upper: null, notices: [] };
       },
     });
     t.after(() => manager.close());
     await manager.initialize();
-    const start = { ...payload(manager), setup: { aiCount: 1 } };
+    const start = { ...payload(manager), setup: { aiCount: 1, opponentRuntime: "llm" } };
     manager.command(start);
     assert.equal((await settle(manager, start.requestId)).status, "failed");
     assert.ok(manager.snapshot().gameId);

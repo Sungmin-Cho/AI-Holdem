@@ -1,167 +1,179 @@
-:root {
-  color-scheme: dark;
-  font-family: system-ui, sans-serif;
-  background: #10211e;
-  color: #edf4ef;
-}
-* {
-  box-sizing: border-box;
-}
-body {
-  margin: 0;
-}
-header {
+/*
+  Host lobby shell: header, setup, boot screen, status card, online session and
+  the embedded table. Components come from ui-base.css; colours only from the
+  semantic tokens in design-tokens.css.
+*/
+
+/* ---- Header ------------------------------------------------------------- */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-floating);
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 16px 24px;
-  border-bottom: 1px solid #36554a;
+  gap: var(--sp-3);
+  min-height: 56px;
+  padding: var(--sp-2) var(--sp-6);
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-bg);
 }
-header strong {
-  margin-right: auto;
-}
-button,
-select,
-input {
-  font: inherit;
-}
-button {
-  background: #d6c18b;
-  color: #17251e;
-  border: 0;
-  border-radius: 8px;
-  padding: 12px 18px;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.45;
-  cursor: wait;
-}
-button:focus-visible,
-input:focus-visible,
-select:focus-visible {
-  outline: 3px solid #7bdec0;
-  outline-offset: 3px;
-}
-main,
-#result {
-  max-width: 780px;
-  margin: 40px auto;
-  padding: 0 24px;
-}
-fieldset {
-  border: 1px solid #4c685c;
-  border-radius: 12px;
-  margin-bottom: 24px;
-  padding: 20px;
-}
-label {
-  display: block;
-  margin: 12px 0;
-}
-small {
-  display: block;
-  margin: 5px 25px;
-  color: #abc2b4;
-}
-input:not([type="radio"]):not([type="checkbox"]),
-select {
-  padding: 8px;
-  border: 1px solid #587568;
-  border-radius: 5px;
-  margin-left: 12px;
-  background: #1a3128;
-  color: inherit;
-  max-width: 200px;
-}
-details {
-  margin: 24px 0;
-  padding: 20px;
-  background: #1a3029;
-  border-radius: 12px;
-}
-p {
-  color: #b4c8be;
-  line-height: 1.6;
-}
-dialog {
-  background: #19352b;
-  color: #edf4ef;
-  border: 1px solid #628874;
-  border-radius: 16px;
-  max-width: 470px;
-  padding: 28px;
-}
-dialog::backdrop {
-  background: #0009;
-}
-dialog button {
-  display: block;
-  width: 100%;
-  margin: 12px 0;
-}
-#game iframe {
-  width: 100%;
-  height: calc(100dvh - 80px);
-  border: 0;
-}
-#error {
-  color: #ffb5aa;
-  margin: 16px 24px;
-}
-[hidden] {
-  display: none !important;
-}
-@media (max-width: 600px) {
-  header {
-    padding: 10px;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  header button {
-    font-size: 13px;
-    padding: 9px;
-  }
-  main {
-    margin: 24px auto;
-  }
-  h1 {
-    font-size: 25px;
-  }
-  #status {
-    font-size: 13px;
-  }
-}
+.brand { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-16); white-space: nowrap; }
+.brand svg { width: 20px; height: 20px; fill: var(--c-info); flex: none; }
+.header-spacer { flex: 1; }
+.shell-context { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); color: var(--c-text-2); font-size: var(--fs-13); min-width: 0; }
+.shell-context .ui-num { color: var(--c-text); }
+.app-status { color: var(--c-text-2); font-size: var(--fs-13); font-weight: 600; white-space: nowrap; }
+.app-header .ui-btn { min-height: 40px; }
 
-/* Keep the original lobby theme with the embedded game filling its viewport. */
-body.has-game {height:100dvh;display:flex;flex-direction:column;}
-body.has-game > header {flex:none;}
-body.has-game #game {flex:1;min-height:240px;}
-body.has-game #game iframe {display:block;height:100%;min-height:240px;}
-.setup-summary {border-left:2px solid #d6c18b;padding:0 16px;margin:24px 0;}
-.setup-summary p {margin:6px 0;}
-#setup-assistance {font-size:13px;}
-@media(max-width:600px) {
-  header {gap:10px;padding:12px;flex-wrap:wrap;}
-  main,#result {margin:24px auto;padding:0 16px;}
-  input:not([type=radio]):not([type=checkbox]),select {max-width:100%;}
+/* ---- Notices banner ------------------------------------------------------ */
+.notices { max-width: 1120px; margin: var(--sp-4) auto 0; padding: 0 var(--sp-6); }
+.notices__toggle {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-height: 36px; padding: 0 var(--sp-3);
+  border: 1px solid var(--c-control-border); border-radius: var(--r-pill);
+  background: var(--c-surface-1); color: var(--c-text-2); font-weight: 600; cursor: pointer;
 }
-@media(prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;}}
-body.has-game > #error:empty {display:none;}
-@media(min-width:1024px) {
-  body.has-game > header {padding:6px 16px;gap:12px;}
-  body.has-game > header button {padding:6px 12px;min-height:32px;}
+.notices[data-level="error"] .notices__toggle, .notices[data-level="warn"] .notices__toggle { border-color: var(--c-danger-border); color: var(--c-danger); }
+.notices__list { list-style: none; margin: var(--sp-2) 0 0; padding: var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-card); background: var(--c-surface-1); }
+.notices__list li { display: flex; gap: var(--sp-2); align-items: baseline; color: var(--c-text); }
+.notices__list li::before { content: ""; width: 6px; height: 6px; margin-top: 7px; border-radius: 50%; background: var(--c-info); flex: none; }
+.notices__list li[data-level="warn"]::before, .notices__list li[data-level="error"]::before { background: var(--c-danger); }
+.notices__list li[data-kind="diagnostic"] { color: var(--c-text-2); }
+
+/* ---- Setup --------------------------------------------------------------- */
+.lobby-setup { max-width: 1120px; margin: 0 auto; padding: var(--sp-8) var(--sp-6) var(--sp-12); }
+.lobby-grid { display: grid; gap: var(--sp-6); align-items: start; }
+.lobby-main, .lobby-side { display: grid; gap: var(--sp-6); min-width: 0; }
+.lobby-intro { display: grid; gap: var(--sp-2); }
+.lobby-section { margin: 0; padding: 0; border: 0; min-width: 0; display: grid; gap: var(--sp-3); }
+.lobby-section > legend { padding: 0; margin-bottom: var(--sp-3); }
+.choice-grid { display: grid; gap: var(--sp-3); }
+.field-pair { grid-template-columns: minmax(0, 1fr); }
+.seat-preview { display: flex; align-items: center; gap: var(--sp-3); }
+.seat-dots { width: 120px; height: 64px; flex: none; }
+.seat-dots .felt { fill: var(--c-surface-2); stroke: var(--c-line-strong); }
+.seat-dots .seat { fill: var(--c-text-3); }
+.seat-dots .seat.me { fill: var(--c-action); }
+.opponent-help { padding: var(--sp-3) var(--sp-4); border-radius: var(--r-card); background: var(--c-surface-1); border: 1px solid var(--c-line); }
+.lobby-details .ui-accordion__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.detail-group { display: grid; gap: var(--sp-3); }
+/* The pace select keeps its bare markup (pinned by a contract test). */
+select[name="pace"] {
+  width: 100%; min-height: var(--tap); padding: 0 36px 0 var(--sp-3);
+  border: 1px solid var(--c-control-border); border-radius: var(--r-control);
+  background: var(--c-surface-2); color: var(--c-text);
+  appearance: none; -webkit-appearance: none;
 }
+.detail-fields { display: grid; gap: var(--sp-4); grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 
-/* Join page: while a game is on, the participant table fills the viewport like the host lobby. */
-#table {width:100%;height:calc(100dvh - 80px);border:0;}
-body.has-game > main {flex:1;min-height:0;max-width:none;margin:0;padding:0;display:flex;flex-direction:column;}
-body.has-game > main > h1 {display:none;}
-body.has-game .join-intro,#ai-provider:empty {display:none;}
-body.has-game #ai-provider {flex:none;margin:4px 0;padding:0 16px;font-size:13px;}
-body.has-game #join-error:empty {display:none;}
-body.has-game #playing {flex:1;min-height:240px;display:flex;flex-direction:column;overflow:auto;-webkit-overflow-scrolling:touch;}
-body.has-game #pause-banner {flex:none;margin:0;padding:10px 16px;}
-body.has-game #table {display:block;flex:1;height:100%;min-height:240px;}
+.summary-card { padding: var(--sp-5); display: grid; gap: var(--sp-4); }
+.setup-summary { display: grid; gap: var(--sp-2); }
+#setup-summary { font-size: var(--fs-16); font-weight: 600; line-height: 1.45; }
+#setup-assistance:empty { display: none; }
 
-body.has-game #result{max-width:none;margin:0;padding:.65rem 1rem;border-bottom:1px solid #4c685c;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem}body.has-game #result[hidden]{display:none}body.has-game #result h1,body.has-game #result h2,body.has-game #result p{margin:0;font-size:.9rem}
+.online-card { margin: 0; padding: var(--sp-5); display: grid; gap: var(--sp-4); min-width: 0; }
+.online-card > legend { float: left; width: 100%; padding: 0; }
+.online-fields { display: grid; gap: var(--sp-3); }
+.room-panel { display: grid; gap: var(--sp-3); padding-top: var(--sp-2); border-top: 1px solid var(--c-line); }
+.invite { display: flex; gap: var(--sp-4); align-items: center; justify-content: space-between; }
+.invite__code { display: grid; gap: var(--sp-1); min-width: 0; }
+.join-code { font-size: var(--fs-22); font-weight: 700; letter-spacing: 0.06em; line-height: 1.2; white-space: nowrap; }
+#room-status { justify-self: start; }
+.invite__qr { width: 132px; flex: none; }
+.invite__qr:empty { display: none; }
+.invite__qr svg { display: block; width: 100%; height: auto; border-radius: var(--r-control); }
+.invite__qr .qr-bg { fill: var(--c-card-face); }
+.invite__qr .qr-fg { fill: var(--c-suit-s); }
+.join-links { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); font-family: var(--f-num); font-size: var(--fs-13); color: var(--c-text-2); overflow-wrap: anywhere; }
+.invite__actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.people { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
+.people li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.people li .ui-btn { min-height: 36px; padding: 0 var(--sp-3); font-size: var(--fs-13); }
+.people:empty { display: none; }
+
+/* ---- Boot screen --------------------------------------------------------- */
+.boot { max-width: 560px; margin: 10vh auto var(--sp-12); padding: 0 var(--sp-6); }
+.boot__card { padding: var(--sp-8); display: grid; gap: var(--sp-5); }
+.boot__meta { display: flex; gap: var(--sp-2); align-items: baseline; }
+#boot-probe:not(:empty)::before { content: " · "; }
+.ui-steps > li[hidden] { display: none; }
+
+/* ---- Status card and result action bar ----------------------------------- */
+.status-card {
+  max-width: 640px; margin: var(--sp-12) auto; padding: var(--sp-6);
+  display: grid; gap: var(--sp-5);
+  border: 1px solid var(--c-line); border-radius: var(--r-panel); background: var(--c-surface-1);
+}
+.status-card__text { display: grid; gap: var(--sp-2); }
+.status-card__actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.seat-management { max-width: 640px; margin: 0 auto var(--sp-8); padding: var(--sp-5); display: grid; gap: var(--sp-3); }
+
+/* ---- Dialog copy ---------------------------------------------------------- */
+.dialog-message { margin-bottom: var(--sp-5); color: var(--c-text-2); }
+
+.lobby-error { max-width: 1120px; margin: var(--sp-4) auto; padding: 0 var(--sp-6); color: var(--c-danger); }
+.lobby-error:empty { display: none; }
+
+/* ---- Embedded table ------------------------------------------------------- */
+#game iframe { width: 100%; height: calc(100dvh - 80px); border: 0; }
+.live-observers { padding: var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--c-line); background: var(--c-surface-1); }
+.live-observers > summary { cursor: pointer; font-weight: 600; color: var(--c-text-2); min-height: 32px; display: flex; align-items: center; }
+.live-observers[open] { display: grid; gap: var(--sp-2); }
+
+/* The game view fills the viewport under the header; the result bar sits at
+   the bottom so the table keeps its height. */
+body.has-game { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+body.has-game > header { flex: none; position: static; }
+body.has-game #game { flex: 1; min-height: 240px; display: flex; flex-direction: column; }
+body.has-game #game iframe { display: block; flex: 1; height: 100%; min-height: 240px; }
+body.has-game #table { display: block; }
+body.has-game > .notices { flex: none; max-width: none; margin: 0; padding: var(--sp-1) var(--sp-4); border-bottom: 1px solid var(--c-line); }
+body.has-game > .notices .notices__list { position: absolute; z-index: var(--z-floating); width: max-content; max-width: min(560px, calc(100vw - 32px)); box-shadow: var(--sh-2); }
+/* On wide screens the in-game notices chip rides in the header row next to the
+   brand instead of taking a row of table height. */
+body.has-game > .notices { position: absolute; top: 10px; left: 136px; z-index: var(--z-floating); padding: 0; border: 0; background: none; }
+#boot-title:focus { outline: none; }
+.field-error { margin: 0; }
+body.has-game > #error:empty { display: none; }
+body.has-game > .lobby-error { flex: none; margin: 0; padding: var(--sp-1) var(--sp-4); max-width: none; }
+body.has-game #result {
+  order: 10; flex: none;
+  max-width: none; margin: 0; padding: var(--sp-3) var(--sp-4);
+  border: 0; border-top: 1px solid var(--c-line-strong); border-radius: 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4);
+}
+body.has-game #result[hidden] { display: none; }
+body.has-game #result .status-card__text { flex: 1 1 240px; gap: 0; }
+body.has-game #result h1 { font-size: var(--fs-16); }
+body.has-game #result p { font-size: var(--fs-13); }
+body.has-game #result .ui-btn { min-height: 40px; }
+body.has-game .seat-management { order: 11; flex: none; max-width: none; max-height: 40vh; overflow: auto; margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
+
+/* ---- Responsive ------------------------------------------------------------ */
+@media (min-width: 560px) {
+  .choice-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-pair { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+}
+@media (min-width: 1024px) {
+  .lobby-grid { grid-template-columns: minmax(0, 1fr) 360px; }
+  .lobby-side { position: sticky; top: 80px; }
+}
+@media (max-width: 767px) {
+  .app-header { padding: var(--sp-2) var(--sp-4); gap: var(--sp-2); flex-wrap: wrap; }
+  .app-header .ui-btn { min-height: var(--tap); padding: 0 var(--sp-3); font-size: var(--fs-13); }
+  .brand strong { font-size: var(--fs-14); }
+  .lobby-setup { padding: var(--sp-6) var(--sp-4) var(--sp-10); }
+  .notices, .lobby-error, .boot { padding: 0 var(--sp-4); }
+  .boot__card { padding: var(--sp-6); }
+  .status-card { margin: var(--sp-6) var(--sp-4); }
+  .invite { flex-direction: column; align-items: flex-start; }
+  /* In-game header on phones: one 52px row — spade, notice count, then the
+     controls. Brand text, status text and chip labels stay for screen readers. */
+  body.has-game > .app-header { flex-wrap: nowrap; min-height: 52px; padding: var(--sp-1) var(--sp-3); gap: var(--sp-2); }
+  body.has-game .brand strong,
+  body.has-game .app-status,
+  body.has-game .coach-chip__text,
+  body.has-game #notices-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  body.has-game > .notices { top: 8px; left: 40px; }
+  body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
+}
