@@ -50,7 +50,9 @@ export function createMotionPlayer({ doc = globalThis.document, enabled = () => 
 
   function animate(node, keyframes, options) {
     if (typeof node?.animate !== 'function') return null;
-    const animation = node.animate(keyframes, { easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'none', ...options });
+    // A delayed start holds its first frame (fill backwards) instead of showing
+    // the final state and then jumping back to the start.
+    const animation = node.animate(keyframes, { easing: 'cubic-bezier(.2,.7,.2,1)', fill: options.delay ? 'backwards' : 'none', ...options });
     running.push(animation);
     animation.finished?.then(() => { running = running.filter((item) => item !== animation); }, () => {});
     return animation;

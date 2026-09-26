@@ -10,13 +10,14 @@ function amountFormat(view){
 }
 // One series (the viewer's running total): no legend, a zero baseline, the end
 // value labelled, and every hand a focusable point with its own name.
-function paintChart(container,series,fmt){
+function paintChart(container,series,fmt,replay=null){
   const width=320,height=120,padding=12,points=graphPoints(series,{width,height,padding});
   if(!points.length)return;
   const values=series.map(row=>row.value),lo=Math.min(0,...values),hi=Math.max(0,...values),span=hi-lo||1;
   const zeroY=height-padding-(0-lo)/span*(height-2*padding);
   const figure=node('figure',undefined,'final-chart-figure');
-  const svg=svgNode('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':`완료 ${series.length}핸드 누적 증감 그래프 · 최종 ${fmt.signed(series.at(-1).value)}`});
+  // A group (not an image) so each focusable point keeps its own name.
+  const svg=svgNode('svg',{viewBox:`0 0 ${width} ${height}`,role:'group','aria-label':`완료 ${series.length}핸드 누적 증감 그래프 · 최종 ${fmt.signed(series.at(-1).value)}`});
   svg.classList.add('final-chart');
   svg.append(svgNode('line',{x1:padding,x2:width-padding,y1:zeroY,y2:zeroY,class:'final-chart-zero'}));
   svg.append(svgNode('polyline',{points:points.map(p=>`${p.x},${p.y}`).join(' '),class:'final-chart-line'}));
@@ -24,8 +25,11 @@ function paintChart(container,series,fmt){
   const show=index=>{const row=series[index],point=points[index];tip.textContent=`핸드 ${row.handNo} · 누적 ${fmt.signed(row.value)}`;tip.hidden=false;tip.style.left=`${point.x/width*100}%`;tip.style.top=`${point.y/height*100}%`;};
   const hide=()=>{tip.hidden=true;};
   points.forEach((point,index)=>{
-    const dot=svgNode('circle',{cx:point.x,cy:point.y,r:4,class:'final-chart-dot',tabindex:0,'aria-label':`핸드 ${series[index].handNo} 누적 ${fmt.signed(series[index].value)}`});
+    const handNo=series[index].handNo,opens=replay?.can(handNo)===true;
+    const dot=svgNode('circle',{cx:point.x,cy:point.y,r:4,class:'final-chart-dot',tabindex:0,role:opens?'button':'img','aria-label':`핸드 ${handNo} 누적 ${fmt.signed(series[index].value)}${opens?' · 복기 열기':''}`});
     dot.addEventListener('focus',()=>show(index));dot.addEventListener('blur',hide);
+    // A point opens that hand's replay (click or Enter/Space) when it has one.
+    if(opens){dot.addEventListener('click',()=>replay.open(handNo));dot.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();replay.open(handNo);}});}
     svg.append(dot);
   });
   const last=points.at(-1);
@@ -66,7 +70,7 @@ export function paintFinalPanel(container,{summary,view,viewer=null,onReplay=nul
   };
   if(viewer) {
     container.append(node('h2','내 요약'));
-    paintChart(container,data.series,fmt);
+    paintChart(container,data.series,fmt,onReplay?{can:handNo=>canReplay(handNo),open:onReplay}:null);
     const cards=node('div',undefined,'final-highlights');
     for(const [label,hand,tone] of [['최고 핸드',data.best,'is-pos'],['최악 핸드',data.worst,'is-neg']]){
       const card=node('div',undefined,`final-highlight ${hand?tone:''}`.trim());

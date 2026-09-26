@@ -247,12 +247,17 @@ function syncTableInert() {
   $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
   $("table-lock-detail").textContent = snapshot.state === 'pausing' ? pauseProgressText(snapshot.pausing) : '';
 }
+// What the pause is waiting for, by kind, and for how long (design §8.1).
 function pauseProgressText(pausing) {
   const w = pausing?.waitingFor ?? {};
-  const training = w.training || (w.evaluate ?? 0) + (w.solve ?? 0) + (w.explain ?? 0);
-  const parts = [w.coach ? `코치 노트 ${w.coach}건` : '', training ? `학습 분석 ${training}건` : '',
-    w.resolver ? 'AI 코치 연결 확인' : '', w.other ? `기타 작업 ${w.other}건` : ''].filter(Boolean);
-  return parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.';
+  const children = (w.explain ?? 0) + (w.evaluate ?? 0) + (w.solve ?? 0);
+  const parts = [w.explain ? `학습 설명 ${w.explain}건` : '', w.evaluate ? `학습 평가 ${w.evaluate}건` : '',
+    w.solve ? `정답 계산 ${w.solve}건` : '', !children && w.training ? `학습 분석 ${w.training}건` : '',
+    w.coach ? `코치 노트 ${w.coach}건` : '', w.resolver ? 'AI 코치 연결 확인' : '',
+    w.other ? `기타 작업 ${w.other}건` : ''].filter(Boolean);
+  const since = Date.parse(pausing?.since ?? '');
+  const elapsed = Number.isFinite(since) ? ` · ${Math.max(0, Math.round((Date.now() - since) / 1000))}초째` : '';
+  return (parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.') + elapsed;
 }
 let refreshFailures=0;
 async function refresh() {

@@ -43,8 +43,10 @@ test('a pause click locks the table until the pause settles, and closing the men
  assert.equal(dom.$('table').inert,true);assert.equal(dom.$('table-lock').hidden,false);
  open=false;context.syncTableInert();assert.equal(dom.$('table').inert,true,'the menu closed while the pause is pending');
  context.snapshot=snap('playing');context.syncTableInert();assert.equal(dom.$('table').inert,true,'a stale playing snapshot does not unlock');
- context.snapshot=snap('pausing',{pausing:{waitingFor:{coach:1,training:2}}});context.render();
- assert.equal(dom.$('table').inert,true);assert.match(dom.$('table-lock-detail').textContent,/코치 노트 1건 · 학습 분석 2건/);
+ context.snapshot=snap('pausing',{pausing:{since:new Date(Date.now()-7000).toISOString(),waitingFor:{coach:1,training:2}}});context.render();
+ assert.equal(dom.$('table').inert,true);assert.match(dom.$('table-lock-detail').textContent,/학습 분석 2건 · 코치 노트 1건 · [67]초째/);
+ context.snapshot=snap('pausing',{pausing:{waitingFor:{training:2,explain:1,solve:1,resolver:true}}});context.render();
+ assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 설명 1건 · 정답 계산 1건 · AI 코치 연결 확인','running children are named by kind');
  assert.equal(dom.$('pause-progress').hidden,false);
  for(const [state,extra] of [['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
   context.pauseLock={gameId:'one',gameEpoch:'epoch'};context.snapshot=snap(state,extra);context.render();
@@ -52,4 +54,21 @@ test('a pause click locks the table until the pause settles, and closing the men
  }
  context.snapshot=snap('finalizing');context.render();assert.equal(dom.$('table').inert,false,'a last-hand pause that lands as finalizing frees the result table');
  assert.equal(dom.$('table-lock').hidden,true);
+});
+
+test('R3: a refused pause unlocks the table, an unanswered one stays locked, a settled one unlocks', async () => {
+ const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,open:false,textContent:'',dataset:{},focus(){}});return nodes.get(id);};
+ let pending=false,send;
+ const lock=()=>({gameId:'g',gameEpoch:'e'});
+ const context={$,busy:false,viewingRecord:false,preparing:null,selecting:false,pauseLock:lock(),
+  snapshot:{instanceId:'i',appRevision:1,gameId:'g',gameEpoch:'e',selectionVersion:1,state:'playing',setup:null},
+  commands:{get pending(){return pending;},send:payload=>send(payload)},uuid:()=>'r1',render(){},refresh:async()=>{},showError(){},openPauseMenu(){}};
+ vm.createContext(context);vm.runInContext(source.slice(source.indexOf('async function command('),source.indexOf('function confirm(fn)')),context);
+ send=async()=>{throw Object.assign(new Error('INVALID_TRANSITION'),{status:409});};
+ await context.command('pause');assert.equal(context.pauseLock,null,'a refusal with a status code is final');
+ context.pauseLock=lock();pending=true;send=async()=>{throw new TypeError('fetch failed');};
+ await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'an unanswered pause (command still stored) stays locked');
+ pending=false;send=async()=>({status:'succeeded'});
+ await context.command('pause');assert.equal(context.pauseLock,null,'a settled pause unlocks (the state keeps the table inert)');
 });

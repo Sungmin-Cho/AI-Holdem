@@ -94,6 +94,14 @@ const motion = createMotionPlayer({ enabled: () => !matchMedia('(prefers-reduced
 let motionInput = { source: 'snapshot', contiguous: false };
 let motionFrame = null;
 let awardBaseline = null;
+// Inside paint() the award waits for paint's own motion.play() (which ends
+// running motion first); the 250ms result repaint plays it at once.
+let painting = false;
+let pendingAward = null;
+function playAwardSoon(playerIds) {
+  if (painting) pendingAward = playerIds;
+  else motion.playAward(playerIds, { table: $('table') });
+}
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -570,8 +578,9 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
   box.hidden=!frame.visible;
   // Pot → winners once, when this hand's held result first shows live (not after a jump, not instant pace).
   const baseline=awardBaseline;awardBaseline={handNo:result?.handNo??null,visible:frame.visible};
-  if(result && baseline && frame.visible && ui.resultHold?.handNo===result.handNo && !(baseline.handNo===result.handNo && baseline.visible))
-    motion.playAward(result.winners.map(row=>row.playerId),{table:$('table')});
+  if(result && baseline && frame.visible && ui.resultHold?.handNo===result.handNo && !(baseline.handNo===result.handNo && baseline.visible)
+    && motionInput.source==='live' && motionInput.contiguous)
+    playAwardSoon(result.winners.map(row=>row.playerId));
   if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;return;}
   if(!frame.visible)return;
   if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
@@ -1312,6 +1321,13 @@ function paintReview(view) {
 }
 
 function paint() {
+  painting = true;
+  try { paintFrame(); }
+  finally { painting = false; }
+  if (pendingAward) { const winners = pendingAward; pendingAward = null; motion.playAward(winners, { table: $('table') }); }
+}
+
+function paintFrame() {
   const view = ui.view;
   ui.handPrior=captureHandPrior(ui.handPrior,{view,log:ui.log,viewer:viewerId(view)});
   ui.handResult=updateHandResult(ui.handResult,{view,log:ui.log,viewer:viewerId(view),prior:ui.handPrior});

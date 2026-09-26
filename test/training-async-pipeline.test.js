@@ -1050,7 +1050,8 @@ test('R1: a pause lets only the running explanation finish; hands waiting on the
   await loop.resumePlay();
   await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
     'held-back explanations did not run after resume', 20_000);
-  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands, undefined);
+  await waitFor(() => readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands === undefined,
+    'the deferred record was not cleared once the hands ran through');
   await loop.requestStop().catch(() => {});
 });
 
@@ -1101,43 +1102,138 @@ test('R1: a solve found while the pause write is in flight waits for resume and 
 
 test('R1: a restart registers the hands a pause held back, and nothing else', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
+  const passing = makeEvaluate();
+  // Hands 1–2 are assessed (their explanations fail, so they stay unsealed);
+  // from hand 3 on the evaluation fails, so the last hand still needs one.
   const first = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
+      training: { evaluate: (dir, handNo) => handNo >= 3 ? handleOf({ ok: false, code: 'EVALUATE_FAILED' }) : passing(dir, handNo), explain: makeExplain({ text: '' }) } },
+  });
+  t.after(() => first.requestStop().catch(() => {}));
+  await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 6, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(first, gameDir, {
+    until: () => (readJson(path.join(gameDir, 'state.json')).lastHand?.handNo ?? 0) >= 3
+      && authorityItems(gameDir).some((item) => item.handNo === 2),
+    timeoutMs: 60_000,
+  });
+  await first.requestStop();
+  // Hand 1 is recorded as held back by a pause; hand 2 is neither held back nor
+  // the last hand (which reconcile re-registers on its own).
+  const items = authorityItems(gameDir);
+  const lastHand = readJson(path.join(gameDir, 'state.json')).lastHand?.handNo;
+  const held = items.filter((item) => item.handNo === 1);
+  const failed = items.filter((item) => item.handNo === 2);
+  assert.ok(lastHand >= 3 && held.length && failed.length, JSON.stringify({ lastHand, hands: items.map((item) => item.handNo) }));
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [1] }));
+  const explained = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
+      // The last hand evaluates first (slowly); held-back hand 1 skips evaluation
+      // and would reach the explain lock first unless it waits for the last hand.
+      training: { evaluate: makeEvaluate({ delayMs: 400 }), explain: (evaluation) => { explained.push(evaluation); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  await resumed.resume();
+  await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
+    'the held-back hand was not registered on restart', 20_000);
+  const ids = explained.map((row) => row.evaluationId);
+  assert.ok(failed.every((item) => !ids.includes(item.evaluationId)), 'a failed explanation is not retried by the restart');
+  const order = explained.map((row) => row.handNo);
+  assert.ok(order.includes(lastHand) && order.indexOf(lastHand) < order.indexOf(1),
+    `the last hand explains before held-back hands: ${JSON.stringify(order)}`);
+  // The record is cleared only once the held-back hand's pipeline has run through.
+  await waitFor(() => readJson(loopPath).trainingDeferredHands === undefined, 'the deferred record was not cleared after completion');
+  await resumed.requestStop().catch(() => {});
+});
+
+test('R1: a paused recovery keeps what it finds queued until play resumes', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
       training: { evaluate: makeEvaluate(), explain: makeExplain({ text: '' }) } },
   });
   t.after(() => first.requestStop().catch(() => {}));
   await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
   putUserOnTheButton(gameDir);
   await playUntil(first, gameDir, {
-    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 3,
-    timeoutMs: 60_000,
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
   });
   await first.requestStop();
-  // Every explanation failed (empty text, unsealed). The first hand with a decision
-  // is recorded as held back by a pause; the second is neither held back nor the
-  // last hand (a third exists), which reconcile re-registers on its own.
-  const items = authorityItems(gameDir);
-  const hands = [...new Set(items.map((item) => item.handNo))].sort((a, b) => a - b);
-  const lastHand = readJson(path.join(gameDir, 'state.json')).lastHand?.handNo;
-  assert.ok(hands.length >= 3 && hands[1] < lastHand, JSON.stringify({ hands, lastHand }));
-  const held = items.filter((item) => item.handNo === hands[0]);
-  const failed = items.filter((item) => item.handNo === hands[1]);
+  const hands = [...new Set(authorityItems(gameDir).map((item) => item.handNo))].sort((a, b) => a - b);
+  const held = authorityItems(gameDir).filter((item) => item.handNo === hands[0]);
   const loopPath = path.join(gameDir, 'loop-state.json');
   fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [hands[0]] }));
   const explained = [];
   const resumed = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
-    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
-      training: { evaluate: makeEvaluate(), explain: makeExplain({ calls: explained }) } },
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, startPaused: true,
+      training: { evaluate: makeEvaluate(), explain: (evaluation) => { explained.push(evaluation.handNo); return handleOf(VALID_EXPLAIN); } } },
   });
   t.after(() => resumed.requestStop().catch(() => {}));
   await resumed.resume();
+  const running = resumed.run();
+  running.catch(() => {});
+  await waitFor(() => readJson(path.join(gameDir, '.session-control.json')).playState === 'paused', 'the recovered game did not park', 20_000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(explained, [], 'nothing starts while the recovered game is paused');
+  assert.ok(readJson(loopPath).trainingDeferredHands?.includes(hands[0]), 'the held-back hand stays recorded');
+  await resumed.resumePlay();
   await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
-    'the held-back hand was not registered on restart', 20_000);
-  assert.ok(failed.every((item) => !explained.includes(item.evaluationId)), 'a failed explanation is not retried by the restart');
-  assert.equal(readJson(loopPath).trainingDeferredHands, undefined);
+    'the held-back hand did not run after resume', 20_000);
   await resumed.requestStop().catch(() => {});
+});
+
+test('R1: a held-back hand stays recorded until its re-registered pipeline finishes', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explainCalls = [];
+  let releaseFirst, releaseSecond;
+  const first = new Promise((resolve) => { releaseFirst = resolve; });
+  const second = new Promise((resolve) => { releaseSecond = resolve; });
+  t.after(() => { releaseFirst(); releaseSecond(); });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: (evaluation) => {
+          explainCalls.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explainCalls.length === 1 ? first : second });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, {
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const pausing = loop.pause();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  releaseFirst();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  const recorded = readJson(loopPath).trainingDeferredHands;
+  assert.ok(recorded?.length > 0);
+  await loop.resumePlay();
+  // The held-back explanation is now running (held on its gate) — a crash here
+  // must still find the hand on restart.
+  await waitFor(() => explainCalls.length >= 2, 'the held-back explanation did not start');
+  assert.deepEqual(readJson(loopPath).trainingDeferredHands, recorded, 'the record outlives re-registration');
+  await loop.requestStop().catch(() => {});
+  assert.ok(recorded.every((handNo) => readJson(loopPath).trainingDeferredHands?.includes(handNo)), 'stop leaves the record for the next start');
 });

@@ -52,22 +52,27 @@ test('final panel renders safe text, bounded graph labels and only authorized re
 
 test('cash results read in the fixed big blind without a meaningless final stack, and every hand point is named', async () => {
  const {paintFinalPanel}=await import('../server/public/final-panel.js');
- const make=tag=>({tag,children:[],attrs:{},textContent:'',className:'',classList:{add(){}},
+ const make=tag=>({tag,children:[],attrs:{},listeners:{},textContent:'',className:'',classList:{add(){}},
   append(...nodes){this.children.push(...nodes);},replaceChildren(){this.children=[];},
-  setAttribute(key,value){this.attrs[key]=value;},addEventListener(){}});
+  setAttribute(key,value){this.attrs[key]=value;},addEventListener(type,callback){this.listeners[type]=callback;}});
  const prior=globalThis.document;globalThis.document={createElement:make,createElementNS:(_ns,tag)=>make(tag)};
  try {
   const container=make('div'),flatten=node=>[node,...node.children.flatMap(flatten)];
   const view={mode:'cash-training',blinds:[25,50],seats:[{playerId:'u',name:'나',stack:5000},{playerId:'a',name:'A',stack:5000}],sessionNet:{u:-75,a:75}};
   const summary={complete:true,players:[{playerId:'u',name:'나',net:-75,finalStack:5000},{playerId:'a',name:'A',net:75,finalStack:5000}],hands:[
    {handNo:1,potTotal:150,net:{u:50,a:-50}},{handNo:2,potTotal:300,net:{u:-125,a:125}}]};
-  paintFinalPanel(container,{summary,view,viewer:'u',onReplay:()=>{},canReplay:()=>true});
+  const opened=[];
+  paintFinalPanel(container,{summary,view,viewer:'u',onReplay:hand=>opened.push(hand),canReplay:hand=>hand===2});
   const nodes=flatten(container);
   assert.deepEqual(nodes.filter(node=>node.tag==='th').map(node=>node.textContent),['순위','이름','증감']);
   const cells=nodes.filter(node=>node.tag==='td').map(node=>node.textContent);
   assert.ok(cells.includes('+1.5 BB')&&cells.includes('−1.5 BB'),JSON.stringify(cells));
   const dots=nodes.filter(node=>node.tag==='circle');
-  assert.deepEqual(dots.map(node=>[node.attrs.tabindex,node.attrs['aria-label']]),[['0','핸드 1 누적 +1 BB'],['0','핸드 2 누적 −1.5 BB']]);
+  assert.deepEqual(dots.map(node=>[node.attrs.tabindex,node.attrs.role,node.attrs['aria-label']]),[['0','img','핸드 1 누적 +1 BB'],['0','button','핸드 2 누적 −1.5 BB · 복기 열기']]);
+  assert.equal(nodes.find(node=>node.tag==='svg').attrs.role,'group','points keep their own names');
+  assert.equal(dots[0].listeners.click,undefined,'a hand without a replay is not a button');
+  dots[1].listeners.keydown({key:'Enter',preventDefault(){}});dots[1].listeners.click();
+  assert.deepEqual(opened,[2,2]);
   assert.equal(nodes.filter(node=>node.tag==='line'&&node.attrs.class==='final-chart-zero').length,1);
   assert.ok(nodes.some(node=>node.textContent==='핸드 1 · 팟 3 BB'),'pot sizes are formatted, never raw chips');
  } finally {if(prior===undefined)delete globalThis.document;else globalThis.document=prior;}
