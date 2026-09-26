@@ -1259,6 +1259,8 @@ function paintReplay() {
   if(body._signature===signature){replayMount?.paint();return;}
   body._signature=signature;
   const scroll=body.scrollTop;
+  // The timeline scrolls on its own; a rebuild (coach note, unit, list toggle) keeps its place.
+  const timelineScroll=body.querySelector('.replayer-timeline')?.scrollTop ?? null;
   const active=body.contains(document.activeElement) ? document.activeElement : null;
   const focusKey=active?.dataset.focusKey ?? null;
   const focusedStudy=active?.dataset.studyId ?? null;
@@ -1277,12 +1279,13 @@ function paintReplay() {
   if (view.header.blinds) {
     meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
   }
+  const replay = ui.handReplays?.[openReplayHandNo];
+  const names = seatNames();
+  if (typeof replay?.button === 'string') meta.append(el('span', 'replay-button', `버튼 ${names[replay.button] ?? replay.button}`));
   if (view.header.winners.length) {
     meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
   }
   body.append(meta);
-  const replay = ui.handReplays?.[openReplayHandNo];
-  const names = seatNames();
   const model = buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, (ui.view?.seats ?? []).map((seat) => seat.playerId)) });
   if (model.ok) {
     replayModel = model;
@@ -1300,6 +1303,8 @@ function paintReplay() {
       onSpeed: setReplaySpeed,
       onStudy: openStudyCard,
     });
+    const timeline = replayMount.root.querySelector('.replayer-timeline');
+    if (timeline && timelineScroll !== null) timeline.scrollTop = timelineScroll;
     const toggle = el('button', 'btn btn-ghost replayer-list-toggle', replayUi.listOpen ? '목록 닫기' : '목록 보기');
     toggle.type = 'button';
     toggle.dataset.focusKey = 'list-toggle';
@@ -1322,7 +1327,10 @@ function paintReplay() {
 function openReplay(handNo) {
   stopReplayPlayback();
   replayUi = { step: 0, playing: false, speed: replayUi.speed, listOpen: false };
+  // A new hand starts from the top: nothing of the previous replay carries over.
   $('replay-body')._signature = null;
+  $('replay-body').replaceChildren();
+  $('replay-body').scrollTop = 0;
   openReplayHandNo = handNo;
   paintReplay();
   dialogs.open($('replay-overlay'),closeReplay);

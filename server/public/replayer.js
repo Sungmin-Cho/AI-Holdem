@@ -5,7 +5,7 @@
  * Cards come only from `replay.holes` (the server's reveal scope); reasons come
  * only from `reasonKind` via formatReplay (never from the `forced` flag). */
 import { renderCard, renderMiniCard, parseCard, cardLabel } from './card-render.js';
-import { ovalPoint } from './seat-format.js';
+import { ovalPoint, mobileSeatSlot } from './seat-format.js';
 import { streetStarts } from './replay-model.js';
 
 const STREET_LABEL = Object.freeze({ preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버', result: '결과' });
@@ -29,6 +29,7 @@ export function stepHeadline(step, { replay, name, amount }) {
   if (step.kind === 'deal') return '카드 배분 · 블라인드';
   if (step.kind === 'street') return `${STREET_LABEL[step.street]} · ${boardText(step.board)}`;
   if (step.kind === 'runout') return `${STREET_LABEL[step.street]} · ${boardText(step.board)} (올인 런아웃)`;
+  if (step.kind === 'return') return '콜되지 않은 베팅 반환';
   if (step.kind === 'showdown') return '쇼다운';
   if (step.kind === 'result') return '결과';
   const verb = VERB_LABEL[step.verb] ?? step.verb;
@@ -46,6 +47,8 @@ export function mountReplayer(container, ctx) {
   const policySeats = rows.some((row) => row.reasonKind === 'policy');
 
   const root = el(doc, 'div', 'replayer');
+  // Seven or more seats get compact plates so neighbours never overlap.
+  if (model.seats.length >= 7) root.classList.add('is-crowded');
   if (policySeats) root.append(el(doc, 'p', 'replay-legend', POLICY_LEGEND));
 
   // Mini table: the viewer sits at the bottom like the live table.
@@ -58,10 +61,14 @@ export function mountReplayer(container, ctx) {
   order.forEach((_, offset) => {
     const playerId = order[(start + offset) % order.length];
     const at = ovalPoint(offset, order.length, 41, 38);
+    // Phones use the live table's slot table (kept inside the felt).
+    const slot = mobileSeatSlot(offset, order.length);
     const seat = el(doc, 'div', 'replayer-seat');
     seat.dataset.playerId = playerId;
-    seat.style.left = `${at.x}%`;
-    seat.style.top = `${at.y}%`;
+    seat.style.setProperty('--seat-x', `${at.x}%`);
+    seat.style.setProperty('--seat-y', `${at.y}%`);
+    seat.style.setProperty('--seat-mx', `${11 + slot.x * 0.78}%`);
+    seat.style.setProperty('--seat-my', `${9 + slot.y * 0.82}%`);
     const cards = el(doc, 'div', 'replayer-seat-cards');
     const holes = replay.holes?.[playerId];
     for (let index = 0; index < 2; index += 1) cards.append(renderCard(Array.isArray(holes) ? holes[index] : null, { small: true, faceDown: !Array.isArray(holes), doc }));
@@ -85,7 +92,7 @@ export function mountReplayer(container, ctx) {
   stage.append(felt);
 
   const controls = el(doc, 'div', 'replayer-controls');
-  controls.setAttribute('role', 'toolbar');
+  controls.setAttribute('role', 'group');
   controls.setAttribute('aria-label', '복기 재생');
   const button = (className, text, label, key, onClick) => {
     const node = el(doc, 'button', `btn btn-ghost ${className}`, text);
@@ -97,6 +104,7 @@ export function mountReplayer(container, ctx) {
   };
   const first = button('replayer-first', '처음', '처음 단계', 'ctl-first', () => ctx.onStep(0));
   const prev = button('replayer-prev', '이전', '이전 단계', 'ctl-prev', () => ctx.onStep(ctx.state().step - 1));
+  // The visible word is the name ("재생" ↔ "일시정지"); no pressed state on top.
   const play = button('replayer-play', '재생', null, 'ctl-play', () => ctx.onPlay());
   const next = button('replayer-next', '다음', '다음 단계', 'ctl-next', () => ctx.onStep(ctx.state().step + 1));
   const lastStep = button('replayer-last', '끝', '마지막 단계', 'ctl-last', () => ctx.onStep(model.steps.length - 1));
@@ -178,6 +186,9 @@ export function mountReplayer(container, ctx) {
   let painted = null;
   function paint() {
     const { step: index, playing, speed: rate } = ctx.state();
+    const active = doc.activeElement;
+    const hadFocus = Boolean(active) && root.contains(active);
+    const focusKey = hadFocus ? active.dataset?.focusKey ?? null : null;
     const step = model.steps[index];
     const winners = new Set((step.awards ?? []).map((row) => row.playerId));
     const revealed = new Map((step.reveals ?? []).map((row) => [row.playerId, row.handName]));
@@ -205,14 +216,9 @@ export function mountReplayer(container, ctx) {
       ? step.pots.map((row) => `${row.potIndex === 0 ? (step.pots.length > 1 ? '메인' : '팟') : `사이드 ${row.potIndex}`} ${short(row.amount)}`).join(' · ')
       : step.total > step.pot ? `팟 ${short(step.pot)} · 베팅 포함 ${short(step.total)}` : `팟 ${short(step.pot)}`;
 
-    const focused = doc.activeElement;
     first.disabled = prev.disabled = index <= 0;
     next.disabled = lastStep.disabled = index >= model.steps.length - 1;
-    // A control that just became disabled would drop focus out of the dialog.
-    if (focused?.disabled && root.contains(focused)) play.focus({ preventScroll: true });
     play.textContent = playing ? '일시정지' : '재생';
-    play.setAttribute('aria-label', playing ? '자동 재생 일시정지' : '자동 재생');
-    play.setAttribute('aria-pressed', String(playing));
     speed.value = String(rate);
     progress.textContent = `${index + 1} / ${model.steps.length}`;
     const currentKey = step.kind === 'result' || step.kind === 'showdown' ? 'result' : step.street;
@@ -221,6 +227,8 @@ export function mountReplayer(container, ctx) {
       else streetButtons[at].removeAttribute('aria-current');
     });
 
+    // Autoplay would queue one announcement per step; speak only when paused.
+    nowTitle.setAttribute('aria-live', playing ? 'off' : 'polite');
     const headline = stepHeadline(step, ctx);
     if (nowTitle.textContent !== headline) nowTitle.textContent = headline;
     if (painted !== index) {
@@ -240,7 +248,18 @@ export function mountReplayer(container, ctx) {
       }
       painted = index;
     }
+    // Focus never leaves the dialog: a control that became disabled, or a
+    // current-step button that was replaced, hands focus to a live control.
+    const now = doc.activeElement;
+    if (hadFocus && (now?.disabled || !root.contains(now))) {
+      const same = focusKey ? controlsIn(root).find((node) => node.dataset.focusKey === focusKey && !node.disabled) : null;
+      // A transport control hands focus to Play; anything else to the current timeline row.
+      const fallback = focusKey?.startsWith('ctl-') ? play : items[index].jump;
+      (same ?? fallback).focus({ preventScroll: true });
+    }
   }
+
+  function controlsIn(scope) { return [...scope.querySelectorAll('button, select')]; }
 
   function detailFor(step) {
     const lines = [];
@@ -249,6 +268,8 @@ export function mountReplayer(container, ctx) {
       for (const post of step.posts ?? []) line('replayer-line', `${name(post.playerId)} ${replay.positions?.[post.playerId] ?? ''} 블라인드 ${amount(post.amount)}`.replace(/\s+/g, ' '));
     } else if (step.kind === 'showdown') {
       for (const row of step.reveals) line('replayer-line', `${name(row.playerId)}${row.handName ? ` · ${row.handName}` : ' · 공개'}`);
+    } else if (step.kind === 'return') {
+      for (const row of step.returned) line('replayer-line', `${name(row.playerId)}에게 돌려준 금액 ${amount(row.amount)} (아무도 따라오지 않은 베팅)`);
     } else if (step.kind === 'result') {
       for (const row of step.returned) line('replayer-line', `${name(row.playerId)}에게 돌려준 금액 ${amount(row.amount)}`);
       for (const pot of step.pots) {

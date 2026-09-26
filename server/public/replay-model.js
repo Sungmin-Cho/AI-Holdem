@@ -145,22 +145,10 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     });
   }
 
-  // An all-in runout deals the streets nobody acted on.
   if (!board.slice(0, shownBoard.length).every((card, at) => card === shownBoard[at])) return fail('board');
-  for (const length of [3, 4, 5]) {
-    if (length <= shownBoard.length || length > board.length) continue;
-    collect();
-    street = STREET_OF_LENGTH[length];
-    shownBoard = board.slice(0, length);
-    snapshot({ kind: 'runout' });
-  }
-
   collect();
-  const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
-  if (reveals.length) {
-    snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
-  }
-
+  // The engine returns an uncalled bet first (finishHand: returnUncalled →
+  // runout → showdown → awards), so the runout and showdown already show it.
   const returns = replay.uncalledReturns ?? {};
   const returned = [];
   for (const [playerId, amount] of Object.entries(returns)) {
@@ -168,8 +156,24 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (!amount) continue;
     stacks[playerId] += amount;
     contrib[playerId] -= amount;
+    if (stacks[playerId] > 0) allIn.delete(playerId);
     returned.push({ playerId, amount });
   }
+  if (returned.length) snapshot({ kind: 'return', returned });
+
+  // An all-in runout deals the streets nobody acted on.
+  for (const length of [3, 4, 5]) {
+    if (length <= shownBoard.length || length > board.length) continue;
+    street = STREET_OF_LENGTH[length];
+    shownBoard = board.slice(0, length);
+    snapshot({ kind: 'runout' });
+  }
+
+  const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
+  if (reveals.length) {
+    snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
+  }
+
   const pots = Array.isArray(replay.pots) ? replay.pots : [];
   if (!pots.length || sum(pots.map((pot) => (isAmount(pot?.amount) ? pot.amount : NaN))) !== sum(Object.values(contrib))) return fail('pots');
   const awards = [];

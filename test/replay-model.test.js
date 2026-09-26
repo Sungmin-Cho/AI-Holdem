@@ -5,6 +5,9 @@ import { replayRecord } from '../shared/hand-replay.js';
 import { buildReplaySteps, replaySeatOrder, streetStarts } from '../server/public/replay-model.js';
 import { formatReplay } from '../server/public/replay-format.js';
 import { handRecordFixture } from './helpers/security-fixtures.js';
+import { mountReplayer } from '../server/public/replayer.js';
+import { createMiniDocument, exposedText } from './helpers/mini-dom.js';
+import { cardLabel, parseCard } from '../server/public/card-render.js';
 
 // Only records the engine itself settled are expected to verify (design §10.1).
 function play(game, pick, deck) {
@@ -28,6 +31,12 @@ function verified(record, options) {
   assert.equal(result.ok, true, `${result.reason} at ${result.at}`);
   // The rebuilt end state is the engine's own end state.
   for (const playerId of Object.keys(record.startStacks)) assert.equal(last(result).stacks[playerId], record.endStacks[playerId]);
+  // Chips are conserved at every step: stacks plus everything in the middle.
+  const chips = Object.values(record.startStacks).reduce((a, b) => a + b, 0);
+  for (const step of result.steps) {
+    const held = Object.values(step.stacks).reduce((a, b) => a + b, 0);
+    assert.equal(held + (step.kind === 'result' ? 0 : step.total), chips, `step ${step.index} ${step.kind}`);
+  }
   return { replay, result };
 }
 
@@ -152,4 +161,86 @@ test('checks and folds carry no amount in the replay rows', () => {
   const rows = formatReplay(replayRecord(record, { reveal: 'all' })).streets.flatMap((street) => street.rows);
   assert.ok(rows.some((row) => row.verb === 'check'));
   for (const row of rows) assert.equal(row.amount === null, row.verb === 'check' || row.verb === 'fold', JSON.stringify(row));
+});
+
+test('an uncalled all-in excess is returned before the runout and showdown are drawn', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  game.seats.find((seat) => seat.playerId !== 'user').stack = 300;
+  // The user shoves; the short stack only ever calls, so part of the shove is never matched.
+  const record = play(game, (legal) => (legal.toAct === 'user' && legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']));
+  assert.ok(record.uncalledReturns.user > 0, JSON.stringify(record.uncalledReturns));
+  const { result } = verified(record);
+  const potTotal = record.pots.reduce((total, pot) => total + pot.amount, 0);
+  const returnAt = result.steps.findIndex((step) => step.kind === 'return');
+  assert.ok(returnAt > 0);
+  const later = result.steps.slice(returnAt).filter((step) => step.kind === 'runout' || step.kind === 'showdown');
+  assert.ok(later.length > 0, 'the hand runs out after the return');
+  for (const step of later) {
+    assert.equal(step.pot, potTotal, `${step.kind} shows the pot the engine dealt the board into`);
+    assert.equal(step.stacks.user, record.endStacks.user - (last(result).awards.filter((row) => row.playerId === 'user').reduce((a, row) => a + row.share, 0)));
+    assert.equal(step.allIn.includes('user'), false, 'chips came back, so the user is no longer all-in');
+  }
+  assert.ok(result.steps.findIndex((step) => step.kind === 'runout') > returnAt);
+});
+
+function mount(replay, { trainingItems = [] } = {}) {
+  const doc = createMiniDocument();
+  const container = doc.createElement('div');
+  doc.body.append(container);
+  const model = buildReplaySteps(replay);
+  assert.equal(model.ok, true, model.reason);
+  const state = { step: 0, playing: false, speed: 1 };
+  const view = formatReplay(replay, { trainingItems });
+  const handle = mountReplayer(container, {
+    replay, view, model, viewer: 'user', name: (playerId) => playerId, amount: (value) => `${value}칩`,
+    state: () => state, onStep: (index) => { state.step = index; handle.paint(); }, onPlay() {}, onSpeed() {}, onStudy() {},
+  });
+  return { doc, container, model, state, handle };
+}
+
+test('public scope in the drawn replayer: a hidden seat shows no cards, no reason and no watchdog note at any step', () => {
+  const game = createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 });
+  let folder = null;
+  const record = play(game, (legal) => {
+    if (folder === null && legal.toAct !== 'user') { folder = legal.toAct; return ['fold']; }
+    return passive(legal);
+  });
+  const folded = record.actions.find((action) => action.playerId === folder && action.action === 'fold');
+  folded.forced = true;
+  folded.reason = 'secret reasoning';
+  const replay = replayRecord(record, { reveal: 'showdown' });
+  assert.equal(replay.holes[folder], undefined);
+  const { container, model, state, handle } = mount(replay);
+  // A card's label (rank + suit) is unique in the deck, so it may appear nowhere.
+  const hidden = record.holes[folder].map((code) => cardLabel(parseCard(code)));
+  for (let index = 0; index < model.steps.length; index += 1) {
+    state.step = index; handle.paint();
+    const text = exposedText(container);
+    for (const label of hidden) assert.equal(text.includes(label), false, `${label} leaked at step ${index}`);
+    assert.doesNotMatch(text, /secret reasoning|워치독/);
+  }
+  const seat = [...container.querySelectorAll('.replayer-seat')].find((node) => node.dataset.playerId === folder);
+  assert.equal(seat.querySelectorAll('.card--back').length, 2, 'the hidden seat is drawn face down');
+  assert.equal([...seat.querySelectorAll('div')].filter((node) => node.getAttribute('aria-label')).length, 0);
+});
+
+test('focus stays in the replayer when the current-step study button is replaced or a control is disabled', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  const replay = replayRecord(record, { reveal: 'all' });
+  const decision = replay.actions.find((action) => action.playerId === 'user');
+  const { doc, container, model, state, handle } = mount(replay, { trainingItems: [{ decisionId: decision.decisionId, evaluationId: 'e-1' }] });
+  const at = model.steps.find((step) => step.actor === 'user' && replay.actions[step.actionIndex] === decision).index;
+  state.step = at; handle.paint();
+  const study = container.querySelector('.replayer-now').querySelector('.replay-study');
+  assert.ok(study, 'the current step offers the study card');
+  study.focus();
+  state.step = at + 1; handle.paint();
+  assert.ok(container.contains(doc.activeElement), 'focus moved to a live control');
+  assert.equal(doc.activeElement.dataset.step, String(at + 1), 'the current timeline row takes it');
+  const next = container.querySelector('.replayer-next');
+  next.focus();
+  state.step = model.steps.length - 1; handle.paint();
+  assert.equal(next.disabled, true);
+  assert.ok(doc.activeElement.classList.contains('replayer-play'), 'a disabled control hands focus to Play');
+  assert.equal(container.querySelector('.replayer-now-title').getAttribute('aria-live'), 'polite');
 });

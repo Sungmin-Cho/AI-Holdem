@@ -9,10 +9,10 @@ import {createGame,startHand,applyAction,legalFor} from '../../engine/hand.js';
 import {newDeck} from '../../engine/cards.js';
 import {userView} from '../../engine/views.js';
 import {fixedDeck} from '../helpers/fixtures.js';
-import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
+import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -43,7 +43,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     while(!legalFor(settledState).handOver){const legal=legalFor(settledState);const raise=legal.canCheck&&legal.street==='turn'&&legal.canRaise;
       settledState=applyAction(settledState,legal.toAct,raise?'raise':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
     const settledHand=settledState.lastHand;
-    writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2),settledHand],config:{replayReveal:'all'},state:{sessionToken:token}});
+    // A nine-handed engine hand for the crowded replayer layout.
+    let fullState=createGame({aiCount:8,startStack:5000,levelEvery:10});fullState.handNo=3;
+    fullState=startHand(fullState,{deck:fixedDeck()}).state;
+    while(!legalFor(fullState).handOver){const legal=legalFor(fullState);fullState=applyAction(fullState,legal.toAct,legal.canCheck?'check':'call').state;}
+    const fullHand=fullState.lastHand;
+    const fixturePlayers=[...defaultPlayers(),...['p2','p3','p4','p5','p6','p7','p8'].map(playerId=>({...defaultPlayers()[1],playerId}))];
+    writeSecurityFixtures(workspace.root,{players:fixturePlayers,hands:[historical,handRecordFixture(2),settledHand,fullHand],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
     for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
@@ -276,21 +282,57 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['press','Home']);
     assert.equal(await evaluate("document.querySelector('.replayer-progress').textContent"),`1 / ${visual.steps}`);
     await evaluate("document.querySelector('.replayer-play').click()");
-    assert.equal(await evaluate("document.querySelector('.replayer-play').getAttribute('aria-pressed')"),'true');
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'일시정지');
+    assert.equal(await evaluate("document.querySelector('.replayer-now-title').getAttribute('aria-live')"),'off','autoplay does not queue announcements');
     await browser(['wait','--fn',"document.querySelector('.replayer-progress').textContent.startsWith('2 /')"]);
     await evaluate("document.querySelector('.replayer-play').click()");
-    assert.equal(await evaluate("document.querySelector('.replayer-play').getAttribute('aria-pressed')"),'false');
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
+    // Space plays and pauses when no control has focus.
+    await evaluate("document.activeElement.blur()");await browser(['press','Space']);
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'일시정지');
+    await browser(['press','Space']);
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
     checks.push('replay-keyboard');
+    // The timeline keeps its own scroll position when the replay is rebuilt (unit change).
+    await evaluate("document.querySelector('.replayer-timeline').scrollTop=60");
+    const timelineBefore=await evaluate("document.querySelector('.replayer-timeline').scrollTop");
+    assert.ok(timelineBefore>0,'the timeline scrolls on its own');
+    await browser(['select','#display-unit','chips']);
+    assert.equal(await evaluate("document.querySelector('.replayer-timeline').scrollTop"),timelineBefore);
+    await browser(['select','#display-unit','bb']);
+    checks.push('replay-timeline-scroll');
     await evaluate("document.querySelector('.replayer-list-toggle').focus()");await browser(['press','Enter']);
     const listed=await evaluate("({rows:document.querySelectorAll('.replay-list .replay-row').length,expanded:document.querySelector('.replayer-list-toggle').getAttribute('aria-expanded'),focus:document.activeElement?.classList.contains('replayer-list-toggle')})");
     assert.ok(listed.rows>0&&listed.expanded==='true'&&listed.focus,JSON.stringify(listed));
     checks.push('replay-list-toggle');
     await browser(['set','viewport','390','844']);
-    const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth}})()");
-    assert.ok(sheet.w===390&&sheet.h===844&&sheet.fits,JSON.stringify(sheet));
+    const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();const low=[...document.querySelectorAll('.replayer-controls .btn,.replayer-speed select,.replayer-jump')].map(n=>Math.round(n.getBoundingClientRect().height)).filter(h=>h<44);return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth,low}})()");
+    assert.ok(sheet.w===390&&sheet.h===844&&sheet.fits&&sheet.low.length===0,JSON.stringify(sheet));
     await browser(['screenshot',path.join(outDir,'replayer-390.png')]);
     checks.push('replay-mobile-sheet');
+    // Closing while playing stops the timer; reopening starts from the first step.
+    await evaluate("document.querySelector('.replayer-play').click()");
     await browser(['press','Escape']);
+    await browser(['wait','1800']);
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    const reopened=await evaluate("({progress:document.querySelector('.replayer-progress').textContent,play:document.querySelector('.replayer-play').textContent})");
+    await browser(['wait','1600']);
+    assert.ok(reopened.progress.startsWith('1 /')&&reopened.play==='재생'&&(await evaluate("document.querySelector('.replayer-progress').textContent")).startsWith('1 /'),JSON.stringify(reopened));
+    await browser(['press','Escape']);
+    checks.push('replay-close-stops');
+    // Nine seats: no two plates overlap on a phone or a desktop.
+    await publish([{type:'hand_start',handNo:4,blinds:fullHand.blinds}],{handReplay:{handNos:[4]}});
+    for(const [w,h] of [[390,844],[1280,800]]) {
+      await browser(['set','viewport',String(w),String(h)]);
+      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+      await browser(['wait','#replay-body .replayer.is-crowded']);
+      const crowd=await evaluate("(()=>{const plates=[...document.querySelectorAll('.replayer-seat')].map(n=>n.getBoundingClientRect());const hits=[];plates.forEach((a,i)=>plates.slice(i+1).forEach((b,j)=>{if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits.push([i,i+j+1]);}));const felt=document.querySelector('.replayer-stage').getBoundingClientRect();const out=plates.filter(r=>r.left<felt.left-1||r.right>felt.right+1).length;return {seats:plates.length,hits,out,fits:document.documentElement.scrollWidth<=innerWidth}})()");
+      assert.ok(crowd.seats===9&&crowd.hits.length===0&&crowd.out===0&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
+      await browser(['screenshot',path.join(outDir,`replayer-9-${w}.png`)]);
+      await browser(['press','Escape']);
+    }
+    checks.push('replay-crowded-layout');
     await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {

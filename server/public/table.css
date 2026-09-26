@@ -1047,6 +1047,8 @@ main {
 .replayer-board .card--sm, .replayer-board .card--slot { --cw: 32px; --ch: 45px; }
 .replayer-seat {
   position: absolute;
+  top: var(--seat-y);
+  left: var(--seat-x);
   display: grid;
   justify-items: center;
   gap: 2px;
@@ -1172,6 +1174,13 @@ p.replayer-policy-tag { margin: 4px 0; }
 .replayer-item:not(.is-action) .replayer-jump { font-weight: 700; color: var(--c-info-text); }
 .replayer-jump .replay-cards { gap: 2px; }
 .replayer-list-toggle { justify-self: start; margin-top: 12px; }
+/* Seven or more seats: cards beside a two-line plate, marks on one line. */
+.replayer.is-crowded .replayer-felt { height: clamp(250px, 38vh, 320px); }
+.replayer.is-crowded .replayer-seat { min-width: 0; gap: 1px; }
+.replayer.is-crowded .card--sm, .replayer.is-crowded .card--back.card--sm { --cw: 20px; --ch: 28px; }
+.replayer.is-crowded .replayer-plate { min-width: 64px; padding: 2px 6px; font-size: 10.5px; }
+.replayer.is-crowded .replayer-seat-pos { display: none; }
+.replayer.is-crowded .replayer-seat-marks { min-height: 16px; }
 .replay-list { margin-top: 4px; }
 .replay-fallback { color: var(--c-text-2); }
 @media (max-width: 760px) {
@@ -1180,6 +1189,12 @@ p.replayer-policy-tag { margin: 4px 0; }
 }
 @media (max-width: 600px) {
   #replay-overlay { padding: 0; }
+  .replayer-seat { top: var(--seat-my); left: var(--seat-mx); }
+  .replayer-controls .btn, .replayer-speed select, .replayer-jump { min-height: 44px; }
+  .replayer.is-crowded .replayer-felt { height: 400px; }
+  .replayer.is-crowded .card--sm, .replayer.is-crowded .card--back.card--sm { --cw: 15px; --ch: 21px; }
+  .replayer.is-crowded .replayer-plate { min-width: 52px; font-size: 9.5px; }
+  .replayer.is-crowded .replayer-seat-name { max-width: 52px; }
   #replay-overlay .replay-card { width: 100%; height: 100dvh; max-height: 100dvh; padding: 16px 14px 20px; border-radius: 0; }
   .replayer-stage { padding: 40px 0 44px; }
   .replayer-felt { height: 236px; border-width: 4px; }
