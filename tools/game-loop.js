@@ -2470,7 +2470,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let settle;
     const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
     activeDecision = active;
-    let httpStarted = false, softTimer, hardTimer, modelMs = 0;
+    // hardTimedOut records that the hard timer ended the request: a timer can fire a
+    // fraction of a millisecond before the monotonic clock reads hardMs elapsed.
+    let httpStarted = false, softTimer, hardTimer, modelMs = 0, hardTimedOut = false;
     const signal = active.controller.signal;
     const lateSettlement = async () => {
       const current = readLoopState()?.pendingDecision;
@@ -2503,7 +2505,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try { if (record.status === 'running' && !record.proposedAction) commit({softWait:true}); }
         catch { active.controller.abort(); }
       }, budget.softMs);
-      hardTimer = setTimeout(() => active.controller.abort(), budget.hardMs);
+      hardTimer = setTimeout(() => { hardTimedOut = true; active.controller.abort(); }, budget.hardMs);
       const peek = await runCli(['decision-peek','--for',next.toAct,'--expect-version',String(stateVersion)]);
       const candidates = buildJevCandidates(peek.snapshot, peek.legal);
       const player = (readJsonOptional(playersPath, 'PLAYERS') ?? []).find(p => p.playerId === next.toAct);
@@ -2561,7 +2563,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const unsafe = unconfirmed || !!record.proposedAction;
       const cancelled = !unsafe && (stopRequested || signal.aborted);
       const code = unsafe ? (unconfirmed ? 'JEV_REQUEST_CLOSE_UNCONFIRMED' : 'JEV_ENGINE_APPLY_UNCONFIRMED')
-        : (monotonicNow()-startedAt >= budget.hardMs ? 'JEV_TIMEOUT' : cancelled ? 'INTERRUPTED' : error.code?.startsWith('JEV_') || error.code === 'INTERRUPTED' ? error.code : 'JEV_INPUT_INVALID');
+        : (hardTimedOut || monotonicNow()-startedAt >= budget.hardMs ? 'JEV_TIMEOUT' : cancelled ? 'INTERRUPTED' : error.code?.startsWith('JEV_') || error.code === 'INTERRUPTED' ? error.code : 'JEV_INPUT_INVALID');
       commit({status:unsafe ? 'unsafe' : 'recovery_required',code,closeConfirmed:!!record.proposedAction || !unsafe,retryable:!unsafe && (cancelled || error.retryable === true),softWait:false});
       appendMetric({runtime:'jev',playerId:record.playerId,decisionId:record.decisionId,outcome:code,
         elapsedMs:Math.max(0,monotonicNow()-startedAt),modelMs,censored:code === 'JEV_TIMEOUT' || unconfirmed});
