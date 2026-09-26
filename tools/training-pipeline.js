@@ -12,7 +12,7 @@ import {
   materializeLearningEvaluation,
   readAnnotationExactFile,
 } from './training-control.js';
-import { validateExplanation } from '../training/explain.js';
+import { explanationEligible, validateExplanation } from '../training/explain.js';
 import { referenceQuality } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
@@ -459,6 +459,9 @@ async function runHandPipelineUnlocked({
       evaluationId: item.evaluationId,
     };
     if (typeof explain !== 'function') continue;
+    // A source no explanation could be accepted for (synthetic or unverified
+    // reference) gets no LLM call; it stays unsealed until the cutoff seal.
+    if (!explanationEligible(evaluation)) continue;
     // Checked between items and again once the explain lock is ours: a pipeline
     // that queued behind the lock during a pause must not start its child.
     if (!explainAdmitted()) { explainDeferred = true; continue; }

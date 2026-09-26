@@ -5,7 +5,7 @@ import {evaluatePreflopReference} from '../training/preflop-reference.js';
 import {projectReferenceCoverage} from '../shared/reference-coverage.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTrainingCard, verifyTrainingDetail } from '../server/public/training-format.js';
+import { excludedFromAssessment, formatTrainingCard, verifyTrainingDetail } from '../server/public/training-format.js';
 
 import { toPublicSummary } from '../training/public-view.js';
 import { createHash } from 'node:crypto';
@@ -368,7 +368,7 @@ function renderTrainingCards(items, receipts = new Map()) {
     el: (tag, cls, text) => new Node(tag, cls, text),
     detailKey: (item) => `${item.evaluationId}:${item.detailSha256}`,
     detailCache: receipts, detailErrors: new Set(),
-    formatTrainingCard, studyLink,
+    formatTrainingCard, excludedFromAssessment, studyLink,
     authenticatedStudyUrl: `http://127.0.0.1:1234/#token=${'a'.repeat(64)}`,
     loadTrainingDetail: () => { throw new Error('closed cards should not load detail'); },
   });
@@ -386,16 +386,18 @@ test('training DOM renders synthetic source caveat and only a generic study link
 });
 
 test('training DOM folds out-of-table and forfeited decisions into one summary after the assessed cards', () => {
-  const supported = { evaluationId: 'assessed', source: { id: 'fake-solver', version: '9.9.9' }, status: 'supported', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' };
+  const supported = { evaluationId: 'assessed', source: { id: 'local-preflop-baseline', version: '1.0.0', contentSha256: CONTENT_SHA256 }, status: 'supported', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' };
   const river = { evaluationId: 'river', status: 'unsupported', street: 'river', spotKey: 'postflop-river-heads-up' };
   const forced = { evaluationId: 'forced', status: 'supported', forced: true, spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'KQs' };
-  const dom = renderTrainingCards([river, supported, forced]);
+  const synthetic = { evaluationId: 'synthetic', status: 'supported', source: { id: 'fake-solver', version: '9.9.9' }, street: 'flop', spotKey: 'postflop-flop-heads-up' };
+  const dom = renderTrainingCards([river, supported, forced, synthetic]);
   assert.equal(dom.children[0].dataset.evaluationId, 'assessed', 'assessed cards come first');
   const group = dom.children.at(-1);
   assert.equal(group.className, 'training-excluded');
   assert.equal(group.hidden, false);
-  assert.equal(group.querySelector('.training-excluded-count').textContent, '기준표 밖·집계 제외 결정 2개 (포스트플랍 1)');
-  assert.deepEqual(group.querySelector('.training-excluded-list').querySelectorAll('[data-evaluation-id]').map((node) => node.dataset.evaluationId), ['river', 'forced']);
+  assert.equal(group.querySelector('.training-excluded-count').textContent, '기준표 밖·집계 제외 결정 3개 (포스트플랍 2)');
+  assert.deepEqual(group.querySelector('.training-excluded-list').querySelectorAll('[data-evaluation-id]').map((node) => node.dataset.evaluationId), ['river', 'forced', 'synthetic'],
+    'a synthetic test source is a record, not an assessment');
   assert.equal(group.querySelector('.training-excluded-list').hidden, true, 'the excluded list starts folded');
   assert.equal(dom.querySelector('.training-none'), null);
   const onlyExcluded = renderTrainingCards([river]);

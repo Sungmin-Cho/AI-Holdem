@@ -49,7 +49,9 @@ test('a pause click locks the table until the pause settles, and closing the men
  context.snapshot=snap('pausing',{pausing:{waitingFor:{training:2,explain:1,solve:1,resolver:true}}});context.render();
  assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 설명 1건 · 솔버 분석 1건 · AI 코치 연결 확인','running children are named by kind');
  assert.equal(dom.$('pause-progress').hidden,false);
- for(const [state,extra] of [['paused',{}],['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
+ context.pauseLock={gameId:'one',gameEpoch:'epoch'};context.snapshot=snap('paused');context.render();
+ assert.deepEqual(context.pauseLock,{gameId:'one',gameEpoch:'epoch'},'a paused snapshot alone (maybe a late answer) keeps the lock');
+ for(const [state,extra] of [['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
   context.pauseLock={gameId:'one',gameEpoch:'epoch'};context.snapshot=snap(state,extra);context.render();
   assert.equal(context.pauseLock,null,`${state} ${JSON.stringify(extra)} releases the lock`);
  }
@@ -62,7 +64,7 @@ test('R3: a refused pause unlocks the table, an unanswered one stays locked, a s
  const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,open:false,textContent:'',dataset:{},focus(){}});return nodes.get(id);};
  let pending=false,send;
  const lock=()=>({gameId:'g',gameEpoch:'e'});
- const context={$,busy:false,viewingRecord:false,preparing:null,selecting:false,pauseLock:lock(),
+ const context={$,busy:false,viewingRecord:false,preparing:null,selecting:false,pauseLock:lock(),refreshSeq:0,
   snapshot:{instanceId:'i',appRevision:1,gameId:'g',gameEpoch:'e',selectionVersion:1,state:'playing',setup:null},
   commands:{get pending(){return pending;},send:payload=>send(payload)},uuid:()=>'r1',render(){},refresh:async()=>{},showError(){},openPauseMenu(){}};
  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('async function command('),source.indexOf('function confirm(fn)')),context);
@@ -70,8 +72,45 @@ test('R3: a refused pause unlocks the table, an unanswered one stays locked, a s
  await context.command('pause');assert.equal(context.pauseLock,null,'a refusal with a status code is final');
  context.pauseLock=lock();pending=true;send=async()=>{throw new TypeError('fetch failed');};
  await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'an unanswered pause (command still stored) stays locked');
- pending=false;send=async()=>({status:'succeeded'});
- await context.command('pause');assert.equal(context.pauseLock,null,'a settled pause unlocks (the state keeps the table inert)');
+ pending=false;send=async()=>({status:'succeeded'});context.refreshSeq=4;
+ await context.command('pause');assert.deepEqual({...context.pauseLock},{...lock(),settledSeq:4},'a settled pause waits for a snapshot requested after it');
  context.pauseLock=lock();context.refresh=async()=>{throw new Error('offline');};
- await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'a settled pause whose follow-up refresh failed stays locked');
+ await context.command('pause');assert.equal(context.pauseLock.settledSeq,4,'a failed follow-up refresh leaves the settled lock for the next poll');
+});
+
+test('R3: only a snapshot requested after the pause settled releases the lock', async () => {
+ const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const start=source.indexOf('let refreshFailures=0;'),end=source.indexOf('const BOOT_ORDER');
+ const pending=[];const context={snapshot:null,pauseLock:null,appliedDefaults:true,form:{},render(){},
+  api:()=>new Promise(resolve=>pending.push(resolve))};
+ vm.createContext(context);vm.runInContext(source.slice(start,end).replace('let refreshFailures=0;','var refreshFailures=0;').replace('let refreshSeq=0;','var refreshSeq=0;'),context);
+ context.pauseLock={gameId:'g',gameEpoch:'e'};
+ const early=context.refresh();                       // started before the pause settled
+ context.pauseLock={...context.pauseLock,settledSeq:context.refreshSeq};
+ const later=context.refresh();                       // started after
+ pending[0]({state:'playing'});await early;
+ assert.equal(context.pauseLock?.settledSeq,1,'a late answer to an earlier refresh keeps the lock');
+ pending[1]({state:'paused'});await later;
+ assert.equal(context.pauseLock,null,'the first snapshot requested after settling releases it');
+});
+
+test('R3: recovery keeps a settled pause locked until a later snapshot and restores a stored pause after reload', async () => {
+ const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const slice=source.slice(source.indexOf('async function recoverCommand()'),source.indexOf('async function roomOp('));
+ const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{id,open:false,textContent:''});return nodes.get(id);};
+ let stored={kind:'pause',expectedGameId:'g'},recover;
+ const context={$,busy:false,selecting:false,pauseLock:null,refreshSeq:7,snapshot:{gameId:'g',gameEpoch:'e',state:'playing'},
+  commands:{get pending(){return !!stored;},get pendingCommand(){return stored;},recover:()=>recover()},
+  refresh:async()=>{throw new Error('offline');},render(){},showError(){},openPauseMenu(){}};
+ vm.createContext(context);vm.runInContext(slice,context);
+ recover=async()=>{stored=null;return {status:'succeeded'};};
+ await context.recoverCommand();
+ assert.deepEqual({...context.pauseLock},{gameId:'g',gameEpoch:'e',settledSeq:7},'restored after reload, settled, and kept while the refresh fails');
+ context.pauseLock=null;stored={kind:'pause',expectedGameId:'g'};
+ recover=async()=>{stored=null;throw new Error('INVALID_TRANSITION');};
+ await context.recoverCommand();
+ assert.equal(context.pauseLock,null,'a confirmed refusal unlocks');
+ stored={kind:'pause',expectedGameId:'other'};recover=async()=>{throw new TypeError('fetch failed');};
+ await context.recoverCommand();
+ assert.equal(context.pauseLock,null,'a stored pause for another game does not lock this one');
 });

@@ -3,7 +3,7 @@ import {paintFinalPanel} from './final-panel.js';
 import {buildHandResult} from './hand-result.js';
 import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
-import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
+import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
@@ -1085,10 +1085,11 @@ function paintTraining() {
   panel.scrollTop = scroll.panel;
 }
 
-// Decisions outside the reference table (or forfeited by the watchdog) are
-// records, not assessments: one folded summary row instead of a card each.
+// Decisions outside the reference table, forfeited by the watchdog, or scored
+// against a synthetic source are records, not assessments: one folded summary
+// row instead of a card each.
 function trainingExcluded(item) {
-  return item?.status === 'unsupported' || Boolean(item?.forced);
+  return excludedFromAssessment(item);
 }
 
 function trainingExcludedGroup(list) {

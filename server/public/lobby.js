@@ -244,9 +244,10 @@ function render() {
 // the dialog observer, so closing the menu never unlocks a pending pause.
 function syncTableInert() {
   if (!snapshot) return;
-  // A snapshot that already shows the pause (paused) or the end keeps the table
-  // inert on its own, so the local lock is no longer needed.
-  if (pauseLock && (['paused','finalizing','completed','ended','error'].includes(snapshot.state)
+  // An end state or another game unlocks; a settled pause unlocks on the first
+  // snapshot fetched after it settled (refresh). A paused snapshot alone does
+  // not: it may be a late answer to a refresh from before this pause.
+  if (pauseLock && (['finalizing','completed','ended','error'].includes(snapshot.state)
     || snapshot.gameId !== pauseLock.gameId || snapshot.gameEpoch !== pauseLock.gameEpoch)) pauseLock = null;
   $("table").inert = Boolean(pauseLock) || (!["playing","finalizing","completed","ended"].includes(snapshot.state)) || Boolean(document.querySelector('dialog[open]'));
   $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
@@ -271,9 +272,14 @@ function pauseElapsedText(pausing) {
 // Rewrite a live region only when its words change.
 function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
 let refreshFailures=0;
+// Counts refreshes as they start, so a settled pause is released only by a
+// snapshot requested after it settled (never by a late, older answer).
+let refreshSeq=0;
 async function refresh() {
+  const seq = ++refreshSeq;
   snapshot = await api("/api/app");
   refreshFailures=0;
+  if (pauseLock?.settledSeq !== undefined && seq > pauseLock.settledSeq) pauseLock = null;
   if (!appliedDefaults && snapshot.defaultSetup) {
     const defaults = snapshot.defaultSetup;
     for (const [key, value] of Object.entries(defaults)) {
@@ -512,11 +518,11 @@ async function command(kind, setup, extra = {}) {
     };
     await commands.send(payload);
     sent = true;
+    // Only a snapshot fetched after the pause settled unlocks the table (see
+    // refresh); if this refresh fails, the next successful poll does.
+    if (kind === "pause" && pauseLock) pauseLock = { ...pauseLock, settledSeq: refreshSeq };
     selecting = false;
     await refresh();
-    // Only a snapshot taken after the pause settled may unlock the table; if
-    // that refresh fails the lock stays and polling releases it on paused.
-    if (kind === "pause") pauseLock = null;
     menuAfter = snapshot.state === "paused";
   } catch (e) {
     refocusStart = !!preparing && kind === "start";
@@ -786,17 +792,27 @@ form.onchange();
 await refresh().catch(showError);
 async function recoverCommand() {
   if (busy || !commands.pending) return;
+  const stored = commands.pendingCommand;
+  // A pause stored before a reload keeps the table locked until it is settled.
+  if (stored?.kind === "pause" && !pauseLock && snapshot?.gameId && stored.expectedGameId === snapshot.gameId) {
+    pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch };
+  }
   busy = true;
   render();
+  let settled = false;
   try {
     await commands.recover();
+    settled = true;
+    if (stored?.kind === "pause" && pauseLock) pauseLock = { ...pauseLock, settledSeq: refreshSeq };
     selecting = false;
     $("error").textContent = "";
     await refresh();
   } catch (e) {
     showError(e);
   } finally {
-    if (!commands.pending) pauseLock = null;
+    // A confirmed refusal (stored command gone, not settled) unlocks at once; a
+    // settled one waits for a later snapshot, an unanswered one stays locked.
+    if (stored?.kind === "pause" && !commands.pending && !settled) pauseLock = null;
     busy = false;
     render();
     // Focus the menu's primary only if the menu is open; recovery never

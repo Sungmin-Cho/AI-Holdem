@@ -1363,3 +1363,63 @@ test('an accepted solve runs its hand once more so the solved decision gets expl
   await loop.requestStop().catch(() => {});
 });
 
+
+test('explanations are requested only for sources an explanation could be accepted for', async () => {
+  const { explanationEligible } = await import('../training/explain.js');
+  const value = cannedEvaluation('d-1-preflop-0', 'ab'.repeat(32));
+  assert.equal(explanationEligible(value), true);
+  assert.equal(explanationEligible({ ...value, source: { id: 'fake-solver', version: '1.0.0' } }), false, 'a synthetic source is never accepted');
+  assert.equal(explanationEligible({ ...value, status: 'unsupported', source: { id: 'fake-solver', version: '1.0.0' } }), true);
+});
+
+test('R1: the finalization priority holds through the last hand\'s solve and its explaining re-run', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explained = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const LAST = 5;
+  const passing = makeEvaluate();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, solverAdapterId: 'fixture-solver',
+      training: {
+        // The last hand's decision goes to a (slow) solve; its first pipeline
+        // explains nothing, and the solve's re-run explains it later.
+        evaluate: (dir, handNo) => handNo === LAST
+          ? handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(dir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 })
+          : passing(dir, handNo),
+        solve: (task) => {
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] }, { delayMs: 700 });
+        },
+        explain: (evaluation) => {
+          explained.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explained.length === 1 ? gate : null });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  const earlier = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].filter((handNo) => handNo < LAST);
+  const { running } = await playUntil(loop, gameDir, { until: (state) => state.handNo >= LAST && earlier().length >= 2, timeoutMs: 60_000 });
+  running.catch(() => {});
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir, 10_000);
+  assert.equal(snapshot.view.handNo, LAST);
+  await postUserAction(lock, { decisionId: snapshot.view.legal.decisionId, action: 'fold' });
+  const waiting = earlier().filter((handNo) => handNo !== explained[0]);
+  const pausing = loop.pause().catch((error) => ({ error: error.code }));
+  release();
+  await pausing;
+  await waitFor(() => [...waiting, LAST].every((handNo) => authorityItems(gameDir).some((item) => item.handNo === handNo)
+    && authorityItems(gameDir).filter((item) => item.handNo === handNo).every((item) => explanationOf(gameDir, item)?.status === 'ready')),
+  'explanations did not finish', 30_000);
+  const lastAt = explained.indexOf(LAST);
+  assert.ok(lastAt !== -1 && waiting.every((handNo) => explained.indexOf(handNo) > lastAt),
+    `the last hand's solved decision explains before held-back hands: ${JSON.stringify({ explained, waiting })}`);
+  await loop.requestStop().catch(() => {});
+});
