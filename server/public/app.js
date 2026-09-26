@@ -6,7 +6,7 @@ import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset } from './table-controls.js';
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
@@ -594,7 +594,7 @@ function setRaiseTo(value, { fromInput = false } = {}) {
   if (!legal || pendingAction) return;
   raiseTo = fromInput ? amountEditor.state.value : amountEditor.choose(value, legal).value;
   $('raise-slider').value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   if (!fromInput) $('raise-amount').value = amountEditor.state.text;
 }
 
@@ -605,7 +605,7 @@ function commitAmount() {
   const state = amountEditor.commit(legal);
   raiseTo = state.value; input.value = state.text;
   $('raise-slider').value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
 }
 
@@ -620,6 +620,11 @@ function adoptDecision(legal) {
   }
 }
 
+// "벳 6 BB" / "레이즈 15 BB" / "올인 97 BB" — the amount is the street total.
+function raiseLabel(amount) {
+  return PRIMARY_VERB_LABEL[primaryVerb(ui.view, amount)];
+}
+
 function syncRaisePanel(legal) {
   adoptDecision(legal);
   raiseTo = clampRaiseTo(raiseTo, legal);
@@ -627,7 +632,7 @@ function syncRaisePanel(legal) {
   slider.min = String(legal.minRaiseTo);
   slider.max = String(legal.maxRaiseTo);
   slider.value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   writeAmountField(raiseTo);
   $('raise-range').textContent = `이번 스트리트 총액 · 최소 ${amountText(legal.minRaiseTo)} · 최대 ${amountText(legal.maxRaiseTo)}`;
 }
@@ -1276,7 +1281,7 @@ $('btn-raise').addEventListener('click', () => {
   if($('raise-amount').value!==amountEditor.state.text)amountEditor.edit($('raise-amount').value,legal);
   const amount=amountEditor.submit(legal,{locked:pendingAction});
   const state=amountEditor.state;raiseTo=state.value;$('raise-amount').value=state.text;markAmountValid(!state.invalid);
-  setBtnLabel($('btn-raise'),'총액 레이즈',raiseTo);
+  setBtnLabel($('btn-raise'),raiseLabel(raiseTo),raiseTo);
   if(amount!==null)void sendAction('raise',amount);
 });
 $('btn-allin-only').addEventListener('click', () => sendAction('raise', ui.view?.legal?.maxRaiseTo));
