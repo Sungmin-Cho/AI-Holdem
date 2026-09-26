@@ -325,7 +325,7 @@ test('property: engine hands with random stacks, seats, levels and actions alway
     return legal.canCheck ? ['check'] : ['call'];
   };
   let hands = 0, returns = 0, sidePots = 0;
-  for (let game = 0; game < 40; game += 1) {
+  for (let game = 0; game < 120; game += 1) {
     const mode = random() < 0.3 ? { mode: 'cash-training', startStack: 2000, handLimit: 100, levelEvery: null } : { startStack: 2000, levelEvery: 2 };
     let state = createGame({ aiCount: 1 + Math.floor(random() * 8), ...mode });
     for (const seat of state.seats) seat.stack = 1 + Math.floor(random() * 4000);
@@ -349,7 +349,7 @@ test('property: engine hands with random stacks, seats, levels and actions alway
       if (record.pots.length > 1) sidePots += 1;
     }
   }
-  assert.ok(hands >= 100 && returns > 0 && sidePots > 0, JSON.stringify({ hands, returns, sidePots }));
+  assert.ok(hands >= 300 && returns > 0 && sidePots > 0, JSON.stringify({ hands, returns, sidePots }));
 });
 
 test('a hand with no actions (both blinds all-in) runs out straight from the deal', () => {
@@ -419,5 +419,32 @@ test('a raise below the minimum (and not a short all-in) is refused', () => {
   // with the minRaiseTo field dropped so only the rule itself can see it.
   small.actions[raise].amount -= 1;
   delete small.actions[raise].minRaiseTo;
-  assert.equal(buildReplaySteps(small).ok, false);
+  // Refused at the raise itself by the size rule, not later by a pot total.
+  assert.deepEqual(buildReplaySteps(small), { ok: false, reason: 'raise', at: raise });
+});
+
+test('turn order and the showdown follow the engine: no seat acts out of turn, no record stops early, every winner shows', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const checked = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive), { reveal: 'all' });
+  assert.equal(buildReplaySteps(checked).ok, true);
+  const flop = checked.actions.findIndex((action) => action.street === 'flop');
+  const twice = structuredClone(checked);
+  twice.actions[flop].playerId = twice.actions[flop + 1].playerId;
+  reject(twice, 'the same seat checks twice in a row (amounts unchanged)');
+  // Swapping who checked first and second closes the round the same way: only the turn order sees it.
+  const swapped = structuredClone(checked);
+  [swapped.actions[flop].playerId, swapped.actions[flop + 1].playerId] = [swapped.actions[flop + 1].playerId, swapped.actions[flop].playerId];
+  assert.equal(swapped.actions[flop].action, 'check');
+  assert.equal(swapped.actions[flop + 1].action, 'check');
+  reject(swapped, 'the flop checked in the wrong order'); 
+  reject({ ...checked, actions: checked.actions.slice(0, -1) }, 'a record that stops while someone still had to act');
+  const winner = checked.pots[0].winners[0].playerId;
+  const hiddenWinner = structuredClone(checked);
+  hiddenWinner.showdown.reveals = hiddenWinner.showdown.reveals.filter((row) => row.playerId !== winner);
+  hiddenWinner.showdown.mucks = [...hiddenWinner.showdown.mucks, winner];
+  reject(hiddenWinner, 'a pot winner who mucks');
+  const lost = structuredClone(checked);
+  lost.showdown.mucks = [];
+  lost.showdown.reveals = lost.showdown.reveals.filter((row) => row.playerId === winner);
+  reject(lost, 'a player still in who neither shows nor mucks');
 });

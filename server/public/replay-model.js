@@ -9,6 +9,7 @@ import { actionVerbs } from './replay-format.js';
 
 const STREET_BOARD = Object.freeze({ preflop: 0, flop: 3, turn: 4, river: 5 });
 const STREET_OF_LENGTH = Object.freeze({ 3: 'flop', 4: 'turn', 5: 'river' });
+const NEXT_STREET = Object.freeze({ preflop: 'flop', flop: 'turn', turn: 'river' });
 
 function positionRank(label) {
   if (label === 'BTN' || label === 'BTN/SB') return 0;
@@ -97,6 +98,43 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   let lastRaiseSize = bigBlind;
   snapshot({ kind: 'deal', posts: posts.map((post) => ({ playerId: post.playerId, amount: post.amount })) });
 
+  // Turn order, as the engine keeps it (needsAction / nextNeedingAction /
+  // bettingRoundClosed / afterAction). It needs the real seating, which the
+  // positions give (clockwise from the button); a legacy record without them
+  // skips this check and relies on the chip, board and fold checks alone.
+  const positional = players.every((playerId) => positionRank(replay.positions?.[playerId]) !== null) ? replaySeatOrder(replay) : null;
+  const acted = new Set();
+  let reopenEligible = true, handOver = false, roundClosed = false, toAct = null;
+  const canPut = (playerId) => !folded.has(playerId) && stacks[playerId] > 0;
+  const actionable = () => players.filter(canPut);
+  const stillIn = () => players.filter((playerId) => !folded.has(playerId)).length;
+  const needsAction = (playerId) => {
+    if (!canPut(playerId)) return false;
+    const matched = bets[playerId] >= currentBet;
+    if (actionable().length === 1) return !matched;
+    return !(acted.has(playerId) && matched);
+  };
+  const nextNeeding = (from) => {
+    for (let step = 1; step <= positional.length; step += 1) {
+      const playerId = positional[(from + step) % positional.length];
+      if (needsAction(playerId)) return playerId;
+    }
+    return null;
+  };
+  const bettingClosed = () => {
+    if (stillIn() <= 1) return true;
+    const open = actionable();
+    if (!open.length) return true;
+    if (open.length === 1) return bets[open[0]] >= currentBet;
+    return open.every((playerId) => acted.has(playerId) && bets[playerId] >= currentBet);
+  };
+  if (positional) {
+    // Preflop starts left of the big blind; if that seat cannot act the hand is already over.
+    const first = positional[(positional.findIndex((playerId) => replay.positions[playerId] === 'BB') + 1) % positional.length];
+    toAct = needsAction(first) ? first : null;
+    handOver = toAct === null;
+  }
+
   const actions = Array.isArray(replay.actions) ? replay.actions : [];
   const verbs = actionVerbs(actions);
   for (let index = 0; index < actions.length; index += 1) {
@@ -108,6 +146,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (players.filter((id) => !folded.has(id)).length < 2 || stacks[playerId] === 0) return fail('actor', index);
     const actionStreet = action.street ?? 'preflop';
     if (!(actionStreet in STREET_BOARD)) return fail('street', index);
+    if (positional && (handOver || (roundClosed ? actionStreet !== NEXT_STREET[street] : actionStreet !== street))) return fail('order', index);
     if (actionStreet !== street) {
       if (STREET_BOARD[actionStreet] <= STREET_BOARD[street]) return fail('street', index);
       street = actionStreet;
@@ -120,7 +159,13 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       if (dealt.length !== STREET_BOARD[street] || !shownBoard.every((card, at) => dealt[at] === card)) return fail('board', index);
       shownBoard = [...dealt];
       snapshot({ kind: 'street', collected });
+      if (positional) {
+        // advanceStreet: bets reset, the first seat after the button that needs to act.
+        acted.clear(); reopenEligible = true; roundClosed = false;
+        toAct = nextNeeding(0);
+      }
     }
+    if (positional && playerId !== toAct) return fail('order', index);
     if (Array.isArray(action.board) && (action.board.length !== STREET_BOARD[street]
       || action.board.some((card, at) => card !== shownBoard[at]))) return fail('board', index);
     // The engine's own pre-action numbers must match the rebuilt state.
@@ -139,15 +184,29 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       chips = owed;
     } else if (action.action === 'raise') {
       if (!isAmount(action.amount) || action.amount <= currentBet) return fail('raise', index);
+      // canRaise: an incomplete raise does not reopen the action, and someone must be left to answer.
+      if (positional && ((acted.has(playerId) && !reopenEligible) || !actionable().some((id) => id !== playerId))) return fail('raise', index);
       chips = action.amount - bets[playerId];
       if (chips <= 0 || chips > stacks[playerId]) return fail('raise', index);
       // A short all-in is the only raise below the minimum (applyAction's rule).
       const minTo = currentBet + lastRaiseSize, maxTo = bets[playerId] + stacks[playerId];
       if (minTo > maxTo ? action.amount !== maxTo : action.amount < minTo) return fail('raise', index);
-      if (action.amount >= minTo) lastRaiseSize = action.amount - currentBet;
+      if (action.amount >= minTo) {
+        lastRaiseSize = action.amount - currentBet;
+        reopenEligible = true;
+        acted.clear();
+      } else reopenEligible = false;
       currentBet = action.amount;
     } else return fail('action', index);
+    acted.add(playerId);
     if (chips) put(playerId, chips);
+    if (positional) {
+      // afterAction: the hand ends, the round goes on, or the next street is due.
+      if (stillIn() <= 1) handOver = true;
+      else if (!bettingClosed()) toAct = nextNeeding(positional.indexOf(playerId));
+      else if (actionable().length <= 1 || street === 'river') handOver = true;
+      else roundClosed = true;
+    }
     snapshot({
       kind: 'action',
       actor: playerId,
@@ -158,6 +217,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     });
   }
 
+  // A record that stops while someone still had to act is incomplete.
+  if (positional && !handOver) return fail('order');
   // The final board extends everything shown during the actions.
   if (board.length < shownBoard.length || !shownBoard.every((card, at) => board[at] === card)) return fail('board');
   // Who folded, and whether there was a showdown, must match the record too:
@@ -201,8 +262,18 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   }
 
   const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
-  // A showdown shows at least the winner, and never a folded hand.
+  // A showdown shows every pot winner and never a folded hand; everyone still
+  // in either shows or mucks, exactly once.
   if ((contested && !reveals.length) || reveals.some((row) => folded.has(row.playerId))) return fail('showdown');
+  if (contested) {
+    const shownIds = reveals.map((row) => row.playerId);
+    const mucked = Array.isArray(replay.showdown?.mucks) ? replay.showdown.mucks : [];
+    const accounted = [...shownIds, ...mucked];
+    const live = players.filter((playerId) => !folded.has(playerId));
+    if (accounted.length !== live.length || new Set(accounted).size !== live.length || live.some((playerId) => !accounted.includes(playerId))) return fail('showdown');
+    const potWinners = (Array.isArray(replay.pots) ? replay.pots : []).flatMap((pot) => (Array.isArray(pot?.winners) ? pot.winners.map((row) => row.playerId) : []));
+    if (potWinners.some((playerId) => !shownIds.includes(playerId))) return fail('showdown');
+  }
   if (reveals.length) {
     snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
   }

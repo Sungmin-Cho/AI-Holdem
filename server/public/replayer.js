@@ -230,8 +230,10 @@ export function mountReplayer(container, ctx) {
         state,
       ].filter(Boolean).join(', ')));
     }
+    // Many side pots do not fit the felt: the total and a count there, each pot in the panel.
     pot.textContent = step.kind === 'result'
-      ? step.pots.map((row) => `${row.potIndex === 0 ? (step.pots.length > 1 ? '메인' : '팟') : `사이드 ${row.potIndex}`} ${short(row.amount)}`).join(' · ')
+      ? (step.pots.length > 2 ? `팟 ${short(step.total)} · ${step.pots.length}개`
+        : step.pots.map((row) => `${row.potIndex === 0 ? (step.pots.length > 1 ? '메인' : '팟') : `사이드 ${row.potIndex}`} ${short(row.amount)}`).join(' · '))
       : step.total > step.pot ? `팟 ${short(step.pot)} · 베팅 포함 ${short(step.total)}` : `팟 ${short(step.pot)}`;
 
     first.disabled = prev.disabled = index <= 0;

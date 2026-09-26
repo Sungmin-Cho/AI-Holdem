@@ -1115,6 +1115,9 @@ main {
 }
 .replayer-board { display: flex; gap: 4px; }
 .replayer-pot {
+  max-width: 92%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 10px;
   border-radius: 999px;
