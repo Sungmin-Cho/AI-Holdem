@@ -173,7 +173,10 @@ test('S8 early: the actual store CLI initializes the default policy table before
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env);
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
-    await within(cli.closed, 8000);
+    // A policy game no longer waits for the held upper probe, so the relay and the
+    // study attachment are already starting when the stop lands; on Windows that
+    // teardown takes well over the POSIX budget.
+    await within(cli.closed, scaled(8000));
   });
   const invocation = await until(() => {
     return readFirstFixtureRecord(fake.log, cli.child);
@@ -282,7 +285,8 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env, { umask: 0o002 });
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
-    await within(cli.closed, 8000);
+    // See the policy-table test above: the stop now waits for relay/study startup.
+    await within(cli.closed, scaled(8000));
     await stopOwnedStudy(store);
   });
   await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);
