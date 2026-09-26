@@ -62,20 +62,35 @@ test('a pause click locks the table until the pause settles, and closing the men
 test('R3: a refused pause unlocks the table, an unanswered one stays locked, a settled one unlocks', async () => {
  const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
  const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:false,disabled:false,open:false,textContent:'',dataset:{},focus(){}});return nodes.get(id);};
- let pending=false,send;
+ let stored=null,send;
  const lock=()=>({gameId:'g',gameEpoch:'e'});
  const context={$,busy:false,viewingRecord:false,preparing:null,selecting:false,pauseLock:lock(),refreshSeq:0,
   snapshot:{instanceId:'i',appRevision:1,gameId:'g',gameEpoch:'e',selectionVersion:1,state:'playing',setup:null},
-  commands:{get pending(){return pending;},send:payload=>send(payload)},uuid:()=>'r1',render(){},refresh:async()=>{},showError(){},openPauseMenu(){}};
- vm.createContext(context);vm.runInContext(source.slice(source.indexOf('async function command('),source.indexOf('function confirm(fn)')),context);
+  commands:{get pending(){return !!stored;},get pendingCommand(){return stored;},send:payload=>send(payload)},uuid:()=>'r1',render(){},refresh:async()=>{},showError(){},openPauseMenu(){}};
+ vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function storedPause('),source.indexOf('function confirm(fn)')),context);
  send=async()=>{throw Object.assign(new Error('INVALID_TRANSITION'),{status:409});};
  await context.command('pause');assert.equal(context.pauseLock,null,'a refusal with a status code is final');
- context.pauseLock=lock();pending=true;send=async()=>{throw new TypeError('fetch failed');};
- await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'an unanswered pause (command still stored) stays locked');
- pending=false;send=async()=>({status:'succeeded'});context.refreshSeq=4;
- await context.command('pause');assert.deepEqual({...context.pauseLock},{...lock(),settledSeq:4},'a settled pause waits for a snapshot requested after it');
+ context.pauseLock=lock();send=async(payload)=>{stored={requestId:payload.requestId,kind:payload.kind};throw new TypeError('fetch failed');};
+ await context.command('pause');assert.deepEqual({...context.pauseLock},{...lock(),requestId:'r1'},'an unanswered pause (command still stored) stays locked');
+ context.pauseLock=lock();stored={requestId:'older',kind:'resume'};send=async()=>{throw new Error('COMMAND_PENDING');};
+ await context.command('pause');assert.equal(context.pauseLock,null,'a pause never stored because another command is pending unlocks');
+ stored=null;send=async()=>({status:'succeeded'});context.pauseLock=lock();context.refreshSeq=4;
+ await context.command('pause');assert.deepEqual({...context.pauseLock},{...lock(),requestId:'r1',settledSeq:4},'a settled pause waits for a snapshot requested after it');
  context.pauseLock=lock();context.refresh=async()=>{throw new Error('offline');};
  await context.command('pause');assert.equal(context.pauseLock.settledSeq,4,'a failed follow-up refresh leaves the settled lock for the next poll');
+});
+
+test('R3: a pause click while another command is being confirmed does not lock the table', () => {
+ const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{id});return nodes.get(id);};
+ const errors=[],sent=[];let pending=true,opened=0;
+ const context={$,busy:false,pauseLock:null,snapshot:{state:'playing',gameId:'g',gameEpoch:'e'},
+  commands:{get pending(){return pending;}},showError:e=>errors.push(e.message),render(){},openPauseMenu(){opened+=1;},command:kind=>{sent.push(kind);}};
+ vm.createContext(context);vm.runInContext(source.slice(source.indexOf('$("menu").onclick'),source.indexOf('$("resume").onclick')),context);
+ $('menu').onclick();
+ assert.equal(context.pauseLock,null);assert.deepEqual(sent,[]);assert.equal(opened,0);assert.deepEqual(errors,['COMMAND_PENDING']);
+ pending=false;$('menu').onclick();
+ assert.deepEqual({...context.pauseLock},{gameId:'g',gameEpoch:'e'});assert.deepEqual(sent,['pause']);assert.equal(opened,1);
 });
 
 test('R3: only a snapshot requested after the pause settled releases the lock', async () => {
@@ -94,6 +109,21 @@ test('R3: only a snapshot requested after the pause settled releases the lock', 
  assert.equal(context.pauseLock,null,'the first snapshot requested after settling releases it');
 });
 
+test('R3: an answer older than the snapshot already shown is dropped', async () => {
+ const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const start=source.indexOf('let refreshFailures=0;'),end=source.indexOf('const BOOT_ORDER');
+ const pending=[];const context={snapshot:null,pauseLock:null,appliedDefaults:true,form:{},render(){},
+  api:()=>new Promise(resolve=>pending.push(resolve))};
+ vm.createContext(context);vm.runInContext(source.slice(start,end).replace('let refreshFailures=0;','var refreshFailures=0;').replace('let refreshSeq=0;','var refreshSeq=0;'),context);
+ const early=context.refresh();                       // started before the pause settled
+ context.pauseLock={gameId:'g',gameEpoch:'e',settledSeq:context.refreshSeq};
+ const later=context.refresh();
+ pending[1]({state:'paused'});await later;            // the newer answer arrives first
+ assert.equal(context.pauseLock,null);assert.equal(context.snapshot.state,'paused');
+ pending[0]({state:'playing'});await early;
+ assert.equal(context.snapshot.state,'paused','the late, older answer does not repaint a stale playing state');
+});
+
 test('R3: recovery keeps a settled pause locked until a later snapshot and restores a stored pause after reload', async () => {
  const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
  const slice=source.slice(source.indexOf('async function recoverCommand()'),source.indexOf('async function roomOp('));
@@ -103,14 +133,21 @@ test('R3: recovery keeps a settled pause locked until a later snapshot and resto
   commands:{get pending(){return !!stored;},get pendingCommand(){return stored;},recover:()=>recover()},
   refresh:async()=>{throw new Error('offline');},render(){},showError(){},openPauseMenu(){}};
  vm.createContext(context);vm.runInContext(slice,context);
+ vm.runInContext(source.slice(source.indexOf('function storedPause('),source.indexOf('async function command(')),context);
+ stored={requestId:'p1',kind:'pause',expectedGameId:'g'};recover=async()=>{throw new TypeError('fetch failed');};
+ await context.recoverCommand();
+ assert.deepEqual({...context.pauseLock},{gameId:'g',gameEpoch:'e',requestId:'p1'},'restored after reload and kept while unanswered');
  recover=async()=>{stored=null;return {status:'succeeded'};};
  await context.recoverCommand();
- assert.deepEqual({...context.pauseLock},{gameId:'g',gameEpoch:'e',settledSeq:7},'restored after reload, settled, and kept while the refresh fails');
- context.pauseLock=null;stored={kind:'pause',expectedGameId:'g'};
+ assert.deepEqual({...context.pauseLock},{gameId:'g',gameEpoch:'e',requestId:'p1',settledSeq:7},'settled, and kept while the refresh fails');
+ context.pauseLock={gameId:'g',gameEpoch:'e',requestId:'p2'};stored={requestId:'r9',kind:'resume',expectedGameId:'g'};
+ await context.recoverCommand();
+ assert.equal(context.pauseLock,null,'a lock whose pause was never stored unlocks once the other command settles');
+ context.pauseLock=null;stored={requestId:'p3',kind:'pause',expectedGameId:'g'};
  recover=async()=>{stored=null;throw new Error('INVALID_TRANSITION');};
  await context.recoverCommand();
  assert.equal(context.pauseLock,null,'a confirmed refusal unlocks');
- stored={kind:'pause',expectedGameId:'other'};recover=async()=>{throw new TypeError('fetch failed');};
+ stored={requestId:'p4',kind:'pause',expectedGameId:'other'};recover=async()=>{throw new TypeError('fetch failed');};
  await context.recoverCommand();
  assert.equal(context.pauseLock,null,'a stored pause for another game does not lock this one');
 });

@@ -66,11 +66,11 @@ export function createLobbyCommandClient({
     get pending() {
       return !!storage.getItem(key);
     },
-    /** Kind and target game of the stored command (survives a reload), or null. */
+    /** Request id, kind and target game of the stored command (survives a reload), or null. */
     get pendingCommand() {
       try {
         const payload = JSON.parse(storage.getItem(key) ?? "null");
-        return payload ? { kind: payload.kind ?? null, expectedGameId: payload.expectedGameId ?? null } : null;
+        return payload ? { requestId: payload.requestId ?? null, kind: payload.kind ?? null, expectedGameId: payload.expectedGameId ?? null } : null;
       } catch {
         return null;
       }

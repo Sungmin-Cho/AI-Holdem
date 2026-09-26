@@ -273,11 +273,16 @@ function pauseElapsedText(pausing) {
 function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
 let refreshFailures=0;
 // Counts refreshes as they start, so a settled pause is released only by a
-// snapshot requested after it settled (never by a late, older answer).
+// snapshot requested after it settled, and an answer older than the one
+// already shown is dropped (it would repaint a stale state).
 let refreshSeq=0;
+let appliedSeq=0;
 async function refresh() {
   const seq = ++refreshSeq;
-  snapshot = await api("/api/app");
+  const next = await api("/api/app");
+  if (seq < appliedSeq) return;
+  appliedSeq = seq;
+  snapshot = next;
   refreshFailures=0;
   if (pauseLock?.settledSeq !== undefined && seq > pauseLock.settledSeq) pauseLock = null;
   if (!appliedDefaults && snapshot.defaultSetup) {
@@ -492,6 +497,11 @@ const commands = createLobbyCommandClient({
   storage: sessionStorage,
   onPoll: refresh,
 });
+// Whether the command still stored for confirmation is this lock's own pause.
+function storedPause(lock) {
+  const stored = commands.pendingCommand;
+  return Boolean(lock?.requestId && stored?.kind === "pause" && stored.requestId === lock.requestId);
+}
 async function command(kind, setup, extra = {}) {
   if (busy) return;
   let refocusStart = false;
@@ -516,6 +526,9 @@ async function command(kind, setup, extra = {}) {
       ...(setup ? { setup } : {}),
       ...extra,
     };
+    // The lock belongs to this pause request: if it is never stored (another
+    // command is pending) or is refused, nothing else would release it.
+    if (kind === "pause" && pauseLock) pauseLock = { ...pauseLock, requestId: payload.requestId };
     await commands.send(payload);
     sent = true;
     // Only a snapshot fetched after the pause settled unlocks the table (see
@@ -527,9 +540,10 @@ async function command(kind, setup, extra = {}) {
   } catch (e) {
     refocusStart = !!preparing && kind === "start";
     preparing = null;
-    // A refused pause is final; an unanswered one stays locked until recovered,
-    // and so does one that succeeded but whose follow-up refresh failed.
-    if (kind === "pause" && !commands.pending && !sent) pauseLock = null;
+    // A pause that is not stored (refused, or never sent because another
+    // command is pending) is final; an unanswered one stays locked until
+    // recovered, and so does one that succeeded but whose refresh failed.
+    if (kind === "pause" && !sent && !storedPause(pauseLock)) pauseLock = null;
     showError(e);
     await refresh().catch(() => {});
   } finally {
@@ -585,6 +599,9 @@ function openPauseMenu() {
 $("menu").onclick = () => {
   if (snapshot.state !== "playing" || pauseLock) { openPauseMenu(); return; }
   if (busy) return;
+  // An earlier command is still being confirmed (the poll settles it); a pause
+  // now would only be refused, so the table is not locked for it.
+  if (commands.pending) { showError(new Error("COMMAND_PENDING")); return; }
   pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch };
   render();
   openPauseMenu();
@@ -795,7 +812,7 @@ async function recoverCommand() {
   const stored = commands.pendingCommand;
   // A pause stored before a reload keeps the table locked until it is settled.
   if (stored?.kind === "pause" && !pauseLock && snapshot?.gameId && stored.expectedGameId === snapshot.gameId) {
-    pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch };
+    pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch, requestId: stored.requestId };
   }
   busy = true;
   render();
@@ -810,9 +827,11 @@ async function recoverCommand() {
   } catch (e) {
     showError(e);
   } finally {
-    // A confirmed refusal (stored command gone, not settled) unlocks at once; a
-    // settled one waits for a later snapshot, an unanswered one stays locked.
-    if (stored?.kind === "pause" && !commands.pending && !settled) pauseLock = null;
+    // A lock whose pause is no longer stored and did not settle here (refused,
+    // or never sent) unlocks at once; a settled one waits for a later snapshot,
+    // an unanswered one stays locked.
+    const settledHere = settled && stored?.kind === "pause";
+    if (pauseLock && pauseLock.settledSeq === undefined && !settledHere && !storedPause(pauseLock)) pauseLock = null;
     busy = false;
     render();
     // Focus the menu's primary only if the menu is open; recovery never

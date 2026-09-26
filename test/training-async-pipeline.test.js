@@ -1423,3 +1423,67 @@ test('R1: the finalization priority holds through the last hand\'s solve and its
     `the last hand's solved decision explains before held-back hands: ${JSON.stringify({ explained, waiting })}`);
   await loop.requestStop().catch(() => {});
 });
+
+test('R1: past the result-wait time no new training work starts, not even for the last hand', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explained = [];
+  const logs = [];
+  let skewNs = 0n;
+  let solveAsked = false;
+  let releaseSolve, releaseEarlier;
+  const solveGate = new Promise((resolve) => { releaseSolve = resolve; });
+  const earlierGate = new Promise((resolve) => { releaseEarlier = resolve; });
+  t.after(() => { releaseSolve(); releaseEarlier(); });
+  const LAST = 3;
+  const RESULT_WAIT_MS = 4_000;
+  const held = makeEvaluate({ gate: earlierGate });
+  const passing = makeEvaluate();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, solverAdapterId: 'fixture-solver',
+      finalizeBudgetMs: 2 * RESULT_WAIT_MS, finalizeCutoffLeadMs: RESULT_WAIT_MS,
+      // The test moves the monotonic clock past the result-wait time while the
+      // finalization settle still waits on the wall clock (hand 1 holds it), so
+      // the window before the cutoff flag stays open long enough to observe.
+      monotonicNs: () => process.hrtime.bigint() + skewNs,
+      log: (record) => logs.push({ event: record.event, at: process.hrtime.bigint() }),
+      training: {
+        evaluate: (dir, handNo) => {
+          if (handNo === 1) return held(dir, handNo);
+          if (handNo === LAST) return handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(dir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 });
+          return passing(dir, handNo);
+        },
+        solve: (task) => {
+          solveAsked = true;
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] }, { gate: solveGate });
+        },
+        explain: (evaluation) => { explained.push(evaluation.handNo); return handleOf(VALID_EXPLAIN); },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  const finalizeStart = () => logs.find((entry) => entry.event === 'finalize-start');
+  const settling = () => finalizeStart() && logs.some((entry) => entry.event === 'training-settle-start' && entry.at >= finalizeStart().at);
+  const { running } = await playUntil(loop, gameDir, { until: () => solveAsked && settling(), timeoutMs: 60_000 });
+  running.catch(() => {});
+  // The result-wait time is at most RESULT_WAIT_MS after finalize-start.
+  const target = finalizeStart().at + BigInt(RESULT_WAIT_MS + 200) * 1_000_000n;
+  const now = process.hrtime.bigint();
+  if (target > now) skewNs = target - now;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  releaseSolve();
+  const decisionId = userDecisions(gameDir, LAST)[0].decisionId;
+  await waitFor(() => authorityItems(gameDir).some((item) => item.decisionId === decisionId), 'the last hand\'s solve was not accepted', 10_000);
+  await waitFor(() => readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands?.includes(LAST),
+    'the solved hand was not kept for the cutoff seal', 3_000);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(logs.some((entry) => entry.event === 'training-settle-return' && entry.at >= finalizeStart().at), false,
+    'the settle was still waiting (the window was open)');
+  assert.equal(explained.includes(LAST), false, `no explanation child starts past the result-wait time: ${JSON.stringify(explained)}`);
+  await loop.requestStop().catch(() => {});
+});

@@ -1018,7 +1018,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // The hand whose priority already ran its course in this process (so a
   // later finalize() reconcile does not set it again).
   let finalizationPriorityDone = null;
-  const trainingMayRun = (handNo) => !trainingAdmissionClosed || handNo === finalizationPriorityHand;
+  const trainingMayRun = (handNo) => !resultWaitPassed()
+    && (!trainingAdmissionClosed || handNo === finalizationPriorityHand);
   const trainingMayExplain = (handNo) => trainingMayRun(handNo)
     && (finalizationPriorityHand === null || handNo === finalizationPriorityHand);
   let waitController = null;
@@ -1141,6 +1142,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     return { deadlineNs, resultWaitCutoffNs: finalizeResultWaitCutoffNs };
   };
+  // Past the result-wait cutoff time nothing new should start: the finalization
+  // sweep may already have listed the children it will end. Every training
+  // admission path checks it — the cutoff flag itself is set only later.
+  const resultWaitPassed = () => finalizeResultWaitCutoffNs !== null && monotonicNs() >= finalizeResultWaitCutoffNs;
 
   const assertFinalizationDeadline = () => {
     if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
@@ -3307,7 +3312,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // A solve still queued on the solve lock when a pause closes the gate
       // leaves its pending entry as is (the SOLVE_CUTOFF path) and re-registers.
       shouldStop: () => {
-        if (stopRequested || finalizationCutoff) return true;
+        if (stopRequested || finalizationCutoff || resultWaitPassed()) return true;
         const closed = trainingAdmissionClosed && task.handNo !== finalizationPriorityHand;
         if (closed) held = true;
         return closed;
@@ -3353,7 +3358,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const launchTrainingPipeline = (handNo) => {
     if (!trainingOn) return null;
-    if (trainingAdmissionClosed && handNo !== finalizationPriorityHand) { queueDeferredHand(handNo); return null; }
+    if (!trainingMayRun(handNo)) { queueDeferredHand(handNo); return null; }
     if (trainingInFlightHands.has(handNo)) return null;
     trainingInFlightHands.add(handNo);
     let result = null;
@@ -3379,10 +3384,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // register it now (after its running pipeline, if one is still going).
   const readmitTrainingHand = (handNo) => {
     if (!Number.isInteger(handNo) || stopRequested) return;
-    // Past the finalization cutoff nothing new starts (the sweep has already
-    // listed the children it ends); the record and pending entries stay.
+    // Past the result-wait time or the finalization cutoff nothing new starts
+    // (the sweep may already list the children it ends); the record and
+    // pending entries stay for the cutoff seal.
     const priority = finalizationPriorityHand !== null && handNo === finalizationPriorityHand;
-    if ((trainingAdmissionClosed && !priority) || finalizationCutoff
+    if ((trainingAdmissionClosed && !priority) || finalizationCutoff || resultWaitPassed()
       || (finalizationPriorityHand !== null && !priority)) queueDeferredHand(handNo);
     else if (trainingInFlightHands.has(handNo)) relaunchAfter.add(handNo);
     else launchTrainingPipeline(handNo);
@@ -3412,9 +3418,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     writeDeferredRecord((set) => set.add(handNo));
   };
 
-  // Past the result-wait cutoff time nothing new should start: the finalization
-  // sweep may already have listed the children it will end.
-  const resultWaitPassed = () => finalizeResultWaitCutoffNs !== null && monotonicNs() >= finalizeResultWaitCutoffNs;
   const drainDeferredHands = () => {
     if (stopRequested || trainingAdmissionClosed || finalizationCutoff || resultWaitPassed() || finalizationPriorityHand !== null) return 0;
     const hands = [...admissionDeferredHands];
