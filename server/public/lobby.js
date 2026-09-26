@@ -1,6 +1,6 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
-import {formatAmount} from './chip-format.js';
+import {formatAmount, readPreference} from './chip-format.js';
 import { uuid } from './uuid.js';
 import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
@@ -319,7 +319,8 @@ function paintNotices() {
   $("notices-title").textContent = level === "info" ? "알림" : "확인이 필요한 알림";
   const key = `holdem.notices.v1:${snapshot.gameId ?? "lobby"}`;
   const stored = noticeState(key);
-  const open = stored ? stored === "open" : level !== "info" && !document.body.classList.contains("has-game");
+  // Only errors open the dropdown by themselves; everything else waits for a click.
+  const open = stored ? stored === "open" : level === "error";
   $("notices-toggle").setAttribute("aria-expanded", String(open));
   $("notices-list").hidden = !open;
   $("notices-list").replaceChildren(...items.map((item) => {
@@ -335,6 +336,10 @@ function paintNotices() {
   const diagnostic = $("notices-list").lastElementChild;
   if (unclassified > 0 && diagnostic) diagnostic.dataset.kind = "diagnostic";
 }
+// The table's BB/chips selector writes the shared preference; follow it here.
+window.addEventListener("storage", (event) => {
+  if (event.key === "holdem.display-unit.v1" && document.body.classList.contains("has-game")) paintContext(shellBridge.context);
+});
 $("notices-toggle").onclick = () => {
   const open = $("notices-toggle").getAttribute("aria-expanded") !== "true";
   try { sessionStorage.setItem(`holdem.notices.v1:${snapshot?.gameId ?? "lobby"}`, open ? "open" : "closed"); } catch { /* per-tab only */ }
@@ -382,7 +387,8 @@ function paintContext(context) {
   if (context.handNo !== null) add("핸드", context.handLimit ? `${context.handNo}/${context.handLimit}` : String(context.handNo));
   if (context.blinds) add(context.level ? `레벨 ${context.level} ·` : "블라인드", `${context.blinds[0].toLocaleString("ko-KR")}/${context.blinds[1].toLocaleString("ko-KR")}`);
   if (context.sessionNet !== null) {
-    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, "chips", true).primary;
+    // Same BB/chips preference as the table's own unit selector.
+    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, readPreference(), true).primary;
     add("손익", net, context.sessionNet > 0 ? "ui-pos" : context.sessionNet < 0 ? "ui-neg" : "");
   }
   if (context.conn !== "on") add("연결", context.conn === "retry" ? "재연결 중" : "종료");

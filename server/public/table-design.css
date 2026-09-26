@@ -318,3 +318,8 @@ select {border:1px solid var(--ui-border);background:var(--panel);color:var(--in
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {display:none;}
   .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
 }
+
+/* Lobby-embedded tables hand their header to the parent once the shell bridge
+   handshake completes; the page body then fills the frame on its own. */
+body.embedded > .topbar {display:none;}
+body.embedded {grid-template-rows:minmax(0,1fr);}

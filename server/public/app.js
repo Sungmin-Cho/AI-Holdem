@@ -14,6 +14,7 @@ import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presenta
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
 import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
+import {createShellEmbed} from './shell-embed.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -25,6 +26,16 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
+// Inside the host lobby the parent header shows hand, blinds, net and connection
+// once it answers the handshake; until then (or without a parent) this page keeps
+// its own top bar.
+const shellEmbed = createShellEmbed({
+  gameId: appGameId,
+  gameEpoch: appEpoch,
+  onReady: () => document.body.classList.add('embedded'),
+});
+let shellConn = 'retry';
+let shellRetries = 0;
 const ui = { sessionEnded: false, handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
@@ -208,6 +219,29 @@ function setConn(on, text = null) {
   $('conn-text').textContent = text ?? (on ? '연결됨' : '재접속 중…');
   box.classList.toggle('on', on);
   box.classList.toggle('off', !on);
+  shellConn = on ? 'on' : ui.sessionEnded ? 'ended' : 'retry';
+  if (on) shellRetries = 0;
+  shellEmbed.send(shellContext(ui.view));
+}
+
+/** Public header context for the lobby shell: no cards, decisions or tokens,
+ * and the session net only for the viewer's own seat. */
+function shellContext(view) {
+  const cash = view?.mode === 'cash-training';
+  const net = view?.sessionNet?.[viewerId(view)];
+  return {
+    handNo: Number.isSafeInteger(view?.handNo) ? view.handNo : null,
+    handLimit: Number.isSafeInteger(view?.handLimit) ? view.handLimit : null,
+    level: view && !cash && Number.isSafeInteger(view.level) ? view.level + 1 : null,
+    blinds: Array.isArray(view?.blinds) && view.blinds.length === 2 ? [view.blinds[0], view.blinds[1]] : null,
+    levelLeft: view && !cash ? handsUntilLevel(view) : null,
+    sessionNet: cash && !isSpectating(view) && Number.isSafeInteger(net) ? net : null,
+    conn: ui.sessionEnded ? 'ended' : shellConn,
+    retryCount: shellRetries,
+    gameOver: view?.gameOver === true,
+    handInProgress: view?.handInProgress !== false,
+    mode: view?.mode ?? null,
+  };
 }
 
 function showBootError(text) {
@@ -1106,6 +1140,7 @@ function paint() {
   paintUnread();
   paintReview(view);
   if (openReplayHandNo != null) paintReplay();
+  shellEmbed.send(shellContext(view));
 }
 
 function upsertHandReplays(rows, replace) {
@@ -1490,7 +1525,7 @@ else {
   };
   es.onerror = () => { booted = false; setConn(false); actionController?.disconnect(); };
   if(appGameId) {
-    es.onretry=attempt=>setConn(false,`재접속 중… (${attempt}번째)`);
+    es.onretry=attempt=>{shellRetries=attempt;setConn(false,`재접속 중… (${attempt}번째)`);};
     es.onfatal=async(code,{signal})=>{
       ++openingAttempt;booted=false;clearInterval(poll);actionController?.disconnect();
       if(code==='SESSION_INACTIVE') {

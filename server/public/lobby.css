@@ -25,8 +25,8 @@
 .app-status { color: var(--c-text-2); font-size: var(--fs-13); font-weight: 600; white-space: nowrap; }
 .app-header .ui-btn { min-height: 40px; }
 
-/* ---- Notices banner ------------------------------------------------------ */
-.notices { max-width: 1120px; margin: var(--sp-4) auto 0; padding: 0 var(--sp-6); }
+/* ---- Notices (header chip + dropdown) ---------------------------------- */
+.notices { position: relative; flex: none; }
 .notices__toggle {
   display: inline-flex; align-items: center; gap: var(--sp-2);
   min-height: 36px; padding: 0 var(--sp-3);
@@ -34,7 +34,12 @@
   background: var(--c-surface-1); color: var(--c-text-2); font-weight: 600; cursor: pointer;
 }
 .notices[data-level="error"] .notices__toggle, .notices[data-level="warn"] .notices__toggle { border-color: var(--c-danger-border); color: var(--c-danger); }
-.notices__list { list-style: none; margin: var(--sp-2) 0 0; padding: var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-card); background: var(--c-surface-1); }
+.notices__list {
+  position: absolute; top: calc(100% + var(--sp-2)); left: 0; z-index: var(--z-floating);
+  width: max-content; max-width: min(560px, calc(100vw - 32px));
+  list-style: none; margin: 0; padding: var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-2);
+  border: 1px solid var(--c-line-strong); border-radius: var(--r-card); background: var(--c-surface-1); box-shadow: var(--sh-2);
+}
 .notices__list li { display: flex; gap: var(--sp-2); align-items: baseline; color: var(--c-text); }
 .notices__list li::before { content: ""; width: 6px; height: 6px; margin-top: 7px; border-radius: 50%; background: var(--c-info); flex: none; }
 .notices__list li[data-level="warn"]::before, .notices__list li[data-level="error"]::before { background: var(--c-danger); }
@@ -127,11 +132,6 @@ body.has-game > header { flex: none; position: static; }
 body.has-game #game { flex: 1; min-height: 240px; display: flex; flex-direction: column; }
 body.has-game #game iframe { display: block; flex: 1; height: 100%; min-height: 240px; }
 body.has-game #table { display: block; }
-body.has-game > .notices { flex: none; max-width: none; margin: 0; padding: var(--sp-1) var(--sp-4); border-bottom: 1px solid var(--c-line); }
-body.has-game > .notices .notices__list { position: absolute; z-index: var(--z-floating); width: max-content; max-width: min(560px, calc(100vw - 32px)); box-shadow: var(--sh-2); }
-/* On wide screens the in-game notices chip rides in the header row next to the
-   brand instead of taking a row of table height. */
-body.has-game > .notices { position: absolute; top: 10px; left: 136px; z-index: var(--z-floating); padding: 0; border: 0; background: none; }
 #boot-title:focus { outline: none; }
 .field-error { margin: 0; }
 body.has-game > #error:empty { display: none; }
@@ -163,7 +163,7 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
   .app-header .ui-btn { min-height: var(--tap); padding: 0 var(--sp-3); font-size: var(--fs-13); }
   .brand strong { font-size: var(--fs-14); }
   .lobby-setup { padding: var(--sp-6) var(--sp-4) var(--sp-10); }
-  .notices, .lobby-error, .boot { padding: 0 var(--sp-4); }
+  .lobby-error, .boot { padding: 0 var(--sp-4); }
   .boot__card { padding: var(--sp-6); }
   .status-card { margin: var(--sp-6) var(--sp-4); }
   .invite { flex-direction: column; align-items: flex-start; }
@@ -174,6 +174,5 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
   body.has-game .app-status,
   body.has-game .coach-chip__text,
   body.has-game #notices-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  body.has-game > .notices { top: 8px; left: 40px; }
   body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
 }

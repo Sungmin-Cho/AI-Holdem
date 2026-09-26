@@ -15,6 +15,12 @@
   <body class="ui-page lobby">
     <header class="app-header">
       <span class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C9.2 6.6 4.5 9.3 4.5 13.2 4.5 15.6 6.3 17.2 8.4 17.2 9.6 17.2 10.6 16.7 11.3 15.9 11.1 17.8 10.3 19.3 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.7 19.3 12.9 17.8 12.7 15.9 13.4 16.7 14.4 17.2 15.6 17.2 17.7 17.2 19.5 15.6 19.5 13.2 19.5 9.3 14.8 6.6 12 2Z" /></svg><strong>AI 홀덤</strong></span>
+      <section id="notices" class="notices" hidden aria-label="알림">
+        <button type="button" id="notices-toggle" class="notices__toggle" aria-expanded="false" aria-controls="notices-list">
+          <span class="ui-count" id="notices-count">0</span><span id="notices-title">알림</span>
+        </button>
+        <ul id="notices-list" class="notices__list" hidden></ul>
+      </section>
       <p id="shell-context" class="shell-context" hidden></p>
       <span class="header-spacer"></span>
       <span id="coach-chip" class="ui-pill ui-pill--info" hidden><span class="ui-dot"></span><span class="coach-chip__text">코치 연결 확인 중</span></span>
@@ -23,12 +29,6 @@
       ><button id="interrupt-decision" class="ui-btn ui-btn--danger" hidden>이 결정 중단</button
       ><button id="study" class="ui-btn ui-btn--quiet">학습 열기 ↗</button>
     </header>
-    <section id="notices" class="notices" hidden aria-label="알림">
-      <button type="button" id="notices-toggle" class="notices__toggle" aria-expanded="false" aria-controls="notices-list">
-        <span class="ui-count" id="notices-count">0</span><span id="notices-title">알림</span>
-      </button>
-      <ul id="notices-list" class="notices__list" hidden></ul>
-    </section>
     <main id="setup" class="lobby-setup">
       <form id="setup-form" class="lobby-grid" novalidate>
         <div class="lobby-main">
