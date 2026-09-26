@@ -97,12 +97,12 @@ test('app, relay and study listeners serve the new assets with correct types', a
     const script = await fetch(`${app.origin}/card-render.js`);
     assert.equal(script.headers.get('cache-control'), 'no-store');
     await script.text();
-    for (const name of ['ui-base.css', 'theme-boot.js', 'card-render.js', 'font-pretendard-700.woff2']) {
+    for (const name of ['ui-base.css', 'theme-boot.js', 'public/card-render.js', 'public/help-panel.js', 'public/display-settings.js', 'public/chip-format.js', 'font-pretendard-700.woff2']) {
       const response = await fetch(`http://127.0.0.1:${drill.port}/${name}`);
       assert.equal(response.status, 200, `drill ${name}`);
       await response.arrayBuffer();
     }
-    for (const name of ['vendor-qrcode.js', 'lobby.js']) {
+    for (const name of ['vendor-qrcode.js', 'lobby.js', 'card-render.js', 'public/app.js', 'public/lobby.js']) {
       assert.equal((await fetch(`http://127.0.0.1:${drill.port}/${name}`)).status, 404, `drill must not serve ${name}`);
     }
   } finally {

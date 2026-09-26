@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, drillRequest, readStudyEntry, formatSource } from '../server/drill-public/study-format.js';
+import { formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, drillRequest, readStudyEntry, formatSource, formatSourceShort, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, STUDY_MODE_HELP, STUDY_MODES } from '../server/drill-public/study-format.js';
 import { LEGACY_REFERENCE_SOURCE as source } from '../shared/reference.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { startDrillServer } from '../tools/drill-server.js';
@@ -411,4 +411,60 @@ test('legacy rejection storage failure cannot authorize a replacement', async ()
   assert.equal(c.state.pending.kind, 'answer'); assert.equal(c.state.recovery, true);
   assert.equal(c.state.replacementOnly, false); assert.equal(c.state.error.code, 'STORAGE');
   assert.equal(JSON.parse(saved).kind, 'answer');
+});
+
+test('position diagram draws only what the spot states', () => {
+  const rfi = spotDiagram({ position: 'CO', spotKey: '6max-100bb-co-rfi-unopened', actionHistory: [] });
+  assert.equal(rfi.seated, 6, 'a legacy spot key still names its six-handed table');
+  assert.deepEqual(rfi.seats.map((seat) => seat.role), ['folded', 'folded', 'hero', 'waiting', 'waiting', 'waiting']);
+  assert.match(rfi.label, /6인.*CO.*모두 폴드/);
+  const defend = spotDiagram({ position: 'CO', seated: 9, openerPosition: 'UTG1', spotKey: '9max-100bb-co-vs-utg1-open25-v2', actionHistory: ['raise'] });
+  assert.deepEqual(defend.seats.map((seat) => seat.role), ['folded', 'opener', 'folded', 'folded', 'folded', 'hero', 'waiting', 'waiting', 'waiting']);
+  assert.match(defend.label, /9인.*CO.*UTG1 오픈/);
+  const unknownOpener = spotDiagram({ position: 'BB', spotKey: '6max-100bb-bb-vs-single-raise', actionHistory: ['raise'] });
+  assert.ok(unknownOpener.seats.every((seat) => seat.role === 'hero' || seat.role === 'waiting'), 'an unnamed opener draws no folds');
+  assert.match(unknownOpener.label, /앞에서 레이즈/);
+  assert.equal(spotDiagram({ position: 'BTN', actionHistory: [] }), null, 'no table size, no diagram');
+  assert.equal(spotDiagram({ position: 'CO', seated: 6, openerPosition: 'BTN', actionHistory: ['raise'] }), null, 'an opener after the hero is inconsistent');
+});
+
+test('hand-class cards show ranks and suitedness without inventing suits', () => {
+  assert.deepEqual(handCards({ handClass: 'T9s' }), { ranks: ['10', '9'], kind: 'suited', label: '같은 무늬', name: '10 9 같은 무늬' });
+  assert.equal(handCards({ handClass: 'AJo' }).label, '다른 무늬');
+  assert.equal(handCards({ handClass: '77' }).kind, 'pair');
+  assert.equal(handCards({ handClass: 'bogus' }), null);
+});
+
+test('feedback bars mark the graded row only for the same question', () => {
+  const result = { questionId: 'q1', status: 'reference-adherence', grade: 'mixed', frequency: 0.3,
+    recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 0.7 }, { action: 'fold', frequency: 0.3 }] };
+  const bars = feedbackBars(result, source, { questionId: 'q1', action: 'fold' });
+  assert.deepEqual(bars.rows.map((row) => [row.label, row.percent, row.width, row.mine]), [['레이즈 2.5BB', '70%', 70, false], ['폴드', '30%', 30, true]]);
+  assert.equal(bars.mineLabel, '내 선택: 폴드');
+  assert.equal(feedbackBars(result, source, { questionId: 'other', action: 'fold' }).rows.some((row) => row.mine), false, 'a stale choice marks nothing');
+  assert.equal(feedbackBars(result, source, null).mineLabel, null);
+  assert.equal(feedbackBars({ ...result, grade: 'off-policy' }, source, { questionId: 'q1', action: 'raise', sizeBb: 8.5 }).rows.some((row) => row.mine), false);
+  assert.deepEqual(feedbackBars(result, { id: 'x', version: '9' }, null).rows, [], 'no verified source, no bars');
+});
+
+test('progress, mode help and the short source tag', () => {
+  assert.equal(runProgress(null), null);
+  assert.deepEqual(runProgress({ sessionId: 's', index: 3, count: 10 }), { index: 3, count: 10, width: 30 });
+  assert.deepEqual(Object.keys(STUDY_MODE_HELP), Object.keys(STUDY_MODES), 'every mode has a description');
+  const summary = formatSummary({ source, bank: { dueCount: 2, totalCount: 5 } });
+  assert.match(modeAvailability('daily', summary), /2개 오늘 복습/);
+  assert.match(modeAvailability('retest', summary), /완료한 새 문제 평가가 없어/);
+  assert.equal(modeAvailability('free', summary), '');
+  assert.match(formatSourceShort(source), /휴리스틱/);
+  assert.doesNotMatch(formatSourceShort({ id: '/Users/private', version: 'token=secret' }), /private|secret/);
+});
+
+test('the study page keeps one honesty statement and its help entry', () => {
+  const html = readFileSync(new URL('../server/drill-public/drill.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /REFERENCE PRACTICE|class="eyebrow"/, 'no English eyebrows');
+  assert.equal((html.match(/id="source"/g) ?? []).length, 1);
+  assert.match(html, /id="mode"[^>]*>(?:<option [^>]+>[^<]+<\/option>){6}<\/select>/, 'the mode select keeps its six options');
+  for (const id of ['start', 'actions', 'next', 'feedback', 'run-progress', 'prompt', 'context', 'goal', 'assessments', 'status', 'reference-source', 'open-help', 'source-help']) {
+    assert.match(html, new RegExp(`id="${id}"`), id);
+  }
 });
