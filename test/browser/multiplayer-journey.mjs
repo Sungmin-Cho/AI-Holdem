@@ -1,4 +1,4 @@
-import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,6 +24,7 @@ export const requiredJourneyChecks = [
   "skip-hidden-multi",
   "guest-table-viewport",
   "guest-single-header",
+  "guest-embed-fit",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
   "turn-deadline-ticks",
@@ -219,6 +220,13 @@ export async function runMultiplayerJourney(outDir) {
     await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");
     await guestB(["screenshot", path.join(outDir, "guest-b-table-mobile.png")]);
     await guestB(["set", "viewport", "1280", "600"]);
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `guest A table at ${width}x${height}`);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `guest ${width}x${height}`);
+    }
+    await guestA(["set", "viewport", "1280", "600"]);
+    check("guest-embed-fit");
     // cardNode renders faces and Korean aria labels, not raw two-character
     // codes. A whole-document substring can instead match a capability token.
     const guestCardVisibility = browser => evaluate(browser)(`(() => {
@@ -294,6 +302,14 @@ export async function runMultiplayerJourney(outDir) {
       () => evaluate(guestA)("document.querySelector('#pause-banner')?.hidden===false"),
       "pause banner",
     );
+    // The pause sits over the table, below the header, without pushing the table down.
+    const pauseGeometry = await evaluate(guestA)(`(() => {
+      const banner = document.querySelector('#pause-banner').getBoundingClientRect();
+      const header = document.querySelector('.app-header').getBoundingClientRect();
+      const frame = document.querySelector('#table').getBoundingClientRect();
+      return { banner: banner.top >= header.bottom - 1 && banner.bottom <= frame.top + 80, overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute' };
+    })()`);
+    assert.deepEqual(pauseGeometry, { banner: true, overlay: true });
     check("pause-banner");
     await click(host, "#resume");
     await wait(

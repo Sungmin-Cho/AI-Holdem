@@ -12,8 +12,50 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
+// The geometry matrix (design A5): every width × table size × height the gate
+// runs. The journey records what it measured and fails if that differs.
+export const GEOMETRY_WIDTHS=[360,390,768,1024,1280,1440];
+export function geometryCombos({ci=false}={}) {
+  const combos=[];
+  for(const count of ci?[2,6,9]:[2,6,8,9]) {
+    for(const width of GEOMETRY_WIDTHS)for(const height of [667,900])combos.push(`${count}p-${width}x${height}`);
+    for(const width of [1024,1280])combos.push(`${count}p-${width}x800`);
+  }
+  return combos;
+}
+// Computed-colour contrast (design A2): text colour against the composited
+// background under it (translucent layers over the felt or page), with the
+// ancestors' opacity applied to both, judged at the WCAG size threshold.
+export const CONTRAST_SCRIPT=`((selectors)=>{
+  const hex=(v)=>{const m=/^#([0-9a-f]{6})$/i.exec(v.trim());return m?[0,2,4].map(i=>parseInt(m[1].slice(i,i+2),16)).concat(1):null;};
+  const parse=(c)=>{if(!c||c==='transparent')return [0,0,0,0];let m=c.match(/^rgba?\\(([^)]+)\\)/);if(m){const p=m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number);return [p[0],p[1],p[2],p[3]??1];}m=c.match(/^color\\(srgb ([^)]+)\\)/);if(m){const p=m[1].split(/[\\s\\/]+/).filter(Boolean).map(Number);return [p[0]*255,p[1]*255,p[2]*255,p[3]??1];}return hex(c);};
+  const over=(top,bottom)=>{const a=top[3]+bottom[3]*(1-top[3]);if(!a)return [0,0,0,0];return [0,1,2].map(i=>(top[i]*top[3]+bottom[i]*bottom[3]*(1-top[3]))/a).concat(a);};
+  const mix=(c,back,o)=>[0,1,2].map(i=>c[i]*o+back[i]*(1-o)).concat(1);
+  const lum=(c)=>{const f=v=>{v/=255;return v<=0.03928?v/12.92:((v+0.055)/1.055)**2.4;};return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);};
+  const root=getComputedStyle(document.documentElement);
+  const page=hex(root.getPropertyValue('--c-bg'))??[0,0,0,1],felt=hex(root.getPropertyValue('--c-felt-mid'))??page;
+  const out=[];let checked=0;
+  for(const selector of selectors)for(const el of document.querySelectorAll(selector)){
+    if(!el.getClientRects().length||!el.textContent.trim())continue;
+    // WCAG exempts disabled controls (they wear opacity on purpose).
+    if(el.disabled||el.closest('[disabled],[aria-disabled="true"]'))continue;
+    const cs=getComputedStyle(el);if(cs.visibility==='hidden')continue;
+    const layers=[];let opacity=1,backdrop=page;
+    for(let n=el;n;n=n.parentElement){const s=getComputedStyle(n);opacity*=Number(s.opacity);
+      if(n.classList.contains('table')){backdrop=felt;break;}
+      const bg=parse(s.backgroundColor);layers.push(bg);if(bg[3]>=1)break;}
+    let base=backdrop;for(const layer of layers.reverse())base=over(layer,base);
+    let text=over(parse(cs.color),base);
+    if(opacity<1){text=mix(text,backdrop,opacity);base=mix(base,backdrop,opacity);}
+    checked+=1;
+    const [hi,lo]=[lum(text),lum(base)].sort((a,b)=>b-a),ratio=(hi+0.05)/(lo+0.05);
+    const size=parseFloat(cs.fontSize),bold=Number(cs.fontWeight)>=700,need=size>=24||(bold&&size>=18.66)?3:4.5;
+    if(ratio<need)out.push({selector,text:el.textContent.trim().slice(0,24),ratio:Math.round(ratio*100)/100,need,size});
+  }
+  return {checked,out};
+})`;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
   const workspace=createBrowserWorkspace(),session=`ui-${randomUUID()}`,token=randomUUID();
@@ -80,15 +122,16 @@ export async function runUiJourney(outDir,{ci=false}={}) {
         assert.equal(await evaluate("!!document.querySelector('.onboarding-card')"),false,'seen once per browser');
         checks.push('onboarding');
       }
-      for(const width of ci?[390,1440]:[360,390,768,1024,1440]) {
-        await browser(['set','viewport',String(width),'900']);await browser(['snapshot','-i']);
+      for(const combo of geometryCombos({ci}).filter(key=>key.startsWith(`${count}p-`))) {
+        const [width,height]=combo.slice(combo.indexOf('-')+1).split('x').map(Number);
+        await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
         const metrics=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,size:parseFloat(getComputedStyle(n.querySelector('.amount-primary')).fontSize)}});const overlaps=[];for(let i=0;i<plates.length;i++)for(let j=i+1;j<plates.length;j++){const a=plates[i],b=plates[j];if(a.x<b.x+b.w-1&&a.x+a.w>b.x+1&&a.y<b.y+b.h-1&&a.y+a.h>b.y+1)overlaps.push([i,j]);}return {width:innerWidth,scroll:document.documentElement.scrollWidth,plates,overlaps};})()`);
         const markers=await evaluate(`(()=>{const visible=n=>!!n&&n.getClientRects().length>0&&getComputedStyle(n).display!=='none';return ${JSON.stringify(state.hand.posts)}.map(post=>{const seat=document.querySelector('.seat[data-player-id="'+post.playerId+'"]'),badge=seat.querySelector('.dealer-btn'),bet=document.querySelector('.bet-marker[data-player-id="'+post.playerId+'"]');return {role:badge?.textContent,betVisible:visible(bet)||visible(seat.querySelector('.seat-bet'))}})})()`);
         assert.equal(markers[0].role,count===2?'D/SB':'SB');
         assert.equal(markers[1].role,'BB');
         assert.ok(markers.every(m=>m.betVisible),JSON.stringify({count,width,markers}));
-        measurements.push({count,...metrics});
-        await browser(['screenshot',path.join(outDir,`table-${count}-${width}.png`)]);
+        measurements.push({combo,count,height,...metrics});
+        await browser(['screenshot',path.join(outDir,`table-${combo}.png`)]);
         assert.ok(metrics.scroll<=width,`horizontal overflow ${count}/${width}: ${metrics.scroll}`);
         assert.equal(metrics.plates.length,count);assert.deepEqual(metrics.overlaps,[],`seat overlap ${count}/${width}`);
         assert.ok(metrics.plates.every(p=>p.size>=12),`stack font ${count}/${width}`);
@@ -97,6 +140,24 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     checks.push('responsive');
     checks.push('blind-and-bet-markers');
+    assert.deepEqual(measurements.map(row=>row.combo),geometryCombos({ci}),'the geometry matrix ran exactly the expected combinations');
+    checks.push('geometry-matrix');
+    // Contrast on the live turn: plates on the felt, secondary amounts, the action bar.
+    const contrastPass=async(label,selectors)=>{
+      const failures=[];
+      for(const theme of ['b','a','c']){
+        await evaluate(theme==='b'?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme','${theme}')`);
+        const {checked,out}=await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(selectors)})`);
+        assert.ok(checked>=12,`${label}/${theme}: only ${checked} elements measured`);
+        measurements.push({contrast:label,theme,checked});
+        for(const row of out)failures.push({label,theme,...row});
+      }
+      await evaluate("document.documentElement.removeAttribute('data-theme')");
+      return failures;
+    };
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const turnContrast=await contrastPass('turn',['.plate-name','.plate-stack .amount-primary','.plate .amount-secondary','.plate-tag','.bet-amount','.pot-label','.pot-amount','#action-bar button','.action-summary','.table-context','.tabs button']);
+    assert.deepEqual(turnContrast,[],JSON.stringify(turnContrast));
     await browser(['set','viewport','1094','500']);await browser(['snapshot','-i']);
     const veryShort=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>n.getBoundingClientRect());return {overflow:getComputedStyle(document.body).overflowY,width:document.documentElement.scrollWidth,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1))}})()`);
     assert.notEqual(veryShort.overflow,'hidden');
@@ -474,6 +535,19 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
     checks.push('last-action-badge');
+    // A short desktop (the lobby or join page iframe at 1280×600): the status line
+    // takes its own row, so a name and stack never wrap letter by letter beside it.
+    await browser(['set','viewport','1280','544']);await browser(['snapshot','-i']);
+    const statusRows=await evaluate("[...document.querySelectorAll('.plate')].filter(p=>p.querySelector('.plate-action')).map(p=>{const info=p.querySelector('.plate-info').getBoundingClientRect(),status=p.querySelector('.plate-status').getBoundingClientRect(),stack=p.querySelector('.plate-stack .amount-primary');return {below:status.top>=info.bottom-1,infoWidth:Math.round(info.width),stackLines:Math.round(stack.getBoundingClientRect().height/parseFloat(getComputedStyle(stack).fontSize))}})");
+    assert.ok(statusRows.length>0&&statusRows.every(row=>row.below&&row.infoWidth>=40&&row.stackLines<=2),JSON.stringify(statusRows));
+    await browser(['screenshot',path.join(outDir,'plate-status-1280x544.png')]);
+    checks.push('plate-status-row');
+    // Contrast after the hand: folded plates (opacity), last actions, the result strip.
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.pot-label','.pot-amount','.log-name','.log-act']);
+    assert.deepEqual(resultContrast,[],JSON.stringify(resultContrast));
+    checks.push('computed-contrast');
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     await evaluate("window.__resultNode=document.querySelector('#hand-result').firstChild");
     await publish([],{view:undefined});
     assert.equal(await evaluate("window.__resultNode===document.querySelector('#hand-result').firstChild"),true);
