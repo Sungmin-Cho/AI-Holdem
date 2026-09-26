@@ -5,6 +5,8 @@ import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, partic
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
+import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
+import { mountReplayer } from './replayer.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
@@ -1140,43 +1142,66 @@ function replayViewFor(handNo) {
   });
 }
 
-function paintReplay() {
-  const overlay = $('replay-overlay');
-  if (!overlay) return;
-  if (openReplayHandNo == null) {
-    overlay.hidden = true;
-    return;
+// Replayer state survives repaints (coach updates, unit changes) of the same hand.
+let replayUi = { step: 0, playing: false, speed: 1, listOpen: false };
+let replayModel = null;
+let replayMount = null;
+let replayTimer = null;
+
+function stopReplayPlayback() {
+  clearTimeout(replayTimer); replayTimer = null;
+  replayUi.playing = false;
+}
+function scheduleReplayTick() {
+  clearTimeout(replayTimer);
+  replayTimer = setTimeout(() => {
+    if (!replayUi.playing || !replayModel || openReplayHandNo == null) return;
+    setReplayStep(replayUi.step + 1, { auto: true });
+    if (replayUi.playing) scheduleReplayTick();
+  }, 1400 / replayUi.speed);
+}
+function setReplayStep(index, { auto = false } = {}) {
+  if (!replayModel) return;
+  const lastIndex = replayModel.steps.length - 1;
+  if (!auto) stopReplayPlayback();
+  replayUi.step = Math.max(0, Math.min(lastIndex, index));
+  if (replayUi.step >= lastIndex) stopReplayPlayback();
+  replayMount?.paint();
+}
+function toggleReplayPlayback() {
+  if (!replayModel) return;
+  if (replayUi.playing) stopReplayPlayback();
+  else {
+    if (replayUi.step >= replayModel.steps.length - 1) replayUi.step = 0;
+    replayUi.playing = true;
+    scheduleReplayTick();
   }
-  overlay.hidden = false;
-  const view = replayViewFor(openReplayHandNo);
-  const title = $('replay-title');
-  const disclaimer = $('replay-disclaimer');
-  const body = $('replay-body');
-  const signature=JSON.stringify([view,displayUnit]);
-  if(body._signature===signature)return;
-  body._signature=signature;
-  const scroll=body.scrollTop;
-  const focusedStudy=body.contains(document.activeElement) ? document.activeElement.dataset.studyId : null;
-  body.replaceChildren();
-  if (view.kind === 'marker') {
-    title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
-    disclaimer.textContent = '';
-    body.append(el('p', 'replay-marker', view.message));
-    return;
-  }
-  title.textContent = `핸드 ${view.header.handNo} 복기`;
-  disclaimer.textContent = `${view.header.disclaimer}. ${view.header.reliability}`;
-  const meta = el('div', 'replay-meta');
-  if (view.header.blinds) {
-    meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
-  }
-  if (view.header.winners.length) {
-    meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
-  }
-  body.append(meta);
+  replayMount?.paint();
+}
+function setReplaySpeed(speed) {
+  replayUi.speed = speed;
+  if (replayUi.playing) scheduleReplayTick();
+  replayMount?.paint();
+}
+
+function openStudyCard(evaluationId) {
+  closeReplay();
+  selectTab('training');
+  const card = document.querySelector(`[data-evaluation-id="${evaluationId}"]`);
+  if (card?.closest('.training-excluded')) setTrainingExcludedOpen(true);
+  if (card instanceof HTMLDetailsElement) card.open = true;
+  card?.scrollIntoView({ block: 'nearest' });
+  card?.querySelector('summary')?.focus({preventScroll:true});
+}
+
+// The text replay: the fallback when the record cannot be drawn, and the
+// "목록 보기" view beside the visual replayer.
+function replayList(view) {
+  const bb = view.header.blinds?.[1] ?? null;
+  const list = el('div', 'replay-list');
   const board = el('div', 'replay-board');
   for (const code of view.header.board) board.append(miniCard(code));
-  if (view.header.board.length) body.append(board);
+  if (view.header.board.length) list.append(board);
   for (const street of view.streets) {
     const block = el('section', 'replay-street');
     block.append(el('h2', 'replay-street-name', street.label));
@@ -1185,8 +1210,8 @@ function paintReplay() {
       const who = [row.name, row.position].filter(Boolean).join(' · ');
       line.append(el('span', 'replay-name', who));
       line.append(el('span', `replay-act is-${row.verb}`, row.verbLabel ?? row.verb));
-      if (row.amount != null) line.append(el('span', 'replay-amount num', amountText(row.amount,view.header.blinds?.[1]??null)));
-      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${amountText(row.pot,view.header.blinds?.[1]??null)}`));
+      if (row.amount != null) line.append(el('span', 'replay-amount num', amountText(row.amount,bb)));
+      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${amountText(row.pot,bb)}`));
       if (row.cards) {
         const cards = el('span', 'replay-cards');
         for (const code of row.cards) cards.append(miniCard(code));
@@ -1207,38 +1232,119 @@ function paintReplay() {
         const link = el('button', 'replay-study', '학습 카드');
         link.type = 'button';
         link.dataset.studyId=row.study.evaluationId;
-        link.addEventListener('click', () => {
-          closeReplay();
-          selectTab('training');
-          const card = document.querySelector(`[data-evaluation-id="${row.study.evaluationId}"]`);
-          if (card?.closest('.training-excluded')) setTrainingExcludedOpen(true);
-          if (card instanceof HTMLDetailsElement) card.open = true;
-          card?.scrollIntoView({ block: 'nearest' });
-          card?.querySelector('summary')?.focus({preventScroll:true});
-        });
+        link.dataset.focusKey=`list-study-${row.study.evaluationId}`;
+        link.addEventListener('click', () => openStudyCard(row.study.evaluationId));
         line.append(link);
       }
       block.append(line);
     }
-    body.append(block);
+    list.append(block);
+  }
+  return list;
+}
+
+function paintReplay() {
+  const overlay = $('replay-overlay');
+  if (!overlay) return;
+  if (openReplayHandNo == null) {
+    overlay.hidden = true;
+    return;
+  }
+  overlay.hidden = false;
+  const view = replayViewFor(openReplayHandNo);
+  const title = $('replay-title');
+  const disclaimer = $('replay-disclaimer');
+  const body = $('replay-body');
+  const signature=JSON.stringify([view,displayUnit,replayUi.listOpen]);
+  if(body._signature===signature){replayMount?.paint();return;}
+  body._signature=signature;
+  const scroll=body.scrollTop;
+  // The timeline scrolls on its own; a rebuild (coach note, unit, list toggle) keeps its place.
+  const timelineScroll=body.querySelector('.replayer-timeline')?.scrollTop ?? null;
+  const active=body.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey=active?.dataset.focusKey ?? null;
+  const focusedStudy=active?.dataset.studyId ?? null;
+  body.replaceChildren();
+  replayMount=null;replayModel=null;
+  if (view.kind === 'marker') {
+    stopReplayPlayback();
+    title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
+    disclaimer.textContent = '';
+    body.append(el('p', 'replay-marker', view.message));
+    return;
+  }
+  title.textContent = `핸드 ${view.header.handNo} 복기`;
+  disclaimer.textContent = `${view.header.disclaimer}. ${view.header.reliability}`;
+  const meta = el('div', 'replay-meta');
+  if (view.header.blinds) {
+    meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
+  }
+  const replay = ui.handReplays?.[openReplayHandNo];
+  const names = seatNames();
+  if (typeof replay?.button === 'string') meta.append(el('span', 'replay-button', `버튼 ${names[replay.button] ?? replay.button}`));
+  if (view.header.winners.length) {
+    meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
+  }
+  body.append(meta);
+  const model = buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, (ui.view?.seats ?? []).map((seat) => seat.playerId)) });
+  if (model.ok) {
+    replayModel = model;
+    replayUi.step = Math.min(replayUi.step, model.steps.length - 1);
+    const bb = view.header.blinds?.[1] ?? null;
+    replayMount = mountReplayer(body, {
+      replay, view, model,
+      name: (playerId) => names[playerId] ?? (playerId === 'user' ? '나' : playerId),
+      viewer: viewerId(ui.view) ?? 'user',
+      amount: (value) => amountText(value, bb),
+      short: (value) => formatAmount(value, bb, displayUnit).primary,
+      state: () => replayUi,
+      onStep: (index) => setReplayStep(index),
+      onPlay: toggleReplayPlayback,
+      onSpeed: setReplaySpeed,
+      onStudy: openStudyCard,
+    });
+    const timeline = replayMount.root.querySelector('.replayer-timeline');
+    if (timeline && timelineScroll !== null) timeline.scrollTop = timelineScroll;
+    const toggle = el('button', 'btn btn-ghost replayer-list-toggle', replayUi.listOpen ? '목록 닫기' : '목록 보기');
+    toggle.type = 'button';
+    toggle.dataset.focusKey = 'list-toggle';
+    toggle.setAttribute('aria-expanded', String(replayUi.listOpen));
+    toggle.addEventListener('click', () => { replayUi.listOpen = !replayUi.listOpen; paintReplay(); });
+    body.append(toggle);
+    if (replayUi.listOpen) body.append(replayList(view));
+  } else {
+    stopReplayPlayback();
+    body.append(el('p', 'replay-marker replay-fallback', '이 핸드는 기록된 숫자로 테이블을 다시 그릴 수 없어 목록으로 보여 드립니다.'));
+    body.append(replayList(view));
   }
   if (view.coachSummary) body.append(el('p', 'replay-summary', view.coachSummary));
   body.scrollTop=scroll;
-  if(focusedStudy)[...body.querySelectorAll('[data-study-id]')].find(node=>node.dataset.studyId===focusedStudy)?.focus({preventScroll:true});
+  const restore=(focusKey && [...body.querySelectorAll('[data-focus-key]')].find((node)=>node.dataset.focusKey===focusKey))
+    ?? (focusedStudy && [...body.querySelectorAll('[data-study-id]')].find((node)=>node.dataset.studyId===focusedStudy));
+  restore?.focus({preventScroll:true});
 }
 
 function openReplay(handNo) {
+  stopReplayPlayback();
+  replayUi = { step: 0, playing: false, speed: replayUi.speed, listOpen: false };
+  // A new hand starts from the top: nothing of the previous replay carries over.
+  $('replay-body')._signature = null;
+  $('replay-body').replaceChildren();
+  $('replay-body').scrollTop = 0;
   openReplayHandNo = handNo;
   paintReplay();
   dialogs.open($('replay-overlay'),closeReplay);
 }
 
 function closeReplay() {
+  stopReplayPlayback();
   openReplayHandNo = null;
+  replayMount = null; replayModel = null;
   const overlay = $('replay-overlay');
   if (overlay) overlay.hidden = true;
   if(dialogs.active===overlay)dialogs.close();
 }
+
 
 const terminalRecord=new URLSearchParams(location.search).get('terminal')==='1';
 let finalSummary=null,summaryPhase=null,summaryLoading=false,summaryVersion=0,finalPanelKey=null,reviewSeen;
@@ -1614,6 +1720,24 @@ $('display-unit').addEventListener('change',ev=>{
 $('seat-close').addEventListener('click',()=>dialogs.close());
 $('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list').scrollHeight;$('log-list')._unread=0;$('log-new').hidden=true;});
 
+// ←/→/Home/End step through the replay; Space plays or pauses unless a
+// control that Space already activates has focus.
+document.addEventListener('keydown', (ev) => {
+  const overlay = $('replay-overlay');
+  if (!replayModel || !overlay || overlay.hidden || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+  if (!(overlay.contains(ev.target) || ev.target === document.body) || ev.target.closest?.('select,input,textarea')) return;
+  // Holding a key must not flip playback (or step) once per repeat — including
+  // with focus on the page itself, the usual way Space toggles playback.
+  if (ev.repeat && [' ', 'Enter'].includes(ev.key)) { ev.preventDefault(); return; }
+  const lastIndex = replayModel.steps.length - 1;
+  if (ev.key === 'ArrowLeft') setReplayStep(replayUi.step - 1);
+  else if (ev.key === 'ArrowRight') setReplayStep(replayUi.step + 1);
+  else if (ev.key === 'Home') setReplayStep(0);
+  else if (ev.key === 'End') setReplayStep(lastIndex);
+  else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) toggleReplayPlayback();
+  else return;
+  ev.preventDefault();
+});
 $('replay-close')?.addEventListener('click', () => {
   closeReplay();
 });

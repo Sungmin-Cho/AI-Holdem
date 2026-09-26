@@ -1,0 +1,520 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
+import { replayRecord } from '../shared/hand-replay.js';
+import { buildReplaySteps, replaySeatOrder, streetStarts } from '../server/public/replay-model.js';
+import { formatReplay } from '../server/public/replay-format.js';
+import { handRecordFixture } from './helpers/security-fixtures.js';
+import { mountReplayer } from '../server/public/replayer.js';
+import { createMiniDocument, exposedText } from './helpers/mini-dom.js';
+import { cardLabel, parseCard } from '../server/public/card-render.js';
+
+// Only records the engine itself settled are expected to verify (design §10.1).
+function play(game, pick, deck) {
+  let state = startHand(game, deck ? { deck } : {}).state;
+  let turn = 0;
+  while (!legalFor(state).handOver) {
+    const legal = legalFor(state);
+    const [action, amount] = pick(legal, turn, state);
+    turn += 1;
+    state = applyAction(state, legal.toAct, action, amount).state;
+  }
+  return state.lastHand;
+}
+const passive = (legal) => (legal.canCheck ? ['check'] : ['call']);
+const shove = (legal) => (legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']);
+const last = (result) => result.steps.at(-1);
+
+function verified(record, options, reveal = 'all') {
+  const replay = replayRecord(record, { reveal });
+  const result = buildReplaySteps(replay, options);
+  assert.equal(result.ok, true, `${result.reason} at ${result.at}`);
+  // The rebuilt end state is the engine's own end state.
+  for (const playerId of Object.keys(record.startStacks)) assert.equal(last(result).stacks[playerId], record.endStacks[playerId]);
+  // Chips are conserved at every step: stacks plus everything in the middle.
+  const chips = Object.values(record.startStacks).reduce((a, b) => a + b, 0);
+  for (const step of result.steps) {
+    const held = Object.values(step.stacks).reduce((a, b) => a + b, 0);
+    assert.equal(held + (step.kind === 'result' ? 0 : step.total), chips, `step ${step.index} ${step.kind}`);
+  }
+  return { replay, result };
+}
+
+test('side pots and an all-in runout rebuild to the engine settlement', () => {
+  const game = createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 });
+  game.seats[1].stack = 300; game.seats[2].stack = 600;
+  const record = play(game, shove);
+  const { result } = verified(record);
+  assert.ok(record.pots.length >= 2, 'the fixture has a side pot');
+  const kinds = result.steps.map((step) => step.kind);
+  assert.equal(kinds[0], 'deal');
+  assert.deepEqual(result.steps.filter((step) => step.kind === 'runout').map((step) => step.board.length), [3, 4, 5]);
+  assert.equal(last(result).kind, 'result');
+  assert.equal(last(result).pots.length, record.pots.length);
+  assert.equal(last(result).total, record.pots.reduce((total, pot) => total + pot.amount, 0));
+  // Bets sit in front of the players until the street ends.
+  const deal = result.steps[0];
+  assert.equal(deal.pot, 0);
+  assert.equal(Object.values(deal.bets).reduce((a, b) => a + b, 0), record.posts.reduce((a, post) => a + post.amount, 0));
+});
+
+test('an uncalled raise is returned before the pot is awarded', () => {
+  const record = play(createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 }), (legal, turn) => (turn === 0 ? ['raise', 400] : ['fold']));
+  assert.ok(Object.values(record.uncalledReturns).some((amount) => amount > 0));
+  const { result } = verified(record);
+  assert.ok(last(result).returned.length > 0);
+  assert.equal(result.steps.some((step) => step.kind === 'showdown'), false, 'an uncontested hand has no showdown step');
+});
+
+test('streets with actions get a deal step and bets reset per street; a first wager reads as a bet', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }),
+    (legal) => (legal.canCheck ? (legal.street === 'turn' && legal.canRaise ? ['raise', 100] : ['check']) : ['call']));
+  const { result } = verified(record);
+  assert.deepEqual(result.steps.filter((step) => step.kind === 'street').map((step) => [step.street, step.board.length]), [['flop', 3], ['turn', 4], ['river', 5]]);
+  const turnBet = result.steps.find((step) => step.kind === 'action' && step.street === 'turn' && step.put > 0);
+  assert.equal(turnBet.verb, 'bet');
+  const river = result.steps.find((step) => step.kind === 'street' && step.street === 'river');
+  assert.ok(Object.values(river.bets).every((bet) => bet === 0));
+  assert.deepEqual(streetStarts(result.steps).map((row) => row.key), ['preflop', 'flop', 'turn', 'river', 'result']);
+});
+
+test('heads-up and a full nine-handed table follow the button order', () => {
+  const headsUp = verified(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive));
+  assert.equal(headsUp.result.seats.length, 2);
+  assert.equal(headsUp.replay.positions[headsUp.result.seats[0]], 'BTN/SB');
+  const full = verified(play(createGame({ aiCount: 8, startStack: 2000, levelEvery: 10 }), (legal, turn) => (turn % 3 === 0 ? ['fold'] : passive(legal))));
+  assert.equal(full.result.seats.length, 9);
+  assert.deepEqual(full.result.seats.map((playerId) => full.replay.positions[playerId]).slice(0, 4), ['BTN', 'SB', 'BB', 'UTG']);
+  assert.equal(full.replay.positions[full.result.seats.at(-1)], 'CO');
+});
+
+test('a legacy record without positions uses the live seat order', () => {
+  const record = play(createGame({ aiCount: 3, startStack: 1000, levelEvery: 10 }), passive);
+  delete record.positions;
+  const live = ['p2', 'user', 'p3', 'p1'];
+  const replay = replayRecord(record, { reveal: 'all' });
+  assert.deepEqual(replaySeatOrder(replay, live), live);
+  const result = buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, live) });
+  assert.equal(result.ok, true, result.reason);
+});
+
+test('an eliminated seat is not dealt in and does not appear in the replay', () => {
+  const game = createGame({ aiCount: 3, startStack: 1000, levelEvery: 10 });
+  game.seats[3].stack = 0; game.seats[3].out = true;
+  const record = play(game, passive);
+  const { result } = verified(record);
+  assert.equal(result.seats.includes(game.seats[3].playerId), false);
+  assert.equal(result.seats.length, 3);
+});
+
+test('records the engine did not settle fall back to the text list', () => {
+  // replay-format's display record has posts: [] and pots that do not add up.
+  const display = {
+    handNo: 1, blinds: [50, 100], board: ['Ah', '7c', '2d'], folded: ['p2'], allIn: [],
+    holes: { user: ['As', 'Td'] }, positions: { user: 'BB', p1: 'BTN', p2: 'SB' },
+    pots: [{ potIndex: 0, amount: 200, eligible: ['user', 'p1'], winners: [{ playerId: 'user', share: 200 }] }],
+    startStacks: { user: 10_000, p1: 10_000, p2: 10_000 }, endStacks: { user: 10_200, p1: 9_800, p2: 10_000 },
+    posts: [], uncalledReturns: {},
+    actions: [{ playerId: 'user', action: 'raise', amount: 250, street: 'preflop', potTotal: 150 }],
+  };
+  assert.equal(buildReplaySteps(display).ok, false);
+  const fixture = replayRecord(handRecordFixture(1, { actions: [{ playerId: 'user', street: 'preflop', action: 'raise', amount: 125 }] }), { reveal: 'all' });
+  assert.equal(buildReplaySteps(fixture).ok, false);
+  assert.equal(buildReplaySteps({ handNo: 3, unavailable: true, reason: 'REPLAY_NOT_COMPLETED' }).ok, false);
+});
+
+test('a record whose numbers disagree with themselves is refused', () => {
+  const record = play(createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 }), passive);
+  const replay = replayRecord(record, { reveal: 'all' });
+  const tamper = (change) => { const copy = structuredClone(replay); change(copy); return buildReplaySteps(copy); };
+  const call = replay.actions.findIndex((action) => action.action === 'call');
+  assert.equal(tamper((copy) => { copy.actions[call].amount += 1; }).ok, false, 'call amount');
+  assert.equal(tamper((copy) => { copy.actions[call].potTotal += 5; }).ok, false, 'pot total');
+  assert.equal(tamper((copy) => { copy.endStacks[copy.actions[call].playerId] += 1; }).ok, false, 'end stacks');
+  assert.equal(tamper((copy) => { copy.pots[0].winners[0].share -= 1; }).ok, false, 'pot shares');
+  assert.equal(tamper((copy) => { copy.posts = []; }).ok, false, 'missing posts');
+  // Every cross-check guards the fallback on its own.
+  assert.equal(tamper((copy) => { copy.actions[call].currentBet += 1; }).ok, false, 'current bet');
+  assert.equal(tamper((copy) => { copy.actions[call].maxRaiseTo += 1; }).ok, false, 'max raise-to');
+  assert.equal(tamper((copy) => { copy.actions[call].callAmount += 1; }).ok, false, 'call amount field');
+  assert.equal(tamper((copy) => { copy.actions[call].minRaiseTo += 1; }).ok, false, 'min raise-to field');
+  const onFlop = replay.actions.findIndex((action) => action.street === 'flop');
+  assert.ok(onFlop > 0, 'the fixture reaches the flop');
+  assert.equal(tamper((copy) => { copy.actions[onFlop].board = [...copy.actions[onFlop].board].reverse(); }).ok, false, 'board prefix');
+  assert.equal(tamper((copy) => { copy.actions[onFlop].street = 'preflop'; copy.actions[onFlop + 1].street = 'flop'; copy.actions.at(-1).street = 'preflop'; }).ok, false, 'street order');
+  assert.equal(tamper((copy) => { const who = copy.actions[call].playerId; copy.uncalledReturns = { [who]: 1_000_000 }; }).ok, false, 'return beyond contribution');
+  // Board, folds and showdown must agree with the record even when no chip moves.
+  assert.equal(tamper((copy) => { copy.board = copy.board.slice(0, 3); }).ok, false, 'final board shorter than what was shown');
+  const flopCards = replay.actions.filter((action) => action.street === 'flop').length;
+  assert.ok(flopCards > 0);
+  assert.equal(tamper((copy) => {
+    const swap = copy.board[4];
+    for (const action of copy.actions) if (action.street === 'flop') action.board = [swap, ...action.board.slice(1)];
+  }).ok, false, 'a flop card that changes on the turn');
+  const lastCheck = replay.actions.findLastIndex((action) => action.action === 'check');
+  assert.ok(lastCheck > 0);
+  assert.equal(tamper((copy) => { copy.actions[lastCheck].action = 'fold'; }).ok, false, 'a check turned into a fold');
+  assert.equal(tamper((copy) => { copy.folded = [copy.actions[0].playerId]; }).ok, false, 'a recorded fold that never happened');
+  assert.equal(tamper((copy) => { copy.showdown = null; }).ok, false, 'a contested hand without its showdown');
+  // An uncontested hand (folded on the turn) whose final board lost the turn card.
+  let turnFolder = null;
+  const early = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal) => {
+    if (legal.street === 'turn' && turnFolder === null) {
+      if (legal.canCheck && legal.canRaise) return ['raise', legal.minRaiseTo];
+      turnFolder = legal.toAct; return ['fold'];
+    }
+    return passive(legal);
+  });
+  assert.equal(early.board.length, 4);
+  const earlyReplay = replayRecord(early, { reveal: 'all' });
+  assert.equal(buildReplaySteps(earlyReplay).ok, true);
+  assert.equal(buildReplaySteps({ ...earlyReplay, board: earlyReplay.board.slice(0, 3) }).ok, false, 'final board shorter than the turn');
+});
+
+test('step wording follows the chips: a runout states only that betting is over, a street says what was collected', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  game.seats.find((seat) => seat.playerId !== 'user').stack = 300;
+  const shove = play(game, (legal) => (legal.toAct === 'user' && legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']));
+  const drawn = mount(replayRecord(shove, { reveal: 'all' }));
+  const runout = drawn.model.steps.find((step) => step.kind === 'runout');
+  drawn.state.step = runout.index; drawn.handle.paint();
+  const runoutText = drawn.container.querySelector('.replayer-now').textContent;
+  assert.match(runoutText, /더 베팅할 수 있는 플레이어가 없어/);
+  assert.doesNotMatch(runoutText, /모두 올인/);
+  const checked = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  const quiet = mount(replayRecord(checked, { reveal: 'all' }));
+  const turn = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'turn');
+  assert.equal(turn.collected, 0);
+  quiet.state.step = turn.index; quiet.handle.paint();
+  assert.match(quiet.container.querySelector('.replayer-now').textContent, /베팅이 없었습니다/);
+  const flop = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'flop');
+  assert.ok(flop.collected > 0);
+});
+
+test('public scope: hidden seats show neither cards nor reasons, and the forced flag decides nothing', () => {
+  const game = createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 });
+  let folder = null;
+  const record = play(game, (legal) => {
+    if (folder === null && legal.toAct !== 'user') { folder = legal.toAct; return ['fold']; }
+    return passive(legal);
+  });
+  const folded = record.actions.find((action) => action.playerId === folder && action.action === 'fold');
+  folded.forced = true;
+  folded.reason = 'secret reasoning';
+  const replay = replayRecord(record, { reveal: 'showdown' });
+  const revealed = new Set(['user', ...(record.showdown?.reveals ?? []).map((row) => row.playerId)]);
+  for (const playerId of Object.keys(record.holes)) assert.equal(Boolean(replay.holes[playerId]), revealed.has(playerId));
+  const rows = formatReplay(replay).streets.flatMap((street) => street.rows);
+  const row = rows.find((candidate) => candidate.playerId === folder);
+  assert.equal(row.reasonKind, 'hidden');
+  assert.equal(row.cards, null);
+  assert.doesNotMatch(row.reasonText, /워치독|secret/);
+  assert.equal(buildReplaySteps(replay).ok, true, 'hiding cards does not change the arithmetic');
+});
+
+test('checks and folds carry no amount in the replay rows', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  const rows = formatReplay(replayRecord(record, { reveal: 'all' })).streets.flatMap((street) => street.rows);
+  assert.ok(rows.some((row) => row.verb === 'check'));
+  for (const row of rows) assert.equal(row.amount === null, row.verb === 'check' || row.verb === 'fold', JSON.stringify(row));
+});
+
+test('an uncalled all-in excess is returned before the runout and showdown are drawn', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  game.seats.find((seat) => seat.playerId !== 'user').stack = 300;
+  // The user shoves; the short stack only ever calls, so part of the shove is never matched.
+  const record = play(game, (legal) => (legal.toAct === 'user' && legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']));
+  assert.ok(record.uncalledReturns.user > 0, JSON.stringify(record.uncalledReturns));
+  const { result } = verified(record);
+  const potTotal = record.pots.reduce((total, pot) => total + pot.amount, 0);
+  const returnAt = result.steps.findIndex((step) => step.kind === 'return');
+  assert.ok(returnAt > 0);
+  const later = result.steps.slice(returnAt).filter((step) => step.kind === 'runout' || step.kind === 'showdown');
+  assert.ok(later.length > 0, 'the hand runs out after the return');
+  for (const step of later) {
+    assert.equal(step.pot, potTotal, `${step.kind} shows the pot the engine dealt the board into`);
+    assert.equal(step.stacks.user, record.endStacks.user - (last(result).awards.filter((row) => row.playerId === 'user').reduce((a, row) => a + row.share, 0)));
+    assert.equal(step.allIn.includes('user'), false, 'chips came back, so the user is no longer all-in');
+  }
+  assert.ok(result.steps.findIndex((step) => step.kind === 'runout') > returnAt);
+});
+
+function mount(replay, { trainingItems = [] } = {}) {
+  const doc = createMiniDocument();
+  const container = doc.createElement('div');
+  doc.body.append(container);
+  const model = buildReplaySteps(replay);
+  assert.equal(model.ok, true, model.reason);
+  const state = { step: 0, playing: false, speed: 1 };
+  const view = formatReplay(replay, { trainingItems });
+  const handle = mountReplayer(container, {
+    replay, view, model, viewer: 'user', name: (playerId) => playerId, amount: (value) => `${value}칩`,
+    state: () => state, onStep: (index) => { state.step = index; handle.paint(); }, onPlay() {}, onSpeed() {}, onStudy() {},
+  });
+  return { doc, container, model, state, handle };
+}
+
+test('public scope in the drawn replayer: a hidden seat shows no cards, no reason and no watchdog note at any step', () => {
+  const game = createGame({ aiCount: 2, startStack: 1000, levelEvery: 10 });
+  let folder = null;
+  const record = play(game, (legal) => {
+    if (folder === null && legal.toAct !== 'user') { folder = legal.toAct; return ['fold']; }
+    return passive(legal);
+  });
+  const folded = record.actions.find((action) => action.playerId === folder && action.action === 'fold');
+  folded.forced = true;
+  folded.reason = 'secret reasoning';
+  const replay = replayRecord(record, { reveal: 'showdown' });
+  assert.equal(replay.holes[folder], undefined);
+  const { container, model, state, handle } = mount(replay);
+  // A card's label (rank + suit) is unique in the deck, so it may appear nowhere.
+  const hidden = record.holes[folder].map((code) => cardLabel(parseCard(code)));
+  for (let index = 0; index < model.steps.length; index += 1) {
+    state.step = index; handle.paint();
+    const text = exposedText(container);
+    for (const label of hidden) assert.equal(text.includes(label), false, `${label} leaked at step ${index}`);
+    assert.doesNotMatch(text, /secret reasoning|워치독/);
+  }
+  const seat = [...container.querySelectorAll('.replayer-seat')].find((node) => node.dataset.playerId === folder);
+  assert.equal(seat.querySelectorAll('.card--back').length, 2, 'the hidden seat is drawn face down');
+  assert.equal([...seat.querySelectorAll('div')].filter((node) => node.getAttribute('aria-label')).length, 0);
+});
+
+test('focus stays in the replayer when the current-step study button is replaced or a control is disabled', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  const replay = replayRecord(record, { reveal: 'all' });
+  const decision = replay.actions.find((action) => action.playerId === 'user');
+  const { doc, container, model, state, handle } = mount(replay, { trainingItems: [{ decisionId: decision.decisionId, evaluationId: 'e-1' }] });
+  const at = model.steps.find((step) => step.actor === 'user' && replay.actions[step.actionIndex] === decision).index;
+  state.step = at; handle.paint();
+  const study = container.querySelector('.replayer-now').querySelector('.replay-study');
+  assert.ok(study, 'the current step offers the study card');
+  study.focus();
+  state.step = at + 1; handle.paint();
+  assert.ok(container.contains(doc.activeElement), 'focus moved to a live control');
+  assert.equal(doc.activeElement.dataset.step, String(at + 1), 'the current timeline row takes it');
+  const next = container.querySelector('.replayer-next');
+  next.focus();
+  state.step = model.steps.length - 1; handle.paint();
+  assert.equal(next.disabled, true);
+  assert.ok(doc.activeElement.classList.contains('replayer-play'), 'a disabled control hands focus to Play');
+  assert.equal(container.querySelector('.replayer-now-title').getAttribute('aria-live'), 'polite');
+});
+
+// A small seeded generator so the property test is the same run every time.
+function seeded(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test('property: engine hands with random stacks, seats, levels and actions always rebuild and conserve chips', () => {
+  const random = seeded(20260926);
+  const pick = (legal) => {
+    const roll = random();
+    if (legal.canRaise && roll < 0.25) {
+      const low = Math.min(legal.minRaiseTo, legal.maxRaiseTo);
+      return ['raise', low >= legal.maxRaiseTo ? legal.maxRaiseTo : low + Math.floor(random() * (legal.maxRaiseTo - low + 1))];
+    }
+    if (!legal.canCheck && roll < 0.4) return ['fold'];
+    return legal.canCheck ? ['check'] : ['call'];
+  };
+  let hands = 0, returns = 0, sidePots = 0;
+  for (let game = 0; game < 120; game += 1) {
+    const mode = random() < 0.3 ? { mode: 'cash-training', startStack: 2000, handLimit: 100, levelEvery: null } : { startStack: 2000, levelEvery: 2 };
+    let state = createGame({ aiCount: 1 + Math.floor(random() * 8), ...mode });
+    for (const seat of state.seats) seat.stack = 1 + Math.floor(random() * 4000);
+    state.button = Math.floor(random() * state.seats.length);
+    for (let hand = 0; hand < 4; hand += 1) {
+      if (state.gameOver || state.seats.filter((seat) => !seat.out && seat.stack > 0).length < 2) break;
+      state = startHand(state, { rng: random }).state;
+      while (!legalFor(state).handOver) {
+        const legal = legalFor(state);
+        const [action, amount] = pick(legal);
+        state = applyAction(state, legal.toAct, action, amount).state;
+      }
+      const record = state.lastHand;
+      for (const reveal of ['all', 'showdown']) verified(record, undefined, reveal);
+      const legacy = structuredClone(record);
+      delete legacy.positions;
+      const replay = replayRecord(legacy, { reveal: 'all' });
+      assert.equal(buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, state.seats.map((seat) => seat.playerId)) }).ok, true);
+      hands += 1;
+      if (Object.values(record.uncalledReturns).some((amount) => amount > 0)) returns += 1;
+      if (record.pots.length > 1) sidePots += 1;
+    }
+  }
+  assert.ok(hands >= 300 && returns > 0 && sidePots > 0, JSON.stringify({ hands, returns, sidePots }));
+});
+
+test('a hand with no actions (both blinds all-in) runs out straight from the deal', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  for (const seat of game.seats) seat.stack = 20;
+  const record = play(game, () => { throw new Error('no decision is expected'); });
+  assert.equal(record.actions.length, 0);
+  const { result } = verified(record);
+  assert.deepEqual(result.steps.filter((step) => step.kind === 'runout').map((step) => step.board.length), [3, 4, 5]);
+  assert.equal(result.steps[0].kind, 'deal');
+});
+
+test('engine rules the arithmetic cannot see: returns, board runout, all-in actors, showdown and winners', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  // A checked-down heads-up hand: no bet was ever uncalled.
+  const checked = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive), { reveal: 'all' });
+  assert.equal(buildReplaySteps(checked).ok, true);
+  const winner = checked.pots[0].winners[0].playerId;
+  const fake = structuredClone(checked);
+  fake.uncalledReturns = { [winner]: 10 };
+  fake.pots[0].amount -= 10;
+  fake.pots[0].winners[0].share -= 10;
+  reject(fake, 'a return where nothing was uncalled (end stacks unchanged)');
+  const hidden = structuredClone(checked);
+  hidden.showdown.reveals = [];
+  reject(hidden, 'a contested showdown that shows nobody');
+  // A preflop fold: the board never ran out, and the folder cannot win.
+  let folder = null;
+  const folded = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal) => {
+    if (folder === null) { folder = legal.toAct; return ['fold']; }
+    return passive(legal);
+  }), { reveal: 'all' });
+  assert.equal(buildReplaySteps(folded).ok, true);
+  reject({ ...folded, board: [...checked.board] }, 'an uncontested hand with a runout');
+  const stolen = structuredClone(folded);
+  const other = Object.keys(stolen.startStacks).find((playerId) => playerId !== folder);
+  const share = stolen.pots[0].winners[0].share;
+  stolen.pots[0].winners = [{ playerId: folder, share }];
+  stolen.endStacks[folder] += share;
+  stolen.endStacks[other] -= share;
+  reject(stolen, 'a folded hand winning the pot');
+  // Both blinds all-in from the posts: no one can act, and the all-in list matters.
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  for (const seat of game.seats) seat.stack = 20;
+  const shoved = replayRecord(play(game, () => { throw new Error('no decision'); }), { reveal: 'all' });
+  assert.equal(buildReplaySteps(shoved).ok, true);
+  const acted = structuredClone(shoved);
+  const actor = acted.posts[0].playerId;
+  acted.actions = [{ playerId: actor, action: 'check', amount: 0, street: 'preflop', potTotal: 40, callAmount: 0, maxRaiseTo: 20, currentBet: acted.blinds[1], board: [] }];
+  reject(acted, 'an all-in player acting');
+  reject({ ...shoved, allIn: [] }, 'an all-in list that forgets the shoves');
+  // With no actions and no list rows, the revealed cards are still readable as text.
+  const drawn = mount(shoved);
+  const summary = drawn.container.querySelector('.replayer-seat-summary').textContent;
+  for (const [playerId, cards] of Object.entries(shoved.holes)) {
+    for (const code of cards) assert.ok(summary.includes(cardLabel(parseCard(code))), `${playerId} ${code} is readable`);
+  }
+});
+
+test('a raise below the minimum (and not a short all-in) is refused', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal, turn) => (turn === 0 && legal.canRaise ? ['raise', legal.minRaiseTo] : passive(legal)));
+  const replay = replayRecord(record, { reveal: 'all' });
+  assert.equal(buildReplaySteps(replay).ok, true);
+  const raise = replay.actions.findIndex((action) => action.action === 'raise');
+  const small = structuredClone(replay);
+  // Keep every number consistent except the size: one chip under the minimum,
+  // with the minRaiseTo field dropped so only the rule itself can see it.
+  small.actions[raise].amount -= 1;
+  delete small.actions[raise].minRaiseTo;
+  // Refused at the raise itself by the size rule, not later by a pot total.
+  assert.deepEqual(buildReplaySteps(small), { ok: false, reason: 'raise', at: raise });
+});
+
+test('turn order and the showdown follow the engine: no seat acts out of turn, no record stops early, every winner shows', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const checked = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive), { reveal: 'all' });
+  assert.equal(buildReplaySteps(checked).ok, true);
+  const flop = checked.actions.findIndex((action) => action.street === 'flop');
+  const twice = structuredClone(checked);
+  twice.actions[flop].playerId = twice.actions[flop + 1].playerId;
+  reject(twice, 'the same seat checks twice in a row (amounts unchanged)');
+  // Swapping who checked first and second closes the round the same way: only the turn order sees it.
+  const swapped = structuredClone(checked);
+  [swapped.actions[flop].playerId, swapped.actions[flop + 1].playerId] = [swapped.actions[flop + 1].playerId, swapped.actions[flop].playerId];
+  assert.equal(swapped.actions[flop].action, 'check');
+  assert.equal(swapped.actions[flop + 1].action, 'check');
+  reject(swapped, 'the flop checked in the wrong order'); 
+  reject({ ...checked, actions: checked.actions.slice(0, -1) }, 'a record that stops while someone still had to act');
+  const winner = checked.pots[0].winners[0].playerId;
+  const hiddenWinner = structuredClone(checked);
+  hiddenWinner.showdown.reveals = hiddenWinner.showdown.reveals.filter((row) => row.playerId !== winner);
+  hiddenWinner.showdown.mucks = [...hiddenWinner.showdown.mucks, winner];
+  reject(hiddenWinner, 'a pot winner who mucks');
+  const lost = structuredClone(checked);
+  lost.showdown.mucks = [];
+  lost.showdown.reveals = lost.showdown.reveals.filter((row) => row.playerId === winner);
+  reject(lost, 'a player still in who neither shows nor mucks');
+});
+
+// The first engine hand (seeded, so always the same) that meets a condition.
+function findHand(predicate, { tries = 400 } = {}) {
+  const random = seeded(7);
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    const game = createGame({ aiCount: 1 + Math.floor(random() * 5), startStack: 2000, levelEvery: 10 });
+    for (const seat of game.seats) seat.stack = 100 + Math.floor(random() * 1900);
+    let state = startHand(game, { rng: random }).state;
+    while (!legalFor(state).handOver) {
+      const legal = legalFor(state);
+      state = applyAction(state, legal.toAct, legal.canRaise && random() < 0.5 ? 'raise' : legal.canCheck ? 'check' : 'call',
+        legal.canRaise ? legal.maxRaiseTo : undefined).state;
+    }
+    if (predicate(state.lastHand)) return state.lastHand;
+  }
+  throw new Error('no engine hand met the condition');
+}
+
+test('each side pot is rebuilt from the contributions, and a split pot shares evenly', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const twoPots = replayRecord(findHand((record) => record.pots.length >= 2
+    && record.pots[0].winners.length === 1 && record.pots[1].winners.length === 1
+    && record.pots[0].winners[0].playerId === record.pots[1].winners[0].playerId), { reveal: 'all' });
+  assert.equal(buildReplaySteps(twoPots).ok, true);
+  const moved = structuredClone(twoPots);
+  moved.pots[0].amount += 1; moved.pots[0].winners[0].share += 1;
+  moved.pots[1].amount -= 1; moved.pots[1].winners[0].share -= 1;
+  reject(moved, 'a chip moved between two pots of the same winner (totals and end stacks unchanged)');
+  const split = replayRecord(findHand((record) => record.pots.some((pot) => pot.winners.length >= 2 && pot.amount >= 20)), { reveal: 'all' });
+  assert.equal(buildReplaySteps(split).ok, true);
+  const uneven = structuredClone(split);
+  const pot = uneven.pots.find((row) => row.winners.length >= 2 && row.amount >= 20);
+  const [a, b] = pot.winners;
+  a.share += 5; b.share -= 5;
+  uneven.endStacks[a.playerId] += 5; uneven.endStacks[b.playerId] -= 5;
+  reject(uneven, 'a split pot shared unevenly');
+});
+
+test('a legacy record without positions is still held to round closure and completeness', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  delete record.positions;
+  const replay = replayRecord(record, { reveal: 'all' });
+  const order = replaySeatOrder(replay, Object.keys(record.startStacks));
+  assert.equal(buildReplaySteps(replay, { seatOrder: order }).ok, true);
+  assert.equal(buildReplaySteps({ ...replay, actions: replay.actions.slice(0, -1) }, { seatOrder: order }).ok, false, 'stops while someone still had to act');
+});
+
+test('pots carry their eligible seats, each winner once, and odd chips go clockwise from the seat after the button', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const twoPots = replayRecord(findHand((record) => record.pots.length >= 2), { reveal: 'all' });
+  assert.equal(buildReplaySteps(twoPots).ok, true);
+  const noSeats = structuredClone(twoPots);
+  delete noSeats.pots[1].eligible;
+  reject(noSeats, 'a pot without its eligible seats');
+  const single = replayRecord(findHand((record) => record.pots[0].winners.length === 1 && record.pots[0].amount % 2 === 0 && record.pots[0].amount >= 20), { reveal: 'all' });
+  assert.equal(buildReplaySteps(single).ok, true);
+  const doubled = structuredClone(single);
+  const [only] = doubled.pots[0].winners;
+  doubled.pots[0].winners = [{ playerId: only.playerId, share: only.share / 2 }, { playerId: only.playerId, share: only.share / 2 }];
+  reject(doubled, 'the same winner listed twice in one pot');
+  const oddSplit = replayRecord(findHand((record) => record.pots.some((pot) => pot.winners.length >= 2 && pot.amount % pot.winners.length !== 0)), { reveal: 'all' });
+  assert.equal(buildReplaySteps(oddSplit).ok, true);
+  const swapped = structuredClone(oddSplit);
+  const pot = swapped.pots.find((row) => row.winners.length >= 2 && row.amount % row.winners.length !== 0);
+  const high = pot.winners.find((row) => row.share === Math.max(...pot.winners.map((w) => w.share)));
+  const low = pot.winners.find((row) => row.share === Math.min(...pot.winners.map((w) => w.share)));
+  high.share -= 1; low.share += 1;
+  swapped.endStacks[high.playerId] -= 1; swapped.endStacks[low.playerId] += 1;
+  reject(swapped, 'the odd chip given to the wrong winner');
+});
