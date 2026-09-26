@@ -101,6 +101,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     const action = actions[index];
     const playerId = action?.playerId;
     if (!known.has(playerId) || folded.has(playerId)) return fail('actor', index);
+    // Once everyone else has folded the hand is over: no action can follow.
+    if (players.filter((id) => !folded.has(id)).length < 2) return fail('actor', index);
     const actionStreet = action.street ?? 'preflop';
     if (!(actionStreet in STREET_BOARD)) return fail('street', index);
     if (actionStreet !== street) {
@@ -110,7 +112,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       collect();
       currentBet = 0;
       const dealt = Array.isArray(action.board) ? action.board : board.slice(0, STREET_BOARD[street]);
-      if (dealt.length !== STREET_BOARD[street]) return fail('board', index);
+      // A new street only adds cards: what was already on the board stays.
+      if (dealt.length !== STREET_BOARD[street] || !shownBoard.every((card, at) => dealt[at] === card)) return fail('board', index);
       shownBoard = [...dealt];
       snapshot({ kind: 'street', collected });
     }
@@ -146,7 +149,14 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     });
   }
 
-  if (!board.slice(0, shownBoard.length).every((card, at) => card === shownBoard[at])) return fail('board');
+  // The final board extends everything shown during the actions.
+  if (board.length < shownBoard.length || !shownBoard.every((card, at) => board[at] === card)) return fail('board');
+  // Who folded, and whether there was a showdown, must match the record too:
+  // a changed check/fold moves no chips, so the arithmetic alone cannot see it.
+  const recordedFolds = new Set(Array.isArray(replay.folded) ? replay.folded : []);
+  if (recordedFolds.size !== folded.size || [...folded].some((playerId) => !recordedFolds.has(playerId))) return fail('folded');
+  const contested = players.filter((playerId) => !folded.has(playerId)).length >= 2;
+  if (contested !== Boolean(replay.showdown) || (contested && board.length !== 5)) return fail('showdown');
   collect();
   // The engine returns an uncalled bet first (finishHand: returnUncalled →
   // runout → showdown → awards), so the runout and showdown already show it.
@@ -171,6 +181,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   }
 
   const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
+  if (reveals.some((row) => folded.has(row.playerId))) return fail('showdown');
   if (reveals.length) {
     snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
   }

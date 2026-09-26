@@ -293,7 +293,7 @@ export function mountReplayer(container, ctx) {
       // Only a fact: someone may still hold chips (a covered call, a returned bet).
       line('replayer-line', '더 베팅할 수 있는 플레이어가 없어 남은 보드를 공개합니다.');
     } else {
-      line('replayer-line', step.collected > 0 ? `보드 공개 · 이전 스트리트 베팅이 팟으로 모였습니다(${amount(step.collected)}).` : '보드 공개 · 이전 스트리트는 모두 체크였습니다.');
+      line('replayer-line', step.collected > 0 ? `보드 공개 · 이전 스트리트 베팅이 팟으로 모였습니다(${amount(step.collected)}).` : '보드 공개 · 이전 스트리트에는 베팅이 없었습니다.');
     }
     return lines;
   }

@@ -142,6 +142,32 @@ test('a record whose numbers disagree with themselves is refused', () => {
   assert.equal(tamper((copy) => { copy.actions[onFlop].board = [...copy.actions[onFlop].board].reverse(); }).ok, false, 'board prefix');
   assert.equal(tamper((copy) => { copy.actions[onFlop].street = 'preflop'; copy.actions[onFlop + 1].street = 'flop'; copy.actions.at(-1).street = 'preflop'; }).ok, false, 'street order');
   assert.equal(tamper((copy) => { const who = copy.actions[call].playerId; copy.uncalledReturns = { [who]: 1_000_000 }; }).ok, false, 'return beyond contribution');
+  // Board, folds and showdown must agree with the record even when no chip moves.
+  assert.equal(tamper((copy) => { copy.board = copy.board.slice(0, 3); }).ok, false, 'final board shorter than what was shown');
+  const flopCards = replay.actions.filter((action) => action.street === 'flop').length;
+  assert.ok(flopCards > 0);
+  assert.equal(tamper((copy) => {
+    const swap = copy.board[4];
+    for (const action of copy.actions) if (action.street === 'flop') action.board = [swap, ...action.board.slice(1)];
+  }).ok, false, 'a flop card that changes on the turn');
+  const lastCheck = replay.actions.findLastIndex((action) => action.action === 'check');
+  assert.ok(lastCheck > 0);
+  assert.equal(tamper((copy) => { copy.actions[lastCheck].action = 'fold'; }).ok, false, 'a check turned into a fold');
+  assert.equal(tamper((copy) => { copy.folded = [copy.actions[0].playerId]; }).ok, false, 'a recorded fold that never happened');
+  assert.equal(tamper((copy) => { copy.showdown = null; }).ok, false, 'a contested hand without its showdown');
+  // An uncontested hand (folded on the turn) whose final board lost the turn card.
+  let turnFolder = null;
+  const early = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal) => {
+    if (legal.street === 'turn' && turnFolder === null) {
+      if (legal.canCheck && legal.canRaise) return ['raise', legal.minRaiseTo];
+      turnFolder = legal.toAct; return ['fold'];
+    }
+    return passive(legal);
+  });
+  assert.equal(early.board.length, 4);
+  const earlyReplay = replayRecord(early, { reveal: 'all' });
+  assert.equal(buildReplaySteps(earlyReplay).ok, true);
+  assert.equal(buildReplaySteps({ ...earlyReplay, board: earlyReplay.board.slice(0, 3) }).ok, false, 'final board shorter than the turn');
 });
 
 test('step wording follows the chips: a runout states only that betting is over, a street says what was collected', () => {
@@ -159,7 +185,7 @@ test('step wording follows the chips: a runout states only that betting is over,
   const turn = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'turn');
   assert.equal(turn.collected, 0);
   quiet.state.step = turn.index; quiet.handle.paint();
-  assert.match(quiet.container.querySelector('.replayer-now').textContent, /모두 체크/);
+  assert.match(quiet.container.querySelector('.replayer-now').textContent, /베팅이 없었습니다/);
   const flop = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'flop');
   assert.ok(flop.collected > 0);
 });
