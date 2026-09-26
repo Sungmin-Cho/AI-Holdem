@@ -288,7 +288,7 @@
     <dialog id="pause-dialog" class="ui-dialog">
       <div class="ui-dialog__head"><h2 class="ui-dialog__title">게임 메뉴</h2></div>
       <p id="pause-message" class="dialog-message">일시정지 중입니다.</p>
-      <p id="pause-progress" class="dialog-progress" hidden></p>
+      <p id="pause-progress" class="dialog-progress" hidden><span id="pause-progress-reasons" role="status"></span><span id="pause-progress-elapsed" aria-hidden="true"></span></p>
       <details id="pause-tech" class="dialog-tech" hidden><summary>기술 정보</summary><p id="pause-tech-text"></p></details>
       <div class="ui-dialog__actions">
         <button id="resume" class="ui-btn ui-btn--primary ui-btn--lg">계속하기</button

@@ -36,7 +36,7 @@ const labels = {
   lobby: "로비",
   starting: "게임 준비 중",
   playing: "게임 중",
-  pausing: "현재 행동을 마친 뒤 일시정지 중",
+  pausing: "일시정지하는 중",
   paused: "일시정지",
   stopping: "게임 종료 중",
   finalizing: "결과 정리 중",
@@ -114,7 +114,10 @@ function render() {
   $("pause-tech").hidden = !technical;
   $("pause-tech-text").textContent = technical.trim();
   $("pause-progress").hidden = !(stopping && s === 'pausing');
-  $("pause-progress").textContent = pauseProgressText(snapshot.pausing) + pauseElapsedText(snapshot.pausing);
+  // The open menu makes the veil inert, so the dialog carries its own status
+  // (only one of the two is ever exposed); elapsed seconds stay out of it.
+  setLiveText($("pause-progress-reasons"), pauseProgressText(snapshot.pausing));
+  $("pause-progress-elapsed").textContent = pauseElapsedText(snapshot.pausing);
   $("retry-decision").hidden = !recovery || snapshot.pendingDecision?.retryable === false;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
@@ -241,7 +244,9 @@ function render() {
 // the dialog observer, so closing the menu never unlocks a pending pause.
 function syncTableInert() {
   if (!snapshot) return;
-  if (pauseLock && (['finalizing','completed','ended','error'].includes(snapshot.state)
+  // A snapshot that already shows the pause (paused) or the end keeps the table
+  // inert on its own, so the local lock is no longer needed.
+  if (pauseLock && (['paused','finalizing','completed','ended','error'].includes(snapshot.state)
     || snapshot.gameId !== pauseLock.gameId || snapshot.gameEpoch !== pauseLock.gameEpoch)) pauseLock = null;
   $("table").inert = Boolean(pauseLock) || (!["playing","finalizing","completed","ended"].includes(snapshot.state)) || Boolean(document.querySelector('dialog[open]'));
   $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
@@ -485,6 +490,7 @@ async function command(kind, setup, extra = {}) {
   if (busy) return;
   let refocusStart = false;
   let menuAfter = false;
+  let sent = false;
   viewingRecord = false;
   busy = true;
   if (["start", "replace-current", "restart"].includes(kind)) {
@@ -505,15 +511,19 @@ async function command(kind, setup, extra = {}) {
       ...extra,
     };
     await commands.send(payload);
-    if (kind === "pause") pauseLock = null;
+    sent = true;
     selecting = false;
     await refresh();
+    // Only a snapshot taken after the pause settled may unlock the table; if
+    // that refresh fails the lock stays and polling releases it on paused.
+    if (kind === "pause") pauseLock = null;
     menuAfter = snapshot.state === "paused";
   } catch (e) {
     refocusStart = !!preparing && kind === "start";
     preparing = null;
-    // A refused pause is final; an unanswered one stays locked until recovered.
-    if (kind === "pause" && !commands.pending) pauseLock = null;
+    // A refused pause is final; an unanswered one stays locked until recovered,
+    // and so does one that succeeded but whose follow-up refresh failed.
+    if (kind === "pause" && !commands.pending && !sent) pauseLock = null;
     showError(e);
     await refresh().catch(() => {});
   } finally {
@@ -789,7 +799,9 @@ async function recoverCommand() {
     if (!commands.pending) pauseLock = null;
     busy = false;
     render();
-    if (snapshot?.state === "paused") openPauseMenu();
+    // Focus the menu's primary only if the menu is open; recovery never
+    // reopens a menu the user closed.
+    if (snapshot?.state === "paused" && $("pause-dialog").open) openPauseMenu();
   }
 }
 async function roomOp(op, extra = {}) {

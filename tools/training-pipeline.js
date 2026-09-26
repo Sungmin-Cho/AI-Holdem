@@ -322,12 +322,15 @@ function solvePendingIds(tc, sessionDir) {
 
 async function runHandPipelineUnlocked({
   sessionDir, handNo, gameEpoch, owner, storeDir,
-  evaluate, explain, publish, consume, solverAdapterId, startSolve, admit,
+  evaluate, explain, publish, consume, solverAdapterId, startSolve, admit, admitExplain,
 }) {
   // `admit()` false means a pause is closing the gate: no new evaluator or
   // explainer child starts, and whatever is left comes back `deferred` so the
   // caller can register the hand again once play resumes (design §11.2 R1).
+  // `admitExplain()` narrows only the explanation stage (finalization lets the
+  // last hand explain first while other hands may still evaluate).
   const admitted = () => typeof admit !== 'function' || admit() === true;
+  const explainAdmitted = () => admitted() && (typeof admitExplain !== 'function' || admitExplain() === true);
   const tc = createTrainingControl({ storeDir });
   const existing = itemsCoveringHand(tc, sessionDir, handNo);
   // 이미 solve로 미뤄진 결정은 evaluate 경로에서 완전히 빠진다. 여기서 빼지
@@ -458,16 +461,19 @@ async function runHandPipelineUnlocked({
     if (typeof explain !== 'function') continue;
     // Checked between items and again once the explain lock is ours: a pipeline
     // that queued behind the lock during a pause must not start its child.
-    if (!admitted()) { explainDeferred = true; continue; }
+    if (!explainAdmitted()) { explainDeferred = true; continue; }
     let text = null;
     let held = false;
     await withExplainLock(sessionDir, async () => {
       if (hasCutoffMarker(sessionDir)) return;
-      if (!admitted()) { held = true; return; }
+      if (!explainAdmitted()) { held = true; return; }
       const explainHandle = toRunnerHandle(explain(evaluation));
       try {
         text = await explainHandle.promise;
       } catch { text = null; }
+      // An explainer that waited (e.g. on the background probe) and found the
+      // gate closed started nothing: the item stays unsealed and is re-registered.
+      if (text === EXPLAIN_HELD) { held = true; text = null; }
     });
     if (hasCutoffMarker(sessionDir)) {
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
@@ -488,6 +494,9 @@ async function runHandPipelineUnlocked({
     handle: evalHandle,
   };
 }
+
+/** Returned by an explainer that declined to start because the gate closed while it waited. */
+export const EXPLAIN_HELD = Symbol('explain-held');
 
 export async function runHandPipeline(opts) {
   const key = `${opts.sessionDir}\0${opts.handNo}`;

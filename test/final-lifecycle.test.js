@@ -49,7 +49,7 @@ test('a pause click locks the table until the pause settles, and closing the men
  context.snapshot=snap('pausing',{pausing:{waitingFor:{training:2,explain:1,solve:1,resolver:true}}});context.render();
  assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 설명 1건 · 솔버 분석 1건 · AI 코치 연결 확인','running children are named by kind');
  assert.equal(dom.$('pause-progress').hidden,false);
- for(const [state,extra] of [['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
+ for(const [state,extra] of [['paused',{}],['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
   context.pauseLock={gameId:'one',gameEpoch:'epoch'};context.snapshot=snap(state,extra);context.render();
   assert.equal(context.pauseLock,null,`${state} ${JSON.stringify(extra)} releases the lock`);
  }
@@ -72,4 +72,6 @@ test('R3: a refused pause unlocks the table, an unanswered one stays locked, a s
  await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'an unanswered pause (command still stored) stays locked');
  pending=false;send=async()=>({status:'succeeded'});
  await context.command('pause');assert.equal(context.pauseLock,null,'a settled pause unlocks (the state keeps the table inert)');
+ context.pauseLock=lock();context.refresh=async()=>{throw new Error('offline');};
+ await context.command('pause');assert.deepEqual(context.pauseLock,lock(),'a settled pause whose follow-up refresh failed stays locked');
 });

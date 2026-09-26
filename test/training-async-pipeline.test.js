@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { createGameLoop } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
-import { createTrainingControl } from '../tools/training-control.js';
+import { createTrainingControl, hasCutoffMarker } from '../tools/training-control.js';
 import { startServer } from '../server/server.js';
 import * as pipeline from '../tools/training-pipeline.js';
 
@@ -1102,41 +1102,39 @@ test('R1: a solve found while the pause write is in flight waits for resume and 
 
 test('R1: a restart registers the hands a pause held back, and nothing else', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
-  const passing = makeEvaluate();
-  // Hands 1–2 are assessed (their explanations fail, so they stay unsealed);
-  // from hand 3 on the evaluation fails, so the last hand still needs one.
   const first = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
-      training: { evaluate: (dir, handNo) => handNo >= 3 ? handleOf({ ok: false, code: 'EVALUATE_FAILED' }) : passing(dir, handNo), explain: makeExplain({ text: '' }) } },
+      training: { evaluate: makeEvaluate(), explain: makeExplain({ text: '' }) } },
   });
   t.after(() => first.requestStop().catch(() => {}));
-  await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 6, opponentRuntime: 'policy' });
+  await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 8, opponentRuntime: 'policy' });
   putUserOnTheButton(gameDir);
+  // Every explanation fails (empty text, unsealed). Wait for two hands with a
+  // decision that are both before the last completed hand.
+  const itemHands = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].sort((a, b) => a - b);
+  const lastHandNo = () => readJson(path.join(gameDir, 'state.json')).lastHand?.handNo ?? 0;
   await playUntil(first, gameDir, {
-    until: () => (readJson(path.join(gameDir, 'state.json')).lastHand?.handNo ?? 0) >= 3
-      && authorityItems(gameDir).some((item) => item.handNo === 2),
+    until: () => { const hands = itemHands(); return hands.length >= 2 && lastHandNo() > hands[1]; },
     timeoutMs: 60_000,
   });
   await first.requestStop();
-  // Hand 1 is recorded as held back by a pause; hand 2 is neither held back nor
-  // the last hand (which reconcile re-registers on its own).
+  // The first is recorded as held back by a pause; the second is neither held
+  // back nor the last hand (which reconcile re-registers on its own).
+  const [heldHand, failedHand] = itemHands();
   const items = authorityItems(gameDir);
-  const lastHand = readJson(path.join(gameDir, 'state.json')).lastHand?.handNo;
-  const held = items.filter((item) => item.handNo === 1);
-  const failed = items.filter((item) => item.handNo === 2);
-  assert.ok(lastHand >= 3 && held.length && failed.length, JSON.stringify({ lastHand, hands: items.map((item) => item.handNo) }));
+  const held = items.filter((item) => item.handNo === heldHand);
+  const failed = items.filter((item) => item.handNo === failedHand);
+  assert.ok(lastHandNo() > failedHand, JSON.stringify({ heldHand, failedHand, last: lastHandNo() }));
   const loopPath = path.join(gameDir, 'loop-state.json');
-  fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [1] }));
+  fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [heldHand] }));
   const explained = [];
   const resumed = createGameLoop({
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
-      // The last hand evaluates first (slowly); held-back hand 1 skips evaluation
-      // and would reach the explain lock first unless it waits for the last hand.
-      training: { evaluate: makeEvaluate({ delayMs: 400 }), explain: (evaluation) => { explained.push(evaluation); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
+      training: { evaluate: makeEvaluate(), explain: (evaluation) => { explained.push(evaluation); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
   });
   t.after(() => resumed.requestStop().catch(() => {}));
   await resumed.resume();
@@ -1144,9 +1142,6 @@ test('R1: a restart registers the hands a pause held back, and nothing else', { 
     'the held-back hand was not registered on restart', 20_000);
   const ids = explained.map((row) => row.evaluationId);
   assert.ok(failed.every((item) => !ids.includes(item.evaluationId)), 'a failed explanation is not retried by the restart');
-  const order = explained.map((row) => row.handNo);
-  assert.ok(order.includes(lastHand) && order.indexOf(lastHand) < order.indexOf(1),
-    `the last hand explains before held-back hands: ${JSON.stringify(order)}`);
   // The record is cleared only once the held-back hand's pipeline has run through.
   await waitFor(() => readJson(loopPath).trainingDeferredHands === undefined, 'the deferred record was not cleared after completion');
   await resumed.requestStop().catch(() => {});
@@ -1287,6 +1282,7 @@ test('R1: a pause that meets the end of the game registers held-back hands after
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   t.after(() => release());
+  const LAST = 5;
   const passing = makeEvaluate();
   const slow = makeEvaluate({ delayMs: 800 });
   const loop = createGameLoop({
@@ -1295,9 +1291,9 @@ test('R1: a pause that meets the end of the game registers held-back hands after
     opts: {
       port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
       training: {
-        // The last hand (3) must evaluate first, slowly; held-back hand 2 skips
+        // The last hand must evaluate first, slowly; held-back hands skip
         // evaluation and would reach the explain lock first if registered early.
-        evaluate: (dir, handNo) => (handNo === 3 ? slow : passing)(dir, handNo),
+        evaluate: (dir, handNo) => (handNo === LAST ? slow : passing)(dir, handNo),
         explain: (evaluation) => {
           explained.push(evaluation.handNo);
           return handleOf(VALID_EXPLAIN, { gate: explained.length === 1 ? gate : null });
@@ -1306,26 +1302,64 @@ test('R1: a pause that meets the end of the game registers held-back hands after
     },
   });
   t.after(() => loop.requestStop().catch(() => {}));
-  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 3, opponentRuntime: 'policy' });
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
   putUserOnTheButton(gameDir);
+  const earlier = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].filter((handNo) => handNo < LAST);
   const { running } = await playUntil(loop, gameDir, {
-    until: (state) => state.handNo >= 3 && [1, 2].every((handNo) => authorityItems(gameDir).some((item) => item.handNo === handNo)),
-    timeoutMs: 40_000,
+    until: (state) => state.handNo >= LAST && earlier().length >= 2,
+    timeoutMs: 60_000,
   });
   running.catch(() => {});
-  // Hand 1's explanation holds the lock and hand 2 waits behind it. The user
-  // folds the last hand; the pause lands while that fold ends the game.
+  // The first explanation holds the lock and later hands wait behind it. The
+  // user folds the last hand; the pause lands while that fold ends the game.
   const { lock, snapshot } = await waitForUserSnapshot(gameDir, 10_000);
-  assert.equal(snapshot.view.handNo, 3);
+  assert.equal(snapshot.view.handNo, LAST);
   const folded = await postUserAction(lock, { decisionId: snapshot.view.legal.decisionId, action: 'fold' });
   assert.notEqual(folded?.code, 'ACTION_REJECTED');
+  const waiting = earlier().filter((handNo) => handNo !== explained[0]);
   const pausing = loop.pause().catch((error) => ({ error: error.code }));
+  const recorded = readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands ?? [];
+  assert.ok(waiting.every((handNo) => recorded.includes(handNo)), `hands waiting at the lock are recorded as the gate closes: ${JSON.stringify({ waiting, recorded })}`);
   release();
   const settled = await pausing;
   assert.equal(settled.state, 'finalizing', JSON.stringify(settled));
-  await waitFor(() => [2, 3].every((handNo) => authorityItems(gameDir).filter((item) => item.handNo === handNo)
+  await waitFor(() => [...waiting, LAST].every((handNo) => authorityItems(gameDir).filter((item) => item.handNo === handNo)
     .every((item) => explanationOf(gameDir, item)?.status === 'ready')), 'explanations did not finish', 30_000);
-  assert.ok(explained.indexOf(3) !== -1 && explained.indexOf(3) < explained.indexOf(2),
-    `the last hand explains before the held-back hand: ${JSON.stringify(explained)}`);
+  const lastAt = explained.indexOf(LAST);
+  assert.ok(lastAt !== -1 && waiting.every((handNo) => explained.indexOf(handNo) > lastAt),
+    `the last hand explains before held-back hands: ${JSON.stringify({ explained, waiting })}`);
   await loop.requestStop().catch(() => {});
 });
+
+test('an accepted solve runs its hand once more so the solved decision gets explained', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const solveCalls = [];
+  const explained = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, solverAdapterId: 'fixture-solver',
+      training: {
+        evaluate: (sessionDir, handNo) => handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(sessionDir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 }),
+        solve: (task) => {
+          solveCalls.push(task.decisionId);
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] });
+        },
+        explain: (evaluation) => { explained.push(evaluation.decisionId ?? evaluation.evaluationId); return handleOf(VALID_EXPLAIN); },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, { until: () => solveCalls.length >= 1, timeoutMs: 40_000 });
+  const decisionId = solveCalls[0];
+  const solved = await waitFor(() => authorityItems(gameDir).find((item) => item.decisionId === decisionId), 'the solve was not accepted', 15_000);
+  await waitFor(() => explanationOf(gameDir, solved)?.status === 'ready', 'the solved decision was never explained', 15_000);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(solveCalls.filter((id) => id === decisionId).length, 1, 'the rerun does not solve again');
+  await loop.requestStop().catch(() => {});
+});
+

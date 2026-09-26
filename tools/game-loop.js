@@ -82,6 +82,7 @@ import {
   sealExploitAnnotations,
   toRunnerHandle,
   trainingAggregate,
+  EXPLAIN_HELD,
 } from './training-pipeline.js';
 import {
   completeSessionStoreMigration,
@@ -1011,6 +1012,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const trainingTaskByHand = new Map();
   // Hand of each running solve (by decisionId), recorded when the gate closes.
   const solveHandOf = new Map();
+  // While a finished game's last hand is being explained, other hands may
+  // still evaluate or solve but must not take the explain lock ahead of it.
+  let finalizationPriorityHand = null;
+  const trainingMayRun = (handNo) => !trainingAdmissionClosed || handNo === finalizationPriorityHand;
+  const trainingMayExplain = (handNo) => trainingMayRun(handNo)
+    && (finalizationPriorityHand === null || handNo === finalizationPriorityHand);
   let waitController = null;
   let resultHoldState = null;
   let resultHoldController = null;
@@ -3237,6 +3244,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const waiting = {
         promise: settleUpperResolution().then(() => {
           if (cancelled || stopRequested) return null;
+          // A pause (or the finalization priority) that closed while this
+          // waited: start nothing and let the pipeline re-register the hand.
+          if (!trainingMayExplain(evaluation.handNo)) return EXPLAIN_HELD;
           started = explainForPipeline(evaluation);
           return started.promise;
         }),
@@ -3284,6 +3294,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     solveHandOf.set(task.decisionId, task.handNo);
     const loop = readLoopState();
     let held = false;
+    let accepted = false;
     trackTrainingTask(task.handNo, () => runSolveTask({
       ...task,
       gameEpoch: task.gameEpoch ?? loop?.gameEpoch,
@@ -3302,10 +3313,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (kind === 'annotation') await flushAnnotationPublish();
       },
       consume: consumeTrainingNow,
-    }).finally(() => {
+    }).then((result) => { accepted = result?.ok === true; return result; }).finally(() => {
       solveInFlight.delete(task.decisionId);
       solveHandOf.delete(task.decisionId);
-      if (held) readmitTrainingHand(task.handNo);
+      // A solve that was held re-registers; one that accepted its evaluation
+      // runs the hand's pipeline once more so the new item gets explained.
+      if (held || accepted) readmitTrainingHand(task.handNo);
       else settleDeferredRecord(task.handNo);
     }));
   };
@@ -3322,7 +3335,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       explain: explainForPipeline,
       solverAdapterId,
       startSolve: startSolveTask,
-      admit: () => !trainingAdmissionClosed,
+      admit: () => trainingMayRun(handNo),
+      admitExplain: () => trainingMayExplain(handNo),
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -3361,7 +3375,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // register it now (after its running pipeline, if one is still going).
   const readmitTrainingHand = (handNo) => {
     if (!Number.isInteger(handNo) || stopRequested) return;
-    if (trainingAdmissionClosed) queueDeferredHand(handNo);
+    // Past the finalization cutoff nothing new starts (the sweep has already
+    // listed the children it ends); the record and pending entries stay.
+    if (trainingAdmissionClosed || finalizationCutoff
+      || (finalizationPriorityHand !== null && handNo !== finalizationPriorityHand)) queueDeferredHand(handNo);
     else if (trainingInFlightHands.has(handNo)) relaunchAfter.add(handNo);
     else launchTrainingPipeline(handNo);
   };
@@ -3391,7 +3408,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const drainDeferredHands = () => {
-    if (stopRequested || trainingAdmissionClosed) return 0;
+    if (stopRequested || trainingAdmissionClosed || finalizationCutoff || finalizationPriorityHand !== null) return 0;
     const hands = [...admissionDeferredHands];
     admissionDeferredHands.clear();
     for (const handNo of hands) readmitTrainingHand(handNo);
@@ -3410,13 +3427,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // Once the game is over the game-over branch registers held-back hands after
   // the last hand; anywhere else they go now.
   const reopenUnlessFinalizing = () => (gameOverPending ? openTrainingAdmission() : reopenTrainingAdmission());
-  // Finalization: the last hand's explanation takes the explain lock first;
-  // held-back hands (which skip evaluation and would reach the lock sooner)
-  // start once that pipeline is done. Whatever misses the result-wait cutoff is
-  // sealed unavailable like any unfinished explanation.
-  const drainDeferredAfter = (first) => {
-    if (!admissionDeferredHands.size) return;
-    trackTrainingTask(null, async () => { await first; drainDeferredHands(); });
+  // Finalization: the last hand explains first. Its priority ends when its
+  // pipeline is done; then the hands that yielded (held back by a pause or by
+  // the priority) are registered — unless the cutoff has passed, in which case
+  // they are sealed unavailable like any unfinished explanation.
+  const endFinalizationPriorityAfter = (lastTask) => {
+    trackTrainingTask(null, async () => {
+      await lastTask;
+      finalizationPriorityHand = null;
+      drainDeferredHands();
+    });
   };
 
   const settleTrainingTasks = async (deadlineNs) => {
@@ -3532,7 +3552,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return confirmed && tasksSettled && solverConfirmed;
   };
 
-  const reconcileTrainingNow = async () => {
+  const reconcileTrainingNow = async ({ finalizing = false } = {}) => {
     if (!trainingOn) return;
     trainingProducerOpen = true;
     try {
@@ -3566,18 +3586,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const lastHandNo = engine?.lastHand?.handNo;
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
       if (stopRequested) return;
-      // The last hand goes first (joining its pipeline if the game-over branch
-      // already started it). Everything else — missing, solve-pending, and the
-      // hands a pause held back (R1 (b), recorded so a restart still has them;
-      // an explanation that simply failed is not retried) — follows it, so none
-      // of them can take the explain lock ahead of the last hand's explanation.
-      let lastTask = null;
-      if (Number.isInteger(lastHandNo) && pendingHands.delete(lastHandNo)) lastTask = joinOrLaunchTraining(lastHandNo);
+      // R1 (b): hands a pause held back (recorded, so a restart still has them;
+      // an explanation that simply failed is not retried here).
       for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
         if (Number.isInteger(handNo)) pendingHands.add(handNo);
       }
-      for (const handNo of pendingHands) if (handNo !== lastHandNo) admissionDeferredHands.add(handNo);
-      if (!trainingAdmissionClosed) drainDeferredAfter(lastTask);
+      // At finalization the last hand has priority at the explain lock: the
+      // others start now (evaluation and solves run before the cutoff) but
+      // explain only after it. The last hand's pipeline is joined if the
+      // game-over branch already started it.
+      if (finalizing && Number.isInteger(lastHandNo) && lastHandNo >= 1) finalizationPriorityHand = lastHandNo;
+      let lastTask = null;
+      for (const handNo of pendingHands) {
+        const task = handNo === lastHandNo ? joinOrLaunchTraining(handNo) : launchTrainingPipeline(handNo);
+        if (handNo === lastHandNo) lastTask = task;
+      }
+      if (finalizing) endFinalizationPriorityAfter(lastTask);
       log('training-reconcile-registered', { hands: [...pendingHands] });
       await consumeTrainingNow();
     } catch (error) {
@@ -5076,8 +5100,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let gameOverPending = false;
   const releasePauseForFinalization = () => {
     // Finalization owns the remaining training (R1 (b)): the gate opens even if
-    // the pause itself has not reached pauseRequested yet, and the held-back
-    // hands follow the last hand's pipeline (drainDeferredAfter).
+    // the pause itself has not reached pauseRequested yet; explanations wait for
+    // the last hand (finalizationPriorityHand) and held-back hands follow it.
     if (trainingAdmissionClosed) openTrainingAdmission();
     if (!pauseRequested) return;
     pauseRequested = false;
@@ -6808,7 +6832,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const checkpoint = baseFinalizationCheckpoint();
     writeLoopState({ finalization: checkpoint });
     log('finalize-start', { budgetMs: finalizeBudgetMs, resultWaitMs: checkpoint.resultWaitMs });
-    await reconcileTrainingNow();
+    await reconcileTrainingNow({ finalizing: true });
 
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') {
@@ -8399,6 +8423,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const ending = out.gameOver;
         if (ending) {
           gameOverPending = true;
+          // The last hand explains first: explanations still waiting at the lock
+          // yield to it from here on (evaluation and solves may continue).
+          finalizationPriorityHand = out.handNo;
           // A pending pause cannot park any more: release it first so coach work
           // it deferred runs now, before the finalization clock.
           releasePauseForFinalization();
@@ -8416,7 +8443,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ensureFinalizationResultWaitCutoff();
         }
         const lastHandTask = joinOrLaunchTraining(out.handNo);
-        if (ending) drainDeferredAfter(lastHandTask);
+        if (ending) endFinalizationPriorityAfter(lastHandTask);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {
           await heartbeatCoach();
