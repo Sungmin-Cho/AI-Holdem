@@ -103,11 +103,15 @@ body.has-game #final { flex: none; max-height: 45vh; overflow: auto; margin: 0; 
   .join-main { padding: var(--sp-6) var(--sp-4) var(--sp-10); }
   .join-card { padding: var(--sp-6) var(--sp-5); }
   /* In game on phones: one row — spade, context, then the controls. */
-  body.has-game > .app-header { flex-wrap: nowrap; min-height: 52px; padding: var(--sp-1) var(--sp-3); gap: var(--sp-2); }
+  body.has-game > .app-header { flex-wrap: wrap; min-height: 0; padding: var(--sp-1) var(--sp-3); gap: 0 var(--sp-2); }
   body.has-game .brand strong,
-  body.has-game .member-role { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  body.has-game .shell-context { font-size: var(--fs-12); gap: 0 var(--sp-2); }
+  body.has-game .member-role,
+  body.has-game .help-menu__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
+  /* The hand context gets its own line under the controls. */
+  body.has-game .shell-context { order: 10; flex: 1 0 100%; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; font-size: var(--fs-12); gap: 0 var(--sp-3); padding-bottom: var(--sp-1); }
+  body.has-game #help-menu { width: var(--tap); padding: 0; }
+  body.has-game #help-menu::before { content: "?" / ""; font-size: var(--fs-16); }
 }
 @media (max-width: 420px) {
   .member-controls { flex-wrap: wrap; }
