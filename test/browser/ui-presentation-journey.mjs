@@ -338,17 +338,22 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("window.__resultNode===document.querySelector('#hand-result').firstChild"),true);
     checks.push('hand-result-survives-side-frames');
     // A held hand without a runout plays pot → winner once; the same paint's
-    // motion.play() (which ends running motion) must not cancel it.
+    // motion.play() (which ends running motion) must not cancel it, and neither
+    // may the action controller's reconcile read of that same revision — heads-up
+    // with the user first to act, so the user's own fold ends the hand and the
+    // decision leaving the view triggers that read at once.
     await evaluate("window.__motion=[];window.__cancelled=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){const a=window.__animate.apply(this,args),target=this,cancel=a.cancel.bind(a);window.__motion.push(String(target.getAttribute('class')));a.cancel=()=>{window.__cancelled.push(String(target.getAttribute('class')));cancel();};return a;}");
-    let award=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:152});award.handNo=150;
+    let award=createGame({mode:'cash-training',aiCount:1,startStack:5000,levelEvery:null,handLimit:152});award.handNo=150;award.button=1;
     const awardDeal=startHand(award,{deck:fixedDeck()});award=awardDeal.state;view=userView(award);await publish(awardDeal.events);
-    let awardEvents;
-    while(!legalFor(award).handOver){const legal=legalFor(award);const step=applyAction(award,legal.toAct,'fold');award=step.state;view=userView(award);if(legalFor(award).handOver)awardEvents=step.events;else await publish(step.events);}
+    assert.equal(legalFor(award).toAct,'user');
+    await browser(['wait','--fn',"document.querySelector('#btn-fold')?.disabled===false"]);
+    const awardStep=applyAction(award,'user','fold');award=awardStep.state;view=userView(award);assert.equal(legalFor(award).handOver,true);
+    const awardEvents=awardStep.events;
     const awardAt=Date.now();
     await publish(awardEvents,{resultHold:{handNo:view.handNo,startAt:new Date(awardAt).toISOString(),until:new Date(awardAt+4000).toISOString(),runoutStepMs:0,runoutStreets:0}});
     await browser(['wait','--fn',"window.__motion.some(name=>/\\bplate\\b/.test(name))"]);
     await browser(['wait','500']);
-    assert.equal(await evaluate("window.__cancelled.some(name=>/\\bplate\\b/.test(name))"),false,'the award pulse is not cancelled by its own paint');
+    assert.equal(await evaluate("window.__cancelled.some(name=>/\\bplate\\b/.test(name))"),false,'the award pulse is cancelled neither by its own paint nor by the reconcile read of the same revision');
     await evaluate("Element.prototype.animate=window.__animate");
     checks.push('award-motion');
     let runout=createGame({mode:'cash-training',aiCount:2,startStack:100,levelEvery:null,handLimit:202});runout.handNo=200;

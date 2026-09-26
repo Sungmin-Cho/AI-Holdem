@@ -98,6 +98,8 @@ let awardBaseline = null;
 // running motion first); the 250ms result repaint plays it at once.
 let painting = false;
 let pendingAward = null;
+// Set while a same-revision snapshot repaints: nothing moved, so nothing is cancelled.
+let keepingMotion = false;
 function playAwardSoon(playerIds) {
   if (painting) pendingAward = playerIds;
   else motion.playAward(playerIds, { table: $('table') });
@@ -1321,10 +1323,10 @@ function paintReview(view) {
   if(!study.hidden)study.href=authenticatedStudyUrl;
 }
 
-function paint() {
-  painting = true;
+function paint({ keepMotion = false } = {}) {
+  painting = true; keepingMotion = keepMotion;
   try { paintFrame(); }
-  finally { painting = false; }
+  finally { painting = false; keepingMotion = false; }
   if (pendingAward) { const winners = pendingAward; pendingAward = null; motion.playAward(winners, { table: $('table') }); }
 }
 
@@ -1363,7 +1365,7 @@ function paintFrame() {
   // Motion runs over the painted DOM; a new view ends whatever was still moving.
   if (view !== motionFrame?.view) {
     const frame = { view, revealed: Object.keys(revealedCards().map) };
-    motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
+    if (!keepingMotion) motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
     motionFrame = frame;
   }
 }
@@ -1408,7 +1410,11 @@ setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlate
 
 function renderSnapshot(snap) {
   // Initial load, reconnect, and terminal records jump; they never animate or award.
-  motionInput = { source: 'snapshot', contiguous: false }; awardBaseline = null;
+  // A read of the revision already shown (the action controller reconciles
+  // right after the user's own decision leaves the view) is not a jump: the
+  // motion it would end — often the award of the hand that action ended — goes on.
+  const sameRevision = ui.view != null && Number.isInteger(snap.revision) && snap.revision === revision;
+  if (!sameRevision) { motionInput = { source: 'snapshot', contiguous: false }; awardBaseline = null; }
   ui.resultHold=snap.resultHold ?? null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
   const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
@@ -1434,7 +1440,7 @@ function renderSnapshot(snap) {
   study.hidden = !authenticatedStudyUrl;
   if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
   else study.removeAttribute('href');
-  paint();
+  paint({ keepMotion: sameRevision });
 }
 
 function render(m, contiguous = true) {
