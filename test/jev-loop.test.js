@@ -108,6 +108,15 @@ test('hard deadline preserves recoverable request, stop abort never applies resp
  assert.equal(loop.pendingDecision.code,'JEV_TIMEOUT');assert.equal(loop.pendingDecision.closeConfirmed,true);assert.equal(loop.pendingDecision.retryable,true);
  assert.equal(read(dir,'state.json').hand.actions.length,0);await loop.requestStop();await running.catch(e=>{if(!['STOPPING','CHILD_FAILED'].includes(e.code))throw e;});
 });
+test('a hard timeout is JEV_TIMEOUT even when the timer fires before the clock reads hardMs', {timeout:20000*SCALE},async t=>{
+ // A slow clock stands in for a timer that fires a fraction of a millisecond
+ // early: when the hard timer aborts, the clock shows less than hardMs elapsed.
+ const client={systemOne(request,{signal}){return new Promise((r,j)=>signal.addEventListener('abort',()=>j(new Error('raw-secret')),{once:true}));}};
+ const {loop,running}=await aiFirst(t,client,{softMs:20,hardMs:200,loopOpts:{monotonicNow:()=>performance.now()/4}});
+ await wait(()=>loop.pendingDecision?.status==='recovery_required');
+ assert.equal(loop.pendingDecision.code,'JEV_TIMEOUT');assert.equal(loop.pendingDecision.retryable,true);
+ await loop.requestStop();await running.catch(e=>{if(!['STOPPING','CHILD_FAILED'].includes(e.code))throw e;});
+});
 test('late settle repairs only closure and never applies revoked response', {timeout:20000*SCALE},async t=>{
  let release;const client={systemOne(request){return new Promise(resolve=>{release=()=>fakeClient([]).systemOne(request).then(resolve);});}};
  const {loop,running,dir}=await aiFirst(t,client,{softMs:20,hardMs:3000,graceMs:30});await wait(()=>release&&loop.pendingDecision?.softWait);
