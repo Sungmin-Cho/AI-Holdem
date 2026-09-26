@@ -1,0 +1,211 @@
+/** Rebuilds a finished hand step by step from the replay record the server
+ * already sends (shared/hand-replay.js). Pure: no DOM. The engine's own
+ * numbers are the check — every action's potTotal / currentBet / maxRaiseTo /
+ * callAmount must match the rebuilt state, and at the end
+ * start − posted − put + uncalled returns + pot shares must equal endStacks.
+ * Any disagreement means the record cannot be drawn faithfully, so the caller
+ * falls back to the text list (design §10.1). */
+import { actionVerbs } from './replay-format.js';
+
+const STREET_BOARD = Object.freeze({ preflop: 0, flop: 3, turn: 4, river: 5 });
+const STREET_OF_LENGTH = Object.freeze({ 3: 'flop', 4: 'turn', 5: 'river' });
+
+function positionRank(label) {
+  if (label === 'BTN' || label === 'BTN/SB') return 0;
+  if (label === 'SB') return 1;
+  if (label === 'BB') return 2;
+  if (label === 'UTG') return 3;
+  const utg = /^UTG\+(\d+)$/.exec(label ?? '');
+  if (utg) return 3 + Number(utg[1]);
+  if (label === 'CO') return 99;
+  return null;
+}
+
+/** Seating order starting at the button (the order positions go round the
+ * table). Without positions (legacy records) the live table's seat order is
+ * used for the players who were dealt in. */
+export function replaySeatOrder(replay, fallbackOrder = []) {
+  const players = Object.keys(replay?.startStacks ?? {});
+  const known = new Set(players);
+  const ranked = players
+    .map((playerId) => ({ playerId, rank: positionRank(replay?.positions?.[playerId]) }))
+    .filter((row) => row.rank !== null);
+  if (ranked.length === players.length && players.length) {
+    return ranked.sort((a, b) => a.rank - b.rank).map((row) => row.playerId);
+  }
+  const ordered = fallbackOrder.filter((playerId) => known.has(playerId));
+  for (const playerId of players) if (!ordered.includes(playerId)) ordered.push(playerId);
+  return ordered;
+}
+
+const isAmount = (value) => Number.isSafeInteger(value) && value >= 0;
+const sum = (values) => values.reduce((total, value) => total + value, 0);
+const fail = (reason, at = null) => ({ ok: false, reason, at });
+
+export function buildReplaySteps(replay, { seatOrder } = {}) {
+  if (!replay || typeof replay !== 'object' || replay.unavailable === true) return fail('unavailable');
+  const startStacks = replay.startStacks ?? {};
+  const players = Object.keys(startStacks);
+  if (players.length < 2 || !players.every((playerId) => isAmount(startStacks[playerId]))) return fail('start-stacks');
+  const known = new Set(players);
+  const seats = seatOrder ?? replaySeatOrder(replay);
+  if (seats.length !== players.length || !seats.every((playerId) => known.has(playerId))) return fail('seat-order');
+  const board = Array.isArray(replay.board) ? replay.board : [];
+  if (board.length > 5 || (board.length > 0 && board.length < 3)) return fail('board');
+
+  const stacks = { ...startStacks };
+  const bets = Object.fromEntries(players.map((playerId) => [playerId, 0]));
+  const contrib = Object.fromEntries(players.map((playerId) => [playerId, 0]));
+  const folded = new Set();
+  const allIn = new Set();
+  let street = 'preflop';
+  let shownBoard = [];
+  const steps = [];
+  const snapshot = (fields) => {
+    const total = sum(Object.values(contrib));
+    steps.push({
+      index: steps.length,
+      street,
+      board: [...shownBoard],
+      stacks: { ...stacks },
+      bets: { ...bets },
+      pot: total - sum(Object.values(bets)),
+      total,
+      folded: [...folded],
+      allIn: [...allIn],
+      actor: null,
+      actionIndex: null,
+      ...fields,
+    });
+  };
+  const put = (playerId, chips) => {
+    stacks[playerId] -= chips;
+    bets[playerId] += chips;
+    contrib[playerId] += chips;
+    if (stacks[playerId] === 0) allIn.add(playerId);
+  };
+  const collect = () => { for (const playerId of players) bets[playerId] = 0; };
+
+  const posts = Array.isArray(replay.posts) ? replay.posts : [];
+  for (const post of posts) {
+    if (!known.has(post?.playerId) || !isAmount(post.amount) || post.amount > stacks[post.playerId]) return fail('post');
+    put(post.playerId, post.amount);
+  }
+  const bigBlind = Array.isArray(replay.blinds) && isAmount(replay.blinds[1]) ? replay.blinds[1] : Math.max(0, ...posts.map((post) => post.amount));
+  let currentBet = bigBlind;
+  snapshot({ kind: 'deal', posts: posts.map((post) => ({ playerId: post.playerId, amount: post.amount })) });
+
+  const actions = Array.isArray(replay.actions) ? replay.actions : [];
+  const verbs = actionVerbs(actions);
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index];
+    const playerId = action?.playerId;
+    if (!known.has(playerId) || folded.has(playerId)) return fail('actor', index);
+    const actionStreet = action.street ?? 'preflop';
+    if (!(actionStreet in STREET_BOARD)) return fail('street', index);
+    if (actionStreet !== street) {
+      if (STREET_BOARD[actionStreet] <= STREET_BOARD[street]) return fail('street', index);
+      street = actionStreet;
+      collect();
+      currentBet = 0;
+      const dealt = Array.isArray(action.board) ? action.board : board.slice(0, STREET_BOARD[street]);
+      if (dealt.length !== STREET_BOARD[street]) return fail('board', index);
+      shownBoard = [...dealt];
+      snapshot({ kind: 'street' });
+    }
+    if (Array.isArray(action.board) && (action.board.length !== STREET_BOARD[street]
+      || action.board.some((card, at) => card !== shownBoard[at]))) return fail('board', index);
+    // The engine's own pre-action numbers must match the rebuilt state.
+    if (action.potTotal !== undefined && action.potTotal !== sum(Object.values(contrib))) return fail('pot-total', index);
+    if (action.currentBet !== undefined && action.currentBet !== currentBet) return fail('current-bet', index);
+    if (action.maxRaiseTo !== undefined && action.maxRaiseTo !== bets[playerId] + stacks[playerId]) return fail('max-raise', index);
+    const owed = Math.min(Math.max(0, currentBet - bets[playerId]), stacks[playerId]);
+    if (action.callAmount !== undefined && action.callAmount !== owed) return fail('call-amount', index);
+    let chips = 0;
+    if (action.action === 'fold') folded.add(playerId);
+    else if (action.action === 'check') {
+      if (owed > 0) return fail('check', index);
+    } else if (action.action === 'call') {
+      if (owed <= 0 || action.amount !== owed) return fail('call', index);
+      chips = owed;
+    } else if (action.action === 'raise') {
+      if (!isAmount(action.amount) || action.amount <= currentBet) return fail('raise', index);
+      chips = action.amount - bets[playerId];
+      if (chips <= 0 || chips > stacks[playerId]) return fail('raise', index);
+      currentBet = action.amount;
+    } else return fail('action', index);
+    if (chips) put(playerId, chips);
+    snapshot({
+      kind: 'action',
+      actor: playerId,
+      actionIndex: index,
+      verb: verbs.get(action) ?? action.action,
+      amount: action.action === 'call' || action.action === 'raise' ? action.amount : null,
+      put: chips,
+    });
+  }
+
+  // An all-in runout deals the streets nobody acted on.
+  if (!board.slice(0, shownBoard.length).every((card, at) => card === shownBoard[at])) return fail('board');
+  for (const length of [3, 4, 5]) {
+    if (length <= shownBoard.length || length > board.length) continue;
+    collect();
+    street = STREET_OF_LENGTH[length];
+    shownBoard = board.slice(0, length);
+    snapshot({ kind: 'runout' });
+  }
+
+  collect();
+  const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
+  if (reveals.length) {
+    snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
+  }
+
+  const returns = replay.uncalledReturns ?? {};
+  const returned = [];
+  for (const [playerId, amount] of Object.entries(returns)) {
+    if (!known.has(playerId) || !isAmount(amount) || amount > contrib[playerId]) return fail('uncalled');
+    if (!amount) continue;
+    stacks[playerId] += amount;
+    contrib[playerId] -= amount;
+    returned.push({ playerId, amount });
+  }
+  const pots = Array.isArray(replay.pots) ? replay.pots : [];
+  if (!pots.length || sum(pots.map((pot) => (isAmount(pot?.amount) ? pot.amount : NaN))) !== sum(Object.values(contrib))) return fail('pots');
+  const awards = [];
+  for (const pot of pots) {
+    const winners = Array.isArray(pot.winners) ? pot.winners : [];
+    if (!winners.length || sum(winners.map((row) => (known.has(row?.playerId) && isAmount(row.share) ? row.share : NaN))) !== pot.amount) return fail('pot-share');
+    for (const row of winners) {
+      stacks[row.playerId] += row.share;
+      awards.push({ potIndex: pot.potIndex, playerId: row.playerId, share: row.share });
+    }
+  }
+  const endStacks = replay.endStacks ?? {};
+  if (!players.every((playerId) => endStacks[playerId] === stacks[playerId])) return fail('end-stacks');
+  for (const playerId of players) contrib[playerId] = 0;
+  snapshot({
+    kind: 'result',
+    returned,
+    awards,
+    pots: pots.map((pot) => ({
+      potIndex: pot.potIndex,
+      amount: pot.amount,
+      winners: pot.winners.map((row) => ({ playerId: row.playerId, share: row.share })),
+    })),
+  });
+  // The last snapshot has no contributions left: every chip went back or out.
+  steps.at(-1).pot = 0;
+  steps.at(-1).total = sum(pots.map((pot) => pot.amount));
+  return { ok: true, seats, steps, bigBlind, board: [...board] };
+}
+
+/** First step of each street (and of the result) for the street chips. */
+export function streetStarts(steps) {
+  const starts = [];
+  for (const step of steps) {
+    const key = step.kind === 'result' || step.kind === 'showdown' ? 'result' : step.street;
+    if (!starts.some((row) => row.key === key)) starts.push({ key, index: step.index });
+  }
+  return starts;
+}

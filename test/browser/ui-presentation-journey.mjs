@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -37,10 +37,16 @@ export async function runUiJourney(outDir,{ci=false}={}) {
   const click=async(selector)=>{await browser(['snapshot','-i']);await browser(['click',selector]);};
   try {
     const historical=handRecordFixture(1,{actions:[{playerId:'user',street:'preflop',action:'raise',amount:125}]});historical.blinds=[25,50];
-    writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
+    // An engine-settled heads-up hand (same seats as the fixture) for the visual replayer.
+    let settledState=createGame({aiCount:1,startStack:5000,levelEvery:10});settledState.handNo=2;
+    settledState=startHand(settledState,{deck:fixedDeck()}).state;
+    while(!legalFor(settledState).handOver){const legal=legalFor(settledState);const raise=legal.canCheck&&legal.street==='turn'&&legal.canRaise;
+      settledState=applyAction(settledState,legal.toAct,raise?'raise':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
+    const settledHand=settledState.lastHand;
+    writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2),settledHand],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
@@ -238,6 +244,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate('document.activeElement===window.focusedReplay'),true);checks.push('replay-arrival-focus');
     await browser(['press','Enter']);
     assert.match(await evaluate("document.querySelector('#replay-body .replay-amount').textContent"),/2.5 BB/);
+    // A display fixture (posts: []) cannot be rebuilt: an explained text list, no drawing.
+    assert.equal(await evaluate("!!document.querySelector('#replay-body .replay-fallback')&&!document.querySelector('#replay-body .replayer')&&!!document.querySelector('#replay-body .replay-list .replay-row')"),true);checks.push('replay-fallback');
     await browser(['press','Escape']);
     const historyAmounts=await evaluate("[...document.querySelectorAll('#log-list .log-amount')].slice(-2).map(n=>n.textContent)");
     assert.match(historyAmounts[0],/2.5 BB/);assert.match(historyAmounts[1],/1.25 BB/);checks.push('historical-bb');
@@ -249,6 +257,41 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).getAttribute('aria-expanded')"),'true');
     assert.ok(await evaluate("document.querySelectorAll('#log-list > .is-collapsed').length")<folded.hidden);
     checks.push('log-hand-fold');
+    // The engine-settled hand draws the visual replayer (design §10.1).
+    const beforeViewport=await evaluate('[innerWidth,innerHeight]');
+    await publish([{type:'hand_start',handNo:3,blinds:settledHand.blinds}],{handReplay:{handNos:[3]}});
+    await browser(['set','viewport','1280','800']);
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    const visual=await evaluate("(()=>({steps:document.querySelectorAll('.replayer-jump').length,seats:document.querySelectorAll('.replayer-seat').length,hero:document.querySelector('.replayer-seat')?.dataset.playerId,progress:document.querySelector('.replayer-progress').textContent,amount:!!document.querySelector('.replayer-timeline .replay-amount'),fallback:!!document.querySelector('.replay-fallback'),backs:document.querySelectorAll('.replayer-seat .card--back').length}))()");
+    assert.ok(visual.steps>=6&&visual.seats===2&&visual.hero==='user'&&visual.progress===`1 / ${visual.steps}`&&visual.amount&&!visual.fallback&&visual.backs===0,JSON.stringify(visual));
+    await browser(['screenshot',path.join(outDir,'replayer-1280.png')]);
+    checks.push('replay-visual');
+    await evaluate("document.querySelector('.replayer-next').focus()");
+    await browser(['press','ArrowRight']);await browser(['press','ArrowRight']);
+    assert.equal(await evaluate("document.querySelector('.replayer-progress').textContent"),`3 / ${visual.steps}`);
+    await browser(['press','End']);
+    const ended=await evaluate("({progress:document.querySelector('.replayer-progress').textContent,title:document.querySelector('.replayer-now-title').textContent,winners:document.querySelectorAll('.replayer-seat.is-winner').length,next:document.querySelector('.replayer-next').disabled,inDialog:document.querySelector('#replay-overlay').contains(document.activeElement)})");
+    assert.ok(ended.progress===`${visual.steps} / ${visual.steps}`&&ended.title==='결과'&&ended.winners>0&&ended.next&&ended.inDialog,JSON.stringify(ended));
+    await browser(['press','Home']);
+    assert.equal(await evaluate("document.querySelector('.replayer-progress').textContent"),`1 / ${visual.steps}`);
+    await evaluate("document.querySelector('.replayer-play').click()");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').getAttribute('aria-pressed')"),'true');
+    await browser(['wait','--fn',"document.querySelector('.replayer-progress').textContent.startsWith('2 /')"]);
+    await evaluate("document.querySelector('.replayer-play').click()");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').getAttribute('aria-pressed')"),'false');
+    checks.push('replay-keyboard');
+    await evaluate("document.querySelector('.replayer-list-toggle').focus()");await browser(['press','Enter']);
+    const listed=await evaluate("({rows:document.querySelectorAll('.replay-list .replay-row').length,expanded:document.querySelector('.replayer-list-toggle').getAttribute('aria-expanded'),focus:document.activeElement?.classList.contains('replayer-list-toggle')})");
+    assert.ok(listed.rows>0&&listed.expanded==='true'&&listed.focus,JSON.stringify(listed));
+    checks.push('replay-list-toggle');
+    await browser(['set','viewport','390','844']);
+    const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth}})()");
+    assert.ok(sheet.w===390&&sheet.h===844&&sheet.fits,JSON.stringify(sheet));
+    await browser(['screenshot',path.join(outDir,'replayer-390.png')]);
+    checks.push('replay-mobile-sheet');
+    await browser(['press','Escape']);
+    await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {
       await browser(['select','#display-unit',unit]);
