@@ -360,3 +360,50 @@ test('a hand with no actions (both blinds all-in) runs out straight from the dea
   assert.deepEqual(result.steps.filter((step) => step.kind === 'runout').map((step) => step.board.length), [3, 4, 5]);
   assert.equal(result.steps[0].kind, 'deal');
 });
+
+test('engine rules the arithmetic cannot see: returns, board runout, all-in actors, showdown and winners', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  // A checked-down heads-up hand: no bet was ever uncalled.
+  const checked = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive), { reveal: 'all' });
+  assert.equal(buildReplaySteps(checked).ok, true);
+  const winner = checked.pots[0].winners[0].playerId;
+  const fake = structuredClone(checked);
+  fake.uncalledReturns = { [winner]: 10 };
+  fake.pots[0].amount -= 10;
+  fake.pots[0].winners[0].share -= 10;
+  reject(fake, 'a return where nothing was uncalled (end stacks unchanged)');
+  const hidden = structuredClone(checked);
+  hidden.showdown.reveals = [];
+  reject(hidden, 'a contested showdown that shows nobody');
+  // A preflop fold: the board never ran out, and the folder cannot win.
+  let folder = null;
+  const folded = replayRecord(play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal) => {
+    if (folder === null) { folder = legal.toAct; return ['fold']; }
+    return passive(legal);
+  }), { reveal: 'all' });
+  assert.equal(buildReplaySteps(folded).ok, true);
+  reject({ ...folded, board: [...checked.board] }, 'an uncontested hand with a runout');
+  const stolen = structuredClone(folded);
+  const other = Object.keys(stolen.startStacks).find((playerId) => playerId !== folder);
+  const share = stolen.pots[0].winners[0].share;
+  stolen.pots[0].winners = [{ playerId: folder, share }];
+  stolen.endStacks[folder] += share;
+  stolen.endStacks[other] -= share;
+  reject(stolen, 'a folded hand winning the pot');
+  // Both blinds all-in from the posts: no one can act, and the all-in list matters.
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  for (const seat of game.seats) seat.stack = 20;
+  const shoved = replayRecord(play(game, () => { throw new Error('no decision'); }), { reveal: 'all' });
+  assert.equal(buildReplaySteps(shoved).ok, true);
+  const acted = structuredClone(shoved);
+  const actor = acted.posts[0].playerId;
+  acted.actions = [{ playerId: actor, action: 'check', amount: 0, street: 'preflop', potTotal: 40, callAmount: 0, maxRaiseTo: 20, currentBet: acted.blinds[1], board: [] }];
+  reject(acted, 'an all-in player acting');
+  reject({ ...shoved, allIn: [] }, 'an all-in list that forgets the shoves');
+  // With no actions and no list rows, the revealed cards are still readable as text.
+  const drawn = mount(shoved);
+  const summary = drawn.container.querySelector('.replayer-seat-summary').textContent;
+  for (const [playerId, cards] of Object.entries(shoved.holes)) {
+    for (const code of cards) assert.ok(summary.includes(cardLabel(parseCard(code))), `${playerId} ${code} is readable`);
+  }
+});

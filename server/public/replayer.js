@@ -137,7 +137,12 @@ export function mountReplayer(container, ctx) {
   const nowTitle = el(doc, 'p', 'replayer-now-title');
   nowTitle.setAttribute('aria-live', 'polite');
   const nowDetail = el(doc, 'div', 'replayer-now-detail');
-  now.append(nowTitle, nowDetail);
+  // The drawn table is aria-hidden; this list says the same (board, pot, and
+  // each seat's stack, bet, cards within the reveal scope, state) as text. It
+  // is not a live region, so autoplay does not read it out on every step.
+  const seatSummary = el(doc, 'ul', 'ui-sr-only replayer-seat-summary');
+  seatSummary.setAttribute('aria-label', '테이블 상태');
+  now.append(nowTitle, nowDetail, seatSummary);
 
   const timeline = el(doc, 'ol', 'replayer-timeline');
   timeline.setAttribute('aria-label', '진행 순서');
@@ -213,6 +218,18 @@ export function mountReplayer(container, ctx) {
     }
     board.replaceChildren();
     for (let slot = 0; slot < 5; slot += 1) board.append(renderCard(step.board[slot], { small: true, slot: slot >= step.board.length, doc }));
+    seatSummary.replaceChildren(el(doc, 'li', null, `보드 ${step.board.length ? boardText(step.board) : '없음'} · 팟 ${amount(step.kind === 'result' ? step.total : step.pot)}`));
+    for (const playerId of order) {
+      const holes = replay.holes?.[playerId];
+      const state = winners.has(playerId) ? '승리' : step.folded.includes(playerId) ? '폴드' : step.allIn.includes(playerId) ? '올인' : '';
+      const bet = step.bets[playerId] ?? 0;
+      seatSummary.append(el(doc, 'li', null, [
+        `${name(playerId)}${replay.positions?.[playerId] ? ` ${replay.positions[playerId]}` : ''}: 스택 ${amount(step.stacks[playerId])}`,
+        bet > 0 ? `이번 스트리트 베팅 ${amount(bet)}` : '',
+        `카드 ${Array.isArray(holes) ? boardText(holes) : '비공개'}`,
+        state,
+      ].filter(Boolean).join(', ')));
+    }
     pot.textContent = step.kind === 'result'
       ? step.pots.map((row) => `${row.potIndex === 0 ? (step.pots.length > 1 ? '메인' : '팟') : `사이드 ${row.potIndex}`} ${short(row.amount)}`).join(' · ')
       : step.total > step.pot ? `팟 ${short(step.pot)} · 베팅 포함 ${short(step.total)}` : `팟 ${short(step.pot)}`;

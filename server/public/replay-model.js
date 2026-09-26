@@ -101,8 +101,9 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     const action = actions[index];
     const playerId = action?.playerId;
     if (!known.has(playerId) || folded.has(playerId)) return fail('actor', index);
-    // Once everyone else has folded the hand is over: no action can follow.
-    if (players.filter((id) => !folded.has(id)).length < 2) return fail('actor', index);
+    // Once everyone else has folded the hand is over, and a player with no
+    // chips behind is all-in: neither can act.
+    if (players.filter((id) => !folded.has(id)).length < 2 || stacks[playerId] === 0) return fail('actor', index);
     const actionStreet = action.street ?? 'preflop';
     if (!(actionStreet in STREET_BOARD)) return fail('street', index);
     if (actionStreet !== street) {
@@ -157,14 +158,25 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   if (recordedFolds.size !== folded.size || [...folded].some((playerId) => !recordedFolds.has(playerId))) return fail('folded');
   const contested = players.filter((playerId) => !folded.has(playerId)).length >= 2;
   if (contested !== Boolean(replay.showdown) || (contested && board.length !== 5)) return fail('showdown');
+  // Only a contested hand runs the board out; otherwise it ends as last shown.
+  if (!contested && board.length !== shownBoard.length) return fail('board');
+  // The engine never removes anyone from its all-in list.
+  const recordedAllIn = new Set(Array.isArray(replay.allIn) ? replay.allIn : []);
+  if (recordedAllIn.size !== allIn.size || [...allIn].some((playerId) => !recordedAllIn.has(playerId))) return fail('all-in');
   collect();
   // The engine returns an uncalled bet first (finishHand: returnUncalled →
   // runout → showdown → awards), so the runout and showdown already show it.
+  // The engine's rule (returnUncalled): the single largest contributor gets
+  // back what nobody matched — the gap to the second largest contribution.
+  const ranked = players.map((playerId) => contrib[playerId]).sort((a, b) => b - a);
+  const top = players.filter((playerId) => contrib[playerId] === ranked[0]);
+  const expected = top.length === 1 && ranked[0] > ranked[1] ? { [top[0]]: ranked[0] - Math.max(0, ranked[1]) } : {};
   const returns = replay.uncalledReturns ?? {};
+  const given = Object.entries(returns).filter(([, amount]) => amount !== 0);
+  if (given.length !== Object.keys(expected).length || given.some(([playerId, amount]) => expected[playerId] !== amount)) return fail('uncalled');
   const returned = [];
-  for (const [playerId, amount] of Object.entries(returns)) {
+  for (const [playerId, amount] of given) {
     if (!known.has(playerId) || !isAmount(amount) || amount > contrib[playerId]) return fail('uncalled');
-    if (!amount) continue;
     stacks[playerId] += amount;
     contrib[playerId] -= amount;
     if (stacks[playerId] > 0) allIn.delete(playerId);
@@ -181,7 +193,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   }
 
   const reveals = (replay.showdown?.reveals ?? []).filter((row) => known.has(row?.playerId));
-  if (reveals.some((row) => folded.has(row.playerId))) return fail('showdown');
+  // A showdown shows at least the winner, and never a folded hand.
+  if ((contested && !reveals.length) || reveals.some((row) => folded.has(row.playerId))) return fail('showdown');
   if (reveals.length) {
     snapshot({ kind: 'showdown', reveals: reveals.map((row) => ({ playerId: row.playerId, handName: row.handName ?? null })) });
   }
@@ -192,6 +205,9 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   for (const pot of pots) {
     const winners = Array.isArray(pot.winners) ? pot.winners : [];
     if (!winners.length || sum(winners.map((row) => (known.has(row?.playerId) && isAmount(row.share) ? row.share : NaN))) !== pot.amount) return fail('pot-share');
+    // Only a hand still in (and eligible for this pot) can win it.
+    const eligible = Array.isArray(pot.eligible) ? new Set(pot.eligible) : null;
+    if (winners.some((row) => folded.has(row.playerId) || (eligible && !eligible.has(row.playerId)))) return fail('pot-winner');
     for (const row of winners) {
       stacks[row.playerId] += row.share;
       awards.push({ potIndex: pot.potIndex, playerId: row.playerId, share: row.share });
