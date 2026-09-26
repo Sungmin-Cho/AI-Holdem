@@ -1329,9 +1329,9 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .seat-bet {display:none;}
 }
 @media (min-width:1024px) and (min-height:550px) {
-  /* The hero's large cards cover the inner felt marker; keep that amount on
-     their own plate so the cards and the committed chips are both readable. */
-  .seat.is-hero .seat-bet {display:block;position:static;transform:none;margin:0 0 0 4px;padding:0;font-size:11px;}
+  /* The viewer's cards sit above their plate, so their marker takes the
+     plate's right edge instead of the centre-facing top. */
+  .table .seat.is-hero[data-bet-band][data-side] .bet-marker {left:calc(100% + 8px);right:auto;top:50%;bottom:auto;transform:translateY(-50%);}
 }
 
 @media (min-width:1024px) and (min-height:550px) {

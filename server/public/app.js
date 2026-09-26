@@ -337,7 +337,8 @@ function paintPots(view) {
   const pot = aggregatePot(view);
   box.hidden = pot.kind === 'hidden';
   if (pot.kind !== 'ready') {box.append(el('span', 'pot-label', pot.kind === 'mismatch' ? '팟 정보 확인 중' : '팟 정보 없음'));return;}
-  box.append(el('span', 'pot-label', view.handInProgress === true ? '현재 베팅 포함 총액' : '팟 합계'), amountNode(pot.total, view.blinds?.[1], 'pot-amount num'));
+  // "팟" during the hand already counts this street's bets (the usual table convention).
+  box.append(el('span', 'pot-label', view.handInProgress === true ? '팟' : '팟 합계'), amountNode(pot.total, view.blinds?.[1], 'pot-amount num'));
   if (showPotBreakdown(view)) {
     const detail = el('details', 'pot-detail');detail.append(el('summary', '', '정산 팟 상세'));
     detail.open = Boolean(wasOpen);
@@ -483,7 +484,8 @@ function paintSeats(view) {
     if(!node.parentNode)seatRoot.append(node);
     previous.delete(seat.playerId);
 
-    if (state.showBet && !isHero) {
+    // One place for committed chips on every seat, the viewer's included.
+    if (state.showBet) {
       const marker = el('span', 'bet-marker');
       marker.setAttribute('aria-hidden', 'true');
       marker.dataset.playerId = seat.playerId;
