@@ -448,3 +448,49 @@ test('turn order and the showdown follow the engine: no seat acts out of turn, n
   lost.showdown.reveals = lost.showdown.reveals.filter((row) => row.playerId === winner);
   reject(lost, 'a player still in who neither shows nor mucks');
 });
+
+// The first engine hand (seeded, so always the same) that meets a condition.
+function findHand(predicate, { tries = 400 } = {}) {
+  const random = seeded(7);
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    const game = createGame({ aiCount: 1 + Math.floor(random() * 5), startStack: 2000, levelEvery: 10 });
+    for (const seat of game.seats) seat.stack = 100 + Math.floor(random() * 1900);
+    let state = startHand(game, { rng: random }).state;
+    while (!legalFor(state).handOver) {
+      const legal = legalFor(state);
+      state = applyAction(state, legal.toAct, legal.canRaise && random() < 0.5 ? 'raise' : legal.canCheck ? 'check' : 'call',
+        legal.canRaise ? legal.maxRaiseTo : undefined).state;
+    }
+    if (predicate(state.lastHand)) return state.lastHand;
+  }
+  throw new Error('no engine hand met the condition');
+}
+
+test('each side pot is rebuilt from the contributions, and a split pot shares evenly', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const twoPots = replayRecord(findHand((record) => record.pots.length >= 2
+    && record.pots[0].winners.length === 1 && record.pots[1].winners.length === 1
+    && record.pots[0].winners[0].playerId === record.pots[1].winners[0].playerId), { reveal: 'all' });
+  assert.equal(buildReplaySteps(twoPots).ok, true);
+  const moved = structuredClone(twoPots);
+  moved.pots[0].amount += 1; moved.pots[0].winners[0].share += 1;
+  moved.pots[1].amount -= 1; moved.pots[1].winners[0].share -= 1;
+  reject(moved, 'a chip moved between two pots of the same winner (totals and end stacks unchanged)');
+  const split = replayRecord(findHand((record) => record.pots.some((pot) => pot.winners.length >= 2 && pot.amount >= 20)), { reveal: 'all' });
+  assert.equal(buildReplaySteps(split).ok, true);
+  const uneven = structuredClone(split);
+  const pot = uneven.pots.find((row) => row.winners.length >= 2 && row.amount >= 20);
+  const [a, b] = pot.winners;
+  a.share += 5; b.share -= 5;
+  uneven.endStacks[a.playerId] += 5; uneven.endStacks[b.playerId] -= 5;
+  reject(uneven, 'a split pot shared unevenly');
+});
+
+test('a legacy record without positions is still held to round closure and completeness', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  delete record.positions;
+  const replay = replayRecord(record, { reveal: 'all' });
+  const order = replaySeatOrder(replay, Object.keys(record.startStacks));
+  assert.equal(buildReplaySteps(replay, { seatOrder: order }).ok, true);
+  assert.equal(buildReplaySteps({ ...replay, actions: replay.actions.slice(0, -1) }, { seatOrder: order }).ok, false, 'stops while someone still had to act');
+});

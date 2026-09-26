@@ -99,9 +99,10 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   snapshot({ kind: 'deal', posts: posts.map((post) => ({ playerId: post.playerId, amount: post.amount })) });
 
   // Turn order, as the engine keeps it (needsAction / nextNeedingAction /
-  // bettingRoundClosed / afterAction). It needs the real seating, which the
-  // positions give (clockwise from the button); a legacy record without them
-  // skips this check and relies on the chip, board and fold checks alone.
+  // bettingRoundClosed / afterAction). When a round closes and whether the hand
+  // is over do not depend on seating, so every record is held to them; who acts
+  // next needs the real seating, which the positions give (clockwise from the
+  // button) — a legacy record without them skips only that part.
   const positional = players.every((playerId) => positionRank(replay.positions?.[playerId]) !== null) ? replaySeatOrder(replay) : null;
   const acted = new Set();
   let reopenEligible = true, handOver = false, roundClosed = false, toAct = null;
@@ -128,11 +129,13 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (open.length === 1) return bets[open[0]] >= currentBet;
     return open.every((playerId) => acted.has(playerId) && bets[playerId] >= currentBet);
   };
-  if (positional) {
-    // Preflop starts left of the big blind; if that seat cannot act the hand is already over.
+  // Preflop starts left of the big blind. If nobody needs to act (the blinds
+  // are all-in), the engine finishes the hand straight from the deal.
+  handOver = !players.some(needsAction);
+  if (positional && !handOver) {
     const first = positional[(positional.findIndex((playerId) => replay.positions[playerId] === 'BB') + 1) % positional.length];
     toAct = needsAction(first) ? first : null;
-    handOver = toAct === null;
+    if (toAct === null) return fail('order');
   }
 
   const actions = Array.isArray(replay.actions) ? replay.actions : [];
@@ -146,7 +149,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (players.filter((id) => !folded.has(id)).length < 2 || stacks[playerId] === 0) return fail('actor', index);
     const actionStreet = action.street ?? 'preflop';
     if (!(actionStreet in STREET_BOARD)) return fail('street', index);
-    if (positional && (handOver || (roundClosed ? actionStreet !== NEXT_STREET[street] : actionStreet !== street))) return fail('order', index);
+    if (handOver || (roundClosed ? actionStreet !== NEXT_STREET[street] : actionStreet !== street)) return fail('order', index);
     if (actionStreet !== street) {
       if (STREET_BOARD[actionStreet] <= STREET_BOARD[street]) return fail('street', index);
       street = actionStreet;
@@ -159,11 +162,9 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       if (dealt.length !== STREET_BOARD[street] || !shownBoard.every((card, at) => dealt[at] === card)) return fail('board', index);
       shownBoard = [...dealt];
       snapshot({ kind: 'street', collected });
-      if (positional) {
-        // advanceStreet: bets reset, the first seat after the button that needs to act.
-        acted.clear(); reopenEligible = true; roundClosed = false;
-        toAct = nextNeeding(0);
-      }
+      // advanceStreet: bets reset, the first seat after the button that needs to act.
+      acted.clear(); reopenEligible = true; roundClosed = false;
+      if (positional) toAct = nextNeeding(0);
     }
     if (positional && playerId !== toAct) return fail('order', index);
     if (Array.isArray(action.board) && (action.board.length !== STREET_BOARD[street]
@@ -185,7 +186,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     } else if (action.action === 'raise') {
       if (!isAmount(action.amount) || action.amount <= currentBet) return fail('raise', index);
       // canRaise: an incomplete raise does not reopen the action, and someone must be left to answer.
-      if (positional && ((acted.has(playerId) && !reopenEligible) || !actionable().some((id) => id !== playerId))) return fail('raise', index);
+      if ((acted.has(playerId) && !reopenEligible) || !actionable().some((id) => id !== playerId)) return fail('raise', index);
       chips = action.amount - bets[playerId];
       if (chips <= 0 || chips > stacks[playerId]) return fail('raise', index);
       // A short all-in is the only raise below the minimum (applyAction's rule).
@@ -200,13 +201,11 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     } else return fail('action', index);
     acted.add(playerId);
     if (chips) put(playerId, chips);
-    if (positional) {
-      // afterAction: the hand ends, the round goes on, or the next street is due.
-      if (stillIn() <= 1) handOver = true;
-      else if (!bettingClosed()) toAct = nextNeeding(positional.indexOf(playerId));
-      else if (actionable().length <= 1 || street === 'river') handOver = true;
-      else roundClosed = true;
-    }
+    // afterAction: the hand ends, the round goes on, or the next street is due.
+    if (stillIn() <= 1) handOver = true;
+    else if (!bettingClosed()) { if (positional) toAct = nextNeeding(positional.indexOf(playerId)); }
+    else if (actionable().length <= 1 || street === 'river') handOver = true;
+    else roundClosed = true;
     snapshot({
       kind: 'action',
       actor: playerId,
@@ -218,7 +217,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   }
 
   // A record that stops while someone still had to act is incomplete.
-  if (positional && !handOver) return fail('order');
+  if (!handOver) return fail('order');
   // The final board extends everything shown during the actions.
   if (board.length < shownBoard.length || !shownBoard.every((card, at) => board[at] === card)) return fail('board');
   // Who folded, and whether there was a showdown, must match the record too:
@@ -280,6 +279,27 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
 
   const pots = Array.isArray(replay.pots) ? replay.pots : [];
   if (!pots.length || sum(pots.map((pot) => (isAmount(pot?.amount) ? pot.amount : NaN))) !== sum(Object.values(contrib))) return fail('pots');
+  // Each pot, rebuilt from the contributions as engine/sidepots.js buildPots
+  // does (one layer per contribution level, merged while the eligible seats
+  // stay the same), must be the recorded pot: same count, order, amount, seats.
+  const rebuilt = [];
+  let previousLevel = 0;
+  for (const level of [...new Set(players.map((playerId) => contrib[playerId]).filter((value) => value > 0))].sort((a, b) => a - b)) {
+    let amount = 0;
+    const eligible = [];
+    for (const playerId of players) {
+      amount += Math.max(0, Math.min(contrib[playerId], level) - previousLevel);
+      if (contrib[playerId] >= level && !folded.has(playerId)) eligible.push(playerId);
+    }
+    const last = rebuilt.at(-1);
+    if (amount > 0) {
+      if (last && last.eligible.length === eligible.length && last.eligible.every((playerId) => eligible.includes(playerId))) last.amount += amount;
+      else rebuilt.push({ amount, eligible });
+    }
+    previousLevel = level;
+  }
+  if (rebuilt.length !== pots.length || rebuilt.some((pot, at) => pot.amount !== pots[at].amount
+    || (Array.isArray(pots[at].eligible) && (pots[at].eligible.length !== pot.eligible.length || pot.eligible.some((playerId) => !pots[at].eligible.includes(playerId)))))) return fail('pots');
   const awards = [];
   for (const pot of pots) {
     const winners = Array.isArray(pot.winners) ? pot.winners : [];
@@ -287,6 +307,9 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     // Only a hand still in (and eligible for this pot) can win it.
     const eligible = Array.isArray(pot.eligible) ? new Set(pot.eligible) : null;
     if (winners.some((row) => folded.has(row.playerId) || (eligible && !eligible.has(row.playerId)))) return fail('pot-winner');
+    // A split pot gives each winner the floor share, the odd chips one each.
+    const shares = winners.map((row) => row.share);
+    if (Math.max(...shares) - Math.min(...shares) > 1) return fail('pot-share');
     for (const row of winners) {
       stacks[row.playerId] += row.share;
       awards.push({ potIndex: pot.potIndex, playerId: row.playerId, share: row.share });
