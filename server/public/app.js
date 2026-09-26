@@ -1726,6 +1726,8 @@ document.addEventListener('keydown', (ev) => {
   const overlay = $('replay-overlay');
   if (!replayModel || !overlay || overlay.hidden || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
   if (!(overlay.contains(ev.target) || ev.target === document.body) || ev.target.closest?.('select,input,textarea')) return;
+  // Holding a key must not flip playback (or step) once per repeat.
+  if (ev.repeat && [' ', 'Enter'].includes(ev.key) && overlay.contains(ev.target)) { ev.preventDefault(); return; }
   const lastIndex = replayModel.steps.length - 1;
   if (ev.key === 'ArrowLeft') setReplayStep(replayUi.step - 1);
   else if (ev.key === 'ArrowRight') setReplayStep(replayUi.step + 1);

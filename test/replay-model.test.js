@@ -25,8 +25,8 @@ const passive = (legal) => (legal.canCheck ? ['check'] : ['call']);
 const shove = (legal) => (legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']);
 const last = (result) => result.steps.at(-1);
 
-function verified(record, options) {
-  const replay = replayRecord(record, { reveal: 'all' });
+function verified(record, options, reveal = 'all') {
+  const replay = replayRecord(record, { reveal });
   const result = buildReplaySteps(replay, options);
   assert.equal(result.ok, true, `${result.reason} at ${result.at}`);
   // The rebuilt end state is the engine's own end state.
@@ -243,4 +243,65 @@ test('focus stays in the replayer when the current-step study button is replaced
   assert.equal(next.disabled, true);
   assert.ok(doc.activeElement.classList.contains('replayer-play'), 'a disabled control hands focus to Play');
   assert.equal(container.querySelector('.replayer-now-title').getAttribute('aria-live'), 'polite');
+});
+
+// A small seeded generator so the property test is the same run every time.
+function seeded(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test('property: engine hands with random stacks, seats, levels and actions always rebuild and conserve chips', () => {
+  const random = seeded(20260926);
+  const pick = (legal) => {
+    const roll = random();
+    if (legal.canRaise && roll < 0.25) {
+      const low = Math.min(legal.minRaiseTo, legal.maxRaiseTo);
+      return ['raise', low >= legal.maxRaiseTo ? legal.maxRaiseTo : low + Math.floor(random() * (legal.maxRaiseTo - low + 1))];
+    }
+    if (!legal.canCheck && roll < 0.4) return ['fold'];
+    return legal.canCheck ? ['check'] : ['call'];
+  };
+  let hands = 0, returns = 0, sidePots = 0;
+  for (let game = 0; game < 40; game += 1) {
+    const mode = random() < 0.3 ? { mode: 'cash-training', startStack: 2000, handLimit: 100, levelEvery: null } : { startStack: 2000, levelEvery: 2 };
+    let state = createGame({ aiCount: 1 + Math.floor(random() * 8), ...mode });
+    for (const seat of state.seats) seat.stack = 1 + Math.floor(random() * 4000);
+    state.button = Math.floor(random() * state.seats.length);
+    for (let hand = 0; hand < 4; hand += 1) {
+      if (state.gameOver || state.seats.filter((seat) => !seat.out && seat.stack > 0).length < 2) break;
+      state = startHand(state, { rng: random }).state;
+      while (!legalFor(state).handOver) {
+        const legal = legalFor(state);
+        const [action, amount] = pick(legal);
+        state = applyAction(state, legal.toAct, action, amount).state;
+      }
+      const record = state.lastHand;
+      for (const reveal of ['all', 'showdown']) verified(record, undefined, reveal);
+      const legacy = structuredClone(record);
+      delete legacy.positions;
+      const replay = replayRecord(legacy, { reveal: 'all' });
+      assert.equal(buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, state.seats.map((seat) => seat.playerId)) }).ok, true);
+      hands += 1;
+      if (Object.values(record.uncalledReturns).some((amount) => amount > 0)) returns += 1;
+      if (record.pots.length > 1) sidePots += 1;
+    }
+  }
+  assert.ok(hands >= 100 && returns > 0 && sidePots > 0, JSON.stringify({ hands, returns, sidePots }));
+});
+
+test('a hand with no actions (both blinds all-in) runs out straight from the deal', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  for (const seat of game.seats) seat.stack = 20;
+  const record = play(game, () => { throw new Error('no decision is expected'); });
+  assert.equal(record.actions.length, 0);
+  const { result } = verified(record);
+  assert.deepEqual(result.steps.filter((step) => step.kind === 'runout').map((step) => step.board.length), [3, 4, 5]);
+  assert.equal(result.steps[0].kind, 'deal');
 });

@@ -1037,7 +1037,8 @@ main {
 .replayer-felt {
   position: relative;
   width: 100%;
-  height: clamp(210px, 34vh, 280px);
+  /* Six seats stack two per side; below ~236px their boxes would touch. */
+  height: clamp(240px, 34vh, 280px);
   border: 6px solid var(--c-surface-3);
   border-radius: 999px;
   background: var(--c-felt);
@@ -1110,7 +1111,7 @@ main {
 .replayer-transport, .replayer-streets { display: flex; flex-wrap: wrap; gap: 6px; }
 .replayer-controls .btn { min-height: 36px; padding: 0 12px; font-size: 13px; }
 .replayer-street[aria-current="true"] { border-color: var(--c-info); background: var(--c-info-soft); color: var(--c-info-text); }
-.replayer-play[aria-pressed="true"] { border-color: var(--c-action); color: var(--c-action); }
+.replayer-play.is-playing { border-color: var(--c-action); color: var(--c-action); }
 .replayer-speed { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--c-text-2); }
 .replayer-speed select {
   min-height: 36px;
@@ -1176,8 +1177,10 @@ p.replayer-policy-tag { margin: 4px 0; }
 .replayer-list-toggle { justify-self: start; margin-top: 12px; }
 /* Seven or more seats: cards beside a two-line plate, marks on one line. */
 .replayer.is-crowded .replayer-felt { height: clamp(250px, 38vh, 320px); }
-.replayer.is-crowded .replayer-seat { min-width: 0; gap: 1px; }
-.replayer.is-crowded .card--sm, .replayer.is-crowded .card--back.card--sm { --cw: 20px; --ch: 28px; }
+.replayer.is-crowded .replayer-seat { min-width: 0; max-width: 86px; gap: 1px; }
+.replayer.is-crowded .replayer-seat-name { max-width: 72px; }
+.replayer.is-crowded .replayer-seat-marks { flex-wrap: wrap; justify-content: center; }
+.replayer.is-crowded .replayer-seat .card--sm, .replayer.is-crowded .replayer-seat .card--back.card--sm { --cw: 20px; --ch: 28px; }
 .replayer.is-crowded .replayer-plate { min-width: 64px; padding: 2px 6px; font-size: 10.5px; }
 .replayer.is-crowded .replayer-seat-pos { display: none; }
 .replayer.is-crowded .replayer-seat-marks { min-height: 16px; }
@@ -1191,8 +1194,10 @@ p.replayer-policy-tag { margin: 4px 0; }
   #replay-overlay { padding: 0; }
   .replayer-seat { top: var(--seat-my); left: var(--seat-mx); }
   .replayer-controls .btn, .replayer-speed select, .replayer-jump { min-height: 44px; }
-  .replayer.is-crowded .replayer-felt { height: 400px; }
-  .replayer.is-crowded .card--sm, .replayer.is-crowded .card--back.card--sm { --cw: 15px; --ch: 21px; }
+  .replayer.is-crowded .replayer-felt { height: 430px; }
+  /* Phone columns only have vertical neighbours: keep seats one line tall. */
+  .replayer.is-crowded .replayer-seat { max-width: none; }
+  .replayer.is-crowded .replayer-seat-marks { flex-wrap: nowrap; }
   .replayer.is-crowded .replayer-plate { min-width: 52px; font-size: 9.5px; }
   .replayer.is-crowded .replayer-seat-name { max-width: 52px; }
   #replay-overlay .replay-card { width: 100%; height: 100dvh; max-height: 100dvh; padding: 16px 14px 20px; border-radius: 0; }

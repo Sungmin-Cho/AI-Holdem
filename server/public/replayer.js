@@ -107,12 +107,13 @@ export function mountReplayer(container, ctx) {
   // The visible word is the name ("재생" ↔ "일시정지"); no pressed state on top.
   const play = button('replayer-play', '재생', null, 'ctl-play', () => ctx.onPlay());
   const next = button('replayer-next', '다음', '다음 단계', 'ctl-next', () => ctx.onStep(ctx.state().step + 1));
-  const lastStep = button('replayer-last', '끝', '마지막 단계', 'ctl-last', () => ctx.onStep(model.steps.length - 1));
+  // Accessible names contain the visible word (WCAG 2.5.3); "끝" needs no label.
+  const lastStep = button('replayer-last', '끝', null, 'ctl-last', () => ctx.onStep(model.steps.length - 1));
   const transport = el(doc, 'div', 'replayer-transport');
   transport.append(first, prev, play, next, lastStep);
   const streets = el(doc, 'div', 'replayer-streets');
   const streetButtons = starts.map((row) => {
-    const node = button('replayer-street', STREET_LABEL[row.key] ?? row.key, `${STREET_LABEL[row.key] ?? row.key}로 이동`, `street-${row.key}`, () => ctx.onStep(row.index));
+    const node = button('replayer-street', STREET_LABEL[row.key] ?? row.key, null, `street-${row.key}`, () => ctx.onStep(row.index));
     node.dataset.step = String(row.index);
     streets.append(node);
     return node;
@@ -219,6 +220,7 @@ export function mountReplayer(container, ctx) {
     first.disabled = prev.disabled = index <= 0;
     next.disabled = lastStep.disabled = index >= model.steps.length - 1;
     play.textContent = playing ? '일시정지' : '재생';
+    play.classList.toggle('is-playing', playing);
     speed.value = String(rate);
     progress.textContent = `${index + 1} / ${model.steps.length}`;
     const currentKey = step.kind === 'result' || step.kind === 'showdown' ? 'result' : step.street;
@@ -287,8 +289,10 @@ export function mountReplayer(container, ctx) {
         line('replay-coach', `대안: ${row.coach.alternative}`);
       } else if (row?.coach?.message) line('replay-coach is-pending', row.coach.message);
       if (row?.study?.evaluationId) lines.push(studyButton(row.study.evaluationId, `now-study-${row.study.evaluationId}`));
+    } else if (step.kind === 'runout') {
+      line('replayer-line', '모두 올인이라 베팅 없이 보드만 공개합니다.');
     } else {
-      line('replayer-line', '보드 공개 · 이번 스트리트 베팅은 팟으로 모였습니다.');
+      line('replayer-line', '보드 공개 · 이전 스트리트 베팅이 팟으로 모였습니다.');
     }
     return lines;
   }

@@ -48,8 +48,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     fullState=startHand(fullState,{deck:fixedDeck()}).state;
     while(!legalFor(fullState).handOver){const legal=legalFor(fullState);fullState=applyAction(fullState,legal.toAct,legal.canCheck?'check':'call').state;}
     const fullHand=fullState.lastHand;
+    // A six-handed hand: two seats per side on a short desktop viewport.
+    let sixState=createGame({aiCount:5,startStack:5000,levelEvery:10});sixState.handNo=4;
+    sixState=startHand(sixState,{deck:fixedDeck()}).state;
+    while(!legalFor(sixState).handOver){const legal=legalFor(sixState);const raise=legal.canRaise&&legal.street==='flop'&&legal.canCheck;
+      sixState=applyAction(sixState,legal.toAct,raise?'raise':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
+    const sixHand=sixState.lastHand;
     const fixturePlayers=[...defaultPlayers(),...['p2','p3','p4','p5','p6','p7','p8'].map(playerId=>({...defaultPlayers()[1],playerId}))];
-    writeSecurityFixtures(workspace.root,{players:fixturePlayers,hands:[historical,handRecordFixture(2),settledHand,fullHand],config:{replayReveal:'all'},state:{sessionToken:token}});
+    writeSecurityFixtures(workspace.root,{players:fixturePlayers,hands:[historical,handRecordFixture(2),settledHand,fullHand,sixHand],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
     for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
@@ -321,17 +327,31 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.ok(reopened.progress.startsWith('1 /')&&reopened.play==='재생'&&(await evaluate("document.querySelector('.replayer-progress').textContent")).startsWith('1 /'),JSON.stringify(reopened));
     await browser(['press','Escape']);
     checks.push('replay-close-stops');
-    // Nine seats: no two plates overlap on a phone or a desktop.
-    await publish([{type:'hand_start',handNo:4,blinds:fullHand.blinds}],{handReplay:{handNos:[4]}});
-    for(const [w,h] of [[390,844],[1280,800]]) {
+    // Nine seats with long names, and six seats on a short desktop: at every
+    // step (tags and bet pills included) no two seats overlap or leave the stage.
+    // (Later checks publish their own views; the closed decision of the earlier
+    // view is never re-opened, which the receipt store would refuse.)
+    const longNames=(seats)=>seats.map(seat=>({...seat,name:'매우 긴 플레이어 이름 접근성 확인'}));
+    const layoutAtEveryStep="(()=>{const measure=()=>{const r=[...document.querySelectorAll('.replayer-seat')].map(n=>n.getBoundingClientRect());let hits=0;r.forEach((a,i)=>r.slice(i+1).forEach(b=>{if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits++;}));const stage=document.querySelector('.replayer-stage').getBoundingClientRect();return hits+100*r.filter(x=>x.left<stage.left-1||x.right>stage.right+1).length;};const steps=document.querySelectorAll('.replayer-jump').length;let worst=0,at=-1;for(let i=0;i<steps;i++){if(i)document.querySelector('.replayer-next').click();const v=measure();if(v>worst){worst=v;at=i;}}return {seats:document.querySelectorAll('.replayer-seat').length,worst,at,steps,board:Math.round(document.querySelector('.replayer-board .card').getBoundingClientRect().width),fits:document.documentElement.scrollWidth<=innerWidth};})()";
+    view={...userView(fullState),seats:longNames(userView(fullState).seats)};
+    await publish([{type:'hand_start',handNo:4,blinds:fullHand.blinds},{type:'hand_start',handNo:5,blinds:sixHand.blinds}],{handReplay:{handNos:[4,5]}});
+    for(const [w,h,board] of [[390,844,24],[1280,800,32]]) {
       await browser(['set','viewport',String(w),String(h)]);
-      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-2).click()");
       await browser(['wait','#replay-body .replayer.is-crowded']);
-      const crowd=await evaluate("(()=>{const plates=[...document.querySelectorAll('.replayer-seat')].map(n=>n.getBoundingClientRect());const hits=[];plates.forEach((a,i)=>plates.slice(i+1).forEach((b,j)=>{if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits.push([i,i+j+1]);}));const felt=document.querySelector('.replayer-stage').getBoundingClientRect();const out=plates.filter(r=>r.left<felt.left-1||r.right>felt.right+1).length;return {seats:plates.length,hits,out,fits:document.documentElement.scrollWidth<=innerWidth}})()");
-      assert.ok(crowd.seats===9&&crowd.hits.length===0&&crowd.out===0&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
+      const crowd=await evaluate(layoutAtEveryStep);
+      assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===board&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
       await browser(['screenshot',path.join(outDir,`replayer-9-${w}.png`)]);
       await browser(['press','Escape']);
     }
+    view={...userView(sixState),seats:longNames(userView(sixState).seats)};await publish();
+    await browser(['set','viewport','1366','640']);
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    const six=await evaluate(layoutAtEveryStep);
+    assert.ok(six.seats===6&&six.worst===0&&six.fits,`1366x640 ${JSON.stringify(six)}`);
+    await browser(['screenshot',path.join(outDir,'replayer-6-1366x640.png')]);
+    await browser(['press','Escape']);
     checks.push('replay-crowded-layout');
     await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
