@@ -15,6 +15,7 @@ import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
 import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
 import {createShellEmbed} from './shell-embed.js';
+import {renderCard, renderMiniCard} from './card-render.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -147,35 +148,14 @@ function cardLabel(parsed) {
   return `${parsed.rank} ${parsed.suit?.name ?? ''}`.trim();
 }
 
-function cardNode(code, { faceDown = false, small = false, hero = false, slot = false } = {}) {
-  const node = el('div', 'card');
-  if (small) node.classList.add('card--sm');
-  if (hero) node.classList.add('card--hero');
-  if (slot) {
-    node.classList.add('card--slot');
-    return node;
-  }
-  if (faceDown || !code) {
-    node.classList.add('card--back');
-    return node;
-  }
-  const parsed = formatCard(code);
-  if (parsed.red) node.classList.add('is-red');
-  node.setAttribute('role', 'img');
-  node.setAttribute('aria-label', cardLabel(parsed));
-  const rank = el('span', parsed.rank === '10' ? 'card-rank is-ten' : 'card-rank', parsed.rank);
-  node.append(rank);
-  if (parsed.suit) node.append(svgUse(parsed.suit.id, 'card-suit'), svgUse(parsed.suit.id, 'card-pip'));
-  return node;
+// One renderer for every card surface (card-render.js): suit classes drive the
+// four-/two-colour deck preference through design tokens.
+function cardNode(code, options = {}) {
+  return renderCard(code, options);
 }
 
 function miniCard(code) {
-  const parsed = formatCard(code);
-  const node = el('span', parsed.red ? 'mini-card is-red' : 'mini-card');
-  node.setAttribute('aria-label', cardLabel(parsed));
-  node.append(document.createTextNode(parsed.rank));
-  if (parsed.suit) node.append(svgUse(parsed.suit.id, 'mini-suit'));
-  return node;
+  return renderMiniCard(code);
 }
 
 function playerName(playerId) {

@@ -40,7 +40,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','table-design.css','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;

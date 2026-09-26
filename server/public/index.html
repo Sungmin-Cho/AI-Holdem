@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>AI 홀덤</title>
+  <script src="/theme-boot.js"></script>
+  <link rel="preload" href="/font-pretendard-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/font-space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/design-tokens.css">
-  <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/table-design.css">
+  <link rel="stylesheet" href="/ui-base.css">
+  <link rel="stylesheet" href="/table.css">
 </head>
 <body>
   <header class="topbar">
@@ -167,8 +170,8 @@
       <path id="suit-d" d="M12 2.2 19.2 12 12 21.8 4.8 12Z"></path>
       <path id="suit-c" d="M12 2.5C10 2.5 8.4 4.1 8.4 6.1 8.4 6.9 8.7 7.7 9.2 8.3 8.8 8.2 8.5 8.1 8.1 8.1 6.1 8.1 4.5 9.7 4.5 11.7 4.5 13.7 6.1 15.3 8.1 15.3 9.4 15.3 10.5 14.7 11.2 13.7 11 16 10.2 18.9 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.8 18.9 13 16 12.8 13.7 13.5 14.7 14.6 15.3 15.9 15.3 17.9 15.3 19.5 13.7 19.5 11.7 19.5 9.7 17.9 8.1 15.9 8.1 15.5 8.1 15.2 8.2 14.8 8.3 15.3 7.7 15.6 6.9 15.6 6.1 15.6 4.1 14 2.5 12 2.5Z"></path>
       <g id="chip">
-        <circle cx="10" cy="10" r="8.6" fill="#C9A860"></circle>
-        <circle cx="10" cy="10" r="8.6" fill="none" stroke="#F4E6BF" stroke-width="2.2" stroke-dasharray="3.4 4.2"></circle>
+        <circle class="chip-face" cx="10" cy="10" r="8.6"></circle>
+        <circle class="chip-ring" cx="10" cy="10" r="8.6" fill="none" stroke-width="2.2" stroke-dasharray="3.4 4.2"></circle>
         <circle cx="10" cy="10" r="4.8" fill="none" stroke="rgba(0,0,0,0.25)" stroke-width="1"></circle>
       </g>
     </defs>
