@@ -410,7 +410,9 @@ main {
   color: var(--c-plate-text-2);
   white-space: nowrap;
 }
-.plate-tag.is-allin { background: var(--c-action); color: var(--c-action-ink); }
+.plate .plate-tag.is-allin { background: var(--c-action); color: var(--c-action-ink); }
+.plate .plate-tag.is-turn { background: var(--c-info); color: var(--c-on-info); }
+.plate-thinking { font-variant-numeric: tabular-nums; }
 
 /* 7인 이상이면 좌석이 서로 밀착한다. 플레이트를 줄여 자리를 만든다. */
 .table.is-crowded { --ch: calc(var(--tw) * 0.0709); --cw: calc(var(--tw) * 0.0501); }
@@ -746,7 +748,7 @@ main {
   color: var(--c-text-3);
 }
 
-.log-empty, .coach-empty {
+.log-empty, .coach-empty, .training-none {
   padding: 16px 2px;
   font-size: 13px;
   color: var(--muted);
@@ -769,6 +771,11 @@ main {
 }
 .coach-text { font-size: 13px; line-height: 1.6; color: var(--ink-2); }
 .coach-note.is-unavailable .coach-text { color: var(--muted); font-style: italic; }
+.coach-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 5px; }
+.coach-head .coach-hand { margin-bottom: 0; }
+.coach-cards { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.coach-cards-sep { color: var(--c-text-3); }
+.coach-replay { margin-top: 6px; padding: 0; border: 0; background: none; color: var(--c-info-text); font: inherit; font-size: 12px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
 .training-list { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
 .training-card {
@@ -781,6 +788,11 @@ main {
 .training-card.grade-off-policy { border-color: var(--c-danger-border); }
 .training-card.is-forced { opacity: 0.72; }
 .training-card.is-unsupported { border-style: dashed; }
+.training-excluded { border: 1px dashed var(--c-line-strong); border-radius: 11px; }
+.training-excluded-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 10px 13px; border: 0; background: none; color: var(--c-text-2); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.training-excluded-hint { color: var(--c-info-text); font-weight: 600; white-space: nowrap; }
+.training-excluded-list { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
+.training-excluded-list[hidden] { display: none; }
 .training-summary { cursor: pointer; list-style: none; }
 .training-summary::-webkit-details-marker { display: none; }
 .training-title {
@@ -901,6 +913,21 @@ main {
   border-radius: 8px;
   color: var(--ink);
 }
+.intent-note-field { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.intent-note-toggle {
+  min-height: 32px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--c-info-text);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.intent-note-wrap:not(.is-open) .intent-note-field { display: none; }
+.intent-note-wrap.is-open .intent-note-toggle { display: none; }
 .action-bar { flex-wrap: wrap; }
 
 .log-divider-text .replay-open {
@@ -909,6 +936,11 @@ main {
   padding: 0 10px;
   font-size: 11px;
 }
+.log-list > .is-collapsed { display: none; }
+.log-divider.is-past { flex-wrap: wrap; row-gap: 0; }
+.log-divider.is-past .log-divider-text { display: flex; align-items: center; }
+.log-hand-toggle { min-width: 28px; padding: 0 4px; border: 0; background: none; color: var(--c-text-2); font: inherit; font-size: 12px; cursor: pointer; }
+.log-hand-summary { flex-basis: 100%; padding-bottom: 2px; text-align: center; font-size: 12px; color: var(--c-text-2); overflow-wrap: anywhere; }
 
 .replay-card {
   --tw: min(640px, 100%);
@@ -1030,6 +1062,11 @@ main {
 .action-feedback p { font-size: 12px; color: var(--c-text-2); margin: 4px 0; }
 .action-feedback .btn { min-height: 32px; padding: 5px 10px; font-size: 12px; }
 .study-entry { padding: 14px 18px 10px; border-bottom: 1px solid var(--c-line); }
+/* Only the post-game "reopen results" button lives here now. */
+.study-entry:not(:has(> :not([hidden]))) { display: none; }
+.topbar .study-link { margin-left: auto; font-size: 13px; white-space: nowrap; }
+.panel .learning-scope { margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; background: var(--c-surface-2); line-height: 1.55; }
+.panel .learning-scope:empty { display: none; }
 .study-entry p { margin: 8px 0 0; font-size: 12px; line-height: 1.65; color: var(--c-text-2); }
 .study-link { color: var(--c-info-text); font-weight: 600; text-decoration: underline; text-underline-offset: 4px; display: inline-block; padding: 5px 0; }
 .study-entry .btn { font-size: 11px; min-height: 28px; padding: 4px 8px; }
@@ -1149,7 +1186,15 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .panel {min-height:260px;max-height:70dvh;overflow:auto;}
 .log-list {max-height:60dvh;overflow:auto;}
 .study-entry p,.learning-scope {font-size:12px;color:var(--muted);}
-.participant-row {display:grid;gap:8px;padding:16px;border-bottom:1px solid var(--line-strong);overflow-wrap:anywhere;}
+.participants-table {width:100%;border-collapse:collapse;font-size:13px;}
+.participants-table caption {padding:10px 2px 8px;text-align:left;font-size:12px;color:var(--c-text-2);}
+.participants-table th,.participants-table td {padding:9px 6px;border-bottom:1px solid var(--c-line);text-align:left;overflow-wrap:anywhere;}
+.participants-table thead th {font-size:11px;font-weight:600;color:var(--c-text-2);}
+.participants-table tbody th {font-weight:600;color:var(--c-text);}
+.participants-table td {color:var(--c-text-2);}
+.participants-table td:last-child,.participants-table thead th:last-child {text-align:right;}
+.participants-table .amount-pair {justify-content:flex-end;}
+.participant-row.is-hero th {color:var(--c-info-text);}
 .cash-reset-note {font-size:12px;color:var(--muted);line-height:1.6;margin:0;}
 .overlay {padding:16px;}
 .review-card,.replay-card {background:var(--c-surface-1);border-color:var(--c-line-strong);max-width:100%;}
@@ -1234,6 +1279,9 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   html,body {height:100%;min-height:0;}
   body {grid-template-rows:auto minmax(0,1fr);overflow:hidden;}
   .topbar {min-height:38px;padding:6px 16px;gap:12px;}
+  .topbar .study-link {min-height:0;padding:2px 0;}
+  /* Pointer-sized log controls keep the side panel dense on desktop. */
+  .log-divider-text .replay-open,.log-hand-toggle,.coach-replay {min-height:28px;height:28px;}
   main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
   .stage {min-height:0;gap:4px;padding:6px 12px;}
   .stage > :not(.table-wrap) {flex-shrink:0;}
@@ -1280,7 +1328,8 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .action-area > * {flex-shrink:0;}
   .action-bar {display:grid;grid-template-columns:auto minmax(0,1fr) auto;width:100%;margin:0;padding:6px 8px;gap:4px 8px;}
   .action-summary {grid-column:1/3;grid-row:1;font-size:11px;line-height:1.3;align-self:center;}
-  .intent-note-wrap {grid-column:3;grid-row:1;width:150px;justify-self:end;gap:4px;}
+  .intent-note-wrap {grid-column:3;grid-row:1;width:150px;justify-self:end;justify-content:flex-end;gap:4px;}
+  .intent-note-toggle {min-height:24px;font-size:11px;}
   .intent-note {min-height:26px;height:26px;width:100px;font-size:11px;padding:0 6px;}
   .act-group {grid-column:1;grid-row:2;gap:5px;}
   .raise-panel {grid-column:2;grid-row:2;min-width:0;gap:4px;}
@@ -1334,9 +1383,6 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .table .seat.is-hero[data-bet-band][data-side] .bet-marker {left:calc(100% + 8px);right:auto;top:50%;bottom:auto;transform:translateY(-50%);}
 }
 
-@media (min-width:1024px) and (min-height:550px) {
-  .table .seat[data-status="플레이 중"] .plate-tag {display:none;}
-}
 @media (min-width:1024px) and (min-height:550px) and (max-height:650px) {
   /* Opponent cards sit beside their own nameplate, away from neighboring seats. */
   .table .seat:not(.is-hero) .seat-cards {position:absolute;left:100%;top:50%;transform:translateY(-50%);margin-left:12px;}
@@ -1383,6 +1429,9 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .action-bar:not(.options-expanded) {display:grid;grid-template-columns:1fr 1fr 1.5fr;}
   .action-summary {grid-column:1/-1;font-size:11px;line-height:1.25;}
   .action-bar:not(.options-expanded) .raise-panel,.action-bar:not(.options-expanded) .intent-note-wrap {display:none;}
+  /* The expanded sheet is where the memo lives on phones. */
+  .action-bar.options-expanded .intent-note-field {display:flex;}
+  .intent-note-toggle {display:none;}
   .action-bar:not(.options-expanded) .act-group {display:contents;}
   .action-bar:not(.options-expanded) .btn {width:auto;min-width:0;height:44px;min-height:44px;padding:4px;}
   #action-options-toggle {display:flex;grid-column:3;grid-row:3;font-size:11px;}

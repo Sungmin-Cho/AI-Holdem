@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -221,6 +221,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['press','Escape']);
     const historyAmounts=await evaluate("[...document.querySelectorAll('#log-list .log-amount')].slice(-2).map(n=>n.textContent)");
     assert.match(historyAmounts[0],/2.5 BB/);assert.match(historyAmounts[1],/1.25 BB/);checks.push('historical-bb');
+    // Hand 2 started, so hand 1 folds to its divider; the toggle reopens it.
+    const folded=await evaluate("(()=>{const heads=[...document.querySelectorAll('#log-list .log-divider.is-past')];return {heads:heads.length,expanded:heads.map(n=>n.querySelector('.log-hand-toggle')?.getAttribute('aria-expanded')),summary:heads.at(-1)?.querySelector('.log-hand-summary')?.textContent,hidden:document.querySelectorAll('#log-list > .is-collapsed').length,latest:[...document.querySelectorAll('#log-list .log-divider')].at(-1).classList.contains('is-past')}})()");
+    assert.ok(folded.heads>0&&folded.expanded.every(value=>value==='false')&&folded.hidden>0&&folded.latest===false,JSON.stringify(folded));
+    assert.equal(folded.summary,'결과 기록 없음');
+    await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).click()");
+    assert.equal(await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).getAttribute('aria-expanded')"),'true');
+    assert.ok(await evaluate("document.querySelectorAll('#log-list > .is-collapsed').length")<folded.hidden);
+    checks.push('log-hand-fold');
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {
       await browser(['select','#display-unit',unit]);

@@ -80,7 +80,7 @@ if (participantMode) {
   const intent = $('intent-note');
   if (intent) {
     intent.hidden = true;
-    intent.closest('label')?.setAttribute('hidden', '');
+    intent.closest('.intent-note-wrap')?.setAttribute('hidden', '');
   }
   document.body.classList.add('participant-mode');
 }
@@ -238,10 +238,20 @@ function paintParticipants(view) {
   const signature=JSON.stringify([view?.seats,view?.handInProgress,view?.toAct,displayUnit,view?.blinds]);
   if(list._signature===signature)return;
   list._signature=signature;list.replaceChildren();
-  for(const seat of view?.seats??[]) {
-    const row=el('div','participant-row');
-    row.append(el('strong','',seat.name??seat.playerId),el('span','',seatPresentation(view,seat).status),amountNode(seat.stack));
-    list.append(row);
+  if(view?.seats?.length) {
+    const table=el('table','participants-table');
+    const head=el('tr');
+    for(const label of ['이름','상태','스택'])head.append(el('th','',label));
+    table.append(el('caption','',participantSummary(view)),el('thead'),el('tbody'));
+    table.tHead.append(head);
+    for(const seat of view.seats) {
+      const row=el('tr',`participant-row${seat.playerId===viewerId(view)?' is-hero':''}`);
+      const stack=el('td');stack.append(amountNode(seat.stack));
+      row.append(el('th','',seat.playerId===viewerId(view)?'나':(seat.name??seat.playerId)),el('td','',seatPresentation(view,seat).status),stack);
+      row.firstChild.scope='row';
+      table.tBodies[0].append(row);
+    }
+    list.append(table);
   }
   paintSeatDetails();
 }
@@ -455,17 +465,24 @@ function paintSeats(view) {
     );
     plate.append(avatarWrap, info);
 
+    // One status line per plate: out > all-in > fold > turn > last action > nothing.
     const statusGroup=el('span','plate-status');
-    statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
-    plate.append(statusGroup);
-    if (active) plate.append(el('span', 'plate-deadline'));
     const lastAction = lastActions[seat.playerId];
-    if (lastAction) {
-      plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
+    if (lastAction) plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
+    if (state.out || state.allIn || state.folded) {
+      statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    } else if (active) {
+      const thinking = !isHero && seat.kind === 'ai';
+      statusGroup.append(el('span', `plate-tag is-turn${thinking ? ' plate-thinking' : ''}`, thinking ? plateThinkingText() : state.status));
+    } else if (lastAction) {
       const badge = el('span', 'plate-action', lastAction.label);
       if (lastAction.amount != null) badge.append(el('span','plate-action-amount', ` ${formatAmount(lastAction.amount,view.blinds?.[1],displayUnit).primary}`));
       statusGroup.append(badge);
+    } else if (state.status !== '플레이 중') {
+      statusGroup.append(el('span', 'plate-tag', state.status));
     }
+    plate.append(statusGroup);
+    if (active) plate.append(el('span', 'plate-deadline'));
     const position = positions[seat.playerId];
     if (state.showButton || position) {
       const badge = el('span', `dealer-btn${position?.includes('SB') ? ' is-sb' : position === 'BB' ? ' is-bb' : ''}`, position ?? 'D');
@@ -496,6 +513,16 @@ function paintSeats(view) {
   }
   for(const node of previous.values())node.remove();
   paintParticipants(view);
+}
+
+// The acting AI's plate counts up with the stage status line (same turn clock).
+function plateThinkingText() {
+  const seconds = thinkingTurn ? Math.max(0, Math.floor((Date.now() - thinkingTurn.start) / 1000)) : 0;
+  return `생각 중 · ${seconds}초`;
+}
+function paintPlateThinking() {
+  const node = document.querySelector('.seat.is-to-act .plate-thinking');
+  if (node && node.textContent !== plateThinkingText()) node.textContent = plateThinkingText();
 }
 
 function paintThinking(view) {
@@ -602,6 +629,16 @@ function adoptDecision(legal) {
   }
 }
 
+// "내 차례 · 콜 1 BB 또는 레이즈" — what this decision allows, in the display unit.
+function turnPrompt(view) {
+  const legal = view?.legal;
+  if (!legal) return null;
+  const verb = legal.canRaise ? PRIMARY_VERB_LABEL[primaryVerb(view, legal.minRaiseTo)] : null;
+  if (legal.canCheck) return verb ? `내 차례 · 체크 또는 ${verb}` : '내 차례 · 체크할 수 있습니다';
+  const call = `콜 ${amountText(legal.callAmount)}`;
+  return verb ? `내 차례 · ${call} 또는 ${verb}` : `내 차례 · ${call}`;
+}
+
 // "벳 6 BB" / "레이즈 15 BB" / "올인 97 BB" — the amount is the street total.
 function raiseLabel(amount) {
   return PRIMARY_VERB_LABEL[primaryVerb(ui.view, amount)];
@@ -624,6 +661,7 @@ function paintEndedControls() {
   $('action-status').textContent='종료된 게임 기록입니다.';
   for(const id of ['action-bar','action-reconcile','action-retry','action-notice'])$(id).hidden=true;
 }
+const POSTFLOP_PRESETS = new Set(['third', 'threequarter']);
 function paintActionBar(view) {
   const bar = $('action-bar');
   const legal = view?.legal;
@@ -653,9 +691,12 @@ function paintActionBar(view) {
   const amount = $('raise-amount');
   amount.disabled = raiseOff;
   amount.closest('.amount-field').classList.toggle('is-disabled', raiseOff);
+  // Preflop adds the reference sizes; later streets add ⅓ and ¾ pot.
   for (const btn of $('raise-panel').querySelectorAll('[data-preset]')) {
     const multiple = btn.dataset.preset === 'rfi' ? 2.5 : btn.dataset.preset === 'threebet' ? 8.5 : null;
-    const available = multiple === null || (view.street === 'preflop' && bbRaiseTo(legal, view.blinds?.[1], multiple) !== null);
+    const postflopOnly = POSTFLOP_PRESETS.has(btn.dataset.preset);
+    const available = multiple !== null ? view.street === 'preflop' && bbRaiseTo(legal, view.blinds?.[1], multiple) !== null
+      : !postflopOnly || view.street !== 'preflop';
     btn.hidden = !available;
     btn.disabled = raiseOff || !available;
   }
@@ -766,6 +807,61 @@ function logNode(item, verb, bb) {
   }
 }
 
+const expandedLogHands = new Set();
+
+// Past hands fold to their divider and a one-line result; the latest hand stays
+// open, and so does a hand the reader is scrolled into when a new one starts.
+function groupLogHands(list, contexts, readingIndex = null) {
+  const handOf = [];
+  const awards = new Map();
+  let hand = 0;
+  ui.log.forEach((item, i) => {
+    if (item.type === 'hand_start') hand = item.handNo;
+    handOf[i] = hand;
+    if (item.type !== 'pot_award') return;
+    const award = awards.get(hand) ?? { amount: 0, bb: contexts[i], winners: [] };
+    award.amount += Number.isSafeInteger(item.amount) ? item.amount : 0;
+    for (const winner of item.winners ?? []) if (!award.winners.includes(winner.playerId)) award.winners.push(winner.playerId);
+    awards.set(hand, award);
+  });
+  const reading = readingIndex == null ? null : handOf[Number(readingIndex)];
+  if (reading && reading !== hand && !list._pastHands?.has(reading)) expandedLogHands.add(reading);
+  const pastHands = new Set();
+  for (const row of list.children) {
+    const i = Number(row.dataset.logIndex);
+    const rowHand = handOf[i];
+    const past = rowHand > 0 && rowHand !== hand;
+    if (past) pastHands.add(rowHand);
+    const open = !past || expandedLogHands.has(rowHand);
+    if (ui.log[i]?.type === 'hand_start') paintLogHandHead(row, rowHand, past, open, awards.get(rowHand));
+    else row.classList.toggle('is-collapsed', !open);
+  }
+  list._pastHands = pastHands;
+}
+
+function paintLogHandHead(row, handNo, past, open, award) {
+  row.classList.toggle('is-past', past);
+  let toggle = row.querySelector('.log-hand-toggle');
+  let summary = row.querySelector('.log-hand-summary');
+  if (!past) {toggle?.remove();summary?.remove();return;}
+  if (!toggle) {
+    toggle = el('button', 'log-hand-toggle');
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => {
+      if (expandedLogHands.has(handNo)) expandedLogHands.delete(handNo); else expandedLogHands.add(handNo);
+      groupLogHands($('log-list'), logBlindContexts(ui.log, ui.handReplays));
+    });
+    row.querySelector('.log-divider-text')?.prepend(toggle);
+  }
+  toggle.textContent = open ? '▾' : '▸';
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', `핸드 ${handNo} 기록 ${open ? '접기' : '펼치기'}`);
+  if (!summary) {summary = el('div', 'log-hand-summary');row.append(summary);}
+  summary.textContent = award?.winners.length
+    ? `승자 ${award.winners.map(playerName).join(', ')} · 팟 ${formatAmount(award.amount, award.bb, displayUnit).primary}`
+    : '결과 기록 없음';
+}
+
 function paintLog() {
   const list = $('log-list');
   if (!ui.log.length) {
@@ -796,9 +892,12 @@ function paintLog() {
     row.dataset.logIndex=String(i);
     if(appendOnly)list.append(row);else rows.push(row);
   }
-  if(!appendOnly) {
-    list.replaceChildren(...rows);
-    if(focusedRow)list.querySelector(`[data-log-index="${focusedRow.dataset.logIndex}"] button`)?.focus({preventScroll:true});
+  if(!appendOnly) list.replaceChildren(...rows);
+  groupLogHands(list, contexts, stick ? null : anchorIndex);
+  // Rebuilt rows lose focus; return it to the same control (replay or fold toggle).
+  if(!appendOnly && focusedRow) {
+    const control=focused.classList.contains('log-hand-toggle') ? '.log-hand-toggle' : '.replay-open';
+    list.querySelector(`[data-log-index="${focusedRow.dataset.logIndex}"] ${control}`)?.focus({preventScroll:true});
   }
   list._keys=keys;
   if (stick) {list.scrollTop = list.scrollHeight;list._unread=0;$('log-new').hidden=true;}
@@ -811,9 +910,18 @@ function paintLog() {
   }
 }
 
+// A coach card names its hand with the viewer's cards and board when the
+// replay is ready, and links straight to that replay.
+function coachReplay(handNo) {
+  const replay = ui.handReplays?.[handNo];
+  if (!replay || replay.unavailable === true || ['REPLAY_NOT_COMPLETED', 'REPLAY_UNAVAILABLE'].includes(replay.reason)) return null;
+  return { cards: replay.holes?.[viewerId(ui.view)] ?? [], board: replay.board ?? [] };
+}
+
 function paintCoach() {
   const list = $('coach-list');
-  const signature=JSON.stringify(ui.coach);
+  const replays = ui.coach.map((note) => coachReplay(note.handNo));
+  const signature=JSON.stringify([ui.coach, replays]);
   if(list._signature===signature)return;
   list._signature=signature;
   if (!ui.coach.length) {
@@ -821,13 +929,28 @@ function paintCoach() {
     return;
   }
   list.replaceChildren();
-  for (const note of ui.coach) {
+  for (const [index, note] of ui.coach.entries()) {
     const box = el('div', 'coach-note');
     if (note.unavailable) box.classList.add('is-unavailable');
-    box.append(
-      el('div', 'coach-hand', `핸드 ${note.handNo}`),
-      el('div', 'coach-text', note.text ?? ''),
-    );
+    const head = el('div', 'coach-head');
+    head.append(el('div', 'coach-hand', `핸드 ${note.handNo}`));
+    const replay = replays[index];
+    if (replay && (replay.cards.length || replay.board.length)) {
+      const cards = el('span', 'coach-cards');
+      cards.setAttribute('role', 'group');
+      cards.setAttribute('aria-label', [replay.cards.length ? `내 카드 ${replay.cards.map(code => cardLabel(formatCard(code))).join(', ')}` : '', replay.board.length ? `보드 ${replay.board.map(code => cardLabel(formatCard(code))).join(', ')}` : ''].filter(Boolean).join(' · '));
+      for (const code of replay.cards) cards.append(miniCard(code));
+      if (replay.cards.length && replay.board.length) cards.append(el('span', 'coach-cards-sep', '·'));
+      for (const code of replay.board) cards.append(miniCard(code));
+      head.append(cards);
+    }
+    box.append(head, el('div', 'coach-text', note.text ?? ''));
+    if (replay) {
+      const open = el('button', 'coach-replay', '복기에서 보기');
+      open.type = 'button';
+      open.addEventListener('click', () => openReplay(note.handNo));
+      box.append(open);
+    }
     list.append(box);
   }
 }
@@ -861,6 +984,14 @@ function paintTraining() {
     return;
   }
   for (const empty of list.querySelectorAll('.coach-empty')) empty.remove();
+  const group = trainingExcludedGroup(list);
+  const excludedList = group.querySelector('.training-excluded-list');
+  const excluded = ui.training.filter(trainingExcluded);
+  if (excluded.length < ui.training.length) list.querySelector('.training-none')?.remove();
+  else if (!list.querySelector('.training-none')) list.prepend(el('div', 'training-none', '기준표로 평가한 결정이 아직 없습니다. 아래 집계 제외 결정은 기록으로만 남습니다.'));
+  group.hidden = !excluded.length;
+  const postflop = excluded.filter((item) => ['flop', 'turn', 'river'].includes(item.street) || String(item.spotKey ?? '').startsWith('postflop-')).length;
+  group.querySelector('.training-excluded-count').textContent = `기준표 밖·집계 제외 결정 ${excluded.length}개${postflop ? ` (포스트플랍 ${postflop})` : ''}`;
   const existing = new Map([...list.querySelectorAll('[data-evaluation-id]')].map((node) => [node.dataset.evaluationId, node]));
   for (const item of ui.training) {
     const key = detailKey(item);
@@ -873,8 +1004,9 @@ function paintTraining() {
         if (box.open) void loadTrainingDetail(ui.training.find((row) => row.evaluationId === box.dataset.evaluationId));
       });
       box.append(el('summary', 'training-summary'), el('div', 'training-body'));
-      list.append(box);
     }
+    const home = trainingExcluded(item) ? excludedList : list;
+    if (box.parentNode !== home) {if (home === list) list.insertBefore(box, group); else excludedList.append(box);}
     existing.delete(item.evaluationId);
     const signature = JSON.stringify([card, authenticatedStudyUrl, detailErrors.has(key)]);
     if (box._signature === signature) continue;
@@ -911,8 +1043,41 @@ function paintTraining() {
     if (box.open && !detailCache.has(key) && !detailErrors.has(key)) void loadTrainingDetail(item);
   }
   for (const node of existing.values()) node.remove();
+  if (list.lastElementChild !== group) list.append(group);
   list.scrollTop = scroll.list;
   panel.scrollTop = scroll.panel;
+}
+
+// Decisions outside the reference table (or forfeited by the watchdog) are
+// records, not assessments: one folded summary row instead of a card each.
+function trainingExcluded(item) {
+  return item?.status === 'unsupported' || Boolean(item?.forced);
+}
+
+function trainingExcludedGroup(list) {
+  let group = list.querySelector('.training-excluded');
+  if (group) return group;
+  group = el('div', 'training-excluded');
+  const toggle = el('button', 'training-excluded-toggle');
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', 'training-excluded-list');
+  toggle.append(el('span', 'training-excluded-count'), el('span', 'training-excluded-hint', '펼치기'));
+  toggle.addEventListener('click', () => setTrainingExcludedOpen(toggle.getAttribute('aria-expanded') !== 'true'));
+  const items = el('div', 'training-excluded-list');
+  items.id = 'training-excluded-list';
+  items.hidden = true;
+  group.append(toggle, items);
+  list.append(group);
+  return group;
+}
+
+function setTrainingExcludedOpen(open) {
+  const group = $('training-list')?.querySelector('.training-excluded');
+  if (!group) return;
+  group.querySelector('.training-excluded-toggle').setAttribute('aria-expanded', String(open));
+  group.querySelector('.training-excluded-hint').textContent = open ? '접기' : '펼치기';
+  group.querySelector('.training-excluded-list').hidden = !open;
 }
 
 let openReplayHandNo = null;
@@ -1006,6 +1171,7 @@ function paintReplay() {
           closeReplay();
           selectTab('training');
           const card = document.querySelector(`[data-evaluation-id="${row.study.evaluationId}"]`);
+          if (card?.closest('.training-excluded')) setTrainingExcludedOpen(true);
           if (card instanceof HTMLDetailsElement) card.open = true;
           card?.scrollIntoView({ block: 'nearest' });
           card?.querySelector('summary')?.focus({preventScroll:true});
@@ -1117,6 +1283,7 @@ function paint() {
   paintHandResult();
   paintTurnDeadline();
   paintThinking(view);
+  paintPlateThinking();
   paintActionBar(view);
   paintHint();
   paintLog();
@@ -1166,7 +1333,7 @@ function paintTurnDeadline() {
     if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
   }
 }
-setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);}, 1000);
+setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlateThinking==='function')paintPlateThinking();}, 1000);
 
 function renderSnapshot(snap) {
   ui.resultHold=snap.resultHold ?? null;
@@ -1222,12 +1389,12 @@ function render(m) {
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (Array.isArray(m.training) && m.training.length) {
-    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
+    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !trainingExcluded(item) && !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
     ui.training = mergeTrainingItems(ui.training, m.training);
     for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   }
   if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {
-    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
+    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !trainingExcluded(ui.training.find((item) => item.evaluationId === ann.evaluationId)) && !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
     for (const ann of m.trainingAnnotations) {
       const at = ui.trainingAnnotations.findIndex((existing) => (
         existing.evaluationId === ann.evaluationId && existing.field === ann.field
@@ -1280,7 +1447,9 @@ $('raise-panel').addEventListener('click', (ev) => {
   if (!preset || !legal || pendingAction || legal.minRaiseTo > legal.maxRaiseTo) return;
   const myBet = myBetOf(ui.view);
   if (preset === 'min') setRaiseTo(legal.minRaiseTo);
+  else if (preset === 'third') setRaiseTo(potRaiseTo(legal, myBet, 1 / 3));
   else if (preset === 'half') setRaiseTo(potRaiseTo(legal, myBet, 0.5));
+  else if (preset === 'threequarter') setRaiseTo(potRaiseTo(legal, myBet, 0.75));
   else if (preset === 'pot') setRaiseTo(potRaiseTo(legal, myBet, 1));
   else if (preset === 'allin') setRaiseTo(legal.maxRaiseTo);
   else if (preset === 'rfi' || preset === 'threebet') {
@@ -1384,6 +1553,13 @@ $('review-reopen').addEventListener('click', () => {
   paintReview(ui.view);
   $('review-close').focus();
 });
+// The memo stays folded until asked for, then stays open for later decisions.
+$('intent-note-toggle').addEventListener('click', () => {
+  $('intent-note').closest('.intent-note-wrap').classList.add('is-open');
+  $('intent-note-toggle').setAttribute('aria-expanded', 'true');
+  $('intent-note').focus();
+});
+
 $('action-options-toggle').addEventListener('click', () => {
   const expanded=$('action-bar').classList.toggle('options-expanded');
   $('action-options-toggle').setAttribute('aria-expanded',String(expanded));
@@ -1449,7 +1625,7 @@ async function initializeController() {
     onState: (state) => {
       if(ui.sessionEnded){paintEndedControls();return;}
       pendingAction = state.disabled;
-      $('action-status').textContent = state.message;
+      $('action-status').textContent = state.phase === 'idle' && state.decisionId ? turnPrompt(ui.view) ?? state.message : state.message;
       const notice=$('action-notice');if(notice){notice.textContent=formatActionNotice(state.notice);notice.hidden=!notice.textContent;}
       $('action-retry').hidden = !state.canRetry;
       $('action-retry').disabled = !state.canRetry;

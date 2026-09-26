@@ -26,6 +26,7 @@
       <div class="meta-seg" data-tournament-meta><span class="meta-label">다음 레벨까지</span><span class="meta-value"><span class="num" id="level-left">—</span>핸드</span></div>
       <div class="meta-seg"><span class="meta-label">누적 손익</span><span class="meta-value num" id="session-net">—</span></div>
     </div>
+    <a id="study-open" class="study-link" target="_blank" rel="noopener noreferrer" hidden>학습실 ↗</a>
     <div id="conn" class="conn off" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span id="conn-text">연결 중…</span></div>
   </header>
 
@@ -58,7 +59,7 @@
         <p id="thinking" class="thinking" hidden></p>
       <span id="thinking-announcement" class="sr-only" aria-live="polite"></span>
         <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
-        <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 확인</button></div>
+        <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 보내기</button></div>
 
         <p id="action-notice" role="status" hidden></p>
         <aside id="pre-action-hint" class="pre-action-hint" aria-live="polite" hidden></aside>
@@ -75,7 +76,9 @@
             <div class="raise-top">
               <div class="presets">
                 <button type="button" class="preset" data-preset="min">최소</button>
+                <button type="button" class="preset" data-preset="third" hidden>⅓ 팟</button>
                 <button type="button" class="preset" data-preset="half">½ 팟</button>
+                <button type="button" class="preset" data-preset="threequarter" hidden>¾ 팟</button>
                 <button type="button" class="preset" data-preset="pot">팟</button>
                 <button type="button" class="preset" data-preset="allin">올인</button>
                 <button type="button" class="preset" data-preset="rfi" hidden>2.5BB</button>
@@ -94,16 +97,19 @@
           <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
           <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
           <p id="turn-deadline" hidden></p>
-          <label class="intent-note-wrap" for="intent-note">의도
-            <input id="intent-note" class="intent-note" type="text" maxlength="160"
-                   autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
-          </label>
+          <div class="intent-note-wrap">
+            <button type="button" id="intent-note-toggle" class="intent-note-toggle" aria-expanded="false" aria-controls="intent-note">메모 추가</button>
+            <label class="intent-note-field" for="intent-note">의도
+              <input id="intent-note" class="intent-note" type="text" maxlength="160"
+                     autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
+            </label>
+          </div>
         </div>
       </div>
     </section>
 
     <aside class="side">
-      <div class="study-entry"><a id="study-open" class="study-link" target="_blank" rel="noopener noreferrer" hidden>학습실 열기 ↗</a><button id="review-reopen" class="btn btn-ghost" type="button" hidden>최종 결과 다시 열기</button><p id="learning-scope"></p></div>
+      <div class="study-entry"><button id="review-reopen" class="btn btn-ghost" type="button" hidden>최종 결과 다시 열기</button></div>
       <div class="tabs" role="tablist">
         <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
         <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치 <span id="unread-coach" class="unread" hidden></span></button>
@@ -118,6 +124,7 @@
         <div id="coach-list" class="coach-list"></div>
       </div>
       <div id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
+        <p id="learning-scope" class="learning-scope"></p>
         <div id="training-list" class="training-list"></div>
       </div>
       <div id="panel-participants" class="panel" role="tabpanel" aria-labelledby="tab-participants" hidden><div id="participants-list"></div></div>

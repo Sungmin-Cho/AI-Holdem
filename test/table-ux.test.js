@@ -24,6 +24,12 @@ test('half pot includes call and prior street contribution', () => {
   assert.equal(potRaiseTo(legal, 0, 0.5), 150);
   assert.equal(potRaiseTo(legal, 25, 1), 275);
 });
+test('postflop third and three-quarter presets share the pot rule', () => {
+  const flop = { ...legal, potTotal: 300, callAmount: 0 };
+  assert.equal(potRaiseTo(flop, 0, 1 / 3), 100);
+  assert.equal(potRaiseTo(flop, 0, 0.75), 225);
+  assert.equal(potRaiseTo(legal, 0, 1 / 3), 117, 'facing a bet the call joins the base, rounded to chips');
+});
 test('short all-in returns only reachable maximum', () => {
   const short = { ...legal, minRaiseTo: 400, maxRaiseTo: 175 };
   assert.equal(clampRaiseTo(400, short), 175);

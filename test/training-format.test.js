@@ -338,6 +338,15 @@ function renderTrainingCards(items, receipts = new Map()) {
       this.classList = { toggle() {} };
     }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+    prepend(...children) { for (const child of children) child.parent = this; this.children.unshift(...children); }
+    insertBefore(child, ref) {
+      if (child.parent) child.remove();
+      child.parent = this; this.children.splice(Math.max(0, this.children.indexOf(ref)), 0, child);
+    }
+    get parentNode() { return this.parent ?? null; }
+    get lastElementChild() { return this.children.at(-1) ?? null; }
+    setAttribute(name, value) { this.attributes = { ...this.attributes, [name]: String(value) }; }
+    getAttribute(name) { return this.attributes?.[name] ?? null; }
     replaceChildren(...children) { this.children = []; this.append(...children); }
     addEventListener() {}
     contains() { return false; }
@@ -374,6 +383,23 @@ test('training DOM renders synthetic source caveat and only a generic study link
   assert.doesNotMatch(source, /휴리스틱/);
   const link = dom.querySelector('a');
   assert.equal(new URL(link.href).search, ''); assert.match(link.text, /지원 상황/);
+});
+
+test('training DOM folds out-of-table and forfeited decisions into one summary after the assessed cards', () => {
+  const supported = { evaluationId: 'assessed', source: { id: 'fake-solver', version: '9.9.9' }, status: 'supported', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo' };
+  const river = { evaluationId: 'river', status: 'unsupported', street: 'river', spotKey: 'postflop-river-heads-up' };
+  const forced = { evaluationId: 'forced', status: 'supported', forced: true, spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'KQs' };
+  const dom = renderTrainingCards([river, supported, forced]);
+  assert.equal(dom.children[0].dataset.evaluationId, 'assessed', 'assessed cards come first');
+  const group = dom.children.at(-1);
+  assert.equal(group.className, 'training-excluded');
+  assert.equal(group.hidden, false);
+  assert.equal(group.querySelector('.training-excluded-count').textContent, '기준표 밖·집계 제외 결정 2개 (포스트플랍 1)');
+  assert.deepEqual(group.querySelector('.training-excluded-list').querySelectorAll('[data-evaluation-id]').map((node) => node.dataset.evaluationId), ['river', 'forced']);
+  assert.equal(group.querySelector('.training-excluded-list').hidden, true, 'the excluded list starts folded');
+  assert.equal(dom.querySelector('.training-none'), null);
+  const onlyExcluded = renderTrainingCards([river]);
+  assert.match(onlyExcluded.children[0].text, /평가한 결정이 아직 없습니다/);
 });
 
 test('training DOM routes a verified supported practice target without altering compact summaries', async () => {
