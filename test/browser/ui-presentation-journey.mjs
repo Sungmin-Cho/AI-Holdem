@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
@@ -48,7 +48,7 @@ const STATE_SCRIPT=`(()=>{
   const plateOverlaps=[];plates.forEach((a,i)=>plates.slice(i+1).forEach(b=>{if(hit(R(a),R(b)))plateOverlaps.push([owner(a),owner(b)]);}));
   const tableHits=[];plates.forEach(p=>center.forEach(c=>{if(hit(R(p),R(c)))tableHits.push([owner(p),c.id||c.className]);}));
   const markerHits=[];markers.forEach(m=>{const who=m.dataset.playerId;[...center,...plates.filter(p=>owner(p)!==who)].forEach(t=>{if(hit(R(m),R(t)))markerHits.push([who,t.id||t.className||owner(t)]);});});
-  const small=[...document.querySelectorAll('.plate-name,.plate-stack .amount-primary')].filter(vis).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).length;
+  const small=[...document.querySelectorAll('.table *, #action-bar *')].filter(n=>!n.closest('.card')&&vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
   const strip=document.querySelector('#hand-result'),table=R(document.querySelector('.table'));let result=null;
   if(vis(strip)){const r=R(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=table.bottom-1),hits:[...center,...plates].filter(n=>hit(r,R(n))).map(n=>n.id||n.className)};}
   return {scroll:document.documentElement.scrollWidth,plateOverlaps,tableHits,markerHits,small,result};
@@ -174,7 +174,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
         measurements.push({combo,count,height,...metrics});
         await browser(['screenshot',path.join(outDir,`table-${combo}.png`)]);
         const crossings=await evaluate(STATE_SCRIPT);
-        assert.ok(crossings.tableHits.length===0&&crossings.markerHits.length===0,`seat/board/pot/marker overlap ${combo}: ${JSON.stringify(crossings)}`);
+        assert.ok(crossings.tableHits.length===0&&crossings.markerHits.length===0&&crossings.small.length===0,`seat/board/pot/marker overlap or text under 12px ${combo}: ${JSON.stringify(crossings)}`);
         assert.ok(metrics.scroll<=width,`horizontal overflow ${count}/${width}: ${metrics.scroll}`);
         assert.equal(metrics.plates.length,count);assert.deepEqual(metrics.overlaps,[],`seat overlap ${count}/${width}`);
         assert.ok(metrics.plates.every(p=>p.size>=12),`stack font ${count}/${width}`);
@@ -719,7 +719,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
         await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
         const m=await evaluate(STATE_SCRIPT);
         await browser(['screenshot',path.join(outDir,`state-${name}-${width}x${height}.png`)]);
-        assert.ok(m.scroll<=width&&m.plateOverlaps.length===0&&m.tableHits.length===0&&m.markerHits.length===0&&m.small===0
+        assert.ok(m.scroll<=width&&m.plateOverlaps.length===0&&m.tableHits.length===0&&m.markerHits.length===0&&m.small.length===0
           &&(!m.result||(m.result.inside&&m.result.hits.length===0)),JSON.stringify({name,width,height,m}));
         stateRuns.push(`${name}-${width}x${height}`);
       }
@@ -731,19 +731,35 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // The runout's 25-second result hold above must end before a new hand can act.
     await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(hold.until)-Date.now()+500)));
     await publish(crowdedDeal.events);await browser(['reload']);await ready();
+    // The first-turn guide on a desktop: an Esc that closes the seat detail is not a
+    // skip, and a timed turn moves keyboard focus from the guide to a visible action.
+    await browser(['set','viewport','1280','800']);
+    await evaluate("localStorage.removeItem('holdem.onboarding.v1');true");await browser(['reload']);await ready();
+    await browser(['wait','aside.side .onboarding-card']);
+    await click('[data-player-id=p1] .plate');
+    assert.equal(await evaluate("document.querySelector('#seat-overlay').hidden"),false);
+    await browser(['press','Escape']);
+    assert.deepEqual(await evaluate("({detail:document.querySelector('#seat-overlay').hidden,guide:!!document.querySelector('.onboarding-card'),stored:localStorage.getItem('holdem.onboarding.v1')})"),{detail:true,guide:true,stored:null},'closing the detail leaves the guide');
+    await evaluate("document.querySelector('.onboarding-next').focus();true");
+    await publish([],{turnDeadline:{decisionId:view.legal.decisionId,at:new Date(Date.now()+120000).toISOString()}});
+    await browser(['wait','--fn',"!document.querySelector('.onboarding-card')"]);
+    const timedFocus=await evaluate("(()=>{const a=document.activeElement;return {inBar:!!a?.closest('#action-bar'),visible:!!a&&a.getClientRects().length>0,enabled:!!a&&!a.disabled}})()");
+    assert.deepEqual(timedFocus,{inBar:true,visible:true,enabled:true},'focus moved to a visible action');
+    checks.push('onboarding-timed-turn');
     await measureState('turn');
     let step=applyAction(crowded,'user','call');crowded=step.state;view=userView(crowded);await publish(step.events);
-    assert.notEqual(legalFor(crowded).toAct,'user');
-    await browser(['wait','--fn',"!!document.querySelector('.plate-thinking')||!!document.querySelector('.seat.is-to-act')"]);
+    const aiActor=legalFor(crowded).toAct;
+    assert.ok(aiActor&&aiActor!=='user'&&view.seats.find(seat=>seat.playerId===aiActor)?.kind==='ai','an AI seat acts next');
+    await browser(['wait','--fn',`(()=>{const tag=document.querySelector('.seat[data-player-id="${aiActor}"] .plate-thinking');return !!tag&&tag.getClientRects().length>0&&document.querySelector('#action-bar').hidden})()`]);
     await measureState('ai-thinking');
     const thinkingView=view;
     view={...thinkingView,seats:thinkingView.seats.map((seat,index)=>index===2?{...seat,folded:true}:index===3?{...seat,allIn:true,bet:seat.bet+seat.stack,stack:0}:index===4?{...seat,out:true,stack:0}:seat)};
     await publish();
-    await browser(['wait','--fn',"!!document.querySelector('.seat.is-out')&&!!document.querySelector('.plate-tag.is-allin')"]);
+    await browser(['wait','--fn',"!!document.querySelector('.seat.is-out')&&!!document.querySelector('.plate-tag.is-allin')&&!!document.querySelector('.seat.is-folded')"]);
     await measureState('fold-allin-out');
     view=thinkingView;await publish();
     while(!legalFor(crowded).handOver){const legal=legalFor(crowded);step=applyAction(crowded,legal.toAct,legal.canCheck?'check':'call');crowded=step.state;view=userView(crowded);await publish(step.events);}
-    await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false"]);
+    await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false&&document.querySelectorAll('.seat:not(.is-hero) .seat-cards .card[role=img]').length>=4"]);
     await measureState('showdown-result');
     assert.deepEqual(stateRuns,stateMatrix(),'the state matrix ran exactly the expected states');
     checks.push('state-matrix');

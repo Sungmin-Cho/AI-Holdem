@@ -42,11 +42,16 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   // Where keyboard focus goes back to when the guide ends from inside its card.
   let returnFocus = null;
   // A timed turn is starting: focus that was in the card moves to the action bar.
+  const focusable = (node) => Boolean(node) && !node.disabled && !node.hidden && node.isConnected !== false
+    && (typeof node.getClientRects !== 'function' || node.getClientRects().length > 0);
   const focusActions = () => {
     const bar = targets.actions?.();
-    const button = bar ? [...bar.querySelectorAll('button')].find((node) => !node.disabled && !node.hidden) : null;
-    const fallback = returnFocus && returnFocus.isConnected !== false && !returnFocus.disabled ? returnFocus : null;
-    (button ?? fallback)?.focus?.();
+    const candidates = bar ? [...bar.querySelectorAll('button')].filter(focusable) : [];
+    if (focusable(returnFocus)) candidates.push(returnFocus);
+    for (const node of candidates) {
+      node.focus?.();
+      if (doc.activeElement === node) return;
+    }
   };
   const end = () => {
     const hadFocus = Boolean(card?.contains(doc.activeElement));

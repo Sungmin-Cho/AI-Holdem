@@ -441,7 +441,7 @@ main {
   border: 1px solid rgba(0, 0, 0, 0.3);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
   font-family: var(--f-num);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--c-badge-d-ink);
 }
@@ -1258,11 +1258,11 @@ p.replayer-policy-tag { margin: 4px 0; }
   .raise-range { display: none; }
 
   .plate { min-width: 0; gap: 6px; padding: 4px 9px 4px 5px; }
-  .avatar, .seat.is-hero .avatar { width: 26px; height: 26px; font-size: 11px; }
-  .plate-name, .seat.is-hero .plate-name { font-size: 11px; }
-  .plate-stack, .seat.is-hero .plate-stack { font-size: 10.5px; }
-  .plate-tag { font-size: 9px; padding: 1px 5px; }
-  .dealer-btn { width: 17px; height: 17px; font-size: 9px; right: -6px; top: -6px; }
+  .avatar, .seat.is-hero .avatar { width: 26px; height: 26px; font-size: 12px; }
+  .plate-name, .seat.is-hero .plate-name { font-size: 12px; }
+  .plate-stack, .seat.is-hero .plate-stack { font-size: 12px; }
+  .plate-tag { font-size: 12px; padding: 1px 5px; }
+  .dealer-btn { width: 19px; height: 19px; font-size: 12px; right: -6px; top: -6px; }
 }
 
 /* Reading and recovery controls keep the existing felt / gold visual language. */
@@ -1327,7 +1327,7 @@ main:has(.pre-action-hint:not([hidden])) { min-height: min-content; }
 .final-chart-line {fill:none;stroke:var(--c-info);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
 .final-chart-dot {fill:var(--c-info);stroke:var(--c-surface-1);stroke-width:2;cursor:pointer;}
 .final-chart-dot:focus-visible {outline:none;stroke:var(--c-focus);stroke-width:3;}
-.final-chart-label {fill:var(--c-text);font-family:var(--f-num);font-size:11px;font-weight:700;}
+.final-chart-label {fill:var(--c-text);font-family:var(--f-num);font-size:12px;font-weight:700;}
 .final-chart-axis {display:flex;justify-content:space-between;font-size:12px;color:var(--c-text-2);}
 .final-chart-tip {position:absolute;z-index:2;margin:0;padding:4px 8px;border:1px solid var(--c-line-strong);border-radius:8px;background:var(--c-surface-2);color:var(--c-text);font-size:12px;white-space:nowrap;pointer-events:none;transform:translate(-50%,calc(-100% - 10px));}
 .final-chart-tip[hidden] {display:none;}
@@ -1422,7 +1422,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .participants-table {width:100%;border-collapse:collapse;font-size:13px;}
 .participants-table caption {padding:10px 2px 8px;text-align:left;font-size:12px;color:var(--c-text-2);}
 .participants-table th,.participants-table td {padding:9px 6px;border-bottom:1px solid var(--c-line);text-align:left;overflow-wrap:anywhere;}
-.participants-table thead th {font-size:11px;font-weight:600;color:var(--c-text-2);}
+.participants-table thead th {font-size:12px;font-weight:600;color:var(--c-text-2);}
 .participants-table tbody th {font-weight:600;color:var(--c-text);}
 .participants-table td {color:var(--c-text-2);}
 .participants-table td:last-child,.participants-table thead th:last-child {text-align:right;}
@@ -1537,7 +1537,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .table .plate-info {display:flex;flex-direction:column;flex:initial;gap:1px;}
   .table .plate-name {font-size:12px;max-width:90px;}
   .table .plate-stack {font-size:14px;line-height:1.25;}
-  .table .plate-tag {position:static;width:auto;max-width:none;margin-left:auto;font-size:10px;line-height:1.2;white-space:nowrap;padding:2px 5px;}
+  .table .plate-tag {position:static;width:auto;max-width:none;margin-left:auto;font-size:12px;line-height:1.2;white-space:nowrap;padding:2px 5px;}
   .table .dealer-btn {top:-4px;}
   .table .plate .amount-pair {gap:0;white-space:nowrap;}
   .table .plate .amount-primary {white-space:nowrap;overflow-wrap:normal;}
@@ -1553,7 +1553,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .table .seat.is-hero .card--hero:first-child {transform:rotate(-3deg);}
   .table .seat.is-hero .card--hero:last-child {margin-left:6px;transform:rotate(3deg);}
   .pots {padding:6px 10px;gap:4px;}
-  .pot-label {font-size:11px;}
+  .pot-label {font-size:12px;}
   .pot-amount {font-size:18px;}
   .pots .amount-secondary {display:none;}
   .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
@@ -1561,13 +1561,13 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) {display:none;}
   /* Reserve the compact controls and status line across turns; errors and
      coaching hints can still expand naturally. */
-  .action-area {display:flex;flex-direction:column;gap:4px;min-height:136px;}
+  .action-area {display:flex;flex-direction:column;gap:4px;min-height:138px;}
   .action-area > * {flex-shrink:0;}
   .action-bar {display:grid;grid-template-columns:auto minmax(0,1fr) auto;width:100%;margin:0;padding:6px 8px;gap:4px 8px;}
-  .action-summary {grid-column:1/3;grid-row:1;font-size:11px;line-height:1.3;align-self:center;}
+  .action-summary {grid-column:1/3;grid-row:1;font-size:12px;line-height:1.3;align-self:center;}
   .intent-note-wrap {grid-column:3;grid-row:1;width:150px;justify-self:end;justify-content:flex-end;gap:4px;}
-  .intent-note-toggle {min-height:24px;font-size:11px;}
-  .intent-note {min-height:26px;height:26px;width:100px;font-size:11px;padding:0 6px;}
+  .intent-note-toggle {min-height:24px;font-size:12px;}
+  .intent-note {min-height:26px;height:26px;width:100px;font-size:12px;padding:0 6px;}
   .act-group {grid-column:1;grid-row:2;gap:5px;}
   .raise-panel {grid-column:2;grid-row:2;min-width:0;gap:4px;}
   #btn-raise,#btn-allin-only {grid-column:3;grid-row:2;}
@@ -1575,12 +1575,12 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .btn {padding:8px 12px;}
   .raise-top {gap:4px;flex-wrap:nowrap;}
   .presets {gap:3px;flex-wrap:wrap;}
-  .preset {padding:4px 6px;min-width:30px;min-height:30px;font-size:11px;}
+  .preset {padding:4px 6px;min-width:30px;min-height:30px;font-size:12px;}
   .amount-field {flex:none;}
   .amount-input {width:64px;min-height:30px;font-size:16px;}
-  .amount-label {font-size:10px;}
+  .amount-label {font-size:12px;}
   .slider {min-height:16px;height:16px;margin:0;}
-  .raise-range {font-size:10px;margin:0;}
+  .raise-range {font-size:12px;margin:0;}
   .side {min-height:0;overflow:hidden;display:flex;flex-direction:column;}
   .side > :not(.panel) {flex-shrink:0;}
   .tabs {margin:8px 6px;}
@@ -1671,7 +1671,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
 .hand-result-pot {font-size:.85em;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
-.plate-action {display:block;font-size:.65rem;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
+.plate-action {display:block;font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
 .result-dock:has(> .hand-result[hidden]) {display:none;}
 /* The narrowest phones: five board cards (152px at 28px) are wider than the gap
    between the side plates (140px at 360px), so the board cards shrink a little. */
@@ -1693,14 +1693,14 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 @media(max-width:600px) {
   .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));gap:6px;}
   .action-bar:not(.options-expanded) {display:grid;grid-template-columns:1fr 1fr 1.5fr;}
-  .action-summary {grid-column:1/-1;font-size:11px;line-height:1.25;}
+  .action-summary {grid-column:1/-1;font-size:12px;line-height:1.25;}
   .action-bar:not(.options-expanded) .raise-panel,.action-bar:not(.options-expanded) .intent-note-wrap {display:none;}
   /* The expanded sheet is where the memo lives on phones. */
   .action-bar.options-expanded .intent-note-field {display:flex;}
   .intent-note-toggle {display:none;}
   .action-bar:not(.options-expanded) .act-group {display:contents;}
   .action-bar:not(.options-expanded) .btn {width:auto;min-width:0;height:44px;min-height:44px;padding:4px;}
-  #action-options-toggle {display:flex;grid-column:3;grid-row:3;font-size:11px;}
+  #action-options-toggle {display:flex;grid-column:3;grid-row:3;font-size:12px;}
   .action-bar:not(.options-expanded) #btn-raise,.action-bar:not(.options-expanded) #btn-allin-only {grid-column:3;grid-row:2;}
   .action-bar.options-expanded {position:relative;}
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table,.stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table.is-crowded {height:250px;}

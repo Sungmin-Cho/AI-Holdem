@@ -270,7 +270,10 @@ test('a timed turn hides the guide and moves focus that was in it to the action 
   const call = doc.createElement('button');
   const disabled = doc.createElement('button');
   disabled.disabled = true;
-  bar.append(disabled, call);
+  // Hidden by CSS (the desktop options toggle): no boxes, cannot take focus.
+  const cssHidden = doc.createElement('button');
+  cssHidden.getClientRects = () => [];
+  bar.append(cssHidden, disabled, call);
   onboarding.offer({ myTurn: true, deadline: false, seated: true });
   side.querySelector('.onboarding-next').focus();
   onboarding.offer({ myTurn: true, deadline: true, seated: true });
