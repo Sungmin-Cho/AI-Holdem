@@ -276,10 +276,15 @@ export async function runMultiplayerJourney(outDir) {
       "guest A action",
     );
     check("guest-action-insecure-context");
+    // At the result frame: guest A's table clock is frozen so its strip stays up,
+    // and the host pauses so no next hand replaces it — the paused measurement
+    // below then sees a real result inside the participant iframe.
     for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
       const doc=document.querySelector('#table')?.contentDocument;
       if(doc?.querySelector('#hand-result')?.hidden===false){
         window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true};
+        if(${JSON.stringify(browser===guestA)}){const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;}
+        if(${JSON.stringify(browser===host)}){const menu=document.querySelector('#menu');if(menu&&!menu.disabled&&!menu.hidden)menu.click();}
         clearInterval(window.__handDriver);return;
       }
       const button=['#btn-check','#btn-fold','#btn-call'].map(id=>doc?.querySelector(id)).find(el=>el&&!el.disabled&&!el.hidden);
@@ -294,7 +299,7 @@ export async function runMultiplayerJourney(outDir) {
     check('skip-hidden-multi');
 
 
-    await click(host, "#menu");
+    if (app.manager.snapshot().state === "playing") await click(host, "#menu");
     await wait(
       () => app.manager.snapshot().state === "paused",
       "paused",
@@ -308,6 +313,7 @@ export async function runMultiplayerJourney(outDir) {
     for (const [width, height] of [[1280, 800], [390, 667]]) {
       await guestA(["set", "viewport", String(width), String(height)]);
       await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `paused guest table at ${width}x${height}`);
+      await guestA(["screenshot", path.join(outDir, `guest-paused-result-${width}x${height}.png`)]);
       assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `paused guest ${width}x${height}`);
       const pauseGeometry = await evaluate(guestA)(`(() => {
         const banner = document.querySelector('#pause-banner').getBoundingClientRect();
@@ -322,10 +328,13 @@ export async function runMultiplayerJourney(outDir) {
           overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute', covered };
       })()`);
       assert.deepEqual(pauseGeometry, { banner: true, overlay: true, covered: false }, `${width}x${height}`);
-      embedStates.push(`paused-${width}x${height}`);
+      const fit = await evaluate(guestA)(EMBED_FIT_SCRIPT);
+      assert.ok(fit.result, `the held result is on screen at ${width}x${height}: ${JSON.stringify(fit)}`);
+      embedStates.push(`paused-result-${width}x${height}`);
     }
+    await evaluate(guestA)("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
     await guestA(["set", "viewport", "1280", "600"]);
-    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667"]);
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-result-1280x800", "paused-result-390x667"]);
     check("guest-embed-fit");
     check("pause-banner");
     await click(host, "#resume");

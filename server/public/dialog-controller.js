@@ -9,7 +9,9 @@ export function createDialogController(doc, onClose=()=>{}) {
       if(active===overlay)return;
       if(active)this.dismiss();
       trigger=doc.activeElement;active=overlay;dismiss=close;overlay.hidden=false;
-      for(const node of doc.body.children)if(node!==overlay && !['script','svg'].includes(node.localName)){previousInert.set(node,node.inert);node.inert=true;}
+      // Native dialogs (help, display settings) stay out: showModal handles their
+      // modality, and an inert closed one could not be used when reopened on top.
+      for(const node of doc.body.children)if(node!==overlay && !['script','svg','dialog'].includes(node.localName)){previousInert.set(node,node.inert);node.inert=true;}
       const target=focusables()[0]??overlay.querySelector('[role="dialog"]')??overlay;
       if(!target.hasAttribute('tabindex') && !target.matches('button,input,a,select,summary'))target.tabIndex=-1;
       target.focus();

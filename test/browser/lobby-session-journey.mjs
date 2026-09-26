@@ -185,12 +185,14 @@ export async function runLobbyJourney(outDir) {
     assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
     check('host-iframe-survives-error-resume');
     const embedStates = [];
-    const measureEmbed = async (stateName) => {
+    const measureEmbed = async (stateName, expectResult = false) => {
       for (const [width, height] of [[1280, 800], [390, 667]]) {
         await browser(["set", "viewport", String(width), String(height)]);
         await wait(async () => (await evaluate(EMBED_FIT_SCRIPT)) !== null);
-        assertEmbedFit(await evaluate(EMBED_FIT_SCRIPT), `host ${stateName} ${width}x${height}`);
+        const fit = await evaluate(EMBED_FIT_SCRIPT);
         await browser(["screenshot", path.join(outDir, `host-embed-${stateName}-${width}x${height}.png`)]);
+        assertEmbedFit(fit, `host ${stateName} ${width}x${height}`);
+        if (expectResult) assert.ok(fit.result, `the held result is on screen: ${JSON.stringify(fit)}`);
         embedStates.push(`${stateName}-${width}x${height}`);
       }
       await browser(["set", "viewport", "1280", "900"]);
@@ -355,13 +357,17 @@ export async function runLobbyJourney(outDir) {
     await browser(['select','[name="pace"]','fast']);
     await browser(['select','#ai-count','1']);
     await evaluate(`(() => {
-      window.__pace={paused:false,skipClicked:false};
+      window.__pace={paused:false,skipClicked:false,resultPaused:false};
       window.__paceDriver=setInterval(()=>{
         const doc=document.querySelector('#table')?.contentDocument;if(!doc)return;
         if(document.querySelector('#status')?.textContent!=='게임 중')return;
         const thinking=doc.querySelector('#thinking'),menu=document.querySelector('#menu');
         if(!window.__pace.paused && thinking && !thinking.hidden && !menu.disabled){window.__pace.paused=true;menu.click();return;}
         const result=doc.querySelector('#hand-result'),skip=doc.querySelector('.hand-result-skip');
+        // Hand 1's result: freeze the table clock (the strip stays up) and pause,
+        // so the host iframe can be measured with a real held result.
+        if(window.__pace.paused && !window.__pace.resultPaused && result?.dataset.handNo==='1' && !result.hidden && !menu.disabled){
+          const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;window.__pace.resultPaused=true;menu.click();return;}
         if(result?.dataset.handNo==='2' && !result.hidden && skip && !skip.hidden && !skip.disabled){window.__pace.skipClicked=true;skip.click();}
         const button=['#btn-check','#btn-call','#btn-fold'].map(id=>doc.querySelector(id)).find(node=>node&&!node.disabled&&!node.hidden);
         if(button)button.click();
@@ -381,8 +387,15 @@ export async function runLobbyJourney(outDir) {
       const pausedState=hashTree(app.manager.current.sessionDir);
       await new Promise(resolve=>setTimeout(resolve,500));assert.equal(hashTree(app.manager.current.sessionDir),pausedState);
       check('pause-during-ai-interval');
+      await click('#resume');
+      await wait(() => evaluate('window.__pace.resultPaused===true'), 60000);
+      await state('paused');
+      await measureEmbed("paused-result", true);
+      await evaluate("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
+      assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667", "paused-result-1280x800", "paused-result-390x667"]);
+      await click('#resume');
       // Four paced hands plus finalization can exceed the ordinary UI wait on CI.
-      await click('#resume');await state('completed', 60000);
+      await state('completed', 60000);
       assert.ok(holds.has(1)&&advances.has(2));
       assert.ok(advances.get(2)>=Date.parse(holds.get(1).until),'next hand preceded server hold deadline');
       check('hand-result-hold-respected');

@@ -1651,29 +1651,31 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 /* Result stays non-modal and leaves table controls reachable. */
 /* The result strip sits just above the board (the felt the collected bet
    markers leave empty), so the board and the settled pot stay visible. */
-.hand-result {position:absolute;z-index:8;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);width:max-content;max-width:min(150%,90vw);padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:center;pointer-events:none;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
-.center:has(.hand-result:not([hidden])) {z-index:8;}
+/* The result strip lives in the action area (#result-dock), where the action bar
+   was until the hand ended: it never covers the board, the pot or a seat. On the
+   fitted desktop it sits in the reserved action area (the table does not move); on
+   scrolling layouts it follows the table in the page flow. A bottom-sticky strip
+   would cover the lowest seats of the fixed-height phone table. */
+.result-dock {display:flex;justify-content:center;}
+.hand-result {display:flex;flex-wrap:wrap;justify-content:center;align-items:baseline;gap:2px 12px;width:100%;max-width:760px;padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:center;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
 .hand-result-title {display:block;font-size:12px;color:var(--c-text-2);}
 .hand-result-winner {font-weight:600;}
 .hand-result-net {font-family:var(--f-num);font-variant-numeric:tabular-nums;font-weight:700;}
 .hand-result-net.is-pos {color:var(--c-pos);}
 .hand-result-net.is-neg {color:var(--c-neg);}
-.hand-result .cash-reset-note {margin-top:2px;}
+.hand-result .cash-reset-note {margin:0;}
 /* A chip that exists only for the flight of a collect/award motion. */
 .motion-chip {position:absolute;z-index:9;width:14px;height:14px;border-radius:50%;background:var(--c-chip);box-shadow:inset 0 0 0 2px var(--c-chip-ring);translate:-50% -50%;pointer-events:none;}
 .hand-result[hidden] {display:none;}
-.hand-result button {pointer-events:auto;display:block;margin:.4rem auto 0;}
+.hand-result button {margin:0;}
 .hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
 .hand-result-pot {font-size:.85em;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:.65rem;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
-/* Phones: app.js moves the strip into #result-dock, which sticks to the bottom of
-   the screen where the action bar was, clear of the board, the pot and the plates. */
-.result-dock:empty,.result-dock:has(> .hand-result[hidden]) {display:none;}
+.result-dock:has(> .hand-result[hidden]) {display:none;}
 @media(max-width:600px) {
   .plate-action-amount {display:none;}
-  .result-dock {position:sticky;z-index:12;bottom:max(8px,env(safe-area-inset-bottom));display:flex;justify-content:center;margin:0 8px;pointer-events:none;}
-  .result-dock .hand-result {position:static;transform:none;width:100%;max-width:420px;font-size:.82rem;padding:.65rem;}
+  .hand-result {font-size:.82rem;padding:.65rem;}
 }
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 

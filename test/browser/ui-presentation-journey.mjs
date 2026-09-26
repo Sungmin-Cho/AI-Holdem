@@ -31,7 +31,7 @@ const EMBEDDED_TABLE_SCRIPT=`(()=>{
   const bar=document.querySelector('#action-bar');let dock=null;
   if(visible(bar)){bar.scrollIntoView({block:'end'});const r=rect(bar);dock=r.top>=0&&r.bottom<=innerHeight+1;}
   let result=null;
-  if(visible(strip)){strip.scrollIntoView({block:'nearest'});const r=rect(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1,hits:blockers.filter(n=>hit(r,rect(n))).map(n=>n.id||n.className)};}
+  if(visible(strip)){const r=rect(strip),t=rect(document.querySelector('.table'));result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=t.bottom-1),hits:blockers.filter(n=>hit(r,rect(n))).map(n=>n.id||n.className)};}
   return {scrollX:document.documentElement.scrollWidth-innerWidth,topbar:getComputedStyle(document.querySelector('.topbar')).display,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>hit(a,b))),dock,result};
 })()`;
 export const geometryCounts=({ci=false}={})=>ci?[2,6,9]:[2,6,8,9];
@@ -439,6 +439,16 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#replay-overlay').hidden"),false,'Esc meant for the drawer leaves the replay open');
     await evaluate("document.querySelector('#help-panel .help-close').click()");
     assert.equal(await evaluate("!document.querySelector('dialog[open]') && !document.querySelector('#replay-overlay').hidden && !!document.activeElement?.closest('#replay-overlay')"),true,'focus comes back to the replay');
+    // The drawer now exists: reopening the replay must not leave it inert.
+    await evaluate("document.querySelector('#replay-close').click()");
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    await browser(['press','Tab']);
+    const drawerReopened=await evaluate("({inert:document.querySelector('#help-panel').inert,inHelp:!!document.activeElement?.closest('#help-panel')})");
+    assert.deepEqual(drawerReopened,{inert:false,inHelp:true},'the reopened drawer is usable');
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
     checks.push('help-over-replay');
     await browser(['set','viewport','390','844']);
     const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();const low=[...document.querySelectorAll('.replayer-controls .btn,.replayer-speed select,.replayer-jump')].map(n=>Math.round(n.getBoundingClientRect().height)).filter(h=>h<44);return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth,low}})()");
@@ -594,11 +604,11 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const winnerLines=await evaluate("[...document.querySelectorAll('#hand-result .hand-result-winner')].map(n=>n.textContent)");
     assert.ok(winnerLines.length>0&&winnerLines.every(line=>/팟 .+ 획득/.test(line)&&!/\+\d/.test(line)),`a winner line is the pot collected, never a signed profit: ${JSON.stringify(winnerLines)}`);
     await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
-    // Every size: the strip never covers the board, the settled pot or a plate,
-    // and stays inside the viewport (phones dock it at the bottom).
+    // Every size: the strip never covers the board, the settled pot or a plate, and
+    // is on screen (fitted desktop action area) or in the flow under the table.
     for(const [width,height] of [[390,667],[768,900],[1024,800],[1440,900]]) {
       await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
-      const placed=await evaluate("(()=>{const node=document.querySelector('#hand-result'),r=node.getBoundingClientRect();return {hidden:node.hidden,inside:r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1,hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+      const placed=await evaluate("(()=>{const node=document.querySelector('#hand-result'),r=node.getBoundingClientRect(),t=document.querySelector('.table').getBoundingClientRect();return {hidden:node.hidden,inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=t.bottom-1),hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
       await browser(['screenshot',path.join(outDir,`hand-result-${width}x${height}.png`)]);
       assert.deepEqual({hidden:placed.hidden,inside:placed.inside,hits:placed.hits},{hidden:false,inside:true,hits:[]},JSON.stringify({width,height,placed}));
     }

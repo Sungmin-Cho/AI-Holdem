@@ -9,11 +9,11 @@ import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
 import { helpButton } from './help-panel.js';
 import { createOnboarding } from './onboarding.js';
-import { DISPLAY_KEYS } from './display-settings.js';
+import { DISPLAY_KEYS, saveDisplaySetting } from './display-settings.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
-import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
+import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
@@ -634,16 +634,7 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
 }
 setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
-// Phones dock the result strip at the bottom of the screen, in the action bar's
-// place once the hand is over; wider screens keep it above the board. Moving the
-// node keeps its content, so a repaint or a side frame never rebuilds it.
-const phoneDock=matchMedia('(max-width: 600px)');
-function placeHandResult() {
-  const box=$('hand-result'),target=phoneDock.matches?$('result-dock'):document.querySelector('.table .center');
-  if(box&&target&&box.parentElement!==target)target.prepend(box);
-}
-phoneDock.addEventListener?.('change',placeHandResult);
-placeHandResult();
+
 
 function writeAmountField(value) {
   const input = $('raise-amount');
@@ -1742,7 +1733,7 @@ document.querySelector('.tabs').addEventListener('keydown',ev=>{
 });
 $('display-unit').value=displayUnit;
 $('display-unit').addEventListener('change',ev=>{
-  displayUnit=ev.target.value==='chips'?'chips':'bb';writePreference(displayUnit);
+  displayUnit=ev.target.value==='chips'?'chips':'bb';saveDisplaySetting('unit',displayUnit);
   paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintHandResult();paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
 });
 $('seat-close').addEventListener('click',()=>dialogs.close());

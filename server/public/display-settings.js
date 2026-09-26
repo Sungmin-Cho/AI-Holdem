@@ -22,6 +22,28 @@ const NORMAL = Object.freeze({
 // Choices this document could not save: they stay applied here, and a later
 // change must not fall back to the stored (or default) value for them.
 const pageChoices = new WeakMap();
+const KEY_NAMES = Object.freeze({ [DISPLAY_KEYS.theme]: 'theme', [DISPLAY_KEYS.deck]: 'deck', [DISPLAY_KEYS.motion]: 'motion', 'holdem.display-unit.v1': 'unit' });
+
+// theme-boot.js skips the attributes named here when storage events arrive.
+function markLocal(doc, choices) {
+  const names = ['theme', 'deck', 'motion'].filter((name) => Object.hasOwn(choices, name));
+  const root = doc?.documentElement;
+  if (!root) return;
+  if (names.length) root.setAttribute('data-display-local', names.join(' '));
+  else root.removeAttribute('data-display-local');
+}
+
+/** Another document of this origin saved a choice: it replaces this page's
+ * unsaved one for that item (theme-boot.js repaints the attribute). */
+export function followStoredChoice(key, { doc = globalThis.document } = {}) {
+  const name = KEY_NAMES[key];
+  const choices = doc && pageChoices.get(doc);
+  if (!name || !choices || !Object.hasOwn(choices, name)) return false;
+  delete choices[name];
+  markLocal(doc, choices);
+  return true;
+}
+try { globalThis.addEventListener?.('storage', (event) => { if (event.key) followStoredChoice(event.key); }); } catch { /* optional */ }
 
 function store(storage) { try { return storage ?? globalThis.localStorage ?? null; } catch { return null; } }
 function read(storage, key) { try { return store(storage)?.getItem(key) ?? null; } catch { return null; } }
@@ -71,6 +93,7 @@ export function saveDisplaySetting(name, value, { doc = globalThis.document, sto
   const choices = { ...pageChoices.get(doc) };
   if (saved) delete choices[name]; else choices[name] = choice;
   pageChoices.set(doc, choices);
+  markLocal(doc, choices);
   applyDisplaySettings(doc, currentDisplaySettings({ doc, storage }));
   // Same-document listeners (the lobby's header, the table) repaint amounts.
   if (name === 'unit') doc.defaultView?.dispatchEvent(new CustomEvent('holdem:display-unit', { detail: choice }));

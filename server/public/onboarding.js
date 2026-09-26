@@ -20,6 +20,8 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   let seenThisPage = false;
   // A deadline turn was skipped; show in the next wait (seated, not our turn).
   let deferred = false;
+  // Shown, then a turn with a deadline came: hidden until the next wait.
+  let suspended = false;
   let card = null;
   const seen = () => {
     if (seenThisPage) return true;
@@ -32,11 +34,20 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   const highlight = (name) => {
     for (const [key, find] of Object.entries(targets)) find()?.classList.toggle('onboarding-focus', key === name);
   };
-  const end = () => {
-    step = -1;
+  const hide = () => {
     highlight(null);
     card?.remove();
     card = null;
+  };
+  // Where keyboard focus goes back to when the guide ends from inside its card.
+  let returnFocus = null;
+  const end = () => {
+    const hadFocus = Boolean(card?.contains(doc.activeElement));
+    step = -1;
+    suspended = false;
+    hide();
+    if (hadFocus && returnFocus?.isConnected !== false && !returnFocus?.disabled) returnFocus?.focus?.();
+    returnFocus = null;
   };
   const button = (label, className, onClick) => {
     const node = doc.createElement('button');
@@ -48,6 +59,8 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   };
   const render = () => {
     const current = ONBOARDING_STEPS[step];
+    // Stepping with the keyboard keeps focus in the guide; otherwise focus is never touched.
+    const hadFocus = Boolean(card?.contains(doc.activeElement));
     card?.remove();
     card = doc.createElement('section');
     card.className = 'onboarding-card';
@@ -71,16 +84,25 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     card.append(count, title, text, actions);
     container().prepend(card);
     highlight(current.target);
+    if (hadFocus) card.querySelector('.onboarding-next')?.focus();
   };
   const api = {
     get active() { return step >= 0; },
+    get suspended() { return suspended; },
     get step() { return step; },
     /** Called on every paint: starts on the viewer's first deadline-free turn,
      * or — after a first turn that had a deadline — in the wait that follows. */
     offer({ myTurn, deadline, seated = true }) {
-      if (step >= 0 || seen()) return false;
+      if (step >= 0) {
+        // Already showing: step aside for a timed turn, come back in the wait after it.
+        if (myTurn && deadline) { if (!suspended) { suspended = true; hide(); } return false; }
+        if (suspended && seated) { suspended = false; render(); return true; }
+        return false;
+      }
+      if (seen()) return false;
       if (myTurn && deadline) { deferred = true; return false; }
       if (!myTurn && !(deferred && seated)) return false;
+      returnFocus = doc.activeElement;
       step = 0;
       render();
       return true;
@@ -97,6 +119,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
       end();
       seenThisPage = false;
       deferred = false;
+      suspended = false;
       try { storageOf(storage)?.removeItem(DISPLAY_KEYS.onboarding); } catch { /* optional */ }
     },
   };
