@@ -133,6 +133,35 @@ test('a record whose numbers disagree with themselves is refused', () => {
   assert.equal(tamper((copy) => { copy.endStacks[copy.actions[call].playerId] += 1; }).ok, false, 'end stacks');
   assert.equal(tamper((copy) => { copy.pots[0].winners[0].share -= 1; }).ok, false, 'pot shares');
   assert.equal(tamper((copy) => { copy.posts = []; }).ok, false, 'missing posts');
+  // Every cross-check guards the fallback on its own.
+  assert.equal(tamper((copy) => { copy.actions[call].currentBet += 1; }).ok, false, 'current bet');
+  assert.equal(tamper((copy) => { copy.actions[call].maxRaiseTo += 1; }).ok, false, 'max raise-to');
+  assert.equal(tamper((copy) => { copy.actions[call].callAmount += 1; }).ok, false, 'call amount field');
+  const onFlop = replay.actions.findIndex((action) => action.street === 'flop');
+  assert.ok(onFlop > 0, 'the fixture reaches the flop');
+  assert.equal(tamper((copy) => { copy.actions[onFlop].board = [...copy.actions[onFlop].board].reverse(); }).ok, false, 'board prefix');
+  assert.equal(tamper((copy) => { copy.actions[onFlop].street = 'preflop'; copy.actions[onFlop + 1].street = 'flop'; copy.actions.at(-1).street = 'preflop'; }).ok, false, 'street order');
+  assert.equal(tamper((copy) => { const who = copy.actions[call].playerId; copy.uncalledReturns = { [who]: 1_000_000 }; }).ok, false, 'return beyond contribution');
+});
+
+test('step wording follows the chips: a runout states only that betting is over, a street says what was collected', () => {
+  const game = createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 });
+  game.seats.find((seat) => seat.playerId !== 'user').stack = 300;
+  const shove = play(game, (legal) => (legal.toAct === 'user' && legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['call']));
+  const drawn = mount(replayRecord(shove, { reveal: 'all' }));
+  const runout = drawn.model.steps.find((step) => step.kind === 'runout');
+  drawn.state.step = runout.index; drawn.handle.paint();
+  const runoutText = drawn.container.querySelector('.replayer-now').textContent;
+  assert.match(runoutText, /더 베팅할 수 있는 플레이어가 없어/);
+  assert.doesNotMatch(runoutText, /모두 올인/);
+  const checked = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), passive);
+  const quiet = mount(replayRecord(checked, { reveal: 'all' }));
+  const turn = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'turn');
+  assert.equal(turn.collected, 0);
+  quiet.state.step = turn.index; quiet.handle.paint();
+  assert.match(quiet.container.querySelector('.replayer-now').textContent, /모두 체크/);
+  const flop = quiet.model.steps.find((step) => step.kind === 'street' && step.street === 'flop');
+  assert.ok(flop.collected > 0);
 });
 
 test('public scope: hidden seats show neither cards nor reasons, and the forced flag decides nothing', () => {

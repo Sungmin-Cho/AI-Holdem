@@ -106,12 +106,13 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (actionStreet !== street) {
       if (STREET_BOARD[actionStreet] <= STREET_BOARD[street]) return fail('street', index);
       street = actionStreet;
+      const collected = sum(Object.values(bets));
       collect();
       currentBet = 0;
       const dealt = Array.isArray(action.board) ? action.board : board.slice(0, STREET_BOARD[street]);
       if (dealt.length !== STREET_BOARD[street]) return fail('board', index);
       shownBoard = [...dealt];
-      snapshot({ kind: 'street' });
+      snapshot({ kind: 'street', collected });
     }
     if (Array.isArray(action.board) && (action.board.length !== STREET_BOARD[street]
       || action.board.some((card, at) => card !== shownBoard[at]))) return fail('board', index);

@@ -46,7 +46,10 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // A nine-handed engine hand for the crowded replayer layout.
     let fullState=createGame({aiCount:8,startStack:5000,levelEvery:10});fullState.handNo=3;
     fullState=startHand(fullState,{deck:fixedDeck()}).state;
-    while(!legalFor(fullState).handOver){const legal=legalFor(fullState);fullState=applyAction(fullState,legal.toAct,legal.canCheck?'check':'call').state;}
+    // Raises and folds, so bet pills and tags sit on seats at the same time.
+    for(let turn=0;!legalFor(fullState).handOver;turn+=1){const legal=legalFor(fullState);
+      const raise=legal.canRaise&&turn%5===0,fold=!raise&&!legal.canCheck&&turn%3===1;
+      fullState=applyAction(fullState,legal.toAct,raise?'raise':fold?'fold':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
     const fullHand=fullState.lastHand;
     // A six-handed hand: two seats per side on a short desktop viewport.
     let sixState=createGame({aiCount:5,startStack:5000,levelEvery:10});sixState.handNo=4;
@@ -298,6 +301,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'일시정지');
     await browser(['press','Space']);
     assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
+    // A held key repeats: repeats never flip playback again.
+    await evaluate("document.body.dispatchEvent(new KeyboardEvent('keydown',{key:' ',repeat:true,bubbles:true,cancelable:true}))");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
     checks.push('replay-keyboard');
     // The timeline keeps its own scroll position when the replay is rebuilt (unit change).
     await evaluate("document.querySelector('.replayer-timeline').scrollTop=60");
@@ -332,26 +338,29 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // (Later checks publish their own views; the closed decision of the earlier
     // view is never re-opened, which the receipt store would refuse.)
     const longNames=(seats)=>seats.map(seat=>({...seat,name:'매우 긴 플레이어 이름 접근성 확인'}));
-    const layoutAtEveryStep="(()=>{const measure=()=>{const r=[...document.querySelectorAll('.replayer-seat')].map(n=>n.getBoundingClientRect());let hits=0;r.forEach((a,i)=>r.slice(i+1).forEach(b=>{if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits++;}));const stage=document.querySelector('.replayer-stage').getBoundingClientRect();return hits+100*r.filter(x=>x.left<stage.left-1||x.right>stage.right+1).length;};const steps=document.querySelectorAll('.replayer-jump').length;let worst=0,at=-1;for(let i=0;i<steps;i++){if(i)document.querySelector('.replayer-next').click();const v=measure();if(v>worst){worst=v;at=i;}}return {seats:document.querySelectorAll('.replayer-seat').length,worst,at,steps,board:Math.round(document.querySelector('.replayer-board .card').getBoundingClientRect().width),fits:document.documentElement.scrollWidth<=innerWidth};})()";
+    // Seats and their tag/bet pills: nothing of one seat may cover another seat's, nor leave the stage.
+    const layoutAtEveryStep="(()=>{const measure=()=>{const boxes=[...document.querySelectorAll('.replayer-seat')].map(seat=>[seat,...seat.querySelectorAll('.replayer-seat-tag,.replayer-seat-bet')].map(n=>n.getBoundingClientRect()).filter(r=>r.width>0));let hits=0;for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++)for(const a of boxes[i])for(const b of boxes[j])if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits++;const stage=document.querySelector('.replayer-stage').getBoundingClientRect();return hits+100*boxes.flat().filter(x=>x.left<stage.left-1||x.right>stage.right+1).length;};const steps=document.querySelectorAll('.replayer-jump').length;let worst=0,at=-1;for(let i=0;i<steps;i++){if(i)document.querySelector('.replayer-next').click();const v=measure();if(v>worst){worst=v;at=i;}}return {seats:document.querySelectorAll('.replayer-seat').length,worst,at,steps,board:Math.round(document.querySelector('.replayer-board .card').getBoundingClientRect().width),fits:document.documentElement.scrollWidth<=innerWidth};})()";
     view={...userView(fullState),seats:longNames(userView(fullState).seats)};
     await publish([{type:'hand_start',handNo:4,blinds:fullHand.blinds},{type:'hand_start',handNo:5,blinds:sixHand.blinds}],{handReplay:{handNos:[4,5]}});
-    for(const [w,h,board] of [[390,844,24],[1280,800,32]]) {
+    for(const [w,h] of [[390,844],[700,1000],[1280,800],[1366,640]]) {
       await browser(['set','viewport',String(w),String(h)]);
       await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-2).click()");
       await browser(['wait','#replay-body .replayer.is-crowded']);
       const crowd=await evaluate(layoutAtEveryStep);
-      assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===board&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
-      await browser(['screenshot',path.join(outDir,`replayer-9-${w}.png`)]);
+      assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===(w<600?24:32)&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
+      await browser(['screenshot',path.join(outDir,`replayer-9-${w}x${h}.png`)]);
       await browser(['press','Escape']);
     }
     view={...userView(sixState),seats:longNames(userView(sixState).seats)};await publish();
-    await browser(['set','viewport','1366','640']);
-    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
-    await browser(['wait','#replay-body .replayer']);
-    const six=await evaluate(layoutAtEveryStep);
-    assert.ok(six.seats===6&&six.worst===0&&six.fits,`1366x640 ${JSON.stringify(six)}`);
-    await browser(['screenshot',path.join(outDir,'replayer-6-1366x640.png')]);
-    await browser(['press','Escape']);
+    for(const [w,h] of [[390,844],[1366,640]]) {
+      await browser(['set','viewport',String(w),String(h)]);
+      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+      await browser(['wait','#replay-body .replayer']);
+      const six=await evaluate(layoutAtEveryStep);
+      assert.ok(six.seats===6&&six.worst===0&&six.fits,`${w}x${h} ${JSON.stringify(six)}`);
+      await browser(['screenshot',path.join(outDir,`replayer-6-${w}x${h}.png`)]);
+      await browser(['press','Escape']);
+    }
     checks.push('replay-crowded-layout');
     await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();

@@ -290,9 +290,10 @@ export function mountReplayer(container, ctx) {
       } else if (row?.coach?.message) line('replay-coach is-pending', row.coach.message);
       if (row?.study?.evaluationId) lines.push(studyButton(row.study.evaluationId, `now-study-${row.study.evaluationId}`));
     } else if (step.kind === 'runout') {
-      line('replayer-line', '모두 올인이라 베팅 없이 보드만 공개합니다.');
+      // Only a fact: someone may still hold chips (a covered call, a returned bet).
+      line('replayer-line', '더 베팅할 수 있는 플레이어가 없어 남은 보드를 공개합니다.');
     } else {
-      line('replayer-line', '보드 공개 · 이전 스트리트 베팅이 팟으로 모였습니다.');
+      line('replayer-line', step.collected > 0 ? `보드 공개 · 이전 스트리트 베팅이 팟으로 모였습니다(${amount(step.collected)}).` : '보드 공개 · 이전 스트리트는 모두 체크였습니다.');
     }
     return lines;
   }
