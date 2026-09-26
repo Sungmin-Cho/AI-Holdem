@@ -167,16 +167,16 @@ test('S8 early: explicit chip stack and new defaults reach the real engine with 
   assert.equal(state.config.handLimit, 20);
 });
 
-test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: scaled(15000) }, async (t) => {
+test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: scaled(30000) }, async (t) => {
   const store = createOwnedTempDir('holdem-s8-cli-store');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env);
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
     // A policy game no longer waits for the held upper probe, so the relay and the
-    // study attachment are already starting when the stop lands; on Windows that
-    // teardown takes well over the POSIX budget.
-    await within(cli.closed, scaled(8000));
+    // study attachment are already starting when the stop lands. Stopping at the
+    // first probe catches a study cold start (up to 120s on Windows) mid-way.
+    await within(cli.closed, scaled(15000));
   });
   const invocation = await until(() => {
     return readFirstFixtureRecord(fake.log, cli.child);
@@ -276,7 +276,7 @@ test('S8 early: policy bootstrap survives failed upper selection and reports LLM
   assert.throws(() => process.kill(pid, 0), (error) => error.code === 'ESRCH');
 });
 
-test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: scaled(30000) }, async (t) => {
   const parent = createOwnedTempDir('holdem-s8-private-store');
   fs.chmodSync(parent, 0o755);
   const store = path.join(parent, 'new-store');
@@ -286,7 +286,7 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
     // See the policy-table test above: the stop now waits for relay/study startup.
-    await within(cli.closed, scaled(8000));
+    await within(cli.closed, scaled(15000));
     await stopOwnedStudy(store);
   });
   await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);

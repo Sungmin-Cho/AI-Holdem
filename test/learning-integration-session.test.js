@@ -115,7 +115,7 @@ test('S8 full: default 20-hand production session records support then study rem
     initialCli.requestStop();
     // The policy default no longer waits for the held upper probe: relay and study
     // startup are underway when this stop lands, which is slow on Windows.
-    assert.equal((await within(initialCli.closed, scaled(8000), 'default20 initialized CLI stop')).code, 0);
+    assert.equal((await within(initialCli.closed, scaled(15000), 'default20 initialized CLI stop')).code, 0);
     const selected = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
     gameDir = path.join(storeDir, '.session-store', selected.sessionRel);
     const stateFile = path.join(gameDir, 'state.json');
