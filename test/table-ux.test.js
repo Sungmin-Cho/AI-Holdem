@@ -377,6 +377,21 @@ test('action notice survives reconcile without changing authority and clears on 
   response={ok:true};await f.controller.retry();assert.equal(f.controller.state.notice,null);
   assert.equal(f.sent.length,2);assert.equal(f.sent[0].requestId,f.sent[1].requestId);
 });
+test('R3: a paused refusal keeps the request; after resume the poll adopts a late accept, and a reload keeps it too',async()=>{
+  const f=fixture({post:()=>({ok:false,code:'GAME_PAUSED'})});await f.controller.connect(f.snapshot);
+  await f.controller.send('raise',400);
+  const requestId=f.controller.state.requestId;
+  assert.equal(f.controller.state.phase,'unreceived');assert.equal(f.controller.state.notice.code,'GAME_PAUSED');
+  // A reload or a second tab restores the same request from storage, not a fresh one.
+  const again=createActionController({gameEpoch:'game-a',storage:{getItem:(key)=>f.values.get(key)??null,setItem:(key,value)=>f.values.set(key,value),removeItem:(key)=>f.values.delete(key)},
+    postAction:async()=>({ok:true}),getSnapshot:async()=>f.snapshot,getStatus:async()=>({ok:true,decisionId:legal.decisionId,requestId:null,phase:'unreceived'}),timeoutMs:15});
+  await again.connect(f.snapshot);assert.equal(again.state.requestId,requestId);
+  // The earlier send did land once play resumed: the regular poll adopts it.
+  f.setStatus({ok:true,decisionId:legal.decisionId,requestId,phase:'accepted'});
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.phase,'accepted');assert.equal(f.controller.state.requestId,requestId);
+  assert.equal(f.sent.length,1,'no second send was needed');
+});
 test('asynchronous rejected receipt exposes a bounded reason as an informational notice',async()=>{
   const f=fixture();await f.controller.connect(f.snapshot);await f.controller.send('call');
   f.setStatus({ok:true,decisionId:legal.decisionId,requestId:f.sent[0].requestId,phase:'rejected',reason:'ILLEGAL_ACTION'});

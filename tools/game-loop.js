@@ -996,6 +996,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let control = null;
   let recoveringControl = false;
   let pauseRequested = !!opts.startPaused;
+  // R1: closed from the moment a pause is requested (before the control write)
+  // until play resumes or finalization takes over. While closed no new training
+  // pipeline, solve, evaluator or explainer starts; each hand that wanted one is
+  // remembered here and registered again when the gate reopens.
+  let trainingAdmissionClosed = false;
+  const admissionDeferredHands = new Set();
   let waitController = null;
   let resultHoldState = null;
   let resultHoldController = null;
@@ -3260,25 +3266,36 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const startSolveTask = (task) => {
     if (!trainingOn) return;
+    if (trainingAdmissionClosed) { queueDeferredHand(task.handNo); return; }
     // 권위의 solveTasks는 자식이 실제로 뜬 뒤에야 보인다. 그 사이에 같은
     // 파이프라인이 다시 돌면 같은 결정에 두 자식이 뜨므로 로컬 in-flight 집합이
     // 먼저 막는다.
     if (solveInFlight.has(task.decisionId)) return;
     solveInFlight.add(task.decisionId);
     const loop = readLoopState();
+    let held = false;
     trackTrainingTask(task.handNo, () => runSolveTask({
       ...task,
       gameEpoch: task.gameEpoch ?? loop?.gameEpoch,
       owner: task.owner ?? loop?.ownerSessionId,
       storeDir,
       solve: solveForPipeline,
-      shouldStop: () => stopRequested || finalizationCutoff,
+      // A solve still queued on the solve lock when a pause closes the gate
+      // leaves its pending entry as is (the SOLVE_CUTOFF path) and re-registers.
+      shouldStop: () => {
+        if (stopRequested || finalizationCutoff) return true;
+        if (trainingAdmissionClosed) held = true;
+        return trainingAdmissionClosed;
+      },
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
       },
       consume: consumeTrainingNow,
-    }).finally(() => solveInFlight.delete(task.decisionId)));
+    }).finally(() => {
+      solveInFlight.delete(task.decisionId);
+      if (held) readmitTrainingHand(task.handNo);
+    }));
   };
 
   const runTrainingPipeline = async (handNo) => {
@@ -3293,6 +3310,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       explain: explainForPipeline,
       solverAdapterId,
       startSolve: startSolveTask,
+      admit: () => !trainingAdmissionClosed,
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -3305,15 +3323,49 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const launchTrainingPipeline = (handNo) => {
     if (!trainingOn) return;
+    if (trainingAdmissionClosed) { queueDeferredHand(handNo); return; }
     if (trainingInFlightHands.has(handNo)) return;
     trainingInFlightHands.add(handNo);
+    let deferred = false;
     trackTrainingTask(handNo, async () => {
       try {
-        return await runTrainingPipeline(handNo);
+        const result = await runTrainingPipeline(handNo);
+        deferred = result?.deferred === true;
+        return result;
       } finally {
         trainingInFlightHands.delete(handNo);
+        // Same turn as the in-flight release, so a reopen in between cannot lose it.
+        if (deferred) readmitTrainingHand(handNo);
       }
     });
+  };
+
+  // A hand whose work a pause held back: queue it while the gate is closed, or
+  // (the gate reopened while it was finishing) register it right away.
+  const readmitTrainingHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested) return;
+    if (trainingAdmissionClosed) queueDeferredHand(handNo);
+    else launchTrainingPipeline(handNo);
+  };
+
+  // The queue is also recorded in loop-state so a restart (paused recovery)
+  // still registers these hands; reconcile reads it back. Every write happens
+  // inside work the pause barrier waits for, so nothing changes once paused.
+  const queueDeferredHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested || admissionDeferredHands.has(handNo)) return;
+    admissionDeferredHands.add(handNo);
+    writeLoopState({ trainingDeferredHands: [...admissionDeferredHands].sort((a, b) => a - b) });
+  };
+
+  const reopenTrainingAdmission = () => {
+    trainingAdmissionClosed = false;
+    const hands = [...admissionDeferredHands];
+    admissionDeferredHands.clear();
+    if (stopRequested) return 0;
+    if (hands.length || readLoopState()?.trainingDeferredHands) writeLoopState({ trainingDeferredHands: undefined });
+    for (const handNo of hands) launchTrainingPipeline(handNo);
+    if (hands.length) log('training-admission-reopened', { hands });
+    return hands.length;
   };
 
   const settleTrainingTasks = async (deadlineNs) => {
@@ -3462,6 +3514,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const lastHandNo = engine?.lastHand?.handNo;
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
+      // R1 (b): hands a pause held back in an earlier process (the in-memory
+      // queue is gone after a restart). Only those — an explanation that simply
+      // failed is not retried here, so it cannot crowd out the last hand's.
+      for (const handNo of loop.trainingDeferredHands ?? []) {
+        if (Number.isInteger(handNo)) pendingHands.add(handNo);
+      }
+      if (loop.trainingDeferredHands && !trainingAdmissionClosed) writeLoopState({ trainingDeferredHands: undefined });
       for (const handNo of pendingHands) launchTrainingPipeline(handNo);
       log('training-reconcile-registered', { hands: [...pendingHands] });
       await consumeTrainingNow();
@@ -4960,6 +5019,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // instead); pause() answers `finalizing` and the app reports finalizing.
   let gameOverPending = false;
   const releasePauseForFinalization = () => {
+    // Finalization owns the remaining training: whatever a pause held back is
+    // registered again before any cutoff (R1 (b)), even if the pause itself
+    // has not reached pauseRequested yet.
+    if (trainingAdmissionClosed) reopenTrainingAdmission();
     if (!pauseRequested) return;
     pauseRequested = false;
     resolvePause?.({ state: 'finalizing' });
@@ -6924,9 +6987,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (gameOverPending) return Promise.resolve({ state: 'finalizing' });
     if(control.read().playState==='paused')return Promise.resolve({state:'paused'});
     pauseCompletion = (async()=>{
+      // R1 (a): the gate closes before the durable pausing write, so training
+      // work that lands while that write is in flight is already held back.
+      trainingAdmissionClosed = true;
       await retryControlWrite(()=>control.set('pausing',{pauseIntent:true}));
       if(stopRequested)return {state:'stopped'};
-      if(readLoopState()?.phase!=='playing')return {state:'finalizing'};
+      if(readLoopState()?.phase!=='playing'){reopenTrainingAdmission();return {state:'finalizing'};}
       pauseRequested=true;
       if (resultHoldState) resultHoldState.skipped = true;
       resultHoldController?.abort();
@@ -6934,7 +7000,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const ack=new Promise(resolve=>{resolvePause=resolve;});
       waitController?.abort();
       return ack;
-    })().catch(error=>{pauseCompletion=null;throw error;});
+    })().catch(error=>{pauseCompletion=null;reopenTrainingAdmission();throw error;});
     return pauseCompletion;
   };
   const resumePlay = async () => {
@@ -6952,6 +7018,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     assertNotStopping();
     pauseRequested = false;
     pauseCompletion = null;
+    reopenTrainingAdmission();
+    // R1 (c): a coach note accepted while pausing stayed in Q (publication is
+    // deferred during a pause). Publish it once now, before the next hand,
+    // rather than at game end. Every coach task settled before paused.
+    if (Object.keys(readCoachAuthority()?.publishQueue ?? {}).length) {
+      try { await drainQueuedCoachPublications(); }
+      catch (error) { log('coach-resume-drain-error', { code: error.code ?? 'ERROR' }); }
+    }
     parkWake?.();
     relaunchPauseDeferredCoach();
   };
@@ -7050,6 +7124,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopRequested) return out;
     if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
       pauseRequested = false;
+      reopenTrainingAdmission();
       resolvePause?.({state:'finalizing'}); resolvePause = null;
       return out;
     }

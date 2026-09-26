@@ -322,8 +322,12 @@ function solvePendingIds(tc, sessionDir) {
 
 async function runHandPipelineUnlocked({
   sessionDir, handNo, gameEpoch, owner, storeDir,
-  evaluate, explain, publish, consume, solverAdapterId, startSolve,
+  evaluate, explain, publish, consume, solverAdapterId, startSolve, admit,
 }) {
+  // `admit()` false means a pause is closing the gate: no new evaluator or
+  // explainer child starts, and whatever is left comes back `deferred` so the
+  // caller can register the hand again once play resumes (design §11.2 R1).
+  const admitted = () => typeof admit !== 'function' || admit() === true;
   const tc = createTrainingControl({ storeDir });
   const existing = itemsCoveringHand(tc, sessionDir, handNo);
   // 이미 solve로 미뤄진 결정은 evaluate 경로에서 완전히 빠진다. 여기서 빼지
@@ -339,6 +343,9 @@ async function runHandPipelineUnlocked({
     promise: Promise.resolve(null),
     terminate: async () => ({ confirmed: true }),
   };
+  if (!skipEvaluate && !admitted()) {
+    return { ok: true, deferred: true, evaluations, accepted: existing, handle: evalHandle };
+  }
   if (!skipEvaluate) {
     evalHandle = typeof evaluate === 'function'
       ? toRunnerHandle(evaluate(sessionDir, handNo, { solverAdapterId }))
@@ -418,6 +425,7 @@ async function runHandPipelineUnlocked({
     if (typeof publish === 'function') await publish('annotation');
   };
 
+  let explainDeferred = false;
   for (const item of acceptedItems) {
     if (hasCutoffMarker(sessionDir)) {
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
@@ -448,9 +456,14 @@ async function runHandPipelineUnlocked({
       evaluationId: item.evaluationId,
     };
     if (typeof explain !== 'function') continue;
+    // Checked between items and again once the explain lock is ours: a pipeline
+    // that queued behind the lock during a pause must not start its child.
+    if (!admitted()) { explainDeferred = true; continue; }
     let text = null;
+    let held = false;
     await withExplainLock(sessionDir, async () => {
       if (hasCutoffMarker(sessionDir)) return;
+      if (!admitted()) { held = true; return; }
       const explainHandle = toRunnerHandle(explain(evaluation));
       try {
         text = await explainHandle.promise;
@@ -460,6 +473,7 @@ async function runHandPipelineUnlocked({
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
       continue;
     }
+    if (held) { explainDeferred = true; continue; }
     if (typeof text !== 'string' || !text.trim()) continue;
     const check = validateExplanation(evaluation, text);
     if (!check.ok) continue;
@@ -468,6 +482,7 @@ async function runHandPipelineUnlocked({
 
   return {
     ok: true,
+    ...(explainDeferred ? { deferred: true } : {}),
     evaluations,
     accepted: acceptedItems,
     handle: evalHandle,

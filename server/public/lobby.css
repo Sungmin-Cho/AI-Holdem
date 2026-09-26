@@ -121,6 +121,18 @@ select[name="pace"] {
 
 /* ---- Embedded table ------------------------------------------------------- */
 #game iframe { width: 100%; height: calc(100dvh - 80px); border: 0; }
+/* R3: the moment pause is clicked the table is locked (inert); this bar above
+   it says why, in normal flow so the table keeps its size. */
+.table-lock { order: -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--c-line); background: var(--c-info-soft); color: var(--c-text); }
+.table-lock[hidden] { display: none; }
+.table-lock strong { font-size: 15px; }
+.table-lock span { color: var(--c-text-2); font-size: 14px; }
+.dialog-progress { margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: 10px; background: var(--c-info-soft); color: var(--c-info-text); font-size: 14px; }
+.dialog-progress[hidden] { display: none; }
+.dialog-message.is-warning { padding: var(--sp-2) var(--sp-3); border-left: 3px solid var(--c-danger-border); border-radius: 8px; background: var(--c-danger-soft); color: var(--c-text); }
+.dialog-tech { margin: 0 0 var(--sp-3); font-size: 13px; color: var(--c-text-2); }
+.dialog-tech > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.dialog-tech p { margin: var(--sp-1) 0 0; overflow-wrap: anywhere; }
 .live-observers { padding: var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--c-line); background: var(--c-surface-1); }
 .live-observers > summary { cursor: pointer; font-weight: 600; color: var(--c-text-2); min-height: 32px; display: flex; align-items: center; }
 .live-observers[open] { display: grid; gap: var(--sp-2); }

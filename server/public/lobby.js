@@ -69,6 +69,10 @@ async function api(url, options = {}) {
   return data;
 }
 let interruptBusy=false;
+// R3: set the moment pause is clicked (before the command is even accepted) so
+// the table is inert at once; released only by a settled pause command, the
+// authoritative state, or a different game (see syncTableInert).
+let pauseLock=null;
 function render() {
   if (!snapshot) return;
   const s = snapshot.state;
@@ -76,7 +80,7 @@ function render() {
   const terminal=['completed','ended'].includes(s);
   viewingRecord=!!(!selecting && terminal && snapshot.gameId);
 
-  $("table").inert = (!["playing","finalizing","completed","ended"].includes(s)) || Boolean(document.querySelector('dialog[open]'));
+  syncTableInert();
   const interruptible=['playing','pausing'].includes(s) && snapshot.pendingDecision?.status==='running' && snapshot.pendingDecision.softWait===true;
   $('interrupt-decision').hidden=!interruptible;
   $('interrupt-decision').disabled=interruptBusy;
@@ -85,7 +89,9 @@ function render() {
   if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'AI가 계속 생각하고 있습니다';
   const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
-  $("pause-message").textContent = recovery
+  const stopping = !paused && (s === 'pausing' || Boolean(pauseLock));
+  let technical = '';
+  $("pause-message").textContent = stopping && !recovery ? '일시정지하는 중입니다. 진행 중인 작업을 마치면 멈춥니다.' : recovery
     ? (snapshot.pendingDecision.status === 'unsafe'
       ? snapshot.pendingDecision.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED' ? 'JEV 요청 종료를 확인하지 못했습니다. 앱 서비스를 종료한 뒤 다시 열어 복구하세요.' : snapshot.pendingDecision.code === 'JEV_ENGINE_APPLY_UNCONFIRMED' ? '액션 적용 여부를 확인할 수 없어 재시도할 수 없습니다. 게임을 종료하거나 앱 재개로 기록을 확인하세요.' : '실행 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
       : snapshot.pendingDecision.retryable === false ? '입력 오류로 재시도할 수 없습니다. 게임을 종료하세요.'
@@ -93,15 +99,22 @@ function render() {
   if (recovery) {
     const pending = snapshot.pendingDecision;
     const d = pending.diagnostics;
+    // Raw reply details help diagnosis but are not the message: fold them away.
     if (d?.lastRejection) {
       const r = d.lastRejection;
-      $("pause-message").textContent += ` 직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회.`;
+      technical += `직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회. `;
     }
     if (pending.retryWillCorrect) $("pause-message").textContent += ' 재시도하면 교정 안내를 함께 보냅니다.';
     if (pending.freshSessionAvailable) $("pause-message").textContent += ' 같은 무효 회신이 반복되면 이 좌석의 새 세션으로 재시도할 수 있습니다.';
     if (pending.freshSessionAuthorized) $("pause-message").textContent = '새 세션으로 재시도 중';
-    if (pending.diagnosticsQuarantined) $("pause-message").textContent += ' (진단 기록이 손상되어 격리됨)';
+    if (pending.diagnosticsQuarantined) technical += '진단 기록이 손상되어 격리됨.';
   }
+  // A decision waiting for recovery is a warning, not the ordinary paused note.
+  $("pause-message").classList.toggle('is-warning', Boolean(recovery));
+  $("pause-tech").hidden = !technical;
+  $("pause-tech-text").textContent = technical.trim();
+  $("pause-progress").hidden = !(stopping && s === 'pausing');
+  $("pause-progress").textContent = pauseProgressText(snapshot.pausing);
   $("retry-decision").hidden = !recovery || snapshot.pendingDecision?.retryable === false;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
@@ -116,7 +129,8 @@ function render() {
       !["playing", "pausing", "paused", "stopping", "finalizing"].includes(s));
   document.body.classList.toggle('has-game', !$("game").hidden);
   $("menu").hidden = !["playing", "pausing", "paused"].includes(s);
-  $("menu").disabled = busy || s === "pausing";
+  // Stays usable while pausing so a closed menu can be reopened to watch progress.
+  $("menu").disabled = busy && !pauseLock;
   $("menu").textContent = paused ? "일시정지 메뉴" : "일시정지 · 메뉴";
   $("result").hidden =
     selecting || !["completed", "ended", "error", "external"].includes(s);
@@ -212,7 +226,7 @@ function render() {
     );
   for (const id of ["resume", "restart", "modes", "end"])
     $(id).disabled = busy || !paused;
-  if (!paused) $("pause-dialog").close();
+  if (!paused && !stopping) $("pause-dialog").close();
   if (!snapshot.gameId || (selecting && terminal)) {
     frameId=null;$("table").removeAttribute('src');
   } else if (frameId!==snapshot.gameId && ['playing','paused','pausing','stopping','finalizing','completed','ended'].includes(s)) {
@@ -221,6 +235,24 @@ function render() {
   }
   // Shell extras live outside render(): tests run this function alone in a VM.
   if (typeof paintShell === "function") paintShell();
+}
+// One place decides whether the table accepts input: a local pause lock, a
+// non-playing state, or any open dialog. Called from render, dialog close and
+// the dialog observer, so closing the menu never unlocks a pending pause.
+function syncTableInert() {
+  if (!snapshot) return;
+  if (pauseLock && (['finalizing','completed','ended','error'].includes(snapshot.state)
+    || snapshot.gameId !== pauseLock.gameId || snapshot.gameEpoch !== pauseLock.gameEpoch)) pauseLock = null;
+  $("table").inert = Boolean(pauseLock) || (!["playing","finalizing","completed","ended"].includes(snapshot.state)) || Boolean(document.querySelector('dialog[open]'));
+  $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
+  $("table-lock-detail").textContent = snapshot.state === 'pausing' ? pauseProgressText(snapshot.pausing) : '';
+}
+function pauseProgressText(pausing) {
+  const w = pausing?.waitingFor ?? {};
+  const training = w.training || (w.evaluate ?? 0) + (w.solve ?? 0) + (w.explain ?? 0);
+  const parts = [w.coach ? `코치 노트 ${w.coach}건` : '', training ? `학습 분석 ${training}건` : '',
+    w.resolver ? 'AI 코치 연결 확인' : '', w.other ? `기타 작업 ${w.other}건` : ''].filter(Boolean);
+  return parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.';
 }
 let refreshFailures=0;
 async function refresh() {
@@ -441,6 +473,7 @@ const commands = createLobbyCommandClient({
 async function command(kind, setup, extra = {}) {
   if (busy) return;
   let refocusStart = false;
+  let menuAfter = false;
   viewingRecord = false;
   busy = true;
   if (["start", "replace-current", "restart"].includes(kind)) {
@@ -461,12 +494,15 @@ async function command(kind, setup, extra = {}) {
       ...extra,
     };
     await commands.send(payload);
+    if (kind === "pause") pauseLock = null;
     selecting = false;
     await refresh();
-    if (snapshot.state === "paused") $("pause-dialog").showModal();
+    menuAfter = snapshot.state === "paused";
   } catch (e) {
     refocusStart = !!preparing && kind === "start";
     preparing = null;
+    // A refused pause is final; an unanswered one stays locked until recovered.
+    if (kind === "pause" && !commands.pending) pauseLock = null;
     showError(e);
     await refresh().catch(() => {});
   } finally {
@@ -474,8 +510,11 @@ async function command(kind, setup, extra = {}) {
     busy = false;
     render();
     // A rejected start returns to the untouched form with focus on the button
-    // (only now is it enabled again).
+    // (only now is it enabled again). A settled pause focuses the menu's primary
+    // only if the menu is still open: one the user dismissed while pausing stays
+    // closed, and the menu button reopens it.
     if (refocusStart && !$("setup").hidden) $("start").focus();
+    if (menuAfter && $("pause-dialog").open) openPauseMenu();
   }
 }
 function confirm(fn) {
@@ -510,10 +549,20 @@ $('interrupt-decision').onclick=async()=>{
   } catch(error){showError(error);}
   finally {interruptBusy=false;render();}
 };
-$("menu").onclick = () =>
-  snapshot.state === "paused"
-    ? $("pause-dialog").showModal()
-    : command("pause");
+function openPauseMenu() {
+  if (!$("pause-dialog").open) $("pause-dialog").showModal();
+  const primary = [$("resume"), $("retry-decision")].find((node) => !node.hidden && !node.disabled);
+  primary?.focus();
+}
+// The menu opens at once; the pause command runs behind it (R3, design §8.1).
+$("menu").onclick = () => {
+  if (snapshot.state !== "playing" || pauseLock) { openPauseMenu(); return; }
+  if (busy) return;
+  pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch };
+  render();
+  openPauseMenu();
+  void command("pause");
+};
 $("resume").onclick = () => command("resume");
 $("retry-decision").onclick = () => command('retry-decision');
 $("retry-fresh-session").onclick = () => $("fresh-session-dialog").showModal();
@@ -710,10 +759,8 @@ $("study").onclick = async () => {
     showError(e);
   }
 };
-for(const dialog of document.querySelectorAll('dialog')) {
-  dialog.addEventListener('close',()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));});
-}
-new MutationObserver(()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+for(const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close',syncTableInert);
+new MutationObserver(syncTableInert).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
 form.onchange();
 await refresh().catch(showError);
 async function recoverCommand() {
@@ -725,12 +772,13 @@ async function recoverCommand() {
     selecting = false;
     $("error").textContent = "";
     await refresh();
-    if (snapshot.state === "paused") $("pause-dialog").showModal();
   } catch (e) {
     showError(e);
   } finally {
+    if (!commands.pending) pauseLock = null;
     busy = false;
     render();
+    if (snapshot?.state === "paused") openPauseMenu();
   }
 }
 async function roomOp(op, extra = {}) {
