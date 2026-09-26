@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMiniDocument } from './helpers/mini-dom.js';
-import { readDisplaySettings, saveDisplaySetting, applyDisplaySettings, replayOnboarding, currentDisplaySettings, followStoredChoice, DISPLAY_KEYS } from '../server/public/display-settings.js';
+import { readDisplaySettings, saveDisplaySetting, applyDisplaySettings, replayOnboarding, currentDisplaySettings, followStoredChoice, openDisplaySettings, DISPLAY_KEYS } from '../server/public/display-settings.js';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createDialogController } from '../server/public/dialog-controller.js';
@@ -263,4 +263,49 @@ test('theme boot repaints only the item another document saved and leaves unsave
   onStorage({ key: 'holdem.theme.v1' });
   assert.equal(attrs.get('data-theme'), 'a', 'a theme saved elsewhere replaces the unsaved one');
   assert.equal(attrs.has('data-display-local'), false);
+});
+
+test('a timed turn hides the guide and moves focus that was in it to the action bar', () => {
+  const { doc, side, bar, onboarding } = guide(memoryStorage());
+  const call = doc.createElement('button');
+  const disabled = doc.createElement('button');
+  disabled.disabled = true;
+  bar.append(disabled, call);
+  onboarding.offer({ myTurn: true, deadline: false, seated: true });
+  side.querySelector('.onboarding-next').focus();
+  onboarding.offer({ myTurn: true, deadline: true, seated: true });
+  assert.equal(onboarding.suspended, true);
+  assert.equal(doc.activeElement, call, 'focus goes to the first live action button');
+  // Back in the wait, the guide returns without taking focus from where the user is.
+  onboarding.offer({ myTurn: false, deadline: false, seated: true });
+  assert.equal(doc.activeElement, call);
+  // Focus elsewhere when the timed turn starts: it stays there.
+  const other = guide(memoryStorage());
+  const button = other.doc.createElement('button');
+  other.doc.body.append(button);
+  other.onboarding.offer({ myTurn: true, deadline: false, seated: true });
+  button.focus();
+  other.onboarding.offer({ myTurn: true, deadline: true, seated: true });
+  assert.equal(other.doc.activeElement, button);
+});
+
+function dialogDocument(noOnboarding) {
+  const doc = createMiniDocument();
+  withWindow(doc);
+  doc.getElementById = () => null;
+  const create = doc.createElement;
+  doc.createElement = (tag) => {
+    const node = create(tag);
+    if (tag === 'dialog') { node.showModal = () => { node.open = true; }; node.close = () => { node.open = false; }; }
+    return node;
+  };
+  if (noOnboarding) doc.body.setAttribute('data-no-onboarding', '');
+  return doc;
+}
+
+test('the study room (another origin, no table) does not offer the guide replay', () => {
+  const table = openDisplaySettings({ doc: dialogDocument(false), storage: memoryStorage() });
+  assert.ok(table.querySelector('.display-onboarding'), 'pages with the table offer it');
+  const study = openDisplaySettings({ doc: dialogDocument(true), storage: memoryStorage() });
+  assert.equal(study.querySelector('.display-onboarding'), null);
 });

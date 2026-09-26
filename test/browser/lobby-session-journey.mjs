@@ -18,6 +18,7 @@ import {
 export const requiredJourneyChecks = [
   "missing-module-visible-error",
   "bare-lobby-no-init",
+  "help-menu-focus-return",
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
@@ -137,6 +138,14 @@ export async function runLobbyJourney(outDir) {
     assert.equal(await evaluate("location.hash"), "");
     check("bare-lobby-no-init");
     await browser(["screenshot", path.join(outDir, "lobby.png")]);
+    // Keyboard: menu → 도움말 → close: focus lands back on the visible menu button.
+    await browser(["focus", "#help-menu"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!document.querySelector('#help-menu-list').hidden"));
+    await browser(["focus", "#open-help"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!!document.querySelector('#help-panel[open]')"));
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    await wait(() => evaluate("!document.querySelector('#help-panel[open]') && document.activeElement?.id==='help-menu'"));
+    check("help-menu-focus-return");
     assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
     await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");

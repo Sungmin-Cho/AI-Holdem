@@ -273,7 +273,8 @@ dialog.ui-dialog.help-panel[open] { display: grid; grid-template-rows: auto auto
 .help-rankings { display: grid; gap: var(--sp-2); margin: var(--sp-3) 0 0; padding: 0; list-style: none; }
 .help-ranking { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .help-ranking-name { font-size: var(--fs-13); font-weight: 600; }
-.help-ranking-cards { display: inline-flex; gap: 3px; --cw: 24px; --ch: 34px; }
+.help-ranking-cards { display: inline-flex; gap: 3px; }
+.help-ranking-cards .card { --cw: 24px; --ch: 34px; }
 .help-ranking-cards .card-pip { display: none; }
 .help-info {
   min-width: 28px;

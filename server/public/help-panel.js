@@ -96,7 +96,8 @@ function sectionContent(doc, id) {
   const button = el(doc, 'button', 'ui-btn ui-btn--ghost help-display-open', '표시 설정 열기');
   button.type = 'button';
   button.addEventListener('click', () => openDisplaySettings({ doc }));
-  return [paragraph(doc, '테마(기본 · 클래식 · 페이퍼), 금액 단위(BB/칩), 덱 색상(4색/2색), 모션 줄이기, 처음 안내 다시 보기를 고를 수 있습니다.'), button];
+  const replay = doc.body?.hasAttribute?.('data-no-onboarding') ? '' : ', 처음 안내 다시 보기';
+  return [paragraph(doc, `테마(기본 · 클래식 · 페이퍼), 금액 단위(BB/칩), 덱 색상(4색/2색), 모션 줄이기${replay}를 고를 수 있습니다.`), button];
 }
 
 function build(doc) {
@@ -168,7 +169,8 @@ export function wireHelpMenu({ doc = globalThis.document, section = 'rules' } = 
   menu.onclick = () => set(list.hidden);
   list.addEventListener('keydown', (event) => { if (event.key === 'Escape') { set(false); menu.focus(); } });
   doc.addEventListener('click', (event) => { if (!list.hidden && !event.target.closest('.help-menu')) set(false); });
-  $('open-help').onclick = () => { set(false); openHelp(section, { doc }); };
-  $('open-display-settings').onclick = () => { set(false); openDisplaySettings({ doc }); };
+  // Close the list and focus the menu button first: the dialog returns focus to it.
+  $('open-help').onclick = () => { set(false); menu.focus(); openHelp(section, { doc }); };
+  $('open-display-settings').onclick = () => { set(false); menu.focus(); openDisplaySettings({ doc }); };
   return { set };
 }

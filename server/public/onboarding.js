@@ -41,6 +41,13 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   };
   // Where keyboard focus goes back to when the guide ends from inside its card.
   let returnFocus = null;
+  // A timed turn is starting: focus that was in the card moves to the action bar.
+  const focusActions = () => {
+    const bar = targets.actions?.();
+    const button = bar ? [...bar.querySelectorAll('button')].find((node) => !node.disabled && !node.hidden) : null;
+    const fallback = returnFocus && returnFocus.isConnected !== false && !returnFocus.disabled ? returnFocus : null;
+    (button ?? fallback)?.focus?.();
+  };
   const end = () => {
     const hadFocus = Boolean(card?.contains(doc.activeElement));
     step = -1;
@@ -95,7 +102,15 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     offer({ myTurn, deadline, seated = true }) {
       if (step >= 0) {
         // Already showing: step aside for a timed turn, come back in the wait after it.
-        if (myTurn && deadline) { if (!suspended) { suspended = true; hide(); } return false; }
+        if (myTurn && deadline) {
+          if (!suspended) {
+            const hadFocus = Boolean(card?.contains(doc.activeElement));
+            suspended = true;
+            hide();
+            if (hadFocus) focusActions();
+          }
+          return false;
+        }
         if (suspended && seated) { suspended = false; render(); return true; }
         return false;
       }

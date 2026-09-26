@@ -145,9 +145,14 @@ export function openDisplaySettings({ doc = globalThis.document, storage } = {})
   const pick = (name) => (value) => {
     note.textContent = saveDisplaySetting(name, value, { doc, storage }) ? '저장했습니다. 이 브라우저에만 적용됩니다.' : '이 브라우저에 저장할 수 없어 이번 화면에만 적용했습니다.';
   };
-  const again = el(doc, 'button', 'ui-btn ui-btn--ghost display-onboarding', '처음 안내 다시 보기');
-  again.type = 'button';
-  again.addEventListener('click', () => { replayOnboarding({ doc, storage }); note.textContent = '다음 내 차례에 처음 안내를 다시 보여 드립니다.'; });
+  // The guide runs on the game table; a page of another origin (the study room)
+  // could not reset it, so it does not offer the button.
+  const offerReplay = !doc.body?.hasAttribute?.('data-no-onboarding');
+  const again = offerReplay ? el(doc, 'button', 'ui-btn ui-btn--ghost display-onboarding', '처음 안내 다시 보기') : null;
+  if (again) {
+    again.type = 'button';
+    again.addEventListener('click', () => { replayOnboarding({ doc, storage }); note.textContent = '다음 내 차례에 처음 안내를 다시 보여 드립니다.'; });
+  }
   const close = el(doc, 'button', 'ui-btn ui-btn--primary display-close', '닫기');
   close.type = 'button';
   close.addEventListener('click', () => dialog.close());
@@ -157,7 +162,7 @@ export function openDisplaySettings({ doc = globalThis.document, storage } = {})
     radioGroup(doc, 'unit', '금액 단위', [['bb', 'BB 중심'], ['chips', '칩 중심']], settings.unit, pick('unit')),
     radioGroup(doc, 'deck', '카드 무늬 색', [['4', '4색 (무늬마다 다른 색)'], ['2', '2색 (빨강·검정)']], settings.deck, pick('deck')),
     radioGroup(doc, 'motion', '모션', [['system', '시스템 설정 따름'], ['reduce', '줄이기']], settings.motion, pick('motion')),
-    again, note, close,
+    ...(again ? [again] : []), note, close,
   );
   dialog.addEventListener('close', () => dialog.remove());
   doc.body.append(dialog);

@@ -1673,6 +1673,11 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:.65rem;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
 .result-dock:has(> .hand-result[hidden]) {display:none;}
+/* The narrowest phones: five board cards (152px at 28px) are wider than the gap
+   between the side plates (140px at 360px), so the board cards shrink a little. */
+@media(max-width:380px) {
+  .board {--cw:25px;--ch:36px;--card-gap:2px;}
+}
 @media(max-width:600px) {
   .plate-action-amount {display:none;}
   .hand-result {font-size:.82rem;padding:.65rem;}

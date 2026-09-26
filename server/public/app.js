@@ -1762,7 +1762,7 @@ $('learning-scope')?.after(helpButton('learning', '학습 수치의 의미'));
 $('replay-disclaimer')?.after(helpButton('privacy', '복기 공개 범위'));
 // Esc ends the first-turn guide when no dialog is open.
 document.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Escape' || !onboarding.active || dialogs.active || document.querySelector('dialog[open]')) return;
+  if (ev.key !== 'Escape' || !onboarding.active || onboarding.suspended || dialogs.active || document.querySelector('dialog[open]')) return;
   onboarding.skip();
 });
 // Display settings changed here or in another document of this origin.
