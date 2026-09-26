@@ -1119,7 +1119,30 @@ main:has(.pre-action-hint:not([hidden])) { min-height: min-content; }
 
 .plate-deadline[hidden] {display:none;}
 
-.final-content{overflow:auto;min-height:0;padding:0 1.5rem 1.5rem}.final-content h2{font-size:1rem;margin-top:1.2rem}.final-ranking{width:100%;border-collapse:collapse;text-align:left}.final-ranking th,.final-ranking td{padding:.45rem;border-bottom:1px solid var(--c-line-strong)}.final-chart{display:block;width:100%;max-width:32rem;height:8rem;color:var(--c-info);fill:currentColor}.final-links{display:flex;gap:1rem;align-items:center;margin-top:1rem}
+.final-content{overflow:auto;min-height:0;padding:0 1.5rem 1.5rem}.final-content h2{font-size:1rem;margin-top:1.2rem}.final-ranking{width:100%;border-collapse:collapse;text-align:left}.final-ranking th,.final-ranking td{padding:.45rem;border-bottom:1px solid var(--c-line-strong)}.final-chart{display:block;width:100%;height:auto;overflow:visible}.final-links{display:flex;gap:1rem;align-items:center;margin-top:1rem}
+/* Final results: one series chart (no legend), a zero baseline, named points. */
+.final-chart-figure {position:relative;max-width:34rem;margin:0;}
+.final-chart-zero {stroke:var(--c-line-strong);stroke-width:1;}
+.final-chart-line {fill:none;stroke:var(--c-info);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
+.final-chart-dot {fill:var(--c-info);stroke:var(--c-surface-1);stroke-width:2;cursor:pointer;}
+.final-chart-dot:focus-visible {outline:none;stroke:var(--c-focus);stroke-width:3;}
+.final-chart-label {fill:var(--c-text);font-family:var(--f-num);font-size:11px;font-weight:700;}
+.final-chart-axis {display:flex;justify-content:space-between;font-size:12px;color:var(--c-text-2);}
+.final-chart-tip {position:absolute;z-index:2;margin:0;padding:4px 8px;border:1px solid var(--c-line-strong);border-radius:8px;background:var(--c-surface-2);color:var(--c-text);font-size:12px;white-space:nowrap;pointer-events:none;transform:translate(-50%,calc(-100% - 10px));}
+.final-chart-tip[hidden] {display:none;}
+.final-highlights {display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:10px;margin-top:12px;}
+.final-highlight {display:grid;gap:4px;padding:10px 12px;border:1px solid var(--c-line);border-radius:12px;background:var(--c-surface-2);}
+.final-highlight-label {font-size:12px;color:var(--c-text-2);}
+.final-highlight-value {font-family:var(--f-num);font-size:20px;color:var(--c-text);}
+.final-highlight.is-pos .final-highlight-value {color:var(--c-pos);}
+.final-highlight.is-neg .final-highlight-value {color:var(--c-neg);}
+.final-highlight .btn {justify-self:start;}
+.final-ranking tr.is-viewer td {color:var(--c-info-text);font-weight:700;}
+.final-pots {padding-left:1.2rem;}
+.review-section {padding:6px 0;border-top:1px solid var(--c-line);}
+.review-section > summary {display:flex;align-items:center;min-height:36px;cursor:pointer;font-size:15px;font-weight:700;color:var(--c-text);}
+.review-section.is-practice {margin:8px 0;padding:8px 12px;border:1px solid color-mix(in srgb,var(--c-action) 45%,transparent);border-radius:12px;background:color-mix(in srgb,var(--c-action) 8%,transparent);}
+.review-practice-link {display:inline-block;margin-top:6px;}
 
 /* ---- Presentation layer (formerly table-design.css) ---- */
 html,body {height:auto;min-height:100%;}

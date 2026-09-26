@@ -85,6 +85,8 @@ if (participantMode) {
   }
   document.body.classList.add('participant-mode');
 }
+// "5,000 칩으로" / "100 BB로": the particle follows the unit's final sound.
+const withParticle = (amount) => `${amount}${/칩$/.test(amount) ? '으로' : '로'}`;
 // The cash reset line lives in the result strip; hold it across strip rebuilds.
 const cashResetNote = $('cash-reset-note');
 // Decorative motion: off for reduced-motion users and the "reduce" display setting.
@@ -323,7 +325,7 @@ function paintTop(view) {
   // Cash stacks are already restored in the view, so the viewer's stack is the next start.
   const restored = view?.seats?.find((seat) => seat.playerId === viewerId(view))?.stack;
   cashResetNote.textContent = Number.isSafeInteger(restored)
-    ? `다음 핸드는 ${formatAmount(restored, view.blinds?.[1], displayUnit).primary}로 다시 시작합니다.`
+    ? `다음 핸드는 ${withParticle(formatAmount(restored, view.blinds?.[1], displayUnit).primary)} 다시 시작합니다.`
     : '다음 핸드는 시작 스택으로 다시 시작합니다.';
   $('learning-scope').textContent = cash
     ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
@@ -1248,11 +1250,30 @@ async function loadFinalSummary() {
     if(!finalSummary && !!(ui.sessionEnded||terminalRecord)!==ended)void loadFinalSummary();
   }
 }
+// Each review heading becomes a section the reader can fold; the practice plan
+// for the next game stays open, stands out, and links to the study room.
+function foldReviewSections(review) {
+  const children=[...review.childNodes];let section=null;
+  review.replaceChildren();
+  for(const child of children){
+    if(child.nodeName==='H2'){
+      const practice=/다음 게임에서 연습할 것/.test(child.textContent);
+      section=document.createElement('details');section.className=`review-section${practice?' is-practice':''}`;
+      section.open=practice||!review.querySelector('details');
+      const summary=document.createElement('summary');summary.append(...child.childNodes);section.append(summary);
+      review.append(section);
+      if(practice&&authenticatedStudyUrl&&!participantMode){const link=document.createElement('a');link.className='study-link review-practice-link';link.href=authenticatedStudyUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='학습실에서 연습하기';section._cta=link;}
+      continue;
+    }
+    (section??review).append(child);
+  }
+  for(const details of review.querySelectorAll('details.is-practice'))if(details._cta)details.append(details._cta);
+}
 function paintReview(view) {
   const state=finalScreen({view,sessionEnded:ui.sessionEnded,terminal:terminalRecord,review:ui.review});
   const overlay=$('review-overlay'),reopen=$('review-reopen');
   reopen.hidden=!state.open;
-  reopen.textContent='최종 결과 다시 열기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
+  reopen.textContent='결과 다시 보기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
   if(state.open)void loadFinalSummary();
   const show=state.open && overlay.dataset.dismissed!=='true' && (!dialogs.active || dialogs.active===overlay);
   overlay.hidden=!show;
@@ -1274,14 +1295,15 @@ function paintReview(view) {
     const hand=buildHandResult({log:ui.log,view:view?{...view,gameOver:false}:view,viewer,prior:null});
     last.hidden=!hand;
     if(hand){const heading=document.createElement('h2');heading.textContent='마지막 핸드';last.append(heading);
-      for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} · ${winner.total}${winner.handName?' · '+winner.handName:''}`;last.append(row);}}
+      const bb=view?.mode==='cash-training'?view.blinds?.[1]:null;
+      for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} 승리${winner.handName?' · '+winner.handName:''} · 팟 ${formatAmount(winner.total,bb,'bb').primary} 획득`;last.append(row);}}
   }
   const section=$('final-review-section');section.hidden=participantMode||spectator;
   const review=$('review-body');
   const source=ui.review??state.review;
   if(review._source!==source){
     const scroll=review.scrollTop;
-    if(ui.review)review.innerHTML=renderMarkdown(reviewBody(ui.review));
+    if(ui.review){review.innerHTML=renderMarkdown(reviewBody(ui.review));foldReviewSections(review);}
     else review.textContent=state.review==='pending'?'종합 리뷰 생성 중… 보통 1~4분':'종합 리뷰가 없습니다';
     review._source=source;review.scrollTop=scroll;
   }

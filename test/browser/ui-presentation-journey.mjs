@@ -326,7 +326,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
     const strip=await evaluate("(()=>{const r=document.querySelector('#hand-result').getBoundingClientRect();return {hidden:document.querySelector('#hand-result').hidden,text:document.querySelector('#hand-result').textContent,hits:[...document.querySelectorAll('#board .card, #pots')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
     assert.equal(strip.hidden,false);assert.deepEqual(strip.hits,[],JSON.stringify(strip));
-    assert.match(strip.text,/팟 .+ 획득/);assert.doesNotMatch(strip.text,/\+\d/,'a winner line is the pot collected, never a signed profit');
+    const winnerLines=await evaluate("[...document.querySelectorAll('#hand-result .hand-result-winner')].map(n=>n.textContent)");
+    assert.ok(winnerLines.length>0&&winnerLines.every(line=>/팟 .+ 획득/.test(line)&&!/\+\d/.test(line)),`a winner line is the pot collected, never a signed profit: ${JSON.stringify(winnerLines)}`);
     await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');

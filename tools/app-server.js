@@ -617,6 +617,10 @@ export async function startAppServer({
                 })),
                 result: engine.result ?? null,
                 winnerId: engine.winnerId ?? null,
+                // Additive: lets the join page format amounts like the host
+                // (cash in the fixed big blind, tournaments in chips).
+                mode: engine.config?.mode ?? null,
+                bigBlind: engine.config?.mode === 'cash-training' && Number.isSafeInteger(engine.config?.blinds0?.[1]) ? engine.config.blinds0[1] : null,
               };
             } catch {
               final = null;
