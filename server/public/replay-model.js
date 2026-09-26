@@ -93,6 +93,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   }
   const bigBlind = Array.isArray(replay.blinds) && isAmount(replay.blinds[1]) ? replay.blinds[1] : Math.max(0, ...posts.map((post) => post.amount));
   let currentBet = bigBlind;
+  // The engine's minimum raise: the last full raise's size, a big blind at each street's start.
+  let lastRaiseSize = bigBlind;
   snapshot({ kind: 'deal', posts: posts.map((post) => ({ playerId: post.playerId, amount: post.amount })) });
 
   const actions = Array.isArray(replay.actions) ? replay.actions : [];
@@ -112,6 +114,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       const collected = sum(Object.values(bets));
       collect();
       currentBet = 0;
+      lastRaiseSize = bigBlind;
       const dealt = Array.isArray(action.board) ? action.board : board.slice(0, STREET_BOARD[street]);
       // A new street only adds cards: what was already on the board stays.
       if (dealt.length !== STREET_BOARD[street] || !shownBoard.every((card, at) => dealt[at] === card)) return fail('board', index);
@@ -124,6 +127,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (action.potTotal !== undefined && action.potTotal !== sum(Object.values(contrib))) return fail('pot-total', index);
     if (action.currentBet !== undefined && action.currentBet !== currentBet) return fail('current-bet', index);
     if (action.maxRaiseTo !== undefined && action.maxRaiseTo !== bets[playerId] + stacks[playerId]) return fail('max-raise', index);
+    if (action.minRaiseTo !== undefined && action.minRaiseTo !== currentBet + lastRaiseSize) return fail('min-raise', index);
     const owed = Math.min(Math.max(0, currentBet - bets[playerId]), stacks[playerId]);
     if (action.callAmount !== undefined && action.callAmount !== owed) return fail('call-amount', index);
     let chips = 0;
@@ -137,6 +141,10 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       if (!isAmount(action.amount) || action.amount <= currentBet) return fail('raise', index);
       chips = action.amount - bets[playerId];
       if (chips <= 0 || chips > stacks[playerId]) return fail('raise', index);
+      // A short all-in is the only raise below the minimum (applyAction's rule).
+      const minTo = currentBet + lastRaiseSize, maxTo = bets[playerId] + stacks[playerId];
+      if (minTo > maxTo ? action.amount !== maxTo : action.amount < minTo) return fail('raise', index);
+      if (action.amount >= minTo) lastRaiseSize = action.amount - currentBet;
       currentBet = action.amount;
     } else return fail('action', index);
     if (chips) put(playerId, chips);

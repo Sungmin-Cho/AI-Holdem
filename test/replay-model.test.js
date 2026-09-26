@@ -137,6 +137,7 @@ test('a record whose numbers disagree with themselves is refused', () => {
   assert.equal(tamper((copy) => { copy.actions[call].currentBet += 1; }).ok, false, 'current bet');
   assert.equal(tamper((copy) => { copy.actions[call].maxRaiseTo += 1; }).ok, false, 'max raise-to');
   assert.equal(tamper((copy) => { copy.actions[call].callAmount += 1; }).ok, false, 'call amount field');
+  assert.equal(tamper((copy) => { copy.actions[call].minRaiseTo += 1; }).ok, false, 'min raise-to field');
   const onFlop = replay.actions.findIndex((action) => action.street === 'flop');
   assert.ok(onFlop > 0, 'the fixture reaches the flop');
   assert.equal(tamper((copy) => { copy.actions[onFlop].board = [...copy.actions[onFlop].board].reverse(); }).ok, false, 'board prefix');
@@ -406,4 +407,17 @@ test('engine rules the arithmetic cannot see: returns, board runout, all-in acto
   for (const [playerId, cards] of Object.entries(shoved.holes)) {
     for (const code of cards) assert.ok(summary.includes(cardLabel(parseCard(code))), `${playerId} ${code} is readable`);
   }
+});
+
+test('a raise below the minimum (and not a short all-in) is refused', () => {
+  const record = play(createGame({ aiCount: 1, startStack: 1000, levelEvery: 10 }), (legal, turn) => (turn === 0 && legal.canRaise ? ['raise', legal.minRaiseTo] : passive(legal)));
+  const replay = replayRecord(record, { reveal: 'all' });
+  assert.equal(buildReplaySteps(replay).ok, true);
+  const raise = replay.actions.findIndex((action) => action.action === 'raise');
+  const small = structuredClone(replay);
+  // Keep every number consistent except the size: one chip under the minimum,
+  // with the minRaiseTo field dropped so only the rule itself can see it.
+  small.actions[raise].amount -= 1;
+  delete small.actions[raise].minRaiseTo;
+  assert.equal(buildReplaySteps(small).ok, false);
 });
