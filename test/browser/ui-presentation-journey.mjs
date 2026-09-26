@@ -12,14 +12,32 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
 export const GEOMETRY_WIDTHS=[360,390,768,1024,1280,1440];
+// The table as it sits inside the lobby or join page: the handshake adds
+// body.embedded (no top bar) and the viewport is the iframe under a header.
+export const EMBEDDED_SIZES=[[1280,744],[390,590]];
+export const embeddedStates=()=>['turn','result'].flatMap(state=>EMBEDDED_SIZES.map(([w,h])=>`${state}-${w}x${h}`));
+const EMBEDDED_TABLE_SCRIPT=`(()=>{
+  const visible=n=>n&&!n.hidden&&n.getClientRects().length>0;
+  const rect=n=>n.getBoundingClientRect();
+  const hit=(a,b)=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1;
+  const plates=[...document.querySelectorAll('.plate')].filter(visible).map(rect);
+  const strip=document.querySelector('#hand-result');
+  const blockers=[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(visible);
+  const bar=document.querySelector('#action-bar');let dock=null;
+  if(visible(bar)){bar.scrollIntoView({block:'end'});const r=rect(bar);dock=r.top>=0&&r.bottom<=innerHeight+1;}
+  let result=null;
+  if(visible(strip)){strip.scrollIntoView({block:'nearest'});const r=rect(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1,hits:blockers.filter(n=>hit(r,rect(n))).map(n=>n.id||n.className)};}
+  return {scrollX:document.documentElement.scrollWidth-innerWidth,topbar:getComputedStyle(document.querySelector('.topbar')).display,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>hit(a,b))),dock,result};
+})()`;
+export const geometryCounts=({ci=false}={})=>ci?[2,6,9]:[2,6,8,9];
 export function geometryCombos({ci=false}={}) {
   const combos=[];
-  for(const count of ci?[2,6,9]:[2,6,8,9]) {
+  for(const count of geometryCounts({ci})) {
     for(const width of GEOMETRY_WIDTHS)for(const height of [667,900])combos.push(`${count}p-${width}x${height}`);
     for(const width of [1024,1280])combos.push(`${count}p-${width}x800`);
   }
@@ -105,7 +123,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const origin=`http://127.0.0.1:${relay.port}`;
     for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js','help-panel.js','display-settings.js','onboarding.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
-    for(const count of ci?[6,9]:[2,6,8,9]) {
+    // The same table sizes the expected matrix names (CI included).
+    for(const count of geometryCounts({ci})) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
       const dealt=startHand(state,{deck:fixedDeck()});state=dealt.state;view=userView(state);
       assert.ok(view.legal);
@@ -155,6 +174,22 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       await evaluate("document.documentElement.removeAttribute('data-theme')");
       return failures;
     };
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    // Embedded turn: no page overflow, no plate overlap, the dock within reach.
+    const embedded=[];
+    const measureEmbedded=async(stateName,expectResult)=>{
+      await evaluate("document.body.classList.add('embedded')");
+      for(const [width,height] of EMBEDDED_SIZES){
+        await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+        const fit=await evaluate(EMBEDDED_TABLE_SCRIPT);
+        assert.ok(fit.scrollX<=1&&fit.topbar==='none'&&!fit.overlap&&fit.dock!==false,JSON.stringify({stateName,width,height,fit}));
+        if(expectResult)assert.deepEqual(fit.result&&{inside:fit.result.inside,hits:fit.result.hits},{inside:true,hits:[]},JSON.stringify({stateName,width,height,fit}));
+        await browser(['screenshot',path.join(outDir,`embedded-${stateName}-${width}x${height}.png`)]);
+        embedded.push(`${stateName}-${width}x${height}`);
+      }
+      await evaluate("document.body.classList.remove('embedded')");
+    };
+    await measureEmbedded('turn',false);
     await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
     const turnContrast=await contrastPass('turn',['.plate-name','.plate-stack .amount-primary','.plate .amount-secondary','.plate-tag','.bet-amount','.pot-label','.pot-amount','#action-bar button','.action-summary','.table-context','.tabs button'],20);
     assert.deepEqual(turnContrast,[],JSON.stringify(turnContrast));
@@ -389,11 +424,39 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const listed=await evaluate("({rows:document.querySelectorAll('.replay-list .replay-row').length,expanded:document.querySelector('.replayer-list-toggle').getAttribute('aria-expanded'),focus:document.activeElement?.classList.contains('replayer-list-toggle')})");
     assert.ok(listed.rows>0&&listed.expanded==='true'&&listed.focus,JSON.stringify(listed));
     checks.push('replay-list-toggle');
+    // The help drawer opened from the replay's ⓘ keeps Tab and Esc to itself;
+    // the replay's own focus trap stands aside until it closes.
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    // Without the fix the replay's trap took Tab and sent focus back under the drawer.
+    // (Past the drawer's last control a native modal may hand focus to the browser.)
+    for(const key of ['Tab','Shift+Tab']) {
+      await browser(['press',key]);
+      const where=await evaluate("({inHelp:!!document.activeElement?.closest('#help-panel'),inReplay:!!document.activeElement?.closest('#replay-overlay')})");
+      assert.deepEqual(where,{inHelp:true,inReplay:false},`${key} stays in the help drawer`);
+    }
+    await evaluate("document.querySelector('#help-panel').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+    assert.equal(await evaluate("document.querySelector('#replay-overlay').hidden"),false,'Esc meant for the drawer leaves the replay open');
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.equal(await evaluate("!document.querySelector('dialog[open]') && !document.querySelector('#replay-overlay').hidden && !!document.activeElement?.closest('#replay-overlay')"),true,'focus comes back to the replay');
+    checks.push('help-over-replay');
     await browser(['set','viewport','390','844']);
     const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();const low=[...document.querySelectorAll('.replayer-controls .btn,.replayer-speed select,.replayer-jump')].map(n=>Math.round(n.getBoundingClientRect().height)).filter(h=>h<44);return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth,low}})()");
     assert.ok(sheet.w===390&&sheet.h===844&&sheet.fits&&sheet.low.length===0,JSON.stringify(sheet));
     await browser(['screenshot',path.join(outDir,'replayer-390.png')]);
     checks.push('replay-mobile-sheet');
+    // Phone: the ⓘ, the drawer's contents links and the settings rows are 44px targets.
+    const infoSize=await evaluate("(()=>{const r=document.querySelector('#replay-disclaimer + .help-info').getBoundingClientRect();return Math.min(r.width,r.height)})()");
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    const navSizes=await evaluate("[...document.querySelectorAll('#help-panel .help-nav-link')].map(n=>Math.round(n.getBoundingClientRect().height))");
+    await evaluate("document.querySelector('.help-display-open').click()");
+    await browser(['wait','#display-settings[open]']);
+    const optionSizes=await evaluate("[...document.querySelectorAll('#display-settings .display-option')].map(n=>Math.round(n.getBoundingClientRect().height))");
+    await evaluate("document.querySelector('#display-settings .display-close').click()");
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.ok(infoSize>=44&&navSizes.length>0&&navSizes.every(h=>h>=44)&&optionSizes.length>0&&optionSizes.every(h=>h>=44),JSON.stringify({infoSize,navSizes,optionSizes}));
+    checks.push('help-touch-targets');
     // Closing while playing stops the timer; reopening starts from the first step.
     await evaluate("document.querySelector('.replayer-play').click()");
     await browser(['press','Escape']);
@@ -539,6 +602,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       await browser(['screenshot',path.join(outDir,`hand-result-${width}x${height}.png`)]);
       assert.deepEqual({hidden:placed.hidden,inside:placed.inside,hits:placed.hits},{hidden:false,inside:true,hits:[]},JSON.stringify({width,height,placed}));
     }
+    await measureEmbedded('result',true);
+    assert.deepEqual(embedded,embeddedStates(),'the embedded state matrix ran exactly the expected states');
+    checks.push('embedded-state-matrix');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));

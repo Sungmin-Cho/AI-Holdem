@@ -13,6 +13,15 @@ export const DISPLAY_KEYS = Object.freeze({
 });
 
 const THEMES = Object.freeze([['b', '미드나잇 (기본)'], ['a', '클래식'], ['c', '페이퍼']]);
+const NORMAL = Object.freeze({
+  theme: (value) => (value === 'a' || value === 'c' ? value : 'b'),
+  unit: (value) => (value === 'chips' ? 'chips' : 'bb'),
+  deck: (value) => (value === '2' ? '2' : '4'),
+  motion: (value) => (value === 'reduce' ? 'reduce' : 'system'),
+});
+// Choices this document could not save: they stay applied here, and a later
+// change must not fall back to the stored (or default) value for them.
+const pageChoices = new WeakMap();
 
 function store(storage) { try { return storage ?? globalThis.localStorage ?? null; } catch { return null; } }
 function read(storage, key) { try { return store(storage)?.getItem(key) ?? null; } catch { return null; } }
@@ -36,6 +45,11 @@ export function readDisplaySettings(storage) {
   };
 }
 
+/** What this document shows: stored choices plus any this page could not save. */
+export function currentDisplaySettings({ doc = globalThis.document, storage } = {}) {
+  return { ...readDisplaySettings(storage), ...(doc ? pageChoices.get(doc) : null) };
+}
+
 /** Mirrors theme-boot.js for this document after a change. */
 export function applyDisplaySettings(doc = globalThis.document, settings = readDisplaySettings()) {
   const root = doc.documentElement;
@@ -47,15 +61,19 @@ export function applyDisplaySettings(doc = globalThis.document, settings = readD
 
 /** Saves one choice and applies it here; returns whether it was saved. */
 export function saveDisplaySetting(name, value, { doc = globalThis.document, storage } = {}) {
+  if (!Object.hasOwn(NORMAL, name)) return false;
+  const choice = NORMAL[name](value);
   let saved;
-  if (name === 'theme') saved = write(storage, DISPLAY_KEYS.theme, value === 'a' || value === 'c' ? value : null);
-  else if (name === 'deck') saved = write(storage, DISPLAY_KEYS.deck, value === '2' ? '2' : null);
-  else if (name === 'motion') saved = write(storage, DISPLAY_KEYS.motion, value === 'reduce' ? 'reduce' : null);
-  else if (name === 'unit') saved = writePreference(value, store(storage) ?? undefined);
-  else return false;
-  applyDisplaySettings(doc, { ...readDisplaySettings(storage), ...(saved ? {} : { [name]: value }) });
+  if (name === 'theme') saved = write(storage, DISPLAY_KEYS.theme, choice === 'b' ? null : choice);
+  else if (name === 'deck') saved = write(storage, DISPLAY_KEYS.deck, choice === '2' ? '2' : null);
+  else if (name === 'motion') saved = write(storage, DISPLAY_KEYS.motion, choice === 'reduce' ? 'reduce' : null);
+  else saved = writePreference(choice, store(storage) ?? undefined);
+  const choices = { ...pageChoices.get(doc) };
+  if (saved) delete choices[name]; else choices[name] = choice;
+  pageChoices.set(doc, choices);
+  applyDisplaySettings(doc, currentDisplaySettings({ doc, storage }));
   // Same-document listeners (the lobby's header, the table) repaint amounts.
-  if (name === 'unit') doc.defaultView?.dispatchEvent(new CustomEvent('holdem:display-unit', { detail: value }));
+  if (name === 'unit') doc.defaultView?.dispatchEvent(new CustomEvent('holdem:display-unit', { detail: choice }));
   return saved;
 }
 
@@ -93,7 +111,7 @@ function radioGroup(doc, name, legend, options, current, onPick) {
 /** Opens (building on first use) the settings dialog. */
 export function openDisplaySettings({ doc = globalThis.document, storage } = {}) {
   doc.getElementById('display-settings')?.remove();
-  const settings = readDisplaySettings(storage);
+  const settings = currentDisplaySettings({ doc, storage });
   const dialog = el(doc, 'dialog', 'ui-dialog ui-sheet display-settings');
   dialog.id = 'display-settings';
   dialog.setAttribute('aria-labelledby', 'display-settings-title');

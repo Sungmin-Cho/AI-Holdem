@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMiniDocument } from './helpers/mini-dom.js';
-import { readDisplaySettings, saveDisplaySetting, applyDisplaySettings, replayOnboarding, DISPLAY_KEYS } from '../server/public/display-settings.js';
+import { readDisplaySettings, saveDisplaySetting, applyDisplaySettings, replayOnboarding, currentDisplaySettings, DISPLAY_KEYS } from '../server/public/display-settings.js';
+import { createDialogController } from '../server/public/dialog-controller.js';
 import { createOnboarding, ONBOARDING_STEPS } from '../server/public/onboarding.js';
 
 function memoryStorage(initial = {}) {
@@ -104,4 +105,70 @@ test('skip ends the guide for good; without storage it shows once per page; repl
   replayOnboarding({ doc, storage });
   assert.equal(storage.getItem('holdem.onboarding.v1'), null);
   assert.equal(events.at(-1).type, 'holdem:onboarding-reset');
+});
+
+test('without storage, each choice stays on this page and a later one does not undo an earlier one', () => {
+  const doc = createMiniDocument();
+  const events = withWindow(doc);
+  assert.equal(saveDisplaySetting('theme', 'c', { doc, storage: brokenStorage }), false);
+  assert.equal(saveDisplaySetting('deck', '2', { doc, storage: brokenStorage }), false);
+  assert.equal(doc.documentElement.getAttribute('data-theme'), 'c', 'the unsaved theme survives the next change');
+  assert.equal(doc.documentElement.getAttribute('data-deck'), '2');
+  saveDisplaySetting('unit', 'chips', { doc, storage: brokenStorage });
+  assert.deepEqual(currentDisplaySettings({ doc, storage: brokenStorage }), { theme: 'c', unit: 'chips', deck: '2', motion: 'system' });
+  assert.equal(events.at(-1).detail, 'chips');
+  const other = createMiniDocument();
+  withWindow(other);
+  assert.equal(currentDisplaySettings({ doc: other, storage: brokenStorage }).theme, 'b', 'another page starts from its own state');
+  // Once storage works again, a saved choice replaces the page-only one.
+  const storage = memoryStorage();
+  saveDisplaySetting('theme', 'a', { doc, storage });
+  assert.equal(currentDisplaySettings({ doc, storage }).theme, 'a');
+});
+
+test('a first turn with a deadline defers the guide to the wait after it, only while seated', () => {
+  const { onboarding } = guide(memoryStorage());
+  assert.equal(onboarding.offer({ myTurn: false, deadline: false, seated: true }), false, 'nothing before a first turn');
+  assert.equal(onboarding.offer({ myTurn: true, deadline: true, seated: true }), false, 'the timed turn is left alone');
+  assert.equal(onboarding.offer({ myTurn: false, deadline: false, seated: false }), false, 'not once the viewer has left the table');
+  assert.equal(onboarding.offer({ myTurn: false, deadline: false, seated: true }), true, 'shown in the wait after that turn');
+  const again = guide(memoryStorage());
+  again.onboarding.offer({ myTurn: true, deadline: true, seated: true });
+  again.onboarding.reset();
+  assert.equal(again.onboarding.offer({ myTurn: false, deadline: false, seated: true }), false, 'reset clears the deferral');
+});
+
+function fakeDialogDocument() {
+  const listeners = [];
+  const doc = { activeElement: null, openDialogs: [], body: { children: [] },
+    addEventListener: (type, handler) => { if (type === 'keydown') listeners.push(handler); },
+    querySelectorAll: (selector) => (selector === 'dialog[open]' ? doc.openDialogs : []),
+    key(key, extra = {}) { const event = { key, shiftKey: false, prevented: false, preventDefault() { this.prevented = true; }, ...extra }; for (const handler of listeners) handler(event); return event; } };
+  const button = (name) => ({ name, hidden: false, getClientRects: () => [1], hasAttribute: () => false, matches: () => true, focus() { doc.activeElement = this; } });
+  const first = button('first'), last = button('last');
+  const overlay = { hidden: true, contains: (node) => node === first || node === last, querySelectorAll: () => [first, last], querySelector: () => null };
+  return { doc, overlay, first, last };
+}
+
+test('the table dialog trap yields Tab and Esc to a native modal opened above it', () => {
+  const { doc, overlay, first, last } = fakeDialogDocument();
+  let dismissed = 0;
+  const dialogs = createDialogController(doc);
+  dialogs.open(overlay, () => { dismissed += 1; });
+  assert.equal(doc.activeElement, first);
+  doc.activeElement = last;
+  assert.equal(doc.key('Tab').prevented, true, 'the trap wraps Tab inside the overlay');
+  assert.equal(doc.activeElement, first);
+  const help = { localName: 'dialog' };
+  doc.openDialogs = [help];
+  doc.activeElement = help;
+  const tab = doc.key('Tab');
+  assert.equal(tab.prevented, false, 'the help drawer keeps its own Tab order');
+  assert.equal(doc.activeElement, help);
+  doc.key('Escape');
+  assert.equal(dismissed, 0, 'Esc closes the help drawer, not the replay under it');
+  assert.equal(dialogs.active, overlay);
+  doc.openDialogs = [];
+  doc.key('Escape');
+  assert.equal(dismissed, 1);
 });

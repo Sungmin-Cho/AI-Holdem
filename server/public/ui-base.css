@@ -311,6 +311,11 @@ dialog.ui-dialog.display-settings[open] { display: grid; gap: var(--sp-3); }
 .onboarding-text { margin: 0; color: var(--c-text-2); font-size: var(--fs-13); line-height: 1.6; }
 .onboarding-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .onboarding-focus { outline: 3px solid var(--c-info); outline-offset: 3px; }
+/* Phones and touch screens: every help and settings control is a 44px target. */
+@media (max-width: 600px), (pointer: coarse) {
+  .help-info { min-width: var(--tap); min-height: var(--tap); }
+  .help-nav-link, .display-option { min-height: var(--tap); }
+}
 
 /* ---- Reduced motion (system or display preference) ---------------------- */
 @media (prefers-reduced-motion: reduce) {

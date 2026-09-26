@@ -1496,9 +1496,11 @@ function paintFrame() {
     if (!keepingMotion) motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
     motionFrame = frame;
   }
+  const seatedLive = !ui.sessionEnded && !spectator && Boolean(view?.seats?.some((seat) => seat.playerId === viewerId(view) && !seat.out));
   onboarding.offer({
-    myTurn: !ui.sessionEnded && !spectator && Boolean(view?.legal) && view.legal.toAct === viewerId(view),
+    myTurn: seatedLive && Boolean(view?.legal) && view.legal.toAct === viewerId(view),
     deadline: Boolean(ui.turnDeadline),
+    seated: seatedLive,
   });
 }
 

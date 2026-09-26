@@ -26,6 +26,9 @@ export function createDialogController(doc, onClose=()=>{}) {
   };
   doc.addEventListener('keydown',ev=>{
     if(!active)return;
+    // A native modal opened above this overlay (help drawer, display settings)
+    // owns Tab and Esc until it closes.
+    if([...doc.querySelectorAll('dialog[open]')].some(node=>!active.contains(node)))return;
     if(ev.key==='Escape'){ev.preventDefault();controller.dismiss();return;}
     if(ev.key!=='Tab')return;
     const nodes=focusables();if(!nodes.length){ev.preventDefault();return;}

@@ -1,9 +1,10 @@
 /** The parent header's game context (hand, blinds, net, connection) from the
  * embedded table's `holdem:context` message (shell-bridge.js). Shared by the
  * host lobby and the join page; amounts follow the BB/chips preference. */
-import { formatAmount, readPreference } from './chip-format.js';
+import { formatAmount } from './chip-format.js';
+import { currentDisplaySettings } from './display-settings.js';
 
-export function paintShellContext(node, context, { doc = globalThis.document, preference = readPreference() } = {}) {
+export function paintShellContext(node, context, { doc = globalThis.document, preference = currentDisplaySettings({ doc }).unit } = {}) {
   if (!node) return;
   if (!context) { node.hidden = true; node.replaceChildren(); return; }
   const parts = [];

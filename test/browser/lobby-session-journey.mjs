@@ -184,14 +184,18 @@ export async function runLobbyJourney(outDir) {
     assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
     assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
     check('host-iframe-survives-error-resume');
-    for (const [width, height] of [[1280, 800], [390, 667]]) {
-      await browser(["set", "viewport", String(width), String(height)]);
-      await wait(async () => (await evaluate(EMBED_FIT_SCRIPT)) !== null);
-      assertEmbedFit(await evaluate(EMBED_FIT_SCRIPT), `host ${width}x${height}`);
-      await browser(["screenshot", path.join(outDir, `host-embed-${width}x${height}.png`)]);
-    }
-    await browser(["set", "viewport", "1280", "900"]);
-    check('host-embed-fit');
+    const embedStates = [];
+    const measureEmbed = async (stateName) => {
+      for (const [width, height] of [[1280, 800], [390, 667]]) {
+        await browser(["set", "viewport", String(width), String(height)]);
+        await wait(async () => (await evaluate(EMBED_FIT_SCRIPT)) !== null);
+        assertEmbedFit(await evaluate(EMBED_FIT_SCRIPT), `host ${stateName} ${width}x${height}`);
+        await browser(["screenshot", path.join(outDir, `host-embed-${stateName}-${width}x${height}.png`)]);
+        embedStates.push(`${stateName}-${width}x${height}`);
+      }
+      await browser(["set", "viewport", "1280", "900"]);
+    };
+    await measureEmbed("turn");
     // R3: the menu opens and the table locks at the click, while the pause POST is
     // still held; closing the menu keeps the lock until the pause settles.
     await evaluate(`(() => {
@@ -219,6 +223,10 @@ export async function runLobbyJourney(outDir) {
     await click("#menu");
     await wait(() => evaluate("document.querySelector('#pause-dialog').open && document.activeElement?.id==='resume'"));
     check('pause-lock-immediate');
+    // Paused with the menu open: the same fit, the table locked under the menu.
+    await measureEmbed("paused");
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667"]);
+    check('host-embed-fit');
     const paused = hashTree(app.manager.current.sessionDir);
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(hashTree(app.manager.current.sessionDir), paused);

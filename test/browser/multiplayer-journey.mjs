@@ -220,13 +220,14 @@ export async function runMultiplayerJourney(outDir) {
     await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");
     await guestB(["screenshot", path.join(outDir, "guest-b-table-mobile.png")]);
     await guestB(["set", "viewport", "1280", "600"]);
+    const embedStates = [];
     for (const [width, height] of [[1280, 800], [390, 667]]) {
       await guestA(["set", "viewport", String(width), String(height)]);
       await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `guest A table at ${width}x${height}`);
       assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `guest ${width}x${height}`);
+      embedStates.push(`turn-${width}x${height}`);
     }
     await guestA(["set", "viewport", "1280", "600"]);
-    check("guest-embed-fit");
     // cardNode renders faces and Korean aria labels, not raw two-character
     // codes. A whole-document substring can instead match a capability token.
     const guestCardVisibility = browser => evaluate(browser)(`(() => {
@@ -302,14 +303,30 @@ export async function runMultiplayerJourney(outDir) {
       () => evaluate(guestA)("document.querySelector('#pause-banner')?.hidden===false"),
       "pause banner",
     );
-    // The pause sits over the table, below the header, without pushing the table down.
-    const pauseGeometry = await evaluate(guestA)(`(() => {
-      const banner = document.querySelector('#pause-banner').getBoundingClientRect();
-      const header = document.querySelector('.app-header').getBoundingClientRect();
-      const frame = document.querySelector('#table').getBoundingClientRect();
-      return { banner: banner.top >= header.bottom - 1 && banner.bottom <= frame.top + 80, overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute' };
-    })()`);
-    assert.deepEqual(pauseGeometry, { banner: true, overlay: true });
+    // The pause sits over the table, below the header, without pushing the table
+    // down or covering a plate, the board or the pot; measured on a laptop and a phone.
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `paused guest table at ${width}x${height}`);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `paused guest ${width}x${height}`);
+      const pauseGeometry = await evaluate(guestA)(`(() => {
+        const banner = document.querySelector('#pause-banner').getBoundingClientRect();
+        const header = document.querySelector('.app-header').getBoundingClientRect();
+        const frame = document.querySelector('#table').getBoundingClientRect();
+        const doc = document.querySelector('#table').contentDocument;
+        const covered = [...doc.querySelectorAll('.plate, #board .card, #pots')].filter((n) => n.getClientRects().length).some((n) => {
+          const r = n.getBoundingClientRect(), top = r.top + frame.top, left = r.left + frame.left;
+          return banner.left < left + r.width - 1 && banner.right > left + 1 && banner.top < top + r.height - 1 && banner.bottom > top + 1;
+        });
+        return { banner: banner.top >= header.bottom - 1 && banner.bottom <= frame.top + 80 && banner.left >= 0 && banner.right <= innerWidth + 1,
+          overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute', covered };
+      })()`);
+      assert.deepEqual(pauseGeometry, { banner: true, overlay: true, covered: false }, `${width}x${height}`);
+      embedStates.push(`paused-${width}x${height}`);
+    }
+    await guestA(["set", "viewport", "1280", "600"]);
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667"]);
+    check("guest-embed-fit");
     check("pause-banner");
     await click(host, "#resume");
     await wait(

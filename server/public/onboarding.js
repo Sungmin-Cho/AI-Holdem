@@ -1,10 +1,10 @@
 /** First-turn guide (design §10.4): three steps on the first turn of the
  * first game — the seat and stack, the action bar, the side panel and menu.
  * It never blocks play: the card sits in the flow of the side panel (no
- * overlay), targets only get an outline, and focus is never moved. A turn with
- * an action deadline (online sessions) is skipped; the guide waits for a turn
- * without one. Seen once per browser (`holdem.onboarding.v1`), or once per
- * page when storage is unavailable. */
+ * overlay), targets only get an outline, and focus is never moved. A first turn
+ * with an action deadline (online sessions) is left alone; the guide then shows
+ * in the wait after that turn. Seen once per browser (`holdem.onboarding.v1`),
+ * or once per page when storage is unavailable. */
 import { DISPLAY_KEYS } from './display-settings.js';
 
 export const ONBOARDING_STEPS = Object.freeze([
@@ -18,6 +18,8 @@ function storageOf(storage) { try { return storage ?? globalThis.localStorage ??
 export function createOnboarding({ doc = globalThis.document, storage, container, targets }) {
   let step = -1;
   let seenThisPage = false;
+  // A deadline turn was skipped; show in the next wait (seated, not our turn).
+  let deferred = false;
   let card = null;
   const seen = () => {
     if (seenThisPage) return true;
@@ -73,9 +75,12 @@ export function createOnboarding({ doc = globalThis.document, storage, container
   const api = {
     get active() { return step >= 0; },
     get step() { return step; },
-    /** Called on every paint; starts on a deadline-free turn of the viewer. */
-    offer({ myTurn, deadline }) {
-      if (step >= 0 || !myTurn || deadline || seen()) return false;
+    /** Called on every paint: starts on the viewer's first deadline-free turn,
+     * or — after a first turn that had a deadline — in the wait that follows. */
+    offer({ myTurn, deadline, seated = true }) {
+      if (step >= 0 || seen()) return false;
+      if (myTurn && deadline) { deferred = true; return false; }
+      if (!myTurn && !(deferred && seated)) return false;
       step = 0;
       render();
       return true;
@@ -91,6 +96,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     reset() {
       end();
       seenThisPage = false;
+      deferred = false;
       try { storageOf(storage)?.removeItem(DISPLAY_KEYS.onboarding); } catch { /* optional */ }
     },
   };
