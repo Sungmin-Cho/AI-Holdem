@@ -634,6 +634,16 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
 }
 setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
+// Phones dock the result strip at the bottom of the screen, in the action bar's
+// place once the hand is over; wider screens keep it above the board. Moving the
+// node keeps its content, so a repaint or a side frame never rebuilds it.
+const phoneDock=matchMedia('(max-width: 600px)');
+function placeHandResult() {
+  const box=$('hand-result'),target=phoneDock.matches?$('result-dock'):document.querySelector('.table .center');
+  if(box&&target&&box.parentElement!==target)target.prepend(box);
+}
+phoneDock.addEventListener?.('change',placeHandResult);
+placeHandResult();
 
 function writeAmountField(value) {
   const input = $('raise-amount');

@@ -1667,8 +1667,14 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .hand-result-pot {font-size:.85em;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:.65rem;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
-/* Phones keep the centred overlay until the S11 geometry gate places it. */
-@media(max-width:600px) {.plate-action-amount {display:none;}.hand-result {top:50%;bottom:auto;transform:translate(-50%,-50%);max-width:90vw;font-size:.82rem;padding:.65rem;}}
+/* Phones: app.js moves the strip into #result-dock, which sticks to the bottom of
+   the screen where the action bar was, clear of the board, the pot and the plates. */
+.result-dock:empty,.result-dock:has(> .hand-result[hidden]) {display:none;}
+@media(max-width:600px) {
+  .plate-action-amount {display:none;}
+  .result-dock {position:sticky;z-index:12;bottom:max(8px,env(safe-area-inset-bottom));display:flex;justify-content:center;margin:0 8px;pointer-events:none;}
+  .result-dock .hand-result {position:static;transform:none;width:100%;max-width:420px;font-size:.82rem;padding:.65rem;}
+}
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 
 /* In the wrapping plate the status line takes its own row: .plate-info grows
