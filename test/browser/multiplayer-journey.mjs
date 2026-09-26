@@ -23,6 +23,7 @@ export const requiredJourneyChecks = [
   "guest-table-booted",
   "skip-hidden-multi",
   "guest-table-viewport",
+  "guest-single-header",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
   "turn-deadline-ticks",
@@ -201,6 +202,23 @@ export async function runMultiplayerJourney(outDir) {
     );
     await wait(async () => Number(await tableHeight(guestA)) >= 400, "guest A table fills the viewport");
     check("guest-table-viewport");
+    // The join page answers the table's handshake: the table hides its own top
+    // bar and the join header carries the hand context (one header, not two).
+    const singleHeader = (browser) => evaluate(browser)(`(() => {
+      const doc = document.querySelector('#table')?.contentDocument;
+      const topbar = doc?.querySelector('.topbar');
+      const context = document.querySelector('#shell-context');
+      return doc?.body?.classList.contains('embedded') === true
+        && (topbar ? doc.defaultView.getComputedStyle(topbar).display === 'none' : false)
+        && context?.hidden === false && context.textContent.includes('핸드');
+    })()`);
+    await wait(async () => (await singleHeader(guestA)) === true, "guest A single header");
+    check("guest-single-header");
+    await guestA(["screenshot", path.join(outDir, "guest-a-table.png")]);
+    await guestB(["set", "viewport", "390", "844"]);
+    await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");
+    await guestB(["screenshot", path.join(outDir, "guest-b-table-mobile.png")]);
+    await guestB(["set", "viewport", "1280", "600"]);
     // cardNode renders faces and Korean aria labels, not raw two-character
     // codes. A whole-document substring can instead match a capability token.
     const guestCardVisibility = browser => evaluate(browser)(`(() => {

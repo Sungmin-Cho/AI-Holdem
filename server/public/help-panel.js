@@ -157,3 +157,18 @@ export function helpButton(section, label, { doc = globalThis.document } = {}) {
   button.addEventListener('click', () => openHelp(section, { doc }));
   return button;
 }
+
+/** Wires the header's 도움말·설정 disclosure (#help-menu, #help-menu-list,
+ * #open-help, #open-display-settings), shared by the lobby and the join page. */
+export function wireHelpMenu({ doc = globalThis.document, section = 'rules' } = {}) {
+  const $ = (id) => doc.getElementById(id);
+  const menu = $('help-menu'), list = $('help-menu-list');
+  if (!menu || !list) return null;
+  const set = (open) => { list.hidden = !open; menu.setAttribute('aria-expanded', String(open)); };
+  menu.onclick = () => set(list.hidden);
+  list.addEventListener('keydown', (event) => { if (event.key === 'Escape') { set(false); menu.focus(); } });
+  doc.addEventListener('click', (event) => { if (!list.hidden && !event.target.closest('.help-menu')) set(false); });
+  $('open-help').onclick = () => { set(false); openHelp(section, { doc }); };
+  $('open-display-settings').onclick = () => { set(false); openDisplaySettings({ doc }); };
+  return { set };
+}
