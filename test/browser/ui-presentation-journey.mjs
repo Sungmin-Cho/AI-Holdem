@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -40,7 +40,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
@@ -203,6 +203,26 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#log-list').scrollTop"),0);
     await browser(['reload']);await ready();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
+    // Motion is decoration over the final DOM: the reduce setting creates nothing, a live bet
+    // pops its marker, a street change flies chips to the pot, and nothing lingers after 300ms.
+    const mover=view.seats.find(s=>s.playerId!=='user'&&!s.out).playerId;
+    const bumped={...view,seats:view.seats.map(s=>s.playerId===mover?{...s,bet:s.bet+view.blinds[1]}:s)};
+    await evaluate("window.__motion=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){window.__motion.push(this.className);return window.__animate.apply(this,args);}");
+    await evaluate("document.documentElement.dataset.motion='reduce'");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn',`[...document.querySelectorAll('.bet-marker')].some(n=>n.dataset.playerId===${JSON.stringify(mover)}&&n.textContent.includes(${JSON.stringify(String((bumped.seats.find(s=>s.playerId===mover).bet)/view.blinds[1]))}))`]);
+    assert.deepEqual(await evaluate('window.__motion'),[],'reduced motion creates no animation');
+    await publish([],{view});
+    await evaluate("delete document.documentElement.dataset.motion;window.__motion=[]");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn','window.__motion.includes("bet-marker")']);
+    await publish([],{view:{...bumped,street:'flop',seats:bumped.seats.map(s=>({...s,bet:0}))}});
+    await browser(['wait','--fn','window.__motion.includes("motion-chip")']);
+    await browser(['wait','400']);
+    assert.deepEqual(await evaluate("({animations:document.getAnimations().filter(a=>a.effect?.target?.closest?.('#table')).length,chips:document.querySelectorAll('.motion-chip').length})"),{animations:0,chips:0});
+    await evaluate("Element.prototype.animate=window.__animate");
+    await publish([],{view});await ready();
+    checks.push('motion-decoration');
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     await click('#action-options-toggle');
     await browser(['fill','#raise-amount','9999999']);await browser(['press','Tab']);await click('#btn-raise');
@@ -302,6 +322,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out,.seat .dealer-btn,.seat .is-allin,.seat .card--back').length"),0);checks.push('cash-reset');
     assert.equal(await evaluate("document.querySelector('#hand-result').hidden"),false);
     assert.match(await evaluate("document.querySelector('#hand-result').textContent"),/상대 전원 폴드/);
+    // On desktop the strip sits above the board and leaves the cards and settled pot visible.
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const strip=await evaluate("(()=>{const r=document.querySelector('#hand-result').getBoundingClientRect();return {hidden:document.querySelector('#hand-result').hidden,text:document.querySelector('#hand-result').textContent,hits:[...document.querySelectorAll('#board .card, #pots')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+    assert.equal(strip.hidden,false);assert.deepEqual(strip.hits,[],JSON.stringify(strip));
+    assert.match(strip.text,/팟 .+ 획득/);assert.doesNotMatch(strip.text,/\+\d/,'a winner line is the pot collected, never a signed profit');
+    await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
     checks.push('last-action-badge');

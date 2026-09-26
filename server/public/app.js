@@ -16,6 +16,7 @@ import {createDialogController} from './dialog-controller.js';
 import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
 import {createShellEmbed} from './shell-embed.js';
 import {renderCard, renderMiniCard} from './card-render.js';
+import {diffViews, createMotionPlayer} from './motion.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -84,6 +85,13 @@ if (participantMode) {
   }
   document.body.classList.add('participant-mode');
 }
+// The cash reset line lives in the result strip; hold it across strip rebuilds.
+const cashResetNote = $('cash-reset-note');
+// Decorative motion: off for reduced-motion users and the "reduce" display setting.
+const motion = createMotionPlayer({ enabled: () => !matchMedia('(prefers-reduced-motion: reduce)').matches && document.documentElement.dataset.motion !== 'reduce' });
+let motionInput = { source: 'snapshot', contiguous: false };
+let motionFrame = null;
+let awardBaseline = null;
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -311,7 +319,12 @@ function paintTop(view) {
   $('session-net').closest('.meta-seg').hidden = !cash || isSpectating(view);
   $('session-net').textContent = amountText(net, view?.blinds?.[1], true);
   $('participants-summary').textContent = view ? participantSummary(view) : '참가자 —';
-  $('cash-reset-note').hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
+  cashResetNote.hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
+  // Cash stacks are already restored in the view, so the viewer's stack is the next start.
+  const restored = view?.seats?.find((seat) => seat.playerId === viewerId(view))?.stack;
+  cashResetNote.textContent = Number.isSafeInteger(restored)
+    ? `다음 핸드는 ${formatAmount(restored, view.blinds?.[1], displayUnit).primary}로 다시 시작합니다.`
+    : '다음 핸드는 시작 스택으로 다시 시작합니다.';
   $('learning-scope').textContent = cash
     ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
     : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
@@ -553,14 +566,27 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
   const winners=new Set(frame.visible ? result?.winners.map(row=>row.playerId) : []);
   for(const seat of document.querySelectorAll('.seat'))seat.classList.toggle('is-winner',winners.has(seat.dataset.playerId));
   box.hidden=!frame.visible;
-  if(!result) {box.replaceChildren();delete box.dataset.handNo;return;}
+  // Pot → winners once, when this hand's held result first shows live (not after a jump, not instant pace).
+  const baseline=awardBaseline;awardBaseline={handNo:result?.handNo??null,visible:frame.visible};
+  if(result && baseline && frame.visible && ui.resultHold?.handNo===result.handNo && !(baseline.handNo===result.handNo && baseline.visible))
+    motion.playAward(result.winners.map(row=>row.playerId),{table:$('table')});
+  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;return;}
   if(!frame.visible)return;
   if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
     box.dataset.handNo=String(result.handNo);box.dataset.unit=displayUnit;box.replaceChildren();
-    box.append(el('strong','','핸드 '+result.handNo+' 결과'));
-    for(const winner of result.winners)box.append(el('div','',`${playerName(winner.playerId)} +${amountText(winner.total)} · ${winner.handName ?? (result.kind==='uncontested'?'상대 전원 폴드':'쇼다운 승리')}`));
-    if(result.pots.length>1)for(const pot of result.pots)box.append(el('div','hand-result-pot',`${pot.potIndex===0?'메인 팟':`사이드 팟 ${pot.potIndex}`} · ${pot.winners.map(row=>`${playerName(row.playerId)} +${amountText(row.share)}`).join(', ')}`));
-    if(result.myNet!==null)box.append(el('div','',`나: ${amountText(result.myNet,view.blinds?.[1],true)}`));
+    const bb=view.blinds?.[1],short=(value)=>formatAmount(value,bb,displayUnit).primary;
+    box.append(el('strong','hand-result-title','핸드 '+result.handNo+' 결과'));
+    // "팟 N 획득" is what a winner collected, never their profit; profit is the viewer's own line.
+    const winnerLines=result.winners.map(winner=>`${playerName(winner.playerId)} 승리 · ${winner.handName ?? (result.kind==='uncontested'?'상대 전원 폴드':'쇼다운')} · 팟 ${short(winner.total)} 획득`);
+    for(const line of winnerLines.slice(0,3))box.append(el('div','hand-result-winner',line));
+    if(winnerLines.length>3)box.append(el('div','hand-result-pot',`외 ${winnerLines.length-3}명`));
+    if(result.pots.length>1) {
+      const potLines=result.pots.map(pot=>`${pot.potIndex===0?'메인 팟':`사이드 팟 ${pot.potIndex}`} · ${pot.winners.map(row=>`${playerName(row.playerId)} ${short(row.share)}`).join(', ')}`);
+      for(const line of potLines.slice(0,3))box.append(el('div','hand-result-pot',line));
+      if(potLines.length>3)box.append(el('div','hand-result-pot',`외 ${potLines.length-3}개 팟`));
+    }
+    if(result.myNet!==null)box.append(el('div',`hand-result-net ${result.myNet>0?'is-pos':result.myNet<0?'is-neg':''}`,`내 손익 ${formatSignedAmount(result.myNet,bb,displayUnit).primary}`));
+    box.append(cashResetNote);
     const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');box.append(counter);
     const skip=el('button','btn btn-ghost hand-result-skip','건너뛰기');skip.type='button';
     skip.onclick=async()=>{
@@ -1295,6 +1321,12 @@ function paint() {
   paintReview(view);
   if (openReplayHandNo != null) paintReplay();
   shellEmbed.send(shellContext(view));
+  // Motion runs over the painted DOM; a new view ends whatever was still moving.
+  if (view !== motionFrame?.view) {
+    const frame = { view, revealed: Object.keys(revealedCards().map) };
+    motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
+    motionFrame = frame;
+  }
 }
 
 function upsertHandReplays(rows, replace) {
@@ -1336,6 +1368,8 @@ function paintTurnDeadline() {
 setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlateThinking==='function')paintPlateThinking();}, 1000);
 
 function renderSnapshot(snap) {
+  // Initial load, reconnect, and terminal records jump; they never animate or award.
+  motionInput = { source: 'snapshot', contiguous: false }; awardBaseline = null;
   ui.resultHold=snap.resultHold ?? null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
   const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
@@ -1364,7 +1398,8 @@ function renderSnapshot(snap) {
   paint();
 }
 
-function render(m) {
+function render(m, contiguous = true) {
+  motionInput = { source: 'live', contiguous };
   if(m.resultHold!==undefined)ui.resultHold=m.resultHold;
   else if(m.view && (m.view.handInProgress || m.view.handNo!==ui.resultHold?.handNo))ui.resultHold=null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, m.turnDeadline, ui.view, m.view ?? ui.view);
@@ -1642,7 +1677,8 @@ function applyMessage(m) {
     return;
   }
   if (m.revision <= revision) return;
-  revision = m.revision; render(m);
+  const contiguous = m.revision === revision + 1;
+  revision = m.revision; render(m, contiguous);
 }
 if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
 else if (appGameId && new URLSearchParams(location.search).get('terminal') === '1') {

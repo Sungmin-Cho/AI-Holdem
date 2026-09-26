@@ -36,8 +36,7 @@
       <p id="turn-announcement" class="sr-only" role="status" aria-live="polite"></p>
       <p id="seat-announcement" class="sr-only" role="status"></p>
       <p id="spectator-banner" class="spectator-banner" role="status" hidden></p>
-      <p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드를 위해 스택을 복원했습니다. 완료 핸드의 결과는 복기에서 확인하세요.</p>
-      <div class="table-wrap">
+            <div class="table-wrap">
         <div class="table" id="table" aria-label="포커 테이블">
           <div class="rail" aria-hidden="true"></div>
           <div class="rail-line" aria-hidden="true"></div>
@@ -46,12 +45,12 @@
             <svg class="felt-mark" viewBox="0 0 24 24"><use href="#suit-s"></use></svg>
           </div>
           <div class="center">
+            <aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden><p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드는 시작 스택으로 다시 시작합니다.</p></aside>
             <div id="board" class="board" aria-label="커뮤니티 카드"></div>
             <div id="pots" class="pots" aria-label="팟"></div>
           </div>
           <div id="bets" class="bets" aria-hidden="true"></div>
           <div id="seats" class="seats"></div>
-          <aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden></aside>
         </div>
       </div>
 

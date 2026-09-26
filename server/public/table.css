@@ -934,8 +934,17 @@ main {
   margin-left: 8px;
   height: 24px;
   padding: 0 10px;
-  font-size: 11px;
+  border: 1px solid var(--c-control-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--c-info-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
+.log-divider-text .replay-open:not(:disabled):hover { background: var(--c-info-soft); }
+.log-divider-text .replay-open:disabled { color: var(--c-text-2); opacity: 0.6; cursor: default; }
 .log-list > .is-collapsed { display: none; }
 .log-divider.is-past { flex-wrap: wrap; row-gap: 0; }
 .log-divider.is-past .log-divider-text { display: flex; align-items: center; }
@@ -1263,6 +1272,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .table,.table.is-crowded {height:auto;aspect-ratio:auto;border:0;border-radius:16px;display:flex;flex-direction:column;gap:20px;padding:10px 0;}
   .table::before,.table::after,.felt,.bets {display:none;}
   .table .center {position:static;transform:none;width:100%;min-width:0;}
+  .hand-result {position:static;transform:none;max-width:100%;}
   .board {flex-wrap:wrap;justify-content:center;}
   .table .seats {position:static;display:grid;gap:20px;}
   .table .seat {position:static;transform:none;}
@@ -1282,6 +1292,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .topbar .study-link {min-height:0;padding:2px 0;}
   /* Pointer-sized log controls keep the side panel dense on desktop. */
   .log-divider-text .replay-open,.log-hand-toggle,.coach-replay {min-height:28px;height:28px;}
+  .hand-result .hand-result-skip {min-height:28px;height:28px;padding:0 10px;font-size:12px;}
   main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
   .stage {min-height:0;gap:4px;padding:6px 12px;}
   .stage > :not(.table-wrap) {flex-shrink:0;}
@@ -1412,14 +1423,26 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 }
 
 /* Result stays non-modal and leaves table controls reachable. */
-.hand-result {position:absolute;z-index:8;left:50%;top:45%;transform:translate(-50%,-50%);max-width:min(90vw,30rem);padding:1rem 1.4rem;border:1px solid var(--c-line-strong);border-radius:1rem;background:var(--c-surface-1);color:var(--c-text);text-align:center;pointer-events:none;box-shadow:0 8px 32px #0008;}
+/* The result strip sits just above the board (the felt the collected bet
+   markers leave empty), so the board and the settled pot stay visible. */
+.hand-result {position:absolute;z-index:8;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);width:max-content;max-width:min(150%,90vw);padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:center;pointer-events:none;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
+.center:has(.hand-result:not([hidden])) {z-index:8;}
+.hand-result-title {display:block;font-size:12px;color:var(--c-text-2);}
+.hand-result-winner {font-weight:600;}
+.hand-result-net {font-family:var(--f-num);font-variant-numeric:tabular-nums;font-weight:700;}
+.hand-result-net.is-pos {color:var(--c-pos);}
+.hand-result-net.is-neg {color:var(--c-neg);}
+.hand-result .cash-reset-note {margin-top:2px;}
+/* A chip that exists only for the flight of a collect/award motion. */
+.motion-chip {position:absolute;z-index:9;width:14px;height:14px;border-radius:50%;background:var(--c-chip);box-shadow:inset 0 0 0 2px var(--c-chip-ring);translate:-50% -50%;pointer-events:none;}
 .hand-result[hidden] {display:none;}
 .hand-result button {pointer-events:auto;display:block;margin:.4rem auto 0;}
 .hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
 .hand-result-pot {font-size:.85em;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {font-size:.65rem;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
-@media(max-width:600px) {.plate-action-amount {display:none;}.hand-result {font-size:.82rem;padding:.65rem;}}
+/* Phones keep the centred overlay until the S11 geometry gate places it. */
+@media(max-width:600px) {.plate-action-amount {display:none;}.hand-result {top:50%;bottom:auto;transform:translate(-50%,-50%);max-width:90vw;font-size:.82rem;padding:.65rem;}}
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 
 .plate-status {display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;}
