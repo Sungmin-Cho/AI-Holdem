@@ -10,7 +10,7 @@ async function fixture(t,{initial='playing',mode='cash-training',summaryCache}={
  const root=createOwnedTempDir('summary-api'),room=createRoomManager({storeDir:root});
  room.open({totalSeats:2});const guest=room.join({code:room.load().joinCode,name:'Guest',addr:'1'});
  room.lockForStart({requestId:'start-1'});room.bind(gameId,[{participantId:guest.participantId,playerId:'h1'}]);
- const state={handNo:2,gameOver:true,result:'abort',config:{mode,startStack:100},sessionNet:{user:20,h1:-20},
+ const state={handNo:2,gameOver:true,result:'abort',config:{mode,startStack:100,blinds0:[25,50]},sessionNet:{user:20,h1:-20},
   seats:[{playerId:'user',name:'Host',kind:'human',stack:105},{playerId:'h1',name:'Guest',kind:'human',stack:75}],
   lastHand:{handNo:1,startStacks:{user:100,h1:100},endStacks:{user:120,h1:80},pots:[{amount:40,winners:[{playerId:'user',share:40}]}]}};
  fs.writeFileSync(path.join(root,'state.json'),JSON.stringify(state));
@@ -54,6 +54,7 @@ test('participant final never starts an archive build and uses completed cash ne
   // the missing early archive would instead mark it incomplete.
   f.state.handNo=3;f.state.lastHand.handNo=2;fs.writeFileSync(path.join(f.root,'state.json'),JSON.stringify(f.state));
   const json=await (await fetch(url,{headers:f.participant})).json();assert.equal(reads,0);assert.equal(json.game.final.stacks.length,2);
+  assert.equal(json.game.final.mode,mode);assert.equal(Number.isSafeInteger(json.game.final.bigBlind),mode==='cash-training');
   if(mode==='cash-training')assert.deepEqual(json.game.final.stacks.map(row=>[row.net,row.rank]),[[20,1],[-20,2]]);
   else assert.ok(json.game.final.stacks.every(row=>!Object.hasOwn(row,'net')&&!Object.hasOwn(row,'rank')));
  }

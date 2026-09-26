@@ -305,7 +305,7 @@ test('UI markup, overlay, note, and handReplays wiring are present', () => {
   assert.doesNotMatch(app, /\/api\/replay/);
   assert.doesNotMatch(app, /selectHandRecord/);
 
-  const css = read('server/public/style.css');
+  const css = read('server/public/table.css');
   assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important/);
   assert.equal((css.match(/\[hidden\]\s*\{\s*display:\s*none\s*!important/g) ?? []).length >= 1, true);
   assert.match(css, /\.replay-/);

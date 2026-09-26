@@ -59,10 +59,10 @@ export function lastActionsBySeat(log) {
   const labels={check:'체크',call:'콜',fold:'폴드',bet:'벳',raise:'레이즈'};
   let actions={};
   for(const event of rows) {
+    // Blinds are not actions: the position badge and the felt chips already show
+    // them, and repeating "SB 0.5 BB" beside the bet marker doubled the number.
     if(event.type==='hand_start' || event.type==='street')actions={};
-    else if(event.type==='blinds_posted') {
-      (event.posts??[]).forEach((post,index)=>{actions[post.playerId]={label:index===0?'SB':'BB',amount:post.amount};});
-    } else if(event.type==='action') {
+    else if(event.type==='action') {
       const verb=verbs.get(event);
       if(!labels[verb])continue;
       actions[event.playerId]={label:event.allIn?'올인':labels[verb],

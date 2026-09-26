@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
@@ -40,7 +40,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','table-design.css','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
     for(const count of ci?[6,9]:[2,6,8,9]) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
@@ -130,7 +130,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     for(const [width,height] of [[1094,559],[1440,900]]) {
       await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
       const bets=await evaluate(`(()=>{const visible=n=>n.getClientRects().length&&getComputedStyle(n).display!=='none',targets=[...document.querySelectorAll('.plate,.seat .card,#board .card,#pots')].filter(visible),overlaps=[],gaps=[];for(const m of [...document.querySelectorAll('.bet-marker')].filter(visible)){const a=m.getBoundingClientRect(),plate=m.closest('.plate'),p=plate.getBoundingClientRect();gaps.push(Math.hypot(Math.max(a.left-p.right,p.left-a.right,0),Math.max(a.top-p.bottom,p.top-a.bottom,0)));for(const n of targets){if(n===plate)continue;const b=n.getBoundingClientRect();if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)overlaps.push({player:m.dataset.playerId,target:n.className,targetPlayer:n.closest('.seat')?.dataset.playerId,marker:a.toJSON(),targetRect:b.toJSON()});}}return {gaps,overlaps}})()`);
-      assert.equal(bets.gaps.length,ownView.seats.length-1);
+      assert.equal(bets.gaps.length,ownView.seats.length,'every betting seat, the viewer included, shows one marker');
       assert.ok(bets.gaps.every(gap=>gap>=4&&gap<=9),JSON.stringify(bets));
       assert.deepEqual(bets.overlaps,[],JSON.stringify({width,height,bets}));
       await browser(['screenshot',path.join(outDir,`bet-spacing-${width}-${height}.png`)]);
@@ -203,6 +203,26 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#log-list').scrollTop"),0);
     await browser(['reload']);await ready();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
+    // Motion is decoration over the final DOM: the reduce setting creates nothing, a live bet
+    // pops its marker, a street change flies chips to the pot, and nothing lingers after 300ms.
+    const mover=view.seats.find(s=>s.playerId!=='user'&&!s.out).playerId;
+    const bumped={...view,seats:view.seats.map(s=>s.playerId===mover?{...s,bet:s.bet+view.blinds[1]}:s)};
+    await evaluate("window.__motion=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){window.__motion.push(this.className);return window.__animate.apply(this,args);}");
+    await evaluate("document.documentElement.dataset.motion='reduce'");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn',`[...document.querySelectorAll('.bet-marker')].some(n=>n.dataset.playerId===${JSON.stringify(mover)}&&n.textContent.includes(${JSON.stringify(String((bumped.seats.find(s=>s.playerId===mover).bet)/view.blinds[1]))}))`]);
+    assert.deepEqual(await evaluate('window.__motion'),[],'reduced motion creates no animation');
+    await publish([],{view});
+    await evaluate("delete document.documentElement.dataset.motion;window.__motion=[]");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn','window.__motion.includes("bet-marker")']);
+    await publish([],{view:{...bumped,street:'flop',seats:bumped.seats.map(s=>({...s,bet:0}))}});
+    await browser(['wait','--fn','window.__motion.includes("motion-chip")']);
+    await browser(['wait','400']);
+    assert.deepEqual(await evaluate("({animations:document.getAnimations().filter(a=>a.effect?.target?.closest?.('#table')).length,chips:document.querySelectorAll('.motion-chip').length})"),{animations:0,chips:0});
+    await evaluate("Element.prototype.animate=window.__animate");
+    await publish([],{view});await ready();
+    checks.push('motion-decoration');
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     await click('#action-options-toggle');
     await browser(['fill','#raise-amount','9999999']);await browser(['press','Tab']);await click('#btn-raise');
@@ -221,6 +241,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['press','Escape']);
     const historyAmounts=await evaluate("[...document.querySelectorAll('#log-list .log-amount')].slice(-2).map(n=>n.textContent)");
     assert.match(historyAmounts[0],/2.5 BB/);assert.match(historyAmounts[1],/1.25 BB/);checks.push('historical-bb');
+    // Hand 2 started, so hand 1 folds to its divider; the toggle reopens it.
+    const folded=await evaluate("(()=>{const heads=[...document.querySelectorAll('#log-list .log-divider.is-past')];return {heads:heads.length,expanded:heads.map(n=>n.querySelector('.log-hand-toggle')?.getAttribute('aria-expanded')),summary:heads.at(-1)?.querySelector('.log-hand-summary')?.textContent,hidden:document.querySelectorAll('#log-list > .is-collapsed').length,latest:[...document.querySelectorAll('#log-list .log-divider')].at(-1).classList.contains('is-past')}})()");
+    assert.ok(folded.heads>0&&folded.expanded.every(value=>value==='false')&&folded.hidden>0&&folded.latest===false,JSON.stringify(folded));
+    assert.equal(folded.summary,'결과 기록 없음');
+    await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).click()");
+    assert.equal(await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).getAttribute('aria-expanded')"),'true');
+    assert.ok(await evaluate("document.querySelectorAll('#log-list > .is-collapsed').length")<folded.hidden);
+    checks.push('log-hand-fold');
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {
       await browser(['select','#display-unit',unit]);
@@ -294,6 +322,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out,.seat .dealer-btn,.seat .is-allin,.seat .card--back').length"),0);checks.push('cash-reset');
     assert.equal(await evaluate("document.querySelector('#hand-result').hidden"),false);
     assert.match(await evaluate("document.querySelector('#hand-result').textContent"),/상대 전원 폴드/);
+    // On desktop the strip sits above the board and leaves the cards and settled pot visible.
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const strip=await evaluate("(()=>{const r=document.querySelector('#hand-result').getBoundingClientRect();return {hidden:document.querySelector('#hand-result').hidden,text:document.querySelector('#hand-result').textContent,hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+    assert.equal(strip.hidden,false);assert.deepEqual(strip.hits,[],JSON.stringify(strip));
+    const winnerLines=await evaluate("[...document.querySelectorAll('#hand-result .hand-result-winner')].map(n=>n.textContent)");
+    assert.ok(winnerLines.length>0&&winnerLines.every(line=>/팟 .+ 획득/.test(line)&&!/\+\d/.test(line)),`a winner line is the pot collected, never a signed profit: ${JSON.stringify(winnerLines)}`);
+    await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
     checks.push('last-action-badge');
@@ -301,6 +337,25 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await publish([],{view:undefined});
     assert.equal(await evaluate("window.__resultNode===document.querySelector('#hand-result').firstChild"),true);
     checks.push('hand-result-survives-side-frames');
+    // A held hand without a runout plays pot → winner once; the same paint's
+    // motion.play() (which ends running motion) must not cancel it, and neither
+    // may the action controller's reconcile read of that same revision — heads-up
+    // with the user first to act, so the user's own fold ends the hand and the
+    // decision leaving the view triggers that read at once.
+    await evaluate("window.__motion=[];window.__cancelled=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){const a=window.__animate.apply(this,args),target=this,cancel=a.cancel.bind(a);window.__motion.push(String(target.getAttribute('class')));a.cancel=()=>{window.__cancelled.push(String(target.getAttribute('class')));cancel();};return a;}");
+    let award=createGame({mode:'cash-training',aiCount:1,startStack:5000,levelEvery:null,handLimit:152});award.handNo=150;award.button=1;
+    const awardDeal=startHand(award,{deck:fixedDeck()});award=awardDeal.state;view=userView(award);await publish(awardDeal.events);
+    assert.equal(legalFor(award).toAct,'user');
+    await browser(['wait','--fn',"document.querySelector('#btn-fold')?.disabled===false"]);
+    const awardStep=applyAction(award,'user','fold');award=awardStep.state;view=userView(award);assert.equal(legalFor(award).handOver,true);
+    const awardEvents=awardStep.events;
+    const awardAt=Date.now();
+    await publish(awardEvents,{resultHold:{handNo:view.handNo,startAt:new Date(awardAt).toISOString(),until:new Date(awardAt+4000).toISOString(),runoutStepMs:0,runoutStreets:0}});
+    await browser(['wait','--fn',"window.__motion.some(name=>/\\bplate\\b/.test(name))"]);
+    await browser(['wait','500']);
+    assert.equal(await evaluate("window.__cancelled.some(name=>/\\bplate\\b/.test(name))"),false,'the award pulse is cancelled neither by its own paint nor by the reconcile read of the same revision');
+    await evaluate("Element.prototype.animate=window.__animate");
+    checks.push('award-motion');
     let runout=createGame({mode:'cash-training',aiCount:2,startStack:100,levelEvery:null,handLimit:202});runout.handNo=200;
     const runoutDeal=startHand(runout,{deck:fixedDeck()});runout=runoutDeal.state;view=userView(runout);await publish(runoutDeal.events);
     await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>{const r=document.querySelector('#hand-result');window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!r.hidden});},50)");

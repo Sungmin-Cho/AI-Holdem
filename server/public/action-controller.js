@@ -2,14 +2,14 @@ const WAITING = new Set(['sending', 'reconciling', 'accepted', 'delivered', 'con
 const PHASES = new Set(['accepted', 'delivered', 'consumed', 'rejected']);
 const MESSAGES = {
   idle: '내 차례입니다. 액션을 선택하세요.',
-  sending: '액션을 전송하고 있습니다…',
-  reconciling: '접수 기록과 현재 차례를 확인하고 있습니다…',
-  accepted: '액션이 접수되었습니다. 게임 진행을 기다려 주세요.',
-  delivered: '접수된 액션을 처리하고 있습니다. 다시 누를 필요가 없습니다.',
-  consumed: '액션 처리가 끝났습니다. 다음 차례를 기다려 주세요.',
-  rejected: '액션이 거부되었습니다. 현재 가능한 액션을 다시 선택하세요.',
-  unreceived: '현재 접수 기록은 없지만 이전 전송이 도착할 수 있습니다. 같은 액션만 다시 확인할 수 있습니다.',
-  unknown: '접수 여부를 확인할 수 없습니다. 연결 복구 후 상태 확인을 눌러 주세요.',
+  sending: '액션을 보내는 중…',
+  reconciling: '접수 상태와 현재 차례를 확인하는 중…',
+  accepted: '액션이 접수됐습니다. 게임 진행을 기다리는 중…',
+  delivered: '접수된 액션을 처리하는 중입니다. 다시 누르지 않아도 됩니다.',
+  consumed: '액션이 반영됐습니다. 다음 차례를 기다리는 중…',
+  rejected: '액션이 거부됐습니다. 현재 가능한 액션을 다시 고르세요.',
+  unreceived: '전송 결과를 확인하지 못했습니다. 같은 액션을 다시 보내거나 상태를 확인하세요.',
+  unknown: '접수 여부를 확인하지 못했습니다. 연결이 돌아오면 상태 확인을 눌러 주세요.',
   storage: '복구 정보를 저장할 수 없습니다. 브라우저 저장 공간을 확인한 뒤 새로고침하세요.',
 };
 
@@ -216,7 +216,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
 }
 
 const NOTICE_MESSAGES={
-  GAME_PAUSED:'게임이 일시정지 중입니다. 재개한 뒤 행동하세요.',
+  GAME_PAUSED:'일시정지로 이 액션을 보내지 못했을 수 있어요. 재개되면 같은 액션을 다시 보내거나 상태를 확인하세요.',
   NOT_YOUR_TURN:'지금은 내 차례가 아닙니다.',
   DECISION_CLOSED:'이 차례는 이미 끝났습니다. 다음 차례를 기다려 주세요.',
   STALE_DECISION:'차례가 바뀌었습니다. 현재 화면을 확인하세요.',

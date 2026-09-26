@@ -12,7 +12,7 @@ import {
   materializeLearningEvaluation,
   readAnnotationExactFile,
 } from './training-control.js';
-import { validateExplanation } from '../training/explain.js';
+import { explanationEligible, validateExplanation } from '../training/explain.js';
 import { referenceQuality } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
@@ -322,8 +322,15 @@ function solvePendingIds(tc, sessionDir) {
 
 async function runHandPipelineUnlocked({
   sessionDir, handNo, gameEpoch, owner, storeDir,
-  evaluate, explain, publish, consume, solverAdapterId, startSolve,
+  evaluate, explain, publish, consume, solverAdapterId, startSolve, admit, admitExplain,
 }) {
+  // `admit()` false means a pause is closing the gate: no new evaluator or
+  // explainer child starts, and whatever is left comes back `deferred` so the
+  // caller can register the hand again once play resumes (design §11.2 R1).
+  // `admitExplain()` narrows only the explanation stage (finalization lets the
+  // last hand explain first while other hands may still evaluate).
+  const admitted = () => typeof admit !== 'function' || admit() === true;
+  const explainAdmitted = () => admitted() && (typeof admitExplain !== 'function' || admitExplain() === true);
   const tc = createTrainingControl({ storeDir });
   const existing = itemsCoveringHand(tc, sessionDir, handNo);
   // 이미 solve로 미뤄진 결정은 evaluate 경로에서 완전히 빠진다. 여기서 빼지
@@ -339,6 +346,9 @@ async function runHandPipelineUnlocked({
     promise: Promise.resolve(null),
     terminate: async () => ({ confirmed: true }),
   };
+  if (!skipEvaluate && !admitted()) {
+    return { ok: true, deferred: true, evaluations, accepted: existing, handle: evalHandle };
+  }
   if (!skipEvaluate) {
     evalHandle = typeof evaluate === 'function'
       ? toRunnerHandle(evaluate(sessionDir, handNo, { solverAdapterId }))
@@ -418,6 +428,7 @@ async function runHandPipelineUnlocked({
     if (typeof publish === 'function') await publish('annotation');
   };
 
+  let explainDeferred = false;
   for (const item of acceptedItems) {
     if (hasCutoffMarker(sessionDir)) {
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
@@ -448,18 +459,30 @@ async function runHandPipelineUnlocked({
       evaluationId: item.evaluationId,
     };
     if (typeof explain !== 'function') continue;
+    // A source no explanation could be accepted for (synthetic or unverified
+    // reference) gets no LLM call; it stays unsealed until the cutoff seal.
+    if (!explanationEligible(evaluation)) continue;
+    // Checked between items and again once the explain lock is ours: a pipeline
+    // that queued behind the lock during a pause must not start its child.
+    if (!explainAdmitted()) { explainDeferred = true; continue; }
     let text = null;
+    let held = false;
     await withExplainLock(sessionDir, async () => {
       if (hasCutoffMarker(sessionDir)) return;
+      if (!explainAdmitted()) { held = true; return; }
       const explainHandle = toRunnerHandle(explain(evaluation));
       try {
         text = await explainHandle.promise;
       } catch { text = null; }
+      // An explainer that waited (e.g. on the background probe) and found the
+      // gate closed started nothing: the item stays unsealed and is re-registered.
+      if (text === EXPLAIN_HELD) { held = true; text = null; }
     });
     if (hasCutoffMarker(sessionDir)) {
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
       continue;
     }
+    if (held) { explainDeferred = true; continue; }
     if (typeof text !== 'string' || !text.trim()) continue;
     const check = validateExplanation(evaluation, text);
     if (!check.ok) continue;
@@ -468,11 +491,15 @@ async function runHandPipelineUnlocked({
 
   return {
     ok: true,
+    ...(explainDeferred ? { deferred: true } : {}),
     evaluations,
     accepted: acceptedItems,
     handle: evalHandle,
   };
 }
+
+/** Returned by an explainer that declined to start because the gate closed while it waited. */
+export const EXPLAIN_HELD = Symbol('explain-held');
 
 export async function runHandPipeline(opts) {
   const key = `${opts.sessionDir}\0${opts.handNo}`;

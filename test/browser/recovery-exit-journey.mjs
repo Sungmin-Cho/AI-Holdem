@@ -55,7 +55,9 @@ export async function runRecoveryExitJourney(outDir) {
       }
       await wait(async()=>{
         if(app.manager.snapshot().state==='paused'&&app.manager.snapshot().pendingDecision)return true;
-        await evaluate("(()=>{const d=document.querySelector('#table').contentDocument;const b=d?.querySelector('#btn-fold');if(b&&!b.disabled)b.click();})()");return false;
+        // A fold that lands in the managed resume's brief park is refused
+        // GAME_PAUSED and can only be sent again as is (#235) — as a user would.
+        await evaluate("(()=>{const d=document.querySelector('#table').contentDocument;const b=d?.querySelector('#btn-fold');if(b&&!b.disabled){b.click();return;}const r=d?.querySelector('#action-retry');if(r&&!r.hidden&&!r.disabled)r.click();})()");return false;
       });
       const old=app.manager.current,engineFile=path.join(old.sessionDir,'state.json'),loopFile=path.join(old.sessionDir,'loop-state.json');
       await app.close();app=null;
