@@ -143,12 +143,12 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.deepEqual(measurements.map(row=>row.combo),geometryCombos({ci}),'the geometry matrix ran exactly the expected combinations');
     checks.push('geometry-matrix');
     // Contrast on the live turn: plates on the felt, secondary amounts, the action bar.
-    const contrastPass=async(label,selectors)=>{
+    const contrastPass=async(label,selectors,minimum)=>{
       const failures=[];
       for(const theme of ['b','a','c']){
         await evaluate(theme==='b'?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme','${theme}')`);
         const {checked,out}=await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(selectors)})`);
-        assert.ok(checked>=12,`${label}/${theme}: only ${checked} elements measured`);
+        assert.ok(checked>=minimum,`${label}/${theme}: only ${checked} elements measured`);
         measurements.push({contrast:label,theme,checked});
         for(const row of out)failures.push({label,theme,...row});
       }
@@ -156,7 +156,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       return failures;
     };
     await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
-    const turnContrast=await contrastPass('turn',['.plate-name','.plate-stack .amount-primary','.plate .amount-secondary','.plate-tag','.bet-amount','.pot-label','.pot-amount','#action-bar button','.action-summary','.table-context','.tabs button']);
+    const turnContrast=await contrastPass('turn',['.plate-name','.plate-stack .amount-primary','.plate .amount-secondary','.plate-tag','.bet-amount','.pot-label','.pot-amount','#action-bar button','.action-summary','.table-context','.tabs button'],20);
     assert.deepEqual(turnContrast,[],JSON.stringify(turnContrast));
     await browser(['set','viewport','1094','500']);await browser(['snapshot','-i']);
     const veryShort=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>n.getBoundingClientRect());return {overflow:getComputedStyle(document.body).overflowY,width:document.documentElement.scrollWidth,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1))}})()`);
@@ -531,6 +531,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const winnerLines=await evaluate("[...document.querySelectorAll('#hand-result .hand-result-winner')].map(n=>n.textContent)");
     assert.ok(winnerLines.length>0&&winnerLines.every(line=>/팟 .+ 획득/.test(line)&&!/\+\d/.test(line)),`a winner line is the pot collected, never a signed profit: ${JSON.stringify(winnerLines)}`);
     await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
+    // Every size: the strip never covers the board, the settled pot or a plate,
+    // and stays inside the viewport (phones dock it at the bottom).
+    for(const [width,height] of [[390,667],[768,900],[1024,800],[1440,900]]) {
+      await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+      const placed=await evaluate("(()=>{const node=document.querySelector('#hand-result'),r=node.getBoundingClientRect();return {hidden:node.hidden,inside:r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1,hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+      await browser(['screenshot',path.join(outDir,`hand-result-${width}x${height}.png`)]);
+      assert.deepEqual({hidden:placed.hidden,inside:placed.inside,hits:placed.hits},{hidden:false,inside:true,hits:[]},JSON.stringify({width,height,placed}));
+    }
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
@@ -544,7 +552,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     checks.push('plate-status-row');
     // Contrast after the hand: folded plates (opacity), last actions, the result strip.
     await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
-    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.pot-label','.pot-amount','.log-name','.log-act']);
+    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.pot-label','.pot-amount','.log-name','.log-act'],8);
     assert.deepEqual(resultContrast,[],JSON.stringify(resultContrast));
     checks.push('computed-contrast');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
