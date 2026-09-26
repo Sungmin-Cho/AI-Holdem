@@ -1006,6 +1006,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const admissionDeferredHands = new Set();
   // Hands whose pipeline was still running when their re-registration came due.
   const relaunchAfter = new Set();
+  // The running pipeline task per hand, so "after the last hand" can join one
+  // that is already going instead of treating it as absent.
+  const trainingTaskByHand = new Map();
+  // Hand of each running solve (by decisionId), recorded when the gate closes.
+  const solveHandOf = new Map();
   let waitController = null;
   let resultHoldState = null;
   let resultHoldController = null;
@@ -3276,6 +3281,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // 먼저 막는다.
     if (solveInFlight.has(task.decisionId)) return;
     solveInFlight.add(task.decisionId);
+    solveHandOf.set(task.decisionId, task.handNo);
     const loop = readLoopState();
     let held = false;
     trackTrainingTask(task.handNo, () => runSolveTask({
@@ -3298,7 +3304,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       consume: consumeTrainingNow,
     }).finally(() => {
       solveInFlight.delete(task.decisionId);
+      solveHandOf.delete(task.decisionId);
       if (held) readmitTrainingHand(task.handNo);
+      else settleDeferredRecord(task.handNo);
     }));
   };
 
@@ -3331,19 +3339,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (trainingInFlightHands.has(handNo)) return null;
     trainingInFlightHands.add(handNo);
     let result = null;
-    return trackTrainingTask(handNo, async () => {
+    const task = trackTrainingTask(handNo, async () => {
       try {
         result = await runTrainingPipeline(handNo);
         return result;
       } finally {
         trainingInFlightHands.delete(handNo);
+        trainingTaskByHand.delete(handNo);
         // Same turn as the in-flight release, so a reopen in between cannot lose it.
         if (result?.deferred === true) readmitTrainingHand(handNo);
-        else if (result?.ok === true) forgetDeferredRecord(handNo);
+        else if (result?.ok === true) settleDeferredRecord(handNo);
         if (relaunchAfter.delete(handNo)) readmitTrainingHand(handNo);
       }
     });
+    trainingTaskByHand.set(handNo, task);
+    return task;
   };
+  const joinOrLaunchTraining = (handNo) => trainingTaskByHand.get(handNo) ?? launchTrainingPipeline(handNo);
 
   // A hand whose work a pause held back: queue it while the gate is closed, or
   // register it now (after its running pipeline, if one is still going).
@@ -3366,7 +3378,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (next.size === current.size && [...next].every((handNo) => current.has(handNo))) return;
     writeLoopState({ trainingDeferredHands: next.size ? [...next].sort((a, b) => a - b) : undefined });
   };
-  const forgetDeferredRecord = (handNo) => writeDeferredRecord((set) => set.delete(handNo));
+  // A hand leaves the record once nothing of it is queued or still running.
+  const settleDeferredRecord = (handNo) => {
+    if (admissionDeferredHands.has(handNo) || trainingInFlightHands.has(handNo)
+      || [...solveHandOf.values()].includes(handNo)) return;
+    writeDeferredRecord((set) => set.delete(handNo));
+  };
   const queueDeferredHand = (handNo) => {
     if (!Number.isInteger(handNo) || stopRequested) return;
     admissionDeferredHands.add(handNo);
@@ -3381,8 +3398,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (hands.length) log('training-admission-reopened', { hands });
     return hands.length;
   };
+  // Closing records what is still running first: a pipeline or solve that is
+  // about to be held back (or a stop/crash before it reports) is found again.
+  const closeTrainingAdmission = () => {
+    trainingAdmissionClosed = true;
+    const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
+    if (running.length) writeDeferredRecord((set) => { for (const handNo of running) set.add(handNo); });
+  };
   const openTrainingAdmission = () => { trainingAdmissionClosed = false; };
   const reopenTrainingAdmission = () => { openTrainingAdmission(); return drainDeferredHands(); };
+  // Once the game is over the game-over branch registers held-back hands after
+  // the last hand; anywhere else they go now.
+  const reopenUnlessFinalizing = () => (gameOverPending ? openTrainingAdmission() : reopenTrainingAdmission());
   // Finalization: the last hand's explanation takes the explain lock first;
   // held-back hands (which skip evaluation and would reach the lock sooner)
   // start once that pipeline is done. Whatever misses the result-wait cutoff is
@@ -3539,17 +3566,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const lastHandNo = engine?.lastHand?.handNo;
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
       if (stopRequested) return;
-      // R1 (b): hands a pause held back (recorded, so a restart still has them).
-      // Only those — an explanation that simply failed is not retried here — and
-      // after the last hand's pipeline, so they cannot take the explain lock first.
-      for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
-        if (Number.isInteger(handNo) && !pendingHands.has(handNo)) admissionDeferredHands.add(handNo);
-      }
+      // The last hand goes first (joining its pipeline if the game-over branch
+      // already started it). Everything else — missing, solve-pending, and the
+      // hands a pause held back (R1 (b), recorded so a restart still has them;
+      // an explanation that simply failed is not retried) — follows it, so none
+      // of them can take the explain lock ahead of the last hand's explanation.
       let lastTask = null;
-      for (const handNo of pendingHands) {
-        const task = launchTrainingPipeline(handNo);
-        if (handNo === lastHandNo) lastTask = task;
+      if (Number.isInteger(lastHandNo) && pendingHands.delete(lastHandNo)) lastTask = joinOrLaunchTraining(lastHandNo);
+      for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
+        if (Number.isInteger(handNo)) pendingHands.add(handNo);
       }
+      for (const handNo of pendingHands) if (handNo !== lastHandNo) admissionDeferredHands.add(handNo);
       if (!trainingAdmissionClosed) drainDeferredAfter(lastTask);
       log('training-reconcile-registered', { hands: [...pendingHands] });
       await consumeTrainingNow();
@@ -7018,10 +7045,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     pauseCompletion = (async()=>{
       // R1 (a): the gate closes before the durable pausing write, so training
       // work that lands while that write is in flight is already held back.
-      trainingAdmissionClosed = true;
+      closeTrainingAdmission();
       await retryControlWrite(()=>control.set('pausing',{pauseIntent:true}));
       if(stopRequested)return {state:'stopped'};
-      if(readLoopState()?.phase!=='playing'){reopenTrainingAdmission();return {state:'finalizing'};}
+      if(readLoopState()?.phase!=='playing'){reopenUnlessFinalizing();return {state:'finalizing'};}
       pauseRequested=true;
       if (resultHoldState) resultHoldState.skipped = true;
       resultHoldController?.abort();
@@ -7029,7 +7056,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const ack=new Promise(resolve=>{resolvePause=resolve;});
       waitController?.abort();
       return ack;
-    })().catch(error=>{pauseCompletion=null;reopenTrainingAdmission();throw error;});
+    })().catch(error=>{pauseCompletion=null;reopenUnlessFinalizing();throw error;});
     return pauseCompletion;
   };
   const resumePlay = async () => {
@@ -8083,7 +8110,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           status: p.closeConfirmed === true ? 'recovery_required' : 'unsafe',
           code: p.closeConfirmed === true ? 'INTERRUPTED' : 'CHILD_CLOSE_UNCONFIRMED' } });
         if (p.schemaVersion !== 3 && p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
-        if (managed) { trainingAdmissionClosed = true; pauseRequested = true; }
+        if (managed) { closeTrainingAdmission(); pauseRequested = true; }
         }
       }
       if (state?.playerBudget) playerBudget(state.playerBudget);
@@ -8388,7 +8415,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
           ensureFinalizationResultWaitCutoff();
         }
-        const lastHandTask = launchTrainingPipeline(out.handNo);
+        const lastHandTask = joinOrLaunchTraining(out.handNo);
         if (ending) drainDeferredAfter(lastHandTask);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {
@@ -8473,7 +8500,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (stopRequested) break;
         if (!managed) throw codedError('PLAYER_RECOVERY_REQUIRED', 'LLM 결정이 미해결 상태로 저장되었습니다. 명시적으로 재시도하거나 종료하세요.');
         // An automatic recovery pause closes the training gate like a user pause.
-        trainingAdmissionClosed = true;
+        closeTrainingAdmission();
         pauseRequested = true;
         await retryControlWrite(() => control.set('pausing', { pauseIntent: true }));
         out = await publishEnvelope(await runCli(['step']), ['--view-only']);

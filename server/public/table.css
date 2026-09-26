@@ -1289,6 +1289,8 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .review-head,.replay-head {flex-wrap:wrap;}
 }
 @media (prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;scroll-behavior:auto!important;}}
+/* The display setting "줄이기" (data-motion=reduce, set by theme-boot.js) stops the same motion. */
+:root[data-motion="reduce"] *,:root[data-motion="reduce"] *::before,:root[data-motion="reduce"] *::after {animation:none!important;transition:none!important;scroll-behavior:auto!important;}
 /* Zoom / unusually narrow embeds reflow to an ordered seat list. */
 @container stage (max-width:300px) {
   .table-wrap {padding:0;}

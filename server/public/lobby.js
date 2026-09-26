@@ -114,7 +114,7 @@ function render() {
   $("pause-tech").hidden = !technical;
   $("pause-tech-text").textContent = technical.trim();
   $("pause-progress").hidden = !(stopping && s === 'pausing');
-  $("pause-progress").textContent = pauseProgressText(snapshot.pausing);
+  $("pause-progress").textContent = pauseProgressText(snapshot.pausing) + pauseElapsedText(snapshot.pausing);
   $("retry-decision").hidden = !recovery || snapshot.pendingDecision?.retryable === false;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
@@ -245,20 +245,26 @@ function syncTableInert() {
     || snapshot.gameId !== pauseLock.gameId || snapshot.gameEpoch !== pauseLock.gameEpoch)) pauseLock = null;
   $("table").inert = Boolean(pauseLock) || (!["playing","finalizing","completed","ended"].includes(snapshot.state)) || Boolean(document.querySelector('dialog[open]'));
   $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
-  $("table-lock-detail").textContent = snapshot.state === 'pausing' ? pauseProgressText(snapshot.pausing) : '';
+  setLiveText($("table-lock-detail"), snapshot.state === 'pausing' ? pauseProgressText(snapshot.pausing) : '');
+  $("table-lock-elapsed").textContent = snapshot.state === 'pausing' ? pauseElapsedText(snapshot.pausing) : '';
 }
-// What the pause is waiting for, by kind, and for how long (design §8.1).
+// What the pause is waiting for, by kind (design §8.1). The elapsed seconds
+// are separate so live regions announce a change of reasons, not every tick.
 function pauseProgressText(pausing) {
   const w = pausing?.waitingFor ?? {};
   const children = (w.explain ?? 0) + (w.evaluate ?? 0) + (w.solve ?? 0);
   const parts = [w.explain ? `학습 설명 ${w.explain}건` : '', w.evaluate ? `학습 평가 ${w.evaluate}건` : '',
-    w.solve ? `정답 계산 ${w.solve}건` : '', !children && w.training ? `학습 분석 ${w.training}건` : '',
+    w.solve ? `솔버 분석 ${w.solve}건` : '', !children && w.training ? `학습 분석 ${w.training}건` : '',
     w.coach ? `코치 노트 ${w.coach}건` : '', w.resolver ? 'AI 코치 연결 확인' : '',
     w.other ? `기타 작업 ${w.other}건` : ''].filter(Boolean);
-  const since = Date.parse(pausing?.since ?? '');
-  const elapsed = Number.isFinite(since) ? ` · ${Math.max(0, Math.round((Date.now() - since) / 1000))}초째` : '';
-  return (parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.') + elapsed;
+  return parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.';
 }
+function pauseElapsedText(pausing) {
+  const since = Date.parse(pausing?.since ?? '');
+  return Number.isFinite(since) ? ` · ${Math.max(0, Math.round((Date.now() - since) / 1000))}초째` : '';
+}
+// Rewrite a live region only when its words change.
+function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
 let refreshFailures=0;
 async function refresh() {
   snapshot = await api("/api/app");

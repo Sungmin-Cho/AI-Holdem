@@ -277,7 +277,7 @@
         <button type="button" id="live-room-rotate" class="ui-btn ui-btn--ghost">참가 코드 재발급</button>
       </details>
       <iframe id="table" title="홀덤 게임 테이블"></iframe>
-      <div id="table-lock" class="table-lock" role="status" hidden><strong>일시정지하는 중…</strong><span id="table-lock-detail"></span></div>
+      <div id="table-lock" class="table-lock" hidden><strong>일시정지하는 중…</strong><span id="table-lock-detail" role="status"></span><span id="table-lock-elapsed" aria-hidden="true"></span></div>
     </section>
     <section id="seat-management" class="ui-card seat-management" hidden>
       <h2 class="ui-h3">다음 게임 참가자 관리</h2>
@@ -288,7 +288,7 @@
     <dialog id="pause-dialog" class="ui-dialog">
       <div class="ui-dialog__head"><h2 class="ui-dialog__title">게임 메뉴</h2></div>
       <p id="pause-message" class="dialog-message">일시정지 중입니다.</p>
-      <p id="pause-progress" class="dialog-progress" role="status" hidden></p>
+      <p id="pause-progress" class="dialog-progress" hidden></p>
       <details id="pause-tech" class="dialog-tech" hidden><summary>기술 정보</summary><p id="pause-tech-text"></p></details>
       <div class="ui-dialog__actions">
         <button id="resume" class="ui-btn ui-btn--primary ui-btn--lg">계속하기</button

@@ -44,9 +44,10 @@ test('a pause click locks the table until the pause settles, and closing the men
  open=false;context.syncTableInert();assert.equal(dom.$('table').inert,true,'the menu closed while the pause is pending');
  context.snapshot=snap('playing');context.syncTableInert();assert.equal(dom.$('table').inert,true,'a stale playing snapshot does not unlock');
  context.snapshot=snap('pausing',{pausing:{since:new Date(Date.now()-7000).toISOString(),waitingFor:{coach:1,training:2}}});context.render();
- assert.equal(dom.$('table').inert,true);assert.match(dom.$('table-lock-detail').textContent,/학습 분석 2건 · 코치 노트 1건 · [67]초째/);
+ assert.equal(dom.$('table').inert,true);assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 분석 2건 · 코치 노트 1건');
+ assert.match(dom.$('table-lock-elapsed').textContent,/[67]초째/,'elapsed seconds sit outside the live region');
  context.snapshot=snap('pausing',{pausing:{waitingFor:{training:2,explain:1,solve:1,resolver:true}}});context.render();
- assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 설명 1건 · 정답 계산 1건 · AI 코치 연결 확인','running children are named by kind');
+ assert.equal(dom.$('table-lock-detail').textContent,'마무리 중: 학습 설명 1건 · 솔버 분석 1건 · AI 코치 연결 확인','running children are named by kind');
  assert.equal(dom.$('pause-progress').hidden,false);
  for(const [state,extra] of [['finalizing',{}],['playing',{gameId:'two'}],['playing',{gameEpoch:'next'}],['error',{}]]){
   context.pauseLock={gameId:'one',gameEpoch:'epoch'};context.snapshot=snap(state,extra);context.render();
