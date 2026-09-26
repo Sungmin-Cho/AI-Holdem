@@ -299,7 +299,8 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     previousLevel = level;
   }
   if (rebuilt.length !== pots.length || rebuilt.some((pot, at) => pot.amount !== pots[at].amount
-    || (Array.isArray(pots[at].eligible) && (pots[at].eligible.length !== pot.eligible.length || pot.eligible.some((playerId) => !pots[at].eligible.includes(playerId)))))) return fail('pots');
+    || !Array.isArray(pots[at].eligible) || pots[at].eligible.length !== pot.eligible.length
+    || pot.eligible.some((playerId) => !pots[at].eligible.includes(playerId)))) return fail('pots');
   const awards = [];
   for (const pot of pots) {
     const winners = Array.isArray(pot.winners) ? pot.winners : [];
@@ -307,9 +308,19 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     // Only a hand still in (and eligible for this pot) can win it.
     const eligible = Array.isArray(pot.eligible) ? new Set(pot.eligible) : null;
     if (winners.some((row) => folded.has(row.playerId) || (eligible && !eligible.has(row.playerId)))) return fail('pot-winner');
-    // A split pot gives each winner the floor share, the odd chips one each.
+    // Each winner once, with a positive share; a split pot gives the floor share
+    // and the odd chips one each, clockwise from the seat after the button
+    // (engine oddChipOrder / awardPots) — that order needs the positions.
+    if (new Set(winners.map((row) => row.playerId)).size !== winners.length || winners.some((row) => row.share <= 0)) return fail('pot-winner');
     const shares = winners.map((row) => row.share);
     if (Math.max(...shares) - Math.min(...shares) > 1) return fail('pot-share');
+    if (positional) {
+      const oddOrder = [...positional.slice(1), positional[0]];
+      const ordered = [...winners].sort((a, b) => oddOrder.indexOf(a.playerId) - oddOrder.indexOf(b.playerId));
+      const floor = Math.floor(pot.amount / winners.length);
+      const odd = pot.amount % winners.length;
+      if (ordered.some((row, at) => row.share !== floor + (at < odd ? 1 : 0))) return fail('pot-share');
+    }
     for (const row of winners) {
       stacks[row.playerId] += row.share;
       awards.push({ potIndex: pot.potIndex, playerId: row.playerId, share: row.share });

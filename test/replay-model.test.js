@@ -494,3 +494,27 @@ test('a legacy record without positions is still held to round closure and compl
   assert.equal(buildReplaySteps(replay, { seatOrder: order }).ok, true);
   assert.equal(buildReplaySteps({ ...replay, actions: replay.actions.slice(0, -1) }, { seatOrder: order }).ok, false, 'stops while someone still had to act');
 });
+
+test('pots carry their eligible seats, each winner once, and odd chips go clockwise from the seat after the button', () => {
+  const reject = (replay, why) => assert.equal(buildReplaySteps(replay).ok, false, why);
+  const twoPots = replayRecord(findHand((record) => record.pots.length >= 2), { reveal: 'all' });
+  assert.equal(buildReplaySteps(twoPots).ok, true);
+  const noSeats = structuredClone(twoPots);
+  delete noSeats.pots[1].eligible;
+  reject(noSeats, 'a pot without its eligible seats');
+  const single = replayRecord(findHand((record) => record.pots[0].winners.length === 1 && record.pots[0].amount % 2 === 0 && record.pots[0].amount >= 20), { reveal: 'all' });
+  assert.equal(buildReplaySteps(single).ok, true);
+  const doubled = structuredClone(single);
+  const [only] = doubled.pots[0].winners;
+  doubled.pots[0].winners = [{ playerId: only.playerId, share: only.share / 2 }, { playerId: only.playerId, share: only.share / 2 }];
+  reject(doubled, 'the same winner listed twice in one pot');
+  const oddSplit = replayRecord(findHand((record) => record.pots.some((pot) => pot.winners.length >= 2 && pot.amount % pot.winners.length !== 0)), { reveal: 'all' });
+  assert.equal(buildReplaySteps(oddSplit).ok, true);
+  const swapped = structuredClone(oddSplit);
+  const pot = swapped.pots.find((row) => row.winners.length >= 2 && row.amount % row.winners.length !== 0);
+  const high = pot.winners.find((row) => row.share === Math.max(...pot.winners.map((w) => w.share)));
+  const low = pot.winners.find((row) => row.share === Math.min(...pot.winners.map((w) => w.share)));
+  high.share -= 1; low.share += 1;
+  swapped.endStacks[high.playerId] -= 1; swapped.endStacks[low.playerId] += 1;
+  reject(swapped, 'the odd chip given to the wrong winner');
+});
