@@ -952,10 +952,12 @@ main {
 .log-hand-summary { flex-basis: 100%; padding-bottom: 2px; text-align: center; font-size: 12px; color: var(--c-text-2); overflow-wrap: anywhere; }
 
 .replay-card {
-  --tw: min(640px, 100%);
-  --ch: calc(var(--tw) * 0.042);
-  --cw: calc(var(--tw) * 0.030);
-  --card-gap: calc(var(--tw) * 0.0115);
+  /* A fixed length: a percentage here would resolve against the font size
+     where --ch is used as font-size and shrink the inline cards to nothing. */
+  --tw: 640px;
+  --ch: calc(var(--tw) * 0.0203);
+  --cw: calc(var(--tw) * 0.0172);
+  --card-gap: calc(var(--tw) * 0.005);
   display: flex;
   flex-direction: column;
   width: var(--tw);
