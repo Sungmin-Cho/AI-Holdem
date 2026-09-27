@@ -325,3 +325,13 @@ test('participants get a guide that names only what their table has', () => {
   side.querySelector('.onboarding-next').click();
   assert.equal(side.querySelector('.onboarding-title').textContent, '로그와 참가자');
 });
+
+test('a guide on screen steps aside when the viewer leaves the table', () => {
+  const { side, onboarding } = guide(memoryStorage());
+  onboarding.offer({ myTurn: true, deadline: false, seated: true });
+  assert.ok(side.querySelector('.onboarding-card'));
+  assert.equal(onboarding.offer({ myTurn: false, deadline: false, seated: false }), false);
+  assert.equal(side.querySelector('.onboarding-card'), null, 'out or game over: hidden');
+  assert.equal(onboarding.suspended, true);
+  assert.equal(onboarding.offer({ myTurn: false, deadline: false, seated: true }), true, 'back at a seat: shown again');
+});

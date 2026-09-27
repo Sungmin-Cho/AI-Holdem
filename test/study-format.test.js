@@ -461,6 +461,8 @@ test('progress, mode help and the short source tag', () => {
     { id: 'new', complete: true, sourceIdentity: source, result: { total: 10, allowedActionRate: 0.6 }, retest: { eligible: false, nextAvailableAt: later } },
   ] });
   assert.match(modeAvailability('retest', runs), /가장 최근 평가의 재평가 가능 시각/, 'an older eligible run does not make the start button work');
+  const capped = formatSummary({ source, assessments: Array.from({ length: 100 }, (_, index) => ({ id: `open-${index}`, complete: false, sourceIdentity: source, result: { total: 3 } })) });
+  assert.match(modeAvailability('retest', capped), /최근 100건에 완료한 평가가 없습니다/, 'a full summary window does not claim no completed run exists');
   assert.equal(modeAvailability('free', summary), '');
   assert.match(formatSourceShort(source), /휴리스틱/);
   assert.doesNotMatch(formatSourceShort({ id: '/Users/private', version: 'token=secret' }), /private|secret/);

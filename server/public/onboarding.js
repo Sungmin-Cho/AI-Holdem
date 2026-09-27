@@ -114,8 +114,9 @@ export function createOnboarding({ doc = globalThis.document, storage, container
      * or — after a first turn that had a deadline — in the wait that follows. */
     offer({ myTurn, deadline, seated = true }) {
       if (step >= 0) {
-        // Already showing: step aside for a timed turn, come back in the wait after it.
-        if (myTurn && deadline) {
+        // Already showing: step aside for a timed turn or once the viewer is no
+        // longer seated (out, game over); come back in a later wait at a seat.
+        if ((myTurn && deadline) || !seated) {
           if (!suspended) {
             const hadFocus = Boolean(card?.contains(doc.activeElement));
             suspended = true;

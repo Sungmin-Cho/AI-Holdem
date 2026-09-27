@@ -124,10 +124,15 @@
   bottom: calc(100% + 2px);
   left: 50%;
   transform: translateX(-50%);
-  color: var(--c-action);
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--c-action);
+  border-radius: var(--r-control);
+  background: var(--c-plate);
+  color: var(--c-plate-text);
   font-family: var(--f-ui);
   font-size: var(--fs-12);
   font-weight: 700;
+  line-height: 1.4;
 }
 .hand-cards { display: flex; align-items: center; gap: var(--sp-3); }
 .rank-cards { display: flex; gap: var(--sp-1); }

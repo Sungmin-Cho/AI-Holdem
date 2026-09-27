@@ -30,7 +30,10 @@ export function modeAvailability(mode, formatted) {
   if (mode !== 'retest') return '';
   // "연습 시작" retests the most recent completed assessment (drill-cli.js);
   // an older one is retested from its own card below.
-  const latest = [...(formatted.assessments ?? [])].reverse().find((run) => run.complete);
+  const runs = formatted.assessments ?? [];
+  const latest = [...runs].reverse().find((run) => run.complete);
+  // The summary carries the latest 100 runs only (study-summary.js).
+  if (!latest && runs.length >= 100) return '최근 100건에 완료한 평가가 없습니다. 연습 시작을 누르면 이전 완료 평가로 재평가할 수 있는지 확인합니다.';
   if (!latest) return '완료한 새 문제 평가가 없어 아직 시작할 수 없습니다.';
   if (latest.canRetest) return '가장 최근 평가를 지금 재평가할 수 있습니다.';
   if (latest.availableAt) return `가장 최근 평가의 재평가 가능 시각: ${latest.availableAt} · 다른 평가는 아래 카드에서 재평가합니다.`;

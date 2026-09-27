@@ -1104,7 +1104,7 @@ main {
 .replayer-seat-bet { flex: none; border: 1px solid var(--c-chip); line-height: 12px; background: var(--c-pot-bg); color: var(--c-pot-text); }
 .replayer-seat.is-actor .replayer-plate { border-color: var(--c-action); box-shadow: 0 0 0 2px var(--c-action); }
 .replayer-seat.is-actor .replayer-seat-tag { background: var(--c-action); color: var(--c-action-ink); }
-.replayer-seat.is-folded .replayer-seat-cards { opacity: 0.45; }
+.replayer-seat.is-folded .replayer-seat-cards .card--back { opacity: 0.45; }
 .replayer-seat.is-folded .replayer-plate { border-style: dashed; color: var(--c-plate-text-2); }
 .replayer-seat.is-winner .replayer-plate { border-color: var(--c-pos); box-shadow: 0 0 0 2px var(--c-pos); }
 .replayer-seat.is-winner .replayer-seat-tag { background: var(--c-pos); color: var(--c-on-info); }

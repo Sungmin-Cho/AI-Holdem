@@ -520,7 +520,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===(w<600?24:32)&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
       if(w===1280){
         assert.ok(await evaluate("document.querySelectorAll('.replayer-seat.is-folded').length>0"),'the last step has folded seats');
-        const replayContrast=await contrastPass('replay',['.replayer-seat-name','.replayer-seat-stack','.replayer-seat-pos','.replayer-seat-tag','.replayer-seat-bet','.replayer-pot','.replayer-now-title'],20);
+        const replayContrast=await contrastPass('replay',['.replayer-seat-name','.replayer-seat-stack','.replayer-seat-pos','.replayer-seat-tag','.replayer-seat-bet','.replayer-pot','.replayer-now-title','.replayer-seat .card-rank'],20);
         assert.deepEqual(replayContrast,[],JSON.stringify(replayContrast));
       }
       await browser(['screenshot',path.join(outDir,`replayer-9-${w}x${h}.png`)]);
