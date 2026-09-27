@@ -77,10 +77,10 @@ test('engine actions and both table layouts advance clockwise; heads-up reverses
   }
 });
 
-test('last action badges track blinds, current street bets, raises and all-in without card data',async()=>{
+test('last action badges track current street bets, raises and all-in, never blinds or card data',async()=>{
   const {lastActionsBySeat}=await import('../server/public/seat-format.js');
   const log=[{type:'hand_start',handNo:1},{type:'blinds_posted',posts:[{playerId:'user',amount:25},{playerId:'p1',amount:50}]}];
-  assert.deepEqual(lastActionsBySeat(log),{user:{label:'SB',amount:25},p1:{label:'BB',amount:50}});
+  assert.deepEqual(lastActionsBySeat(log),{},'posting a blind is not an action');
   log.push({type:'action',playerId:'user',action:'call',street:'preflop'});
   assert.deepEqual(lastActionsBySeat(log).user,{label:'콜',amount:null});
   log.push({type:'street',street:'flop',board:['As','Kh','Qc']});

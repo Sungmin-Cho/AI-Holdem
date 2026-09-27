@@ -43,7 +43,7 @@ async function waitFor(predicate, message, timeoutMs = 15_000 * SCALE) {
   assert.fail(message);
 }
 
-function coachUpper({ coachDelayMs = 0 } = {}) {
+function coachUpper({ coachDelayMs = 0, coachGate = null } = {}) {
   const starts = [];
   const coachHands = [];
   let disposed = 0;
@@ -63,7 +63,8 @@ function coachUpper({ coachDelayMs = 0 } = {}) {
       const raw = stage === 'evaluator' ? '표본 30핸드 미만이므로 참고용입니다. 공개 정보 기준 과정 평가는 안정적이었습니다.'
         : stage === 'synthesizer' ? VALID_REVIEW
         : stage === 'explain' ? '{}' : JSON.stringify({ handNo, text: '기본 코치 응답' });
-      const done = stage === 'coach' && coachDelayMs > 0 ? sleep(coachDelayMs).then(() => ({ raw })) : Promise.resolve({ raw });
+      const done = stage === 'coach' && coachGate ? coachGate.then(() => ({ raw }))
+        : stage === 'coach' && coachDelayMs > 0 ? sleep(coachDelayMs).then(() => ({ raw })) : Promise.resolve({ raw });
       return { pid: 930_000 + starts.length, startTime: `r2-${starts.length}`, done, async terminate() { return { confirmed: true }; } };
     },
     async dispose() { disposed += 1; },
@@ -497,4 +498,36 @@ test('R2: while a finished game waits for the probe the app reports finalizing a
   assert.equal(snap.upperStatus, 'probing');
   gate.resolve();
   await waitFor(() => manager.snapshot().state === 'completed', 'completed');
+});
+
+test('R1: a coach note that finishes while pausing is published by resume, before the next hand', { timeout: 90_000 * SCALE }, async (t) => {
+  const gameDir = createOwnedTempDir('holdem-r1-coach-queue');
+  const coachGate = deferred();
+  const upper = coachUpper({ coachGate: coachGate.promise });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', controlProtocolVersion: 1 },
+  });
+  t.after(() => { coachGate.resolve(); return loop.requestStop().catch(() => {}); });
+  await loop.bootstrap({ ...POLICY_GAME, hands: 5 });
+  await waitFor(() => loop.upperStatus === 'ready', 'the probe did not settle');
+  let finished = false;
+  let driving = true;
+  const running = loop.run().finally(() => { finished = true; });
+  running.catch(() => {});
+  const driver = driveHuman(gameDir, () => finished || !driving);
+  await waitFor(() => upper.coachHands.length >= 1, 'no coach generation started');
+  driving = false;
+  await driver;
+  const coachHand = upper.coachHands[0];
+  const pausing = loop.pause();
+  await sleep(150);
+  coachGate.resolve();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  assert.equal(publishedNote(gameDir, coachHand), undefined, 'publication waits while pausing');
+  await loop.resumePlay();
+  const note = publishedNote(gameDir, coachHand);
+  assert.ok(note && /기본 코치 응답/.test(note.text ?? ''), `note after resume: ${JSON.stringify(note ?? null)}`);
+  await loop.requestStop().catch(() => {});
 });

@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>AI 홀덤</title>
+  <script src="/theme-boot.js"></script>
+  <link rel="preload" href="/font-pretendard-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/font-space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/design-tokens.css">
-  <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/table-design.css">
+  <link rel="stylesheet" href="/ui-base.css">
+  <link rel="stylesheet" href="/table.css">
 </head>
 <body>
   <header class="topbar">
@@ -23,6 +26,7 @@
       <div class="meta-seg" data-tournament-meta><span class="meta-label">다음 레벨까지</span><span class="meta-value"><span class="num" id="level-left">—</span>핸드</span></div>
       <div class="meta-seg"><span class="meta-label">누적 손익</span><span class="meta-value num" id="session-net">—</span></div>
     </div>
+    <a id="study-open" class="study-link" target="_blank" rel="noopener noreferrer" hidden>학습실 ↗</a>
     <div id="conn" class="conn off" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span id="conn-text">연결 중…</span></div>
   </header>
 
@@ -32,8 +36,7 @@
       <p id="turn-announcement" class="sr-only" role="status" aria-live="polite"></p>
       <p id="seat-announcement" class="sr-only" role="status"></p>
       <p id="spectator-banner" class="spectator-banner" role="status" hidden></p>
-      <p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드를 위해 스택을 복원했습니다. 완료 핸드의 결과는 복기에서 확인하세요.</p>
-      <div class="table-wrap">
+            <div class="table-wrap">
         <div class="table" id="table" aria-label="포커 테이블">
           <div class="rail" aria-hidden="true"></div>
           <div class="rail-line" aria-hidden="true"></div>
@@ -42,12 +45,12 @@
             <svg class="felt-mark" viewBox="0 0 24 24"><use href="#suit-s"></use></svg>
           </div>
           <div class="center">
+            <aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden><p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드는 시작 스택으로 다시 시작합니다.</p></aside>
             <div id="board" class="board" aria-label="커뮤니티 카드"></div>
             <div id="pots" class="pots" aria-label="팟"></div>
           </div>
           <div id="bets" class="bets" aria-hidden="true"></div>
           <div id="seats" class="seats"></div>
-          <aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden></aside>
         </div>
       </div>
 
@@ -55,7 +58,7 @@
         <p id="thinking" class="thinking" hidden></p>
       <span id="thinking-announcement" class="sr-only" aria-live="polite"></span>
         <p id="idle-hint" class="idle-hint">게임을 기다리는 중…</p>
-        <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 확인</button></div>
+        <div class="action-feedback"><p id="action-status" role="status" aria-live="polite">현재 차례를 확인하는 중…</p><button type="button" id="action-reconcile" class="btn btn-ghost" hidden>상태 확인</button><button type="button" id="action-retry" class="btn btn-ghost" hidden>같은 액션 다시 보내기</button></div>
 
         <p id="action-notice" role="status" hidden></p>
         <aside id="pre-action-hint" class="pre-action-hint" aria-live="polite" hidden></aside>
@@ -72,7 +75,9 @@
             <div class="raise-top">
               <div class="presets">
                 <button type="button" class="preset" data-preset="min">최소</button>
+                <button type="button" class="preset" data-preset="third" hidden>⅓ 팟</button>
                 <button type="button" class="preset" data-preset="half">½ 팟</button>
+                <button type="button" class="preset" data-preset="threequarter" hidden>¾ 팟</button>
                 <button type="button" class="preset" data-preset="pot">팟</button>
                 <button type="button" class="preset" data-preset="allin">올인</button>
                 <button type="button" class="preset" data-preset="rfi" hidden>2.5BB</button>
@@ -91,16 +96,19 @@
           <button type="button" id="btn-raise" class="btn btn-raise">레이즈</button>
           <button type="button" id="btn-allin-only" class="btn btn-raise" hidden>올인</button>
           <p id="turn-deadline" hidden></p>
-          <label class="intent-note-wrap" for="intent-note">의도
-            <input id="intent-note" class="intent-note" type="text" maxlength="160"
-                   autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
-          </label>
+          <div class="intent-note-wrap">
+            <button type="button" id="intent-note-toggle" class="intent-note-toggle" aria-expanded="false" aria-controls="intent-note">메모 추가</button>
+            <label class="intent-note-field" for="intent-note">의도
+              <input id="intent-note" class="intent-note" type="text" maxlength="160"
+                     autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
+            </label>
+          </div>
         </div>
       </div>
     </section>
 
     <aside class="side">
-      <div class="study-entry"><a id="study-open" class="study-link" target="_blank" rel="noopener noreferrer" hidden>학습실 열기 ↗</a><button id="review-reopen" class="btn btn-ghost" type="button" hidden>최종 결과 다시 열기</button><p id="learning-scope"></p></div>
+      <div class="study-entry"><button id="review-reopen" class="btn btn-ghost" type="button" hidden>결과 다시 보기</button></div>
       <div class="tabs" role="tablist">
         <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
         <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치 <span id="unread-coach" class="unread" hidden></span></button>
@@ -115,6 +123,7 @@
         <div id="coach-list" class="coach-list"></div>
       </div>
       <div id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
+        <p id="learning-scope" class="learning-scope"></p>
         <div id="training-list" class="training-list"></div>
       </div>
       <div id="panel-participants" class="panel" role="tabpanel" aria-labelledby="tab-participants" hidden><div id="participants-list"></div></div>
@@ -141,7 +150,7 @@
         <svg class="review-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#suit-s"></use></svg>
         <h1 id="review-title">최종 결과</h1>
         <p id="review-result" class="review-result"></p>
-        <button type="button" id="review-close" class="btn btn-ghost">닫기</button>
+        <button type="button" id="review-close" class="btn btn-ghost">테이블 보기</button>
       </div>
       <div class="review-rule" aria-hidden="true"></div>
       <div class="final-content">
@@ -167,8 +176,8 @@
       <path id="suit-d" d="M12 2.2 19.2 12 12 21.8 4.8 12Z"></path>
       <path id="suit-c" d="M12 2.5C10 2.5 8.4 4.1 8.4 6.1 8.4 6.9 8.7 7.7 9.2 8.3 8.8 8.2 8.5 8.1 8.1 8.1 6.1 8.1 4.5 9.7 4.5 11.7 4.5 13.7 6.1 15.3 8.1 15.3 9.4 15.3 10.5 14.7 11.2 13.7 11 16 10.2 18.9 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.8 18.9 13 16 12.8 13.7 13.5 14.7 14.6 15.3 15.9 15.3 17.9 15.3 19.5 13.7 19.5 11.7 19.5 9.7 17.9 8.1 15.9 8.1 15.5 8.1 15.2 8.2 14.8 8.3 15.3 7.7 15.6 6.9 15.6 6.1 15.6 4.1 14 2.5 12 2.5Z"></path>
       <g id="chip">
-        <circle cx="10" cy="10" r="8.6" fill="#C9A860"></circle>
-        <circle cx="10" cy="10" r="8.6" fill="none" stroke="#F4E6BF" stroke-width="2.2" stroke-dasharray="3.4 4.2"></circle>
+        <circle class="chip-face" cx="10" cy="10" r="8.6"></circle>
+        <circle class="chip-ring" cx="10" cy="10" r="8.6" fill="none" stroke-width="2.2" stroke-dasharray="3.4 4.2"></circle>
         <circle cx="10" cy="10" r="4.8" fill="none" stroke="rgba(0,0,0,0.25)" stroke-width="1"></circle>
       </g>
     </defs>

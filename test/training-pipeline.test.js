@@ -202,6 +202,31 @@ test('runHandPipeline publishes machine before explain and seals explanation set
   assert.equal(sealed.status, 'ready');
 });
 
+test('an evaluation whose source no explanation could be accepted for gets no explain call and stays unsealed', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  let explainCalls = 0;
+  const evaluation = { ...cannedEvaluation('d-1-preflop-0', gameEpoch), source: { id: 'fake-solver', version: '1.0.0' } };
+  const result = await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    explain: () => { explainCalls += 1; return handleOf(VALID_EXPLAIN); },
+    admit: () => true,
+    admitExplain: () => true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.deferred, undefined, 'skipping is not a deferral: the hand is not registered again');
+  assert.equal(explainCalls, 0);
+  const item = createTrainingControl().loadAuthority(dir).items[evaluation.evaluationId];
+  assert.equal(item.status, 'evaluated');
+  assert.equal(item.annotations?.explanation, undefined, 'left for the cutoff seal');
+});
+
 test('evaluator failure records pending[decisionId] without an item', async () => {
   const dir = tmp();
   const token = 'tok';

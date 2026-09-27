@@ -24,6 +24,7 @@ export const requiredJourneyChecks = [
   "host-iframe-survives-error-resume",
   "setup-back-no-resume",
   "menu-close-reopen",
+  "pause-lock-immediate",
   "restart-new-id",
   "abort-summary",
   "final-overlay-ended",
@@ -182,8 +183,33 @@ export async function runLobbyJourney(outDir) {
     assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
     assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
     check('host-iframe-survives-error-resume');
+    // R3: the menu opens and the table locks at the click, while the pause POST is
+    // still held; closing the menu keeps the lock until the pause settles.
+    await evaluate(`(() => {
+      const original = window.fetch;
+      window.__pauseGate = new Promise((resolve) => { window.__releasePause = resolve; });
+      window.fetch = async (url, options) => {
+        if (String(url) === '/api/commands' && options?.method === 'POST' && JSON.parse(options.body).kind === 'pause') {
+          window.fetch = original;
+          await window.__pauseGate;
+        }
+        return original(url, options);
+      };
+    })()`);
     await click("#menu");
+    assert.deepEqual(await evaluate("({open:document.querySelector('#pause-dialog').open,inert:document.querySelector('#table').inert,veil:!document.querySelector('#table-lock').hidden})"),{open:true,inert:true,veil:true});
+    // Closed with the menu's own button: an Esc cancel here followed by the later
+    // viewport emulation change and Esc (keyboard-mobile) hung headless Chrome's
+    // renderer in agent-browser (Page.enable unanswered); the button path does not.
+    await click("#close-menu");
+    assert.deepEqual(await evaluate("({open:document.querySelector('#pause-dialog').open,inert:document.querySelector('#table').inert,veil:!document.querySelector('#table-lock').hidden})"),{open:false,inert:true,veil:true});
+    await evaluate("window.__releasePause()");
     await state("paused");
+    // A menu the user dismissed while pausing stays closed; the table stays locked.
+    await wait(() => evaluate("!document.querySelector('#pause-dialog').open && document.querySelector('#table').inert && document.querySelector('#table-lock').hidden && !document.querySelector('#menu').disabled"));
+    await click("#menu");
+    await wait(() => evaluate("document.querySelector('#pause-dialog').open && document.activeElement?.id==='resume'"));
+    check('pause-lock-immediate');
     const paused = hashTree(app.manager.current.sessionDir);
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(hashTree(app.manager.current.sessionDir), paused);

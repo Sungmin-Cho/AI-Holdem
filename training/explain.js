@@ -99,6 +99,14 @@ function afterToken(text, index, token) {
   return text.slice(index + token.length);
 }
 
+/** Whether an explanation of this evaluation could pass validateExplanation
+ * at all (its source checks). The pipeline skips the LLM call otherwise. */
+export function explanationEligible(evaluation) {
+  if (evaluation?.status === 'supported' && referenceQuality(evaluation.source).quality !== 'heuristic-reference') return false;
+  if (evaluation?.source?.version === '2.0.0' && !independentAssessmentEligibility(evaluation).verified) return false;
+  return true;
+}
+
 export function validateExplanation(evaluation, explanation) {
   if (typeof explanation !== 'string' || !explanation.trim()) {
     return { ok: false, code: 'EMPTY_EXPLANATION' };

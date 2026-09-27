@@ -1,6 +1,6 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
-import {formatAmount} from './chip-format.js';
+import {formatAmount, readPreference} from './chip-format.js';
 import { uuid } from './uuid.js';
 import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
@@ -36,7 +36,7 @@ const labels = {
   lobby: "로비",
   starting: "게임 준비 중",
   playing: "게임 중",
-  pausing: "현재 행동을 마친 뒤 일시정지 중",
+  pausing: "일시정지하는 중",
   paused: "일시정지",
   stopping: "게임 종료 중",
   finalizing: "결과 정리 중",
@@ -69,6 +69,10 @@ async function api(url, options = {}) {
   return data;
 }
 let interruptBusy=false;
+// R3: set the moment pause is clicked (before the command is even accepted) so
+// the table is inert at once; released only by a settled pause command, the
+// authoritative state, or a different game (see syncTableInert).
+let pauseLock=null;
 function render() {
   if (!snapshot) return;
   const s = snapshot.state;
@@ -76,7 +80,7 @@ function render() {
   const terminal=['completed','ended'].includes(s);
   viewingRecord=!!(!selecting && terminal && snapshot.gameId);
 
-  $("table").inert = (!["playing","finalizing","completed","ended"].includes(s)) || Boolean(document.querySelector('dialog[open]'));
+  syncTableInert();
   const interruptible=['playing','pausing'].includes(s) && snapshot.pendingDecision?.status==='running' && snapshot.pendingDecision.softWait===true;
   $('interrupt-decision').hidden=!interruptible;
   $('interrupt-decision').disabled=interruptBusy;
@@ -85,7 +89,9 @@ function render() {
   if (snapshot.pendingDecision?.freshSessionAuthorized) $("status").textContent = '새 세션으로 재시도 중';
   if (snapshot.pendingDecision?.status === 'running' && snapshot.pendingDecision.softWait) $("status").textContent = 'AI가 계속 생각하고 있습니다';
   const recovery = snapshot.pendingDecision && snapshot.pendingDecision.status !== 'running';
-  $("pause-message").textContent = recovery
+  const stopping = !paused && (s === 'pausing' || Boolean(pauseLock));
+  let technical = '';
+  $("pause-message").textContent = stopping && !recovery ? '일시정지하는 중입니다. 진행 중인 작업을 마치면 멈춥니다.' : recovery
     ? (snapshot.pendingDecision.status === 'unsafe'
       ? snapshot.pendingDecision.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED' ? 'JEV 요청 종료를 확인하지 못했습니다. 앱 서비스를 종료한 뒤 다시 열어 복구하세요.' : snapshot.pendingDecision.code === 'JEV_ENGINE_APPLY_UNCONFIRMED' ? '액션 적용 여부를 확인할 수 없어 재시도할 수 없습니다. 게임을 종료하거나 앱 재개로 기록을 확인하세요.' : '실행 종료를 확인할 수 없어 재시도할 수 없습니다. 게임 종료 후 진단하세요.'
       : snapshot.pendingDecision.retryable === false ? '입력 오류로 재시도할 수 없습니다. 게임을 종료하세요.'
@@ -93,15 +99,25 @@ function render() {
   if (recovery) {
     const pending = snapshot.pendingDecision;
     const d = pending.diagnostics;
+    // Raw reply details help diagnosis but are not the message: fold them away.
     if (d?.lastRejection) {
       const r = d.lastRejection;
-      $("pause-message").textContent += ` 직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회.`;
+      technical += `직전 회신 action=${r.action}${r.amount === null ? '' : ` amount=${r.amount}`} → ${r.detail}; 자동 교정 ${d.corrections}회. `;
     }
     if (pending.retryWillCorrect) $("pause-message").textContent += ' 재시도하면 교정 안내를 함께 보냅니다.';
     if (pending.freshSessionAvailable) $("pause-message").textContent += ' 같은 무효 회신이 반복되면 이 좌석의 새 세션으로 재시도할 수 있습니다.';
     if (pending.freshSessionAuthorized) $("pause-message").textContent = '새 세션으로 재시도 중';
-    if (pending.diagnosticsQuarantined) $("pause-message").textContent += ' (진단 기록이 손상되어 격리됨)';
+    if (pending.diagnosticsQuarantined) technical += '진단 기록이 손상되어 격리됨.';
   }
+  // A decision waiting for recovery is a warning, not the ordinary paused note.
+  $("pause-message").classList.toggle('is-warning', Boolean(recovery));
+  $("pause-tech").hidden = !technical;
+  $("pause-tech-text").textContent = technical.trim();
+  $("pause-progress").hidden = !(stopping && s === 'pausing');
+  // The open menu makes the veil inert, so the dialog carries its own status
+  // (only one of the two is ever exposed); elapsed seconds stay out of it.
+  setLiveText($("pause-progress-reasons"), pauseProgressText(snapshot.pausing));
+  $("pause-progress-elapsed").textContent = pauseElapsedText(snapshot.pausing);
   $("retry-decision").hidden = !recovery || snapshot.pendingDecision?.retryable === false;
   $("retry-decision").disabled = busy || !snapshot.allowedCommands.includes('retry-decision');
   $("retry-fresh-session").hidden = !snapshot.pendingDecision?.freshSessionAvailable;
@@ -116,7 +132,8 @@ function render() {
       !["playing", "pausing", "paused", "stopping", "finalizing"].includes(s));
   document.body.classList.toggle('has-game', !$("game").hidden);
   $("menu").hidden = !["playing", "pausing", "paused"].includes(s);
-  $("menu").disabled = busy || s === "pausing";
+  // Stays usable while pausing so a closed menu can be reopened to watch progress.
+  $("menu").disabled = busy && !pauseLock;
   $("menu").textContent = paused ? "일시정지 메뉴" : "일시정지 · 메뉴";
   $("result").hidden =
     selecting || !["completed", "ended", "error", "external"].includes(s);
@@ -212,7 +229,7 @@ function render() {
     );
   for (const id of ["resume", "restart", "modes", "end"])
     $(id).disabled = busy || !paused;
-  if (!paused) $("pause-dialog").close();
+  if (!paused && !stopping) $("pause-dialog").close();
   if (!snapshot.gameId || (selecting && terminal)) {
     frameId=null;$("table").removeAttribute('src');
   } else if (frameId!==snapshot.gameId && ['playing','paused','pausing','stopping','finalizing','completed','ended'].includes(s)) {
@@ -222,10 +239,52 @@ function render() {
   // Shell extras live outside render(): tests run this function alone in a VM.
   if (typeof paintShell === "function") paintShell();
 }
+// One place decides whether the table accepts input: a local pause lock, a
+// non-playing state, or any open dialog. Called from render, dialog close and
+// the dialog observer, so closing the menu never unlocks a pending pause.
+function syncTableInert() {
+  if (!snapshot) return;
+  // An end state or another game unlocks; a settled pause unlocks on the first
+  // snapshot fetched after it settled (refresh). A paused snapshot alone does
+  // not: it may be a late answer to a refresh from before this pause.
+  if (pauseLock && (['finalizing','completed','ended','error'].includes(snapshot.state)
+    || snapshot.gameId !== pauseLock.gameId || snapshot.gameEpoch !== pauseLock.gameEpoch)) pauseLock = null;
+  $("table").inert = Boolean(pauseLock) || (!["playing","finalizing","completed","ended"].includes(snapshot.state)) || Boolean(document.querySelector('dialog[open]'));
+  $("table-lock").hidden = !(pauseLock || snapshot.state === 'pausing');
+  setLiveText($("table-lock-detail"), snapshot.state === 'pausing' ? pauseProgressText(snapshot.pausing) : '');
+  $("table-lock-elapsed").textContent = snapshot.state === 'pausing' ? pauseElapsedText(snapshot.pausing) : '';
+}
+// What the pause is waiting for, by kind (design §8.1). The elapsed seconds
+// are separate so live regions announce a change of reasons, not every tick.
+function pauseProgressText(pausing) {
+  const w = pausing?.waitingFor ?? {};
+  const children = (w.explain ?? 0) + (w.evaluate ?? 0) + (w.solve ?? 0);
+  const parts = [w.explain ? `학습 설명 ${w.explain}건` : '', w.evaluate ? `학습 평가 ${w.evaluate}건` : '',
+    w.solve ? `솔버 분석 ${w.solve}건` : '', !children && w.training ? `학습 분석 ${w.training}건` : '',
+    w.coach ? `코치 노트 ${w.coach}건` : '', w.resolver ? 'AI 코치 연결 확인' : '',
+    w.other ? `기타 작업 ${w.other}건` : ''].filter(Boolean);
+  return parts.length ? `마무리 중: ${parts.join(' · ')}` : '현재 결정을 마치는 중입니다.';
+}
+function pauseElapsedText(pausing) {
+  const since = Date.parse(pausing?.since ?? '');
+  return Number.isFinite(since) ? ` · ${Math.max(0, Math.round((Date.now() - since) / 1000))}초째` : '';
+}
+// Rewrite a live region only when its words change.
+function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
 let refreshFailures=0;
+// Counts refreshes as they start, so a settled pause is released only by a
+// snapshot requested after it settled, and an answer older than the one
+// already shown is dropped (it would repaint a stale state).
+let refreshSeq=0;
+let appliedSeq=0;
 async function refresh() {
-  snapshot = await api("/api/app");
+  const seq = ++refreshSeq;
+  const next = await api("/api/app");
+  if (seq < appliedSeq) return;
+  appliedSeq = seq;
+  snapshot = next;
   refreshFailures=0;
+  if (pauseLock?.settledSeq !== undefined && seq > pauseLock.settledSeq) pauseLock = null;
   if (!appliedDefaults && snapshot.defaultSetup) {
     const defaults = snapshot.defaultSetup;
     for (const [key, value] of Object.entries(defaults)) {
@@ -319,7 +378,8 @@ function paintNotices() {
   $("notices-title").textContent = level === "info" ? "알림" : "확인이 필요한 알림";
   const key = `holdem.notices.v1:${snapshot.gameId ?? "lobby"}`;
   const stored = noticeState(key);
-  const open = stored ? stored === "open" : level !== "info" && !document.body.classList.contains("has-game");
+  // Only errors open the dropdown by themselves; everything else waits for a click.
+  const open = stored ? stored === "open" : level === "error";
   $("notices-toggle").setAttribute("aria-expanded", String(open));
   $("notices-list").hidden = !open;
   $("notices-list").replaceChildren(...items.map((item) => {
@@ -335,6 +395,10 @@ function paintNotices() {
   const diagnostic = $("notices-list").lastElementChild;
   if (unclassified > 0 && diagnostic) diagnostic.dataset.kind = "diagnostic";
 }
+// The table's BB/chips selector writes the shared preference; follow it here.
+window.addEventListener("storage", (event) => {
+  if (event.key === "holdem.display-unit.v1" && document.body.classList.contains("has-game")) paintContext(shellBridge.context);
+});
 $("notices-toggle").onclick = () => {
   const open = $("notices-toggle").getAttribute("aria-expanded") !== "true";
   try { sessionStorage.setItem(`holdem.notices.v1:${snapshot?.gameId ?? "lobby"}`, open ? "open" : "closed"); } catch { /* per-tab only */ }
@@ -382,7 +446,8 @@ function paintContext(context) {
   if (context.handNo !== null) add("핸드", context.handLimit ? `${context.handNo}/${context.handLimit}` : String(context.handNo));
   if (context.blinds) add(context.level ? `레벨 ${context.level} ·` : "블라인드", `${context.blinds[0].toLocaleString("ko-KR")}/${context.blinds[1].toLocaleString("ko-KR")}`);
   if (context.sessionNet !== null) {
-    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, "chips", true).primary;
+    // Same BB/chips preference as the table's own unit selector.
+    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, readPreference(), true).primary;
     add("손익", net, context.sessionNet > 0 ? "ui-pos" : context.sessionNet < 0 ? "ui-neg" : "");
   }
   if (context.conn !== "on") add("연결", context.conn === "retry" ? "재연결 중" : "종료");
@@ -432,9 +497,16 @@ const commands = createLobbyCommandClient({
   storage: sessionStorage,
   onPoll: refresh,
 });
+// Whether the command still stored for confirmation is this lock's own pause.
+function storedPause(lock) {
+  const stored = commands.pendingCommand;
+  return Boolean(lock?.requestId && stored?.kind === "pause" && stored.requestId === lock.requestId);
+}
 async function command(kind, setup, extra = {}) {
   if (busy) return;
   let refocusStart = false;
+  let menuAfter = false;
+  let sent = false;
   viewingRecord = false;
   busy = true;
   if (["start", "replace-current", "restart"].includes(kind)) {
@@ -454,13 +526,24 @@ async function command(kind, setup, extra = {}) {
       ...(setup ? { setup } : {}),
       ...extra,
     };
+    // The lock belongs to this pause request: if it is never stored (another
+    // command is pending) or is refused, nothing else would release it.
+    if (kind === "pause" && pauseLock) pauseLock = { ...pauseLock, requestId: payload.requestId };
     await commands.send(payload);
+    sent = true;
+    // Only a snapshot fetched after the pause settled unlocks the table (see
+    // refresh); if this refresh fails, the next successful poll does.
+    if (kind === "pause" && pauseLock) pauseLock = { ...pauseLock, settledSeq: refreshSeq };
     selecting = false;
     await refresh();
-    if (snapshot.state === "paused") $("pause-dialog").showModal();
+    menuAfter = snapshot.state === "paused";
   } catch (e) {
     refocusStart = !!preparing && kind === "start";
     preparing = null;
+    // A pause that is not stored (refused, or never sent because another
+    // command is pending) is final; an unanswered one stays locked until
+    // recovered, and so does one that succeeded but whose refresh failed.
+    if (kind === "pause" && !sent && !storedPause(pauseLock)) pauseLock = null;
     showError(e);
     await refresh().catch(() => {});
   } finally {
@@ -468,8 +551,11 @@ async function command(kind, setup, extra = {}) {
     busy = false;
     render();
     // A rejected start returns to the untouched form with focus on the button
-    // (only now is it enabled again).
+    // (only now is it enabled again). A settled pause focuses the menu's primary
+    // only if the menu is still open: one the user dismissed while pausing stays
+    // closed, and the menu button reopens it.
     if (refocusStart && !$("setup").hidden) $("start").focus();
+    if (menuAfter && $("pause-dialog").open) openPauseMenu();
   }
 }
 function confirm(fn) {
@@ -504,10 +590,23 @@ $('interrupt-decision').onclick=async()=>{
   } catch(error){showError(error);}
   finally {interruptBusy=false;render();}
 };
-$("menu").onclick = () =>
-  snapshot.state === "paused"
-    ? $("pause-dialog").showModal()
-    : command("pause");
+function openPauseMenu() {
+  if (!$("pause-dialog").open) $("pause-dialog").showModal();
+  const primary = [$("resume"), $("retry-decision")].find((node) => !node.hidden && !node.disabled);
+  primary?.focus();
+}
+// The menu opens at once; the pause command runs behind it (R3, design §8.1).
+$("menu").onclick = () => {
+  if (snapshot.state !== "playing" || pauseLock) { openPauseMenu(); return; }
+  if (busy) return;
+  // An earlier command is still being confirmed (the poll settles it); a pause
+  // now would only be refused, so the table is not locked for it.
+  if (commands.pending) { showError(new Error("COMMAND_PENDING")); return; }
+  pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch };
+  render();
+  openPauseMenu();
+  void command("pause");
+};
 $("resume").onclick = () => command("resume");
 $("retry-decision").onclick = () => command('retry-decision');
 $("retry-fresh-session").onclick = () => $("fresh-session-dialog").showModal();
@@ -704,27 +803,40 @@ $("study").onclick = async () => {
     showError(e);
   }
 };
-for(const dialog of document.querySelectorAll('dialog')) {
-  dialog.addEventListener('close',()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));});
-}
-new MutationObserver(()=>{if(snapshot)$('table').inert=(!['playing','finalizing','completed','ended'].includes(snapshot.state))||Boolean(document.querySelector('dialog[open]'));}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+for(const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close',syncTableInert);
+new MutationObserver(syncTableInert).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
 form.onchange();
 await refresh().catch(showError);
 async function recoverCommand() {
   if (busy || !commands.pending) return;
+  const stored = commands.pendingCommand;
+  // A pause stored before a reload keeps the table locked until it is settled.
+  if (stored?.kind === "pause" && !pauseLock && snapshot?.gameId && stored.expectedGameId === snapshot.gameId) {
+    pauseLock = { gameId: snapshot.gameId, gameEpoch: snapshot.gameEpoch, requestId: stored.requestId };
+  }
   busy = true;
   render();
+  let settled = false;
   try {
     await commands.recover();
+    settled = true;
+    if (stored?.kind === "pause" && pauseLock) pauseLock = { ...pauseLock, settledSeq: refreshSeq };
     selecting = false;
     $("error").textContent = "";
     await refresh();
-    if (snapshot.state === "paused") $("pause-dialog").showModal();
   } catch (e) {
     showError(e);
   } finally {
+    // A lock whose pause is no longer stored and did not settle here (refused,
+    // or never sent) unlocks at once; a settled one waits for a later snapshot,
+    // an unanswered one stays locked.
+    const settledHere = settled && stored?.kind === "pause";
+    if (pauseLock && pauseLock.settledSeq === undefined && !settledHere && !storedPause(pauseLock)) pauseLock = null;
     busy = false;
     render();
+    // Focus the menu's primary only if the menu is open; recovery never
+    // reopens a menu the user closed.
+    if (snapshot?.state === "paused" && $("pause-dialog").open) openPauseMenu();
   }
 }
 async function roomOp(op, extra = {}) {

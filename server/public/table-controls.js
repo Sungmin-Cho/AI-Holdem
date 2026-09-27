@@ -16,6 +16,18 @@ export function bbRaiseTo(legal, bb, multiple) {
     && Number.isSafeInteger(amount) ? amount : null;
 }
 
+/** Verb for the primary wager button, sharing replay-format actionVerbs' rule:
+ * a street with chips already in (preflop always, blinds count) makes the
+ * wager a raise, an empty street makes it a bet, and the maximum is all-in. */
+export function primaryVerb(view, amount) {
+  const legal = view?.legal;
+  if (legal && Number.isSafeInteger(amount) && Number.isSafeInteger(legal.maxRaiseTo) && amount >= legal.maxRaiseTo) return 'allin';
+  const wagered = view?.street === 'preflop'
+    || (view?.seats ?? []).some((seat) => Number.isSafeInteger(seat.bet) && seat.bet > 0);
+  return wagered ? 'raise' : 'bet';
+}
+export const PRIMARY_VERB_LABEL = Object.freeze({ bet: '벳', raise: '레이즈', allin: '올인' });
+
 export function reviewDismissalAfterUpdate(dismissed) {
   return dismissed === true;
 }

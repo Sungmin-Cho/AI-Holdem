@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
 function fixture(){
- const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{hidden:false,disabled:false,dataset:{},attrs:{},replaceChildren(){},append(){},close(){},set src(value){this.attrs.src=value;},getAttribute(key){return this.attrs[key]??null;},removeAttribute(key){delete this.attrs[key];}});return nodes.get(id);};
- const context={$ ,URLSearchParams,snapshot:{state:'playing',gameId:'game',gameEpoch:'epoch',allowedCommands:[],pendingDecision:{status:'running',softWait:true,decisionId:'d-one',generation:3}},selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,rejoinFor:null,labels:{},errorMessages:{},document:{querySelector:()=>null,body:{classList:{toggle(){}}}}};
+ const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,{hidden:false,disabled:false,dataset:{},attrs:{},classList:{toggle(){}},replaceChildren(){},append(){},close(){},set src(value){this.attrs.src=value;},getAttribute(key){return this.attrs[key]??null;},removeAttribute(key){delete this.attrs[key];}});return nodes.get(id);};
+ const context={$ ,URLSearchParams,snapshot:{state:'playing',gameId:'game',gameEpoch:'epoch',allowedCommands:[],pendingDecision:{status:'running',softWait:true,decisionId:'d-one',generation:3}},selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,pauseLock:null,rejoinFor:null,labels:{},errorMessages:{},document:{querySelector:()=>null,body:{classList:{toggle(){}}}}};
  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function render()'),source.includes('let refreshFailures=')?source.indexOf('let refreshFailures='):source.indexOf('async function refresh()')),context);
  return context;
 }

@@ -1,4 +1,5 @@
 import {paintFinalPanel} from './final-panel.js';
+import {formatAmount,formatSignedAmount} from './chip-format.js';
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.get('code')) $('join-code').value = params.get('code');
@@ -43,16 +44,20 @@ function paintFinal(final,state) {
   const spectator=state.me.roomRole==='spectator'||state.me.viewerRole==='spectator';
   const key=JSON.stringify([final,finalSummary,state.me.playerId,spectator]);if(key===finalPanelKey)return;finalPanelKey=key;
   const table=$('final-stacks');table.replaceChildren();
+  // Same amounts as the host's result panel: cash in the fixed big blind, a
+  // tournament (or an older host without these fields) in chips.
+  const cash=final.mode==='cash-training'&&Number.isSafeInteger(final.bigBlind);
+  const bb=cash?final.bigBlind:null,plain=value=>formatAmount(value,bb,'bb').primary,signed=value=>formatSignedAmount(value,bb,'bb').primary;
   const hasNet=final.stacks.every(row=>Number.isSafeInteger(row.net));
   const head=document.createElement('tr');
-  for(const label of ['순위','이름',...(hasNet?['증감']:[]),'최종 스택']){const th=document.createElement('th');th.textContent=label;head.append(th);}
+  for(const label of ['순위','이름',...(hasNet?['증감']:[]),...(cash?[]:['최종 스택'])]){const th=document.createElement('th');th.textContent=label;head.append(th);}
   const thead=document.createElement('thead');thead.append(head);table.append(thead);
   for(const row of [...final.stacks].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))) {
-    const tr=document.createElement('tr');
-    for(const value of [row.rank??'—',row.name??row.playerId,...(hasNet?[`${row.net>0?'+':''}${row.net}`]:[]),row.stack??'']){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}table.append(tr);
+    const tr=document.createElement('tr');if(row.playerId===state.me.playerId)tr.className='is-viewer';
+    for(const value of [row.rank??'—',row.name??row.playerId,...(hasNet?[signed(row.net)]:[]),...(cash?[]:[Number.isSafeInteger(row.stack)?plain(row.stack):''])]){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}table.append(tr);
   }
   paintFinalPanel($('final-details'),{summary:finalSummary,viewer:spectator?null:state.me.playerId,
-    view:{seats:[],mode:'tournament'},includeRanking:false});
+    view:{seats:[],mode:cash?'cash-training':'tournament',blinds:cash?[null,final.bigBlind]:undefined},includeRanking:false});
 
 }
 async function poll() {
