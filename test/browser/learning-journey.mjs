@@ -78,6 +78,12 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     const data = await browser(['eval', expression]);
     return data?.result ?? data;
   };
+  // The finish button can sit on the viewport's bottom edge (its centre off
+  // screen) depending on text wrapping; bring it into view before clicking.
+  const clickNext = async () => {
+    await evaluate("document.querySelector('#next').scrollIntoView({block:'center'})");
+    await browser(['click', '#next']);
+  };
   async function setViewport(width, height) {
     await browser(['set', 'viewport', String(width), String(height)]);
     viewport = `${width}x${height}`;
@@ -323,7 +329,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     const mobileFeedback = await evaluate('!document.querySelector("#next").hidden && !document.querySelector("#feedback").hidden');
 
     await setViewport(1280, 900);
-    await browser(['click', '#next']);
+    await clickNext();
     await browser(['wait', '#actions button:not([disabled])']);
     await browser(['snapshot', '-i']);
     await browser(['click', '#actions button:not([disabled])']);
@@ -352,7 +358,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       }
       const hasNext = await evaluate('!document.querySelector("#next").hidden');
       if (!hasNext) break;
-      await browser(['click', '#next']);
+      await clickNext();
       await waitForExpression(`document.querySelector('#actions button:not([disabled])')
         || document.querySelector('#prompt').textContent.includes('완료했습니다')`, 'next study question');
       const hasAnswer = await evaluate('Boolean(document.querySelector("#actions button:not([disabled])"))');
@@ -373,7 +379,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     }
     await evaluate("document.documentElement.removeAttribute('data-theme')");
     assert.deepEqual(studyContrast, [], JSON.stringify(studyContrast));
-    await browser(['click', '#next']);
+    await clickNext();
     await waitForExpression('document.querySelector("#prompt").textContent.includes("완료했습니다")', 'explicit assessment finish');
     await waitForExpression('document.querySelector("#assessments button")?.disabled === true', 'assessment retest summary');
     const summaryEvidence = await evaluate(`document.querySelector('#source').textContent.includes('휴리스틱')
