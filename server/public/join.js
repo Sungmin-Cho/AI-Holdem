@@ -1,4 +1,8 @@
 import {paintFinalPanel} from './final-panel.js';
+import {formatAmount,formatSignedAmount} from './chip-format.js';
+import {createShellBridge} from './shell-bridge.js';
+import {paintShellContext} from './shell-context.js';
+import {helpButton,wireHelpMenu} from './help-panel.js';
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.get('code')) $('join-code').value = params.get('code');
@@ -43,17 +47,59 @@ function paintFinal(final,state) {
   const spectator=state.me.roomRole==='spectator'||state.me.viewerRole==='spectator';
   const key=JSON.stringify([final,finalSummary,state.me.playerId,spectator]);if(key===finalPanelKey)return;finalPanelKey=key;
   const table=$('final-stacks');table.replaceChildren();
+  // Same amounts as the host's result panel: cash in the fixed big blind, a
+  // tournament (or an older host without these fields) in chips.
+  const cash=final.mode==='cash-training'&&Number.isSafeInteger(final.bigBlind);
+  const bb=cash?final.bigBlind:null,plain=value=>formatAmount(value,bb,'bb').primary,signed=value=>formatSignedAmount(value,bb,'bb').primary;
   const hasNet=final.stacks.every(row=>Number.isSafeInteger(row.net));
   const head=document.createElement('tr');
-  for(const label of ['순위','이름',...(hasNet?['증감']:[]),'최종 스택']){const th=document.createElement('th');th.textContent=label;head.append(th);}
+  for(const label of ['순위','이름',...(hasNet?['증감']:[]),...(cash?[]:['최종 스택'])]){const th=document.createElement('th');th.textContent=label;head.append(th);}
   const thead=document.createElement('thead');thead.append(head);table.append(thead);
   for(const row of [...final.stacks].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))) {
-    const tr=document.createElement('tr');
-    for(const value of [row.rank??'—',row.name??row.playerId,...(hasNet?[`${row.net>0?'+':''}${row.net}`]:[]),row.stack??'']){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}table.append(tr);
+    const tr=document.createElement('tr');if(row.playerId===state.me.playerId)tr.className='is-viewer';
+    for(const value of [row.rank??'—',row.name??row.playerId,...(hasNet?[signed(row.net)]:[]),...(cash?[]:[Number.isSafeInteger(row.stack)?plain(row.stack):''])]){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}table.append(tr);
   }
   paintFinalPanel($('final-details'),{summary:finalSummary,viewer:spectator?null:state.me.playerId,
-    view:{seats:[],mode:'tournament'},includeRanking:false});
+    view:{seats:[],mode:cash?'cash-training':'tournament',blinds:cash?[null,final.bigBlind]:undefined},includeRanking:false});
 
+}
+// The table in the iframe hides its own top bar once this page answers the
+// handshake; the header then shows its hand, blinds, net and connection. The
+// iframe element is replaced for each game, so the bridge is rebound with it.
+let tableGame = null;
+let bridge = null;
+function bindBridge() {
+  bridge?.dispose();
+  paintShellContext($('shell-context'), null);
+  bridge = createShellBridge({ frame: $('table'), identity: () => tableGame, onContext: (context) => paintShellContext($('shell-context'), context) });
+}
+function paintProvider(state) {
+  // Before joining the page cannot know the host's choice, so the form carries
+  // the general notice; once joined, a JEV game gets this banner.
+  const jev = state.game?.aiProvider === 'jev';
+  $('ai-provider').hidden = !jev;
+  $('ai-provider').textContent = jev ? '상대 AI: JEV · 게임 중 AI 결정마다 그 AI의 자기 패와 공개 플레이 정보가 TypeSafe AI로 전송됩니다. 참가자의 패와 이름은 보내지 않습니다.' : '';
+}
+function paintWaiting(state) {
+  const room = state.room ?? {};
+  const people = Array.isArray(room.participants) ? room.participants : [];
+  const seated = people.filter((row) => row.roomRole === 'seated').length;
+  const ai = Number.isSafeInteger(room.totalSeats) ? Math.max(0, room.totalSeats - 1 - seated) : null;
+  $('waiting-summary').textContent = `${room.hostName ?? '호스트'} 님의 테이블${Number.isSafeInteger(room.totalSeats) ? ` · ${room.totalSeats}인` : ''}${ai !== null ? ` · 나머지 ${ai}석은 AI` : ''}`;
+  const rows = [{ name: room.hostName ?? '호스트', role: '호스트', connected: true, me: false }, ...people.map((row) => ({
+    name: row.name, role: row.roomRole === 'spectator' ? '관전' : '플레이어', connected: row.connected === true, me: row.me === true,
+  }))];
+  const list = $('waiting-participants');
+  list.replaceChildren(...rows.map((row) => {
+    const item = document.createElement('li');
+    item.className = `waiting-row${row.connected ? '' : ' is-away'}`;
+    const dot = document.createElement('span'); dot.className = 'waiting-dot'; dot.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span'); name.className = 'waiting-name'; name.textContent = row.me ? `${row.name} (나)` : row.name;
+    const role = document.createElement('span'); role.className = 'ui-pill'; role.textContent = row.role;
+    const status = document.createElement('span'); status.className = 'waiting-state'; status.textContent = row.connected ? '접속 중' : '연결 끊김';
+    item.append(dot, name, role, status);
+    return item;
+  }));
 }
 async function poll() {
   const token = sessionStorage.getItem('holdem-participant-token');
@@ -66,7 +112,7 @@ async function poll() {
     if($('join-error').dataset.kind==='offline'){$('join-error').textContent='';delete $('join-error').dataset.kind;}
     const state = await res.json();
     latest = state;
-    $('ai-provider').textContent = state.game?.aiProvider === 'jev' ? '상대 AI: JEV · 공개 플레이 정보를 TypeSafe AI로 전송 중' : '';
+    paintProvider(state);
     $('member-controls').hidden = false;
     const spectator = state.me.roomRole === 'spectator';
     const watching = spectator || state.me.viewerRole === 'spectator';
@@ -77,6 +123,7 @@ async function poll() {
     $('leave').hidden = !watching && state.room.status === 'locked';
     $('leave').textContent = watching ? '관전 나가기' : '나가기';
     $('join-form').hidden = true;
+    $('join-panel').hidden = true;
     const admitted = watching || Boolean(state.me.playerId);
     const final = admitted ? state.game?.final : null;
     const inGame = admitted && ['playing','pausing','paused','stopping','finalizing','completed','ended'].includes(state.game?.state);
@@ -94,12 +141,15 @@ async function poll() {
     $('waiting-status').textContent = state.game?.state === 'starting'
       ? '게임 준비 중'
       : '호스트가 시작하기를 기다리는 중';
+    if (!$('waiting').hidden) paintWaiting(state);
     const identity = inGame && state.game?.gameId && state.game?.gameEpoch
       ? `${state.game.gameId}:${state.game.gameEpoch}:${state.me.viewerGeneration}` : null;
     if (identity !== tableIdentity) {
       // Remove the old document and its SSE/card/receipt state before any new game.
       const table = document.createElement('iframe');table.id='table';table.title='홀덤 테이블';
       $('table').replaceWith(table);tableIdentity=identity;
+      tableGame = identity ? { gameId: state.game.gameId, gameEpoch: state.game.gameEpoch } : null;
+      bindBridge();
       if(summaryIdentity && !summaryIdentity.startsWith(`${state.game?.gameId}:`)){summaryIdentity=null;finalSummary=null;finalPanelKey=null;}
     }
     if (identity && !$('table').getAttribute('src')) {
@@ -145,5 +195,12 @@ $('seat-request')?.addEventListener('click', async () => {
   $('join-error').textContent=response.ok ? '' : JOIN_ERRORS[result.code] ?? '참가 신청에 실패했습니다.';
   await poll();
 });
+wireHelpMenu();
+$('join-transfer-help').append(helpButton('privacy', '외부 전송'));
+// Follow the BB/chips choice made here or in the table's own selector.
+const repaintContext = () => paintShellContext($('shell-context'), bridge?.context ?? null);
+window.addEventListener('storage', (event) => { if (event.key === 'holdem.display-unit.v1') repaintContext(); });
+window.addEventListener('holdem:display-unit', repaintContext);
+bindBridge();
 setInterval(poll, 1000);
 poll();

@@ -82,6 +82,7 @@ import {
   sealExploitAnnotations,
   toRunnerHandle,
   trainingAggregate,
+  EXPLAIN_HELD,
 } from './training-pipeline.js';
 import {
   completeSessionStoreMigration,
@@ -99,6 +100,7 @@ import {
   prepareSession,
   resolveCurrentSession,
 } from '../engine/session-catalog.js';
+import { projectNotices } from './notice-projection.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -107,6 +109,8 @@ const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const COACH_GENERATION_MS = 120_000;
+// A first attempt plus one replacement, with room for the coach CLI steps.
+const COACH_BACKLOG_WAIT_MS = 2 * COACH_GENERATION_MS + 10_000;
 const REVIEW_GENERATION_MS = 300_000;
 const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+내 성향 통계(?:[ \t]|$)/m,
@@ -776,7 +780,20 @@ export function exitCodeFor(error) {
   return 5;
 }
 
+/** Waits until `pending()` is empty, re-reading it after every round: work that
+ * finishes during the wait can register follow-ups (an evaluation starting its
+ * solve), and the pause barrier must not declare `paused` while any of them can
+ * still write. Stops early once `stopped()` is true. */
+export async function settleUntilIdle(pending, stopped = () => false) {
+  for (;;) {
+    const current = pending();
+    if (current.length === 0 || stopped()) return;
+    await Promise.allSettled(current);
+  }
+}
+
 export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+const UPPER_UNAVAILABLE_NOTICE = '상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.';
 const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
   ({questionVersion, candidateVersion, projectionVersion, ...(selectionVersion ? {selectionVersion} : {})});
 
@@ -980,6 +997,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let control = null;
   let recoveringControl = false;
   let pauseRequested = !!opts.startPaused;
+  // R1: closed from the moment a pause is requested (before the control write)
+  // until play resumes or finalization takes over. While closed no new training
+  // pipeline, solve, evaluator or explainer starts; each hand that wanted one is
+  // remembered here and registered again when the gate reopens.
+  // A paused recovery (startPaused) starts closed too: reconcile on resume must
+  // queue, not run, the work it finds while control already says pausing.
+  let trainingAdmissionClosed = !!opts.startPaused;
+  const admissionDeferredHands = new Set();
+  // Hands whose pipeline was still running when their re-registration came due.
+  const relaunchAfter = new Set();
+  // The running pipeline task per hand, so "after the last hand" can join one
+  // that is already going instead of treating it as absent.
+  const trainingTaskByHand = new Map();
+  // Hand of each running solve (by decisionId), recorded when the gate closes.
+  const solveHandOf = new Map();
+  // While a finished game's last hand is being explained, other hands may
+  // still evaluate or solve but must not take the explain lock ahead of it.
+  let finalizationPriorityHand = null;
+  // The hand whose priority already ran its course in this process (so a
+  // later finalize() reconcile does not set it again).
+  let finalizationPriorityDone = null;
+  const trainingMayRun = (handNo) => !resultWaitPassed()
+    && (!trainingAdmissionClosed || handNo === finalizationPriorityHand);
+  const trainingMayExplain = (handNo) => trainingMayRun(handNo)
+    && (finalizationPriorityHand === null || handNo === finalizationPriorityHand);
   let waitController = null;
   let resultHoldState = null;
   let resultHoldController = null;
@@ -1026,6 +1068,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
+  // Host lobby progress only (boot screen, coach chip); kept in memory, never
+  // written to loop-state.
+  let bootState = null;
+  let bootProbe = null;
+  let upperResolved = false;
+  const markBootStage = (stage) => {
+    const at = new Date().toISOString();
+    bootState = { stage, startedAt: bootState?.startedAt ?? at, stageAt: at };
+  };
   let studyPromise = null;
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
@@ -1091,6 +1142,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     return { deadlineNs, resultWaitCutoffNs: finalizeResultWaitCutoffNs };
   };
+  // Past the result-wait cutoff time nothing new should start: the finalization
+  // sweep may already have listed the children it will end. Every training
+  // admission path checks it — the cutoff flag itself is set only later.
+  const resultWaitPassed = () => finalizeResultWaitCutoffNs !== null && monotonicNs() >= finalizeResultWaitCutoffNs;
 
   const assertFinalizationDeadline = () => {
     if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
@@ -2022,25 +2077,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopRequested) startAdapterDisposal(adapter);
   };
 
-  const createCanaryAndResolve = async (need) => {
-    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+  const invokeResolverWithCanary = async (need) => {
     const canaryAbsPath = path.join(root, `.runtime-canary-${randomUUID()}`);
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(canaryAbsPath, `SIDECAR_CANARY_${randomBytes(24).toString('hex')}`);
     canaries.add(canaryAbsPath);
-    const invocation = Promise.resolve().then(() => resolver({
-      need,
-      canaryAbsPath,
-      registerAdapter,
-      lockRoot,
-    }));
-    resolverPromise = invocation;
     try {
-      const resolved = await invocation;
-      assertNotStopping();
-      return resolved;
+      return await Promise.resolve().then(() => resolver({
+        need,
+        canaryAbsPath,
+        registerAdapter,
+        lockRoot,
+        onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
+          bootProbe = { tier, runtime, round, ok, elapsedMs };
+          if (ok !== null) log('runtime-probe', bootProbe);
+        },
+      }));
     } finally {
-      if (resolverPromise === invocation) resolverPromise = null;
       try { fs.unlinkSync(canaryAbsPath); } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }
@@ -2048,9 +2101,75 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const createCanaryAndResolve = async (need) => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const invocation = invokeResolverWithCanary(need);
+    resolverPromise = invocation;
+    try {
+      const resolved = await invocation;
+      assertNotStopping();
+      return resolved;
+    } finally {
+      if (resolverPromise === invocation) resolverPromise = null;
+    }
+  };
+
+  // R2 (design §11.2): a new policy/JEV game opens the table while the upper-model
+  // probe runs. The probe, its merge into loop-state and adapter registration are
+  // one owned promise in `resolverPromise`, so stop, pause and finalization wait
+  // for all of it. Coach and explanation work wait for it before reading
+  // `upperAdapter`; a result that lands after stop is dropped (its adapter still
+  // closes through registerAdapter). Resume keeps the blocking probe: persisted
+  // coach reclaim scans runtime processes and resumed descriptors are already
+  // reserved, so neither may overlap a probe.
+  const startUpperResolveInBackground = () => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const gameEpoch = readLoopState()?.gameEpoch ?? null;
+    const sameLiveGame = () => {
+      if (stopRequested) return false;
+      try { return (readLoopState()?.gameEpoch ?? null) === gameEpoch; } catch { return false; }
+    };
+    const owned = (async () => {
+      let resolved;
+      try {
+        resolved = await invokeResolverWithCanary('upper-only');
+      } catch (error) {
+        if (!sameLiveGame()) return;
+        log('upper-resolve-error', { code: error.code ?? 'ERROR' });
+        resolved = { player: null, upper: null, notices: [UPPER_UNAVAILABLE_NOTICE] };
+      }
+      if (!sameLiveGame()) {
+        registerAdapter(resolved?.upper ?? null);
+        return;
+      }
+      upperAdapter = resolved?.upper ?? null;
+      upperResolved = true;
+      registerAdapter(upperAdapter);
+      const notices = Array.isArray(readLoopState()?.notices) ? [...readLoopState().notices] : [];
+      for (const notice of Array.isArray(resolved?.notices) ? resolved.notices : []) {
+        if (!notices.includes(notice)) notices.push(notice);
+      }
+      writeLoopState({ notices, upperRuntime: upperAdapter?.kind ?? null });
+      log('upper-resolved', { upperRuntime: upperAdapter?.kind ?? null });
+    })();
+    const tracked = owned.finally(() => {
+      if (resolverPromise === tracked) resolverPromise = null;
+    });
+    tracked.catch((error) => log('upper-resolve-merge-error', { code: error?.code ?? 'ERROR' }));
+    resolverPromise = tracked;
+  };
+
+  const settleUpperResolution = async () => {
+    const pending = resolverPromise;
+    if (pending) {
+      try { await pending; } catch { /* the owned promise logs and falls back */ }
+    }
+  };
+
   const selectAdapters = (resolved) => {
     playerAdapter = resolved.player ?? null;
     upperAdapter = resolved.upper ?? null;
+    upperResolved = true;
     registerAdapter(playerAdapter);
     registerAdapter(upperAdapter);
   };
@@ -3127,6 +3246,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         toRunnerHandle(trainingHooks.explain(evaluation)),
       );
     }
+    if (resolverPromise) {
+      // R2: hold the explanation until the background probe settles. Terminating
+      // while waiting cancels the call before any child starts.
+      let cancelled = false;
+      let started = null;
+      const waiting = {
+        promise: settleUpperResolution().then(() => {
+          if (cancelled || stopRequested) return null;
+          // A pause (or the finalization priority) that closed while this
+          // waited: start nothing and let the pipeline re-register the hand.
+          if (!trainingMayExplain(evaluation.handNo)) return EXPLAIN_HELD;
+          started = explainForPipeline(evaluation);
+          return started.promise;
+        }),
+        terminate: async () => {
+          cancelled = true;
+          return started ? started.terminate() : { confirmed: true };
+        },
+      };
+      return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, waiting);
+    }
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
       return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
     }
@@ -3155,25 +3295,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const startSolveTask = (task) => {
     if (!trainingOn) return;
+    if (trainingAdmissionClosed && task.handNo !== finalizationPriorityHand) { queueDeferredHand(task.handNo); return; }
     // 권위의 solveTasks는 자식이 실제로 뜬 뒤에야 보인다. 그 사이에 같은
     // 파이프라인이 다시 돌면 같은 결정에 두 자식이 뜨므로 로컬 in-flight 집합이
     // 먼저 막는다.
     if (solveInFlight.has(task.decisionId)) return;
     solveInFlight.add(task.decisionId);
+    solveHandOf.set(task.decisionId, task.handNo);
     const loop = readLoopState();
+    let held = false;
+    let accepted = false;
     trackTrainingTask(task.handNo, () => runSolveTask({
       ...task,
       gameEpoch: task.gameEpoch ?? loop?.gameEpoch,
       owner: task.owner ?? loop?.ownerSessionId,
       storeDir,
       solve: solveForPipeline,
-      shouldStop: () => stopRequested || finalizationCutoff,
+      // A solve still queued on the solve lock when a pause closes the gate
+      // leaves its pending entry as is (the SOLVE_CUTOFF path) and re-registers.
+      shouldStop: () => {
+        if (stopRequested || finalizationCutoff || resultWaitPassed()) return true;
+        const closed = trainingAdmissionClosed && task.handNo !== finalizationPriorityHand;
+        if (closed) held = true;
+        return closed;
+      },
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
       },
       consume: consumeTrainingNow,
-    }).finally(() => solveInFlight.delete(task.decisionId)));
+    }).then((result) => { accepted = result?.ok === true; return result; }).finally(() => {
+      solveInFlight.delete(task.decisionId);
+      solveHandOf.delete(task.decisionId);
+      // A solve that was held re-registers; one that accepted its evaluation
+      // runs the hand's pipeline once more so the new item gets explained.
+      if (held || accepted) readmitTrainingHand(task.handNo);
+      else settleDeferredRecord(task.handNo);
+    }));
   };
 
   const runTrainingPipeline = async (handNo) => {
@@ -3188,6 +3346,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       explain: explainForPipeline,
       solverAdapterId,
       startSolve: startSolveTask,
+      admit: () => trainingMayRun(handNo),
+      admitExplain: () => trainingMayExplain(handNo),
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -3199,15 +3359,106 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const launchTrainingPipeline = (handNo) => {
-    if (!trainingOn) return;
-    if (trainingInFlightHands.has(handNo)) return;
+    if (!trainingOn) return null;
+    if (!trainingMayRun(handNo)) { queueDeferredHand(handNo); return null; }
+    if (trainingInFlightHands.has(handNo)) return null;
     trainingInFlightHands.add(handNo);
-    trackTrainingTask(handNo, async () => {
+    let result = null;
+    const task = trackTrainingTask(handNo, async () => {
       try {
-        return await runTrainingPipeline(handNo);
+        result = await runTrainingPipeline(handNo);
+        return result;
       } finally {
         trainingInFlightHands.delete(handNo);
+        trainingTaskByHand.delete(handNo);
+        // Same turn as the in-flight release, so a reopen in between cannot lose it.
+        if (result?.deferred === true) readmitTrainingHand(handNo);
+        else if (result?.ok === true) settleDeferredRecord(handNo);
+        if (relaunchAfter.delete(handNo)) readmitTrainingHand(handNo);
       }
+    });
+    trainingTaskByHand.set(handNo, task);
+    return task;
+  };
+  const joinOrLaunchTraining = (handNo) => trainingTaskByHand.get(handNo) ?? launchTrainingPipeline(handNo);
+
+  // A hand whose work a pause held back: queue it while the gate is closed, or
+  // register it now (after its running pipeline, if one is still going).
+  const readmitTrainingHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested) return;
+    // Past the result-wait time or the finalization cutoff nothing new starts
+    // (the sweep may already list the children it ends); the record and
+    // pending entries stay for the cutoff seal.
+    const priority = finalizationPriorityHand !== null && handNo === finalizationPriorityHand;
+    if ((trainingAdmissionClosed && !priority) || finalizationCutoff || resultWaitPassed()
+      || (finalizationPriorityHand !== null && !priority)) queueDeferredHand(handNo);
+    else if (trainingInFlightHands.has(handNo)) relaunchAfter.add(handNo);
+    else launchTrainingPipeline(handNo);
+  };
+
+  // loop-state `trainingDeferredHands` is the durable copy of the queue: a hand
+  // leaves it only once its pipeline has run through without deferring, so a
+  // restart at any point still registers it (reconcile reads it back). Writes
+  // happen inside work the pause barrier waits for, never after stop.
+  const writeDeferredRecord = (change) => {
+    if (stopRequested) return;
+    const current = new Set((readLoopState()?.trainingDeferredHands ?? []).filter(Number.isInteger));
+    const next = new Set(current);
+    change(next);
+    if (next.size === current.size && [...next].every((handNo) => current.has(handNo))) return;
+    writeLoopState({ trainingDeferredHands: next.size ? [...next].sort((a, b) => a - b) : undefined });
+  };
+  // A hand leaves the record once nothing of it is queued or still running.
+  const settleDeferredRecord = (handNo) => {
+    if (admissionDeferredHands.has(handNo) || trainingInFlightHands.has(handNo)
+      || [...solveHandOf.values()].includes(handNo)) return;
+    writeDeferredRecord((set) => set.delete(handNo));
+  };
+  const queueDeferredHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested) return;
+    admissionDeferredHands.add(handNo);
+    writeDeferredRecord((set) => set.add(handNo));
+  };
+
+  const drainDeferredHands = () => {
+    if (stopRequested || trainingAdmissionClosed || finalizationCutoff || resultWaitPassed() || finalizationPriorityHand !== null) return 0;
+    const hands = [...admissionDeferredHands];
+    admissionDeferredHands.clear();
+    for (const handNo of hands) readmitTrainingHand(handNo);
+    if (hands.length) log('training-admission-reopened', { hands });
+    return hands.length;
+  };
+  // Closing records what is still running first: a pipeline or solve that is
+  // about to be held back (or a stop/crash before it reports) is found again.
+  const closeTrainingAdmission = () => {
+    trainingAdmissionClosed = true;
+    const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
+    if (running.length) writeDeferredRecord((set) => { for (const handNo of running) set.add(handNo); });
+  };
+  const openTrainingAdmission = () => { trainingAdmissionClosed = false; };
+  const reopenTrainingAdmission = () => { openTrainingAdmission(); return drainDeferredHands(); };
+  // Once the game is over the game-over branch registers held-back hands after
+  // the last hand; anywhere else they go now.
+  const reopenUnlessFinalizing = () => (gameOverPending ? openTrainingAdmission() : reopenTrainingAdmission());
+  // Finalization: the last hand explains first. Its priority ends when its
+  // pipeline is done; then the hands that yielded (held back by a pause or by
+  // the priority) are registered — unless the cutoff has passed, in which case
+  // they are sealed unavailable like any unfinished explanation.
+  const lastHandBusy = (handNo) => trainingInFlightHands.has(handNo) || relaunchAfter.has(handNo)
+    || admissionDeferredHands.has(handNo) || [...solveHandOf.values()].includes(handNo);
+  const endFinalizationPriorityAfter = (handNo, lastTask) => {
+    trackTrainingTask(null, async () => {
+      await lastTask;
+      // The last hand's solves and the re-run that explains their results count
+      // too: hold the priority until nothing of that hand is running.
+      while (lastHandBusy(handNo) && !stopRequested && !finalizationCutoff && !resultWaitPassed()) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (finalizationPriorityHand === handNo) {
+        finalizationPriorityHand = null;
+        finalizationPriorityDone = handNo;
+      }
+      drainDeferredHands();
     });
   };
 
@@ -3324,7 +3575,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return confirmed && tasksSettled && solverConfirmed;
   };
 
-  const reconcileTrainingNow = async () => {
+  const reconcileTrainingNow = async ({ finalizing = false } = {}) => {
     if (!trainingOn) return;
     trainingProducerOpen = true;
     try {
@@ -3357,7 +3608,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const lastHandNo = engine?.lastHand?.handNo;
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
-      for (const handNo of pendingHands) launchTrainingPipeline(handNo);
+      if (stopRequested) return;
+      // R1 (b): hands a pause held back (recorded, so a restart still has them;
+      // an explanation that simply failed is not retried here).
+      for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
+        if (Number.isInteger(handNo)) pendingHands.add(handNo);
+      }
+      // At finalization the last hand has priority at the explain lock: the
+      // others start now (evaluation and solves run before the cutoff) but
+      // explain only after it. The last hand's pipeline is joined if the
+      // game-over branch already started it.
+      // In this process the game-over branch usually set (or already finished)
+      // the priority; only a restart into finalization sets it here.
+      const priorityHere = finalizing && Number.isInteger(lastHandNo) && lastHandNo >= 1
+        && finalizationPriorityHand === null && finalizationPriorityDone !== lastHandNo;
+      if (priorityHere) finalizationPriorityHand = lastHandNo;
+      let lastTask = null;
+      for (const handNo of pendingHands) {
+        const task = handNo === lastHandNo ? joinOrLaunchTraining(handNo) : launchTrainingPipeline(handNo);
+        if (handNo === lastHandNo) lastTask = task;
+      }
+      if (priorityHere) endFinalizationPriorityAfter(lastHandNo, lastTask);
       log('training-reconcile-registered', { hands: [...pendingHands] });
       await consumeTrainingNow();
     } catch (error) {
@@ -4830,8 +5101,55 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--spawn-evidence', '1',
   ]);
 
+  // A coach that stops because play is pausing while no child of its runs (any
+  // point before spawn, or after attempt 1's termination was confirmed) keeps its
+  // hand here and starts again on resume or when the game ends. The relaunch
+  // reserves afresh: `reserve` retires whatever reservation the hand still holds
+  // (including a descriptor a paused recovery handed over), so no stale deadline
+  // survives a long pause. Without this the hand would sit unspawned and the
+  // heartbeat or the finalization cutoff would seal it unavailable even though
+  // the upper model is there. Stop and cutoff still end the work as before.
+  const pauseDeferredCoachHands = new Set();
+  const deferCoachIfPaused = (handNo) => {
+    if (!coachWorkSuspended()) return false;
+    if (pauseRequested && !stopRequested && !finalizationCutoff) pauseDeferredCoachHands.add(handNo);
+    return true;
+  };
+  /** Starts every deferred hand again; returns how many were started. */
+  const relaunchPauseDeferredCoach = () => {
+    const hands = [...pauseDeferredCoachHands].sort((a, b) => a - b);
+    pauseDeferredCoachHands.clear();
+    for (const handNo of hands) launchCoachPipeline(handNo);
+    return hands.length;
+  };
+  // Once the last hand is over a pause can no longer park (the game finalizes
+  // instead); pause() answers `finalizing` and the app reports finalizing.
+  let gameOverPending = false;
+  const releasePauseForFinalization = () => {
+    // Finalization owns the remaining training (R1 (b)): the gate opens even if
+    // the pause itself has not reached pauseRequested yet; explanations wait for
+    // the last hand (finalizationPriorityHand) and held-back hands follow it.
+    if (trainingAdmissionClosed) openTrainingAdmission();
+    if (!pauseRequested) return;
+    pauseRequested = false;
+    resolvePause?.({ state: 'finalizing' });
+    resolvePause = null;
+  };
+  // Set once a coach task had to wait for the background probe; the last hand
+  // then lets that backlog finish before the finalization clock starts.
+  let coachProbeBacklog = false;
+
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
+    if (resolverPromise) {
+      // R2: finish the background probe first so this hand gets the LLM note, not
+      // the upper-unavailable fallback. The task stays in coachTasks, so a pause
+      // barrier waits for it; if play paused meanwhile, the check after capture
+      // defers the hand to resume/finalization instead of reserving now.
+      coachProbeBacklog = true;
+      await settleUpperResolution();
+      if (stopRequested || finalizationCutoff) return;
+    }
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const upperUsable = upperAdapter && typeof upperAdapter.oneshotStart === 'function';
@@ -4866,12 +5184,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (typeof opts.coachCaptureCheckpoint === 'function') {
       await opts.coachCaptureCheckpoint({ handNo });
     }
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
     const denyDetailed = coachForbiddenDetailed(handNo);
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
-      if (coachWorkSuspended()) return;
+      if (deferCoachIfPaused(handNo)) return;
       try {
         descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
       } catch (reserveError) {
@@ -4889,7 +5207,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return;
       }
     }
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
     const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     if (eligibleProcessInput(processInput).hands.length === 0) {
       await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
@@ -4932,7 +5250,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // later step in that same branch (e.g. fenceCurrentGeneration()) throws.
       let identityUnavailableReason = null;
       try {
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo)) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
           const checkpointResult = await opts.coachSpawnCheckpoint({ handNo, attempt });
           // #192 O4: narrow test seam — a real `pause()` winning the race while this
@@ -4960,7 +5278,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 S4 E1: also require that this exact instance is the one that minted
         // `owner` (`issuedOwners`), not merely that loop-state's `ownerSessionId` still
         // reads back the same string this coachPipeline call started with.
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo)) return;
         assertBeforeResultWaitCutoff();
         const spawnLoopState = readLoopState();
         if (spawnLoopState?.ownerSessionId !== owner || !issuedOwners.has(owner)) return;
@@ -5262,7 +5580,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           });
           return;
         }
-        if (coachWorkSuspended()) return;
+        // Attempt 1's child is confirmed gone: a pause here keeps the hand too.
+        if (deferCoachIfPaused(handNo)) return;
         if (attempt === 1) {
           if (!coachReplacementAllowed()) {
             appendNotice(`핸드 ${handNo} 코치 교체 예산(5초)이 남지 않아 고정 문구로 대체합니다.`);
@@ -5276,7 +5595,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             return;
           }
           try {
-            if (coachWorkSuspended()) return;
+            if (deferCoachIfPaused(handNo)) return;
             descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
           } catch (reserveError) {
             if (reserveError.code !== 'ADAPTER_DISABLED') throw reserveError;
@@ -6524,6 +6843,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         'finalize는 finalizing phase에서만 실행할 수 있습니다.',
       );
     }
+    // R2: a background probe settles before any finalization budget starts.
+    await settleUpperResolution();
+    if (stopRequested) return readLoopState();
+    // A paused recovery (startPaused) that lands in finalization never parks;
+    // release its pause so coach work it deferred can run.
+    releasePauseForFinalization();
+    relaunchPauseDeferredCoach();
     // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
     // 번만 정한다. finalizing resume은 begin-owner 전에 이미 같은 값을 설치한다.
     const {
@@ -6533,7 +6859,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const checkpoint = baseFinalizationCheckpoint();
     writeLoopState({ finalization: checkpoint });
     log('finalize-start', { budgetMs: finalizeBudgetMs, resultWaitMs: checkpoint.resultWaitMs });
-    await reconcileTrainingNow();
+    await reconcileTrainingNow({ finalizing: true });
 
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') {
@@ -6765,11 +7091,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const pause = () => {
     if (!managed || readLoopState()?.phase !== 'playing' || terminalOperation || stopRequested) throw codedError('INVALID_TRANSITION', '현재 상태에서는 일시정지할 수 없습니다.');
     if (pauseCompletion) return pauseCompletion;
+    if (gameOverPending) return Promise.resolve({ state: 'finalizing' });
     if(control.read().playState==='paused')return Promise.resolve({state:'paused'});
     pauseCompletion = (async()=>{
+      // R1 (a): the gate closes before the durable pausing write, so training
+      // work that lands while that write is in flight is already held back.
+      closeTrainingAdmission();
       await retryControlWrite(()=>control.set('pausing',{pauseIntent:true}));
       if(stopRequested)return {state:'stopped'};
-      if(readLoopState()?.phase!=='playing')return {state:'finalizing'};
+      if(readLoopState()?.phase!=='playing'){reopenUnlessFinalizing();return {state:'finalizing'};}
       pauseRequested=true;
       if (resultHoldState) resultHoldState.skipped = true;
       resultHoldController?.abort();
@@ -6777,7 +7107,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const ack=new Promise(resolve=>{resolvePause=resolve;});
       waitController?.abort();
       return ack;
-    })().catch(error=>{pauseCompletion=null;throw error;});
+    })().catch(error=>{pauseCompletion=null;reopenUnlessFinalizing();throw error;});
     return pauseCompletion;
   };
   const resumePlay = async () => {
@@ -6795,7 +7125,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     assertNotStopping();
     pauseRequested = false;
     pauseCompletion = null;
+    reopenTrainingAdmission();
+    // R1 (c): a coach note accepted while pausing stayed in Q (publication is
+    // deferred during a pause). Publish it once now, before the next hand,
+    // rather than at game end. Every coach task settled before paused.
+    if (Object.keys(readCoachAuthority()?.publishQueue ?? {}).length) {
+      try { await drainQueuedCoachPublications(); }
+      catch (error) { log('coach-resume-drain-error', { code: error.code ?? 'ERROR' }); }
+    }
     parkWake?.();
+    relaunchPauseDeferredCoach();
   };
   const retryDecision = async (decisionId, { freshAuthorization = null } = {}) => {
     if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
@@ -6885,10 +7224,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (drained.userAction && !drained.userAction.timeout) out = await handleUserTurn(drained);
     }
-    await Promise.allSettled([...coachTasks, ...trainingTasks, ...auxiliaryTasks]);
+    await settleUntilIdle(
+      () => [...coachTasks, ...trainingTasks, ...auxiliaryTasks, ...(resolverPromise ? [resolverPromise] : [])],
+      () => stopRequested,
+    );
     if (stopRequested) return out;
     if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
       pauseRequested = false;
+      // The game-over branch registers held-back hands after the last hand.
+      openTrainingAdmission();
       resolvePause?.({state:'finalizing'}); resolvePause = null;
       return out;
     }
@@ -7365,6 +7709,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
+      markBootStage('sweep');
       let sweepNotices = [];
       let sweepFailed = 0;
       let sweepDetails = [];
@@ -7479,7 +7824,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           appendNotice(notice);
         }
       }
-      const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
+      const backgroundUpper = opponentRuntimeOf() !== 'llm';
+      let resolved = null;
+      if (!backgroundUpper) {
+        markBootStage('runtime-probe');
+        resolved = await createCanaryAndResolve('player+upper');
+      }
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
       const notices = [
@@ -7491,7 +7841,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // 하지 않아 평가가 왜 비어 있는지 알 길이 없었다.
         ...(trainingOn ? [] : ['이 세션은 레거시 --game-dir라 training이 꺼져 있습니다. 학습 평가를 남기려면 --store-dir로 시작하세요.']),
       ];
-      selectAdapters(resolved ?? {});
+      if (resolved) selectAdapters(resolved);
       writeLoopState({
         notices,
         playerRuntime: playerAdapter?.kind ?? null,
@@ -7499,7 +7849,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         opponentRuntime: opponentRuntimeOf(),
       });
       if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
+      if (backgroundUpper) startUpperResolveInBackground();
 
+      markBootStage('relay');
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
       installPracticeFocus({
@@ -7508,8 +7860,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         practiceFocusFile,
         onNotice: appendNotice,
       });
-      if (opponentRuntimeOf() === 'llm') await warmPlayers();
+      if (opponentRuntimeOf() === 'llm') {
+        markBootStage('player-warmup');
+        await warmPlayers();
+      }
       const state = writeLoopState({ phase: 'playing' });
+      markBootStage('ready');
       log('bootstrap-playing', { port });
       return state;
     } catch (error) {
@@ -7627,6 +7983,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
         || existingState.opponentRuntime === 'policy';
+      markBootStage('runtime-probe');
       const resolved = await createCanaryAndResolve('upper-only');
       selectAdapters(resolved ?? {});
       const notices = [
@@ -7648,8 +8005,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         assertSelfOpponentsConsistent({ root, players });
         stampPlayerPolicies(root, { onNotice: appendNotice });
       }
+      markBootStage('relay');
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
-      return writeLoopState({ port });
+      const written = writeLoopState({ port });
+      markBootStage('ready');
+      return written;
     }
     if (phase === 'done') {
       await ensureStudyForOwner();
@@ -7666,6 +8026,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
 
     const policyMode = opponentRuntimeOf() === 'policy' || existingState.opponentRuntime === 'policy';
+    markBootStage('runtime-probe');
     const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
     selectAdapters(resolved ?? {});
     const notices = [
@@ -7683,6 +8044,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
       ? existingState.port
       : requestedPort;
+    markBootStage('relay');
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
     // #192 D6 (FO-3): persisted-coach reclaim is a playing-resume step, not a player-restore
@@ -7696,9 +8058,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
     } else if (opponentRuntimeOf() === 'llm') {
+      markBootStage('player-warmup');
       await restorePlayers();
     }
-    return writeLoopState({ phase: 'playing' });
+    const playing = writeLoopState({ phase: 'playing' });
+    markBootStage('ready');
+    return playing;
   };
 
   const resume = async ({ skipLock = false } = {}) => {
@@ -7796,7 +8161,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           status: p.closeConfirmed === true ? 'recovery_required' : 'unsafe',
           code: p.closeConfirmed === true ? 'INTERRUPTED' : 'CHILD_CLOSE_UNCONFIRMED' } });
         if (p.schemaVersion !== 3 && p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
-        if (managed) pauseRequested = true;
+        if (managed) { closeTrainingAdmission(); pauseRequested = true; }
         }
       }
       if (state?.playerBudget) playerBudget(state.playerBudget);
@@ -8083,8 +8448,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await checkArchivePending(out);
       if (out.handOver) {
         const ending = out.gameOver;
-        if (ending) ensureFinalizationResultWaitCutoff();
-        launchTrainingPipeline(out.handNo);
+        if (ending) {
+          gameOverPending = true;
+          // The last hand explains first. Its pipeline starts here, before the
+          // probe and coach waits (outside the finalization clock), and
+          // explanations still waiting at the lock yield to it from now on;
+          // other hands may keep evaluating and solving.
+          finalizationPriorityHand = out.handNo;
+          endFinalizationPriorityAfter(out.handNo, joinOrLaunchTraining(out.handNo));
+          // A pending pause cannot park any more: release it first so coach work
+          // it deferred runs now, before the finalization clock.
+          releasePauseForFinalization();
+          const relaunched = relaunchPauseDeferredCoach();
+          // R2: never let the background probe spend the finalization budget.
+          await settleUpperResolution();
+          if (stopRequested) break;
+          // Coach work a slow probe or a pause held back gets its own time (bounded
+          // by the coach generation limit) instead of the last hand's result-wait
+          // window.
+          if (coachProbeBacklog || relaunched > 0) {
+            await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), COACH_BACKLOG_WAIT_MS);
+            if (stopRequested) break;
+          }
+          ensureFinalizationResultWaitCutoff();
+        }
+        if (!ending) launchTrainingPipeline(out.handNo);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {
           await heartbeatCoach();
@@ -8096,6 +8484,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         launchCoachPipeline(out.handNo);
         if (ending) {
           pauseRequested=false;resolvePause?.({state:'finalizing'});resolvePause=null;
+          relaunchPauseDeferredCoach();
           // §5 finalizing 1: handOver 분기가 이미 async로 띄운 마지막 핸드 generation을
           // 그대로 둔다. 여기서 reserve를 다시 부르면 그 prior가 discard된다.
           writeLoopState({ phase: 'finalizing', handNo: out.handNo });
@@ -8166,6 +8555,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (decision.kind === 'recovery_required') {
         if (stopRequested) break;
         if (!managed) throw codedError('PLAYER_RECOVERY_REQUIRED', 'LLM 결정이 미해결 상태로 저장되었습니다. 명시적으로 재시도하거나 종료하세요.');
+        // An automatic recovery pause closes the training gate like a user pause.
+        closeTrainingAdmission();
         pauseRequested = true;
         await retryControlWrite(() => control.set('pausing', { pauseIntent: true }));
         out = await publishEnvelope(await runCli(['step']), ['--view-only']);
@@ -8217,6 +8608,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     requestStop,
     get stopping() { return stopRequested; },
     get serverPid() { return serverPid; },
+    // Host lobby read-only progress (tools/session-manager.js snapshot). No
+    // tokens, paths or PIDs: stage names, runtime names, counts and times.
+    get bootStage() {
+      return bootState ? { ...bootState, ...(bootProbe ? { probe: { ...bootProbe } } : {}) } : null;
+    },
+    get pauseProgress() {
+      const waiting = { coach: coachTasks.size, training: trainingTasks.size, evaluate: 0, solve: 0, explain: 0,
+        other: auxiliaryTasks.size, resolver: resolverPromise !== null };
+      for (const key of trainingAttempts.keys()) {
+        const kind = String(key).slice(String(key).lastIndexOf(':') + 1);
+        if (kind === 'evaluate' || kind === 'solve' || kind === 'explain') waiting[kind] += 1;
+      }
+      return waiting;
+    },
+    get gameOverPending() { return gameOverPending; },
+    get upperStatus() {
+      if (resolverPromise !== null) return 'probing';
+      if (!upperResolved) return null;
+      return upperAdapter && !coachAdapterDisabled ? 'ready' : 'unavailable';
+    },
+    get noticesProjected() { return projectNotices(readLoopState()?.notices); },
   };
 }
 

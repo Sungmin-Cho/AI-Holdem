@@ -1,4 +1,4 @@
-import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -23,6 +23,8 @@ export const requiredJourneyChecks = [
   "guest-table-booted",
   "skip-hidden-multi",
   "guest-table-viewport",
+  "guest-single-header",
+  "guest-embed-fit",
   "guest-cards-hidden-from-others",
   "guest-action-insecure-context",
   "turn-deadline-ticks",
@@ -201,6 +203,41 @@ export async function runMultiplayerJourney(outDir) {
     );
     await wait(async () => Number(await tableHeight(guestA)) >= 400, "guest A table fills the viewport");
     check("guest-table-viewport");
+    // The join page answers the table's handshake: the table hides its own top
+    // bar and the join header carries the hand context (one header, not two).
+    const singleHeader = (browser) => evaluate(browser)(`(() => {
+      const doc = document.querySelector('#table')?.contentDocument;
+      const topbar = doc?.querySelector('.topbar');
+      const context = document.querySelector('#shell-context');
+      return doc?.body?.classList.contains('embedded') === true
+        && (topbar ? doc.defaultView.getComputedStyle(topbar).display === 'none' : false)
+        && context?.hidden === false && context.textContent.includes('핸드');
+    })()`);
+    await wait(async () => (await singleHeader(guestA)) === true, "guest A single header");
+    check("guest-single-header");
+    // Keyboard tab order on a participant table skips the host-only tabs.
+    const tabWalk = await evaluate(guestA)(`(() => {
+      const doc = document.querySelector('#table').contentDocument;
+      doc.querySelector('#tab-log').focus();
+      doc.querySelector('.tabs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      const result = { focus: doc.activeElement?.id, coach: doc.querySelector('#panel-coach')?.hidden !== false, training: doc.querySelector('#panel-training')?.hidden !== false };
+      doc.querySelector('#tab-log').click();
+      return result;
+    })()`);
+    assert.deepEqual(tabWalk, { focus: "tab-participants", coach: true, training: true });
+    await guestA(["screenshot", path.join(outDir, "guest-a-table.png")]);
+    await guestB(["set", "viewport", "390", "844"]);
+    await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");
+    await guestB(["screenshot", path.join(outDir, "guest-b-table-mobile.png")]);
+    await guestB(["set", "viewport", "1280", "600"]);
+    const embedStates = [];
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `guest A table at ${width}x${height}`);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `guest ${width}x${height}`);
+      embedStates.push(`turn-${width}x${height}`);
+    }
+    await guestA(["set", "viewport", "1280", "600"]);
     // cardNode renders faces and Korean aria labels, not raw two-character
     // codes. A whole-document substring can instead match a capability token.
     const guestCardVisibility = browser => evaluate(browser)(`(() => {
@@ -249,10 +286,15 @@ export async function runMultiplayerJourney(outDir) {
       "guest A action",
     );
     check("guest-action-insecure-context");
+    // At the result frame: guest A's table clock is frozen so its strip stays up,
+    // and the host pauses so no next hand replaces it — the paused measurement
+    // below then sees a real result inside the participant iframe.
     for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
       const doc=document.querySelector('#table')?.contentDocument;
       if(doc?.querySelector('#hand-result')?.hidden===false){
         window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true};
+        if(${JSON.stringify(browser===guestA)}){const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;}
+        if(${JSON.stringify(browser===host)}){const menu=document.querySelector('#menu');if(menu&&!menu.disabled&&!menu.hidden)menu.click();}
         clearInterval(window.__handDriver);return;
       }
       const button=['#btn-check','#btn-fold','#btn-call'].map(id=>doc?.querySelector(id)).find(el=>el&&!el.disabled&&!el.hidden);
@@ -267,7 +309,7 @@ export async function runMultiplayerJourney(outDir) {
     check('skip-hidden-multi');
 
 
-    await click(host, "#menu");
+    if (app.manager.snapshot().state === "playing") await click(host, "#menu");
     await wait(
       () => app.manager.snapshot().state === "paused",
       "paused",
@@ -276,6 +318,34 @@ export async function runMultiplayerJourney(outDir) {
       () => evaluate(guestA)("document.querySelector('#pause-banner')?.hidden===false"),
       "pause banner",
     );
+    // The pause sits over the table, below the header, without pushing the table
+    // down or covering a plate, the board or the pot; measured on a laptop and a phone.
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `paused guest table at ${width}x${height}`);
+      await guestA(["screenshot", path.join(outDir, `guest-paused-result-${width}x${height}.png`)]);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `paused guest ${width}x${height}`);
+      const pauseGeometry = await evaluate(guestA)(`(() => {
+        const banner = document.querySelector('#pause-banner').getBoundingClientRect();
+        const header = document.querySelector('.app-header').getBoundingClientRect();
+        const frame = document.querySelector('#table').getBoundingClientRect();
+        const doc = document.querySelector('#table').contentDocument;
+        const covered = [...doc.querySelectorAll('.plate, #board .card, #pots')].filter((n) => n.getClientRects().length).some((n) => {
+          const r = n.getBoundingClientRect(), top = r.top + frame.top, left = r.left + frame.left;
+          return banner.left < left + r.width - 1 && banner.right > left + 1 && banner.top < top + r.height - 1 && banner.bottom > top + 1;
+        });
+        return { banner: banner.top >= header.bottom - 1 && banner.bottom <= frame.top + 80 && banner.left >= 0 && banner.right <= innerWidth + 1,
+          overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute', covered };
+      })()`);
+      assert.deepEqual(pauseGeometry, { banner: true, overlay: true, covered: false }, `${width}x${height}`);
+      const fit = await evaluate(guestA)(EMBED_FIT_SCRIPT);
+      assert.ok(fit.result, `the held result is on screen at ${width}x${height}: ${JSON.stringify(fit)}`);
+      embedStates.push(`paused-result-${width}x${height}`);
+    }
+    await evaluate(guestA)("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
+    await guestA(["set", "viewport", "1280", "600"]);
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-result-1280x800", "paused-result-390x667"]);
+    check("guest-embed-fit");
     check("pause-banner");
     await click(host, "#resume");
     await wait(
@@ -301,6 +371,9 @@ export async function runMultiplayerJourney(outDir) {
       "final stacks",
     );
     const stackText = await evaluate(guestA)("document.querySelector('#final-stacks')?.innerText ?? ''");
+    // The participant's final panel keeps every text at 12px or larger (A5).
+    const finalSmall = await evaluate(guestA)("[...document.querySelectorAll('#final *')].filter(n=>n.getClientRects().length&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.tagName)");
+    assert.deepEqual(finalSmall, [], 'participant final text under 12px');
     assert.match(String(stackText), /민준|서연|호스트/);
     check("end-final-stacks");
     const retained=await evaluate(guestA)("clearInterval(window.__endWatch);({same:document.querySelector('#table').contentDocument===window.__endingDocument,samples:window.__stoppingFrames,visible:!document.querySelector('#playing').hidden})");
@@ -322,7 +395,7 @@ export async function runMultiplayerJourney(outDir) {
     );
     await click(host, "#room-close");
     await wait(
-      () => evaluate(host)("document.querySelector('#room-status')?.textContent==='closed'"),
+      () => evaluate(host)("document.querySelector('#room-status')?.dataset.status==='closed'"),
       "room closed",
     );
     await wait(

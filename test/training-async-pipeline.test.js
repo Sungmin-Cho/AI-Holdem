@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { createGameLoop } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
-import { createTrainingControl } from '../tools/training-control.js';
+import { createTrainingControl, hasCutoffMarker } from '../tools/training-control.js';
 import { startServer } from '../server/server.js';
 import * as pipeline from '../tools/training-pipeline.js';
 
@@ -990,4 +990,500 @@ test('async scheduling fixture uses verified reference while unverified source r
   assert.match(contentSha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(validateExplanation({ ...value, source: legacySource }, VALID_EXPLAIN),
     { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' });
+});
+
+// R1 (design §11.2): a pause closes the training gate before its control write.
+// Work already running finishes; nothing new starts until play resumes or the
+// game finalizes, and the held-back hands are registered again then.
+const explanationOf = (gameDir, item) => createTrainingControl().loadAuthority(gameDir)
+  ?.items?.[item.evaluationId]?.annotations?.explanation ?? null;
+const authorityItems = (gameDir) => Object.values(createTrainingControl().loadAuthority(gameDir)?.items ?? {});
+
+test('R1: a pause lets only the running explanation finish; hands waiting on the lock explain after resume', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explainCalls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: (evaluation) => {
+          explainCalls.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explainCalls.length === 1 ? gate : null });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  // Hand 1's explanation holds the lock; hand 2's pipeline is accepted and queued behind it.
+  await playUntil(loop, gameDir, {
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(explainCalls.length, 1, 'only the first explanation is running');
+  const pausing = loop.pause();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  release();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  assert.equal(explainCalls.length, 1, 'no explanation started after the pause request');
+  const first = authorityItems(gameDir).find((item) => item.handNo === explainCalls[0]);
+  assert.equal(explanationOf(gameDir, first)?.status, 'ready', 'the running explanation completed');
+  const held = authorityItems(gameDir).filter((item) => item.handNo !== explainCalls[0]);
+  assert.ok(held.length > 0 && held.every((item) => explanationOf(gameDir, item) === null));
+  assert.ok(readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands?.length > 0,
+    'held-back hands are recorded for a restart');
+  const frozen = ['loop-state.json', path.join('.training', 'authority.json')]
+    .filter((file) => fs.existsSync(path.join(gameDir, file)))
+    .map((file) => [file, fs.readFileSync(path.join(gameDir, file), 'utf8')]);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  for (const [file, bytes] of frozen) assert.equal(fs.readFileSync(path.join(gameDir, file), 'utf8'), bytes, `${file} changed while paused`);
+  assert.equal(explainCalls.length, 1);
+
+  await loop.resumePlay();
+  await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
+    'held-back explanations did not run after resume', 20_000);
+  await waitFor(() => readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands === undefined,
+    'the deferred record was not cleared once the hands ran through');
+  await loop.requestStop().catch(() => {});
+});
+
+test('R1: a solve found while the pause write is in flight waits for resume and runs once', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const evaluateCalls = [];
+  const solveCalls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      solverAdapterId: 'fixture-solver',
+      training: {
+        // Every decision is deferred to a solve; the first evaluation is held.
+        evaluate: (sessionDir, handNo) => {
+          evaluateCalls.push(handNo);
+          return handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(sessionDir, handNo).map((snap) => snap.decisionId) }),
+            { gate: evaluateCalls.length === 1 ? gate : null, delayMs: 20 });
+        },
+        solve: (task) => { solveCalls.push(task.decisionId); return handleOf({ ok: false, code: 'SOLVE_FAILED' }); },
+        explain: makeExplain(),
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, { until: () => evaluateCalls.length >= 1, timeoutMs: 40_000 });
+  const pausing = loop.pause();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  release();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  const pending = Object.keys(createTrainingControl().loadAuthority(gameDir)?.pending ?? {});
+  assert.ok(pending.length > 0, 'the evaluation that was running recorded its solve as pending');
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(solveCalls, [], 'no solve starts after the pause request');
+
+  await loop.resumePlay();
+  await waitFor(() => pending.every((id) => solveCalls.includes(id)), 'the held solve did not run after resume', 20_000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  for (const id of pending) assert.equal(solveCalls.filter((call) => call === id).length, 1, `solve ${id} ran more than once`);
+  await loop.requestStop().catch(() => {});
+});
+
+test('R1: a restart registers the hands a pause held back, and nothing else', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
+      training: { evaluate: makeEvaluate(), explain: makeExplain({ text: '' }) } },
+  });
+  t.after(() => first.requestStop().catch(() => {}));
+  await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 8, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  // Every explanation fails (empty text, unsealed). Wait for two hands with a
+  // decision that are both before the last completed hand.
+  const itemHands = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].sort((a, b) => a - b);
+  const lastHandNo = () => readJson(path.join(gameDir, 'state.json')).lastHand?.handNo ?? 0;
+  await playUntil(first, gameDir, {
+    until: () => { const hands = itemHands(); return hands.length >= 2 && lastHandNo() > hands[1]; },
+    timeoutMs: 60_000,
+  });
+  await first.requestStop();
+  // The first is recorded as held back by a pause; the second is neither held
+  // back nor the last hand (which reconcile re-registers on its own).
+  const [heldHand, failedHand] = itemHands();
+  const items = authorityItems(gameDir);
+  const held = items.filter((item) => item.handNo === heldHand);
+  const failed = items.filter((item) => item.handNo === failedHand);
+  assert.ok(lastHandNo() > failedHand, JSON.stringify({ heldHand, failedHand, last: lastHandNo() }));
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [heldHand] }));
+  const explained = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
+      training: { evaluate: makeEvaluate(), explain: (evaluation) => { explained.push(evaluation); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  await resumed.resume();
+  await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
+    'the held-back hand was not registered on restart', 20_000);
+  const ids = explained.map((row) => row.evaluationId);
+  assert.ok(failed.every((item) => !ids.includes(item.evaluationId)), 'a failed explanation is not retried by the restart');
+  // The record is cleared only once the held-back hand's pipeline has run through.
+  await waitFor(() => readJson(loopPath).trainingDeferredHands === undefined, 'the deferred record was not cleared after completion');
+  await resumed.requestStop().catch(() => {});
+});
+
+test('R1: a paused recovery keeps what it finds queued until play resumes', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const first = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: { evaluate: makeEvaluate(), explain: makeExplain({ text: '' }) } },
+  });
+  t.after(() => first.requestStop().catch(() => {}));
+  await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(first, gameDir, {
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
+  });
+  await first.requestStop();
+  const hands = [...new Set(authorityItems(gameDir).map((item) => item.handNo))].sort((a, b) => a - b);
+  const held = authorityItems(gameDir).filter((item) => item.handNo === hands[0]);
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [hands[0]] }));
+  const explained = [];
+  const resumed = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, startPaused: true,
+      training: { evaluate: makeEvaluate(), explain: (evaluation) => { explained.push(evaluation.handNo); return handleOf(VALID_EXPLAIN); } } },
+  });
+  t.after(() => resumed.requestStop().catch(() => {}));
+  await resumed.resume();
+  const running = resumed.run();
+  running.catch(() => {});
+  await waitFor(() => readJson(path.join(gameDir, '.session-control.json')).playState === 'paused', 'the recovered game did not park', 20_000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(explained, [], 'nothing starts while the recovered game is paused');
+  assert.ok(readJson(loopPath).trainingDeferredHands?.includes(hands[0]), 'the held-back hand stays recorded');
+  await resumed.resumePlay();
+  await waitFor(() => held.every((item) => explanationOf(gameDir, item)?.status === 'ready'),
+    'the held-back hand did not run after resume', 20_000);
+  await resumed.requestStop().catch(() => {});
+});
+
+test('R1: a held-back hand stays recorded until its re-registered pipeline finishes', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explainCalls = [];
+  let releaseFirst, releaseSecond;
+  const first = new Promise((resolve) => { releaseFirst = resolve; });
+  const second = new Promise((resolve) => { releaseSecond = resolve; });
+  t.after(() => { releaseFirst(); releaseSecond(); });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: (evaluation) => {
+          explainCalls.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explainCalls.length === 1 ? first : second });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, {
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const pausing = loop.pause();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  releaseFirst();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  const recorded = readJson(loopPath).trainingDeferredHands;
+  assert.ok(recorded?.length > 0);
+  await loop.resumePlay();
+  // The held-back explanation is now running (held on its gate) — a crash here
+  // must still find the hand on restart.
+  await waitFor(() => explainCalls.length >= 2, 'the held-back explanation did not start');
+  assert.deepEqual(readJson(loopPath).trainingDeferredHands, recorded, 'the record outlives re-registration');
+  await loop.requestStop().catch(() => {});
+  assert.ok(recorded.every((handNo) => readJson(loopPath).trainingDeferredHands?.includes(handNo)), 'stop leaves the record for the next start');
+});
+
+test('R1: closing the gate records running hands at once; only held-back ones stay recorded', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explainCalls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: {
+        evaluate: makeEvaluate(),
+        explain: (evaluation) => {
+          explainCalls.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explainCalls.length === 1 ? gate : null });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, {
+    until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
+    timeoutMs: 40_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const loopPath = path.join(gameDir, 'loop-state.json');
+  const running = [...new Set(authorityItems(gameDir).map((item) => item.handNo))];
+  const pausing = loop.pause();
+  // Written by the close itself, before any pipeline reports (a stop or crash
+  // now would still find these hands).
+  const atClose = readJson(loopPath).trainingDeferredHands ?? [];
+  assert.ok(running.every((handNo) => atClose.includes(handNo)), JSON.stringify({ running, atClose }));
+  release();
+  assert.deepEqual(await pausing, { state: 'paused' });
+  const after = readJson(loopPath).trainingDeferredHands ?? [];
+  assert.ok(!after.includes(explainCalls[0]), 'the hand whose explanation finished left the record');
+  assert.ok(after.length > 0 && after.every((handNo) => handNo !== explainCalls[0]), JSON.stringify({ after, first: explainCalls[0] }));
+  await loop.requestStop().catch(() => {});
+});
+
+test('R1: a pause that meets the end of the game registers held-back hands after the last hand', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explained = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const LAST = 5;
+  const passing = makeEvaluate();
+  const slow = makeEvaluate({ delayMs: 800 });
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1,
+      training: {
+        // The last hand must evaluate first, slowly; held-back hands skip
+        // evaluation and would reach the explain lock first if registered early.
+        evaluate: (dir, handNo) => (handNo === LAST ? slow : passing)(dir, handNo),
+        explain: (evaluation) => {
+          explained.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explained.length === 1 ? gate : null });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  const earlier = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].filter((handNo) => handNo < LAST);
+  const { running } = await playUntil(loop, gameDir, {
+    until: (state) => state.handNo >= LAST && earlier().length >= 2,
+    timeoutMs: 60_000,
+  });
+  running.catch(() => {});
+  // The first explanation holds the lock and later hands wait behind it. The
+  // user folds the last hand; the pause lands while that fold ends the game.
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir, 10_000);
+  assert.equal(snapshot.view.handNo, LAST);
+  const folded = await postUserAction(lock, { decisionId: snapshot.view.legal.decisionId, action: 'fold' });
+  assert.notEqual(folded?.code, 'ACTION_REJECTED');
+  const waiting = earlier().filter((handNo) => handNo !== explained[0]);
+  const pausing = loop.pause().catch((error) => ({ error: error.code }));
+  const recorded = readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands ?? [];
+  assert.ok(waiting.every((handNo) => recorded.includes(handNo)), `hands waiting at the lock are recorded as the gate closes: ${JSON.stringify({ waiting, recorded })}`);
+  release();
+  const settled = await pausing;
+  assert.equal(settled.state, 'finalizing', JSON.stringify(settled));
+  await waitFor(() => [...waiting, LAST].every((handNo) => authorityItems(gameDir).filter((item) => item.handNo === handNo)
+    .every((item) => explanationOf(gameDir, item)?.status === 'ready')), 'explanations did not finish', 30_000);
+  const lastAt = explained.indexOf(LAST);
+  assert.ok(lastAt !== -1 && waiting.every((handNo) => explained.indexOf(handNo) > lastAt),
+    `the last hand explains before held-back hands: ${JSON.stringify({ explained, waiting })}`);
+  await loop.requestStop().catch(() => {});
+});
+
+test('an accepted solve runs its hand once more so the solved decision gets explained', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const solveCalls = [];
+  const explained = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, solverAdapterId: 'fixture-solver',
+      training: {
+        evaluate: (sessionDir, handNo) => handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(sessionDir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 }),
+        solve: (task) => {
+          solveCalls.push(task.decisionId);
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] });
+        },
+        explain: (evaluation) => { explained.push(evaluation.decisionId ?? evaluation.evaluationId); return handleOf(VALID_EXPLAIN); },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 5, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  await playUntil(loop, gameDir, { until: () => solveCalls.length >= 1, timeoutMs: 40_000 });
+  const decisionId = solveCalls[0];
+  const solved = await waitFor(() => authorityItems(gameDir).find((item) => item.decisionId === decisionId), 'the solve was not accepted', 15_000);
+  await waitFor(() => explanationOf(gameDir, solved)?.status === 'ready', 'the solved decision was never explained', 15_000);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(solveCalls.filter((id) => id === decisionId).length, 1, 'the rerun does not solve again');
+  await loop.requestStop().catch(() => {});
+});
+
+
+test('explanations are requested only for sources an explanation could be accepted for', async () => {
+  const { explanationEligible } = await import('../training/explain.js');
+  const value = cannedEvaluation('d-1-preflop-0', 'ab'.repeat(32));
+  assert.equal(explanationEligible(value), true);
+  assert.equal(explanationEligible({ ...value, source: { id: 'fake-solver', version: '1.0.0' } }), false, 'a synthetic source is never accepted');
+  assert.equal(explanationEligible({ ...value, status: 'unsupported', source: { id: 'fake-solver', version: '1.0.0' } }), true);
+});
+
+test('R1: the finalization priority holds through the last hand\'s solve and its explaining re-run', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explained = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const LAST = 5;
+  const passing = makeEvaluate();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, solverAdapterId: 'fixture-solver',
+      training: {
+        // The last hand's decision goes to a (slow) solve; its first pipeline
+        // explains nothing, and the solve's re-run explains it later.
+        evaluate: (dir, handNo) => handNo === LAST
+          ? handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(dir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 })
+          : passing(dir, handNo),
+        solve: (task) => {
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] }, { delayMs: 700 });
+        },
+        explain: (evaluation) => {
+          explained.push(evaluation.handNo);
+          return handleOf(VALID_EXPLAIN, { gate: explained.length === 1 ? gate : null });
+        },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  const earlier = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))].filter((handNo) => handNo < LAST);
+  const { running } = await playUntil(loop, gameDir, { until: (state) => state.handNo >= LAST && earlier().length >= 2, timeoutMs: 60_000 });
+  running.catch(() => {});
+  const { lock, snapshot } = await waitForUserSnapshot(gameDir, 10_000);
+  assert.equal(snapshot.view.handNo, LAST);
+  await postUserAction(lock, { decisionId: snapshot.view.legal.decisionId, action: 'fold' });
+  const waiting = earlier().filter((handNo) => handNo !== explained[0]);
+  const pausing = loop.pause().catch((error) => ({ error: error.code }));
+  release();
+  await pausing;
+  await waitFor(() => [...waiting, LAST].every((handNo) => authorityItems(gameDir).some((item) => item.handNo === handNo)
+    && authorityItems(gameDir).filter((item) => item.handNo === handNo).every((item) => explanationOf(gameDir, item)?.status === 'ready')),
+  'explanations did not finish', 30_000);
+  const lastAt = explained.indexOf(LAST);
+  assert.ok(lastAt !== -1 && waiting.every((handNo) => explained.indexOf(handNo) > lastAt),
+    `the last hand's solved decision explains before held-back hands: ${JSON.stringify({ explained, waiting })}`);
+  await loop.requestStop().catch(() => {});
+});
+
+test('R1: past the result-wait time no new training work starts, not even for the last hand', { timeout: 120_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const explained = [];
+  const logs = [];
+  let skewNs = 0n;
+  let solveAsked = false;
+  let releaseSolve, releaseEarlier;
+  const solveGate = new Promise((resolve) => { releaseSolve = resolve; });
+  const earlierGate = new Promise((resolve) => { releaseEarlier = resolve; });
+  t.after(() => { releaseSolve(); releaseEarlier(); });
+  const LAST = 3;
+  const RESULT_WAIT_MS = 4_000;
+  const held = makeEvaluate({ gate: earlierGate });
+  const passing = makeEvaluate();
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    opts: {
+      port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true, controlProtocolVersion: 1, solverAdapterId: 'fixture-solver',
+      finalizeBudgetMs: 2 * RESULT_WAIT_MS, finalizeCutoffLeadMs: RESULT_WAIT_MS,
+      // The test moves the monotonic clock past the result-wait time while the
+      // finalization settle still waits on the wall clock (hand 1 holds it), so
+      // the window before the cutoff flag stays open long enough to observe.
+      monotonicNs: () => process.hrtime.bigint() + skewNs,
+      log: (record) => logs.push({ event: record.event, at: process.hrtime.bigint() }),
+      training: {
+        evaluate: (dir, handNo) => {
+          if (handNo === 1) return held(dir, handNo);
+          if (handNo === LAST) return handleOf(() => ({ ok: true, evaluations: [], pendingSolve: userDecisions(dir, handNo).map((snap) => snap.decisionId) }), { delayMs: 20 });
+          return passing(dir, handNo);
+        },
+        solve: (task) => {
+          solveAsked = true;
+          const state = readJson(path.join(task.sessionDir, 'state.json'));
+          return handleOf({ ok: true, evaluations: [cannedEvaluation(task.decisionId, gameEpochOf(state.sessionToken))] }, { gate: solveGate });
+        },
+        explain: (evaluation) => { explained.push(evaluation.handNo); return handleOf(VALID_EXPLAIN); },
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: LAST, opponentRuntime: 'policy' });
+  putUserOnTheButton(gameDir);
+  const finalizeStart = () => logs.find((entry) => entry.event === 'finalize-start');
+  const settling = () => finalizeStart() && logs.some((entry) => entry.event === 'training-settle-start' && entry.at >= finalizeStart().at);
+  const { running } = await playUntil(loop, gameDir, { until: () => solveAsked && settling(), timeoutMs: 60_000 });
+  running.catch(() => {});
+  // The result-wait time is at most RESULT_WAIT_MS after finalize-start.
+  const target = finalizeStart().at + BigInt(RESULT_WAIT_MS + 200) * 1_000_000n;
+  const now = process.hrtime.bigint();
+  if (target > now) skewNs = target - now;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  releaseSolve();
+  const decisionId = userDecisions(gameDir, LAST)[0].decisionId;
+  await waitFor(() => authorityItems(gameDir).some((item) => item.decisionId === decisionId), 'the last hand\'s solve was not accepted', 10_000);
+  await waitFor(() => readJson(path.join(gameDir, 'loop-state.json')).trainingDeferredHands?.includes(LAST),
+    'the solved hand was not kept for the cutoff seal', 3_000);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(logs.some((entry) => entry.event === 'training-settle-return' && entry.at >= finalizeStart().at), false,
+    'the settle was still waiting (the window was open)');
+  assert.equal(explained.includes(LAST), false, `no explanation child starts past the result-wait time: ${JSON.stringify(explained)}`);
+  await loop.requestStop().catch(() => {});
 });

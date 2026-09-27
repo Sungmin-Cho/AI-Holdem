@@ -167,13 +167,16 @@ test('S8 early: explicit chip stack and new defaults reach the real engine with 
   assert.equal(state.config.handLimit, 20);
 });
 
-test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: scaled(15000) }, async (t) => {
+test('S8 early: the actual store CLI initializes the default policy table before an upper-only probe', { timeout: scaled(30000) }, async (t) => {
   const store = createOwnedTempDir('holdem-s8-cli-store');
   const fake = failedCliFixtures({ hold: true });
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env);
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
-    await within(cli.closed, 8000);
+    // A policy game no longer waits for the held upper probe, so the relay and the
+    // study attachment are already starting when the stop lands. Stopping at the
+    // first probe catches a study cold start (up to 120s on Windows) mid-way.
+    await within(cli.closed, scaled(15000));
   });
   const invocation = await until(() => {
     return readFirstFixtureRecord(fake.log, cli.child);
@@ -186,7 +189,8 @@ test('S8 early: the actual store CLI initializes the default policy table before
   const state = JSON.parse(fs.readFileSync(path.join(gameDir, 'state.json')));
   const loopState = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json')));
   const players = JSON.parse(fs.readFileSync(path.join(gameDir, 'players.json')));
-  assert.equal(loopState.phase, 'bootstrap');
+  // The upper probe runs in the background, so the relay may already be up.
+  assert.ok(['bootstrap', 'playing'].includes(loopState.phase), loopState.phase);
   assert.equal(loopState.opponentRuntime, 'policy');
   assert.equal(state.config.mode, 'cash-training');
   assert.equal(state.config.aiCount, 5);
@@ -198,9 +202,8 @@ test('S8 early: the actual store CLI initializes the default policy table before
   assert.equal(players.filter((player) => player.playerId !== 'user').length, 5);
   assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === VERSION_V2));
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
-  assert.equal(fs.existsSync(path.join(gameDir, 'lock.json')), false, 'the held probe keeps this test before relay startup');
   cli.requestStop();
-  const result = await within(cli.closed, 8000);
+  const result = await within(cli.closed, scaled(15000));
   assert.equal(result.code, 0, JSON.stringify(result));
   assert.equal(result.signal, null);
 });
@@ -273,7 +276,7 @@ test('S8 early: policy bootstrap survives failed upper selection and reports LLM
   assert.throws(() => process.kill(pid, 0), (error) => error.code === 'ESRCH');
 });
 
-test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: scaled(15000) }, async (t) => {
+test('S8 full: actual store bootstrap creates private lock metadata under inherited umask 002', { timeout: scaled(30000) }, async (t) => {
   const parent = createOwnedTempDir('holdem-s8-private-store');
   fs.chmodSync(parent, 0o755);
   const store = path.join(parent, 'new-store');
@@ -282,7 +285,8 @@ test('S8 full: actual store bootstrap creates private lock metadata under inheri
   const cli = startCli(['--store-dir', store, '--player-runtime', 'claude'], fake.env, { umask: 0o002 });
   t.after(async () => {
     if (cli.child.exitCode === null && cli.child.signalCode === null) cli.requestStop();
-    await within(cli.closed, 8000);
+    // See the policy-table test above: the stop now waits for relay/study startup.
+    await within(cli.closed, scaled(15000));
     await stopOwnedStudy(store);
   });
   await until(() => readFirstFixtureRecord(fake.log, cli.child), cli);

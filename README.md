@@ -14,7 +14,7 @@ A self-hosted, browser-based No-Limit Texas Hold'em playground with AI opponents
 
 ![AI Hold’em browser table](docs/images/table.png)
 
-Six-player tournament table from a browser test session (Korean UI).
+A six-player cash-training game against the local policy AIs, in the host lobby (browser test session, Korean UI).
 
 ## Why AI Hold'em?
 

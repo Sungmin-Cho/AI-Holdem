@@ -115,6 +115,13 @@ export async function verifyTrainingDetail(item, detail) {
   }
 }
 
+/** Decisions that are records, not assessments: outside the reference table,
+ * forfeited by the watchdog, or compared against a synthetic test source. */
+export function excludedFromAssessment(item) {
+  return item?.status === 'unsupported' || Boolean(item?.forced)
+    || referenceQuality(item?.source).quality === 'synthetic';
+}
+
 export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   const receipt = verifiedDetail && verifiedDetails.get(verifiedDetail);
   const verified = receipt?.binding === detailBinding(item);

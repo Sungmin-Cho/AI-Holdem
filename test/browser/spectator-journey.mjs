@@ -24,7 +24,8 @@ export async function runSpectatorJourney(outDir) {
   const preload = new URL('../helpers/spectator-seeded-engine.mjs', import.meta.url).href;
   process.env.NODE_OPTIONS = `${priorNodeOptions || ''} --import=${JSON.stringify(preload)}`;
   const evaluate=async(id,expr)=>{const data=await browsers[id](['eval',expr]);return data?.result??data;};
-  const table=async(id,expr)=>evaluate(id,`(()=>{const doc=document.querySelector('#table')?.contentDocument;return doc?(${expr}):null;})()`);
+  // A new game replaces the iframe; until its document has parsed, there is no table to read.
+  const table=async(id,expr)=>evaluate(id,`(()=>{const doc=document.querySelector('#table')?.contentDocument;return doc&&doc.readyState!=='loading'&&doc.body?(${expr}):null;})()`);
   const wait=async(predicate,label)=>{
     const until=Date.now()+60_000;
     while(Date.now()<until){

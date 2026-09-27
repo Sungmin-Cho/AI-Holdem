@@ -1435,12 +1435,13 @@ function ladderFrom(preferred) {
  *     전 후보가 CANARY_REQUIRED로 탈락한다(fail-closed).
  */
 export function createProductionResolver({ preferred = null, resolve = resolveRuntimes } = {}) {
-  return ({ need, canaryAbsPath, registerAdapter, lockRoot }) => resolve({
+  return ({ need, canaryAbsPath, registerAdapter, lockRoot, onProbe }) => resolve({
     need,
     canaryAbsPath,
     lockRoot,
     preferred,
     onAdapterCreated: registerAdapter,
+    onProbe,
   });
 }
 
@@ -1453,8 +1454,26 @@ export async function resolveRuntimes({
   runtimeOpts = {},
   lockRoot = null,
   probeTimeoutMs,
+  onProbe,
 } = {}) {
   const order = ladderFrom(preferred);
+  // Progress for the lobby boot screen: runtime name, ladder position and
+  // elapsed time only. A throwing observer must never change the probe outcome.
+  const observe = (event) => { try { onProbe?.(event); } catch { /* observer only */ } };
+  const probeWith = async (tier, kind, round, run) => {
+    const started = Date.now();
+    observe({ tier, runtime: kind, round, ok: null, elapsedMs: 0 });
+    let ok = false;
+    try {
+      const result = await run();
+      ok = tier === 'upper'
+        ? !!(result?.ok && result.upper && result.containment)
+        : !!(result?.ok && result.containment);
+      return result;
+    } finally {
+      observe({ tier, runtime: kind, round, ok, elapsedMs: Date.now() - started });
+    }
+  };
   const notices = [];
   const made = new Map();
   const resolvedOpts = (
@@ -1475,11 +1494,11 @@ export async function resolveRuntimes({
 
   let player = null;
   if (need !== 'upper-only') {
-    for (const kind of order) {
+    for (const [round, kind] of order.entries()) {
       const adapter = adapterFor(kind);
       let result;
       try {
-        result = await adapter.probe({ canaryAbsPath, ...probeOpts });
+        result = await probeWith('player', kind, round, () => adapter.probe({ canaryAbsPath, ...probeOpts }));
       } catch (error) {
         notices.push(`플레이어 런타임 ${kind} probe 오류: ${error.code ?? 'ERROR'}`);
         continue;
@@ -1501,11 +1520,11 @@ export async function resolveRuntimes({
 
   const upperOrder = player ? [player.kind, ...order.filter((kind) => kind !== player.kind)] : order;
   let upper = null;
-  for (const kind of upperOrder) {
+  for (const [round, kind] of upperOrder.entries()) {
     const adapter = adapterFor(kind);
     let result;
     try {
-      result = await adapter.probe({ upper: true, canaryAbsPath, ...probeOpts });
+      result = await probeWith('upper', kind, round, () => adapter.probe({ upper: true, canaryAbsPath, ...probeOpts }));
     } catch (error) {
       notices.push(`상위 모델 런타임 ${kind} probe 오류: ${error.code ?? 'ERROR'}`);
       continue;

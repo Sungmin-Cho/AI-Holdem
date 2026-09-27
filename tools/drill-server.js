@@ -15,6 +15,18 @@ const STATIC = new Map([
   ['/drill.js', ['server/drill-public/drill.js', 'text/javascript; charset=utf-8']],
   ['/drill.css', ['server/drill-public/drill.css', 'text/css; charset=utf-8']],
   ['/design-tokens.css', ['server/public/design-tokens.css', 'text/css; charset=utf-8']],
+  ['/ui-base.css', ['server/public/ui-base.css', 'text/css; charset=utf-8']],
+  ['/theme-boot.js', ['server/public/theme-boot.js', 'text/javascript; charset=utf-8']],
+  // Shared page modules keep their on-disk relative imports: drill.js and
+  // study-format.js import '../public/x.js', which the browser resolves to /public/x.js.
+  ['/public/card-render.js', ['server/public/card-render.js', 'text/javascript; charset=utf-8']],
+  ['/public/help-panel.js', ['server/public/help-panel.js', 'text/javascript; charset=utf-8']],
+  ['/public/display-settings.js', ['server/public/display-settings.js', 'text/javascript; charset=utf-8']],
+  ['/public/chip-format.js', ['server/public/chip-format.js', 'text/javascript; charset=utf-8']],
+  ['/font-pretendard-400.woff2', ['server/public/font-pretendard-400.woff2', 'font/woff2']],
+  ['/font-pretendard-600.woff2', ['server/public/font-pretendard-600.woff2', 'font/woff2']],
+  ['/font-pretendard-700.woff2', ['server/public/font-pretendard-700.woff2', 'font/woff2']],
+  ['/font-space-grotesk.woff2', ['server/public/font-space-grotesk.woff2', 'font/woff2']],
   ['/study-format.js', ['server/drill-public/study-format.js', 'text/javascript; charset=utf-8']],
   ['/shared/preflop-key.js', ['shared/preflop-key.js', 'text/javascript; charset=utf-8']],
   ['/shared/reference.js', ['shared/reference.js', 'text/javascript; charset=utf-8']],
