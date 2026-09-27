@@ -131,7 +131,8 @@ export function formatReplay(replay, { coachNote, trainingItems, names } = {}) {
       position: replay.positions?.[action.playerId] ?? '',
       verb,
       verbLabel: ACTION_LABEL[verb] ?? verb,
-      amount: action.amount ?? null,
+      // The engine records 0 for checks and folds; only chips that moved are an amount.
+      amount: (action.action === 'call' || action.action === 'raise') && Number.isFinite(action.amount) && action.amount > 0 ? action.amount : null,
       pot: action.potTotal ?? null,
       cards,
       reasonKind: action.reasonKind ?? null,
