@@ -45,3 +45,16 @@ test('the token file defines no legacy aliases and every var() a page uses is de
   }
   assert.deepEqual([...new Set(missing)], []);
 });
+
+test('page stylesheets declare no text smaller than 12px', () => {
+  const offenders = [];
+  for (const file of PAGE_CSS) {
+    const css = withoutComments(fs.readFileSync(file, 'utf8'));
+    for (const [decl] of css.matchAll(/font-size:\s*([0-9.]+)(px|rem|em)/g)) {
+      const [, value, unit] = /font-size:\s*([0-9.]+)(px|rem|em)/.exec(decl);
+      const px = unit === 'px' ? Number(value) : Number(value) * 16;
+      if (px < 12) offenders.push(`${file}: ${decl}`);
+    }
+  }
+  assert.deepEqual(offenders, [], 'A5: 12px minimum (rem/em counted at 16px)');
+});

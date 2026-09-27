@@ -15,7 +15,15 @@ export const ONBOARDING_STEPS = Object.freeze([
 
 function storageOf(storage) { try { return storage ?? globalThis.localStorage ?? null; } catch { return null; } }
 
-export function createOnboarding({ doc = globalThis.document, storage, container, targets }) {
+// Online participants have no coach, learning, memo or pause menu; the leave and
+// help controls are in the join page's header.
+export const PARTICIPANT_ONBOARDING_STEPS = Object.freeze([
+  ONBOARDING_STEPS[0],
+  { target: 'actions', title: '액션 바와 금액', text: '폴드·체크/콜·벳/레이즈를 고릅니다. 레이즈 금액은 그 스트리트의 총액입니다. 온라인 게임은 차례마다 제한 시간이 있습니다.' },
+  { target: 'side', title: '로그와 참가자', text: '탭에서 진행 기록과 참가자를 봅니다. 도움말과 나가기는 페이지 위쪽 헤더에 있습니다.' },
+]);
+
+export function createOnboarding({ doc = globalThis.document, storage, container, targets, steps = ONBOARDING_STEPS }) {
   let step = -1;
   let seenThisPage = false;
   // A deadline turn was skipped; show in the next wait (seated, not our turn).
@@ -70,7 +78,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     return node;
   };
   const render = () => {
-    const current = ONBOARDING_STEPS[step];
+    const current = steps[step];
     // Stepping with the keyboard keeps focus in the guide; otherwise focus is never touched.
     const hadFocus = Boolean(card?.contains(doc.activeElement));
     card?.remove();
@@ -79,7 +87,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     card.setAttribute('aria-label', '처음 안내');
     const count = doc.createElement('p');
     count.className = 'onboarding-count';
-    count.textContent = `처음 안내 ${step + 1} / ${ONBOARDING_STEPS.length}`;
+    count.textContent = `처음 안내 ${step + 1} / ${steps.length}`;
     const title = doc.createElement('h2');
     title.className = 'onboarding-title';
     title.textContent = current.title;
@@ -88,7 +96,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     text.textContent = current.text;
     const actions = doc.createElement('div');
     actions.className = 'onboarding-actions';
-    const last = step === ONBOARDING_STEPS.length - 1;
+    const last = step === steps.length - 1;
     actions.append(
       button(last ? '마치기' : '다음', 'ui-btn--primary onboarding-next', () => api.next()),
       button('건너뛰기', 'ui-btn--quiet onboarding-skip', () => api.skip()),
@@ -129,7 +137,7 @@ export function createOnboarding({ doc = globalThis.document, storage, container
     },
     next() {
       if (step < 0) return;
-      if (step >= ONBOARDING_STEPS.length - 1) { remember(); end(); return; }
+      if (step >= steps.length - 1) { remember(); end(); return; }
       step += 1;
       render();
     },

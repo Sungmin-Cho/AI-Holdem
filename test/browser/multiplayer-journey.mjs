@@ -361,6 +361,9 @@ export async function runMultiplayerJourney(outDir) {
       "final stacks",
     );
     const stackText = await evaluate(guestA)("document.querySelector('#final-stacks')?.innerText ?? ''");
+    // The participant's final panel keeps every text at 12px or larger (A5).
+    const finalSmall = await evaluate(guestA)("[...document.querySelectorAll('#final *')].filter(n=>n.getClientRects().length&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.tagName)");
+    assert.deepEqual(finalSmall, [], 'participant final text under 12px');
     assert.match(String(stackText), /민준|서연|호스트/);
     check("end-final-stacks");
     const retained=await evaluate(guestA)("clearInterval(window.__endWatch);({same:document.querySelector('#table').contentDocument===window.__endingDocument,samples:window.__stoppingFrames,visible:!document.querySelector('#playing').hidden})");

@@ -84,7 +84,7 @@ button, input { font: inherit; color: inherit; }
 
 .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; flex: 1; min-width: 0; }
 .meta-seg { display: flex; flex-direction: column; gap: 1px; }
-.meta-label { font-size: 11px; line-height: 1.2; color: var(--muted); }
+.meta-label { font-size: 12px; line-height: 1.2; color: var(--muted); }
 .meta-value { font-size: 15px; font-weight: 700; line-height: 1.25; color: var(--ink); }
 
 .conn {
@@ -404,7 +404,7 @@ main {
   padding: 2px 7px;
   border-radius: 5px;
   background: var(--c-surface-2);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.05em;
   color: var(--c-plate-text-2);
@@ -423,8 +423,8 @@ main {
 .table.is-crowded .plate-name,
 .table.is-crowded .seat.is-hero .plate-name { font-size: 12px; }
 .table.is-crowded .plate-stack,
-.table.is-crowded .seat.is-hero .plate-stack { font-size: 11.5px; }
-.table.is-crowded .plate-tag { font-size: 9.5px; padding: 1px 5px; }
+.table.is-crowded .seat.is-hero .plate-stack { font-size: 12px; }
+.table.is-crowded .plate-tag { font-size: 12px; padding: 1px 5px; }
 .table.is-crowded .card--back.card--sm { --ch: calc(var(--tw) * 0.0354); --cw: calc(var(--tw) * 0.0253); }
 .table.is-crowded .card--sm { --ch: calc(var(--tw) * 0.0470); --cw: calc(var(--tw) * 0.0334); }
 
@@ -603,7 +603,7 @@ main {
 .amount-field.is-invalid { border-color: var(--c-danger-border); }
 .amount-field.is-disabled { opacity: 0.4; }
 
-.amount-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.amount-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
 .amount-input {
   width: 76px;
@@ -626,7 +626,7 @@ main {
 
 .raise-range {
   margin: -2px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   text-align: right;
 }
@@ -701,7 +701,7 @@ main {
 .log-act {
   padding: 2px 8px;
   border-radius: 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -723,7 +723,7 @@ main {
 .log-divider { display: flex; align-items: center; gap: 10px; padding: 10px 0 6px; }
 .log-divider-rule { flex: 1; height: 1px; background: var(--line); }
 .log-divider-text {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--muted);
@@ -764,7 +764,7 @@ main {
 }
 .coach-hand {
   margin-bottom: 5px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--c-info-text);
@@ -797,7 +797,7 @@ main {
 .training-summary::-webkit-details-marker { display: none; }
 .training-title {
   margin-bottom: 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--c-info-text);
@@ -1026,7 +1026,7 @@ main {
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   color: var(--c-info-text);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -1072,7 +1072,7 @@ main {
   border-radius: 10px;
   background: var(--c-plate);
   color: var(--c-plate-text);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.3;
 }
 .replayer-seat-name { max-width: 100%; overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
@@ -1084,7 +1084,7 @@ main {
   border-radius: 999px;
   background: var(--c-surface-3);
   color: var(--c-plate-text-2);
-  font-size: 9.5px;
+  font-size: 12px;
   line-height: 15px;
 }
 .replayer-seat-pos:empty { display: none; }
@@ -1092,7 +1092,7 @@ main {
 .replayer-seat-tag, .replayer-seat-bet {
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 14px;
   white-space: nowrap;
@@ -1158,7 +1158,7 @@ main {
   padding: 1px 6px;
   border: 1px solid var(--c-line-strong);
   border-radius: 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--c-text-2);
 }
 p.replayer-policy-tag { margin: 4px 0; }
@@ -1199,9 +1199,9 @@ p.replayer-policy-tag { margin: 4px 0; }
 .replayer.is-crowded .replayer-felt { height: clamp(250px, 38vh, 320px); }
 .replayer.is-crowded .replayer-seat { --seat-w: 84px; gap: 1px; }
 .replayer.is-crowded .replayer-seat .card--sm, .replayer.is-crowded .replayer-seat .card--back.card--sm { --cw: 20px; --ch: 28px; }
-.replayer.is-crowded .replayer-plate { padding: 2px 6px; font-size: 10.5px; }
+.replayer.is-crowded .replayer-plate { padding: 2px 6px; font-size: 12px; }
 .replayer.is-crowded .replayer-seat-marks { height: 16px; }
-.replayer.is-crowded .replayer-seat-tag, .replayer.is-crowded .replayer-seat-bet { padding: 1px 5px; font-size: 10px; line-height: 12px; }
+.replayer.is-crowded .replayer-seat-tag, .replayer.is-crowded .replayer-seat-bet { padding: 1px 5px; font-size: 12px; line-height: 14px; }
 .replayer.is-crowded .replayer-seat-bet { line-height: 10px; }
 @container replayer (max-width: 879px) {
   .replayer.is-crowded .replayer-seat { --seat-w: 76px; top: var(--seat-my); left: var(--seat-mx); }
@@ -1212,9 +1212,9 @@ p.replayer-policy-tag { margin: 4px 0; }
   .replayer-felt { height: 250px; border-width: 4px; }
   .replayer .card--sm, .replayer .card--back.card--sm, .replayer .card--slot { --cw: 18px; --ch: 25px; }
   .replayer-board .card--sm, .replayer-board .card--slot { --cw: 24px; --ch: 34px; }
-  .replayer-plate { padding: 2px 5px; font-size: 10.5px; }
+  .replayer-plate { padding: 2px 5px; font-size: 12px; }
   .replayer-center { top: 45%; }
-  .replayer-pot { font-size: 11px; }
+  .replayer-pot { font-size: 12px; }
   .replayer.is-crowded .replayer-felt { height: 430px; }
 }
 @media (max-width: 760px) {
@@ -1279,7 +1279,7 @@ p.replayer-policy-tag { margin: 4px 0; }
 .panel .learning-scope:empty { display: none; }
 .study-entry p { margin: 8px 0 0; font-size: 12px; line-height: 1.65; color: var(--c-text-2); }
 .study-link { color: var(--c-info-text); font-weight: 600; text-decoration: underline; text-underline-offset: 4px; display: inline-block; padding: 5px 0; }
-.study-entry .btn { font-size: 11px; min-height: 28px; padding: 4px 8px; }
+.study-entry .btn { font-size: 12px; min-height: 28px; padding: 4px 8px; }
 .unread { border-radius: 10px; background: var(--c-info); color: var(--c-on-info); padding: 2px 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .presets { flex-wrap: wrap; }
 .training-card summary { cursor: pointer; }
@@ -1289,7 +1289,7 @@ p.replayer-policy-tag { margin: 4px 0; }
   .topbar .meta { order: 3; width: 100%; gap: 12px; flex-wrap: wrap; }
   .meta-seg { display: flex !important; }
   .meta-seg[hidden] { display: none !important; }
-  .meta-label { font-size: 9px; }
+  .meta-label { font-size: 12px; }
   .meta-value { font-size: 12px; }
   .action-bar { gap: 8px; padding: 12px; }
   .raise-top { gap: 8px; flex-wrap: wrap; }
@@ -1300,7 +1300,7 @@ p.replayer-policy-tag { margin: 4px 0; }
   .action-feedback { flex-wrap: wrap; gap: 4px; text-align: center; }
   .study-entry { padding: 10px 14px; }
 }
-@media (max-width: 900px) { .raise-range { display: block; font-size: 10px; } }
+@media (max-width: 900px) { .raise-range { display: block; font-size: 12px; } }
 
 .pre-action-hint { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--c-info); border-radius: 10px; background: var(--c-info-soft); color: var(--c-text); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 .pre-action-hint strong { display: block; margin-bottom: 5px; }

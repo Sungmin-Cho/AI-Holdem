@@ -178,7 +178,7 @@
 .ui-pill { display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2); border-radius: var(--r-pill); background: var(--c-surface-2); color: var(--c-text-2); font-size: var(--fs-12); font-weight: 700; }
 .ui-pill--info { background: var(--c-info-soft); color: var(--c-info-text); }
 .ui-pill--warn { background: var(--c-danger-soft); color: var(--c-danger); }
-.ui-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--c-info); color: var(--c-on-info); font-size: 11px; font-weight: 800; }
+.ui-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--c-info); color: var(--c-on-info); font-size: 12px; font-weight: 800; }
 .ui-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
 
 /* ---- Banners and toasts ----------------------------------------------- */

@@ -5,7 +5,7 @@ import { readDisplaySettings, saveDisplaySetting, applyDisplaySettings, replayOn
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createDialogController } from '../server/public/dialog-controller.js';
-import { createOnboarding, ONBOARDING_STEPS } from '../server/public/onboarding.js';
+import { createOnboarding, ONBOARDING_STEPS, PARTICIPANT_ONBOARDING_STEPS } from '../server/public/onboarding.js';
 
 function memoryStorage(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -311,4 +311,17 @@ test('the study room (another origin, no table) does not offer the guide replay'
   assert.ok(table.querySelector('.display-onboarding'), 'pages with the table offer it');
   const study = openDisplaySettings({ doc: dialogDocument(true), storage: memoryStorage() });
   assert.equal(study.querySelector('.display-onboarding'), null);
+});
+
+test('participants get a guide that names only what their table has', () => {
+  const text = PARTICIPANT_ONBOARDING_STEPS.map((step) => `${step.title} ${step.text}`).join(' ');
+  assert.doesNotMatch(text, /코치|학습|메모|일시정지/);
+  assert.deepEqual(PARTICIPANT_ONBOARDING_STEPS.map((step) => step.target), ONBOARDING_STEPS.map((step) => step.target));
+  const side = createMiniDocument().createElement('aside');
+  const doc = side.ownerDocument;
+  const onboarding = createOnboarding({ doc, storage: memoryStorage(), container: () => side, steps: PARTICIPANT_ONBOARDING_STEPS, targets: { seat: () => null, actions: () => null, side: () => null } });
+  onboarding.offer({ myTurn: true, deadline: false, seated: true });
+  side.querySelector('.onboarding-next').click();
+  side.querySelector('.onboarding-next').click();
+  assert.equal(side.querySelector('.onboarding-title').textContent, '로그와 참가자');
 });

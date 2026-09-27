@@ -8,7 +8,7 @@ import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
 import { helpButton } from './help-panel.js';
-import { createOnboarding } from './onboarding.js';
+import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
 import { DISPLAY_KEYS, saveDisplaySetting } from './display-settings.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
@@ -111,6 +111,7 @@ function playAwardSoon(playerIds) {
 }
 // First-turn guide: a card at the top of the side panel, outlines only.
 const onboarding = createOnboarding({
+  steps: participantMode ? PARTICIPANT_ONBOARDING_STEPS : undefined,
   container: () => document.querySelector('aside.side'),
   targets: {
     seat: () => document.querySelector('.seat.is-hero .plate'),
