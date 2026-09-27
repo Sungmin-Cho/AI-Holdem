@@ -3399,7 +3399,7 @@ test('idle playing resume starts the next hand without an unnecessary view-only 
   assert.equal(snapshot.view.handNo, 1);
 });
 
-test('playing resume seeds the checked hand so its archive is checked exactly once', { timeout: 10_000 }, async (t) => {
+test('playing resume seeds the checked hand so its archive is checked exactly once', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const original = createGameLoop({
     gameDir,
@@ -5848,6 +5848,9 @@ test('a paused recovery keeps the hand of a begin-owner coach and runs it on res
   const note = await waitForCoachNote(gameDir, 1, 15_000 * WIN32_SCALE);
   assert.equal(note.unavailable, undefined);
   assert.match(note.text, /기본 코치 응답/);
+  // The resumed loop deals on after the note; stop at the next user turn, not
+  // inside that new-hand step (a stop there ends run() with STOPPING by design).
+  await waitForUserSnapshot(gameDir, 15_000 * WIN32_SCALE);
   await stopRun(resumed, running);
 });
 
