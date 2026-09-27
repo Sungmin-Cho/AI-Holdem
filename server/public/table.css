@@ -257,12 +257,13 @@ main {
   left: calc(var(--ch) * 0.098);
   font-family: var(--f-num);
   font-weight: 800;
-  font-size: calc(var(--ch) * 0.28);
+  /* A5: rank text is 12px even on the smallest cards. */
+  font-size: max(12px, calc(var(--ch) * 0.28));
   line-height: 1;
   letter-spacing: -0.03em;
 }
 .card-rank.is-ten {
-  font-size: calc(var(--ch) * 0.22);
+  font-size: max(12px, calc(var(--ch) * 0.22));
   left: calc(var(--ch) * 0.073);
   top: calc(var(--ch) * 0.098);
   letter-spacing: -0.06em;
@@ -270,7 +271,8 @@ main {
 
 .card-suit {
   position: absolute;
-  top: calc(var(--ch) * 0.40);
+  /* Below the rank, which may be larger than its share on a small card. */
+  top: max(calc(var(--ch) * 0.40), calc(var(--ch) * 0.073 + 13px));
   left: calc(var(--ch) * 0.098);
   width: calc(var(--ch) * 0.17);
   height: calc(var(--ch) * 0.17);
@@ -1097,11 +1099,13 @@ main {
   line-height: 14px;
   white-space: nowrap;
 }
-.replayer-seat-tag { min-width: 0; overflow: hidden; background: var(--c-info-soft); color: var(--c-info-text); text-overflow: ellipsis; }
+/* The tag sits on the felt: the plate tokens are the ones made for the felt in every theme. */
+.replayer-seat-tag { min-width: 0; overflow: hidden; border: 1px solid var(--c-plate-line); background: var(--c-plate); color: var(--c-plate-text); text-overflow: ellipsis; }
 .replayer-seat-bet { flex: none; border: 1px solid var(--c-chip); line-height: 12px; background: var(--c-pot-bg); color: var(--c-pot-text); }
 .replayer-seat.is-actor .replayer-plate { border-color: var(--c-action); box-shadow: 0 0 0 2px var(--c-action); }
 .replayer-seat.is-actor .replayer-seat-tag { background: var(--c-action); color: var(--c-action-ink); }
-.replayer-seat.is-folded { opacity: 0.45; }
+.replayer-seat.is-folded .replayer-seat-cards { opacity: 0.45; }
+.replayer-seat.is-folded .replayer-plate { border-style: dashed; color: var(--c-plate-text-2); }
 .replayer-seat.is-winner .replayer-plate { border-color: var(--c-pos); box-shadow: 0 0 0 2px var(--c-pos); }
 .replayer-seat.is-winner .replayer-seat-tag { background: var(--c-pos); color: var(--c-on-info); }
 .replayer-center {

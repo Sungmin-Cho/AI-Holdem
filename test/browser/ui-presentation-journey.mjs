@@ -48,7 +48,7 @@ const STATE_SCRIPT=`(()=>{
   const plateOverlaps=[];plates.forEach((a,i)=>plates.slice(i+1).forEach(b=>{if(hit(R(a),R(b)))plateOverlaps.push([owner(a),owner(b)]);}));
   const tableHits=[];plates.forEach(p=>center.forEach(c=>{if(hit(R(p),R(c)))tableHits.push([owner(p),c.id||c.className]);}));
   const markerHits=[];markers.forEach(m=>{const who=m.dataset.playerId;[...center,...plates.filter(p=>owner(p)!==who)].forEach(t=>{if(hit(R(m),R(t)))markerHits.push([who,t.id||t.className||owner(t)]);});});
-  const small=[...document.querySelectorAll('.table *, #action-bar *, #result-dock *')].filter(n=>!n.closest('.card')&&vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
+  const small=[...document.querySelectorAll('.table *, #action-bar *, #result-dock *')].filter(n=>vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
   const strip=document.querySelector('#hand-result'),table=R(document.querySelector('.table'));let result=null;
   if(vis(strip)){const r=R(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=table.bottom-1),hits:[...center,...plates].filter(n=>hit(r,R(n))).map(n=>n.id||n.className)};}
   return {scroll:document.documentElement.scrollWidth,plateOverlaps,tableHits,markerHits,small,result};
@@ -81,10 +81,11 @@ export const CONTRAST_SCRIPT=`((selectors)=>{
     // WCAG exempts disabled controls (they wear opacity on purpose).
     if(el.disabled||el.closest('[disabled],[aria-disabled="true"]'))continue;
     const cs=getComputedStyle(el);if(cs.visibility==='hidden')continue;
-    const layers=[];let opacity=1,backdrop=page;
+    const layers=[];let opacity=1,backdrop=page,stopped=false;
     for(let n=el;n;n=n.parentElement){const s=getComputedStyle(n);opacity*=Number(s.opacity);
-      if(n.classList.contains('table')){backdrop=felt;break;}
-      const bg=parse(s.backgroundColor);layers.push(bg);if(bg[3]>=1)break;}
+      if(stopped)continue;
+      if(n.classList.contains('table')||n.classList.contains('replayer-felt')){backdrop=felt;stopped=true;continue;}
+      const bg=parse(s.backgroundColor);layers.push(bg);if(bg[3]>=1)stopped=true;}
     let base=backdrop;for(const layer of layers.reverse())base=over(layer,base);
     let text=over(parse(cs.color),base);
     if(opacity<1){text=mix(text,backdrop,opacity);base=mix(base,backdrop,opacity);}
@@ -517,6 +518,11 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       await browser(['wait','#replay-body .replayer.is-crowded']);
       const crowd=await evaluate(layoutAtEveryStep);
       assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===(w<600?24:32)&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
+      if(w===1280){
+        assert.ok(await evaluate("document.querySelectorAll('.replayer-seat.is-folded').length>0"),'the last step has folded seats');
+        const replayContrast=await contrastPass('replay',['.replayer-seat-name','.replayer-seat-stack','.replayer-seat-pos','.replayer-seat-tag','.replayer-seat-bet','.replayer-pot','.replayer-now-title'],20);
+        assert.deepEqual(replayContrast,[],JSON.stringify(replayContrast));
+      }
       await browser(['screenshot',path.join(outDir,`replayer-9-${w}x${h}.png`)]);
       await browser(['press','Escape']);
     }
@@ -538,6 +544,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // The rules' ranking cards keep their own size inside the table document too.
     const rankingCards=await evaluate("[...document.querySelectorAll('#help-panel .help-ranking-cards .card')].map(n=>{const r=n.getBoundingClientRect();return [Math.round(r.width),Math.round(r.height)]})");
     assert.ok(rankingCards.length===50&&rankingCards.every(([w,h])=>w>=20&&h>=28),JSON.stringify(rankingCards.slice(0,5)));
+    const rankSizes=await evaluate("[...document.querySelectorAll('#help-panel .help-ranking-cards .card-rank')].map(n=>parseFloat(getComputedStyle(n).fontSize))");
+    assert.ok(rankSizes.length===50&&rankSizes.every(size=>size>=12),JSON.stringify(rankSizes.slice(0,5)));
     await evaluate("document.querySelector('.help-display-open').click()");
     await browser(['wait','#display-settings[open]']);
     await evaluate("document.querySelector('#display-settings input[name=display-theme][value=c]').click()");

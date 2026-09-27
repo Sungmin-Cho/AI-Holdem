@@ -1707,6 +1707,8 @@ function paintUnread() {
 }
 
 function selectTab(which) {
+  // A tab hidden for this viewer (coach, learning for participants) cannot be selected.
+  if ($(`tab-${which}`)?.hidden) return;
   selectedTab = which;
   if (which in unread) unread[which] = 0;
   paintUnread();
@@ -1726,7 +1728,7 @@ $('tab-training')?.addEventListener('click', () => selectTab('training'));
 $('tab-participants').addEventListener('click',()=>selectTab('participants'));
 selectTab('log');
 document.querySelector('.tabs').addEventListener('keydown',ev=>{
-  const tabs=['log','coach','training','participants'];let index=tabs.indexOf(selectedTab);
+  const tabs=['log','coach','training','participants'].filter(name=>$(`tab-${name}`)&&!$(`tab-${name}`).hidden);let index=tabs.indexOf(selectedTab);
   if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
   else if(ev.key==='ArrowLeft')index=(index+tabs.length-1)%tabs.length;
   else if(ev.key==='Home')index=0;else if(ev.key==='End')index=tabs.length-1;else return;

@@ -58,3 +58,12 @@ test('page stylesheets declare no text smaller than 12px', () => {
   }
   assert.deepEqual(offenders, [], 'A5: 12px minimum (rem/em counted at 16px)');
 });
+
+test('a computed font size keeps the 12px floor', () => {
+  const offenders = [];
+  for (const file of PAGE_CSS) {
+    const css = withoutComments(fs.readFileSync(file, 'utf8'));
+    for (const [decl] of css.matchAll(/font-size:\s*calc\([^;}]*/g)) offenders.push(`${file}: ${decl}`);
+  }
+  assert.deepEqual(offenders, [], 'wrap computed sizes as max(12px, calc(...))');
+});

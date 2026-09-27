@@ -215,6 +215,16 @@ export async function runMultiplayerJourney(outDir) {
     })()`);
     await wait(async () => (await singleHeader(guestA)) === true, "guest A single header");
     check("guest-single-header");
+    // Keyboard tab order on a participant table skips the host-only tabs.
+    const tabWalk = await evaluate(guestA)(`(() => {
+      const doc = document.querySelector('#table').contentDocument;
+      doc.querySelector('#tab-log').focus();
+      doc.querySelector('.tabs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      const result = { focus: doc.activeElement?.id, coach: doc.querySelector('#panel-coach')?.hidden !== false, training: doc.querySelector('#panel-training')?.hidden !== false };
+      doc.querySelector('#tab-log').click();
+      return result;
+    })()`);
+    assert.deepEqual(tabWalk, { focus: "tab-participants", coach: true, training: true });
     await guestA(["screenshot", path.join(outDir, "guest-a-table.png")]);
     await guestB(["set", "viewport", "390", "844"]);
     await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");

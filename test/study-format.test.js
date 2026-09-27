@@ -454,6 +454,13 @@ test('progress, mode help and the short source tag', () => {
   const summary = formatSummary({ source, bank: { dueCount: 2, totalCount: 5 } });
   assert.match(modeAvailability('daily', summary), /2개 오늘 복습/);
   assert.match(modeAvailability('retest', summary), /완료한 새 문제 평가가 없어/);
+  // The start button retests the latest completed run, so the note follows that run.
+  const later = new Date(Date.now() + 3600e3).toISOString();
+  const runs = formatSummary({ source, assessments: [
+    { id: 'old', complete: true, sourceIdentity: source, result: { total: 10, allowedActionRate: 0.5 }, retest: { eligible: true } },
+    { id: 'new', complete: true, sourceIdentity: source, result: { total: 10, allowedActionRate: 0.6 }, retest: { eligible: false, nextAvailableAt: later } },
+  ] });
+  assert.match(modeAvailability('retest', runs), /가장 최근 평가의 재평가 가능 시각/, 'an older eligible run does not make the start button work');
   assert.equal(modeAvailability('free', summary), '');
   assert.match(formatSourceShort(source), /휴리스틱/);
   assert.doesNotMatch(formatSourceShort({ id: '/Users/private', version: 'token=secret' }), /private|secret/);
