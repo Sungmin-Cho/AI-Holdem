@@ -74,7 +74,14 @@ const ASSET_TYPES = {
   ".js": "text/javascript",
   ".css": "text/css",
   ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
 };
+// Font files are fixed, pinned binaries (see test/ui-assets.test.js); letting the
+// browser keep them avoids re-downloading ~830 KB on every table/lobby load.
+// Everything else stays no-store so a restarted service never serves stale code.
+const cacheControlFor = (name) =>
+  path.extname(name) === ".woff2" ? "public, max-age=86400" : "no-store";
 function serveAsset(res, rel) {
   const shared = rel.startsWith("shared/");
   const name = shared ? rel.slice(7) : rel;
@@ -95,7 +102,7 @@ function serveAsset(res, rel) {
   }
   res.writeHead(200, {
     "content-type": ASSET_TYPES[path.extname(name)] ?? "application/octet-stream",
-    "cache-control": "no-store",
+    "cache-control": cacheControlFor(name),
   });
   res.end(content);
 }

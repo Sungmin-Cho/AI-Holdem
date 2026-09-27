@@ -1,5 +1,19 @@
+/*
+  AI Holdem design tokens. This file must stay ASCII-only
+  (test/ui-public-contract.test.js).
+
+  Pages reference the semantic --c-* / --f-* / --sp-* / --r-* tokens only.
+  Theme B (midnight studio) is the default on :root. Themes A (classic room)
+  and C (paper and ink) override the same names under [data-theme]; the
+  choice is a per-browser display preference applied by theme-boot.js.
+
+  The legacy --ui-* aliases keep their previous values so pages that have not
+  migrated yet look unchanged. They are removed in the final cleanup slice.
+*/
 :root {
   color-scheme: dark;
+
+  /* Legacy aliases (unchanged values). */
   --ui-bg: #0A0D0B;
   --ui-panel: #0E120F;
   --ui-raised: #1D241F;
@@ -12,4 +26,230 @@
   --ui-font: 'IBM Plex Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
   --ui-number: 'Archivo', 'IBM Plex Sans KR', system-ui, sans-serif;
   --ui-radius: 16px;
+
+  /* Theme B: midnight studio (default). */
+  --c-bg: #0A0F1C;
+  --c-surface-1: #10182A;
+  --c-surface-2: #18223A;
+  --c-surface-3: #212C48;
+  --c-stage: radial-gradient(60% 55% at 50% 38%, rgba(40,86,150,0.30) 0%, rgba(10,15,28,0) 100%), #0A0F1C;
+  --c-line: rgba(170,190,255,0.12);
+  --c-line-strong: rgba(170,190,255,0.24);
+  --c-control-border: #7382A8;
+  --c-text: #E9EEF9;
+  --c-text-2: #A0ABC6;
+  --c-text-3: #95A1BE;
+  --c-info: #5CD3F5;
+  --c-info-text: #7FDDF8;
+  --c-info-soft: rgba(92,211,245,0.14);
+  --c-on-info: #04202B;
+  --c-action: #F5A524;
+  --c-action-hover: #FFB43D;
+  --c-action-pressed: #E09417;
+  --c-action-ink: #231400;
+  --c-danger: #F4A39B;
+  --c-danger-border: #C27A73;
+  --c-danger-soft: rgba(244,163,155,0.12);
+  --c-pos: #7FD6A4;
+  --c-neg: #F4A39B;
+  --c-focus: #5CD3F5;
+  --c-focus-on-felt: #5CD3F5;
+  --c-scrim: rgba(4,8,18,0.72);
+  --c-felt: radial-gradient(70% 85% at 50% 40%, #1E4C74 0%, #15385C 55%, #0C2444 100%);
+  --c-felt-mid: #15385C;
+  --c-rail: linear-gradient(180deg, #252E44 0%, #161C2D 60%, #0C101B 100%);
+  --c-rail-shadow: 0 34px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(170,190,255,0.22), inset 0 -6px 14px rgba(0,0,0,0.5);
+  --c-inlay: rgba(92,211,245,0.38);
+  --c-slot-line: rgba(170,190,255,0.16);
+  --c-plate: rgba(12,18,33,0.92);
+  --c-plate-line: rgba(170,190,255,0.16);
+  --c-plate-text: #E9EEF9;
+  --c-plate-text-2: #A0ABC6;
+  --c-pot-bg: rgba(4,10,24,0.55);
+  --c-pot-text: #E9EEF9;
+  --c-card-face: #F7F9FC;
+  --c-card-back: repeating-linear-gradient(45deg, rgba(92,211,245,0.30) 0 1.5px, transparent 1.5px 6px), linear-gradient(160deg, #24406B, #142645);
+  --c-card-back-border: #DDE6F6;
+  --c-suit-s: #1B2233;
+  --c-suit-h: #C62D28;
+  --c-suit-d: #2A5FD1;
+  --c-suit-c: #137A45;
+  --c-chip: #5CD3F5;
+  --c-chip-ring: #DDF7FF;
+  --c-badge-d-bg: #E9EEF9;
+  --c-badge-d-ink: #10182A;
+  --c-badge-sb-bg: #5CD3F5;
+  --c-badge-sb-ink: #04202B;
+  --c-badge-bb-bg: #F5A524;
+  --c-badge-bb-ink: #231400;
+  --sh-1: 0 2px 6px rgba(0,0,0,0.28);
+  --sh-2: 0 10px 24px rgba(0,0,0,0.32);
+  --sh-3: 0 24px 60px rgba(0,0,0,0.40);
+
+  /* Typography: self-hosted, identical across themes. */
+  --f-ui: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif;
+  --f-num: 'Space Grotesk', 'Pretendard', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-22: 22px;
+  --fs-28: 28px;
+  --fs-36: 36px;
+
+  /* Spacing, radius, layering, motion. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --r-control: 8px;
+  --r-card: 12px;
+  --r-panel: 16px;
+  --r-sheet: 22px;
+  --r-pill: 999px;
+  --z-seats: 10;
+  --z-floating: 30;
+  --z-sheet: 50;
+  --z-toast: 60;
+  --z-dialog: 70;
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 300ms;
+  --ease-standard: cubic-bezier(.2,.8,.2,1);
+  --tap: 44px;
+}
+
+/* Theme A: classic poker room. */
+:root[data-theme="a"] {
+  color-scheme: dark;
+  --c-bg: #0A100D;
+  --c-surface-1: #111A15;
+  --c-surface-2: #1A2620;
+  --c-surface-3: #22302A;
+  --c-stage: radial-gradient(60% 55% at 50% 38%, rgba(40,92,66,0.34) 0%, rgba(10,16,13,0) 100%), #0A100D;
+  --c-line: rgba(239,233,218,0.10);
+  --c-line-strong: rgba(239,233,218,0.20);
+  --c-control-border: #7E8C81;
+  --c-text: #EFE9DA;
+  --c-text-2: #A9B0A2;
+  --c-text-3: #9EA697;
+  --c-info: #9CC0D6;
+  --c-info-text: #B4D1E3;
+  --c-info-soft: rgba(156,192,214,0.14);
+  --c-on-info: #0E2230;
+  --c-action: #D4B26C;
+  --c-action-hover: #E0C07C;
+  --c-action-pressed: #BF9D57;
+  --c-action-ink: #1E1606;
+  --c-danger: #E8A197;
+  --c-danger-border: #B97A72;
+  --c-danger-soft: rgba(232,161,151,0.12);
+  --c-pos: #8CCBA4;
+  --c-neg: #E8A197;
+  --c-focus: #E4C987;
+  --c-focus-on-felt: #E4C987;
+  --c-scrim: rgba(3,6,4,0.72);
+  --c-felt: radial-gradient(70% 85% at 50% 40%, #1F6E4F 0%, #155238 55%, #0C3326 100%);
+  --c-felt-mid: #155238;
+  --c-rail: linear-gradient(180deg, #3F2E1B 0%, #24190E 55%, #140D07 100%);
+  --c-rail-shadow: 0 34px 80px rgba(0,0,0,0.55), inset 0 2px 3px rgba(255,255,255,0.12), inset 0 -6px 14px rgba(0,0,0,0.5);
+  --c-inlay: rgba(207,174,103,0.55);
+  --c-slot-line: rgba(255,255,255,0.10);
+  --c-plate: rgba(8,12,10,0.88);
+  --c-plate-line: rgba(239,233,218,0.10);
+  --c-plate-text: #EFE9DA;
+  --c-plate-text-2: #A9B0A2;
+  --c-pot-bg: rgba(0,0,0,0.36);
+  --c-pot-text: #F3E3B5;
+  --c-card-face: #FBF8F0;
+  --c-card-back: repeating-linear-gradient(135deg, rgba(207,174,103,0.35) 0 1.5px, transparent 1.5px 5px), linear-gradient(160deg, #21503C, #133526);
+  --c-card-back-border: #E9E2CE;
+  --c-suit-s: #1E1F22;
+  --c-suit-h: #B8322C;
+  --c-suit-d: #2659C4;
+  --c-suit-c: #137A45;
+  --c-chip: #CFAE67;
+  --c-chip-ring: #F6EBCB;
+  --c-badge-d-bg: #F4F0E3;
+  --c-badge-d-ink: #3A3428;
+  --c-badge-sb-bg: #CFAE67;
+  --c-badge-sb-ink: #1E1606;
+  --c-badge-bb-bg: #C3D8C8;
+  --c-badge-bb-ink: #14231A;
+}
+
+/* Theme C: paper and ink (light). */
+:root[data-theme="c"] {
+  color-scheme: light;
+  --c-bg: #F3EFE6;
+  --c-surface-1: #FBF9F4;
+  --c-surface-2: #ECE6D8;
+  --c-surface-3: #E2DACA;
+  --c-stage: radial-gradient(60% 55% at 50% 40%, #F9F6EF 0%, #F3EFE6 100%);
+  --c-line: rgba(28,27,25,0.12);
+  --c-line-strong: rgba(28,27,25,0.24);
+  --c-control-border: #7A7266;
+  --c-text: #1C1B19;
+  --c-text-2: #4F4A42;
+  --c-text-3: #5A554B;
+  --c-info: #1F5F8B;
+  --c-info-text: #1F5F8B;
+  --c-info-soft: rgba(31,95,139,0.10);
+  --c-on-info: #FFFFFF;
+  --c-action: #C4452C;
+  --c-action-hover: #B23D26;
+  --c-action-pressed: #9E3521;
+  --c-action-ink: #FFFFFF;
+  --c-danger: #A8321F;
+  --c-danger-border: #A8321F;
+  --c-danger-soft: rgba(168,50,31,0.08);
+  --c-pos: #256B42;
+  --c-neg: #A8321F;
+  --c-focus: #1F5F8B;
+  --c-focus-on-felt: #FBF9F4;
+  --c-scrim: rgba(28,27,25,0.45);
+  --c-felt: radial-gradient(70% 85% at 50% 40%, #4A7A61 0%, #38634E 55%, #2A4C3C 100%);
+  --c-felt-mid: #36604B;
+  --c-rail: linear-gradient(180deg, #F0E8D8 0%, #DDD1B9 60%, #CBBDA1 100%);
+  --c-rail-shadow: 0 24px 50px rgba(60,48,28,0.22), inset 0 1px 0 rgba(255,255,255,0.8), inset 0 -4px 10px rgba(80,64,40,0.18);
+  --c-inlay: rgba(28,27,25,0.30);
+  --c-slot-line: rgba(255,255,255,0.22);
+  --c-plate: rgba(251,249,244,0.97);
+  --c-plate-line: rgba(28,27,25,0.14);
+  --c-plate-text: #1C1B19;
+  --c-plate-text-2: #4F4A42;
+  --c-pot-bg: rgba(251,249,244,0.94);
+  --c-pot-text: #1C1B19;
+  --c-card-face: #FFFFFF;
+  --c-card-back: repeating-linear-gradient(135deg, rgba(243,239,230,0.32) 0 1.5px, transparent 1.5px 5px), linear-gradient(160deg, #38634E, #243F32);
+  --c-card-back-border: #FBF9F4;
+  --c-suit-s: #1C1B19;
+  --c-suit-h: #C4452C;
+  --c-suit-d: #2A5FD1;
+  --c-suit-c: #137A45;
+  --c-chip: #C4452C;
+  --c-chip-ring: #FBE3DC;
+  --c-badge-d-bg: #1C1B19;
+  --c-badge-d-ink: #FBF9F4;
+  --c-badge-sb-bg: #ECE6D8;
+  --c-badge-sb-ink: #1C1B19;
+  --c-badge-bb-bg: #C4452C;
+  --c-badge-bb-ink: #FFFFFF;
+  --sh-1: 0 2px 6px rgba(60,48,28,0.14);
+  --sh-2: 0 10px 24px rgba(60,48,28,0.16);
+  --sh-3: 0 24px 60px rgba(60,48,28,0.20);
+}
+
+/* Two-colour deck preference: diamonds follow hearts, clubs follow spades.
+   Same specificity as the theme blocks and declared after them, so it wins
+   whichever theme is active. */
+:root[data-deck="2"] {
+  --c-suit-d: var(--c-suit-h);
+  --c-suit-c: var(--c-suit-s);
 }

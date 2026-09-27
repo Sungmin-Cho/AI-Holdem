@@ -1,0 +1,169 @@
+/* Join page styles, split from the pre-redesign lobby.css unchanged so the
+   participant page keeps its look until its own redesign (slice S9). */
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #10211e;
+  color: #edf4ef;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #36554a;
+}
+header strong {
+  margin-right: auto;
+}
+button,
+select,
+input {
+  font: inherit;
+}
+button {
+  background: #d6c18b;
+  color: #17251e;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px 18px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid #7bdec0;
+  outline-offset: 3px;
+}
+main,
+#result {
+  max-width: 780px;
+  margin: 40px auto;
+  padding: 0 24px;
+}
+fieldset {
+  border: 1px solid #4c685c;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  padding: 20px;
+}
+label {
+  display: block;
+  margin: 12px 0;
+}
+small {
+  display: block;
+  margin: 5px 25px;
+  color: #abc2b4;
+}
+input:not([type="radio"]):not([type="checkbox"]),
+select {
+  padding: 8px;
+  border: 1px solid #587568;
+  border-radius: 5px;
+  margin-left: 12px;
+  background: #1a3128;
+  color: inherit;
+  max-width: 200px;
+}
+details {
+  margin: 24px 0;
+  padding: 20px;
+  background: #1a3029;
+  border-radius: 12px;
+}
+p {
+  color: #b4c8be;
+  line-height: 1.6;
+}
+dialog {
+  background: #19352b;
+  color: #edf4ef;
+  border: 1px solid #628874;
+  border-radius: 16px;
+  max-width: 470px;
+  padding: 28px;
+}
+dialog::backdrop {
+  background: #0009;
+}
+dialog button {
+  display: block;
+  width: 100%;
+  margin: 12px 0;
+}
+#game iframe {
+  width: 100%;
+  height: calc(100dvh - 80px);
+  border: 0;
+}
+#error {
+  color: #ffb5aa;
+  margin: 16px 24px;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 600px) {
+  header {
+    padding: 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  header button {
+    font-size: 13px;
+    padding: 9px;
+  }
+  main {
+    margin: 24px auto;
+  }
+  h1 {
+    font-size: 25px;
+  }
+  #status {
+    font-size: 13px;
+  }
+}
+
+/* Keep the original lobby theme with the embedded game filling its viewport. */
+body.has-game {height:100dvh;display:flex;flex-direction:column;}
+body.has-game > header {flex:none;}
+body.has-game #game {flex:1;min-height:240px;}
+body.has-game #game iframe {display:block;height:100%;min-height:240px;}
+.setup-summary {border-left:2px solid #d6c18b;padding:0 16px;margin:24px 0;}
+.setup-summary p {margin:6px 0;}
+#setup-assistance {font-size:13px;}
+@media(max-width:600px) {
+  header {gap:10px;padding:12px;flex-wrap:wrap;}
+  main,#result {margin:24px auto;padding:0 16px;}
+  input:not([type=radio]):not([type=checkbox]),select {max-width:100%;}
+}
+@media(prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;}}
+body.has-game > #error:empty {display:none;}
+@media(min-width:1024px) {
+  body.has-game > header {padding:6px 16px;gap:12px;}
+  body.has-game > header button {padding:6px 12px;min-height:32px;}
+}
+
+/* Join page: while a game is on, the participant table fills the viewport like the host lobby. */
+#table {width:100%;height:calc(100dvh - 80px);border:0;}
+body.has-game > main {flex:1;min-height:0;max-width:none;margin:0;padding:0;display:flex;flex-direction:column;}
+body.has-game > main > h1 {display:none;}
+body.has-game .join-intro,#ai-provider:empty {display:none;}
+body.has-game #ai-provider {flex:none;margin:4px 0;padding:0 16px;font-size:13px;}
+body.has-game #join-error:empty {display:none;}
+body.has-game #playing {flex:1;min-height:240px;display:flex;flex-direction:column;overflow:auto;-webkit-overflow-scrolling:touch;}
+body.has-game #pause-banner {flex:none;margin:0;padding:10px 16px;}
+body.has-game #table {display:block;flex:1;height:100%;min-height:240px;}
+
+body.has-game #result{max-width:none;margin:0;padding:.65rem 1rem;border-bottom:1px solid #4c685c;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem}body.has-game #result[hidden]{display:none}body.has-game #result h1,body.has-game #result h2,body.has-game #result p{margin:0;font-size:.9rem}

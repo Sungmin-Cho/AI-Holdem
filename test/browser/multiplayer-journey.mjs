@@ -322,7 +322,7 @@ export async function runMultiplayerJourney(outDir) {
     );
     await click(host, "#room-close");
     await wait(
-      () => evaluate(host)("document.querySelector('#room-status')?.textContent==='closed'"),
+      () => evaluate(host)("document.querySelector('#room-status')?.dataset.status==='closed'"),
       "room closed",
     );
     await wait(
