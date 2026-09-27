@@ -7,10 +7,13 @@ import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, me
 import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
+import { helpButton } from './help-panel.js';
+import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
+import { DISPLAY_KEYS, saveDisplaySetting } from './display-settings.js';
 
 import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
-import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
+import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
@@ -106,6 +109,16 @@ function playAwardSoon(playerIds) {
   if (painting) pendingAward = playerIds;
   else motion.playAward(playerIds, { table: $('table') });
 }
+// First-turn guide: a card at the top of the side panel, outlines only.
+const onboarding = createOnboarding({
+  steps: participantMode ? PARTICIPANT_ONBOARDING_STEPS : undefined,
+  container: () => document.querySelector('aside.side'),
+  targets: {
+    seat: () => document.querySelector('.seat.is-hero .plate'),
+    actions: () => $('action-bar'),
+    side: () => document.querySelector('.side .tabs'),
+  },
+});
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -622,6 +635,7 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
 }
 setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
+
 
 function writeAmountField(value) {
   const input = $('raise-amount');
@@ -1474,6 +1488,12 @@ function paintFrame() {
     if (!keepingMotion) motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
     motionFrame = frame;
   }
+  const seatedLive = !ui.sessionEnded && !spectator && Boolean(view?.seats?.some((seat) => seat.playerId === viewerId(view) && !seat.out));
+  onboarding.offer({
+    myTurn: seatedLive && Boolean(view?.legal) && view.legal.toAct === viewerId(view),
+    deadline: Boolean(ui.turnDeadline),
+    seated: seatedLive,
+  });
 }
 
 function upsertHandReplays(rows, replace) {
@@ -1687,6 +1707,8 @@ function paintUnread() {
 }
 
 function selectTab(which) {
+  // A tab hidden for this viewer (coach, learning for participants) cannot be selected.
+  if ($(`tab-${which}`)?.hidden) return;
   selectedTab = which;
   if (which in unread) unread[which] = 0;
   paintUnread();
@@ -1706,7 +1728,7 @@ $('tab-training')?.addEventListener('click', () => selectTab('training'));
 $('tab-participants').addEventListener('click',()=>selectTab('participants'));
 selectTab('log');
 document.querySelector('.tabs').addEventListener('keydown',ev=>{
-  const tabs=['log','coach','training','participants'];let index=tabs.indexOf(selectedTab);
+  const tabs=['log','coach','training','participants'].filter(name=>$(`tab-${name}`)&&!$(`tab-${name}`).hidden);let index=tabs.indexOf(selectedTab);
   if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
   else if(ev.key==='ArrowLeft')index=(index+tabs.length-1)%tabs.length;
   else if(ev.key==='Home')index=0;else if(ev.key==='End')index=tabs.length-1;else return;
@@ -1714,7 +1736,7 @@ document.querySelector('.tabs').addEventListener('keydown',ev=>{
 });
 $('display-unit').value=displayUnit;
 $('display-unit').addEventListener('change',ev=>{
-  displayUnit=ev.target.value==='chips'?'chips':'bb';writePreference(displayUnit);
+  displayUnit=ev.target.value==='chips'?'chips':'bb';saveDisplaySetting('unit',displayUnit);
   paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintHandResult();paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
 });
 $('seat-close').addEventListener('click',()=>dialogs.close());
@@ -1737,6 +1759,26 @@ document.addEventListener('keydown', (ev) => {
   else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) toggleReplayPlayback();
   else return;
   ev.preventDefault();
+});
+// ⓘ beside the notices that the help drawer explains.
+$('learning-scope')?.after(helpButton('learning', '학습 수치의 의미'));
+$('replay-disclaimer')?.after(helpButton('privacy', '복기 공개 범위'));
+// Esc ends the first-turn guide when no dialog is open.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || ev.defaultPrevented || !onboarding.active || onboarding.suspended || dialogs.active || document.querySelector('dialog[open]')) return;
+  onboarding.skip();
+});
+// Display settings changed here or in another document of this origin.
+const followUnit = (value) => {
+  displayUnit = value === 'chips' ? 'chips' : 'bb';
+  if ($('display-unit')) $('display-unit').value = displayUnit;
+  paint();
+};
+window.addEventListener('holdem:display-unit', (ev) => followUnit(ev.detail));
+window.addEventListener('holdem:onboarding-reset', () => onboarding.reset());
+window.addEventListener('storage', (ev) => {
+  if (ev.key === 'holdem.display-unit.v1') followUnit(readPreference());
+  if (ev.key === DISPLAY_KEYS.onboarding && ev.newValue === null) onboarding.reset();
 });
 $('replay-close')?.addEventListener('click', () => {
   closeReplay();

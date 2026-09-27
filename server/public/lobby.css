@@ -181,10 +181,36 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
   .invite { flex-direction: column; align-items: flex-start; }
   /* In-game header on phones: one 52px row — spade, notice count, then the
      controls. Brand text, status text and chip labels stay for screen readers. */
-  body.has-game > .app-header { flex-wrap: nowrap; min-height: 52px; padding: var(--sp-1) var(--sp-3); gap: var(--sp-2); }
+  body.has-game > .app-header { flex-wrap: wrap; min-height: 0; padding: var(--sp-1) var(--sp-3); gap: 0 var(--sp-2); }
   body.has-game .brand strong,
   body.has-game .app-status,
   body.has-game .coach-chip__text,
-  body.has-game #notices-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  body.has-game #notices-title,
+  body.has-game .help-menu__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   body.has-game .app-header .ui-btn { padding: 0 var(--sp-2); }
+  /* The hand context gets its own line under the controls. */
+  body.has-game .shell-context { order: 10; flex: 1 0 100%; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; font-size: var(--fs-12); gap: 0 var(--sp-3); padding-bottom: var(--sp-1); }
+  body.has-game .label-long { display: none; }
+  body.has-game #help-menu { width: var(--tap); padding: 0; }
+  body.has-game #help-menu::before { content: "?" / ""; font-size: var(--fs-16); }
 }
+
+/* Help and display settings (design §3.4, §10.4). */
+.help-menu { position: relative; }
+.help-menu__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 160px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-card);
+  background: var(--c-surface-1);
+  box-shadow: var(--sh-3);
+}
+.help-menu__list[hidden] { display: none; }
+.help-menu__list .ui-btn { justify-content: flex-start; }
+.lobby-first { margin: var(--sp-1) 0 0; }
+.lobby-first .ui-btn { padding: 0; min-height: var(--tap); color: var(--c-info-text); }

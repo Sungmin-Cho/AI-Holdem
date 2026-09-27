@@ -125,3 +125,20 @@ test('dispose detaches listeners and the observer', () => {
   assert.deepEqual(seen, []);
   assert.equal(win.observers[0].disconnected, true);
 });
+
+test('the header context shows hand, blinds, net and a lost connection, and clears on null', async () => {
+  const { createMiniDocument } = await import('./helpers/mini-dom.js');
+  const { paintShellContext } = await import('../server/public/shell-context.js');
+  const doc = createMiniDocument();
+  const node = doc.createElement('p');
+  paintShellContext(node, { handNo: 3, handLimit: 20, level: null, blinds: [25, 50], sessionNet: -150, conn: 'retry' }, { doc, preference: 'bb' });
+  assert.equal(node.hidden, false);
+  assert.match(node.textContent, /핸드 3\/20/);
+  assert.match(node.textContent, /블라인드 25\/50/);
+  assert.match(node.textContent, /손익 [−-]3 BB/);
+  assert.match(node.textContent, /연결 재연결 중/);
+  assert.ok(node.querySelector('.ui-neg'), 'a loss wears the negative colour');
+  paintShellContext(node, null, { doc });
+  assert.equal(node.hidden, true);
+  assert.equal(node.textContent, '');
+});

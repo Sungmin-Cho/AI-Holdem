@@ -71,7 +71,14 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `server/public/final-summary.js`, `server/public/final-panel.js` | 최종 순위·누적 손익·개인 요약 표시와 DOM 생성. |
 | `tools/session-summary.js` | 완료 핸드 아카이브의 제한된 읽기·증분 캐시·공개 세션 요약. |
 | `server/public/app-transport.js` | 앱 SSE 단일 연결·35초 워치독·백오프·종료 스냅샷 복구. |
-| `server/public/` | 정적 UI(`index.html`/`app.js`/`style.css`) — 한국어 포커 테이블. |
+| `server/public/` | 정적 UI — 테이블(`index.html`/`app.js`/`table.css`), 호스트 로비(`lobby.html`/`lobby.js`/`lobby.css`), 참가 페이지(`join.html`/`join.js`/`join.css`). 한국어. |
+| `server/public/design-tokens.css`, `ui-base.css`, `theme-boot.js` | 의미 토큰(테마 B 기본, A·C는 `[data-theme]`), 자체 호스팅 폰트와 공용 컴포넌트, 첫 페인트 전 표시 설정 적용. 페이지 CSS는 토큰만 쓴다(`test/ui-token-usage.test.js`). |
+| `server/public/card-render.js`, `motion.js` | 공용 카드 렌더러(접근 이름·4색/2색 덱)와 최종 DOM 위의 장식 모션(모션 줄이기 존중). |
+| `server/public/shell-bridge.js`, `shell-embed.js`, `shell-context.js` | 로비·참가 페이지(부모) ↔ 테이블 iframe(자식) 핸드셰이크. 부모가 응답하면 테이블은 자기 상단바를 숨기고 공개 문맥(핸드·블라인드·손익·연결)만 부모 헤더로 보낸다. |
+| `server/public/replay-model.js`, `replayer.js` | 복기 레코드를 엔진 정산 규칙으로 재구성·검산하는 순수 모델과 시각 리플레이어. 한 곳이라도 어긋나면 텍스트 목록으로 대체한다. |
+| `server/public/help-panel.js`, `display-settings.js`, `onboarding.js` | 도움말 드로어(학습 수치의 의미 = 정직성 고지 정본), 브라우저별 표시 설정, 첫 내 차례 안내(비차단·포커스 유지). |
+| `server/public/invite.js`, `vendor-qrcode.js` | 온라인 세션 초대 카드의 복사·QR(무수정 벤더 모듈, sha256 고정). |
+| `server/drill-public/` | 학습실(`drill.html`/`drill.js`/`study-format.js`) — 모드 설명, 포지션 다이어그램·핸드 클래스 카드, 기준 빈도 막대. 공용 모듈은 `/public/` 경로로 받는다. |
 | `game/` | gitignore된 runtime store — `loop.lock.d/`와 `.session-store/current.json`; 선택된 `.session-store/sessions/<gameId>/` 아래에 `loop-state.json`, `state.json`, server/publish/coach 파일이 있다. |
 | `test/` | `node --test` 스위트 — 엔진 단위 테스트부터 사이드카 통합(`game-loop.test.js`), 어댑터 계약(`player-runtime.test.js`), step→publish 통합 계약(`turn-contract.test.js`)까지. |
 

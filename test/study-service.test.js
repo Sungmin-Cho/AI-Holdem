@@ -75,11 +75,27 @@ test('REQ-010: mutations reject foreign origins and cross-site fetches before bo
 
 test('REQ-010: explicit static whitelist hides private files and serves shared reference', async (t) => {
   const { port } = await standalone(t);
-  for (const route of ['/', '/drill.html', '/drill.js', '/drill.css', '/shared/reference.js']) {
+  for (const route of ['/', '/drill.html', '/drill.js', '/drill.css', '/shared/reference.js', '/public/help-panel.js']) {
     const response = await fetch(`http://127.0.0.1:${port}${route}`);
     assert.equal(response.status, 200, route); await response.text();
   }
-  for (const route of ['/package.json', '/.training/study-service.json', '/shared/study-contract.js',
+  // Every module the study page loads resolves on this listener (the help
+  // drawer and card renderer come from server/public through their relative imports).
+  const seen = new Set();
+  const pending = ['/drill.js'];
+  while (pending.length) {
+    const route = pending.pop();
+    if (seen.has(route)) continue;
+    seen.add(route);
+    const response = await fetch(`http://127.0.0.1:${port}${route}`);
+    assert.equal(response.status, 200, `module ${route}`);
+    const source = await response.text();
+    for (const [, spec] of source.matchAll(/(?:\bfrom|^import)\s*['"]([^'"]+)['"]/gm)) {
+      pending.push(new URL(spec, `http://127.0.0.1:${port}${route}`).pathname);
+    }
+  }
+  assert.ok(seen.has('/public/display-settings.js') && seen.has('/public/card-render.js'), [...seen].join(' '));
+  for (const route of ['/package.json', '/.training/study-service.json', '/shared/study-contract.js', '/public/app.js', '/public/lobby.js',
     '/%2e%2e/tools/study-service.js', '/drill.html/extra', '/api/drill.html']) {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { headers: { 'x-drill-token': 'study-http' } });
     assert.equal(response.status, 404, route); assert.equal((await response.json()).ok, false);

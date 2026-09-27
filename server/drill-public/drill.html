@@ -2,42 +2,80 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
   <title>AI 홀덤 · 학습실</title>
+  <script src="/theme-boot.js"></script>
+  <link rel="preload" href="/font-pretendard-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/font-space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/design-tokens.css">
+  <link rel="stylesheet" href="/ui-base.css">
   <link rel="stylesheet" href="/drill.css">
 </head>
-<body>
-  <header class="header"><span class="brand">♠ AI 홀덤</span><span class="eyebrow">학습실</span><p>한 가지 상황을 이해하고, 다시 선택해 보세요.</p></header>
-  <main>
+<body class="ui-page study" data-no-onboarding>
+  <header class="app-header">
+    <span class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C9.2 6.6 4.5 9.3 4.5 13.2 4.5 15.6 6.3 17.2 8.4 17.2 9.6 17.2 10.6 16.7 11.3 15.9 11.1 17.8 10.3 19.3 8.9 20.3L8.9 21.5 15.1 21.5 15.1 20.3C13.7 19.3 12.9 17.8 12.7 15.9 13.4 16.7 14.4 17.2 15.6 17.2 17.7 17.2 19.5 15.6 19.5 13.2 19.5 9.3 14.8 6.6 12 2Z" /></svg><strong>AI 홀덤</strong><span class="brand-sub">학습실</span></span>
+    <span class="header-spacer"></span>
+    <button type="button" id="open-help" class="ui-btn ui-btn--quiet">도움말</button>
+    <button type="button" id="open-display-settings" class="ui-btn ui-btn--quiet">표시 설정</button>
+  </header>
+  <main class="study-grid">
     <section class="workspace" aria-labelledby="study-title">
-      <div class="section-head"><span class="eyebrow">REFERENCE PRACTICE</span><h1 id="study-title">다음 선택을 위한 연습</h1><p>게임이 끝난 뒤에도 이 학습실에서 이어갈 수 있습니다.</p></div>
-      <div class="mode-controls"><div class="mode-field"><label for="mode">연습 모드</label><select id="mode"><option value="free">자유 연습</option><option value="leak">연습 후보</option><option value="daily">오늘 복습</option><option value="mistake-review">기준표와 다른 선택 복습</option><option value="assessment">새 문제 평가</option><option value="retest">지연 재평가</option></select></div><div class="mode-field"><label for="reference-source">연습 기준표</label><select id="reference-source"><option value="">현재 기록 기준</option><option value="1.0.0">v1 · 이전 기록 복습</option><option value="2.0.0">v2 · 6·8·9인</option></select></div><button id="start" class="primary" type="button" disabled>연습 시작</button></div>
-      <p class="mode-help">새 문제 평가는 추적된 기록에서 보지 않은 상황을 고릅니다. 과거 미추적 노출은 알 수 없으며, 지연 재평가는 완료 후 24시간이 지나야 열립니다.</p>
-      <div class="status-row"><p id="status" role="status" aria-live="polite">저장된 연습을 확인하고 있습니다…</p><button id="recover" class="quiet" type="button">현재 상태 확인</button><button id="retry" class="quiet" type="button" hidden>같은 답안 다시 확인</button></div>
+      <div class="study-intro">
+        <h1 id="study-title" class="ui-h1">다음 선택을 위한 연습</h1>
+        <p class="ui-muted">한 가지 상황을 이해하고 다시 선택해 보세요. 게임이 끝난 뒤에도 이어갈 수 있습니다.</p>
+      </div>
+      <div class="mode-controls">
+        <div class="ui-field mode-field">
+          <label class="ui-label" for="mode">연습 모드</label>
+          <span class="ui-select-wrap"><select id="mode" class="ui-select" aria-describedby="mode-help"><option value="free">자유 연습</option><option value="leak">연습 후보</option><option value="daily">오늘 복습</option><option value="mistake-review">기준표와 다른 선택 복습</option><option value="assessment">새 문제 평가</option><option value="retest">지연 재평가</option></select></span>
+        </div>
+        <p id="mode-help" class="mode-help"><span id="mode-description"></span> <span id="mode-availability"></span></p>
+        <button id="start" class="ui-btn ui-btn--primary ui-btn--lg" type="button" disabled>연습 시작</button>
+      </div>
+      <details class="study-advanced">
+        <summary>고급 · 연습 기준표</summary>
+        <div class="ui-field">
+          <label class="ui-label" for="reference-source">연습 기준표</label>
+          <span class="ui-select-wrap"><select id="reference-source" class="ui-select"><option value="">현재 기록 기준</option><option value="1.0.0">v1 · 이전 기록 복습</option><option value="2.0.0">v2 · 6·8·9인</option></select></span>
+        </div>
+      </details>
+      <div class="status-row"><p id="status" role="status" aria-live="polite">저장된 연습을 확인하고 있습니다…</p><button id="recover" class="ui-btn ui-btn--quiet" type="button">현재 상태 확인</button><button id="retry" class="ui-btn ui-btn--ghost" type="button" hidden>같은 답안 다시 확인</button></div>
       <article class="question" aria-labelledby="prompt">
-        <p id="run-progress" class="eyebrow">연습 준비</p>
-        <h2 id="prompt">오늘은 어떤 상황을 연습할까요</h2>
+        <div class="question-top">
+          <p id="run-progress" class="question-progress">연습 준비</p>
+          <div id="run-meter" class="study-meter" role="progressbar" aria-label="연습 진행" aria-valuemin="0" hidden><span class="study-meter__fill"></span></div>
+        </div>
+        <div id="spot" class="spot" hidden>
+          <div id="spot-diagram" class="spot-diagram" role="img"></div>
+          <div id="hand-cards" class="hand-cards"></div>
+        </div>
+        <h2 id="prompt" class="question-title">오늘은 어떤 상황을 연습할까요</h2>
         <p id="context" class="context"></p>
         <div id="actions" class="actions" aria-label="가능한 액션"></div>
         <div id="feedback" class="feedback" aria-live="polite" hidden></div>
-        <button id="next" class="primary" type="button" hidden>다음 문제</button>
+        <button id="next" class="ui-btn ui-btn--primary ui-btn--lg" type="button" hidden>다음 문제</button>
         <p id="notices" class="notice"></p>
-        <p id="question-source" class="source-note"></p>
+        <p id="question-source" class="source-tag"></p>
       </article>
     </section>
     <aside class="learning" aria-label="학습 요약">
-      <section class="goal-card"><span class="eyebrow">오늘의 연습 목표</span><h2 id="goal">기록을 확인하고 있습니다</h2><p id="due"></p></section>
+      <section class="goal-card"><h2 class="goal-eyebrow">오늘의 연습 목표</h2><p id="goal" class="goal-text">기록을 확인하고 있습니다</p><p id="due" class="goal-due"></p></section>
       <div class="metrics-grid">
-        <section class="metric"><h2>게임 기록</h2><p class="metric-label">기준표 허용률</p><strong id="game-rate">—</strong><p id="game-samples"></p><p id="game-coverage"></p><p class="metric-label">빈도 일치도</p><p id="game-calibration"></p></section>
-        <section class="metric"><h2>연습 기록</h2><p class="metric-label">기준표 허용률</p><strong id="practice-rate">—</strong><p id="practice-samples"></p><p id="practice-coverage"></p><p class="metric-label">빈도 일치도</p><p id="practice-calibration"></p></section>
+        <section class="metric" aria-labelledby="game-title"><h2 id="game-title" class="metric-title">게임 기록</h2><p class="metric-label">기준표 허용률</p><strong id="game-rate" class="metric-value">—</strong><p id="game-samples" class="metric-samples"></p>
+          <details class="metric-more"><summary>자세히</summary><p id="game-coverage"></p><p class="metric-label">빈도 일치도</p><p id="game-calibration"></p></details></section>
+        <section class="metric" aria-labelledby="practice-title"><h2 id="practice-title" class="metric-title">연습 기록</h2><p class="metric-label">기준표 허용률</p><strong id="practice-rate" class="metric-value">—</strong><p id="practice-samples" class="metric-samples"></p>
+          <details class="metric-more"><summary>자세히</summary><p id="practice-coverage"></p><p class="metric-label">빈도 일치도</p><p id="practice-calibration"></p></details></section>
       </div>
-      <p id="source" class="source-note"></p><p id="summary-status" role="status"></p>
-      <section class="assessments"><h2>평가와 재평가</h2><p class="source-note">같은 출처의 기준표 측정치를 따로 비교합니다. 이 수치만으로 실력 향상을 단정하지 않습니다.</p><div id="assessments"></div></section>
+      <p id="summary-status" role="status"></p>
+      <section class="assessments" aria-labelledby="assessments-title"><h2 id="assessments-title" class="ui-h3">평가와 재평가</h2><p class="assessments-note">같은 출처의 기준표 측정치끼리 비교합니다.</p><div id="assessments"></div></section>
     </aside>
   </main>
-  <footer>연습 기준: 선택한 출처 버전의 100BB 프리플롭. v2는 6·8·9인 미오픈·단일 오픈 대응을 지원합니다. 게임의 투영 참고는 점수에 포함하지 않습니다.</footer>
+  <footer class="study-foot">
+    <p class="study-honesty"><span>학습 수치는 로컬 휴리스틱 기준표와 비교한 참고값이며, 실제 포커 실력·수익·GTO 정답을 증명하지 않습니다.</span> <span id="source-help"></span></p>
+    <p id="source" class="study-source">기준표 출처를 확인하고 있습니다.</p>
+    <p>연습 기준: 선택한 출처 버전의 100BB 프리플롭. v2는 6·8·9인 미오픈·단일 오픈 대응을 지원합니다. 게임의 투영 참고는 점수에 포함하지 않습니다.</p>
+  </footer>
   <script type="module" src="/drill.js"></script>
 </body>
 </html>

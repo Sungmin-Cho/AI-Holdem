@@ -1,5 +1,7 @@
 import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
-import { STUDY_MODES, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, formatSource, readStudyEntry, drillRequest } from './study-format.js';
+import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, formatSource, formatSourceShort, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability } from './study-format.js';
+import { helpButton, openHelp } from '../public/help-panel.js';
+import { openDisplaySettings } from '../public/display-settings.js';
 
 // Exact pre-start rejections from createDrillHandler/startDrill. An unknown
 // response or a pending journal is not a failed start proof.
@@ -202,7 +204,85 @@ async function mountStudy() {
   const node = (tag, text, cls) => { const value = document.createElement(tag); value.textContent = text; if (cls) value.className = cls; return value; };
   let controller;
   let summary = null;
+  let formattedSummary = null;
+  // The last question shown for answering and the choice made on it. The answer
+  // DTO carries neither, so feedback visuals use them only for the same questionId.
+  let shown = null;
+  let chosen = null;
   const latestSummary = createLatestRequest();
+  function paintModeHelp() {
+    const mode = $('mode').value;
+    $('mode-description').textContent = STUDY_MODE_HELP[mode] ?? '';
+    $('mode-availability').textContent = modeAvailability(mode, formattedSummary);
+  }
+  function paintProgress(current) {
+    const meter = $('run-meter');
+    const progress = runProgress(current);
+    meter.hidden = !progress;
+    if (!progress) return;
+    meter.setAttribute('aria-valuemax', String(progress.count));
+    meter.setAttribute('aria-valuenow', String(progress.index));
+    meter.setAttribute('aria-valuetext', `${progress.index} / ${progress.count}문항 완료`);
+    meter.querySelector('.study-meter__fill').style.width = `${progress.width}%`;
+  }
+  function paintSpot(prompt) {
+    const diagram = prompt ? spotDiagram(prompt) : null;
+    const cards = prompt ? handCards(prompt) : null;
+    $('spot').hidden = !diagram && !cards;
+    const box = $('spot-diagram');
+    box.replaceChildren();
+    box.hidden = !diagram;
+    if (diagram) {
+      box.setAttribute('aria-label', diagram.label);
+      box.dataset.seated = String(diagram.seated);
+      box.append(node('span', '', 'spot-felt'));
+      const heroAt = diagram.seats.findIndex((seat) => seat.role === 'hero');
+      diagram.seats.forEach((seat, index) => {
+        // Hero at the bottom; betting order runs clockwise (bottom → left → top → right).
+        const angle = Math.PI / 2 + ((index - heroAt) * 2 * Math.PI) / diagram.seats.length;
+        const dot = node('span', seat.position, `spot-seat spot-seat--${seat.role}`);
+        dot.style.setProperty('--x', `${(50 + 41 * Math.cos(angle)).toFixed(2)}%`);
+        dot.style.setProperty('--y', `${(50 + 36 * Math.sin(angle)).toFixed(2)}%`);
+        if (seat.role === 'opener') dot.append(node('span', '오픈', 'spot-tag'));
+        box.append(dot);
+      });
+    }
+    const hand = $('hand-cards');
+    hand.replaceChildren();
+    hand.hidden = !cards;
+    if (cards) {
+      const pair = node('span', '', `rank-cards rank-cards--${cards.kind}`);
+      pair.setAttribute('aria-hidden', 'true');
+      for (const rank of cards.ranks) pair.append(node('span', rank, 'rank-card'));
+      hand.append(pair, node('span', cards.label, 'hand-kind'), node('span', `내 손패 ${cards.name}`, 'ui-sr-only'));
+    }
+  }
+  function paintFeedback(state, current) {
+    const box = $('feedback');
+    const feedback = formatFeedback(state.feedback, current?.sourceIdentity);
+    box.hidden = !feedback;
+    box.replaceChildren();
+    if (!feedback) return;
+    const bars = feedbackBars(state.feedback, current?.sourceIdentity, chosen);
+    box.append(node('h3', feedback.title, 'feedback-title'), node('p', feedback.detail, 'feedback-detail'));
+    if (bars.rows.length) {
+      const list = node('ul', '', 'freq-list');
+      list.setAttribute('aria-label', '기준 빈도');
+      for (const row of bars.rows) {
+        const item = node('li', '', `freq-row${row.mine ? ' is-mine' : ''}`);
+        const track = node('span', '', 'freq-track');
+        track.setAttribute('aria-hidden', 'true');
+        const fill = node('span', '', 'freq-fill');
+        fill.style.width = `${row.width}%`;
+        track.append(fill);
+        item.append(node('span', row.label, 'freq-label'), track, node('span', row.percent, 'freq-value'));
+        if (row.mine) item.append(node('span', '내 선택', 'freq-mine'));
+        list.append(item);
+      }
+      box.append(list);
+      if (bars.mineLabel && !bars.rows.some((row) => row.mine)) box.append(node('p', bars.mineLabel, 'feedback-mine'));
+    } else box.append(...feedback.actions.map((text) => node('p', text, 'reference-action')));
+  }
   function render(state) {
     const current = state.session;
     if (!state.target && (entry.spotKey || entry.handClass)) {
@@ -222,11 +302,16 @@ async function mountStudy() {
       : state.error ? formatStudyError(state.error)
         : state.busy ? '확인하고 있습니다…' : state.recovery ? '이전 요청을 확인한 뒤 이어서 진행하세요.' : '준비되었습니다.';
     $('run-progress').textContent = current?.sessionId ? `${STUDY_MODES[current.mode] ?? '연습'} · ${current.index} / ${current.count}문항 완료` : '모드를 선택하고 연습을 시작하세요.';
-    $('question-source').textContent = formatSource(current?.sourceIdentity);
+    paintProgress(current);
+    $('question-source').textContent = current?.sessionId ? formatSourceShort(current.sourceIdentity) : '';
     const notices = (current?.notices ?? []).filter((value) => typeof value === 'string' && (/^추적된 미노출 문항은 \d+개입니다\.$/.test(value) || value === '추적 시작 이전의 노출 여부는 알 수 없습니다.' || /^postflop 항목 \d+건은 드릴 대상이 아닙니다$/.test(value)));
     $('notices').textContent = notices.join(' ');
     const actions = $('actions'); actions.replaceChildren();
     const q = current?.question;
+    if (q && !state.awaitNext) shown = { questionId: q.questionId, prompt: q.prompt };
+    paintSpot(state.awaitNext
+      ? (shown && state.feedback?.questionId === shown.questionId ? shown.prompt : null)
+      : q?.prompt ?? null);
     if (state.awaitNext) {
       const step = formatFeedbackStep(current);
       $('prompt').textContent = step.title;
@@ -236,9 +321,10 @@ async function mountStudy() {
       const formatted = formatQuestion(q);
       $('prompt').textContent = formatted.title; $('context').textContent = formatted.context;
       for (const offered of formatted.actions) {
-        const button = node('button', offered.label, 'answer'); button.type = 'button';
+        const button = node('button', offered.label, `answer ui-btn ui-btn--lg ${offered.action === 'fold' ? 'ui-btn--ghost' : 'ui-btn--secondary'}`); button.type = 'button';
         button.disabled = state.busy || state.recovery || state.replacementOnly || !authenticated;
         button.addEventListener('click', async () => {
+          chosen = { questionId: q.questionId, action: offered.action, ...(offered.sizeBb !== undefined ? { sizeBb: offered.sizeBb } : {}) };
           const settled = await controller.answer(offered.action, offered.sizeBb);
           if (!settled.recovery && settled.awaitNext) await refreshSummary();
         });
@@ -250,10 +336,7 @@ async function mountStudy() {
       $('next').textContent = '다음 문제';
     }
     $('next').hidden = !state.awaitNext; $('next').disabled = state.busy || state.recovery;
-    const feedback = formatFeedback(state.feedback, current?.sourceIdentity);
-    $('feedback').hidden = !feedback;
-    $('feedback').replaceChildren();
-    if (feedback) $('feedback').append(node('h3', feedback.title), node('p', feedback.detail), ...feedback.actions.map((text) => node('p', text, 'reference-action')));
+    paintFeedback(state, current);
   }
   async function refreshSummary() {
     try {
@@ -263,20 +346,23 @@ async function mountStudy() {
       if (!response.ok) { $('summary-status').textContent = formatStudyError(response); return; }
       summary = response.summary;
       const formatted = formatSummary(summary);
+      formattedSummary = formatted;
+      paintModeHelp();
       $('summary-status').textContent = '';
-      $('source').textContent = formatted.source; $('goal').textContent = formatted.goal; $('due').textContent = formatted.due;
+      $('source').textContent = `출처: ${formatted.sourceShort}`; $('goal').textContent = formatted.goal; $('due').textContent = formatted.due;
       for (const origin of ['game', 'practice']) {
         const metrics = formatted[origin];
         $(`${origin}-rate`).textContent = metrics.rate; $(`${origin}-samples`).textContent = metrics.samples;
+        $(`${origin}-rate`).classList.toggle('is-empty', !/^\d+%$/.test(metrics.rate));
         $(`${origin}-coverage`).textContent = metrics.coverage; $(`${origin}-calibration`).textContent = metrics.calibration;
       }
       const runs = $('assessments'); runs.replaceChildren();
       for (const run of [...formatted.assessments, ...formatted.retests]) {
         const card = node('article', '', 'assessment');
-        card.append(node('h3', run.title), node('p', `${run.rate} · ${run.samples}`), node('p', run.status));
+        card.append(node('h3', run.title), node('p', `${run.rate} · ${run.samples}`, 'assessment-rate'), node('p', run.status));
         if (run.availableAt) card.append(node('p', `재평가 가능 시각: ${run.availableAt}`));
         if (!run.assessmentId) {
-          const button = node('button', '이 평가 재평가하기'); button.type = 'button'; button.disabled = !run.canRetest;
+          const button = node('button', '이 평가 재평가하기', 'ui-btn ui-btn--ghost'); button.type = 'button'; button.disabled = !run.canRetest;
           button.addEventListener('click', () => void controller.start({ mode: 'retest', assessmentId: run.id })); card.append(button);
         }
         runs.append(card);
@@ -285,6 +371,11 @@ async function mountStudy() {
     } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; }
   }
   $('mode').value = entry.mode;
+  $('mode').addEventListener('change', paintModeHelp);
+  paintModeHelp();
+  $('open-help').addEventListener('click', () => openHelp('learning'));
+  $('open-display-settings').addEventListener('click', () => openDisplaySettings());
+  $('source-help').append(helpButton('learning', '학습 수치의 의미'));
   if (!entry.token) { $('status').textContent = '접속 토큰이 없습니다. 학습실에서 제공한 링크를 다시 열어 주세요.'; $('start').disabled = true; return; }
   try {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(entry.token));

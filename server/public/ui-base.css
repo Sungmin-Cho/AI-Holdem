@@ -178,7 +178,7 @@
 .ui-pill { display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2); border-radius: var(--r-pill); background: var(--c-surface-2); color: var(--c-text-2); font-size: var(--fs-12); font-weight: 700; }
 .ui-pill--info { background: var(--c-info-soft); color: var(--c-info-text); }
 .ui-pill--warn { background: var(--c-danger-soft); color: var(--c-danger); }
-.ui-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--c-info); color: var(--c-on-info); font-size: 11px; font-weight: 800; }
+.ui-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--c-info); color: var(--c-on-info); font-size: 12px; font-weight: 800; }
 .ui-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
 
 /* ---- Banners and toasts ----------------------------------------------- */
@@ -232,9 +232,9 @@ dialog.ui-dialog::backdrop { background: var(--c-scrim); }
 .card.suit-h { color: var(--c-suit-h); }
 .card.suit-d { color: var(--c-suit-d); }
 .card.suit-c { color: var(--c-suit-c); }
-.card-rank { position: absolute; top: calc(var(--ch, 62px) * 0.073); left: calc(var(--ch, 62px) * 0.098); font-family: var(--f-num); font-weight: 700; font-size: calc(var(--ch, 62px) * 0.28); line-height: 1; letter-spacing: -0.03em; }
-.card-rank.is-ten { font-size: calc(var(--ch, 62px) * 0.24); letter-spacing: -0.06em; }
-.card-suit { position: absolute; top: calc(var(--ch, 62px) * 0.40); left: calc(var(--ch, 62px) * 0.098); width: calc(var(--ch, 62px) * 0.17); height: calc(var(--ch, 62px) * 0.17); fill: currentColor; }
+.card-rank { position: absolute; top: calc(var(--ch, 62px) * 0.073); left: calc(var(--ch, 62px) * 0.098); font-family: var(--f-num); font-weight: 700; font-size: max(12px, calc(var(--ch, 62px) * 0.28)); line-height: 1; letter-spacing: -0.03em; }
+.card-rank.is-ten { font-size: max(12px, calc(var(--ch, 62px) * 0.24)); letter-spacing: -0.06em; }
+.card-suit { position: absolute; top: max(calc(var(--ch, 62px) * 0.40), calc(var(--ch, 62px) * 0.073 + 13px)); left: calc(var(--ch, 62px) * 0.098); width: calc(var(--ch, 62px) * 0.17); height: calc(var(--ch, 62px) * 0.17); fill: currentColor; }
 .card-pip { position: absolute; right: calc(var(--ch, 62px) * 0.073); bottom: calc(var(--ch, 62px) * 0.061); width: calc(var(--ch, 62px) * 0.29); height: calc(var(--ch, 62px) * 0.29); fill: currentColor; }
 .card--back { background: var(--c-card-back); box-shadow: 0 3px 8px rgba(0,0,0,0.4), inset 0 0 0 2px var(--c-card-back-border); }
 .card--slot { background: rgba(0,0,0,0.16); box-shadow: inset 0 0 0 1px var(--c-slot-line); }
@@ -243,6 +243,80 @@ dialog.ui-dialog::backdrop { background: var(--c-scrim); }
 .mini-card.suit-d { color: var(--c-suit-d); }
 .mini-card.suit-c { color: var(--c-suit-c); }
 .mini-suit { width: 11px; height: 11px; fill: currentColor; }
+
+/* ---- Help drawer, display settings, first-turn guide (design §3.4, §10.4) - */
+dialog.ui-dialog.help-panel {
+  width: min(460px, 100vw);
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border-radius: var(--r-sheet) 0 0 var(--r-sheet);
+  overflow: hidden;
+}
+dialog.ui-dialog.help-panel[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.help-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4) var(--sp-5) var(--sp-2); }
+.help-title { flex: 1; margin: 0; font-size: var(--fs-22); font-weight: 700; }
+.help-nav { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); padding: 0 var(--sp-5) var(--sp-3); border-bottom: 1px solid var(--c-line); }
+.help-nav-link { display: inline-flex; align-items: center; min-height: 32px; color: var(--c-info-text); font-size: var(--fs-13); text-decoration: none; }
+.help-nav-link:hover { text-decoration: underline; }
+.help-body { overflow: auto; padding: var(--sp-2) var(--sp-5) var(--sp-8); }
+.help-section { padding: var(--sp-4) 0; border-bottom: 1px solid var(--c-line); }
+.help-section:last-child { border-bottom: 0; }
+.help-section-title { margin: 0 0 var(--sp-2); font-size: var(--fs-16); font-weight: 700; }
+.help-section-title:focus { outline: none; }
+.help-section-title:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; }
+.help-text { margin: 0 0 var(--sp-2); color: var(--c-text-2); font-size: var(--fs-14); line-height: 1.65; }
+.help-terms { display: grid; gap: var(--sp-1) 0; margin: 0; }
+.help-terms dt { margin-top: var(--sp-2); font-weight: 700; }
+.help-terms dd { margin: 0; color: var(--c-text-2); font-size: var(--fs-14); line-height: 1.6; }
+.help-rankings { display: grid; gap: var(--sp-2); margin: var(--sp-3) 0 0; padding: 0; list-style: none; }
+.help-ranking { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.help-ranking-name { font-size: var(--fs-13); font-weight: 600; }
+.help-ranking-cards { display: inline-flex; gap: 3px; }
+.help-ranking-cards .card { --cw: 24px; --ch: 34px; }
+.help-ranking-cards .card-pip { display: none; }
+.help-info {
+  min-width: 28px;
+  min-height: 28px;
+  margin-left: var(--sp-1);
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--c-info-text);
+  font-size: var(--fs-14);
+  line-height: 1;
+  vertical-align: middle;
+  cursor: pointer;
+}
+.help-info:hover { background: var(--c-info-soft); }
+dialog.ui-dialog.display-settings { display: none; }
+dialog.ui-dialog.display-settings[open] { display: grid; gap: var(--sp-3); }
+.display-title { margin: 0; font-size: var(--fs-22); font-weight: 700; }
+.display-group { display: grid; gap: var(--sp-1); margin: 0; padding: 0; border: 0; }
+.display-option { display: flex; align-items: center; gap: var(--sp-2); min-height: 40px; font-size: var(--fs-14); cursor: pointer; }
+.display-option input { width: 18px; height: 18px; accent-color: var(--c-info); }
+.display-note { margin: 0; color: var(--c-text-2); font-size: var(--fs-13); }
+.onboarding-card {
+  display: grid;
+  gap: var(--sp-2);
+  margin: var(--sp-2) var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-info);
+  border-radius: var(--r-card);
+  background: var(--c-info-soft);
+  color: var(--c-text);
+}
+.onboarding-count { margin: 0; color: var(--c-info-text); font-size: var(--fs-12); font-weight: 700; }
+.onboarding-title { margin: 0; font-size: var(--fs-16); font-weight: 700; }
+.onboarding-text { margin: 0; color: var(--c-text-2); font-size: var(--fs-13); line-height: 1.6; }
+.onboarding-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.onboarding-focus { outline: 3px solid var(--c-info); outline-offset: 3px; }
+/* Phones and touch screens: every help and settings control is a 44px target. */
+@media (max-width: 600px), (pointer: coarse) {
+  .help-info { min-width: var(--tap); min-height: var(--tap); }
+  .help-nav-link, .display-option { min-height: var(--tap); }
+}
 
 /* ---- Reduced motion (system or display preference) ---------------------- */
 @media (prefers-reduced-motion: reduce) {

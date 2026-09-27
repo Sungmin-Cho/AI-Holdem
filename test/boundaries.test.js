@@ -152,7 +152,8 @@ test('server imports only contracts, named containment and pure viewer projectio
     if (edge.from === 'server/public/lobby.js' && edge.to === 'shared/game-setup.js'
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
+    // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {

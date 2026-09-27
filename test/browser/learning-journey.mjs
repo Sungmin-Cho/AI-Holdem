@@ -1,3 +1,4 @@
+import { CONTRAST_SCRIPT } from './ui-presentation-journey.mjs';
 import { finishJourney, selfTestJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -362,6 +363,16 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     assert.equal(terminalAfterFinalAnswer && completedSummaryBeforeFinish, true,
       'the final answer must bind authoritative completion and summary before finish or retest');
     await browser(['screenshot', path.join(output, 'study-final-answer-desktop.png')]);
+    // The study room's diagram, hand cards and bars in each theme (A2 computed contrast).
+    const studyContrast = [];
+    for (const theme of ['b', 'a', 'c']) {
+      await evaluate(theme === 'b' ? "document.documentElement.removeAttribute('data-theme')" : `document.documentElement.setAttribute('data-theme','${theme}')`);
+      const { checked, out } = await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(['.spot-seat', '.spot-tag', '.rank-card', '.hand-kind', '.freq-label', '.freq-value', '.freq-mine', '.feedback-title', '.question-title', '.metric-value', '#source', '.study-honesty span'])})`);
+      assert.ok(checked >= 10, `study contrast measured ${checked} elements`);
+      studyContrast.push(...out.map((row) => ({ theme, ...row })));
+    }
+    await evaluate("document.documentElement.removeAttribute('data-theme')");
+    assert.deepEqual(studyContrast, [], JSON.stringify(studyContrast));
     await browser(['click', '#next']);
     await waitForExpression('document.querySelector("#prompt").textContent.includes("완료했습니다")', 'explicit assessment finish');
     await waitForExpression('document.querySelector("#assessments button")?.disabled === true', 'assessment retest summary');

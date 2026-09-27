@@ -1,4 +1,4 @@
-import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -18,10 +18,12 @@ import {
 export const requiredJourneyChecks = [
   "missing-module-visible-error",
   "bare-lobby-no-init",
+  "help-menu-focus-return",
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
   "host-iframe-survives-error-resume",
+  "host-embed-fit",
   "setup-back-no-resume",
   "menu-close-reopen",
   "pause-lock-immediate",
@@ -136,6 +138,18 @@ export async function runLobbyJourney(outDir) {
     assert.equal(await evaluate("location.hash"), "");
     check("bare-lobby-no-init");
     await browser(["screenshot", path.join(outDir, "lobby.png")]);
+    // Keyboard: menu → 도움말 → close: focus lands back on the visible menu button.
+    await browser(["focus", "#help-menu"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!document.querySelector('#help-menu-list').hidden"));
+    await browser(["focus", "#open-help"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!!document.querySelector('#help-panel[open]')"));
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    await wait(() => evaluate("!document.querySelector('#help-panel[open]') && document.activeElement?.id==='help-menu'"));
+    check("help-menu-focus-return");
+    await browser(["set", "viewport", "390", "844"]);
+    const lobbyTargets = await evaluate("[...document.querySelectorAll('#setup button, #setup select, #setup input, #setup summary, .app-header button')].filter(n=>n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'&&!n.closest('[hidden]')).filter(n=>n.type!=='radio'&&n.type!=='checkbox').map(n=>({id:n.id||n.name||n.className,h:Math.round(n.getBoundingClientRect().height)})).filter(t=>t.h<44)");
+    assert.deepEqual(lobbyTargets, [], "every lobby control is a 44px target on a phone");
+    await browser(["set", "viewport", "1280", "900"]);
     assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
     await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");
@@ -183,6 +197,20 @@ export async function runLobbyJourney(outDir) {
     assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
     assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
     check('host-iframe-survives-error-resume');
+    const embedStates = [];
+    const measureEmbed = async (stateName, expectResult = false) => {
+      for (const [width, height] of [[1280, 800], [390, 667]]) {
+        await browser(["set", "viewport", String(width), String(height)]);
+        await wait(async () => (await evaluate(EMBED_FIT_SCRIPT)) !== null);
+        const fit = await evaluate(EMBED_FIT_SCRIPT);
+        await browser(["screenshot", path.join(outDir, `host-embed-${stateName}-${width}x${height}.png`)]);
+        assertEmbedFit(fit, `host ${stateName} ${width}x${height}`);
+        if (expectResult) assert.ok(fit.result, `the held result is on screen: ${JSON.stringify(fit)}`);
+        embedStates.push(`${stateName}-${width}x${height}`);
+      }
+      await browser(["set", "viewport", "1280", "900"]);
+    };
+    await measureEmbed("turn");
     // R3: the menu opens and the table locks at the click, while the pause POST is
     // still held; closing the menu keeps the lock until the pause settles.
     await evaluate(`(() => {
@@ -210,6 +238,10 @@ export async function runLobbyJourney(outDir) {
     await click("#menu");
     await wait(() => evaluate("document.querySelector('#pause-dialog').open && document.activeElement?.id==='resume'"));
     check('pause-lock-immediate');
+    // Paused with the menu open: the same fit, the table locked under the menu.
+    await measureEmbed("paused");
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667"]);
+    check('host-embed-fit');
     const paused = hashTree(app.manager.current.sessionDir);
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(hashTree(app.manager.current.sessionDir), paused);
@@ -338,13 +370,17 @@ export async function runLobbyJourney(outDir) {
     await browser(['select','[name="pace"]','fast']);
     await browser(['select','#ai-count','1']);
     await evaluate(`(() => {
-      window.__pace={paused:false,skipClicked:false};
+      window.__pace={paused:false,skipClicked:false,resultPaused:false};
       window.__paceDriver=setInterval(()=>{
         const doc=document.querySelector('#table')?.contentDocument;if(!doc)return;
         if(document.querySelector('#status')?.textContent!=='게임 중')return;
         const thinking=doc.querySelector('#thinking'),menu=document.querySelector('#menu');
         if(!window.__pace.paused && thinking && !thinking.hidden && !menu.disabled){window.__pace.paused=true;menu.click();return;}
         const result=doc.querySelector('#hand-result'),skip=doc.querySelector('.hand-result-skip');
+        // Hand 1's result: freeze the table clock (the strip stays up) and pause,
+        // so the host iframe can be measured with a real held result.
+        if(window.__pace.paused && !window.__pace.resultPaused && result?.dataset.handNo==='1' && !result.hidden && !menu.disabled){
+          const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;window.__pace.resultPaused=true;menu.click();return;}
         if(result?.dataset.handNo==='2' && !result.hidden && skip && !skip.hidden && !skip.disabled){window.__pace.skipClicked=true;skip.click();}
         const button=['#btn-check','#btn-call','#btn-fold'].map(id=>doc.querySelector(id)).find(node=>node&&!node.disabled&&!node.hidden);
         if(button)button.click();
@@ -364,8 +400,15 @@ export async function runLobbyJourney(outDir) {
       const pausedState=hashTree(app.manager.current.sessionDir);
       await new Promise(resolve=>setTimeout(resolve,500));assert.equal(hashTree(app.manager.current.sessionDir),pausedState);
       check('pause-during-ai-interval');
+      await click('#resume');
+      await wait(() => evaluate('window.__pace.resultPaused===true'), 60000);
+      await state('paused');
+      await measureEmbed("paused-result", true);
+      await evaluate("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
+      assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667", "paused-result-1280x800", "paused-result-390x667"]);
+      await click('#resume');
       // Four paced hands plus finalization can exceed the ordinary UI wait on CI.
-      await click('#resume');await state('completed', 60000);
+      await state('completed', 60000);
       assert.ok(holds.has(1)&&advances.has(2));
       assert.ok(advances.get(2)>=Date.parse(holds.get(1).until),'next hand preceded server hold deadline');
       check('hand-result-hold-respected');

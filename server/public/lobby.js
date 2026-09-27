@@ -1,9 +1,11 @@
 import { createLobbyCommandClient } from "./lobby-command-client.js";
 import {normalizeSetup} from '../../shared/game-setup.js';
-import {formatAmount, readPreference} from './chip-format.js';
+import {formatAmount} from './chip-format.js';
 import { uuid } from './uuid.js';
 import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
+import { openHelp, helpButton, wireHelpMenu } from './help-panel.js';
+import { paintShellContext } from './shell-context.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -399,6 +401,14 @@ function paintNotices() {
 window.addEventListener("storage", (event) => {
   if (event.key === "holdem.display-unit.v1" && document.body.classList.contains("has-game")) paintContext(shellBridge.context);
 });
+// The same choice made in this document's display settings.
+window.addEventListener("holdem:display-unit", () => {
+  if (document.body.classList.contains("has-game")) paintContext(shellBridge.context);
+});
+// Help and display settings: a small disclosure menu in the header.
+wireHelpMenu();
+$("open-rules").onclick = () => openHelp("rules");
+$("jev-transfer-help").append(helpButton("privacy", "외부 전송"));
 $("notices-toggle").onclick = () => {
   const open = $("notices-toggle").getAttribute("aria-expanded") !== "true";
   try { sessionStorage.setItem(`holdem.notices.v1:${snapshot?.gameId ?? "lobby"}`, open ? "open" : "closed"); } catch { /* per-tab only */ }
@@ -431,28 +441,7 @@ function paintInvite() {
   renderQr($("join-qr"), link);
 }
 function paintContext(context) {
-  const node = $("shell-context");
-  if (!context) { node.hidden = true; node.replaceChildren(); return; }
-  const parts = [];
-  const add = (label, value, className = "") => {
-    const span = document.createElement("span");
-    span.append(`${label} `);
-    const strong = document.createElement("span");
-    strong.className = `ui-num ${className}`.trim();
-    strong.textContent = value;
-    span.append(strong);
-    parts.push(span);
-  };
-  if (context.handNo !== null) add("핸드", context.handLimit ? `${context.handNo}/${context.handLimit}` : String(context.handNo));
-  if (context.blinds) add(context.level ? `레벨 ${context.level} ·` : "블라인드", `${context.blinds[0].toLocaleString("ko-KR")}/${context.blinds[1].toLocaleString("ko-KR")}`);
-  if (context.sessionNet !== null) {
-    // Same BB/chips preference as the table's own unit selector.
-    const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, readPreference(), true).primary;
-    add("손익", net, context.sessionNet > 0 ? "ui-pos" : context.sessionNet < 0 ? "ui-neg" : "");
-  }
-  if (context.conn !== "on") add("연결", context.conn === "retry" ? "재연결 중" : "종료");
-  node.replaceChildren(...parts);
-  node.hidden = parts.length === 0;
+  paintShellContext($("shell-context"), context);
 }
 const errorMessages = {
   JEV_API_KEY_MISSING: '서버에 TYPESAFE_API_KEY를 설정한 뒤 다시 시작하세요.',

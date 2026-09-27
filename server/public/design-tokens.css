@@ -6,26 +6,9 @@
   Theme B (midnight studio) is the default on :root. Themes A (classic room)
   and C (paper and ink) override the same names under [data-theme]; the
   choice is a per-browser display preference applied by theme-boot.js.
-
-  The legacy --ui-* aliases keep their previous values so pages that have not
-  migrated yet look unchanged. They are removed in the final cleanup slice.
 */
 :root {
   color-scheme: dark;
-
-  /* Legacy aliases (unchanged values). */
-  --ui-bg: #0A0D0B;
-  --ui-panel: #0E120F;
-  --ui-raised: #1D241F;
-  --ui-ink: #E9EDE6;
-  --ui-muted: #8E9A90;
-  --ui-accent: #C9A860;
-  --ui-gold: #C9A860;
-  --ui-danger: #DE9188;
-  --ui-border: rgba(255,255,255,0.12);
-  --ui-font: 'IBM Plex Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
-  --ui-number: 'Archivo', 'IBM Plex Sans KR', system-ui, sans-serif;
-  --ui-radius: 16px;
 
   /* Theme B: midnight studio (default). */
   --c-bg: #0A0F1C;

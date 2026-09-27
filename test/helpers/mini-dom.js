@@ -51,6 +51,12 @@ class MiniNode {
       if (this.localName === 'select' && child.localName === 'option' && !this.value) this.value = child.value;
     }
   }
+  prepend(...nodes) {
+    const kept = this.children;
+    this.children = [];
+    this.append(...nodes);
+    for (const child of kept) if (!this.children.includes(child)) this.children.push(child);
+  }
   removeChild(child) { this.children = this.children.filter((node) => node !== child); child.parentNode = null; }
   remove() { this.parentNode?.removeChild(this); }
   replaceChildren(...nodes) { for (const child of this.children) child.parentNode = null; this.children = []; this.append(...nodes); }
