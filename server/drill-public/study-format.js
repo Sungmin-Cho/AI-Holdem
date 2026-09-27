@@ -204,7 +204,7 @@ export function formatSummary(summary = {}) {
   const goal = summary.goal;
   const goalAllowed = goal && (verified(goal.sourceIdentity) || goal.origin === 'default');
   return {
-    source: formatSource(source), game: originSummary(summary.game, allowed), practice: originSummary(summary.practice, allowed),
+    source: formatSource(source), sourceShort: formatSourceShort(source), game: originSummary(summary.game, allowed), practice: originSummary(summary.practice, allowed),
     due: `${count(summary.bank?.dueCount)}개 오늘 복습 · 전체 ${count(summary.bank?.totalCount)}개`,
     goal: goalAllowed ? `${goal.origin === 'game' ? '게임 기록' : goal.origin === 'practice' ? '연습 기록' : '기본 지원 상황'}에서 정한 목표: ${position(goal.spotKey?.split('-')[2])} · ${hand(goal.handClass)}의 기준 빈도 확인` : '확인된 근거가 없어 목표를 준비하지 못했습니다.',
     assessments: (summary.assessments ?? []).map((run) => runSummary(run, allowed)),

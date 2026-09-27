@@ -12,7 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
@@ -48,7 +48,7 @@ const STATE_SCRIPT=`(()=>{
   const plateOverlaps=[];plates.forEach((a,i)=>plates.slice(i+1).forEach(b=>{if(hit(R(a),R(b)))plateOverlaps.push([owner(a),owner(b)]);}));
   const tableHits=[];plates.forEach(p=>center.forEach(c=>{if(hit(R(p),R(c)))tableHits.push([owner(p),c.id||c.className]);}));
   const markerHits=[];markers.forEach(m=>{const who=m.dataset.playerId;[...center,...plates.filter(p=>owner(p)!==who)].forEach(t=>{if(hit(R(m),R(t)))markerHits.push([who,t.id||t.className||owner(t)]);});});
-  const small=[...document.querySelectorAll('.table *, #action-bar *')].filter(n=>!n.closest('.card')&&vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
+  const small=[...document.querySelectorAll('.table *, #action-bar *, #result-dock *')].filter(n=>!n.closest('.card')&&vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
   const strip=document.querySelector('#hand-result'),table=R(document.querySelector('.table'));let result=null;
   if(vis(strip)){const r=R(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=table.bottom-1),hits:[...center,...plates].filter(n=>hit(r,R(n))).map(n=>n.id||n.className)};}
   return {scroll:document.documentElement.scrollWidth,plateOverlaps,tableHits,markerHits,small,result};
@@ -572,6 +572,18 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
     assert.equal(await evaluate("document.querySelector('#final-last-hand').hidden"),false);
     checks.push('final-overlay-immediate');
+    // The final result on a phone and a laptop: no sideways scroll, the card inside the viewport width.
+    const finalRuns=[];
+    for(const [width,height] of STATE_SIZES){
+      await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+      const fit=await evaluate("(()=>{const card=document.querySelector('#review-overlay .review-card').getBoundingClientRect();return {open:!document.querySelector('#review-overlay').hidden,scroll:document.documentElement.scrollWidth,left:card.left,right:card.right,innerWidth}})()");
+      await browser(['screenshot',path.join(outDir,`final-${width}x${height}.png`)]);
+      assert.ok(fit.open&&fit.scroll<=width&&fit.left>=0&&fit.right<=width+1,JSON.stringify({width,height,fit}));
+      finalRuns.push(`final-${width}x${height}`);
+    }
+    assert.deepEqual(finalRuns,STATE_SIZES.map(([w,h])=>`final-${w}x${h}`));
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    checks.push('final-geometry');
     await click('#review-close');
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out').length"),eliminated);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out .card--back,.seat.is-out .dealer-btn,.seat.is-out.is-to-act').length"),0);

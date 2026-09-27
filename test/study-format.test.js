@@ -463,6 +463,9 @@ test('the study page keeps one honesty statement and its help entry', () => {
   const html = readFileSync(new URL('../server/drill-public/drill.html', import.meta.url), 'utf8');
   assert.doesNotMatch(html, /REFERENCE PRACTICE|class="eyebrow"/, 'no English eyebrows');
   assert.equal((html.match(/id="source"/g) ?? []).length, 1);
+  // The honesty statement is in the page itself, not waiting on the summary request.
+  assert.match(html, /class="study-honesty"><span>학습 수치는 로컬 휴리스틱 기준표와 비교한 참고값이며, 실제 포커 실력·수익·GTO 정답을 증명하지 않습니다\.<\/span>/);
+  assert.match(formatSummary({ source }).sourceShort, /휴리스틱/);
   assert.match(html, /id="mode"[^>]*>(?:<option [^>]+>[^<]+<\/option>){6}<\/select>/, 'the mode select keeps its six options');
   for (const id of ['start', 'actions', 'next', 'feedback', 'run-progress', 'prompt', 'context', 'goal', 'assessments', 'status', 'reference-source', 'open-help', 'source-help']) {
     assert.match(html, new RegExp(`id="${id}"`), id);

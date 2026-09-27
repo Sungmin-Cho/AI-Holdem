@@ -1669,7 +1669,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .hand-result[hidden] {display:none;}
 .hand-result button {margin:0;}
 .hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
-.hand-result-pot {font-size:.85em;}
+.hand-result-pot {font-size:12px;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
 .result-dock:has(> .hand-result[hidden]) {display:none;}

@@ -349,7 +349,7 @@ async function mountStudy() {
       formattedSummary = formatted;
       paintModeHelp();
       $('summary-status').textContent = '';
-      $('source').textContent = formatted.source; $('goal').textContent = formatted.goal; $('due').textContent = formatted.due;
+      $('source').textContent = `출처: ${formatted.sourceShort}`; $('goal').textContent = formatted.goal; $('due').textContent = formatted.due;
       for (const origin of ['game', 'practice']) {
         const metrics = formatted[origin];
         $(`${origin}-rate`).textContent = metrics.rate; $(`${origin}-samples`).textContent = metrics.samples;

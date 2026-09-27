@@ -146,6 +146,10 @@ export async function runLobbyJourney(outDir) {
     await evaluate("document.querySelector('#help-panel .help-close').click()");
     await wait(() => evaluate("!document.querySelector('#help-panel[open]') && document.activeElement?.id==='help-menu'"));
     check("help-menu-focus-return");
+    await browser(["set", "viewport", "390", "844"]);
+    const lobbyTargets = await evaluate("[...document.querySelectorAll('#setup button, #setup select, #setup input, #setup summary, .app-header button')].filter(n=>n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'&&!n.closest('[hidden]')).filter(n=>n.type!=='radio'&&n.type!=='checkbox').map(n=>({id:n.id||n.name||n.className,h:Math.round(n.getBoundingClientRect().height)})).filter(t=>t.h<44)");
+    assert.deepEqual(lobbyTargets, [], "every lobby control is a 44px target on a phone");
+    await browser(["set", "viewport", "1280", "900"]);
     assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
     await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");

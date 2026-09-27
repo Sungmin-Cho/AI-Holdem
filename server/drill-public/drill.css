@@ -126,7 +126,7 @@
   transform: translateX(-50%);
   color: var(--c-action);
   font-family: var(--f-ui);
-  font-size: 11px;
+  font-size: var(--fs-12);
   font-weight: 700;
 }
 .hand-cards { display: flex; align-items: center; gap: var(--sp-3); }
@@ -211,6 +211,7 @@
 /* ---- Footer: the one honesty statement for this screen -------------------- */
 .study-foot { max-width: 1280px; margin: 0 auto; padding: var(--sp-5) var(--sp-6) var(--sp-8); border-top: 1px solid var(--c-line); display: grid; gap: var(--sp-2); color: var(--c-text-2); font-size: var(--fs-12); }
 .study-honesty { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); color: var(--c-text); font-size: var(--fs-13); }
+.study-source { color: var(--c-text-2); font-size: var(--fs-12); }
 
 /* ---- Responsive ---------------------------------------------------------- */
 @media (max-width: 900px) {

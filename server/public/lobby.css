@@ -213,4 +213,4 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
 .help-menu__list[hidden] { display: none; }
 .help-menu__list .ui-btn { justify-content: flex-start; }
 .lobby-first { margin: var(--sp-1) 0 0; }
-.lobby-first .ui-btn { padding: 0; min-height: 32px; color: var(--c-info-text); }
+.lobby-first .ui-btn { padding: 0; min-height: var(--tap); color: var(--c-info-text); }

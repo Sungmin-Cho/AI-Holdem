@@ -78,7 +78,7 @@ function paintProvider(state) {
   // the general notice; once joined, a JEV game gets this banner.
   const jev = state.game?.aiProvider === 'jev';
   $('ai-provider').hidden = !jev;
-  $('ai-provider').textContent = jev ? '상대 AI: JEV · 공개 플레이 정보와 각 AI의 자기 패를 TypeSafe AI로 전송하는 중입니다. 참가자의 패와 이름은 보내지 않습니다.' : '';
+  $('ai-provider').textContent = jev ? '상대 AI: JEV · 게임 중 AI 결정마다 그 AI의 자기 패와 공개 플레이 정보가 TypeSafe AI로 전송됩니다. 참가자의 패와 이름은 보내지 않습니다.' : '';
 }
 function paintWaiting(state) {
   const room = state.room ?? {};
