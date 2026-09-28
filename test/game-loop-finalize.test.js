@@ -32,6 +32,7 @@ import { defaultEvaluate } from '../tools/training-pipeline.js';
 import { createSessionManager } from '../tools/session-manager.js';
 import {
   execFileAsync,
+  ROOT,
   CLI,
   COACH_CLI,
   REAL_LSOF,
@@ -109,6 +110,10 @@ function createJumpClock() {
 // §9.2 (2): a finalizing replacement needs an absolute 5 s of result wait. Tests that jump
 // to "less than that is left" land here, leaving room for one coach child on a slow host.
 const LEFT_BELOW_REPLACEMENT_FLOOR_NS = 4_500n * 1_000_000n;
+
+// #213: while this marker exists in a game dir, the shim fails `bind-handle` and `fence`.
+const COACH_FAILURE_SHIM = path.join(ROOT, 'test/helpers/coach-failure-cli-shim.mjs');
+const COACH_FAILURE_MARKER = '.inject-coach-failure';
 
 // #192 S2a E3: the CLI now exits non-zero for reserve/begin-owner/bind-handle without
 // --spawn-evidence 1. execFile's promisified form rejects on a non-zero exit but still
@@ -1995,15 +2000,12 @@ test('#192 S3 D6: policy playing resume의 persisted coach 회수는 ensureServe
 });
 
 test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize가 NOT_SPAWNED로 닫지 않는다', { timeout: 45_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
-  let held = null;
-  t.after(async () => {
-    if (!held) return;
-    held.release();
-    await held.done;
-  });
+  // #213: bind-handle (and the fence after its unconfirmed termination) fail through a
+  // coach CLI shim while a marker exists, instead of holding publish.lock.d past a 1.5 s
+  // global childTimeoutMs that win32 coach children exceed without any contention.
+  const failureMarker = path.join(gameDir, COACH_FAILURE_MARKER);
   let spawnEntered;
   const entered = new Promise((resolve) => { spawnEntered = resolve; });
   const upper = makeCoachAdapter({
@@ -2016,10 +2018,10 @@ test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize�
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      childTimeoutMs: 1_500,
+      coachCliPath: COACH_FAILURE_SHIM,
       coachSpawnCheckpoint: async () => {
-        // bind-handle이 coach-control 락에서 막히도록 spawn 직전에 락을 잡는다.
-        held = await holdNamedLock(gameDir, 'publish.lock.d');
+        // bind-handle이 실패하도록 spawn 직전에 실패 주입을 켠다.
+        fs.writeFileSync(failureMarker, '');
         spawnEntered();
       },
     },
@@ -2027,14 +2029,13 @@ test('#192 FO-1 RED: bind-handle 실패 뒤 종료 미확인 worker를 finalize�
 
   await loop.resume();
   await entered;
-  await waitFor(
+  const coachError = await waitFor(
     () => readLoopLog(gameDir).find((row) => row.event === 'coach-error'),
     'bind-handle failure did not end the coach attempt',
-    15_000,
+    15_000 * WIN32_SCALE,
   );
-  held.release();
-  await held.done;
-  held = null;
+  fs.rmSync(failureMarker, { force: true });
+  assert.equal(coachError.code, 'INJECTED_COACH_FAILURE', 'precondition: the attempt ended on the injected fence failure');
 
   assert.equal(coachInvocations(calls, 'bind-handle').length, 1, 'precondition: the spawned worker reached bind-handle');
   assert.equal(
@@ -2150,15 +2151,12 @@ test('#192 S2a: 정상 코치 attempt는 bind-handle에 --spawn-evidence 1을 �
 });
 
 test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 terminateLiveCoachGenerations가 confirmed:true를 받으면 지워진다', { timeout: 45_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
-  let held = null;
-  t.after(async () => {
-    if (!held) return;
-    held.release();
-    await held.done;
-  });
+  // #213: bind-handle (and the fence after its unconfirmed termination) fail through a
+  // coach CLI shim while a marker exists, instead of holding publish.lock.d past a 1.5 s
+  // global childTimeoutMs that win32 coach children exceed without any contention.
+  const failureMarker = path.join(gameDir, COACH_FAILURE_MARKER);
   let spawnEntered;
   const entered = new Promise((resolve) => { spawnEntered = resolve; });
   let terminateCalls = 0;
@@ -2180,9 +2178,10 @@ test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 te
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      childTimeoutMs: 1_500,
+      coachCliPath: COACH_FAILURE_SHIM,
       coachSpawnCheckpoint: async () => {
-        held = await holdNamedLock(gameDir, 'publish.lock.d');
+        // bind-handle이 실패하도록 spawn 직전에 실패 주입을 켠다.
+        fs.writeFileSync(failureMarker, '');
         spawnEntered();
       },
     },
@@ -2190,14 +2189,13 @@ test('#192 S2a: 종료 미확인 attempt의 record는 남아 있다가 이후 te
 
   await loop.resume();
   await entered;
-  await waitFor(
+  const coachError = await waitFor(
     () => readLoopLog(gameDir).find((row) => row.event === 'coach-error'),
     'bind-handle failure did not end the coach attempt',
-    15_000,
+    15_000 * WIN32_SCALE,
   );
-  held.release();
-  await held.done;
-  held = null;
+  fs.rmSync(failureMarker, { force: true });
+  assert.equal(coachError.code, 'INJECTED_COACH_FAILURE', 'precondition: the attempt ended on the injected fence failure');
 
   assert.equal(coachInvocations(calls, 'bind-handle').length, 1, 'precondition: the spawned worker reached bind-handle');
   assert.equal(terminateCalls, 1, 'precondition: only the first (unconfirmed) terminate has run so far');
@@ -4246,7 +4244,7 @@ function coachAuthorityRow(authority, handNo) {
 }
 
 test('#192 S5: 이슈 재현 — 1차 finalize 실패 store를 수정 없이 두 번 재개하면 done과 리뷰 게시에 도달한다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  if (skipOnWin32(t, '#192 S5 fixture injects failures via a 900 ms global childTimeoutMs on a held publish.lock.d; win32 coach/publish children exceed 900 ms without contention')) return;
   const { gameDir, init } = await buildIssue192FirstRunFailure(t);
 
   const loopLog = readLoopLog(gameDir);
@@ -4413,7 +4411,7 @@ test('#192 I4: publishCliPath 테스트 seam — 비envelope stdout은 training-
 // receipt between runs — the only allowed edit — so the fresh resume must close both rows
 // on spawn evidence alone.
 test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize 실패 store가 done에 도달한다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  if (skipOnWin32(t, '#192 S5 fixture injects failures via a 900 ms global childTimeoutMs on a held publish.lock.d; win32 coach/publish children exceed 900 ms without contention')) return;
   const { gameDir } = await buildIssue192FirstRunFailure(t);
 
   const loopStateBefore = readJson(path.join(gameDir, 'loop-state.json'));
@@ -4488,7 +4486,7 @@ test('#192 S5: 종료 영수증 없이도 spawn 증거만으로 1차 finalize �
 // explicitly rather than silently release it, and must not duplicate coach-control
 // transitions on a second resume attempt.
 test('#192 S5: 영수증 없는 crash store는 명시적으로 멈추고 증거 요약을 남긴다', { timeout: 60_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+  if (skipOnWin32(t, '#192 S5 fixture injects failures via a 900 ms global childTimeoutMs on a held publish.lock.d; win32 coach/publish children exceed 900 ms without contention')) return;
   const { gameDir } = await buildIssue192FirstRunFailure(t, { crashHandOneIntent: true });
 
   const loopStateBefore = readJson(path.join(gameDir, 'loop-state.json'));
