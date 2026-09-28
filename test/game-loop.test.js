@@ -1293,7 +1293,7 @@ test('#195 S4: resolver receives lockRoot for store and legacy game dirs', { tim
   assert.notEqual(path.resolve(lockDir), path.resolve(gameDir));
 });
 
-test('#195 S4: player-sessions bind runtimeHomeId on create and reuse', { timeout: 10_000 }, async (t) => {
+test('#195 S4: player-sessions bind runtimeHomeId on create and reuse', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   adapter.runtimeHomeId = 'home-A';
@@ -1693,7 +1693,7 @@ test('fresh warmup returning an argv-unsafe session ID rejects with INVALID_SESS
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
 });
 
-test('a live owner rejects a second bootstrap and resume without re-running init', { timeout: 10_000 }, async (t) => {
+test('a live owner rejects a second bootstrap and resume without re-running init', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const adapter = makeAdapter();
   const first = createGameLoop({ gameDir, resolver: resolverFor(adapter), opts: { port: 0 } });
@@ -2688,7 +2688,7 @@ test('playing resume seeds the checked hand so its archive is checked exactly on
   assert.equal(checks[0].handNo, 1);
 });
 
-test('resumed active hand의 새 archivePending은 entry check와 별개로 다시 검사해 repair_failed로 멈춘다', { timeout: 10_000 }, async (t) => {
+test('resumed active hand의 새 archivePending은 entry check와 별개로 다시 검사해 repair_failed로 멈춘다', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const original = createGameLoop({
     gameDir,
@@ -2758,7 +2758,7 @@ test('playing starts a hand, accepts a tolerant AI decision, and preserves every
   assert.equal(state.lastPublishId >= 3, true, 'first hand/action/next hand were not all published');
 });
 
-test('LLM timeout preserves the decision and never starts a shorter automatic retry', { timeout: 10000 }, async (t) => {
+test('LLM timeout preserves the decision and never starts a shorter automatic retry', { timeout: 10000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({ timeoutMs }) => {
     await new Promise(resolve => setTimeout(resolve, timeoutMs));
     throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
@@ -2887,7 +2887,7 @@ test('stop during real in-flight child preserves closed recovery and no engine a
   assert.equal(readJson(path.join(gameDir,'state.json')).lastHand.actions.length,1);
 });
 
-test('explicit retry after invalid response applies exactly one decision', { timeout: 10000 }, async (t) => {
+test('explicit retry after invalid response applies exactly one decision', { timeout: 10000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({ onDecide: async ({message}, attempt) => ({
     raw: attempt <= 2 ? 'invalid' : JSON.stringify({decisionId:decisionIdOfMessage(message),action:'fold'})
   }) });
@@ -3069,7 +3069,7 @@ test('an applied AI step records publishMs and publishError even when terminal p
   assert.equal(Number.isFinite(metric.publishMs) && metric.publishMs >= 0, true);
 });
 
-test('archivePending runs resume-check once and repair_failed halts before a new hand', { timeout: 10_000 }, async (t) => {
+test('archivePending runs resume-check once and repair_failed halts before a new hand', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
   fs.mkdirSync(path.join(gameDir, 'hands', 'hand-0001.json'), { recursive: true });
@@ -3111,7 +3111,7 @@ test('VERSION_MISMATCH discards the stale model decision, resynchronizes with an
   assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand.actions[0].playerId, 'p1');
 });
 
-test('ATTEMPT_PENDING is retried before the current AI transition publish', { timeout: 10_000 }, async (t) => {
+test('ATTEMPT_PENDING is retried before the current AI transition publish', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter();
   const { gameDir, loop } = await setupAiFirst(t, { adapter });
   const engine = readJson(path.join(gameDir, 'state.json'));
@@ -3292,7 +3292,7 @@ test('nested ATTEMPT_PENDING retry errors re-enter the bounded publish matrix wi
   }
 });
 
-test('BAD_ATTEMPT deletes only the corrupt record, resyncs state, and republishes view-only', { timeout: 10_000 }, async (t) => {
+test('BAD_ATTEMPT deletes only the corrupt record, resyncs state, and republishes view-only', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
   fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), '{broken-json');
   const running = startRun(loop);
@@ -3305,7 +3305,7 @@ test('BAD_ATTEMPT deletes only the corrupt record, resyncs state, and republishe
   assert.equal(Number.isInteger(snapshot.view.handNo), true);
 });
 
-test('BAD_SNAPSHOT verifies the server, removes the corrupt snapshot, and republishes once', { timeout: 10_000 }, async (t) => {
+test('BAD_SNAPSHOT verifies the server, removes the corrupt snapshot, and republishes once', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter() });
   fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), '{broken-snapshot');
   const running = startRun(loop);
@@ -3501,13 +3501,13 @@ test('PUBLISH_REJECTED verifies the live relay then retries the exact recorded b
   await stopRun(loop, running);
 });
 
-test('user timeouts repeat wait-only indefinitely and never force-default before the submitted raise', { timeout: 10_000 }, async (t) => {
+test('user timeouts repeat wait-only indefinitely and never force-default before the submitted raise', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 30 } });
   const running = startRun(loop);
 
   await waitWhileRunning(running, () => (
     readLoopLog(gameDir).filter((entry) => entry.event === 'user-wait-timeout').length >= 3
-  ), 'three user wait-only timeouts were not observed');
+  ), 'three user wait-only timeouts were not observed', 3_000 * WIN32_SCALE);
   const { lock, snapshot } = await waitForUserSnapshot(gameDir);
   const action = preferredUserAction(snapshot.view.legal);
   assert.equal(action.action, 'raise', 'fixture must distinguish a real user action from force-default');
@@ -3516,6 +3516,7 @@ test('user timeouts repeat wait-only indefinitely and never force-default before
     running,
     () => waitForUserAction(gameDir, (entry) => entry.action === 'raise'),
     'submitted user raise was not applied',
+    3_000 * WIN32_SCALE,
   );
   assert.equal(applied.decisionId, action.decisionId);
 
@@ -3586,7 +3587,7 @@ test('user action·amount의 잘못된 shape는 HTTP에서 거부되고 engine a
   await stopRun(loop, running);
 });
 
-test('stale user decision is discarded and the same current decision is re-waited', { timeout: 10_000 }, async (t) => {
+test('stale user decision is discarded and the same current decision is re-waited', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 35 } });
   const running = startRun(loop);
   const { lock, snapshot } = await waitForUserSnapshot(gameDir);
@@ -3612,7 +3613,7 @@ test('stale user decision is discarded and the same current decision is re-waite
   await stopRun(loop, running);
 });
 
-test('illegal user action resynchronizes, narrates, and waits again without folding the user', { timeout: 10_000 }, async (t) => {
+test('illegal user action resynchronizes, narrates, and waits again without folding the user', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupUserFirst(t, { loopOpts: { waitMs: 40 } });
   const running = startRun(loop);
   const { lock, snapshot } = await waitForUserSnapshot(gameDir);
@@ -5841,7 +5842,7 @@ test('D9 never restarts the server while stopping and preserves the failed publi
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), false);
 });
 
-test('SIGTERM during D9 health await cannot unlink, spawn, retry, or resolve the attempt', { timeout: 15_000 }, async (t) => {
+test('SIGTERM during D9 health await cannot unlink, spawn, retry, or resolve the attempt', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, loop } = await setupAiFirst(t, { adapter: makeAdapter(), loopOpts: { waitMs: 0 } });
   const lockPath = path.join(gameDir, 'lock.json');
   const originalRaw = fs.readFileSync(lockPath, 'utf8');
@@ -7356,7 +7357,7 @@ test('review_generated with stale view publishes view-only then review', { timeo
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, VALID_REVIEW);
 });
 
-test('finalizing resume with stale view publishes view-only before review', { timeout: 20_000 }, async (t) => {
+test('finalizing resume with stale view publishes view-only before review', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();

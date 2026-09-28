@@ -30,6 +30,7 @@ import { gameEpochOf } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { defaultEvaluate } from '../tools/training-pipeline.js';
 import { createSessionManager } from '../tools/session-manager.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import {
   execFileAsync,
   ROOT,
@@ -3882,7 +3883,16 @@ test('#192 L2: observeRun은 LOOP_LOCK_LOST stop 실패에도 session을 비우�
     storeDir: root,
     resolver: resolverFor(makeAdapter()),
   });
-  t.after(() => manager.close().catch(() => {}));
+  t.after(async () => {
+    try { await manager.close().catch(() => {}); }
+    finally {
+      // #213: app shutdown deliberately preserves study. Stop the service this store
+      // started so it does not keep running checkpoint ACL proofs (a PowerShell child per
+      // proof on win32) through every later test in this file (288d426's teardown).
+      const study = await inspectStudyService(root);
+      if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId });
+    }
+  });
   await manager.initialize();
 
   const payload = (kind) => {
