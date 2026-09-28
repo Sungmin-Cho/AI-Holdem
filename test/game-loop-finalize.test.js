@@ -542,8 +542,7 @@ test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 
   assert.deepEqual(halted.halt.recovery.commands, []);
 });
 
-test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked worker 종료 전에 차단한다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked worker 종료 전에 차단한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const never = new Promise(() => {});
@@ -554,8 +553,8 @@ test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked wor
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 1_200,
-      finalizeCutoffLeadMs: 800,
+      finalizeBudgetMs: 1_200 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 800 * WIN32_SCALE,
       signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
     },
   });
@@ -750,8 +749,7 @@ test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면
   assertCutoffAbortedBeginOwner(calls);
 });
 
-test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남은 예산으로 cutoff와 Q drain을 완료한다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남은 예산으로 cutoff와 Q drain을 완료한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -762,8 +760,8 @@ test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남�
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 3_000,
-      finalizeCutoffLeadMs: 1_500,
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 1_500 * WIN32_SCALE,
       childTimeoutMs: 5_000,
     },
   });
@@ -775,20 +773,36 @@ test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남�
     released = true;
     held.release();
   };
-  const timer = setTimeout(release, 1_750);
+  // #213: release the lock when the heartbeat is observed ending at the result-wait
+  // cutoff, not on a wall-clock timer tuned to POSIX: the cutoff transaction and Q drain
+  // must then complete on the lead that remains.
+  const isCutoffHeartbeat = (row) => (
+    row.event === 'coach-heartbeat-error'
+    && row.phase === 'finalizing'
+    && row.code === 'FINALIZATION_RESULT_WAIT_CUTOFF'
+  );
+  let watching = true;
+  const releaseAtCutoff = (async () => {
+    while (watching && !released) {
+      let seen = false;
+      try { seen = readLoopLog(gameDir).some(isCutoffHeartbeat); } catch { /* log not readable yet */ }
+      if (seen) {
+        release();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  })();
   t.after(async () => {
-    clearTimeout(timer);
+    watching = false;
+    await releaseAtCutoff;
     release();
     await held.done;
   });
 
   assert.equal((await loop.run()).phase, 'done');
 
-  const cutoffHeartbeat = readLoopLog(gameDir).find((row) => (
-    row.event === 'coach-heartbeat-error'
-    && row.phase === 'finalizing'
-    && row.code === 'FINALIZATION_RESULT_WAIT_CUTOFF'
-  ));
+  const cutoffHeartbeat = readLoopLog(gameDir).find(isCutoffHeartbeat);
   assert.notEqual(cutoffHeartbeat, undefined, 'heartbeat가 result-wait cutoff 뒤까지 살아남았다');
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 1);
   assert.equal(nonReviewPublishInvocations(calls).length, 1);
@@ -877,8 +891,7 @@ test('finalizing 중 requestStop은 BAD_LOOP_PHASE 없이 정상 정리된다', 
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt, undefined);
 });
 
-test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 확인된 동일 pid만 종료한다', { timeout: 20_000, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 확인된 동일 pid만 종료한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -895,9 +908,9 @@ test('Task 7A r2: persisted identity unknown은 deadline까지 재조회하고 �
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 2_500,
-      finalizeCutoffLeadMs: 1_500,
-      orphanTerminateGraceMs: 500,
+      finalizeBudgetMs: 2_500 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 1_500 * WIN32_SCALE,
+      orphanTerminateGraceMs: 500 * WIN32_SCALE,
       processStartTime: (pid) => {
         if (pid === orphan.pid) {
           const n = Number(fs.readFileSync(countPath, 'utf8')) + 1;
@@ -1602,8 +1615,21 @@ test('#192 S3: identity-unavailable 분기에서 fence child가 실패해도 att
   assert.equal(reserves.length, 1, 'identity-unavailable 실패 뒤 attempt 2를 위해 다시 reserve했다');
 });
 
+// #213: "not released" and "no signal" also hold when the finalization deadline simply
+// expires first, so pin the abort to the identity classification itself: the persisted
+// row stays unresolved on the injected scanner's own answer (not SCAN_DEADLINE,
+// DEADLINE_EXCEEDED or IDENTITY_UNKNOWN), and the cutoff is not a deadline abort.
+function assertUnverifiedIdentityHalt(gameDir, resumeError) {
+  assert.equal(resumeError?.code, 'FINALIZATION_ABORTED', `resume ${resumeError?.code ?? 'ok'}`);
+  const halted = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(halted.finalization.cutoff.reason, 'persisted_worker_unresolved');
+  assert.deepEqual(
+    halted.halt.recovery.attempts.map((row) => [row.reason, row.evidence?.legacyScanDetail]),
+    [['LEGACY_SCAN_UNAVAILABLE', 'TEST_DEFAULT']],
+  );
+}
+
 test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니므로 released로 닫지 않는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
@@ -1624,8 +1650,8 @@ test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니
     upper: makeCoachAdapter(),
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 2_500,
-      finalizeCutoffLeadMs: 1_500,
+      finalizeBudgetMs: 2_500 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 1_500 * WIN32_SCALE,
       signalProcess: (pid, signal) => {
         if (pid === orphan.pid) signals.push(signal);
         process.kill(pid, signal);
@@ -1648,10 +1674,10 @@ test('#192 FO-2 RED: persisted "pid:null" handle은 검증된 identity가 아니
     `an unverified "pid:null" identity was closed as released (resume ${resumeError?.code ?? 'ok'})`,
   );
   assert.deepEqual(signals, [], 'a signal was sent to a pid whose identity was never verified');
+  assertUnverifiedIdentityHalt(gameDir, resumeError);
 });
 
 test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"면 검증된 identity로 취급하지 않는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   for (const sentinelStartTime of ['   ', 'undefined']) {
     const gameDir = tmpGame();
     const init = await seedFinishedGame(gameDir);
@@ -1673,8 +1699,8 @@ test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"�
       upper: makeCoachAdapter(),
       stateOverrides: { port: external.lock.port },
       loopOpts: {
-        finalizeBudgetMs: 2_500,
-        finalizeCutoffLeadMs: 1_500,
+        finalizeBudgetMs: 2_500 * WIN32_SCALE,
+        finalizeCutoffLeadMs: 1_500 * WIN32_SCALE,
         signalProcess: (pid, signal) => {
           if (pid === orphan.pid) signals.push(signal);
           process.kill(pid, signal);
@@ -1701,6 +1727,7 @@ test('#192 S1: persisted handle의 startTime이 공백뿐이거나 "undefined"�
       [],
       `a signal was sent to a pid whose "${sentinelStartTime}" startTime identity was never verified`,
     );
+    assertUnverifiedIdentityHalt(gameDir, resumeError);
   }
 });
 
@@ -2075,7 +2102,6 @@ test('#192 O2: startTime null 코치 attempt의 종료가 confirmed면 handle �
 });
 
 test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제 terminate()만 실행하고 결과를 공유한다', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let terminateCalls = 0;
@@ -2097,7 +2123,7 @@ test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제
   });
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 3_000, finalizeCutoffLeadMs: 1_500 },
+    loopOpts: { finalizeBudgetMs: 3_000 * WIN32_SCALE, finalizeCutoffLeadMs: 1_500 * WIN32_SCALE },
   });
 
   // Safety net: `requestStop()` (registered by `finalizingLoop` via `t.after`) awaits
@@ -2123,9 +2149,9 @@ test('#192 I3: 같은 attempt에 대한 동시 종료 호출은 하나의 실제
     await waitFor(
       () => readLoopLog(gameDir).some((row) => row.event === 'finalize-coach-settled'),
       'finalize가 coach settle 단계에 도달하지 않았다',
-      15_000,
+      15_000 * WIN32_SCALE,
     );
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300 * WIN32_SCALE));
 
     assert.equal(terminateCalls, 1, '두 번째 caller가 이미 진행 중인 termination을 공유하지 않고 다시 호출했다');
   } finally {
