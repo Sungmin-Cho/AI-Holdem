@@ -479,8 +479,8 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
     loopOpts: {
       finalizeBudgetMs: 4_000 * WIN32_SCALE,
       finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
-      orphanTerminateGraceMs: 180,
-      orphanTerminateKillWaitMs: 180,
+      orphanTerminateGraceMs: 180 * WIN32_SCALE,
+      orphanTerminateKillWaitMs: 180 * WIN32_SCALE,
       processStartTime: (pid) => seededStartTime(pid) ?? processStartTime(pid),
       signalProcess: (pid, signal) => {
         if (orphans.some((child) => child.pid === pid)) signals.push({ pid, signal, at: Date.now() });
@@ -730,13 +730,15 @@ test('Task 7A r1: held coach-control lock은 result-wait cutoff에서 종료 시
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
   // #213: the window is scaled so a win32 resume still reaches begin-owner before the
-  // cutoff; the lock is held past any window, so only the wait gets longer.
+  // cutoff; the lock is held past any window, so only the wait gets longer. The child
+  // timeout keeps its POSIX margin over the window, so the cutoff (not the ordinary child
+  // timeout) is what ends the blocked child.
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
       finalizeBudgetMs: 250 * WIN32_SCALE,
       finalizeCutoffLeadMs: 150 * WIN32_SCALE,
-      childTimeoutMs: 5_000,
+      childTimeoutMs: 5_000 * WIN32_SCALE,
     },
   });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
@@ -775,7 +777,7 @@ test('Task 7A full review: coach-control lock이 result-wait cutoff를 넘으면
     loopOpts: {
       finalizeBudgetMs: 1_200 * WIN32_SCALE,
       finalizeCutoffLeadMs: 700 * WIN32_SCALE,
-      childTimeoutMs: 5_000,
+      childTimeoutMs: 5_000 * WIN32_SCALE,
     },
   });
   const held = await holdNamedLock(gameDir, 'publish.lock.d');
@@ -821,7 +823,7 @@ test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남�
     loopOpts: {
       finalizeBudgetMs: 3_000 * WIN32_SCALE,
       finalizeCutoffLeadMs: 1_500 * WIN32_SCALE,
-      childTimeoutMs: 5_000,
+      childTimeoutMs: 5_000 * WIN32_SCALE,
     },
   });
   await loop.resume();
@@ -834,7 +836,8 @@ test('Task 7A full review: result-wait heartbeat는 cutoff에서 끝나고 남�
   };
   // #213: release the lock when the heartbeat is observed ending at the result-wait
   // cutoff, not on a wall-clock timer tuned to POSIX: the cutoff transaction and Q drain
-  // must then complete on the lead that remains.
+  // must then complete on the lead that remains. (The child timeout above stays longer
+  // than the window, or the blocked heartbeat would end on it instead of the cutoff.)
   const isCutoffHeartbeat = (row) => (
     row.event === 'coach-heartbeat-error'
     && row.phase === 'finalizing'
