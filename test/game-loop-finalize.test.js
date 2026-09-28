@@ -500,6 +500,13 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
   assert.equal((await loop.run()).phase, 'done');
 });
 
+// A start-time string for the same pid that provably belongs to another process: 7 s off
+// the observed reading, which no time-zone offset can explain (#214 D4a).
+function replacedStartTime(startTime) {
+  if (process.platform === 'win32') return `${startTime}-replaced`;
+  return new Date(Date.parse(startTime) + 7_000).toISOString();
+}
+
 test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identity에 signal하지 않고 prior cleanup을 released로 닫는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -507,10 +514,12 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
   t.after(() => terminateIfAlive(external.child));
   const orphan = await startCoachOrphan();
   t.after(() => terminateIfAlive(orphan));
-  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
   const authorityPath = path.join(gameDir, '.coach-authority.json');
   const authority = readJson(authorityPath);
-  authority.hands['1'].agentHandle = `${orphan.pid}:identity-does-not-match`;
+  // #214 D4a: a provable replacement — 7 s apart is no time-zone offset (unlike an
+  // unparseable or whole-quarter-hour difference, which stays unknown).
+  authority.hands['1'].agentHandle = `${orphan.pid}:${replacedStartTime(seeded.startTime)}`;
   fs.writeFileSync(authorityPath, JSON.stringify(authority));
 
   const signalled = [];
@@ -543,6 +552,38 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
   );
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reviewGate, 'open');
 });
+
+// #214 D4a: POSIX `ps -o lstart=` has no zone. A reading 19 h off the recorded one
+// (UTC−10 recorded, UTC+9 observed) may be the same live process and must never release it.
+test('#214 a start time that differs only by a time-zone offset is unknown, not a replacement', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  if (skipOnWin32(t, 'win32 start times carry their UTC offset')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].agentHandle = `${orphan.pid}:${new Date(Date.parse(seeded.startTime) + 19 * 3_600_000).toISOString()}`;
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const signalled = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_UNKNOWN/.test(error.message));
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'a possibly-live coach must not be released or signalled');
+  assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
+  assert.notEqual(readJson(authorityPath).retiredAttempts.find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
 
 test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 없이 durable recovery로 중단한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
