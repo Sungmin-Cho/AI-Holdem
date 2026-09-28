@@ -1515,14 +1515,14 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       // turn to another seat between attempts. Re-check the seat inside each locked
       // attempt, bound to the same synchronous section as accept/cancel.
       const seatStillToAct = () => !(state.decision?.toAct && state.decision.toAct !== seat);
-      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => {
-        if (!seatStillToAct()) throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' });
-        return receiptStore.accept(body, currentDecisionId());
-      }, {
+      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => receiptStore.accept(body, currentDecisionId()), {
         decisionId: body.decisionId,
+        precheck: () => {
+          if (!seatStillToAct()) throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' });
+        },
         // #235: a pause refusal records a durable per-request cancellation under the
         // same control lock, so the client may release the request and choose again.
-        onClosed: (control) => (seatStillToAct() ? receiptStore.cancel(body, currentDecisionId(), control.controlRevision) : null),
+        onClosed: (control) => receiptStore.cancel(body, currentDecisionId(), control.controlRevision),
       }), {timeoutMs:250});
       else receiptStore.accept(body, current);
       clearHintClients(current);

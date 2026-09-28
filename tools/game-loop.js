@@ -338,6 +338,19 @@ export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
   return null;
 }
 
+// Whether an authenticated relay found at adoption can keep serving this loop. A relay
+// lacking a capability this loop relies on is replaced through the normal
+// `server-capability-replaced` path instead of being reused.
+export function relayHealthCompatible(health, { responseOk, managed, study, snapshotStudyUrl, hints }) {
+  return responseOk === true && health?.ok === true && health.protocolVersion === 2
+    && health.capabilities?.actionReceipts === true
+    // #235: a managed relay from before the pause cancellation ledger would keep
+    // refusing paused actions without proof; replace it like any stale relay.
+    && (!managed || health.capabilities?.actionCancellations === 1)
+    && (!study || (health.capabilities?.studyLink === true && snapshotStudyUrl === study.studyUrl))
+    && (hints !== 'on' || health.capabilities?.preActionHints === 1);
+}
+
 export const LOOP_RELEASE_REASONS = Object.freeze([
   'IDENTITY_DEAD', 'IDENTITY_REPLACED', 'NOT_SPAWNED', 'OWNER_RUNTIME_CLOSED',
   'CLOSED_CONFIRMED', 'ACCEPT_EVIDENCE', 'LEGACY_NO_RUNTIME_PROCESS',
@@ -1684,13 +1697,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let health = null;
     try { health = await response.json(); } catch { /* incompatible owned relay */ }
     if (stopAware) assertNotStopping();
-    return response.ok && health?.ok === true && health.protocolVersion === 2
-      && health.capabilities?.actionReceipts === true
-      // #235: a managed relay from before the pause cancellation ledger would keep
-      // refusing paused actions without proof; replace it like any stale relay.
-      && (!managed || health.capabilities?.actionCancellations === 1)
-      && (!study || (health.capabilities?.studyLink === true && snapshot.studyUrl === study.studyUrl))
-      && (opts.hints !== 'on' || health.capabilities?.preActionHints === 1);
+    return relayHealthCompatible(health, {
+      responseOk: response.ok, managed, study, snapshotStudyUrl: snapshot.studyUrl, hints: opts.hints,
+    });
   };
 
   const identityStillAlive = (pid, startTime, { owned = false } = {}) => {

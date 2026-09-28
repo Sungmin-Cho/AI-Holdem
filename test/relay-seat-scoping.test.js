@@ -235,3 +235,41 @@ test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision
   } finally { if (!released) releaseOwnedLock(lock); }
   assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), false);
 });
+
+test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is recorded', async (t) => {
+  const f = await multiRelay(t);
+  const control = createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  control.set('paused', { pauseIntent: true });
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-paused', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    saveState(f.dir, next);
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.deepEqual(response.json, { ok: false, code: 'NOT_YOUR_TURN' }, 'the seat error wins over GAME_PAUSED and carries no proof');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-cancellations.json')), false, 'no cancellation for another seat');
+});

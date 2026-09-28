@@ -563,6 +563,12 @@ test('a pause-refused request is cancelled for good and a different action is ap
   assert.equal(receipt.requestId,'after-resume-fold');
   assert.equal(receipt.action,'fold');
   assert.equal(receipt.phase,'consumed','the new action was applied');
+  const engine=read('state.json');
+  const decisionHand=Number(decisionId.split('-')[1]);
+  const handActions=(engine.hand?.handNo===decisionHand?engine.hand.actions:engine.lastHand?.handNo===decisionHand?engine.lastHand.actions:null);
+  assert.ok(handActions,'the decided hand is still readable');
+  const userActions=handActions.filter(action=>action.playerId==='user');
+  assert.deepEqual(userActions.map(action=>action.action),['fold'],'exactly one user action, the new one, reached the engine');
   assert.equal((await post({requestId:'paused-call',action:'call'})).body.code,'STALE_DECISION');
 });
 

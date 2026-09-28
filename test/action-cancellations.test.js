@@ -10,6 +10,8 @@ import { gameEpochOf } from '../publish-contract.js';
 import { createSessionControl, withActionGate } from '../tools/session-control.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
+import { relayHealthCompatible } from '../tools/game-loop.js';
+import { createActionReceiptStore, createRelayRootOwner } from '../server/action-receipts.js';
 
 const TOKEN = 'cancel-test-token';
 const EPOCH = gameEpochOf(TOKEN);
@@ -225,4 +227,61 @@ test('status lists earlier rejected requests of the current decision as terminal
 test('a managed relay advertises the cancellation protocol so a stale relay is replaced on adoption', async (t) => {
   const f = await fixture(t);
   assert.equal((await f.http('health')).body.capabilities.actionCancellations, 1);
+});
+
+test('a linked, foreign-epoch or oversized ledger fails closed and the linked target is untouched', async (t) => {
+  for (const damage of ['symlink', 'epoch', 'oversize']) {
+    if (damage === 'symlink' && process.platform === 'win32') continue;
+    const f = await fixture(t);
+    f.pause();
+    await f.action();
+    f.resume();
+    const outside = path.join(createOwnedTempDir('holdem-ledger-outside'), 'target.json');
+    if (damage === 'symlink') {
+      fs.writeFileSync(outside, fs.readFileSync(f.ledgerPath()));
+      fs.rmSync(f.ledgerPath());
+      fs.symlinkSync(outside, f.ledgerPath());
+    } else if (damage === 'epoch') {
+      fs.writeFileSync(f.ledgerPath(), JSON.stringify({ ...f.ledger(), gameEpoch: 'ab'.repeat(32) }));
+    } else {
+      const ledger = f.ledger();
+      fs.writeFileSync(f.ledgerPath(), JSON.stringify({ ...ledger, entries: [{ ...ledger.entries[0], requestId: 'x'.repeat(128) }] }) + ' '.repeat(4096));
+    }
+    const before = damage === 'symlink' ? fs.readFileSync(outside) : null;
+    assert.equal((await f.action(request('other'))).status, 500, `${damage}: acceptance fails closed`);
+    assert.equal((await f.status()).status, 503, `${damage}: status fails closed`);
+    if (before) assert.deepEqual(fs.readFileSync(outside), before);
+  }
+});
+
+test('a ledger write the writer refuses gives no proof and leaves nothing behind', () => {
+  // The writer re-checks the relay root identity at every step; replacing the root
+  // under a live store is the writer's own refusal path, exercised without seams.
+  const dir = createOwnedTempDir('holdem-ledger-write-fail');
+  const owner = createRelayRootOwner(dir);
+  const store = createActionReceiptStore(dir, EPOCH, { owner });
+  const moved = `${dir}-moved`;
+  fs.renameSync(dir, moved);
+  fs.mkdirSync(dir);
+  try {
+    assert.equal(store.cancel(request(), D1, 1), null);
+    assert.equal(fs.existsSync(path.join(dir, LEDGER)), false);
+    assert.equal(fs.existsSync(path.join(moved, LEDGER)), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.renameSync(moved, dir);
+  }
+});
+
+test('adoption keeps a relay only when it has every capability this loop relies on', () => {
+  const health = (capabilities) => ({ ok: true, protocolVersion: 2, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, ...capabilities } });
+  const study = { studyUrl: 'http://127.0.0.1:1/#token=x' };
+  const base = { responseOk: true, snapshotStudyUrl: study.studyUrl, hints: 'on' };
+  assert.equal(relayHealthCompatible(health({}), { ...base, managed: true, study }), false, 'managed relay without the ledger is replaced');
+  assert.equal(relayHealthCompatible(health({}), { ...base, managed: true, study: null }), false, 'also without a study service');
+  assert.equal(relayHealthCompatible(health({ actionCancellations: 1 }), { ...base, managed: true, study }), true);
+  assert.equal(relayHealthCompatible(health({ actionCancellations: 1 }), { ...base, managed: true, study: null }), true);
+  assert.equal(relayHealthCompatible(health({}), { ...base, managed: false, study }), true, 'legacy relays do not need the ledger');
+  assert.equal(relayHealthCompatible(health({ actionCancellations: 1 }), { ...base, managed: true, study, snapshotStudyUrl: 'other' }), false);
+  assert.equal(relayHealthCompatible(health({ actionCancellations: 1 }), { ...base, managed: true, study, responseOk: false }), false);
 });

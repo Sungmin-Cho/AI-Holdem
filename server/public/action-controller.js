@@ -70,7 +70,9 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   }
   function release() {
     request = null; requestGeneration += 1; knownReceipt = null;
-    storage.removeItem?.(key);
+    // A storage failure must not strand the state machine mid-transition; a stale
+    // stored request is re-validated against the server on the next load anyway.
+    try { storage.removeItem?.(key); } catch { /* next load reconciles */ }
   }
   function rememberReceipt(receipt) {
     if (knownReceipt?.decisionId === receipt.decisionId && knownReceipt.requestId === receipt.requestId
@@ -231,6 +233,9 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
           && result.cancelled?.requestId === captured.requestId) {
           release();
           notice = { code: 'ACTION_CANCELLED' };
+          // A status read started before this proof may still report the gate as
+          // open; drop it so only a later read can unlock input.
+          ++revision;
           return setPhase('paused');
         }
         // Both codes are terminal for this exact request id and digest.

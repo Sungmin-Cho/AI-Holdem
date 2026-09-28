@@ -62,8 +62,12 @@ export function withControlLock(root, fn) {
 // closed for a pause, so a cancellation it records is linearized before resume
 // (which takes this lock to write `playing`). Its truthy result is attached to
 // the GAME_PAUSED error as `cancelled`; a throwing callback only drops the proof.
-export function withActionGate(root, epoch, fn, { decisionId, onClosed } = {}) {
+// `precheck()` runs first inside the lock, before the gate state is consulted, so a
+// caller's own admission error (e.g. the turn moved to another seat while a
+// CONTROL_BUSY retry was waiting) wins over GAME_PAUSED and records nothing.
+export function withActionGate(root, epoch, fn, { decisionId, onClosed, precheck } = {}) {
   return withControlLock(root, () => {
+    if (typeof precheck === "function") precheck();
     const control = readSessionControl(root, epoch);
     if (control.playState !== "playing") {
       const error = controlError("GAME_PAUSED");

@@ -475,6 +475,83 @@ test('#235: an older rejected receipt does not reopen input while paused', async
   assert.equal(f.controller.state.phase, 'rejected');
   assert.equal(f.controller.state.disabled, false);
 });
+test('#235: a status read started before the cancellation proof cannot unlock input', async () => {
+  // e.g. a hint-clear event reconciles while the POST is still in flight.
+  let resolvePost, resolveStatus;
+  let statusCalls = 0;
+  const values = new Map();
+  const storage = { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: (k) => values.delete(k) };
+  const snapshot = { gameEpoch: 'game-a', view: { legal, gameOver: false } };
+  const controller = createActionController({
+    gameEpoch: 'game-a', storage, timeoutMs: 1000,
+    uuid: () => '00000000-0000-4000-8000-000000000001',
+    postAction: (body) => new Promise((resolve) => { resolvePost = () => resolve({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } }); }),
+    getSnapshot: async () => snapshot,
+    getStatus: () => {
+      statusCalls += 1;
+      if (statusCalls === 1) return Promise.resolve({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', paused: false });
+      return new Promise((resolve) => { resolveStatus = () => resolve({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', paused: false }); });
+    },
+  });
+  await controller.connect(snapshot);
+  const sending = controller.send('call');
+  await new Promise((resolve) => setImmediate(resolve));
+  const staleRead = controller.reconcile();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePost();
+  await sending;
+  assert.equal(controller.state.phase, 'paused');
+  resolveStatus();
+  await staleRead;
+  assert.equal(controller.state.phase, 'paused', 'the stale open-gate read is discarded');
+  assert.equal(controller.state.disabled, true);
+});
+test('#235: an ACTION_REJECTED POST alone is terminal for that request', async () => {
+  const f = fixture({ post: () => ({ ok: false, code: 'ACTION_REJECTED' }) });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('raise', 400);
+  assert.equal(f.controller.state.requestId, null, 'released without any status evidence');
+  assert.equal(f.controller.state.disabled, false);
+  assert.deepEqual(f.controller.state.notice, { code: 'ACTION_REJECTED' });
+});
+test('#235: a late cancellation for an earlier request never releases the current one', async () => {
+  let resolveFirst;
+  const posts = [];
+  const f = fixture({ post: (body) => {
+    posts.push(body.requestId);
+    if (posts.length === 1) return new Promise((resolve) => { resolveFirst = () => resolve({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } }); });
+    return new Promise(() => {});
+  } });
+  await f.controller.connect(f.snapshot);
+  const firstSend = f.controller.send('call');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // The first POST timed out client-side; a poll proves it cancelled, and a new request goes out.
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', cancelled: [posts[0]], paused: false });
+  await firstSend;
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.requestId, null);
+  void f.controller.send('fold');
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = f.controller.state.requestId;
+  assert.ok(second && second !== posts[0]);
+  resolveFirst();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(f.controller.state.requestId, second, 'the late proof for the first request is ignored');
+});
+test('#235: a storage failure while releasing never strands the controller in sending', async () => {
+  const values = new Map();
+  const storage = { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: () => { throw new Error('quota'); } };
+  const controller = createActionController({
+    gameEpoch: 'game-a', storage, timeoutMs: 50,
+    postAction: async (body) => ({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } }),
+    getSnapshot: async () => ({ gameEpoch: 'game-a', view: { legal, gameOver: false } }),
+    getStatus: async () => ({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived' }),
+  });
+  await controller.connect({ gameEpoch: 'game-a', view: { legal, gameOver: false } });
+  await controller.send('call');
+  assert.equal(controller.state.phase, 'paused');
+  assert.equal(controller.state.requestId, null);
+});
 test('#235: an idle tab locks while paused instead of spending cancellation slots', async () => {
   const f = fixture();
   f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', paused: true });
