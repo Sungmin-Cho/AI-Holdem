@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { withActionGate, retryControlWrite } from '../tools/session-control.js';
+import { withActionGate, retryControlWrite, readActionGatePaused } from '../tools/session-control.js';
 import { verifyHintPublication } from '../tools/hint-proof.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
@@ -1511,15 +1511,28 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       return;
     }
     try {
-      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => receiptStore.accept(body,currentDecisionId()), { decisionId: body.decisionId }), {timeoutMs:250});
+      // CONTROL_BUSY retries yield to the event loop, so a publication can move the
+      // turn to another seat between attempts. Re-check the seat inside each locked
+      // attempt, bound to the same synchronous section as accept/cancel.
+      const seatStillToAct = () => !(state.decision?.toAct && state.decision.toAct !== seat);
+      if (controlProtocolVersion === 1) await retryControlWrite(() => withActionGate(root, gameEpoch, () => {
+        if (!seatStillToAct()) throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' });
+        return receiptStore.accept(body, currentDecisionId());
+      }, {
+        decisionId: body.decisionId,
+        // #235: a pause refusal records a durable per-request cancellation under the
+        // same control lock, so the client may release the request and choose again.
+        onClosed: (control) => (seatStillToAct() ? receiptStore.cancel(body, currentDecisionId(), control.controlRevision) : null),
+      }), {timeoutMs:250});
       else receiptStore.accept(body, current);
       clearHintClients(current);
       deliverSlot();
     } catch (error) {
       const status = error.code === 'GAME_PAUSED' || error.code === 'DECISION_CLOSED' || error.code === 'NOT_YOUR_TURN' ? 409
         : ['CONTROL_BUSY','CONTROL_UNAVAILABLE'].includes(error.code) ? 503 : error.code === 'BAD_ACTION' ? 400
-        : ['STALE_DECISION', 'ACTION_ALREADY_RECEIVED', 'ACTION_REJECTED', 'ACTION_RECEIPT_CAPACITY'].includes(error.code) ? 409 : 500;
-      sendJson(res, status, { ok: false, code: error.code ?? 'PERSIST_FAILED' });
+        : ['STALE_DECISION', 'ACTION_ALREADY_RECEIVED', 'ACTION_REJECTED', 'ACTION_RECEIPT_CAPACITY', 'ACTION_CANCELLED'].includes(error.code) ? 409 : 500;
+      sendJson(res, status, { ok: false, code: error.code ?? 'PERSIST_FAILED',
+        ...(error.code === 'GAME_PAUSED' && error.cancelled ? { cancelled: error.cancelled } : {}) });
       return;
     }
     sendJson(res, 200, { ok: true });
@@ -1594,7 +1607,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       if (supplied !== null && supplied !== undefined) {
         if (!checkToken(supplied, res)) return;
         await hintInitialized;
-        sendJson(res, 200, { ok: true, protocolVersion: 2, controlProtocolVersion, capabilities: { actionReceipts: true, studyLink: true, preActionHints: 1, preActionHintsReady: hintContext.ready === true } });
+        sendJson(res, 200, { ok: true, protocolVersion: 2, controlProtocolVersion, capabilities: { actionReceipts: true, ...(controlProtocolVersion === 1 ? { actionCancellations: 1 } : {}), studyLink: true, preActionHints: 1, preActionHintsReady: hintContext.ready === true } });
       } else sendJson(res, 200, { ok: true });
       return;
     }
@@ -1612,8 +1625,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         sendJson(res, 200, { ok: true, decisionId: null, requestId: null, phase: 'unreceived' });
         return;
       }
-      try { sendJson(res, 200, receiptStore.status(currentDecisionId())); }
-      catch { sendJson(res, 503, { ok: false, code: 'ACTION_RECEIPT_CORRUPT' }); }
+      try {
+        sendJson(res, 200, { ...receiptStore.status(currentDecisionId()),
+          ...(controlProtocolVersion === 1 ? { paused: readActionGatePaused(root, gameEpoch) } : {}) });
+      } catch { sendJson(res, 503, { ok: false, code: 'ACTION_RECEIPT_CORRUPT' }); }
       return;
     }
 

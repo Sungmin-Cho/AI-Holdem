@@ -1675,7 +1675,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const matchesStoreRelay = async ({ port, sessionToken }, snapshot, study, { stopAware }) => {
-    if (!study) return true;
+    if (!study && !managed) return true;
     const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
       headers: { 'x-session-token': sessionToken },
       signal: AbortSignal.timeout(assertAndBoundFinalizationMs(localHttpProbeMs)),
@@ -1685,9 +1685,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try { health = await response.json(); } catch { /* incompatible owned relay */ }
     if (stopAware) assertNotStopping();
     return response.ok && health?.ok === true && health.protocolVersion === 2
-      && health.capabilities?.actionReceipts === true && health.capabilities?.studyLink === true
-      && (opts.hints !== 'on' || health.capabilities?.preActionHints === 1)
-      && snapshot.studyUrl === study.studyUrl;
+      && health.capabilities?.actionReceipts === true
+      // #235: a managed relay from before the pause cancellation ledger would keep
+      // refusing paused actions without proof; replace it like any stale relay.
+      && (!managed || health.capabilities?.actionCancellations === 1)
+      && (!study || (health.capabilities?.studyLink === true && snapshot.studyUrl === study.studyUrl))
+      && (opts.hints !== 'on' || health.capabilities?.preActionHints === 1);
   };
 
   const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
@@ -1927,8 +1930,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (startTimeOf(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
           }
-          const compatible = study ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
-          if (study) {
+          const compatible = study || managed ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
+          if (study || managed) {
             assertPinnedServerLock(pin);
             if (startTimeOf(existing.serverPid) !== startTime) {
               throw codedError('SERVER_IDENTITY_CHANGED', 'store relay identity가 capability 검증 중 바뀌었습니다.');

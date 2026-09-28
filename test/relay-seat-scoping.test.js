@@ -7,11 +7,11 @@ import { HOST_ID } from '../publish-contract.js';
 import { createSessionControl, withActionGate } from '../tools/session-control.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
-import { createGame, startHand } from '../engine/hand.js';
+import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
 import { viewFor } from '../engine/views.js';
 import { gameEpochOf } from '../publish-contract.js';
-import { saveState, writeJsonAtomic } from '../engine/state.js';
+import { saveState, writeJsonAtomic, acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
 
 const TOKEN = 'seat-scope-token';
 
@@ -192,4 +192,46 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
     // Card values must be absent; the card-free epoch digest may contain "2c".
     assert.equal(blob.includes(JSON.stringify(card)), false, card);
   }
+});
+
+// CONTROL_BUSY retries yield to the event loop; a publication in between can hand
+// the turn to another seat. The seat check must be repeated inside the locked
+// attempt, or a predicted next decision id would be accepted for the wrong seat.
+test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision', async (t) => {
+  const f = await multiRelay(t);
+  createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  assert.ok(['user', 'h1'].includes(actor), `a human acts first (${actor})`);
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  assert.notEqual(nextLegal.toAct, actor);
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-next', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    saveState(f.dir, next);
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.equal(response.json.code, 'NOT_YOUR_TURN');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), false);
 });

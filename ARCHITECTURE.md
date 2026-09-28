@@ -46,7 +46,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `shared/hand-replay.js` | 완료 핸드 복기 투영(`replayRecord`). 엔진 CLI와 서버가 같은 함수를 부른다. |
 | `tools/room-manager.js` | 로비 룸 상태(`open/locked/closed/error`), 참가 코드·토큰 세대, `lockForStart`/`bind`/`unlock`/`release`. |
 | `server/public/replay-format.js` | 복기 오버레이용 순수 행 모델(`formatReplay`). 표식 문구와 벳/레이즈 동사. |
-| `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. |
+| `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. 일시정지 gate가 거부한 요청의 취소 원장(`ui-action-cancellations.json`, 현재 결정 한정)도 소유하며, 기록된 요청은 이후 `ACTION_CANCELLED`로만 거부된다. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |

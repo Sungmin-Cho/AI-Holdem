@@ -322,6 +322,78 @@ test('x-seat is overwritten and note is stripped on the public game proxy', asyn
   assert.equal(lobbyOnPublic.status, 401);
 });
 
+// #235: while pausing/paused the relay's gate decides, so its refusal body (with
+// per-request cancellation proof) reaches the participant unchanged. Other
+// non-playing states keep the proxy's own unproven refusal.
+test('paused action POSTs reach the relay gate and its cancellation proof passes through', async (t) => {
+  const storeDir = createOwnedTempDir('holdem-proxy-paused');
+  const captured = [];
+  const relay = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
+    captured.push({ url: req.url, seat: req.headers['x-seat'], body });
+    res.writeHead(409, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } }));
+  });
+  await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => relay.close(resolve)));
+  const gameId = randomUUID();
+  const sessionDir = path.join(storeDir, 'session');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionToken = 'c'.repeat(64);
+  const gameEpoch = createHash('sha256').update(sessionToken).digest('hex');
+  fs.writeFileSync(path.join(sessionDir, 'lock.json'), JSON.stringify({
+    serverPid: process.pid, port: relay.address().port, sessionToken, controlProtocolVersion: 1, startedAt: new Date().toISOString(),
+  }));
+  fs.writeFileSync(path.join(sessionDir, 'state.json'), JSON.stringify({ sessionToken, seats: [] }));
+  const roomStore = createOwnedTempDir('holdem-proxy-paused-room');
+  const roomMgr = createRoomManager({ storeDir: roomStore });
+  let state = 'pausing';
+  const manager = {
+    snapshot: () => ({ state, instanceId: 'i', appRevision: 1, gameId, gameEpoch, selectionVersion: 1, allowedCommands: [] }),
+    command: () => ({ requestId: 'x', status: 'rejected' }),
+    receipt: () => ({ requestId: 'x', status: 'rejected' }),
+    current: { gameId, sessionDir, selectionVersion: 1 },
+    session: { loop: { serverPid: process.pid } },
+    room: roomMgr,
+  };
+  const app = await startAppServer({ manager, token: TOKEN, storeDir: roomStore, port: 0, publicPort: 0 });
+  registerOwnedServer(app.server, 'app-paused');
+  t.after(() => app.close());
+  const opened = await fetch(`${app.origin}/api/room`, {
+    method: 'POST', headers: auth(),
+    body: JSON.stringify({ op: 'open', hostName: '호스트', totalSeats: 4, actionTimeoutSec: 60 }),
+  });
+  const room = await opened.json();
+  const joined = await fetch(`http://127.0.0.1:${app.publicPort}/api/join`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: room.joinCode, name: '민준' }),
+  });
+  const guest = await joined.json();
+  roomMgr.bind(gameId, [{ participantId: guest.participantId, playerId: 'h1' }]);
+  const post = (requestId) => fetch(`http://127.0.0.1:${app.publicPort}/api/p/game/${gameId}/action`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${guest.participantToken}`, 'content-type': 'application/json', 'x-game-epoch': gameEpoch },
+    body: JSON.stringify({ decisionId: 'd-1-preflop-0', requestId, action: 'fold' }),
+  });
+  for (const next of ['pausing', 'paused']) {
+    state = next;
+    const response = await post(`q-${next}`);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: 'd-1-preflop-0', requestId: `q-${next}` } });
+    assert.equal(captured.at(-1).seat, 'h1');
+  }
+  const forwarded = captured.length;
+  for (const next of ['starting', 'stopping', 'finalizing', 'error']) {
+    state = next;
+    const response = await post(`q-${next}`);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { code: 'GAME_PAUSED' });
+  }
+  assert.equal(captured.length, forwarded, 'non-pause states never reach the relay');
+});
+
 test('start injects room participants into the engine session', { timeout: TIMEOUT }, async (t) => {
   const { storeDir, manager, app } = await boot(t);
   const opened = await fetch(`${app.origin}/api/room`, {

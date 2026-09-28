@@ -392,6 +392,99 @@ test('R3: a paused refusal keeps the request; after resume the poll adopts a lat
   assert.equal(f.controller.state.phase,'accepted');assert.equal(f.controller.state.requestId,requestId);
   assert.equal(f.sent.length,1,'no second send was needed');
 });
+// #235: only durable server proof for this exact request releases it.
+test('#235: pause refusal with cancellation proof releases the request and locks until resume', async () => {
+  let response = null;
+  const f = fixture({ post: (body) => response ?? { ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } } });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('raise', 400);
+  const first = f.sent[0].requestId;
+  assert.equal(f.controller.state.phase, 'paused');
+  assert.equal(f.controller.state.requestId, null);
+  assert.equal(f.controller.state.disabled, true, 'locked while paused');
+  assert.equal(f.controller.state.canRetry, false);
+  assert.deepEqual(f.controller.state.notice, { code: 'ACTION_CANCELLED' });
+  assert.equal(f.values.size, 0, 'the released request leaves session storage');
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', cancelled: [first], paused: true });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.phase, 'paused', 'the poll keeps the lock while the gate is closed');
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', cancelled: [first], paused: false });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.phase, 'idle');
+  assert.equal(f.controller.state.disabled, false);
+  response = { ok: true };
+  await f.controller.send('fold');
+  assert.equal(f.sent[1].action, 'fold', 'a different action is allowed after resume');
+  assert.notEqual(f.sent[1].requestId, first);
+});
+test('#235: proof for another request, or a plain refusal, keeps the request', async () => {
+  const f = fixture({ post: () => ({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: legal.decisionId, requestId: 'someone-else' } }) });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  assert.equal(f.controller.state.phase, 'unreceived');
+  assert.equal(f.controller.state.requestId, f.sent[0].requestId);
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', cancelled: ['someone-else'], paused: true });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.requestId, f.sent[0].requestId, 'another id in the list is not proof for this request');
+  assert.equal(f.controller.state.phase, 'unreceived');
+});
+test('#235: a restored request is released by the status list, and a late retry by ACTION_CANCELLED', async () => {
+  const f = fixture({ post: () => ({ ok: false, code: 'GAME_PAUSED' }) });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  const requestId = f.sent[0].requestId;
+  // A duplicated tab restores the same request from storage and learns of the
+  // cancellation (recorded for the other tab's POST) from its poll.
+  const restored = fixture({ values: new Map(f.values) });
+  restored.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', cancelled: [requestId], paused: false });
+  await restored.controller.connect(restored.snapshot);
+  assert.equal(restored.controller.state.requestId, null);
+  assert.equal(restored.controller.state.phase, 'idle');
+  assert.deepEqual(restored.controller.state.notice, { code: 'ACTION_CANCELLED' });
+  // The original tab never saw the proof; its retry after resume is refused for good.
+  const late = fixture({ values: new Map(f.values), post: () => ({ ok: false, code: 'ACTION_CANCELLED' }) });
+  await late.controller.connect(late.snapshot);
+  assert.equal(late.controller.state.requestId, requestId);
+  await late.controller.retry();
+  assert.equal(late.controller.state.requestId, null);
+  assert.equal(late.controller.state.phase, 'idle');
+  assert.deepEqual(late.controller.state.notice, { code: 'ACTION_CANCELLED' });
+});
+test('#235: a request whose rejection another tab superseded is released by the rejected list', async () => {
+  const f = fixture({ post: () => { throw new Error('response lost'); } });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  const mine = f.sent[0].requestId;
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: 'other-tab', phase: 'rejected', reason: 'ILLEGAL_ACTION', rejected: [mine] });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.requestId, null);
+  assert.equal(f.controller.state.phase, 'rejected');
+  assert.equal(f.controller.state.disabled, false, 'no RECEIPT_MISMATCH lock');
+});
+test('#235: an older rejected receipt does not reopen input while paused', async () => {
+  const f = fixture({ post: (body) => ({ ok: false, code: 'GAME_PAUSED', cancelled: { decisionId: body.decisionId, requestId: body.requestId } }) });
+  await f.controller.connect(f.snapshot);
+  await f.controller.send('call');
+  const cancelled = f.sent[0].requestId;
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: 'older-rejected', phase: 'rejected', reason: 'ILLEGAL_ACTION', cancelled: [cancelled], paused: true });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.phase, 'paused');
+  assert.equal(f.controller.state.disabled, true);
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: 'older-rejected', phase: 'rejected', reason: 'ILLEGAL_ACTION', cancelled: [cancelled], paused: false });
+  await f.controller.reconcile();
+  assert.equal(f.controller.state.phase, 'rejected');
+  assert.equal(f.controller.state.disabled, false);
+});
+test('#235: an idle tab locks while paused instead of spending cancellation slots', async () => {
+  const f = fixture();
+  f.setStatus({ ok: true, decisionId: legal.decisionId, requestId: null, phase: 'unreceived', paused: true });
+  await f.controller.connect(f.snapshot);
+  assert.equal(f.controller.state.phase, 'paused');
+  await f.controller.send('call');
+  assert.equal(f.sent.length, 0);
+  const { formatActionNotice } = await import('../server/public/action-controller.js');
+  assert.match(formatActionNotice({ code: 'ACTION_CANCELLED' }), /취소/);
+});
 test('asynchronous rejected receipt exposes a bounded reason as an informational notice',async()=>{
   const f=fixture();await f.controller.connect(f.snapshot);await f.controller.send('call');
   f.setStatus({ok:true,decisionId:legal.decisionId,requestId:f.sent[0].requestId,phase:'rejected',reason:'ILLEGAL_ACTION'});
