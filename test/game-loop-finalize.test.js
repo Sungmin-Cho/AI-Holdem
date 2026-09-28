@@ -85,6 +85,31 @@ import {
   assert205UnconfirmedCommand,
 } from './helpers/game-loop-fixtures.mjs';
 
+// #213: a monotonic clock that shares process.hrtime's origin (publish.js compares
+// --deadline-monotonic-ns against its own hrtime) and only ever moves forward. Jumping it
+// crosses a finalization cutoff at once instead of waiting it out in real time — the win32
+// default result wait alone is 190 s. Timers and child timeouts armed before a jump are not
+// shortened, so a test jumps while the step it wants past the cutoff is parked in-process.
+function createJumpClock() {
+  let offsetNs = 0n;
+  const monotonicNs = () => process.hrtime.bigint() + offsetNs;
+  return {
+    monotonicNs,
+    jumpBy(ms) {
+      assert.ok(Number.isSafeInteger(ms) && ms >= 0, `jump clock moves forward only (${ms})`);
+      offsetNs += BigInt(ms) * 1_000_000n;
+    },
+    jumpTo(targetNs) {
+      const delta = targetNs - monotonicNs();
+      if (delta > 0n) offsetNs += delta;
+    },
+  };
+}
+
+// §9.2 (2): a finalizing replacement needs an absolute 5 s of result wait. Tests that jump
+// to "less than that is left" land here, leaving room for one coach child on a slow host.
+const LEFT_BELOW_REPLACEMENT_FLOOR_NS = 4_500n * 1_000_000n;
+
 // #192 S2a E3: the CLI now exits non-zero for reserve/begin-owner/bind-handle without
 // --spawn-evidence 1. execFile's promisified form rejects on a non-zero exit but still
 // attaches the child's stdout/stderr to the error, so the failure envelope is read there.
@@ -404,16 +429,28 @@ test('Task 7A r1: cutoff 커밋 뒤 crash-resume은 pending Q를 owner 교대 �
   assert.ok(after.publishedSeals['1']);
 });
 
-test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫은 뒤에만 replacement를 시작한다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫은 뒤에만 replacement를 시작한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const external = await startExternalServer(gameDir, init.sessionToken);
   t.after(() => terminateIfAlive(external.child));
   const orphans = [await startCoachOrphan(), await startCoachOrphan()];
   for (const child of orphans) t.after(() => terminateIfAlive(child));
-  await seedRunningCoach(gameDir, 'old-owner', 1, orphans[0]);
-  await seedRunningCoach(gameDir, 'old-owner', 2, orphans[1]);
+  const seeded = [
+    await seedRunningCoach(gameDir, 'old-owner', 1, orphans[0]),
+    await seedRunningCoach(gameDir, 'old-owner', 2, orphans[1]),
+  ];
+  // #213: on win32 each identity probe is a synchronous PowerShell child (~200 ms) that
+  // blocks the event loop between the two workers' SIGTERMs. Serve the start time the seed
+  // itself observed for exactly these pids while they are still running; liveness still
+  // comes from kill(pid, 0) and every other pid keeps the real probe, so the 80 ms
+  // concurrency bound below stays as it is.
+  const seededStartTime = (pid) => {
+    const index = orphans.findIndex((child) => child.pid === pid);
+    if (index === -1) return null;
+    const child = orphans[index];
+    return child.exitCode === null && child.signalCode === null ? seeded[index].startTime : null;
+  };
 
   const signals = [];
   let liveAtReplacement = [];
@@ -434,10 +471,11 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
     upper,
     stateOverrides: { port: external.lock.port },
     loopOpts: {
-      finalizeBudgetMs: 4_000,
-      finalizeCutoffLeadMs: 2_000,
+      finalizeBudgetMs: 4_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
       orphanTerminateGraceMs: 180,
       orphanTerminateKillWaitMs: 180,
+      processStartTime: (pid) => seededStartTime(pid) ?? processStartTime(pid),
       signalProcess: (pid, signal) => {
         if (orphans.some((child) => child.pid === pid)) signals.push({ pid, signal, at: Date.now() });
         process.kill(pid, signal);
@@ -573,8 +611,7 @@ test('Task 7A full review: finalize 직전 authority epoch 오염도 tracked wor
   assert.equal(halted.halt.recovery.attempts[0].reason, 'STALE_GAME_EPOCH');
 });
 
-test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spawn/bind하지 않는다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spawn/bind하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseCapture;
@@ -588,9 +625,17 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
       raw: JSON.stringify({ handNo: 1, text: 'cutoff 뒤 시작하면 안 되는 worker' }),
     }],
   });
+  // #213: the POSIX default budget, crossed with a clock jump instead of a 10 s (win32
+  // 190 s) wait. The lead also covers a win32 resume's tail before the jump.
+  const clock = createJumpClock();
+  const resultWaitMs = 10_000 * WIN32_SCALE;
+  const leadMs = 10_000 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
       coachCaptureCheckpoint: async () => {
         captureEntered();
         await captureGate;
@@ -600,13 +645,14 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
 
   await loop.resume();
   await entered;
+  // The deadline starts during resume, before capture. Cross its cutoff while capture is
+  // parked, before run() arms the settle wait, and observe the settle step seeing it.
+  clock.jumpBy(resultWaitMs);
   const running = startRun(loop);
-  // The deadline starts during resume, before capture. Observe the real cutoff
-  // under the normal budget rather than sleeping relative to the end of resume.
   const cutoff = await waitFor(
     () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
     'capture stayed blocked without reaching the result-wait cutoff',
-    15_000,
+    15_000 * WIN32_SCALE,
   );
   assert.equal(cutoff.settled, false, 'the blocked capture did not cross the cutoff');
   assert.equal(cutoff.pending, 1);
@@ -618,8 +664,7 @@ test('Task 7A r1: capture가 cutoff를 가로질러도 reserve 뒤 worker를 spa
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.terminationConfirmed, true);
 });
 
-test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handle 없는 worker를 시작하지 않는다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handle 없는 worker를 시작하지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseSpawn;
@@ -628,9 +673,16 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
   let spawnEntered;
   const entered = new Promise((resolve) => { spawnEntered = resolve; });
   const upper = makeCoachAdapter();
+  // #213: as above — the POSIX default budget, crossed with a clock jump.
+  const clock = createJumpClock();
+  const resultWaitMs = 10_000 * WIN32_SCALE;
+  const leadMs = 10_000 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
       coachSpawnCheckpoint: async () => {
         spawnEntered();
         await spawnGate;
@@ -640,11 +692,12 @@ test('Task 7A full review: reserve 뒤 spawn 경계가 cutoff를 넘으면 handl
 
   await loop.resume();
   await entered;
+  clock.jumpBy(resultWaitMs);
   const running = startRun(loop);
   const cutoff = await waitFor(
     () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
     'spawn stayed blocked without reaching the result-wait cutoff',
-    15_000,
+    15_000 * WIN32_SCALE,
   );
   assert.equal(cutoff.settled, false, 'the blocked spawn did not cross the cutoff');
   assert.equal(cutoff.pending, 1);
@@ -1131,22 +1184,46 @@ test('Task 7A r3: Q로 이미 봉인되고 pid가 죽은 retired attempt는 clea
   assert.equal((await loop.run()).phase, 'done');
 });
 
-test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설치해 5초 미만 attempt-2를 막는다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설치해 5초 미만 attempt-2를 막는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
+  // #213: the 5 s replacement floor is absolute, so a scaled window would change the
+  // scenario. The window is large instead, and a clock jump leaves less than 5 s of it.
+  // Attempt 1 answers only after its bind is durable and the jump has landed, so a slow
+  // host has to fit just the complete-unavailable seal into what is left.
+  const clock = createJumpClock();
+  const cutoffs = [];
+  let answerAttemptOne;
+  const attemptOneGate = new Promise((resolve) => { answerAttemptOne = resolve; });
+  t.after(() => answerAttemptOne());
   const upper = makeCoachAdapter({
     rounds: [
-      { raw: 'invalid first coach response' },
+      { gate: attemptOneGate, raw: 'invalid first coach response' },
       { raw: JSON.stringify({ handNo: 1, text: '금지된 pre-run replacement' }) },
     ],
   });
+  const leadMs = 4_000 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 4_000 },
+    loopOpts: {
+      finalizeBudgetMs: 10_000 * WIN32_SCALE + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+      onFinalizationDeadline: (installed) => {
+        cutoffs.push({ ...installed, beginOwners: coachInvocations(calls, 'begin-owner').length });
+      },
+    },
   });
 
   await loop.resume();
+  assert.equal(cutoffs.length, 1, 'finalizing resume이 result-wait cutoff를 설치하지 않았다');
+  assert.equal(cutoffs[0].beginOwners, 0, 'result-wait cutoff가 begin-owner 뒤에 설치됐다');
+  await waitFor(
+    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
+    'resume-time attempt 1 was not bound',
+  );
+  clock.jumpTo(cutoffs[0].resultWaitCutoffNs - LEFT_BELOW_REPLACEMENT_FLOOR_NS);
+  answerAttemptOne();
   await waitFor(
     () => upper.starts.length >= 2 || coachInvocations(calls, 'complete-unavailable').length >= 1,
     'resume-time attempt 1 did not settle',
@@ -1161,20 +1238,52 @@ test('Task 7A r2: finalizing resume begin-owner 전에 result-wait cutoff를 설
   assert.equal((await loop.run()).phase, 'done');
 });
 
-test('Task 7A r2: open review gate는 cutoff deadline을 해제하고 독립 300초 Task 7B handoff scope를 연다', { timeout: 20_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('#213 onFinalizationDeadline은 cutoff 설치를 한 번 관찰만 하고, 던져도 finalization을 바꾸지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const observed = [];
+  const leadMs = 4_000 * WIN32_SCALE;
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    loopOpts: {
+      finalizeBudgetMs: 6_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: leadMs,
+      onFinalizationDeadline: (installed) => {
+        observed.push(installed);
+        throw new Error('an observer failure must not reach finalization');
+      },
+    },
+  });
+
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+
+  assert.equal(observed.length, 1);
+  assert.equal(typeof observed[0].deadlineNs, 'bigint');
+  assert.equal(observed[0].deadlineNs - observed[0].resultWaitCutoffNs, BigInt(leadMs) * 1_000_000n);
+  const loopState = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(loopState.halt, undefined);
+  assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
+});
+
+test('Task 7A r2: open review gate는 cutoff deadline을 해제하고 독립 300초 Task 7B handoff scope를 연다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let seamCalls = 0;
   const upper = makeCoachAdapter();
+  const clock = createJumpClock();
+  const finalizeBudgetMs = 3_000 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 3_000,
-      finalizeCutoffLeadMs: 2_000,
+      finalizeBudgetMs,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      monotonicNs: clock.monotonicNs,
       reviewGateCheckpoint: async () => {
         seamCalls += 1;
-        await new Promise((resolve) => setTimeout(resolve, 3_200));
+        // #213: move the clock past the whole finalization budget at once (was a 3.2 s
+        // sleep against a 3 s budget): the handoff child after the reset must still run.
+        clock.jumpBy(finalizeBudgetMs + 1_000);
       },
     },
   });
@@ -1270,8 +1379,7 @@ test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행
   assert.equal(authority.activeOwnerSessionId, resumed.ownerSessionId);
 });
 
-test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finalize-cutoff가 봉인한다', { timeout: 40_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finalize-cutoff가 봉인한다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
@@ -1280,12 +1388,26 @@ test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finali
   const upper = makeCoachAdapter({
     rounds: [{ gate, raw: JSON.stringify({ handNo: 1, text: '예산을 넘긴 코치' }) }],
   });
+  const clock = createJumpClock();
+  const resultWaitMs = 5_000 * WIN32_SCALE;
+  const leadMs = 4_300 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+    loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+    },
   });
 
   await loop.resume();
+  // #213: cross the cutoff with a clock jump once the tracked worker's bind is durable,
+  // instead of a 700 ms window a win32 resume overruns before spawn and bind.
+  await waitFor(
+    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
+    'tracked coach was not bound before the cutoff',
+  );
+  clock.jumpBy(resultWaitMs);
   assert.equal((await loop.run()).phase, 'done');
 
   assert.equal(upper.starts.length, 1, 'begin-owner descriptor가 스폰되지 않았다');
@@ -1305,34 +1427,45 @@ test('종료: 예산을 넘긴 tracked 코치 생성은 종료 확인 뒤 finali
   assert.equal(flagValue(cutoff, '--snapshot-file'), path.join(gameDir, 'ui-snapshot.json'));
   assert.equal(fs.existsSync(flagValue(cutoff, '--stats-file')), true);
   const loopState = readJson(path.join(gameDir, 'loop-state.json'));
-  assert.equal(loopState.finalization.budgetMs, 5_000);
-  assert.equal(loopState.finalization.resultWaitMs, 700);
+  assert.equal(loopState.finalization.budgetMs, resultWaitMs + leadMs);
+  assert.equal(loopState.finalization.resultWaitMs, resultWaitMs);
   assert.equal(loopState.finalization.cutoff.terminationConfirmed, true);
   assert.deepEqual(loopState.finalization.cutoff.sealed, [1]);
   const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
   assert.equal(note.unavailable, true);
 });
 
-test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 그 generation을 unavailable로 봉인한다', { timeout: 40_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 그 generation을 unavailable로 봉인한다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
-  // Attempt 1 fails only after the finalization checkpoint exists, so the remaining
-  // result-wait budget (≤ 2s here) is always below the 5s replacement floor of §9.2 (2).
+  // Attempt 1 fails only after the finalization checkpoint exists. #213: the window is
+  // large (the 5 s floor of §9.2 (2) is absolute, so it is not scaled) and a clock jump at
+  // that moment leaves less than 5 s of it.
+  const clock = createJumpClock();
+  const cutoffs = [];
   const gate = waitFor(
     () => Boolean(readJson(path.join(gameDir, 'loop-state.json')).finalization),
     'finalization checkpoint did not appear',
-    10_000,
-  );
+    10_000 * WIN32_SCALE,
+  ).then(() => {
+    assert.equal(cutoffs.length, 1, 'result-wait cutoff was not installed');
+    clock.jumpTo(cutoffs[0].resultWaitCutoffNs - LEFT_BELOW_REPLACEMENT_FLOOR_NS);
+  });
   const upper = makeCoachAdapter({
     rounds: [
       { gate, raw: '코치 응답이 JSON이 아니다' },
       { raw: JSON.stringify({ handNo: 1, text: '교체 예산 없이 스폰된 attempt 2' }) },
     ],
   });
+  const leadMs = 4_000 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 4_000 },
+    loopOpts: {
+      finalizeBudgetMs: 10_000 * WIN32_SCALE + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+      onFinalizationDeadline: (installed) => cutoffs.push(installed),
+    },
   });
 
   await loop.resume();
@@ -1357,8 +1490,7 @@ test('종료: result-wait 잔여가 5초 미만이면 attempt 2 교체 없이 �
   assert.equal(loopState.finalization.cutoff.reviewGate, 'open');
 });
 
-test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린다', { timeout: 40_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
@@ -1367,12 +1499,26 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
   const upper = makeCoachAdapter({
     rounds: [{ gate, raw: JSON.stringify({ handNo: 1, text: '예산을 넘긴 코치' }) }],
   });
+  const clock = createJumpClock();
+  const resultWaitMs = 5_000 * WIN32_SCALE;
+  const leadMs = 4_300 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+    loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+    },
   });
 
   await loop.resume();
+  // #213: cross the cutoff with a clock jump once the tracked worker's bind is durable,
+  // instead of a 700 ms window a win32 resume overruns before spawn and bind.
+  await waitFor(
+    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
+    'tracked coach was not bound before the cutoff',
+  );
+  clock.jumpBy(resultWaitMs);
   assert.equal((await loop.run()).phase, 'done');
 
   const cutoffAt = calls.findIndex((call) => call.kind === 'coach' && call.args[0] === 'finalize-cutoff');
@@ -1396,8 +1542,7 @@ test('종료: cutoff 뒤 잔여 Q만 deadline 게시로 정확히 한 번 실린
   assert.equal(nonReviewPublishInvocations(calls).length, 1);
 });
 
-test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION_ABORTED로 리뷰 게이트를 잠근다', { timeout: 40_000 }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
+test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION_ABORTED로 리뷰 게이트를 잠근다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
@@ -1410,12 +1555,26 @@ test('종료: 종료 미확인 코치는 fence·adapter-disable 뒤 FINALIZATION
       terminate: { confirmed: false, reason: 'reason-must-not-open-the-gate' },
     }],
   });
+  const clock = createJumpClock();
+  const resultWaitMs = 5_000 * WIN32_SCALE;
+  const leadMs = 4_300 * WIN32_SCALE;
   const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 5_000, finalizeCutoffLeadMs: 4_300 },
+    loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+    },
   });
 
   await loop.resume();
+  // #213: cross the cutoff with a clock jump once the tracked worker's bind is durable,
+  // instead of a 700 ms window a win32 resume overruns before spawn and bind.
+  await waitFor(
+    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
+    'tracked coach was not bound before the cutoff',
+  );
+  clock.jumpBy(resultWaitMs);
   await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
 
   const verbs = coachInvocations(calls).map((args) => args[0]);
@@ -2227,7 +2386,6 @@ test('#192 S2b: 정상 attempt는 bind-handle 전에 .spawn.json phase:identity�
 });
 
 test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 spawn도 남기지 않는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let releaseSpawn;
@@ -2236,9 +2394,16 @@ test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 s
   let spawnEntered;
   const entered = new Promise((resolve) => { spawnEntered = resolve; });
   const upper = makeCoachAdapter();
+  // #213: the POSIX default budget, crossed with a clock jump while spawn is parked.
+  const clock = createJumpClock();
+  const resultWaitMs = 10_000 * WIN32_SCALE;
+  const leadMs = 10_000 * WIN32_SCALE;
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
       coachSpawnCheckpoint: async () => {
         spawnEntered();
         await spawnGate;
@@ -2248,11 +2413,12 @@ test('#192 S2b: coachSpawnCheckpoint 대기 중 cutoff가 걸리면 sidecar도 s
 
   await loop.resume();
   await entered;
+  clock.jumpBy(resultWaitMs);
   const running = startRun(loop);
   await waitFor(
     () => readLoopLog(gameDir).find((row) => row.event === 'finalize-coach-settled'),
     'spawn stayed blocked without reaching the result-wait cutoff',
-    15_000,
+    15_000 * WIN32_SCALE,
   );
   releaseSpawn();
   assert.equal((await running).phase, 'done');
@@ -2490,21 +2656,25 @@ test('#192 O4: spawn 직전 loop-state의 ownerSessionId가 바뀌면 sidecar도
 });
 
 test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar는 aborted-before-spawn으로 끝나고 finalize는 NOT_SPAWNED로 닫는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
-  if (skipOnWin32(t, 'finalization budgets are timed for POSIX; win32 CI overruns the cutoff')) return;
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   const upper = makeCoachAdapter();
-  let blockedOnce = false;
+  let crossedOnce = false;
+  const clock = createJumpClock();
+  const resultWaitMs = 5_000 * WIN32_SCALE;
+  const leadMs = 2_000 * WIN32_SCALE;
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
     loopOpts: {
-      finalizeBudgetMs: 3_500,
-      finalizeCutoffLeadMs: 2_000,
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
       writeSpawnEvidence: (filePath, data) => {
-        if (data.phase === 'intent' && !blockedOnce) {
-          blockedOnce = true;
-          const sab = new Int32Array(new SharedArrayBuffer(4));
-          Atomics.wait(sab, 0, 0, 1_700);
+        if (data.phase === 'intent' && !crossedOnce) {
+          crossedOnce = true;
+          // #213: the intent write crosses the result-wait cutoff by a clock jump (was a
+          // 1.7 s Atomics.wait against a 1.5 s window, which a win32 resume overruns).
+          clock.jumpBy(resultWaitMs + 100);
         }
         writeJsonAtomic(filePath, data);
       },
@@ -2514,7 +2684,7 @@ test('#192 S2b: intent 기록이 result-wait cutoff를 가로지르면 sidecar�
   await loop.resume();
   const outcome = await loop.run().catch((error) => error);
 
-  assert.equal(blockedOnce, true, 'precondition: intent 기록이 실제로 블록됐다');
+  assert.equal(crossedOnce, true, 'precondition: intent 기록이 실제로 cutoff를 가로질렀다');
   assert.equal(upper.starts.length, 0, 'cutoff를 넘긴 뒤에도 worker를 시작했다');
   const authority = readJson(path.join(gameDir, '.coach-authority.json'));
   const retired = authority.retiredAttempts.find((row) => row.handNo === 1);
