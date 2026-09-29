@@ -189,6 +189,8 @@ jobs:
           path: ${{ env.AI_HOLDEM_PLATFORM_DIAGNOSTICS }}/proofs.jsonl
           if-no-files-found: ignore
           retention-days: 14
+          # A re-run attempt uploads under the same name.
+          overwrite: true
   windows-suite:
     name: Windows suite
     needs: windows

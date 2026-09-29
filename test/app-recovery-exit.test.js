@@ -27,9 +27,10 @@ const settle=async(manager,id)=>{
 };
 const read=file=>JSON.parse(fs.readFileSync(file));
 // #211: a failing receipt assertion must name the recovery path, not only the status. The
-// diagnostics carry codes and phases only — never tokens.
+// diagnostics carry codes and phases only — never tokens, so never an error message (a
+// JSON.parse error quotes the file it read, and loop-state.json holds the sessionToken).
 function receiptDiagnostics(manager,row){
-  const safe=fn=>{try{return fn();}catch(error){return `unreadable: ${error.code??error.message}`;}};
+  const safe=fn=>{try{return fn();}catch(error){return `unreadable: ${typeof error?.code==='string'?error.code:'error'}`;}};
   const snapshot=safe(()=>manager.snapshot());
   const dir=safe(()=>manager.current?.sessionDir);
   const loopState=typeof dir==='string'?safe(()=>read(path.join(dir,'loop-state.json'))):null;
@@ -38,11 +39,24 @@ function receiptDiagnostics(manager,row){
   return JSON.stringify({
     receipt:{status:row?.status,error:row?.error,kind:row?.kind,completedAt:row?.completedAt,recovery:row?.recovery?.kind},
     snapshot:typeof snapshot==='object'?{state:snapshot?.state,error:snapshot?.error,recoveryExit:snapshot?.recoveryExit,allowedCommands:snapshot?.allowedCommands}:snapshot,
-    loopState:loopState&&typeof loopState==='object'?{phase:loopState.phase,halt:loopState.halt?.code,haltRecovery:loopState.halt?.recovery?.code,aborting:Boolean(loopState.aborting)}:loopState,
+    loopState:loopState&&typeof loopState==='object'&&!Array.isArray(loopState)?{phase:loopState.phase,halt:loopState.halt?.code,haltRecovery:loopState.halt?.recovery?.code,aborting:Boolean(loopState.aborting)}
+      :typeof loopState==='string'&&loopState.startsWith('unreadable: ')?loopState:loopState===null?null:'non-object',
     log,
   });
 }
 const assertReceipt=(manager,row,status)=>assert.equal(row?.status,status,receiptDiagnostics(manager,row));
+test('#211 receipt diagnostics never carry a token, even from a torn or non-object loop-state',()=>{
+  const secret='f'.repeat(64);
+  for(const body of [`{"sessionToken":"${secret}","phase":`,JSON.stringify(secret),JSON.stringify([secret])]){
+    const dir=createOwnedTempDir('holdem-receipt-diag');
+    fs.writeFileSync(path.join(dir,'loop-state.json'),body);
+    fs.writeFileSync(path.join(dir,'loop.log'),`${JSON.stringify({event:'halt',code:'X',sessionToken:secret})}\n{"torn":"${secret}`);
+    const manager={snapshot:()=>({state:'error',error:'SESSION_RECOVERABLE',allowedCommands:['end']}),current:{sessionDir:dir}};
+    const text=receiptDiagnostics(manager,{status:'failed',error:'X',kind:'end'});
+    assert.equal(text.includes(secret.slice(0,8)),false,text);
+    assert.match(text,/"state":"error"/);
+  }
+});
 const write=(file,value)=>fs.writeFileSync(file,JSON.stringify(value));
 const engineEnd=async(root,operationId)=>promisify(execFile)(process.execPath,[path.resolve('engine/cli.js'),
   'end','--result','abort','--operation-id',operationId,'--game-dir',root]);

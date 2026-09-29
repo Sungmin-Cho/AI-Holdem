@@ -694,15 +694,15 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   if (response.status !== 200 || response.body.ok !== true) fail();
   // #211: while the service pid still runs, the stop cannot have completed and no
   // replacement can exist, so a kill(0) probe is enough to keep waiting. The full ACL and
-  // identity check (a PowerShell spawn each on Windows) runs once the pid is gone, and at
-  // least once a second so a reused pid can never stall the wait.
+  // identity check (a PowerShell spawn each on Windows) runs once the pid is gone, at least
+  // once a second so a reused pid can never stall the wait, and on every poll of the last
+  // second so a finished stop is never reported as a timeout.
   let lastFullCheck = -Infinity;
   while (platformNow() < deadline) {
-    if (pidRunning(value.pid) && platformNow() - lastFullCheck < 1000) {
+    if (pidRunning(value.pid) && platformNow() - lastFullCheck < 1000 && deadline - platformNow() > 1000) {
       await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
       continue;
     }
-    lastFullCheck = platformNow();
     const { current, lock } = aclTransaction(ctx, () => {
       assertContext(ctx);
       return { current: readDescriptor(ctx), lock: readLock(ctx) };
@@ -712,6 +712,7 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
     }
     // A replacement belongs to the next caller; it is never ours to stop.
     if (current.state === 'valid' && current.value.instanceId !== expectedInstanceId) fail('STUDY_IDENTITY_MISMATCH');
+    lastFullCheck = platformNow();
     await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
   }
   fail();

@@ -82,13 +82,15 @@ test('win32 default processStartTime does not depend on ps and is one canonical 
   const orig = process.env.PATH;
   process.env.PATH = '';
   try {
-    const a = processStartTime(process.pid);
-    const b = processStartTime(process.pid);
+    // An uncached reader: the default one may already hold this pid from an earlier test.
+    const read = createProcessStartTime();
+    const a = read(process.pid);
+    const b = read(process.pid);
     assert.equal(typeof a, 'string');
     assert.ok(a.length > 0);
     assert.equal(a, b);
     assert.match(a, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(processStartTime(99_999_999), null);
+    assert.equal(read(99_999_999), null);
   } finally {
     process.env.PATH = orig;
   }
