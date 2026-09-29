@@ -9,7 +9,7 @@ import { writeJsonAtomic } from '../engine/state.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { deriveServerLockObservation } from '../tools/game-loop.js';
-import { compareStartTimes, observeRecordedIdentity } from '../tools/coach-evidence.js';
+import { compareStartTimes, observeRecordedIdentity, rowIdentities } from '../tools/coach-evidence.js';
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
 const TOKEN = 'tok-coach-release';
@@ -379,6 +379,16 @@ test('#247 a changed zone and a reused pid never make an owned handle alive', ()
   assert.equal(observeRecordedIdentity({ pid: DEAD_PID, startTime: OWNED.utc }, {
     processAlive: () => false, startTimeOf: legacyReader, ownedStartTimeOf: ownedReader,
   }), 'dead');
+});
+
+test('#247 an authority handle and a sidecar identity in different forms are a conflict', () => {
+  for (const [authority, sidecar] of [[OWNED.utc, START], [START, OWNED.utc], [OWNED.win32, OWNED.utc]]) {
+    const ids = rowIdentities({ agentHandle: `${LIVE_PID}:${authority}` }, { phase: 'identity', data: { pid: LIVE_PID, startTime: sidecar } });
+    assert.equal(ids.conflict, true, `${authority} vs ${sidecar}`);
+  }
+  const same = rowIdentities({ agentHandle: `${LIVE_PID}:${OWNED.utc}` }, { phase: 'identity', data: { pid: LIVE_PID, startTime: OWNED.utc } });
+  assert.equal(same.conflict, false);
+  assert.deepEqual(same.selected, { pid: LIVE_PID, startTime: OWNED.utc }, 'the whole owned value survives the handle parser');
 });
 
 test('#247 writer: owned handles are alive, replaced or unverifiable by the owned reader alone', async () => {

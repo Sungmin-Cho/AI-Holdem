@@ -755,21 +755,16 @@ export async function assert205UnconfirmedCommand(gameDir, command) {
 // that fakes the loop's observations through seams must give the writer the same view, or
 // the writer correctly refuses a release the loop only believed in. Pass the returned path
 // as the loop's `coachCliPath`. The shim lives outside the repository test tree.
-// `startTimes` answers the legacy reader, `ownedStartTimes` the reader of owned handles.
-export function writerObservationShim({ startTimes = {}, ownedStartTimes = {}, scan = null } = {}) {
+export function writerObservationShim({ startTimes = {}, scan = null } = {}) {
   const dir = createOwnedTempDir('holdem-writer-shim');
   const file = path.join(dir, 'coach-writer-shim.mjs');
-  const byPid = (values) => JSON.stringify(Object.fromEntries(Object.entries(values).map(([pid, value]) => [String(pid), value])));
   fs.writeFileSync(file, [
     `import { runCoachControlCliMain } from ${JSON.stringify(pathToFileURL(COACH_CLI).href)};`,
     `import { processStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/process-identity.js')).href)};`,
-    `import { ownedProcessStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/state.js')).href)};`,
-    `const startTimes = ${byPid(startTimes)};`,
-    `const ownedStartTimes = ${byPid(ownedStartTimes)};`,
+    `const startTimes = ${JSON.stringify(Object.fromEntries(Object.entries(startTimes).map(([pid, value]) => [String(pid), value])))};`,
     `const scan = ${JSON.stringify(scan)};`,
     'await runCoachControlCliMain(process.argv.slice(2), {',
     '  processStartTime: (pid) => (Object.hasOwn(startTimes, String(pid)) ? startTimes[String(pid)] : processStartTime(pid)),',
-    '  ownedProcessStartTime: (pid) => (Object.hasOwn(ownedStartTimes, String(pid)) ? ownedStartTimes[String(pid)] : ownedProcessStartTime(pid)),',
     '  ...(scan ? { scanRuntimeProcesses: async () => scan } : {}),',
     '});',
     '',

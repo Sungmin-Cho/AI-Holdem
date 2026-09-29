@@ -185,7 +185,9 @@ const LSTART_SHAPE = /^\S+\s+\S+\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$|^\S+\s+\S+
 // Windows creation FILETIME, or the start time macOS stores at fork. Linux derives lstart
 // from the boot time, which follows clock steps (and time namespaces), so there a mismatch
 // proves nothing. Two kinds, or a malformed value, prove nothing. Only a record made by the
-// legacy reader uses the rules below.
+// legacy reader uses the rules below. Equal text is still whole-second text: a wall clock
+// set back by exactly the gap, plus a reused pid, could match — the limit lifetime locks
+// already accept, and far narrower than the zone-dependent legacy reading.
 const OWNED = /^(?:utc|win32)-v1:/;
 const owned = (value) => typeof value === 'string' && OWNED.test(value);
 export function isOwnedStartTime(value) { return owned(value); }
