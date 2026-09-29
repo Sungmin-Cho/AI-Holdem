@@ -273,3 +273,19 @@ test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is rec
   } finally { if (!released) releaseOwnedLock(lock); }
   assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-cancellations.json')), false, 'no cancellation for another seat');
 });
+
+test('the gate precheck runs inside the lock before the gate state and wins over GAME_PAUSED', () => {
+  const dir = createOwnedTempDir('holdem-gate-precheck');
+  const epoch = gameEpochOf(TOKEN);
+  const control = createSessionControl(dir, epoch);
+  control.set('paused', { pauseIntent: true });
+  let closedCalls = 0;
+  const seatMoved = () => { throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' }); };
+  assert.throws(() => withActionGate(dir, epoch, () => 'ok', { precheck: seatMoved, onClosed: () => { closedCalls += 1; return { decisionId: 'd', requestId: 'q' }; } }),
+    (error) => error.code === 'NOT_YOUR_TURN' && !('cancelled' in error));
+  assert.equal(closedCalls, 0, 'no cancellation is recorded for a request whose seat moved');
+  control.set('playing', { pauseIntent: false, closedDecisionId: null });
+  let ran = false;
+  assert.throws(() => withActionGate(dir, epoch, () => { ran = true; }, { precheck: seatMoved }), { code: 'NOT_YOUR_TURN' });
+  assert.equal(ran, false);
+});

@@ -254,23 +254,24 @@ test('a linked, foreign-epoch or oversized ledger fails closed and the linked ta
   }
 });
 
-test('a ledger write the writer refuses gives no proof and leaves nothing behind', () => {
-  // The writer re-checks the relay root identity at every step; replacing the root
-  // under a live store is the writer's own refusal path, exercised without seams.
+test('a real ledger write failure gives no proof, creates no ledger, and the request stays admissible', () => {
   const dir = createOwnedTempDir('holdem-ledger-write-fail');
-  const owner = createRelayRootOwner(dir);
-  const store = createActionReceiptStore(dir, EPOCH, { owner });
-  const moved = `${dir}-moved`;
-  fs.renameSync(dir, moved);
-  fs.mkdirSync(dir);
+  const store = createActionReceiptStore(dir, EPOCH, { owner: createRelayRootOwner(dir) });
+  const original = fs.openSync;
+  let injected = 0;
+  fs.openSync = (target, ...rest) => {
+    if (String(target).includes('.ui-action-cancellations.json.')) {
+      injected += 1;
+      throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+    }
+    return original(target, ...rest);
+  };
   try {
     assert.equal(store.cancel(request(), D1, 1), null);
-    assert.equal(fs.existsSync(path.join(dir, LEDGER)), false);
-    assert.equal(fs.existsSync(path.join(moved, LEDGER)), false);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.renameSync(moved, dir);
-  }
+  } finally { fs.openSync = original; }
+  assert.equal(injected, 1, 'the writer itself was reached');
+  assert.equal(fs.existsSync(path.join(dir, LEDGER)), false);
+  assert.equal(store.accept(request(), D1).requestId, 'request-1', 'without proof the request is admissible, as before #235');
 });
 
 test('adoption keeps a relay only when it has every capability this loop relies on', () => {
