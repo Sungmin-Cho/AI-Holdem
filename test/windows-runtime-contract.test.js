@@ -100,6 +100,50 @@ test('production child processes hide the Windows console', () => {
   assert.deepEqual(missing, []);
 });
 
+// #249: the proof child's fixed start-up cost came from the Get-Acl and ConvertTo-Json
+// cmdlets; the script now calls .NET directly and writes the same JSON itself.
+test('#249 the ACL proof script calls .NET only, never a cmdlet', () => {
+  const script = files.aclProofScript(['C:\\store\\.training', "C:\\it's"]);
+  assert.doesNotMatch(script, /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/, 'no Verb-Noun cmdlet');
+  assert.match(script, /\[System\.IO\.Directory\]::GetAccessControl\(\$p\)/);
+  assert.match(script, /\[System\.IO\.File\]::GetAccessControl\(\$p\)/);
+  assert.match(script, /GetAccessRules\(\$true,\$true,\$sid\)/, 'explicit and inherited rules, as SIDs');
+  assert.match(script, /ToString\(\$inv\)/, 'rights are written in the invariant culture');
+  assert.ok(script.includes("@('C:\\store\\.training','C:\\it''s')"), 'paths stay single-quoted literals');
+});
+
+test('#249 the JSON the proof script writes is judged exactly as before', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acl-proof-shape-'));
+  const user = 'S-1-5-21-1-2-3-1001';
+  const proof = (rules, extra = {}) => `{"user":"${user}","tokenOwner":null,"owner":"${user}","reparse":false,"rules":[${rules.join(',')}]${extra.tail ?? ''}}`;
+  const rule = (sid, rights, type = 'Allow') => `{"sid":"${sid}","type":"${type}","rights":${rights}}`;
+  const verdict = (stdout, privateMode = true) => {
+    const reasons = [];
+    let script;
+    const result = files.arePrivatePaths([{ file: dir, privateMode }], {
+      platform: 'win32',
+      spawn: (_exe, args) => { script = args.at(-1); return { status: 0, stdout, stderr: '' }; },
+      onUnproven: (reason) => reasons.push(reason),
+    });
+    assert.equal(script, files.aclProofScript([dir]));
+    return { result, reasons };
+  };
+  try {
+    // GENERIC_READ is a negative 32-bit value; SYSTEM holding it is still trusted.
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-5-18', -2147483648)])}]\r\n`).result, true);
+    assert.equal(verdict(`\uFEFF[${proof([rule(user, 2032127)])}]`).result, true, 'a BOM is tolerated as before');
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-1-0', 1179817)])}]`).result, false, 'Everyone may not read a private path');
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-1-0', 1179817)])}]`, false).result, true, 'but may read a non-private one');
+    assert.equal(verdict(`[${proof([])}]`).result, false, 'no rule for the user is no proof');
+    assert.equal(verdict(`[${proof([rule(user, 2032127)]).replace('"reparse":false', '"reparse":true')}]`).result, false);
+    assert.equal(verdict(`[${proof([rule(user, 2032127)]).replace(`"owner":"${user}"`, '"owner":null')}]`).result, false, 'an unknown owner is no proof');
+    const broken = verdict(`[${proof([rule(user, 2032127)])},]`);
+    assert.equal(broken.result, false);
+    assert.match(broken.reasons.join(' '), /^error:/, 'malformed output is unproven');
+    assert.match(verdict('[]').reasons.join(' '), /^proofs:0\/1/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('one monotonic deadline bounds sequential ACL and identity children', () => {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runtime-budget-'));
  let clock=0; const timeouts=[];
