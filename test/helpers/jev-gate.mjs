@@ -144,9 +144,24 @@ export function guardFromArchive(hand, index, candidateKeys) {
   };
 }
 
+// Whether the engine let the actor raise (engine/hand.js legalSnapshot), replayed from the
+// archive: a full raise (amount >= that action's minRaiseTo) reopens the street to everyone
+// else; a short all-in raise does not reopen it for players who already acted. The actor also
+// needs a live opponent who can still put chips in, and room above the current bet.
+export function canRaiseFromArchive(hand, index) {
+  const a = hand.actions[index], { folded } = tableAt(hand, index);
+  let acted = new Set(), reopen = true;
+  for (const p of hand.actions.slice(0, index)) {
+    if (p.street !== a.street) { acted = new Set(); reopen = true; continue; }
+    if (p.action === 'raise' && p.amount >= p.minRaiseTo) { acted = new Set([p.playerId]); reopen = true; continue; }
+    if (p.action === 'raise') reopen = false;
+    acted.add(p.playerId);
+  }
+  const respondent = Object.keys(hand.holes).some(id => id !== a.playerId && !folded.has(id) && (a.stacks[id] ?? 0) > 0);
+  return !(acted.has(a.playerId) && !reopen) && respondent && a.maxRaiseTo > a.currentBet;
+}
 // The v3 menu re-derived from the archive alone: the action record keeps the legal range, the
-// pot, the street bet and every stack before the action. canRaise is not archived, so the
-// offered keys must equal either the no-raise menu or the full v3 menu for that state.
+// pot, the street bet and every stack before the action. Null when it is not a legal menu.
 export function menuFromArchive(hand, index) {
   const a = hand.actions[index], { bets, folded } = tableAt(hand, index);
   const snapshot = { street: a.street, blinds: hand.blinds, currentBet: a.currentBet, potBefore: a.potTotal,
@@ -154,17 +169,19 @@ export function menuFromArchive(hand, index) {
     priorActions: hand.actions.slice(0, index).map(p => ({ playerId: p.playerId, street: p.street, action: p.action, amount: p.amount })),
     publicSeats: Object.keys(hand.holes).map(id => ({ playerId: id, stack: a.stacks[id] ?? 0, bet: bets[id] ?? 0,
       folded: folded.has(id), out: false })) };
-  const legal = { canCheck: a.callAmount === 0, callAmount: a.callAmount, minRaiseTo: a.minRaiseTo, maxRaiseTo: a.maxRaiseTo };
-  const menus = [];
-  for (const canRaise of [false, true]) {
-    try { menus.push(buildJevCandidates(snapshot, { ...legal, canRaise })); } catch { /* not a legal menu */ }
-  }
-  return menus;
+  const legal = { canCheck: a.callAmount === 0, canRaise: canRaiseFromArchive(hand, index), callAmount: a.callAmount,
+    minRaiseTo: a.minRaiseTo, maxRaiseTo: a.maxRaiseTo };
+  try { return buildJevCandidates(snapshot, legal); } catch { return null; }
 }
 const sameKeys = (menu, probabilities) => {
   const keys = Object.keys(probabilities);
-  return menu.length === keys.length && menu.every(c => Object.hasOwn(probabilities, c.key));
+  return Array.isArray(menu) && menu.length === keys.length && menu.every(c => Object.hasOwn(probabilities, c.key));
 };
+// The gate judges stores born under the current descriptor only: both the engine's birth copy
+// and the loop's copy equal it and nothing was rolled forward. Older stores keep entries of
+// other versions that this gate cannot recompute.
+const sameDescriptor = d => Boolean(d) && typeof d === 'object' && Object.keys(d).length === Object.keys(JEV_CONFIG).length
+  && Object.entries(JEV_CONFIG).every(([key, value]) => d[key] === value);
 const percentile = (values, p) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -221,8 +238,8 @@ function judgeRun(run) {
   const recomputed = [...top.values()].filter(e => {
     if (!sameVersions(e) || e.selection.rule !== rule) { mismatches.version += 1; return false; }
     const { hand, index, action: applied } = archived.get(e.decisionId);
-    const candidates = menuFromArchive(hand, index).find(menu => sameKeys(menu, e.probabilities));
-    if (!candidates) { mismatches.menu += 1; return false; }
+    const candidates = menuFromArchive(hand, index);
+    if (!sameKeys(candidates, e.probabilities)) { mismatches.menu += 1; return false; }
     let unit;
     try { unit = deriveUnit('jev-selection-v1', token, e.decisionId, String(e.generation)); } catch { unit = null; }
     if (unit === null || unit !== e.selection.unit) { mismatches.unit += 1; return false; }
@@ -283,15 +300,22 @@ function judgeRun(run) {
   const three = run.mode === 'tournament'
     ? { applies: true, pass: new Set(busted(EARLY_HANDS)).size <= 1, bustedEarly: [...new Set(busted(EARLY_HANDS))].length }
     : { applies: false, zeroStackFirst5: busted(EARLY_HANDS).length, zeroStackAll: busted().length };
-  // Sample completeness: a cash run must reach its hand limit, a tournament must finish its
-  // first five hands however it ended (End also sets gameOver), the journey itself must have
-  // passed, and the run must stay inside its approved request cap.
-  const inconclusive = [];
-  if (truncated) inconclusive.push('진단 절단/손상(미러 없음 또는 불일치)');
-  if (run.journeyPass === false) inconclusive.push('저니 실패(result.pass false)');
-  else if (run.journeyPass !== true) inconclusive.push('저니 결과 없음(result.json)');
-  if (!Number.isSafeInteger(run.requests)) inconclusive.push('요청 수 기록 없음');
-  else if (run.requests > GATE_BUDGET.perRun) inconclusive.push(`요청 ${run.requests} > 실행 상한 ${GATE_BUDGET.perRun}`);
+  // Evidence completeness: a run without it is not judged at all (it never FAILs the gate and
+  // its samples are not pooled). Sample completeness: a cash run must reach its hand limit, a
+  // tournament must finish its first five hands however it ended (End also sets gameOver),
+  // and the journey must have passed; those runs are still judged.
+  const evidence = [];
+  if (!(sameDescriptor(run.birthDescriptor) && sameDescriptor(run.loopState?.jev) && !run.loopState?.jevRolledForward)) {
+    evidence.push('현재 descriptor로 시작한 store가 아님');
+  }
+  if (truncated) evidence.push('진단 절단/손상(미러 없음 또는 불일치)');
+  if (run.journeyPass !== true && run.journeyPass !== false) evidence.push('저니 결과 없음(result.json)');
+  if (!Number.isSafeInteger(run.requests)) evidence.push('요청 수 기록 없음');
+  else if (run.requests > GATE_BUDGET.perRun) evidence.push(`요청 ${run.requests} > 실행 상한 ${GATE_BUDGET.perRun}`);
+  if (run.stoppedBy === 'request-cap') evidence.push('요청 상한 도달로 결정 중 중단');
+  const judged = evidence.length === 0;
+  const inconclusive = [...evidence];
+  if (run.journeyPass === false && run.stoppedBy !== 'request-cap') inconclusive.push('저니 실패(result.pass false)');
   if (run.mode !== 'tournament' && Number.isSafeInteger(run.handLimit) && hands.length < run.handLimit) {
     inconclusive.push(`완료 핸드 ${hands.length} < handLimit ${run.handLimit}${run.stoppedBy ? ` (${run.stoppedBy})` : ''}`);
   }
@@ -308,8 +332,8 @@ function judgeRun(run) {
     modelMsP50: percentile(model, 0.5), modelMsP90: percentile(model, 0.9),
     tokens: entries.reduce((sum, e) => ({ input: sum.input + (e.usage?.input_tokens ?? 0), output: sum.output + (e.usage?.output_tokens ?? 0) }), { input: 0, output: 0 }),
     entryBytes: Buffer.byteLength(JSON.stringify(entries), 'utf8'), requests: run.requests ?? null, stoppedBy: run.stoppedBy ?? null };
-  const pass = (one.judged ? one.pass : true) && four.pass && (!three.applies || three.pass);
-  return { run: { name: run.name, mode: run.mode, hands: hands.length, pass, inconclusive, one, two, three, four, report }, vpip };
+  const pass = judged ? (one.judged ? one.pass : true) && four.pass && (!three.applies || three.pass) : null;
+  return { run: { name: run.name, mode: run.mode, hands: hands.length, judged, pass, inconclusive, one, two, three, four, report }, vpip: judged ? vpip : new Map() };
 }
 
 export function gateSessions(runs) {
@@ -331,14 +355,16 @@ export function gateSessions(runs) {
     const pass = judged && v >= lo && v <= hi && (PFR_MAX[archetype] === undefined || p <= PFR_MAX[archetype]);
     vpip[archetype] = { opportunities, vpip: v, pfr: p, judged, pass, band: [lo, hi], ...(judged ? {} : { note: '표본 부족' }) };
   }
-  const opportunities = perRun.reduce((sum, r) => sum + r.two.opportunities, 0);
-  const violations = perRun.reduce((sum, r) => sum + r.two.violations.length, 0);
-  const v2Violations = perRun.reduce((sum, r) => sum + r.two.v2Violations, 0);
+  // Pooled criteria use judged runs only.
+  const judgedRuns = perRun.filter(r => r.judged);
+  const opportunities = judgedRuns.reduce((sum, r) => sum + r.two.opportunities, 0);
+  const violations = judgedRuns.reduce((sum, r) => sum + r.two.violations.length, 0);
+  const v2Violations = judgedRuns.reduce((sum, r) => sum + r.two.v2Violations, 0);
   const rate = opportunities ? violations / opportunities : null;
   const desperation = { opportunities, violations, rate, v2Violations, v2Rate: opportunities ? v2Violations / opportunities : null,
     zeroRule: violations === 0 ? '달성' : '미달', pass: rate !== null && rate <= DESPERATION_RATE_MAX,
     byMode: Object.fromEntries(['cash-training', 'tournament'].map(mode => {
-      const rows = perRun.filter(r => (r.mode === 'tournament') === (mode === 'tournament'));
+      const rows = judgedRuns.filter(r => (r.mode === 'tournament') === (mode === 'tournament'));
       return [mode, { opportunities: rows.reduce((s, r) => s + r.two.opportunities, 0), violations: rows.reduce((s, r) => s + r.two.violations.length, 0) }];
     })) };
   const pooled = { vpip, desperation, pass: desperation.pass && Object.values(vpip).every(r => r.pass) };
@@ -346,10 +372,10 @@ export function gateSessions(runs) {
     ...perRun.flatMap(r => r.inconclusive.map(reason => `${r.name}: ${reason}`)),
     ...(opportunities === 0 ? ['② 기회 0건'] : []),
     ...Object.entries(vpip).filter(([, r]) => !r.judged).map(([archetype, r]) => `⑤ ${archetype} 기회 ${r.opportunities} < ${MIN_OPPORTUNITIES}`),
-    ...(perRun.some(r => r.mode === 'tournament') ? [] : ['③ 토너먼트 실행 없음']),
+    ...(judgedRuns.some(r => r.mode === 'tournament') ? [] : ['③ 토너먼트 실행 없음']),
     ...(spent > GATE_BUDGET.total ? [`판정 실행 요청 합계 ${spent} > 승인 예산 ${GATE_BUDGET.total}`] : []),
   ];
-  const failed = perRun.some(r => !r.pass) || (opportunities > 0 && !desperation.pass)
+  const failed = judgedRuns.some(r => !r.pass) || (opportunities > 0 && !desperation.pass)
     || Object.values(vpip).some(r => r.judged && !r.pass);
   return { perRun, pooled, inconclusive, verdict: failed ? 'FAIL' : inconclusive.length ? 'INCONCLUSIVE' : 'PASS' };
 }
@@ -366,12 +392,16 @@ export function loadGateRun(dir) {
   const handsDir = path.join(session, 'hands');
   const hands = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter(n => /^hand-.*\.json$/.test(n)).map(n => readJson(path.join(handsDir, n))) : [];
   const mirrorFile = path.join(dir, 'diagnostics-mirror.jsonl');
-  const mirror = fs.existsSync(mirrorFile) ? fs.readFileSync(mirrorFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : null;
+  // A torn or unreadable mirror restores nothing; it never stops the loader.
+  let mirror = null;
+  if (fs.existsSync(mirrorFile)) {
+    try { mirror = fs.readFileSync(mirrorFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch { mirror = 'unreadable'; }
+  }
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
     loopState: readJson(path.join(session, 'loop-state.json')), players: readJson(path.join(session, 'players.json')),
     requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null, mirror,
     journeyPass: typeof result.pass === 'boolean' ? result.pass : null,
-    handLimit: engine.config?.handLimit ?? null, gameOver: engine.gameOver === true,
+    handLimit: engine.config?.handLimit ?? null, gameOver: engine.gameOver === true, birthDescriptor: engine.config?.jev ?? null,
     unfinishedHand: aborted || engine.hand ? engine.handNo : null };
 }
 

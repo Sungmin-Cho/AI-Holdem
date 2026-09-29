@@ -39,6 +39,8 @@ export function parseLiveArgs(argv){
 }
 export async function runJevLiveJourney(outDir,input={}) {
  const options={...DEFAULT_LIVE_OPTIONS,...input},cap=options.maxRequests??40,softCap=options.maxRequests===null?Infinity:Math.max(1,cap-HAND_RESERVE);
+ // One run per directory: a reused one could mix an earlier session into this run's evidence.
+ if(fs.existsSync(outDir)&&fs.readdirSync(outDir).length)throw new Error(`--out-dir must be new or empty: ${outDir}`);
  const workspace=createBrowserWorkspace(),root=workspace.root,userStore=path.resolve('game'),before=hashTree(userStore);
  const session=`jev-${randomUUID()}`,originalFetch=globalThis.fetch,requests=[];let app,failure,summary=null,stoppedBy=null,sessionDir=null;
  // Owner-only from the first byte: files this process and its browser children create are 0600/0700.
@@ -58,7 +60,8 @@ export async function runJevLiveJourney(outDir,input={}) {
  const wait=async(fn,ms=90000)=>{const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,150));}throw new Error('JEV live journey timeout');};
  globalThis.fetch=async(url,options)=>{
   if(String(url).startsWith('https://api.typesafe.ai/')){
-   assert.ok(requests.length<cap,`real-play request cap ${cap} reached`);const started=Date.now();const row={};requests.push(row);
+   // Hitting the cap mid-hand fails that decision; the gate reads it as a spent budget, not a defect.
+   if(requests.length>=cap){stoppedBy='request-cap';throw new Error(`real-play request cap ${cap} reached`);}const started=Date.now();const row={};requests.push(row);
    try{const response=await originalFetch(url,options);row.status=response.status;row.ms=Date.now()-started;const body=await response.clone().json();const a=body.answers?.action;row.answerCheck={model:body.model,type:a?.type,choice:a?.choice,confidence:a?.confidence,probabilities:a?.probabilities,sum:Object.values(a?.probabilities??{}).reduce((a,b)=>a+b,0),usage:body.usage};return response;}catch(e){row.failed=true;row.ms=Date.now()-started;throw e;}
   }return originalFetch(url,options);
  };

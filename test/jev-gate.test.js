@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
 import {gateSessions,hopeless,chen,isPremium,effectiveRemainingAt,runCap,mayRerun,loadGateRun,MIN_DECISIONS,guardFromArchive,menuFromArchive,GATE_BUDGET} from './helpers/jev-gate.mjs';
-import {JEV_CONFIG} from '../shared/opponent-runtime.js';
+import {JEV_CONFIG,JEV_CONFIG_LEGACY} from '../shared/opponent-runtime.js';
 import {deriveUnit} from '../training/policies/rng.js';
 import {selectJevAction,validateJevAnswer} from '../tools/jev-player.js';
 
@@ -29,18 +29,27 @@ function decide(decisionId,probabilities,apiChoice,archivedHand,generation=1){
 const VERSIONS={questionVersion:JEV_CONFIG.questionVersion,candidateVersion:JEV_CONFIG.candidateVersion,projectionVersion:JEV_CONFIG.projectionVersion,selectionVersion:JEV_CONFIG.selectionVersion};
 const entryOf=(decisionId,probabilities,apiChoice,selected,generation=1)=>({decisionId,generation,probabilities,apiChoice,...VERSIONS,
  selection:selected.selection,usage:{input_tokens:10,output_tokens:1}});
+// The answer covers the whole v3 menu of the archived state; unnamed keys get 0.
+function fullMenu(archivedHand,decisionId,probabilities){
+ const menu=menuFromArchive(archivedHand,archivedHand.actions.findIndex(a=>a.decisionId===decisionId));
+ assert.ok(menu&&Object.keys(probabilities).every(k=>menu.some(c=>c.key===k)),`${decisionId}: ${Object.keys(probabilities)} not in the v3 menu`);
+ return Object.fromEntries(menu.map(c=>[c.key,probabilities[c.key]??0]));
+}
 // n clean decisions: each AI action is exactly what the recorded selection chose.
 function cleanRun(name,n=MIN_DECISIONS,{mode='cash-training',hands:handsOut=[],entries:entriesOut=[],metrics:metricsOut=[],probabilities:base={fold:0.5,call:0.5}}={}){
  const hands=[],entries=[],metrics=[];
  for(let i=1;i<=n;i++){
-  const decisionId=`d-${i}-preflop-0`,probabilities={...base};
+  const decisionId=`d-${i}-preflop-0`;
   const probe=hand(i,[action('p1','fold',{decisionId})]);
+  const probabilities=fullMenu(probe,decisionId,base);
   const selected=decide(decisionId,probabilities,'fold',probe);
   hands.push(hand(i,[action('p1',selected.action.action,{decisionId,amount:selected.action.action==='call'?50:0})]));
   entries.push(entryOf(decisionId,probabilities,'fold',selected));
   metrics.push({runtime:'jev',decisionId,outcome:'jev_accepted',modelMs:200+i});
  }
- return {name,mode,players,hands:[...hands,...handsOut],loopState:{sessionToken:TOKEN,jevDiagnostics:{schemaVersion:1,entries:[...entries,...entriesOut],dropped:0},metrics:[...metrics,...metricsOut]}};
+ // Complete evidence by default: a passed journey inside its request cap.
+ return {name,mode,players,hands:[...hands,...handsOut],birthDescriptor:{...JEV_CONFIG},journeyPass:true,requests:n,
+  loopState:{sessionToken:TOKEN,jev:{...JEV_CONFIG},jevDiagnostics:{schemaVersion:1,entries:[...entries,...entriesOut],dropped:0},metrics:[...metrics,...metricsOut]}};
 }
 
 test('hopeless hands: made hands with hole cards, draws on flop/turn and two overcards are excluded',()=>{
@@ -92,7 +101,7 @@ test('failures, truncation, missing samples and v1 entries make the run unjudgea
  const gate=gateSessions([failed,truncated,dropped,small,v1]),[f,t,d,s,v]=gate.perRun;
  for(const run of [f,s,v])assert.equal(run.one.pass,false,run.name);
  // Truncated diagnostics without a matching mirror are unjudgeable: INCONCLUSIVE, never FAIL.
- for(const run of [t,d]){assert.equal(run.one.judged,false,run.name);assert.equal(run.pass,true,run.name);assert.ok(run.inconclusive.some(r=>r.startsWith('진단 절단')),run.name);}
+ for(const run of [t,d]){assert.equal(run.judged,false,run.name);assert.equal(run.pass,null,run.name);assert.ok(run.inconclusive.some(r=>r.startsWith('진단 절단')),run.name);}
  assert.ok(v.one.reasons.includes('v1 — ① 미적용'));assert.ok(v.one.reasons.some(r=>r.startsWith('아카이브 없는 완료 핸드')));
 });
 test('an entry of an unfinished hand is reported as incomplete and left out of the count',()=>{
@@ -179,7 +188,7 @@ function guardedRun(name){
  const run=cleanRun(name);
  const decisionId='d-300-preflop-3',probabilities={fold:0.5,call:0.2,raise_to_5000:0.3};
  const probe=hand(300,[action('p1','fold',{decisionId,...facingRaise})],{holes:{user:cards('2c 3d'),p1:cards('9c 7d'),p2:cards('7c 2d')}});
- assert.deepEqual(menuFromArchive(probe,0).map(m=>m.map(c=>c.key)),[['fold','call'],['fold','call','raise_to_5000']]);
+ assert.deepEqual(menuFromArchive(probe,0).map(c=>c.key),['fold','call','raise_to_5000']);
  const selected=decide(decisionId,probabilities,'fold',probe);
  assert.deepEqual(selected.selection.guard,{commit:['raise_to_5000'],mass:0.3});
  run.hands.push(hand(300,[action('p1',selected.action.action,{decisionId,...facingRaise,amount:selected.action.action==='call'?4000:0})],{holes:{user:cards('2c 3d'),p1:cards('9c 7d'),p2:cards('7c 2d')}}));
@@ -202,8 +211,9 @@ test('#234 ① recomputes from the seed and the archive: tampered unit, rule or 
   e=>{e.candidateVersion='legal-menu-v2';},
   e=>{delete e.projectionVersion;},
   e=>{e.selection.unit=e.selection.unit/2;},
-  // A key set that is not the v3 menu for the archived state.
+  // A key set that is not the v3 menu for the archived state, or a menu missing a legal raise.
   e=>{e.probabilities={fold:0.5,call:0.2,raise_to_4800:0.3};},
+  e=>{e.probabilities={fold:0.5,call:0.5};},
  ];
  for(const [i,change] of tamper.entries()){
   const {run:bad,decisionId}=guardedRun(`T${i}`);
@@ -223,7 +233,7 @@ test('#234 ② is judged on the aggregate rate; zero opportunities, short runs a
  assert.ok(gateSessions([short]).inconclusive.some(r=>r.includes('handLimit')&&r.includes('max-requests')));
  const failedJourney=cleanRun('J');failedJourney.journeyPass=false;
  assert.ok(gateSessions([failedJourney]).inconclusive.some(r=>r.includes('저니 실패')));
- const noResult=cleanRun('R');
+ const noResult=cleanRun('R');delete noResult.journeyPass;delete noResult.requests;
  assert.ok(gateSessions([noResult]).inconclusive.some(r=>r.includes('저니 결과 없음')),'a run without result.json is never judged complete');
  assert.ok(gateSessions([noResult]).inconclusive.some(r=>r.includes('요청 수 기록 없음')));
  const over=cleanRun('O');over.journeyPass=true;over.requests=GATE_BUDGET.perRun+1;
@@ -253,8 +263,7 @@ test('#234 ② is judged on the aggregate rate; zero opportunities, short runs a
 // the v3 menu re-derived from the archive, then the real selector runs on its output.
 function loopDecision(decisionId,probabilities,archivedHand,generation=1){
  const index=archivedHand.actions.findIndex(a=>a.decisionId===decisionId);
- const candidates=menuFromArchive(archivedHand,index).find(m=>m.length===Object.keys(probabilities).length&&m.every(c=>Object.hasOwn(probabilities,c.key)));
- assert.ok(candidates,`${decisionId}: not a v3 menu`);
+ const candidates=menuFromArchive(archivedHand,index);probabilities=fullMenu(archivedHand,decisionId,probabilities);
  const choice=Object.keys(probabilities).reduce((a,b)=>probabilities[b]>probabilities[a]?b:a);
  const {diagnostics}=validateJevAnswer({model:JEV_CONFIG.model,usage:{input_tokens:1999,output_tokens:99},
   answers:{action:{type:'choice',choice,confidence:probabilities[choice],probabilities}}},candidates);
@@ -286,14 +295,14 @@ test('#234 r3: entries the loop dropped past the byte cap are restored from the 
  assert.deepEqual(mirror,all,'the mirror holds every entry once, in order');
  run.loopState.jevDiagnostics=kept;
  const cut=gateSessions([run]).perRun[0];
- assert.equal(cut.one.judged,false);assert.ok(cut.inconclusive.some(r=>r.startsWith('진단 절단')),'without a mirror a truncated run is inconclusive');
+ assert.equal(cut.judged,false);assert.ok(cut.inconclusive.some(r=>r.startsWith('진단 절단')),'without a mirror a truncated run is inconclusive');
  run.mirror=mirror;
  const [restored]=gateSessions([run]).perRun;
  assert.equal(restored.one.pass,true,JSON.stringify(restored.one.reasons));assert.equal(restored.one.restoredFromMirror,kept.dropped);
  assert.equal(restored.one.recomputed,MIN_DECISIONS);assert.equal(restored.inconclusive.length,0,JSON.stringify(restored.inconclusive));
  for(const broken of [mirror.slice(1),[...mirror.slice(0,-1),{...mirror.at(-1),confidence:0.01}],[...mirror,mirror.at(-1)]]){
   run.mirror=broken;const [r]=gateSessions([run]).perRun;
-  assert.equal(r.one.judged,false);assert.ok(r.inconclusive.some(x=>x.startsWith('진단 절단')));
+  assert.equal(r.judged,false);assert.ok(r.inconclusive.some(x=>x.startsWith('진단 절단')));
  }
 });
 test('#234 r3: privateTree makes the evidence tree owner-only',{skip:process.platform==='win32'&&'POSIX permission bits'},async()=>{
@@ -330,7 +339,7 @@ function passingRun(name,{mode='cash-training',jam=false,strongSeats=[]}={}){
   hands.push({handNo:n,blinds:[25,50],holes,posts:[],actions,endStacks:sixStacks,startStacks:sixStacks});
  }
  return {name,mode,players,hands,handLimit:mode==='tournament'?null:20,journeyPass:true,requests:entries.length,gameOver:mode==='tournament',
-  loopState:{sessionToken:TOKEN,jevDiagnostics:{schemaVersion:1,entries,dropped:0},metrics}};
+  birthDescriptor:{...JEV_CONFIG},loopState:{sessionToken:TOKEN,jev:{...JEV_CONFIG},jevDiagnostics:{schemaVersion:1,entries,dropped:0},metrics}};
 }
 test('#234 r3: a complete gate input passes every criterion (the gate can say PASS)',()=>{
  const result=gateSessions([passingRun('A'),passingRun('B'),passingRun('T',{mode:'tournament'})]);
@@ -369,11 +378,86 @@ test('#234 r3: menuFromArchive reproduces the loop menu for every decision of en
   const archived=st.lastHand;
   for(const {decisionId,menu} of menus){
    const index=archived.actions.findIndex(a=>a.decisionId===decisionId);assert.ok(index>=0,decisionId);
-   const rebuilt=menuFromArchive(archived,index).map(m=>JSON.stringify(m));
-   assert.ok(rebuilt.includes(JSON.stringify(menu)),`${decisionId}: ${JSON.stringify(menu)} not in ${rebuilt.join(' | ')}`);
+   assert.deepEqual(menuFromArchive(archived,index),menu,decisionId);
    checked++;if(menu.some(c=>c.action==='raise'))withRaise++;
   }
   if(st.gameOver)break;
  }
  assert.ok(checked>=60&&withRaise>=30,`${checked} decisions, ${withRaise} with raise sizes`);
+});
+
+// r4: only stores born under the current descriptor are judged; anything else is INCONCLUSIVE,
+// never PASS and never FAIL.
+test('#234 r4: a run whose descriptors are not the current ones is not judged',()=>{
+ const base=()=>[passingRun('A'),passingRun('B'),passingRun('T',{mode:'tournament'})];
+ assert.equal(gateSessions(base()).verdict,'PASS');
+ const variants={
+  'loop v2':runs=>{runs[0].loopState.jev={...JEV_CONFIG_LEGACY[1]};},
+  'loop missing':runs=>{delete runs[0].loopState.jev;},
+  'birth v2':runs=>{runs[0].birthDescriptor={...JEV_CONFIG_LEGACY[1]};},
+  'birth missing':runs=>{runs[0].birthDescriptor=null;},
+  'rolled forward':runs=>{runs[0].loopState.jevRolledForward={from:{...JEV_CONFIG_LEGACY[1]},at:'2026-09-29T00:00:00.000Z'};},
+ };
+ for(const [label,change] of Object.entries(variants)){
+  const runs=base();change(runs);const result=gateSessions(runs);
+  assert.equal(result.perRun[0].judged,false,label);assert.equal(result.verdict,'INCONCLUSIVE',label);
+  assert.ok(result.inconclusive.some(r=>r.includes('현재 descriptor')),label);
+ }
+});
+test('#234 r4: incomplete evidence makes the verdict INCONCLUSIVE even when that run also carries failures',()=>{
+ const good=()=>[passingRun('A'),passingRun('B'),passingRun('T',{mode:'tournament'})];
+ // The request cap fired mid-decision: a failed metric and a recovery pending remain.
+ const capped=cleanRun('C');capped.journeyPass=false;capped.stoppedBy='request-cap';
+ capped.loopState.metrics.push({runtime:'jev',decisionId:'d-101-flop-1',outcome:'JEV_NETWORK'});
+ capped.loopState.pendingDecision={status:'recovery_required',code:'JEV_NETWORK'};
+ let result=gateSessions([...good(),capped]);
+ assert.equal(result.perRun[3].judged,false);assert.equal(result.perRun[3].pass,null);
+ assert.equal(result.verdict,'INCONCLUSIVE',JSON.stringify(result.inconclusive));
+ // Truncation, a missing result.json and an over-cap run together: still INCONCLUSIVE.
+ const broken=cleanRun('X');broken.loopState.jevDiagnostics.dropped=2;delete broken.journeyPass;broken.requests=GATE_BUDGET.perRun+5;
+ broken.loopState.metrics.push({runtime:'jev',decisionId:'d-102-flop-1',outcome:'JEV_TIMEOUT'});
+ result=gateSessions([...good(),broken]);
+ assert.equal(result.verdict,'INCONCLUSIVE');assert.equal(result.perRun[3].inconclusive.length>=3,true,JSON.stringify(result.perRun[3].inconclusive));
+ // A journey that failed for any other reason is judged: its product failure still FAILs.
+ const failed=cleanRun('F');failed.journeyPass=false;failed.loopState.metrics.push({runtime:'jev',decisionId:'d-103-flop-1',outcome:'JEV_INVALID_RESPONSE'});
+ result=gateSessions([...good(),failed]);
+ assert.equal(result.perRun[3].judged,true);assert.equal(result.verdict,'FAIL');
+});
+test('#234 r4: a torn mirror never stops the loader and restores nothing',()=>{
+ const dir=createOwnedTempDir('jev-gate-torn');
+ const write=(name,value)=>{fs.mkdirSync(path.dirname(path.join(dir,name)),{recursive:true});fs.writeFileSync(path.join(dir,name),typeof value==='string'?value:JSON.stringify(value));};
+ write('session/state.json',{handNo:1,hand:null,config:{mode:'cash-training',jev:{...JEV_CONFIG}}});
+ write('session/loop-state.json',{jev:{...JEV_CONFIG},metrics:[],jevDiagnostics:{schemaVersion:1,entries:[],dropped:3}});
+ write('session/players.json',players);write('result.json',{pass:true,requests:[]});
+ write('diagnostics-mirror.jsonl','{"decisionId":"d-1-preflop-0","generation":1}\n{"decisionId":"d-1-pre');
+ const run=loadGateRun(dir);
+ assert.equal(run.mirror,'unreadable');assert.deepEqual(run.birthDescriptor,JEV_CONFIG);
+ const [r]=gateSessions([run]).perRun;assert.equal(r.judged,false);assert.ok(r.inconclusive.some(x=>x.startsWith('진단 절단')));
+});
+// r4: canRaise is replayed from the street's archived actions. After a full raise to 150 and
+// two short all-ins, the opener faces 200 again with the street not reopened: no raise.
+test('#234 r4: a short all-in does not reopen the street for the opener, in the engine and in the archive',async()=>{
+ const {createGame,startHand,applyAction,legalFor,blindsForLevel}=await import('../engine/hand.js');
+ const {snapshotDecision}=await import('../engine/decision.js');
+ const {buildJevCandidates}=await import('../tools/jev-player.js');
+ let st=createGame({aiCount:4,startStack:5000,levelEvery:100});st.button=0;
+ const order=[];let dry=startHand(structuredClone(st)).state;
+ for(let i=0;i<3;i++){const id=legalFor(dry).toAct;order.push(id);dry=applyAction(dry,id,'fold').state;}
+ st.seats.find(x=>x.playerId===order[1]).stack=180;st.seats.find(x=>x.playerId===order[2]).stack=200;
+ st=startHand(st).state;
+ st=applyAction(st,order[0],'raise',150).state;st=applyAction(st,order[1],'raise',180).state;st=applyAction(st,order[2],'raise',200).state;
+ const menus=[];
+ while(!legalFor(st).handOver&&st.hand.street==='preflop'){
+  const legal=legalFor(st),snapshot=snapshotDecision(st,legal.toAct,null,{blinds:blindsForLevel(st.level,st.config.blinds0),legal});
+  menus.push({decisionId:legal.decisionId,toAct:legal.toAct,canRaise:legal.canRaise,menu:buildJevCandidates(snapshot,legal)});
+  st=applyAction(st,legal.toAct,'call').state;
+ }
+ while(!legalFor(st).handOver)st=applyAction(st,legalFor(st).toAct,legalFor(st).canCheck?'check':'fold').state;
+ const reopened=menus.find(m=>m.toAct===order[0]);
+ assert.equal(reopened.canRaise,false,'the engine blocks the opener');
+ assert.deepEqual(reopened.menu.map(c=>c.key),['fold','call']);
+ for(const {decisionId,menu} of menus){
+  const index=st.lastHand.actions.findIndex(a=>a.decisionId===decisionId);
+  assert.deepEqual(menuFromArchive(st.lastHand,index),menu,decisionId);
+ }
 });
