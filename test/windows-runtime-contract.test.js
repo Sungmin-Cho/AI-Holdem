@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import * as files from '../shared/platform-files.js';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { win32ProcessStartTime } from '../engine/process-identity.js';
@@ -142,6 +143,55 @@ test('#249 the JSON the proof script writes is judged exactly as before', () => 
     assert.match(broken.reasons.join(' '), /^error:/, 'malformed output is unproven');
     assert.match(verdict('[]').reasons.join(' '), /^proofs:0\/1/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The script #249 replaced, kept only as the reference the .NET-only script is compared with.
+const GET_ACL_SCRIPT = (paths) => `$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); $me=$id.User.Value; $tokenOwner=$id.Owner.Value; $proofs=@(); foreach($p in @(${paths.map((file) => `'${file.replaceAll("'", "''")}'`).join(',')})) { $a=Get-Acl -LiteralPath $p; $rules=@(); foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { $rules+=@{sid=$r.IdentityReference.Value;type=$r.AccessControlType.ToString();rights=[long]$r.FileSystemRights} }; $proofs+=@{user=$me;tokenOwner=$tokenOwner;owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;reparse=(([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0);rules=$rules} }; ConvertTo-Json -InputObject @($proofs) -Depth 5 -Compress`;
+
+// A proof that silently drops one foreign ACE would still be valid JSON and could pass, so
+// the replacement is compared with Get-Acl on real DACLs: a private directory and file, a
+// directory with an explicit inheritable Everyone ACE, a file that inherits it, and a file
+// with its own explicit Everyone ACE — all in one call, in order.
+test('#249 on real Windows ACLs the .NET-only script reads exactly what Get-Acl read', {
+  skip: process.platform === 'win32' ? false : 'real DACLs need Windows',
+}, () => {
+  const system = process.env.SystemRoot || 'C:\\Windows';
+  const root = createOwnedTempDir('holdem-acl-diff');
+  const privateFile = path.join(root, 'private.json');
+  fs.writeFileSync(privateFile, '{}');
+  const shared = path.join(root, 'shared');
+  fs.mkdirSync(shared);
+  const icacls = (...args) => {
+    const result = spawnSync(path.join(system, 'System32', 'icacls.exe'), args, { encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 0, `icacls ${args.join(' ')}: ${result.stdout}${result.stderr}`);
+  };
+  icacls(shared, '/grant', '*S-1-1-0:(OI)(CI)(RX)');
+  const inherited = path.join(shared, 'inherited.json');
+  fs.writeFileSync(inherited, '{}');
+  const explicit = path.join(root, 'explicit.json');
+  fs.writeFileSync(explicit, '{}');
+  icacls(explicit, '/grant', '*S-1-1-0:(R)');
+  const all = [root, privateFile, shared, inherited, explicit];
+  const run = (script) => {
+    const result = spawnSync(path.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { env: files.windowsPowerShellEnvironment(), encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(String(result.stderr).trim(), '');
+    return JSON.parse(String(result.stdout).replace(/^\uFEFF/, ''));
+  };
+  const current = run(files.aclProofScript(all));
+  assert.deepEqual(current, run(GET_ACL_SCRIPT(all)));
+  const everyone = (proof) => proof.rules.filter((rule) => rule.sid === 'S-1-1-0');
+  assert.deepEqual(current.map((proof) => everyone(proof).length > 0), [false, false, true, true, true],
+    'the comparison covers explicit and inherited foreign ACEs');
+  const verdict = (file, privateMode) => files.arePrivatePaths([{ file, privateMode }]);
+  assert.equal(verdict(root, true), true);
+  assert.equal(verdict(privateFile, true), true);
+  for (const file of [shared, inherited, explicit]) {
+    assert.equal(verdict(file, true), false, `Everyone may read ${path.basename(file)}, so it is not private`);
+    assert.equal(verdict(file, false), true, `Everyone may only read ${path.basename(file)}`);
+  }
 });
 
 test('one monotonic deadline bounds sequential ACL and identity children', () => {
