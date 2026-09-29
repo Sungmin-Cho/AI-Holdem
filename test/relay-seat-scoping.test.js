@@ -80,7 +80,7 @@ test('DECISION_CLOSED는 같은 결정만 거부한다', () => {
   assert.equal(withActionGate(dir, epoch, () => 'ok', { decisionId: 'd-1-preflop-1' }), 'ok');
 });
 
-async function multiRelay(t) {
+async function multiRelay(t, serverOptions = {}) {
   const dir = createOwnedTempDir('holdem-relay-multi');
   const state = createGame({
     aiCount: 1,
@@ -97,7 +97,7 @@ async function multiRelay(t) {
     { playerId: 'p1', seat: 2, name: 'AI', kind: 'ai' },
   ]);
   saveState(dir, started);
-  const relay = await startServer({ gameDir: dir, port: 0, token: TOKEN, controlProtocolVersion: 1 });
+  const relay = await startServer({ gameDir: dir, port: 0, token: TOKEN, controlProtocolVersion: 1, ...serverOptions });
   registerOwnedServer(relay.server, 'relay-multi');
   t.after(async () => { if (relay.server.listening) await relay.close(); });
   const http = async (pathname, { method = 'GET', body, seat, headers = {} } = {}) => {
@@ -203,8 +203,12 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
 // CONTROL_BUSY retries yield to the event loop; a publication in between can hand
 // the turn to another seat. The seat check must be repeated inside the locked
 // attempt, or a predicted next decision id would be accepted for the wrong seat.
+// The race needs the action to still be retrying when the lock is released. The product
+// window (250 ms) can close first on a loaded Windows runner (the publication and the lock's
+// identity checks run inside it), so these tests widen it; the order of events is unchanged.
+const RACE_WINDOW = { actionControlRetryMs: 10_000 };
 test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision', async (t) => {
-  const f = await multiRelay(t);
+  const f = await multiRelay(t, RACE_WINDOW);
   createSessionControl(f.dir, gameEpochOf(TOKEN));
   const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
   engine.sessionToken = TOKEN;
@@ -244,7 +248,7 @@ test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision
 });
 
 test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is recorded', async (t) => {
-  const f = await multiRelay(t);
+  const f = await multiRelay(t, RACE_WINDOW);
   const control = createSessionControl(f.dir, gameEpochOf(TOKEN));
   const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
   engine.sessionToken = TOKEN;
