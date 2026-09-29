@@ -156,14 +156,20 @@ export function legacyEligible(row, sidecar, attributable) {
 // are never proof of replacement (#214 D4a). Win32 readings carry their offset (ISO `o`).
 const TZ_STEP_MS = 15 * 60 * 1000;
 const TZ_SPAN_MS = 26 * 60 * 60 * 1000;
-export function startTimesMayBeSameProcess(recorded, current, { platform = process.platform } = {}) {
-  if (recorded === current) return true;
-  if (platform === 'win32') return false;
+// Compare a recorded start time with a fresh reading of the same pid: 'same', 'different',
+// or 'unknown'. A reading either side cannot parse is never proof of anything. Win32
+// readings carry their UTC offset, so equal instants are the same process and different
+// instants are not. POSIX readings are zone-less wall times: a whole number of 15-minute
+// steps within ±26 hours may be the same process read from another time zone.
+export function compareStartTimes(recorded, current, { platform = process.platform } = {}) {
+  if (recorded === current) return 'same';
   const a = Date.parse(recorded);
   const b = Date.parse(current);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return true;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 'unknown';
+  if (a === b) return 'same';
+  if (platform === 'win32') return 'different';
   const diff = Math.abs(a - b);
-  return diff <= TZ_SPAN_MS && diff % TZ_STEP_MS === 0;
+  return diff <= TZ_SPAN_MS && diff % TZ_STEP_MS === 0 ? 'unknown' : 'different';
 }
 
 // One observation of a recorded {pid, startTime}: 'dead' (kill 0 says gone), 'alive' (same
@@ -174,9 +180,8 @@ export function observeRecordedIdentity({ pid, startTime }, { processAlive, star
   if (!processAlive(pid)) return 'dead';
   const current = startTimeOf(pid);
   if (current === null || current === undefined) return 'unknown';
-  if (current === startTime) return 'alive';
-  if (startTimesMayBeSameProcess(startTime, current, { platform })) return 'unknown';
-  return 'replaced';
+  const compared = compareStartTimes(startTime, current, { platform });
+  return compared === 'same' ? 'alive' : compared === 'different' ? 'replaced' : 'unknown';
 }
 
 export function processAlive(pid) {

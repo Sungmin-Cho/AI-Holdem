@@ -505,7 +505,6 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
 // A start-time string for the same pid that provably belongs to another process: 7 s off
 // the observed reading, which no time-zone offset can explain (#214 D4a).
 function replacedStartTime(startTime) {
-  if (process.platform === 'win32') return `${startTime}-replaced`;
   return new Date(Date.parse(startTime) + 7_000).toISOString();
 }
 
@@ -5851,7 +5850,7 @@ test('#204 explicit reclaim budgets are not scaled again', { timeout: 20_000 * W
 
 // #205: real persisted rows and real coach CLI children; only the orphan identity and
 // signals are controlled, so server cleanup always retains its normal behavior.
-async function recovery205Fixture(t, { foreign = false, mixed = false, identity = 'alive', jump = false, coachCliPath } = {}) {
+async function recovery205Fixture(t, { foreign = false, mixed = false, identity = 'alive', jump = false, coachCliPath, residualMs = 5_000 * WIN32_SCALE } = {}) {
   const gameDir = tmpGame();
   const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
   await first.bootstrap({ ai: 1 });
@@ -5882,7 +5881,7 @@ async function recovery205Fixture(t, { foreign = false, mixed = false, identity 
   const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: {
     port: 0, waitMs: 0, pollMs: 10,
     coachCliPath: coachCliPath ?? writerObservationShim({ startTimes: { [orphan.pid]: writerView } }),
-    ...(jump ? {} : { orphanTerminateGraceMs: 100 * WIN32_SCALE, orphanTerminateKillWaitMs: 100 * WIN32_SCALE, resumeReclaimResidualMs: 5_000 * WIN32_SCALE }),
+    ...(jump ? {} : { orphanTerminateGraceMs: 100 * WIN32_SCALE, orphanTerminateKillWaitMs: 100 * WIN32_SCALE, resumeReclaimResidualMs: residualMs }),
     monotonicNs: () => armed ? base + 1_000_000_000_000n : process.hrtime.bigint(),
     processStartTime: (pid) => {
       if (pid !== orphan.pid) return processStartTime(pid);
@@ -6002,15 +6001,38 @@ test('#216 a cleanup child that dies after its commit still counts as released',
   const [pid] = authority.hands['1'].agentHandle.split(':');
   authority.hands['1'].agentHandle = `${pid}:${new Date(Date.parse(processStartTime(Number(pid))) + 7_000).toISOString()}`;
   writeJsonAtomic(authorityPath, authority);
-  if (process.platform === 'win32') {
-    authority.hands['1'].agentHandle = `${pid}:${processStartTime(Number(pid))}-replaced`;
-    writeJsonAtomic(authorityPath, authority);
-  }
   assert.equal((await f.loop.resume()).phase, 'playing');
   const after = readJson(authorityPath);
   assert.equal(after.retiredAttempts[0].cleanupState, 'released');
   assert.equal(after.adapterState, 'enabled', 'a committed release never disables coaching');
   assert.equal(f.calls.some((args) => args[0] === 'adapter-disable'), false);
+});
+
+// #214 D5: the release commits, then the child's answer arrives only after the closure
+// deadline. The loop must still find the commit instead of halting on the deadline.
+test('#216 a cleanup child whose committed answer misses the deadline still counts as released', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const shimDir = createOwnedTempDir('holdem-commit-late-shim');
+  const shim = path.join(shimDir, 'commit-then-stall.mjs');
+  const view = writerObservationShim({});
+  fs.writeFileSync(shim, [
+    "import { spawnSync } from 'node:child_process';",
+    `const writer = ${JSON.stringify(view)};`,
+    'const args = process.argv.slice(2);',
+    "const result = spawnSync(process.execPath, [writer, ...args], { encoding: 'utf8' });",
+    `if (args[0] === 'cleanup-result') await new Promise((resolve) => setTimeout(resolve, ${8_000 * WIN32_SCALE}));`,
+    "process.stdout.write(result.stdout ?? ''); process.exitCode = result.status ?? 1;",
+    '',
+  ].join('\n'));
+  const f = await recovery205Fixture(t, { identity: 'replaced', coachCliPath: shim, residualMs: 2_000 * WIN32_SCALE });
+  const authorityPath = path.join(f.gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  const [pid] = authority.hands['1'].agentHandle.split(':');
+  authority.hands['1'].agentHandle = `${pid}:${new Date(Date.parse(processStartTime(Number(pid))) + 7_000).toISOString()}`;
+  writeJsonAtomic(authorityPath, authority);
+  assert.equal((await f.loop.resume()).phase, 'playing');
+  const after = readJson(authorityPath);
+  assert.equal(after.retiredAttempts[0].cleanupState, 'released');
+  assert.equal(after.adapterState, 'enabled');
 });
 
 test('#205 closure deadline before fence has a rowless retry diagnostic', { timeout: 20_000 * WIN32_SCALE }, async (t) => {

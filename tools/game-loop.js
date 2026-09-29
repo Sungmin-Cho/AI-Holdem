@@ -4559,12 +4559,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             ...(result.cleanupState === 'released' ? ['--evidence', result.reason] : []),
           ], { deadlineNs, deadlineError });
         } catch (error) {
-          if (error.code === deadlineError().code) throw error;
           // #214/#216: a child can fail after its authority commit (a crash before the
-          // response, a lock-release error reported as INTERNAL). This closure only calls the
-          // child when the recorded state differs, so finding the requested state now means
-          // the transition committed. Anything else keeps the child's own refusal code.
+          // response, a lock-release error reported as INTERNAL, a success that arrived past
+          // the deadline). This closure only calls the child when the recorded state differs,
+          // so finding the requested state now means the transition committed — whatever the
+          // failure, including a deadline. Otherwise a deadline still ends the closure.
           if (committedCleanupState(attempt) === result.cleanupState) childFailure = null;
+          else if (error.code === deadlineError().code) throw error;
           else {
             const refused = ['RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED']
               .includes(error.code);

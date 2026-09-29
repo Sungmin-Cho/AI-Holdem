@@ -717,6 +717,7 @@ export function createCoachControl(deps = {}) {
   const scanRuntimeProcesses = deps.scanRuntimeProcesses
     ?? (() => scanCoachRuntimeProcesses({ lsofPath: DEFAULT_LSOF }));
   const wallClock = deps.wallClock ?? (() => new Date());
+  const platform = deps.platform ?? process.platform;
 
   // #216: the authority file is canonical. Trace rows are committed into `traceOutbox`
   // with the state change they describe (one atomic authority write), appended after the
@@ -744,9 +745,12 @@ export function createCoachControl(deps = {}) {
 
   function persist(gameDir, auth, { trace = null } = {}) {
     flushTraceOutbox(gameDir, auth);
+    // FIFO: while an earlier row still waits, the new one waits behind it.
+    const blocked = (auth.traceOutbox ?? []).length > 0;
     if (trace) auth.traceOutbox = [...(auth.traceOutbox ?? []), trace];
     writeAuthority(authPath(gameDir), dehydrate(auth));
     if (!trace) return null;
+    if (blocked) return 'pending';
     try {
       appendTraceRow(gameDir, trace);
       return 'recorded';
@@ -1248,7 +1252,7 @@ export function createCoachControl(deps = {}) {
     const attributable = reader.coachEvidenceAttributable(row.exactResultPath);
     const tupleMismatch = sidecarTupleMismatch(sidecar, row, auth.gameEpoch);
     const ids = rowIdentities(row, tupleMismatch ? null : sidecar);
-    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf }) : null);
+    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf, platform }) : null);
     const authorityState = probe(ids.authority);
     const sidecarState = ids.sidecar && (!ids.authority || ids.conflict) ? probe(ids.sidecar) : authorityState;
     const scan = scanLegacy && !ids.selected && legacyEligible(row, sidecar, attributable)
@@ -1280,6 +1284,12 @@ export function createCoachControl(deps = {}) {
       ...(observed.conflict ? { conflict: true } : {}),
       ...(observed.scan ? { scan: observed.scan.status } : {}),
     };
+    // The declared-evidence path judges in the loop's order: Step 0 tuple and identity
+    // conflict first, then a live identity. The operator path refuses a live identity first.
+    if (!operatorConfirmed) {
+      if (observed.tupleMismatch) codedFail('RELEASE_EVIDENCE_REFUTED', 'spawn sidecar가 이 행의 것이 아닙니다(SPAWN_EVIDENCE_MISMATCH).');
+      if (observed.conflict) codedFail('RELEASE_EVIDENCE_REFUTED', 'authority와 sidecar의 코치 identity가 다릅니다(IDENTITY_CONFLICT).');
+    }
     if (observed.identityStates.includes('alive')) {
       codedFail('RELEASE_TARGET_ALIVE', '기록된 코치 프로세스가 아직 살아 있습니다. 종료된 뒤 다시 실행하세요.');
     }
@@ -1288,8 +1298,6 @@ export function createCoachControl(deps = {}) {
         && observed.identityStates.every((state) => state === 'dead' || state === 'replaced');
       return { status: verified ? 'verified' : 'unverified', method: verified ? 'identity' : 'operator', observed: summary };
     }
-    if (observed.tupleMismatch) codedFail('RELEASE_EVIDENCE_REFUTED', 'spawn sidecar가 이 행의 것이 아닙니다(SPAWN_EVIDENCE_MISMATCH).');
-    if (observed.conflict) codedFail('RELEASE_EVIDENCE_REFUTED', 'authority와 sidecar의 코치 identity가 다릅니다(IDENTITY_CONFLICT).');
     const holds = new Set();
     if (observed.selectedState === 'dead' || observed.selectedState === 'replaced') {
       holds.add('IDENTITY_DEAD'); holds.add('IDENTITY_REPLACED');

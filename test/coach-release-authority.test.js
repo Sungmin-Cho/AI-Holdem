@@ -9,6 +9,7 @@ import { writeJsonAtomic } from '../engine/state.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { deriveServerLockObservation } from '../tools/game-loop.js';
+import { compareStartTimes } from '../tools/coach-evidence.js';
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
 const TOKEN = 'tok-coach-release';
@@ -77,8 +78,9 @@ test('#214 identity declarations are verified by the writer, not taken from the 
   const replaced = await fixture({ handle: `${LIVE_PID}:${START}`, deps: observed({ [LIVE_PID]: 'Mon Sep 28 12:00:07 2026' }) });
   assert.equal((await replaced.cleanup({ evidence: 'IDENTITY_DEAD' })).verification.status, 'verified');
 
+  // A 9 h zone-less difference is ambiguous on POSIX (pinned so every CI platform runs it).
   for (const [state, code] of [[START, 'RELEASE_TARGET_ALIVE'], ['unknown', 'RELEASE_EVIDENCE_UNVERIFIABLE'], ['Mon Sep 28 21:00:00 2026', 'RELEASE_EVIDENCE_UNVERIFIABLE']]) {
-    const f = await fixture({ handle: `${LIVE_PID}:${START}`, deps: observed({ [LIVE_PID]: state }) });
+    const f = await fixture({ handle: `${LIVE_PID}:${START}`, deps: { ...observed({ [LIVE_PID]: state }), platform: 'darwin' } });
     const before = bytes(f.dir);
     await assert.rejects(f.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code }, state);
     assert.deepEqual(bytes(f.dir), before, `${code} writes nothing`);
@@ -240,4 +242,53 @@ test('#215 the server-lock observation distinguishes absent, invalid, foreign, u
   assert.equal(state({ processAlive: () => false }), 'unverified', 'the verified relay has since exited');
   assert.equal(state({ startTimeOf: () => 'Mon Sep 28 13:00:07 2026' }), 'unverified', 'the pid now belongs to another process');
   assert.deepEqual(deriveServerLockObservation({ ...base, readLock: () => lock }), { state: 'authenticated', serverPid: 4242, observedAt: '2026-09-29T00:00:00.000Z' });
+});
+
+test('#214 D4a start-time comparison: unparseable is unknown, win32 instants are exact, POSIX zone steps are ambiguous', () => {
+  const iso = '2026-09-28T12:00:00.0000000+09:00';
+  assert.equal(compareStartTimes(iso, iso, { platform: 'win32' }), 'same');
+  assert.equal(compareStartTimes('2026-09-28T03:00:00.000Z', iso, { platform: 'win32' }), 'same', 'the same instant in another offset');
+  assert.equal(compareStartTimes('2026-09-28T03:00:07.000Z', iso, { platform: 'win32' }), 'different');
+  assert.equal(compareStartTimes('garbage', iso, { platform: 'win32' }), 'unknown', 'a malformed record never proves replacement');
+  assert.equal(compareStartTimes(START, 'Mon Sep 28 12:00:07 2026', { platform: 'darwin' }), 'different');
+  for (const hours of [1, 9, 19, 26]) {
+    assert.equal(compareStartTimes(START, new Date(Date.parse(START) + hours * 3_600_000).toString(), { platform: 'linux' }), 'unknown', `${hours} h`);
+  }
+  assert.equal(compareStartTimes(START, new Date(Date.parse(START) + 27 * 3_600_000).toString(), { platform: 'linux' }), 'different', 'beyond any zone pair');
+  assert.equal(compareStartTimes(START, 'not a time', { platform: 'linux' }), 'unknown');
+});
+
+test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {
+  let failing = true;
+  const appended = [];
+  const appendTrace = (dir, row) => {
+    if (failing && row.operation === 'cleanup-result') throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    appended.push(row.operation);
+    fs.appendFileSync(path.join(dir, TRACE), `${JSON.stringify(row)}\n`);
+  };
+  const f = await fixture({ handle: `${DEAD_PID}:${START}`, deps: { ...observed({ [DEAD_PID]: 'dead' }), appendTrace } });
+  appended.length = 0;
+  assert.equal((await f.cleanup({ evidence: 'IDENTITY_DEAD' })).audit, 'pending');
+  // The next operation's flush fails again for the release row; its own row must not overtake.
+  const disabled = await f.cc.adapterDisable({ gameDir: f.dir, owner: OWNER, reason: 'later' });
+  assert.equal(disabled.audit, 'pending');
+  assert.deepEqual(appended, []);
+  failing = false;
+  await f.cc.adapterDisable({ gameDir: f.dir, owner: OWNER, reason: 'flush' });
+  const order = traceRows(f.dir).map((row) => row.operation).slice(-3);
+  assert.deepEqual(order, ['cleanup-result', 'adapter-disable', 'adapter-disable']);
+  assert.equal(authorityOf(f.dir).traceOutbox?.length ?? 0, 1, 'the last row waits only for the next flush to confirm it');
+});
+
+test('#216 a bind-handle append failure never fails the committed bind', async () => {
+  const dir = tmpGame();
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({ serverPid: process.pid, port: 8877, sessionToken: TOKEN, startedAt: new Date().toISOString() }));
+  writeJsonAtomic(path.join(dir, 'ui-snapshot.json'), { revision: 1, view: null, log: [], coach: [] });
+  writeJsonAtomic(path.join(dir, 'stats.json'), { perPlayer: { user: { sample: 0, vpip: 0 } } });
+  const cc = createCoachControl({ appendTrace: () => { throw new Error('EIO'); } });
+  const reserved = await cc.reserve({ gameDir: dir, owner: OWNER, handNo: 1, statsFile: path.join(dir, 'stats.json'), snapshotFile: path.join(dir, 'ui-snapshot.json') });
+  const bound = await cc.bindHandle({ gameDir: dir, owner: OWNER, handNo: 1, generation: reserved.generation, handle: `${DEAD_PID}:${START}` });
+  assert.deepEqual(bound, { ok: true, audit: 'pending' });
+  assert.equal(authorityOf(dir).hands['1'].agentHandle, `${DEAD_PID}:${START}`);
+  assert.equal(authorityOf(dir).traceOutbox[0].operation, 'bind-handle');
 });
