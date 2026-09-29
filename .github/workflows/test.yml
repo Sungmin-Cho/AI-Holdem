@@ -184,6 +184,16 @@ jobs:
           if (Test-Path $file) { node test/helpers/proof-profile-report.mjs $file } else { echo 'no proofs.jsonl' }
           $log = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'study-children.log'
           if (Test-Path $log) { Get-Content $log }
+      - name: Upload Windows proof profile
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proofs-${{ matrix.shard }}-node${{ matrix.node-version }}
+          path: ${{ env.AI_HOLDEM_PLATFORM_DIAGNOSTICS }}/proofs.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+          # A re-run attempt uploads under the same name.
+          overwrite: true
   windows-suite:
     name: Windows suite
     needs: windows
