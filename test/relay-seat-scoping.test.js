@@ -116,6 +116,12 @@ async function multiRelay(t) {
     try { json = await response.json(); } catch { /* empty */ }
     return { status: response.status, json };
   };
+  // The relay reads state.json asynchronously while it initializes (hint proof), and the
+  // credentialed health probe waits for that read. On Windows an in-process open handle
+  // makes a test's state.json rename fail, and the rename's synchronous retries block the
+  // event loop the read needs to close its handle, so wait for it before writing state.json.
+  const health = await http('/api/health');
+  assert.equal(health.status, 200);
   return { dir, relay, state: started, http };
 }
 
@@ -217,6 +223,8 @@ test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision
   const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
   const nextLegal = legalFor(next);
   assert.notEqual(nextLegal.toAct, actor);
+  // The engine state moves first; the relay only learns of it from the publication below.
+  saveState(f.dir, next);
   const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
   let released = false;
   try {
@@ -225,7 +233,6 @@ test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision
       body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-next', action: 'fold' },
     });
     await new Promise((resolve) => setTimeout(resolve, 60));
-    saveState(f.dir, next);
     await publish(next, 2);
     releaseOwnedLock(lock);
     released = true;
@@ -255,6 +262,7 @@ test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is rec
   const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
   const nextLegal = legalFor(next);
   control.set('paused', { pauseIntent: true });
+  saveState(f.dir, next);
   const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
   let released = false;
   try {
@@ -263,7 +271,6 @@ test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is rec
       body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-paused', action: 'fold' },
     });
     await new Promise((resolve) => setTimeout(resolve, 60));
-    saveState(f.dir, next);
     await publish(next, 2);
     releaseOwnedLock(lock);
     released = true;
