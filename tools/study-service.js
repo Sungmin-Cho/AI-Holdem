@@ -703,10 +703,23 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
       await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
       continue;
     }
-    const { current, lock } = aclTransaction(ctx, () => {
-      assertContext(ctx);
-      return { current: readDescriptor(ctx), lock: readLock(ctx) };
-    });
+    let observed;
+    try {
+      observed = aclTransaction(ctx, () => {
+        assertContext(ctx);
+        return { current: readDescriptor(ctx), lock: readLock(ctx) };
+      });
+    } catch (error) {
+      // The service deletes its descriptor and lock while it stops. On Windows a file deleted
+      // while any handle (ours included) is open stays "delete pending": reading it fails as a
+      // corrupt file (EPERM), not a missing one. That clears on the next poll, so it is not a
+      // verdict; a file that stays unreadable still fails at the deadline below.
+      if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+      lastFullCheck = platformNow();
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    const { current, lock } = observed;
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
