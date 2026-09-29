@@ -1148,10 +1148,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return finalizationDeadlineNs;
   };
 
+  // #213: observation-only test seam, called once each time a result-wait cutoff is
+  // installed, so a test can place a monotonic clock jump relative to it. The return value
+  // is ignored, and neither a throw nor a rejected promise from it reaches finalization.
+  const notifyFinalizationDeadline = (deadlineNs, resultWaitCutoffNs) => {
+    if (typeof opts.onFinalizationDeadline !== 'function') return;
+    try {
+      const observed = opts.onFinalizationDeadline({ deadlineNs, resultWaitCutoffNs });
+      if (observed && typeof observed.then === 'function') observed.then(null, () => {});
+    } catch {
+      // Observation only.
+    }
+  };
+
   const ensureFinalizationResultWaitCutoff = () => {
     const deadlineNs = ensureFinalizationDeadline();
     if (finalizeResultWaitCutoffNs === null) {
       finalizeResultWaitCutoffNs = deadlineNs - BigInt(finalizeCutoffLeadMs) * 1_000_000n;
+      notifyFinalizationDeadline(deadlineNs, finalizeResultWaitCutoffNs);
     }
     return { deadlineNs, resultWaitCutoffNs: finalizeResultWaitCutoffNs };
   };
