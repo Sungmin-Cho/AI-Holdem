@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { validWin32StartTime } from '../engine/process-identity.js';
+import { validOwnedIdentity } from '../engine/state.js';
 
 export const SIDECAR_MAX_BYTES = 64 * 1024;
 // #192 I2: undefined (not 0) on a platform that has no O_NOFOLLOW (e.g. Windows) so callers
@@ -178,7 +179,26 @@ const LSTART_SHAPE = /^\S+\s+\S+\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$|^\S+\s+\S+
 //   lstart in any locale). Different text that parses to the same instant (a DST fold) or
 //   differs by a whole number of 15-minute steps within ±26 hours may be one process read
 //   from another zone: unknown. Different text Date cannot read (another locale) is unknown.
+// #247: owned readings (`utc-v1:`, `win32-v1:` — `ownedProcessStartTime`) carry no time
+// zone, so equal text is the same process wherever it is read. Unequal text proves another
+// process only where the reading is a start time fixed when the process was created: a
+// Windows creation FILETIME, or the start time macOS stores at fork. Linux derives lstart
+// from the boot time, which follows clock steps (and time namespaces), so there a mismatch
+// proves nothing. Two kinds, or a malformed value, prove nothing. Only a record made by the
+// legacy reader uses the rules below. Equal text is still whole-second text: a wall clock
+// set back by exactly the gap, plus a reused pid, could match — the limit lifetime locks
+// already accept, and far narrower than the zone-dependent legacy reading.
+const OWNED = /^(?:utc|win32)-v1:/;
+const owned = (value) => typeof value === 'string' && OWNED.test(value);
+export function isOwnedStartTime(value) { return owned(value); }
 export function compareStartTimes(recorded, current, { platform = process.platform } = {}) {
+  if (owned(recorded) || owned(current)) {
+    if (!validOwnedIdentity(recorded) || !validOwnedIdentity(current)) return 'unknown';
+    const kind = recorded.slice(0, recorded.indexOf(':'));
+    if (kind !== current.slice(0, current.indexOf(':'))) return 'unknown';
+    if (recorded === current) return 'same';
+    return kind === 'win32-v1' || platform === 'darwin' ? 'different' : 'unknown';
+  }
   if (platform === 'win32') {
     const a = win32Ticks(recorded);
     const b = win32Ticks(current);
@@ -198,10 +218,14 @@ export function compareStartTimes(recorded, current, { platform = process.platfo
 // One observation of a recorded {pid, startTime}: 'dead' (kill 0 says gone), 'alive' (same
 // start time), 'replaced' (pid reused by a provably different process), or 'unknown'
 // (start time unreadable, unparseable, or ambiguous across time zones). Never 'dead' from
-// 'unknown'. kill(0) runs first so a dead pid costs no `ps`/PowerShell spawn.
-export function observeRecordedIdentity({ pid, startTime }, { processAlive, startTimeOf, platform = process.platform }) {
+// 'unknown'. kill(0) runs first so a dead pid costs no `ps`/PowerShell spawn. An owned
+// record is read back only with `ownedStartTimeOf` (#247); without it the answer is unknown,
+// never a legacy reading compared against an owned one.
+export function observeRecordedIdentity({ pid, startTime }, { processAlive, startTimeOf, ownedStartTimeOf, platform = process.platform }) {
   if (!processAlive(pid)) return 'dead';
-  const current = startTimeOf(pid);
+  const read = owned(startTime) ? ownedStartTimeOf : startTimeOf;
+  if (typeof read !== 'function') return 'unknown';
+  const current = read(pid);
   if (current === null || current === undefined) return 'unknown';
   const compared = compareStartTimes(startTime, current, { platform });
   return compared === 'same' ? 'alive' : compared === 'different' ? 'replaced' : 'unknown';

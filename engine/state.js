@@ -638,7 +638,7 @@ function resolveOwnedStartTime(pid, probe) {
   return value === processStartTime(pid) ? ownedProcessStartTime(pid) : null;
 }
 
-function validOwnedIdentity(value) {
+export function validOwnedIdentity(value) {
   if (typeof value !== 'string') return false;
   if (value.startsWith('utc-v1:')) return validOwnedTimestamp(value.slice(7));
   // The owned wire is exactly the Windows round-trip 'o' format. Shorter
