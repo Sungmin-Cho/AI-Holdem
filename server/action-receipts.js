@@ -8,13 +8,21 @@ import {
 import { openContained } from '../tools/training-store.js';
 
 const RECEIPT_FILE = 'ui-action-receipt.json';
-const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-snapshot.json', 'lock.json']);
+// #235: requests the pause gate refused with durable proof. Only the current
+// decision's entries are kept; a new decision's first entry replaces the file.
+const CANCELLATION_FILE = 'ui-action-cancellations.json';
+const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json']);
 export const ACTION_RECEIPT_MAX_BYTES = 4096;
 export const ACTION_REJECTION_LIMIT = 16;
+export const ACTION_CANCELLATION_LIMIT = 16;
+export const ACTION_CANCELLATION_MAX_BYTES = 4096;
 const PHASES = new Set(['accepted', 'delivered', 'consumed', 'rejected']);
 const TERMINAL = new Set(['consumed', 'rejected']);
 const KEYS = new Set(['schemaVersion', 'gameEpoch', 'decisionId', 'requestId', 'action', 'amount', 'digest', 'phase', 'publishId', 'reason', 'rejections', 'retiredAtPublishId', 'note']);
 const REJECTION_KEYS = new Set(['requestId', 'digest', 'reason', 'publishId']);
+const CANCELLATION_KEYS = new Set(['schemaVersion', 'gameEpoch', 'decisionId', 'entries']);
+const CANCELLATION_ENTRY_KEYS = new Set(['requestId', 'digest', 'controlRevision']);
+const DECISION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const REASON = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -129,10 +137,11 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
   if (!DIGEST.test(gameEpoch ?? '') || !owners.has(owner) || owner.root !== path.resolve(root)) throw fail();
   const file = path.join(owner.root, RECEIPT_FILE);
   let observedReceipt = false;
-  const inspect = () => {
+  let observedCancellations = false;
+  const inspectFile = (target) => {
     owner.assert();
     try {
-      const st = fs.lstatSync(file);
+      const st = fs.lstatSync(target);
       if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) throw fail();
       return st;
     } catch (error) {
@@ -140,6 +149,7 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       throw error;
     }
   };
+  const inspect = () => inspectFile(file);
   const validate = (row) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)
       || Object.keys(row).some((key) => !KEYS.has(key))
@@ -201,6 +211,51 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       return row;
     } catch { throw fail(); }
   };
+  const validateCancellations = (ledger) => {
+    if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)
+      || Object.keys(ledger).some((key) => !CANCELLATION_KEYS.has(key))
+      || ledger.schemaVersion !== 1 || ledger.gameEpoch !== gameEpoch
+      || typeof ledger.decisionId !== 'string' || !DECISION_ID.test(ledger.decisionId)
+      || !Array.isArray(ledger.entries) || ledger.entries.length < 1
+      || ledger.entries.length > ACTION_CANCELLATION_LIMIT
+      || Buffer.byteLength(JSON.stringify(ledger), 'utf8') > ACTION_CANCELLATION_MAX_BYTES) throw fail();
+    const ids = new Set();
+    for (const entry of ledger.entries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+        || Object.keys(entry).some((key) => !CANCELLATION_ENTRY_KEYS.has(key))
+        || typeof entry.requestId !== 'string' || !REQUEST_ID.test(entry.requestId)
+        || entry.requestId.startsWith('legacy-')
+        || typeof entry.digest !== 'string' || !DIGEST.test(entry.digest)
+        || !Number.isSafeInteger(entry.controlRevision) || entry.controlRevision < 0
+        || ids.has(entry.requestId)) throw fail();
+      ids.add(entry.requestId);
+    }
+    return ledger;
+  };
+  const cancellationFile = path.join(owner.root, CANCELLATION_FILE);
+  // Same fail-closed reading as the receipt: once observed, a vanished ledger is
+  // corruption, never "nothing was cancelled".
+  const readCancellations = () => {
+    try {
+      const before = inspectFile(cancellationFile);
+      if (!before) {
+        if (observedCancellations) throw fail();
+        return null;
+      }
+      const bytes = openContained(owner.root, [CANCELLATION_FILE], { maxBytes: ACTION_CANCELLATION_MAX_BYTES });
+      const after = inspectFile(cancellationFile);
+      if (!after || after.dev !== before.dev || after.ino !== before.ino) throw fail();
+      const ledger = validateCancellations(JSON.parse(bytes.toString('utf8')));
+      observedCancellations = true;
+      return ledger;
+    } catch { throw fail(); }
+  };
+  const cancelledEntry = (decisionId, requestId) => {
+    const ledger = readCancellations();
+    return ledger?.decisionId === decisionId
+      ? ledger.entries.find((entry) => entry.requestId === requestId) ?? null
+      : null;
+  };
   const commit = (row) => {
     checkCapacity(row);
     validate(row);
@@ -248,11 +303,16 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
     return { ack, publishId: ackPublishId, current };
   };
   read();
+  readCancellations();
   return {
     read,
     accept(body, currentDecision) {
       if (currentDecision == null || body?.decisionId !== currentDecision) throw coded('STALE_DECISION');
       const next = { schemaVersion: 1, gameEpoch, ...normalizeActionRequest(body), phase: 'accepted', rejections: [] };
+      // #235: a request the pause gate cancelled with proof can never be accepted
+      // later, whether it is a retry after resume or an older timed-out POST.
+      const cancelled = cancelledEntry(next.decisionId, next.requestId);
+      if (cancelled) throw coded(cancelled.digest === next.digest ? 'ACTION_CANCELLED' : 'ACTION_ALREADY_RECEIVED');
       const previous = read();
       if (previous?.decisionId === next.decisionId) {
         const rejected = previous.rejections.find((entry) => entry.requestId === next.requestId);
@@ -312,11 +372,46 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       }
       return receipt;
     },
+    // #235: called by the action gate while it holds the control lock and the game
+    // is pausing/paused. Returns durable proof `{decisionId, requestId}` only after
+    // the ledger write (file + directory fsync) completed; otherwise null, which the
+    // relay reports as a plain GAME_PAUSED exactly as before. Never evicts.
+    cancel(body, currentDecision, controlRevision) {
+      try {
+        if (body?.requestId === undefined || !Number.isSafeInteger(controlRevision) || controlRevision < 0) return null;
+        const request = normalizeActionRequest(body);
+        if (request.requestId.startsWith('legacy-')) return null;
+        if (currentDecision == null || request.decisionId !== currentDecision) return null;
+        const receipt = read();
+        if (receipt?.decisionId === request.decisionId && (receipt.requestId === request.requestId
+          || receipt.rejections.some((entry) => entry.requestId === request.requestId))) return null;
+        const ledger = readCancellations();
+        const same = ledger?.decisionId === request.decisionId ? ledger : null;
+        const proof = { decisionId: request.decisionId, requestId: request.requestId };
+        const existing = same?.entries.find((entry) => entry.requestId === request.requestId);
+        if (existing) return existing.digest === request.digest ? proof : null;
+        const next = { schemaVersion: 1, gameEpoch, decisionId: request.decisionId,
+          entries: [...(same?.entries ?? []), { requestId: request.requestId, digest: request.digest, controlRevision }] };
+        try { validateCancellations(next); } catch { return null; }
+        inspectFile(cancellationFile);
+        writeRelayJsonAtomic(owner, 'ui-action-cancellations.json', next);
+        observedCancellations = true;
+        return proof;
+      } catch { return null; }
+    },
     status(currentDecision) {
       const row = read();
       const current = row?.decisionId === currentDecision ? row : null;
+      const ledger = readCancellations();
+      // #235: earlier rejected requests of the current decision are terminal too.
+      // A tab holding one of them (its response lost while another tab corrected)
+      // needs this list to release instead of reading a mismatched receipt.
+      const rejected = (current?.rejections ?? []).map((entry) => entry.requestId).filter((id) => id !== current.requestId);
       return { ok: true, decisionId: currentDecision, requestId: current?.requestId ?? null, phase: current?.phase ?? 'unreceived',
-        ...(current?.phase==='rejected' && ['STALE_DECISION','ILLEGAL_ACTION','VERSION_MISMATCH'].includes(current.reason)?{reason:current.reason}:{}) };
+        ...(current?.phase==='rejected' && ['STALE_DECISION','ILLEGAL_ACTION','VERSION_MISMATCH'].includes(current.reason)?{reason:current.reason}:{}),
+        ...(rejected.length ? { rejected } : {}),
+        ...(currentDecision != null && ledger?.decisionId === currentDecision
+          ? { cancelled: ledger.entries.map((entry) => entry.requestId) } : {}) };
     },
   };
 }

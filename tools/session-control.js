@@ -5,6 +5,7 @@ import { writePrivateJson as writeJsonAtomic } from "./app-files.js";
 import { controlError } from "../shared/session-control-contract.js";
 const FILE = ".session-control.json";
 const STATES = new Set(["playing", "pausing", "paused", "stopping", "aborted"]);
+const PAUSE_STATES = new Set(["pausing", "paused"]);
 export function readSessionControl(root, epoch) {
   let fd;
   try {
@@ -33,6 +34,15 @@ export function readSessionControl(root, epoch) {
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
+// #235: display hint for action-status. Lock-free and advisory — the gate stays
+// the only admission authority. null when the control cannot be read.
+export function readActionGatePaused(root, epoch) {
+  try {
+    return PAUSE_STATES.has(readSessionControl(root, epoch).playState);
+  } catch {
+    return null;
+  }
+}
 export function withControlLock(root, fn) {
   let lock;
   try {
@@ -48,10 +58,26 @@ export function withControlLock(root, fn) {
     releaseOwnedLock(lock);
   }
 }
-export function withActionGate(root, epoch, fn, { decisionId } = {}) {
+// #235: `onClosed(control)` runs inside the same control lock when the gate is
+// closed for a pause, so a cancellation it records is linearized before resume
+// (which takes this lock to write `playing`). Its truthy result is attached to
+// the GAME_PAUSED error as `cancelled`; a throwing callback only drops the proof.
+// `precheck()` runs first inside the lock, before the gate state is consulted, so a
+// caller's own admission error (e.g. the turn moved to another seat while a
+// CONTROL_BUSY retry was waiting) wins over GAME_PAUSED and records nothing.
+export function withActionGate(root, epoch, fn, { decisionId, onClosed, precheck } = {}) {
   return withControlLock(root, () => {
+    if (typeof precheck === "function") precheck();
     const control = readSessionControl(root, epoch);
-    if (control.playState !== "playing") throw controlError("GAME_PAUSED");
+    if (control.playState !== "playing") {
+      const error = controlError("GAME_PAUSED");
+      if (typeof onClosed === "function" && PAUSE_STATES.has(control.playState)) {
+        let cancelled = null;
+        try { cancelled = onClosed(control) ?? null; } catch { cancelled = null; }
+        if (cancelled) error.cancelled = cancelled;
+      }
+      throw error;
+    }
     if (decisionId != null && control.closedDecisionId === decisionId) {
       throw controlError("DECISION_CLOSED");
     }

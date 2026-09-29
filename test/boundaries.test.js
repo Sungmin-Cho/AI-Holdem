@@ -153,7 +153,7 @@ test('server imports only contracts, named containment and pure viewer projectio
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
@@ -187,7 +187,7 @@ test('the server writes only its UI, receipt and lock files, never its security 
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
     const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
-      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json']) : new Set();
+      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json', 'ui-action-cancellations.json']) : new Set();
     for (const call of source.matchAll(/\bwriteRelayJsonAtomic\(([^\n]*)/g)) {
       if (source.slice(Math.max(0, call.index - 16), call.index).endsWith('function ')) {
         if (relative !== 'server/action-receipts.js') offenders.push(`${relative} -> unowned writer declaration`);
@@ -197,7 +197,8 @@ test('the server writes only its UI, receipt and lock files, never its security 
       if (!relayTargets.has(target)) offenders.push(`${relative} -> unapproved relay destination`);
     }
     if (relative === 'server/action-receipts.js') {
-      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes("const CANCELLATION_FILE = 'ui-action-cancellations.json';"));
       assert.ok(source.includes('!owners.has(owner) || !RELAY_FILES.has(name)'));
     }
     for (const call of source.matchAll(/writeJsonAtomic\(\s*path\.join\(([^)]*)\)/g)) {

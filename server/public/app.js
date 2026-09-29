@@ -1875,7 +1875,7 @@ async function initializeController() {
       const notice=$('action-notice');if(notice){notice.textContent=formatActionNotice(state.notice);notice.hidden=!notice.textContent;}
       $('action-retry').hidden = !state.canRetry;
       $('action-retry').disabled = !state.canRetry;
-      $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(state.phase);
+      $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed', 'paused'].includes(state.phase);
       paintActionBar(ui.view);
     },
   });
@@ -1956,7 +1956,7 @@ else {
   }
 
   const poll = setInterval(() => {
-    if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(actionController.state.phase)) void actionController.reconcile();
+    if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed', 'paused'].includes(actionController.state.phase)) void actionController.reconcile();
   }, 2500);
   window.addEventListener('pagehide', () => { clearInterval(poll); es.close(); });
 }
