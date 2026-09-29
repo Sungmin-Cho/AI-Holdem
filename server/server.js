@@ -1055,7 +1055,8 @@ function serveStatic(pathname, res) {
   });
 }
 
-// `actionControlRetryMs` bounds how long an action waits out CONTROL_BUSY; only tests change it.
+// `actionControlRetryMs` is how long an action keeps retrying CONTROL_BUSY; a slow first
+// attempt is still followed by the minimum retries (#251). Only tests change it.
 export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250 }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
