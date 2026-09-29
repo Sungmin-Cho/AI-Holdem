@@ -50,8 +50,17 @@ test('identity memo reuses startTimeOf only inside one transaction', () => {
 
 test('nextCheckpointDelay stretches only on win32 after a slow checkpoint', () => {
   assert.equal(nextCheckpointDelay(1000, 6000, 'win32'), 12000);
-  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 1000);
   assert.equal(nextCheckpointDelay(1000, 6000, 'linux'), 1000);
+  assert.equal(nextCheckpointDelay(50, 100, 'linux'), 50);
+});
+
+// #249: cheaper proofs must not multiply the PowerShell children an idle service spawns.
+test('win32 checkpoints stay at least 4 s apart however fast the last one was', () => {
+  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 4000);
+  assert.equal(nextCheckpointDelay(1000, 550, 'win32'), 4000, 'two ~260 ms proofs');
+  assert.equal(nextCheckpointDelay(50, 0, 'win32'), 4000);
+  assert.equal(nextCheckpointDelay(1000, 2100, 'win32'), 4200, 'two ~1 s proofs, as before #249');
+  assert.equal(nextCheckpointDelay(5000, 100, 'win32'), 5000);
 });
 
 test('live wait retries transport resets while the same owner is alive', () => {
