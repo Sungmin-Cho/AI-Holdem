@@ -17,6 +17,11 @@ const DEAD_PID = 4_194_303;
 const LIVE_PID = process.pid;
 const START = 'Mon Sep 28 12:00:00 2026';
 const TRACE = '.coach-adapter-trace.jsonl';
+// `ps -o lstart=` text for an instant in this process's zone (C locale).
+function lstart(ms) {
+  const d = new Date(ms), two = (n) => String(n).padStart(2, '0');
+  return `${'SunMonTueWedThuFriSat'.slice(d.getDay() * 3, d.getDay() * 3 + 3)} ${'JanFebMarAprMayJunJulAugSepOctNovDec'.slice(d.getMonth() * 3, d.getMonth() * 3 + 3)} ${String(d.getDate()).padStart(2, ' ')} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} ${d.getFullYear()}`;
+}
 
 function tmpGame() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-coach-release-'));
@@ -60,9 +65,12 @@ async function fixture({ handle = null, spawnEvidence = false, deps = {}, sideca
   return { dir, cc, generation: reserved.generation, cleanup };
 }
 
-const observed = (states) => ({
+// The writer's observations, pinned to POSIX so these POSIX-format handles mean the same on
+// every CI platform (r5: on win32 only the canonical UTC reading is evidence).
+const observed = (states, { platform = 'darwin' } = {}) => ({
   processAlive: (pid) => states[pid] !== 'dead',
   processStartTime: (pid) => states[pid] === 'unknown' ? null : (states[pid] ?? START),
+  platform,
 });
 
 test('#214 identity declarations are verified by the writer, not taken from the caller', async () => {
@@ -80,7 +88,7 @@ test('#214 identity declarations are verified by the writer, not taken from the 
 
   // A 9 h zone-less difference is ambiguous on POSIX (pinned so every CI platform runs it).
   for (const [state, code] of [[START, 'RELEASE_TARGET_ALIVE'], ['unknown', 'RELEASE_EVIDENCE_UNVERIFIABLE'], ['Mon Sep 28 21:00:00 2026', 'RELEASE_EVIDENCE_UNVERIFIABLE']]) {
-    const f = await fixture({ handle: `${LIVE_PID}:${START}`, deps: { ...observed({ [LIVE_PID]: state }), platform: 'darwin' } });
+    const f = await fixture({ handle: `${LIVE_PID}:${START}`, deps: observed({ [LIVE_PID]: state }) });
     const before = bytes(f.dir);
     await assert.rejects(f.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code }, state);
     assert.deepEqual(bytes(f.dir), before, `${code} writes nothing`);
@@ -278,9 +286,9 @@ test('#214 D4a start-time comparison: unparseable is unknown, win32 ticks are ex
   assert.equal(compareStartTimes(START, START, { platform: 'darwin' }), 'same');
   assert.equal(compareStartTimes(START, 'Mon Sep 28 12:00:07 2026', { platform: 'darwin' }), 'different');
   for (const hours of [1, 9, 19, 26]) {
-    assert.equal(compareStartTimes(START, new Date(Date.parse(START) + hours * 3_600_000).toString(), { platform: 'linux' }), 'unknown', `${hours} h`);
+    assert.equal(compareStartTimes(START, lstart(Date.parse(START) + hours * 3_600_000), { platform: 'linux' }), 'unknown', `${hours} h`);
   }
-  assert.equal(compareStartTimes(START, new Date(Date.parse(START) + 27 * 3_600_000).toString(), { platform: 'linux' }), 'different', 'beyond any zone pair');
+  assert.equal(compareStartTimes(START, lstart(Date.parse(START) + 27 * 3_600_000), { platform: 'linux' }), 'different', 'beyond any zone pair');
   // r4: equal unparseable text is still unknown, and different text at the same parsed instant
   // (a DST fold such as 02:30 and 03:30 on a spring-forward night) is never 'same'.
   assert.equal(compareStartTimes(START, 'not a time', { platform: 'linux' }), 'unknown');
@@ -288,6 +296,31 @@ test('#214 D4a start-time comparison: unparseable is unknown, win32 ticks are ex
   const sameInstant = new Date(Date.parse(START)).toISOString();
   assert.notEqual(sameInstant, START);
   assert.equal(compareStartTimes(START, sameInstant, { platform: 'darwin' }), 'unknown');
+  // r5: `ps lstart` follows the locale. Identical localized readings are the same process;
+  // text that is not a timestamp never is.
+  for (const local of ['Mo 28 Sep 12:00:00 2026', '월  9 28 12:00:00 2026', 'lun. 28 sept. 12:00:00 2026']) {
+    assert.equal(compareStartTimes(local, local, { platform: 'linux' }), 'same', local);
+  }
+  for (const junk of ['', '-', 'null', '12:00:00', 'garbage 2026']) {
+    assert.equal(compareStartTimes(junk, junk, { platform: 'linux' }), 'unknown', JSON.stringify(junk));
+  }
+});
+
+// r5: the writer's verdicts with canonical Win32 readings, as a Windows store records them.
+test('#214 win32 writer: alive, replaced and refusal precedence with UTC tick handles', async () => {
+  const TICK = '2026-09-28T03:00:00.1234567Z';
+  const win = (states) => observed(Object.fromEntries(Object.entries(states).map(([pid, v]) => [pid, v === 'live' ? TICK : v])), { platform: 'win32' });
+  const replaced = await fixture({ handle: `${LIVE_PID}:${TICK}`, deps: win({ [LIVE_PID]: '2026-09-28T03:00:00.1234568Z' }) });
+  assert.equal((await replaced.cleanup({ evidence: 'IDENTITY_REPLACED' })).verification.status, 'verified', '100 ns later is another process');
+  const alive = await fixture({ handle: `${LIVE_PID}:${TICK}`, deps: win({ [LIVE_PID]: 'live' }) });
+  await assert.rejects(alive.cleanup({ evidence: 'IDENTITY_DEAD' }), { code: 'RELEASE_TARGET_ALIVE' });
+  await assert.rejects(alive.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
+  const posixText = await fixture({ handle: `${LIVE_PID}:${START}`, deps: win({ [LIVE_PID]: START }) });
+  await assert.rejects(posixText.cleanup({ evidence: 'IDENTITY_DEAD' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' }, 'non-canonical text proves nothing on win32');
+  const mismatch = await fixture({ handle: `${LIVE_PID}:${TICK}`, sidecar: { phase: 'closed-confirmed', generation: 99 }, deps: win({ [LIVE_PID]: 'live' }) });
+  await assert.rejects(mismatch.cleanup({ evidence: 'CLOSED_CONFIRMED' }), { code: 'RELEASE_EVIDENCE_REFUTED' });
+  const mismatch2 = await fixture({ handle: `${LIVE_PID}:${TICK}`, sidecar: { phase: 'closed-confirmed', generation: 99 }, deps: win({ [LIVE_PID]: 'live' }) });
+  await assert.rejects(mismatch2.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
 });
 
 test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {

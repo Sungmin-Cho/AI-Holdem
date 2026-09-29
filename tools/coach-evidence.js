@@ -164,13 +164,20 @@ function win32Ticks(value) {
   const [whole, fraction = ''] = value.slice(0, -1).split('.');
   return `${whole}.${fraction.padEnd(7, '0')}`;
 }
+// A POSIX `ps -o lstart=` reading: weekday, month, day, time and year. The names follow the
+// reader's locale (Date.parse only reads English), so the shape, not the words, is checked.
+// An ISO 8601 instant (a replacement written in UTC form). Date.parse alone is too lenient:
+// it reads "garbage 2026" as a date.
+const ISO_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const LSTART_SHAPE = /^\S+\s+\S+\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$|^\S+\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s+\S+\s+\d{4}$/u;
 // Compare a recorded start time with a fresh reading of the same pid: 'same', 'different',
-// or 'unknown'. A reading either side cannot parse is never proof of anything, even when the
-// two strings are equal.
-// - win32: equal ticks are the same process, any other tick is not.
-// - POSIX: only the identical text is the same process. Different text that parses to the
-//   same instant (a DST fold) or differs by a whole number of 15-minute steps within ±26
-//   hours may be one process read from another zone: unknown. Anything else is different.
+// or 'unknown'. Garbage is never proof of anything, even when the two strings are equal.
+// - win32: equal ticks of the canonical UTC reading are the same process, any other tick
+//   is not; any other text is unknown.
+// - POSIX: only identical text is the same process, and only when it is a timestamp (an
+//   lstart in any locale). Different text that parses to the same instant (a DST fold) or
+//   differs by a whole number of 15-minute steps within ±26 hours may be one process read
+//   from another zone: unknown. Different text Date cannot read (another locale) is unknown.
 export function compareStartTimes(recorded, current, { platform = process.platform } = {}) {
   if (platform === 'win32') {
     const a = win32Ticks(recorded);
@@ -178,10 +185,12 @@ export function compareStartTimes(recorded, current, { platform = process.platfo
     if (a === null || b === null) return 'unknown';
     return a === b ? 'same' : 'different';
   }
+  const timestamp = (text) => typeof text === 'string' && (LSTART_SHAPE.test(text.trim()) || ISO_SHAPE.test(text));
+  if (!timestamp(recorded) || !timestamp(current)) return 'unknown';
+  if (recorded === current) return 'same';
   const a = Date.parse(recorded);
   const b = Date.parse(current);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return 'unknown';
-  if (recorded === current) return 'same';
   const diff = Math.abs(a - b);
   return diff <= TZ_SPAN_MS && diff % TZ_STEP_MS === 0 ? 'unknown' : 'different';
 }
