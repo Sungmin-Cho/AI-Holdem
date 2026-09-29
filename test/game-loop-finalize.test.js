@@ -14,6 +14,7 @@ import {
   acquireOwnedLock,
 } from '../engine/state.js';
 import { skipOnWin32 } from './helpers/platform.js';
+import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import {
   createGameLoop,
   defaultReclaimBudgets,
@@ -85,6 +86,7 @@ import {
   flagValue,
   assert205Evidence,
   assert205UnconfirmedCommand,
+  writerObservationShim,
 } from './helpers/game-loop-fixtures.mjs';
 
 // #213: a monotonic clock that shares process.hrtime's origin (publish.js compares
@@ -500,6 +502,13 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
   assert.equal((await loop.run()).phase, 'done');
 });
 
+// A start-time string for the same pid that provably belongs to another process: seconds off
+// the observed reading, which no time-zone offset can explain (#214 D4a). The UTC `o` form
+// parses on every platform and is the canonical Win32 reading.
+function replacedStartTime(startTime, offsetMs = 7_000) {
+  return new Date(Date.parse(startTime) + offsetMs).toISOString();
+}
+
 test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identity에 signal하지 않고 prior cleanup을 released로 닫는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -507,10 +516,12 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
   t.after(() => terminateIfAlive(external.child));
   const orphan = await startCoachOrphan();
   t.after(() => terminateIfAlive(orphan));
-  await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
   const authorityPath = path.join(gameDir, '.coach-authority.json');
   const authority = readJson(authorityPath);
-  authority.hands['1'].agentHandle = `${orphan.pid}:identity-does-not-match`;
+  // #214 D4a: a provable replacement — 7 s apart is no time-zone offset (unlike an
+  // unparseable or whole-quarter-hour difference, which stays unknown).
+  authority.hands['1'].agentHandle = `${orphan.pid}:${replacedStartTime(seeded.startTime)}`;
   fs.writeFileSync(authorityPath, JSON.stringify(authority));
 
   const signalled = [];
@@ -543,6 +554,38 @@ test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identi
   );
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reviewGate, 'open');
 });
+
+// #214 D4a: POSIX `ps -o lstart=` has no zone. A reading 19 h off the recorded one
+// (UTC−10 recorded, UTC+9 observed) may be the same live process and must never release it.
+test('#214 a start time that differs only by a time-zone offset is unknown, not a replacement', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  if (skipOnWin32(t, 'win32 start times carry their UTC offset')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].agentHandle = `${orphan.pid}:${new Date(Date.parse(seeded.startTime) + 19 * 3_600_000).toISOString()}`;
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const signalled = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_UNKNOWN/.test(error.message));
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'a possibly-live coach must not be released or signalled');
+  assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
+  assert.notEqual(readJson(authorityPath).retiredAttempts.find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
 
 test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 없이 durable recovery로 중단한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
@@ -1069,8 +1112,12 @@ test('Task 7A full review: handle-less persisted generation은 owner 교대 전�
   const halted = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(halted.halt.code, 'FINALIZATION_ABORTED');
   assert.equal(halted.halt.recovery.code, 'COACH_HANDLE_UNRESOLVED');
-  assert.equal(halted.halt.recovery.prerequisites.authenticatedServerLock, true);
-  assert.equal(halted.halt.recovery.prerequisites.sessionToken, init.sessionToken);
+  // #215: the requirement (a lock.json with this sessionToken) is separate from what the
+  // halt observed: this instance had verified the external relay's binding itself.
+  assert.deepEqual(halted.halt.recovery.prerequisites, { serverLockSessionToken: init.sessionToken });
+  assert.equal(halted.halt.recovery.observed.serverLock.state, 'authenticated');
+  assert.equal(halted.halt.recovery.observed.serverLock.serverPid, external.child.pid);
+  assert.equal(typeof halted.halt.recovery.observed.serverLock.observedAt, 'string');
   assert.equal(halted.halt.recovery.commands.length, 1);
   assert.equal(halted.halt.recovery.commands[0].args.includes('cleanup-result'), true);
   assert.equal(halted.halt.recovery.commands[0].args.includes('released'), true);
@@ -1078,8 +1125,8 @@ test('Task 7A full review: handle-less persisted generation은 owner 교대 전�
   assert.equal(firstUpper.starts.length, 0);
   assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).activeOwnerSessionId, 'old-owner');
 
-  const recoveryServer = await startExternalServer(gameDir, init.sessionToken);
-  t.after(() => terminateIfAlive(recoveryServer.child));
+  // #215: no relay needs to be running — the command requires only the stale lock.json.
+  await terminateIfAlive(external.child);
   const recovery = halted.halt.recovery.commands[0];
   await assert205UnconfirmedCommand(gameDir, recovery);
   const recovered = JSON.parse((await execFileAsync(recovery.program, [...recovery.args, '--operator-confirmed', '1'], {
@@ -3488,6 +3535,7 @@ test('#192 S3 분류자 f (H2): evidence가 있으면 processStartTime unknown i
       finalizeBudgetMs: 4_000 * WIN32_SCALE,
       finalizeCutoffLeadMs: 1_000 * WIN32_SCALE,
       processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
+      coachCliPath: writerObservationShim({ startTimes: { [orphan.pid]: null } }),
       signalProcess: (pid, signal) => {
         if (pid === orphan.pid) signals.push(signal);
         process.kill(pid, signal);
@@ -5138,6 +5186,8 @@ test('#192 L1: 스캐너가 clean이면 evidence 없는 legacy 행이 자동 복
     stateOverrides: { port: external.lock.port },
     loopOpts: {
       scanCoachRuntimeProcesses: () => { scanCalls += 1; return Promise.resolve({ status: 'clean' }); },
+      // #214: the writer re-scans on its own; give it the same deterministic clean view.
+      coachCliPath: writerObservationShim({ scan: { status: 'clean' } }),
     },
   });
 
@@ -5801,7 +5851,7 @@ test('#204 explicit reclaim budgets are not scaled again', { timeout: 20_000 * W
 
 // #205: real persisted rows and real coach CLI children; only the orphan identity and
 // signals are controlled, so server cleanup always retains its normal behavior.
-async function recovery205Fixture(t, { foreign = false, mixed = false, identity = 'alive', jump = false, coachCliPath } = {}) {
+async function recovery205Fixture(t, { foreign = false, mixed = false, identity = 'alive', jump = false, coachCliPath, residualMs = 5_000 * WIN32_SCALE } = {}) {
   const gameDir = tmpGame();
   const first = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
   await first.bootstrap({ ai: 1 });
@@ -5828,14 +5878,19 @@ async function recovery205Fixture(t, { foreign = false, mixed = false, identity 
   const signals = [];
   let armed = false;
   const base = process.hrtime.bigint();
+  // r4: a parseable replacement on every platform, 14 s off — distinct from both the live
+  // reading and the +7 s handles the #216 tests store.
+  const replacedView = replacedStartTime(startTime, 14_000);
+  const writerView = identity === 'unknown' ? null : identity === 'replaced' ? replacedView : startTime;
   const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: {
-    port: 0, waitMs: 0, pollMs: 10, coachCliPath,
-    ...(jump ? {} : { orphanTerminateGraceMs: 100 * WIN32_SCALE, orphanTerminateKillWaitMs: 100 * WIN32_SCALE, resumeReclaimResidualMs: 5_000 * WIN32_SCALE }),
+    port: 0, waitMs: 0, pollMs: 10,
+    coachCliPath: coachCliPath ?? writerObservationShim({ startTimes: { [orphan.pid]: writerView } }),
+    ...(jump ? {} : { orphanTerminateGraceMs: 100 * WIN32_SCALE, orphanTerminateKillWaitMs: 100 * WIN32_SCALE, resumeReclaimResidualMs: residualMs }),
     monotonicNs: () => armed ? base + 1_000_000_000_000n : process.hrtime.bigint(),
     processStartTime: (pid) => {
       if (pid !== orphan.pid) return processStartTime(pid);
       if (jump) armed = true;
-      return identity === 'unknown' ? null : identity === 'replaced' ? `${startTime}0` : startTime;
+      return identity === 'unknown' ? null : identity === 'replaced' ? replacedView : startTime;
     },
     signalProcess: (pid, signal) => {
       if (pid === orphan.pid) signals.push(signal);
@@ -5916,6 +5971,72 @@ test('#205 replaced identity releases with evidence without signaling the replac
   assert.deepEqual(f.signals, []);
   assert205Evidence(f.calls, 'IDENTITY_REPLACED');
   assert205Trace(f.gameDir, 'IDENTITY_REPLACED');
+});
+
+// #214 D5: a writer that sees the recorded coach alive refuses; the loop classifies that
+// refusal as live (no operator command), not as a generic child failure.
+test('#214 a writer that observes the coach alive keeps the row live instead of releasing it', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const f = await recovery205Fixture(t, { identity: 'replaced', coachCliPath: writerObservationShim() });
+  await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts[0].reason, 'RELEASE_TARGET_ALIVE');
+  assert.deepEqual(halt.recovery.commands, [], 'a live coach gets no release command');
+  assert.notEqual(readJson(path.join(f.gameDir, '.coach-authority.json')).retiredAttempts[0].cleanupState, 'released');
+});
+
+// #214/#216 D5: the child commits the release and then dies before answering. The loop
+// re-reads the authority, sees the requested state, and neither halts nor disables coaching.
+test('#216 a cleanup child that dies after its commit still counts as released', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const shimDir = createOwnedTempDir('holdem-commit-crash-shim');
+  const shim = path.join(shimDir, 'commit-then-crash.mjs');
+  const view = writerObservationShim({});
+  fs.writeFileSync(shim, [
+    "import { spawnSync } from 'node:child_process';",
+    `const writer = ${JSON.stringify(view)};`,
+    'const args = process.argv.slice(2);',
+    "const result = spawnSync(process.execPath, [writer, ...args], { encoding: 'utf8' });",
+    "if (args[0] === 'cleanup-result') { process.exitCode = 1; } else { process.stdout.write(result.stdout ?? ''); process.exitCode = result.status ?? 1; }",
+    '',
+  ].join('\n'));
+  const f = await recovery205Fixture(t, { identity: 'replaced', coachCliPath: shim });
+  // The shim's writer sees the real (live) orphan, so make it provably replaced instead.
+  const authorityPath = path.join(f.gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  const [pid] = authority.hands['1'].agentHandle.split(':');
+  authority.hands['1'].agentHandle = `${pid}:${replacedStartTime(processStartTime(Number(pid)))}`;
+  writeJsonAtomic(authorityPath, authority);
+  assert.equal((await f.loop.resume()).phase, 'playing');
+  const after = readJson(authorityPath);
+  assert.equal(after.retiredAttempts[0].cleanupState, 'released');
+  assert.equal(after.adapterState, 'enabled', 'a committed release never disables coaching');
+  assert.equal(f.calls.some((args) => args[0] === 'adapter-disable'), false);
+});
+
+// #214 D5: the release commits, then the child's answer arrives only after the closure
+// deadline. The loop must still find the commit instead of halting on the deadline.
+test('#216 a cleanup child whose committed answer misses the deadline still counts as released', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const shimDir = createOwnedTempDir('holdem-commit-late-shim');
+  const shim = path.join(shimDir, 'commit-then-stall.mjs');
+  const view = writerObservationShim({});
+  fs.writeFileSync(shim, [
+    "import { spawnSync } from 'node:child_process';",
+    `const writer = ${JSON.stringify(view)};`,
+    'const args = process.argv.slice(2);',
+    "const result = spawnSync(process.execPath, [writer, ...args], { encoding: 'utf8' });",
+    `if (args[0] === 'cleanup-result') await new Promise((resolve) => setTimeout(resolve, ${8_000 * WIN32_SCALE}));`,
+    "process.stdout.write(result.stdout ?? ''); process.exitCode = result.status ?? 1;",
+    '',
+  ].join('\n'));
+  const f = await recovery205Fixture(t, { identity: 'replaced', coachCliPath: shim, residualMs: 2_000 * WIN32_SCALE });
+  const authorityPath = path.join(f.gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  const [pid] = authority.hands['1'].agentHandle.split(':');
+  authority.hands['1'].agentHandle = `${pid}:${replacedStartTime(processStartTime(Number(pid)))}`;
+  writeJsonAtomic(authorityPath, authority);
+  assert.equal((await f.loop.resume()).phase, 'playing');
+  const after = readJson(authorityPath);
+  assert.equal(after.retiredAttempts[0].cleanupState, 'released');
+  assert.equal(after.adapterState, 'enabled');
 });
 
 test('#205 closure deadline before fence has a rowless retry diagnostic', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
