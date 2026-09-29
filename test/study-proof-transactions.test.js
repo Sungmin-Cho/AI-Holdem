@@ -55,12 +55,14 @@ test('nextCheckpointDelay stretches only on win32 after a slow checkpoint', () =
 });
 
 // #249: cheaper proofs must not multiply the PowerShell children an idle service spawns.
-test('win32 checkpoints stay at least 4 s apart however fast the last one was', () => {
-  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 4000);
-  assert.equal(nextCheckpointDelay(1000, 550, 'win32'), 4000, 'two ~260 ms proofs');
-  assert.equal(nextCheckpointDelay(50, 0, 'win32'), 4000);
-  assert.equal(nextCheckpointDelay(1000, 2100, 'win32'), 4200, 'two ~1 s proofs, as before #249');
-  assert.equal(nextCheckpointDelay(5000, 100, 'win32'), 5000);
+test('win32 checkpoints start at least 6 s apart after the first, however fast they were', () => {
+  assert.equal(nextCheckpointDelay(1000, 0, 'win32'), 1000, 'the first checkpoint keeps its own delay');
+  assert.equal(nextCheckpointDelay(50, 0, 'win32'), 50);
+  assert.equal(nextCheckpointDelay(1000, 550, 'win32'), 5450, 'two ~260 ms proofs: 6 s start to start');
+  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 5900);
+  assert.equal(nextCheckpointDelay(50, 100, 'win32'), 5900);
+  assert.equal(nextCheckpointDelay(1000, 2100, 'win32'), 4200, 'two ~1 s proofs: unchanged from before #249');
+  assert.equal(nextCheckpointDelay(8000, 100, 'win32'), 8000);
 });
 
 test('live wait retries transport resets while the same owner is alive', () => {
