@@ -57,22 +57,28 @@ test('resolveOpponentRuntime keeps evidence mismatch and unsupported descriptor 
 });
 const V1={schemaVersion:1,model:'jev-1.13.0',questionVersion:'poker-choice-v1',candidateVersion:'legal-menu-v1',projectionVersion:1};
 const V2={schemaVersion:1,model:'jev-1.13.0',questionVersion:'poker-choice-v2',candidateVersion:'legal-menu-v2',projectionVersion:2,selectionVersion:'class-sample-v1'};
-test('descriptor v2 is current and the only legacy entry is the exact v1 descriptor',()=>{
- assert.deepEqual(JEV_CONFIG,V2);assert.deepEqual(JEV_CONFIG_LEGACY,[V1]);
- assert.throws(()=>validateJevConfig(V1),unsupported);assert.deepEqual(validateJevConfig(V2),V2);
- assert.deepEqual(rollForwardJevConfig(V1),{config:V2,rolledForward:true,from:V1});
+const V3={schemaVersion:1,model:'jev-1.13.0',questionVersion:'poker-choice-v3',candidateVersion:'legal-menu-v3',projectionVersion:2,selectionVersion:'class-sample-v2'};
+test('descriptor v3 is current and the legacy entries are the exact v1 and v2 descriptors',()=>{
+ assert.deepEqual(JEV_CONFIG,V3);assert.deepEqual(JEV_CONFIG_LEGACY,[V1,V2]);
+ assert.throws(()=>validateJevConfig(V1),unsupported);assert.throws(()=>validateJevConfig(V2),unsupported);assert.deepEqual(validateJevConfig(V3),V3);
+ assert.deepEqual(rollForwardJevConfig(V1),{config:V3,rolledForward:true,from:V1});
+ assert.deepEqual(rollForwardJevConfig(V2),{config:V3,rolledForward:true,from:V2});
  assert.deepEqual(rollForwardJevConfig({...V1}).from,V1);
  assert.throws(()=>rollForwardJevConfig({...V1,model:'jev-1.12.0'}),unsupported);
+ assert.throws(()=>rollForwardJevConfig({...V3,selectionVersion:'class-sample-v1'}),unsupported,'a hybrid descriptor is never guessed');
 });
 test('roll-forward is judged by the loop copy with the real legacy list',()=>{
- const engineV1={config:{opponentRuntime:'jev',jev:{...V1}}},engineV2={config:{opponentRuntime:'jev',jev:{...V2}}};
- assert.deepEqual(jevRollForwardOf(engineV1,{jev:{...V1}}),{config:V2,rolledForward:true,from:V1});
- assert.deepEqual(jevRollForwardOf(engineV1,{jev:{...V2}}),{config:V2,rolledForward:false});
- assert.deepEqual(jevRollForwardOf(engineV1,undefined),{config:V2,rolledForward:true,from:V1});
- assert.deepEqual(jevRollForwardOf(engineV2,undefined),{config:V2,rolledForward:false});
- assert.deepEqual(jevRollForwardOf(engineV2,{jev:{...V2}}),{config:V2,rolledForward:false});
+ const engineV1={config:{opponentRuntime:'jev',jev:{...V1}}},engineV2={config:{opponentRuntime:'jev',jev:{...V2}}},engineV3={config:{opponentRuntime:'jev',jev:{...V3}}};
+ assert.deepEqual(jevRollForwardOf(engineV1,{jev:{...V1}}),{config:V3,rolledForward:true,from:V1});
+ // A v1-born store already rolled to v2 moves on to v3 from its loop copy.
+ assert.deepEqual(jevRollForwardOf(engineV1,{jev:{...V2}}),{config:V3,rolledForward:true,from:V2});
+ assert.deepEqual(jevRollForwardOf(engineV1,{jev:{...V3}}),{config:V3,rolledForward:false});
+ assert.deepEqual(jevRollForwardOf(engineV1,undefined),{config:V3,rolledForward:true,from:V1});
+ assert.deepEqual(jevRollForwardOf(engineV2,undefined),{config:V3,rolledForward:true,from:V2});
+ assert.deepEqual(jevRollForwardOf(engineV2,{jev:{...V3}}),{config:V3,rolledForward:false});
+ assert.deepEqual(jevRollForwardOf(engineV3,undefined),{config:V3,rolledForward:false});
  assert.equal(resolveOpponentRuntime(engineV1),'jev');
- assert.equal(resolveOpponentRuntime(engineV1,{loop:{opponentRuntime:'jev',jev:{...V2}}}),'jev');
+ assert.equal(resolveOpponentRuntime(engineV2,{loop:{opponentRuntime:'jev',jev:{...V3}}}),'jev');
  assert.equal(resolveOpponentRuntime(engineV1,{loop:{opponentRuntime:'jev',jev:{...V1}}}),'jev');
  assert.throws(()=>resolveOpponentRuntime(engineV1,{loop:{opponentRuntime:'llm',jev:{...V1}}}),{code:'OPPONENT_RUNTIME_MISMATCH'});
  assert.throws(()=>resolveOpponentRuntime({config:{jev:{...V1}}}),unsupported);

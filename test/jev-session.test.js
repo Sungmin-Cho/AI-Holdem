@@ -63,7 +63,7 @@ test('unsupported JEV version preserves records and still permits explicit app E
  assert.equal((await command(m,'resume')).status,'failed');assert.deepEqual(fs.readFileSync(file),unsupportedBytes);assert.equal(m.snapshot().error,'JEV_CONFIG_UNSUPPORTED');assert.ok(m.snapshot().allowedCommands.includes('end'));
  assert.equal((await command(m,'end')).status,'succeeded');assert.equal(read(file).config.jev.model,'unsupported-model');assert.equal(read(file).result,'abort');
 });
-const V1=JEV_CONFIG_LEGACY[0];
+const V1=JEV_CONFIG_LEGACY[0],V2=JEV_CONFIG_LEGACY[1];
 const loopLog=dir=>fs.existsSync(path.join(dir,'loop.log'))?fs.readFileSync(path.join(dir,'loop.log'),'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
 const rolledLogs=dir=>loopLog(dir).filter(r=>r.event==='jev-config-rolled-forward');
 function oneHotFetch(){
@@ -103,13 +103,14 @@ test('known v1 store rolls forward once on resume; engine descriptor and old ent
  assert.equal(first.notices.filter(n=>n===JEV_ROLL_FORWARD_NOTICE).length,1);
  const logs=rolledLogs(box.dir);assert.equal(logs.length,1);
  assert.deepEqual(logs[0].from,{questionVersion:'poker-choice-v1',candidateVersion:'legal-menu-v1',projectionVersion:1});
- assert.deepEqual(logs[0].to,{questionVersion:'poker-choice-v2',candidateVersion:'legal-menu-v2',projectionVersion:2,selectionVersion:'class-sample-v1'});
+ assert.deepEqual(logs[0].to,{questionVersion:'poker-choice-v3',candidateVersion:'legal-menu-v3',projectionVersion:2,selectionVersion:'class-sample-v2'});
  const engine=read(path.join(box.dir,'state.json'));assert.deepEqual(engine.config.jev,V1);assert.equal(Object.hasOwn(engine,'jevRolledForward'),false);
  assert.equal(engine.handNo>=engineV1.handNo,true);assert.deepEqual(first.jevDiagnostics.entries[0],v1Entry);
- // The next AI decision is recorded under the v2 versions, beside the v1 entry.
+ // The next AI decision is recorded under the current versions, beside the v1 entry.
  await wait(async()=>{await actHost(box.dir);return read(path.join(box.dir,'loop-state.json')).jevDiagnostics.entries.length>1;});
  const entries=read(path.join(box.dir,'loop-state.json')).jevDiagnostics.entries;
- assert.deepEqual(entries[0],v1Entry);assert.equal(entries.at(-1).questionVersion,'poker-choice-v2');assert.equal(entries.at(-1).selectionVersion,'class-sample-v1');
+ assert.deepEqual(entries[0],v1Entry);assert.equal(entries.at(-1).questionVersion,'poker-choice-v3');assert.equal(entries.at(-1).selectionVersion,'class-sample-v2');
+ assert.equal(entries.at(-1).selection.rule,'class-sample-v2');
  assert.ok(entries.at(-1).selection);
  // A second resume keeps the marker, its time, one notice and one log line.
  assert.equal((await command(m,'pause')).status,'succeeded');m=await box.reopen();assert.equal((await command(m,'resume')).status,'succeeded');
@@ -121,6 +122,22 @@ test('known v1 store rolls forward once on resume; engine descriptor and old ent
  const restarted=await command(m,'restart');assert.equal(restarted.status,'succeeded');assert.deepEqual(restarted.jevConfig,JEV_CONFIG);
  assert.deepEqual(read(path.join(m.current.sessionDir,'state.json')).config.jev,JEV_CONFIG);
  assert.equal(Object.hasOwn(read(path.join(m.current.sessionDir,'loop-state.json')),'jevRolledForward'),false);
+});
+// #234: a v2-born store, and a v1-born store already rolled to v2, both move to v3 once.
+test('v2 stores (born v2, or v1 already rolled to v2) roll forward to v3 once', {timeout:process.platform==='win32'?300000:60000},async t=>{
+ for(const [label,born] of [['born-v2',V2],['v1-then-v2',V1]])await t.test(label,async st=>{
+  const box=await jevApp(st,`jev-roll-v3-${label}`);await box.reopen();
+  const engine=read(path.join(box.dir,'state.json'));engine.config.jev={...born};fs.writeFileSync(path.join(box.dir,'state.json'),JSON.stringify(engine));
+  const loop=read(path.join(box.dir,'loop-state.json'));loop.jev={...V2};
+  if(born===V1)loop.jevRolledForward={from:{...V1},at:'2026-09-23T00:00:00.000Z'};else delete loop.jevRolledForward;
+  fs.writeFileSync(path.join(box.dir,'loop-state.json'),JSON.stringify(loop));
+  const m=await box.reopen();assert.equal((await command(m,'resume')).status,'succeeded');
+  const after=read(path.join(box.dir,'loop-state.json'));
+  assert.deepEqual(after.jev,JEV_CONFIG);assert.deepEqual(after.jevRolledForward.from,V2,'the marker names the latest transition');
+  assert.equal(after.notices.filter(n=>n===JEV_ROLL_FORWARD_NOTICE).length,1);
+  assert.deepEqual(rolledLogs(box.dir).at(-1).from,{questionVersion:'poker-choice-v2',candidateVersion:'legal-menu-v2',projectionVersion:2,selectionVersion:'class-sample-v1'});
+  assert.deepEqual(read(path.join(box.dir,'state.json')).config.jev,born,'the engine keeps its birth descriptor');
+ });
 });
 test('pending-free v1 store keeps a single marker across resumes; a failed marker write is redone', {timeout:process.platform==='win32'?300000:60000},async t=>{
  const box=await jevApp(t,'jev-roll-crash');await box.reopen();downgradeToV1(box.dir,[]);
@@ -140,7 +157,7 @@ test('pending-free v1 store keeps a single marker across resumes; a failed marke
  const second=read(target);assert.deepEqual(second.jevRolledForward,first.jevRolledForward);assert.equal(rolledLogs(box.dir).length,2);
  assert.equal(second.notices.filter(n=>n===JEV_ROLL_FORWARD_NOTICE).length,1);
 });
-test('v2-born JEV and non-JEV stores record no roll-forward on resume', {timeout:process.platform==='win32'?300000:60000},async t=>{
+test('current-born JEV and non-JEV stores record no roll-forward on resume', {timeout:process.platform==='win32'?300000:60000},async t=>{
  const box=await jevApp(t,'jev-v2-resume');let m=await box.reopen();assert.equal((await command(m,'resume')).status,'succeeded');
  const ls=read(path.join(box.dir,'loop-state.json'));assert.equal(Object.hasOwn(ls,'jevRolledForward'),false);
  assert.equal(ls.notices.includes(JEV_ROLL_FORWARD_NOTICE),false);assert.equal(rolledLogs(box.dir).length,0);

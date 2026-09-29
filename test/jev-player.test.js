@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {buildJevCandidates,projectJevState,validateJevAnswer,effectiveRemaining,JEV_INSTRUCTIONS,JEV_STYLES} from '../tools/jev-player.js';
+import {buildJevCandidates,projectJevState,validateJevAnswer,effectiveRemaining,JEV_INSTRUCTIONS,JEV_STYLES,jevGuardContext,fullRaisesThisStreet} from '../tools/jev-player.js';
 import {createGame,startHand,applyAction,legalFor,blindsForLevel} from '../engine/hand.js';
 import {snapshotDecision} from '../engine/decision.js';
 import {ARCHETYPES} from '../engine/personas.js';
@@ -70,11 +70,28 @@ test('hundredth rounding envelope is bounded at each supported candidate count',
 });
 const keys=(s,l)=>buildJevCandidates(s,l).map(c=>c.key);
 const seat=(playerId,extra={})=>({playerId,position:null,stack:5000,bet:0,contribution:0,folded:false,allIn:false,out:false,...extra});
-test('legal menu v2: standard sizes, all-in only when short, near a pot raise or forced',()=>{
+const raise=(amount,playerId='secret-other-id')=>({playerId,action:'raise',amount,street:'preflop'});
+test('legal menu v3: full-raise ladder, all-in only when short, near a pot raise, forced or a five-bet',()=>{
  const {snapshot:s,legal:l}=fixture();
  assert.equal(keys(s,l).includes('raise_to_5000'),false);
- assert.deepEqual(keys({...s,currentBet:200,actorBet:50,publicSeats:[{...s.publicSeats[0],stack:4950,bet:50},s.publicSeats[1]]},{...l,callAmount:150,minRaiseTo:350,maxRaiseTo:4950}),
-  ['fold','call','raise_to_350','raise_to_500','raise_to_600','raise_to_800']);
+ // Facing an open (one full raise): 3x / 3.4x / 4x the open.
+ assert.deepEqual(keys({...s,currentBet:200,actorBet:50,priorActions:[raise(200)],publicSeats:[{...s.publicSeats[0],stack:4950,bet:50},s.publicSeats[1]]},{...l,callAmount:150,minRaiseTo:350,maxRaiseTo:4950}),
+  ['fold','call','raise_to_350','raise_to_600','raise_to_680','raise_to_800']);
+ // Facing a three-bet: 2.2x / 2.3x / 2.5x, rounded to whole chips before clamping (425 -> 935/978/1063).
+ const threeBet={...s,currentBet:425,actorBet:150,priorActions:[raise(150,'private-user-id'),raise(425)],
+  publicSeats:[{...s.publicSeats[0],stack:4850,bet:150},{...s.publicSeats[1],stack:4575,bet:425}]};
+ assert.deepEqual(keys(threeBet,{...l,callAmount:275,minRaiseTo:700,maxRaiseTo:5000}),['fold','call','raise_to_700','raise_to_935','raise_to_978','raise_to_1063']);
+ // Facing a four-bet: the five-bet is all-in only.
+ assert.deepEqual(keys({...s,currentBet:1800,actorBet:450,priorActions:[raise(150),raise(450,'private-user-id'),raise(1800)],
+  publicSeats:[{...s.publicSeats[0],stack:4550,bet:450},{...s.publicSeats[1],stack:3200,bet:1800}]},{...l,callAmount:1350,minRaiseTo:3150,maxRaiseTo:5000}),
+  ['fold','call','raise_to_5000']);
+ // Short all-in raises do not reopen the ladder: 100 (full), 110 and 120 (short) is still one full raise.
+ const shorts={...s,currentBet:120,priorActions:[raise(100,'a'),raise(110,'b'),raise(120,'c')]};
+ assert.equal(fullRaisesThisStreet(shorts,50),1);
+ assert.deepEqual(keys(shorts,{...l,callAmount:120,minRaiseTo:170,maxRaiseTo:5000}),['fold','call','raise_to_170','raise_to_360','raise_to_408','raise_to_480']);
+ // A standard size within 5% of all-in is all-in.
+ assert.deepEqual(keys({...s,currentBet:200,priorActions:[raise(200)],publicSeats:[{...s.publicSeats[0],stack:830},s.publicSeats[1]]},{...l,callAmount:200,minRaiseTo:350,maxRaiseTo:830}),
+  ['fold','call','raise_to_350','raise_to_600','raise_to_680','raise_to_830']);
  // Short actor: standard sizes plus all-in.
  assert.deepEqual(keys({...s,publicSeats:[{...s.publicSeats[0],stack:900},s.publicSeats[1]]},{...l,maxRaiseTo:900}),
   ['fold','call','raise_to_100','raise_to_125','raise_to_150','raise_to_200','raise_to_900']);
@@ -92,9 +109,6 @@ test('legal menu v2: standard sizes, all-in only when short, near a pot raise or
  assert.deepEqual(spr.map(c=>c.key),['fold','call','raise_to_2000','raise_to_2333','raise_to_3667','raise_to_5000','raise_to_5500']);
  // Clamp reaching max keeps a single all-in key.
  assert.deepEqual(keys(s,{...l,maxRaiseTo:180}),['fold','call','raise_to_100','raise_to_125','raise_to_150','raise_to_180']);
- // Deep four-bet: 2.5x/3x/4x clamp to all-in.
- assert.deepEqual(keys({...s,currentBet:1800,actorBet:450,publicSeats:[{...s.publicSeats[0],stack:4550,bet:450},{...s.publicSeats[1],stack:3200,bet:1800}]},{...l,callAmount:1350,minRaiseTo:3150,maxRaiseTo:5000}),
-  ['fold','call','raise_to_3150','raise_to_4500','raise_to_5000']);
  // Limped pot and heads-up blind use the open table; tournament level uses the current big blind.
  assert.deepEqual(keys({...s,priorActions:[{playerId:'secret-other-id',action:'call',amount:50,street:'preflop'}]},l),['fold','call','raise_to_100','raise_to_125','raise_to_150','raise_to_200']);
  assert.deepEqual(keys({...s,position:'BTN/SB',actorBet:25,publicSeats:[{...s.publicSeats[0],position:'BTN/SB',stack:4975,bet:25},{...s.publicSeats[1],position:'BB',stack:4950,bet:50}]},{...l,callAmount:25,maxRaiseTo:5000}),
@@ -157,16 +171,49 @@ test('projection v2 matches real engine states and stays under 24 KiB at the lar
  const size=Buffer.byteLength(JSON.stringify(projected(huge,{...l,callAmount:big,canCheck:false},longest)));
  assert.ok(size<24*1024,`${size}`);
 });
-test('instructions and styles are the approved v2 text for exactly the engine archetypes',()=>{
- for(const phrase of ['never the ranking of hands','effectiveRemainingBB','potOdds','prefer a standard raise size over all-in'])assert.ok(JEV_INSTRUCTIONS.includes(phrase),phrase);
+test('instructions and styles are the approved v3 text for exactly the engine archetypes',()=>{
+ for(const phrase of ['never the ranking of hands','effectiveRemainingBB','potOdds','prefer a standard raise size over all-in','weak aces and weak offsuit hands fold'])assert.ok(JEV_INSTRUCTIONS.includes(phrase),phrase);
  assert.deepEqual(Object.keys(JEV_STYLES).sort(),[...ARCHETYPES].sort());
  assert.deepEqual(JEV_STYLES,{
-  TAG:'Tight-aggressive: enters pots with a selective range of strong hands and plays them aggressively with standard sizes; folds marginal hands to pressure.',
+  TAG:'Tight-aggressive: folds most hands before the flop and enters only with strong hands, opening and three-betting them with standard sizes; four-bets only premium hands; folds marginal hands to pressure.',
   LAG:'Loose-aggressive: opens and three-bets a wide range and applies frequent pressure, but still folds hopeless hands and does not stack off deep without a strong hand or a strong draw.',
-  Nit:'Very tight: plays few hands, but raises premium hands (big pairs, ace-king) firmly and never folds them to a single raise; with a short stack, shoves premiums rather than limping or checking.',
-  CallingStation:'Loose-passive: calls more often than ideal with draws and weak pairs and rarely raises, but folds hopeless hands to large bets and never calls off a deep stack with nothing.',
+  Nit:'Very tight: plays few hands and raises only premium hands (big pairs, ace-king), never folding them to a single raise; with other playable hands prefers calling or folding; with a short stack, shoves premiums rather than limping or checking.',
+  CallingStation:'Loose-passive: calls often with draws and weak pairs but almost never raises, even with good hands; never bluffs, folds hopeless hands to large bets, and never calls off or moves all-in with a deep stack without a strong made hand.',
   Maniac:'Hyper-aggressive: raises and bluffs far more often than normal, including all-in pressure when the stack is short or the pot is large, but not with hopeless hands deep.',
-  Trickster:'Deceptive: sometimes slow-plays strong hands and occasionally bluffs, varying sizes to be hard to read, while keeping fundamentally sound hand selection.'});
+  Trickster:"Deceptive but disciplined: hand selection is as tight and sound as a solid regular's; the deception comes from how strong hands are played (occasional slow-plays, varied sizes), not from playing more hands."});
  for(const text of Object.values(JEV_STYLES)){assert.ok(text.length<=320);assert.match(text,/^[\x20-\x7e]+$/);}
  assert.equal(projected(fixture().snapshot,fixture().legal,'Nit').style,JEV_STYLES.Nit);
+});
+
+test('guard context: deep beyond 40bb, commit keys within 5% of all-in or a 95% call, preflop premiums only',()=>{
+ const {snapshot:s,legal:l}=fixture();
+ const deep={...s,holeCards:['9s','7d'],currentBet:1800,actorBet:450,priorActions:[raise(150),raise(450,'private-user-id'),raise(1800)],
+  publicSeats:[{...s.publicSeats[0],stack:4550,bet:450},{...s.publicSeats[1],stack:3200,bet:1800}]};
+ const legal={...l,callAmount:1350,minRaiseTo:3150,maxRaiseTo:5000};
+ const candidates=buildJevCandidates(deep,legal);
+ assert.deepEqual(jevGuardContext(deep,legal,candidates),{deep:true,commitKeys:['raise_to_5000'],premium:false});
+ // Exactly 40bb remaining is not deep; a call of 95% of the stack is a call-off.
+ const edge={...s,publicSeats:[{...s.publicSeats[0],stack:2000},{...s.publicSeats[1],stack:2000}]};
+ assert.equal(jevGuardContext(edge,{...l,maxRaiseTo:2000},buildJevCandidates(edge,{...l,maxRaiseTo:2000})).deep,false);
+ const callOff={...deep,publicSeats:[{...deep.publicSeats[0],stack:1400},deep.publicSeats[1]]};
+ assert.ok(jevGuardContext(callOff,{...legal,callAmount:1330,maxRaiseTo:1400},buildJevCandidates(callOff,{...legal,callAmount:1330,minRaiseTo:1400,maxRaiseTo:1400})).commitKeys.includes('call'));
+ for(const [hole,premium] of [[['Ah','Ad'],true],[['Kc','Kd'],true],[['Qs','Qh'],true],[['As','Ks'],true],[['Ad','Kc'],true],[['Js','Jh'],false],[['Ts','Th'],false],[['As','Qs'],false]])
+  assert.equal(jevGuardContext({...deep,holeCards:hole},legal,candidates).premium,premium,hole.join(''));
+ assert.equal(jevGuardContext({...deep,street:'flop',board:['2h','3c','4s'],holeCards:['Ah','Ad']},legal,candidates).premium,false,'postflop has no premium exception');
+});
+// #234 r3: the ladder on an engine-played street, not hand-made priorActions: a full raise to
+// 150, then two short all-ins (180, 200). The small blind still faces one full raise.
+test('#234 consecutive short all-ins on a real engine street keep the one-raise ladder',()=>{
+ const peek=st=>{const legal=legalFor(st);return {legal,snapshot:snapshotDecision(st,legal.toAct,null,{blinds:blindsForLevel(st.level,st.config.blinds0),legal})};};
+ let st=createGame({aiCount:4,startStack:5000,levelEvery:100});st.button=0;
+ const order=[];let dry=startHand(structuredClone(st)).state;
+ for(let i=0;i<3;i++){const id=legalFor(dry).toAct;order.push(id);dry=applyAction(dry,id,'fold').state;}
+ st.seats.find(s=>s.playerId===order[1]).stack=180;st.seats.find(s=>s.playerId===order[2]).stack=200;
+ st=startHand(st).state;
+ st=applyAction(st,order[0],'raise',150).state;st=applyAction(st,order[1],'raise',180).state;st=applyAction(st,order[2],'raise',200).state;
+ const {snapshot,legal}=peek(st);
+ assert.deepEqual(snapshot.priorActions.filter(a=>a.action==='raise').map(a=>a.amount),[150,180,200]);
+ assert.equal(fullRaisesThisStreet(snapshot,50),1);
+ assert.equal(legal.minRaiseTo,300,'the engine also keeps the last full raise (100)');
+ assert.deepEqual(buildJevCandidates(snapshot,legal).map(c=>c.key),['fold','call','raise_to_300','raise_to_600','raise_to_680','raise_to_800']);
 });

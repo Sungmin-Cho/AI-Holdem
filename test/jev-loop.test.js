@@ -8,6 +8,7 @@ import {createGameLoop,prepareGameSession} from '../tools/game-loop.js';
 import {createJevRuntime} from '../tools/jev-runtime.js';
 import {validJevPending} from '../shared/jev-pending.js';
 import {JEV_CONFIG,JEV_CONFIG_LEGACY} from '../shared/opponent-runtime.js';
+import {guardFromArchive} from './helpers/jev-gate.mjs';
 import {selectJevAction} from '../tools/jev-player.js';
 import {deriveUnit} from '../training/policies/rng.js';
 const SCALE=process.platform==='win32'?10:1;
@@ -32,19 +33,25 @@ function archivedActions(dir){
  return [...hands,...(read(dir,'state.json').hand?.actions??[])];
 }
 // D6: for each decision with a selection entry, the highest generation's selectedKey is what the engine applied.
+function archivedHands(dir){
+ const hands=fs.existsSync(path.join(dir,'hands'))?fs.readdirSync(path.join(dir,'hands')).filter(n=>/^hand-.*\.json$/.test(n)).map(n=>read(path.join(dir,'hands'),n)):[];
+ const live=read(dir,'state.json').hand;return live?[...hands,live]:hands;
+}
 function assertRecomputed(dir){
- const ls=read(dir,'loop-state.json'),top=new Map(),actions=archivedActions(dir);
+ const ls=read(dir,'loop-state.json'),top=new Map(),actions=archivedActions(dir),hands=archivedHands(dir);
  for(const e of ls.jevDiagnostics.entries){if(!e.selection)continue;const prev=top.get(e.decisionId);if(!prev||e.generation>prev.generation)top.set(e.decisionId,e);}
  for(const [id,e] of top){
   assert.equal(e.selection.unit,deriveUnit('jev-selection-v1',ls.sessionToken,id,String(e.generation)));
   // Public inputs alone (gameEpoch is sent to every participant) must not reproduce the draw.
   assert.notEqual(e.selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,id,String(e.generation)));
-  const again=selectJevAction({probabilities:e.probabilities,candidates:candidatesOf(Object.keys(e.probabilities)),unit:e.selection.unit,apiChoice:e.apiChoice});
+  const hand=hands.find(h=>h.actions?.some(a=>a.decisionId===id&&a.playerId!=='user'));
+  const guard=guardFromArchive(hand,hand.actions.findIndex(a=>a.decisionId===id&&a.playerId!=='user'),Object.keys(e.probabilities));
+  const again=selectJevAction({probabilities:e.probabilities,candidates:candidatesOf(Object.keys(e.probabilities)),unit:e.selection.unit,apiChoice:e.apiChoice,rule:'class-sample-v2',guard});
   assert.deepEqual(again.selection,e.selection);
   const applied=actions.filter(a=>a.decisionId===id&&a.playerId!=='user');assert.equal(applied.length,1,id);
   assert.equal(applied[0].action,again.action.action);
   if(again.action.action==='raise')assert.equal(applied[0].amount,again.action.amount);
-  assert.equal(e.selectionVersion,'class-sample-v1');assert.equal(e.questionVersion,'poker-choice-v2');assert.equal(e.selection.apiChoice,e.apiChoice);
+  assert.equal(e.selectionVersion,'class-sample-v2');assert.equal(e.selection.rule,'class-sample-v2');assert.equal(e.questionVersion,'poker-choice-v3');assert.equal(e.selection.apiChoice,e.apiChoice);
  }
  return top.size;
 }
@@ -280,7 +287,7 @@ test('crash after the proposal write keeps the entry and never infers again', {t
  assert.deepEqual(read(f.dir,'loop-state.json').jevDiagnostics.entries,crashed.jevDiagnostics.entries);
  assert.equal(calls.length,1);assert.equal(read(f.dir,'state.json').hand.actions.length,0);
 });
-const V1=JEV_CONFIG_LEGACY[0];
+const V1=JEV_CONFIG_LEGACY[0],V2=JEV_CONFIG_LEGACY[1];
 function treeOf(dir){if(!fs.existsSync(dir))return {};return Object.fromEntries(fs.readdirSync(dir).sort().map(n=>[n,fs.readFileSync(path.join(dir,n),'utf8')]));}
 test('loop-state loss on a v1 engine rebuilds a v2 loop copy with marker and notice', {timeout:15000*SCALE},async t=>{
  const dir=createOwnedTempDir('jev-v1-rebuild');execFileSync(process.execPath,['engine/cli.js','init','--ai','1','--opponent-runtime','jev','--game-dir',dir]);
@@ -299,17 +306,19 @@ test('a finished v1 store resumes to done without a roll-forward marker', {timeo
  const loop=createGameLoop({gameDir:dir,resolver,opts:{port:0}});t.after(()=>loop.requestStop());await loop.resume();
  const ls=read(dir,'loop-state.json');assert.equal(Object.hasOwn(ls,'jevRolledForward'),false);assert.deepEqual(ls.jev,V1);
 });
-test('v1 store with a v3 pending rolls forward without touching the pending record', {timeout:30000*SCALE},async t=>{
- for(const kind of ['applied','recovery'])await t.test(kind,async st=>{
-  const dir=createOwnedTempDir('jev-v1-pending');execFileSync(process.execPath,['engine/cli.js','init','--ai','1','--opponent-runtime','jev','--game-dir',dir]);
-  let engine=read(dir,'state.json');engine.button=0;engine.config.jev={...V1};fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify(engine));
+// #234 r3: the same holds for a v2-born store and for a v1-born store already rolled to v2.
+const PENDING_BIRTHS=[['v1',V1,V1,null],['v2',V2,V2,null],['v1-then-v2',V1,V2,{from:{...V1},at:'2026-09-23T00:00:00.000Z'}]];
+test('v1 and v2 stores with a current pending roll forward without touching the pending record', {timeout:60000*SCALE},async t=>{
+ for(const [born,engineJev,loopJev,marker] of PENDING_BIRTHS)for(const kind of ['applied','recovery'])await t.test(`${born} ${kind}`,async st=>{
+  const dir=createOwnedTempDir('jev-old-pending');execFileSync(process.execPath,['engine/cli.js','init','--ai','1','--opponent-runtime','jev','--game-dir',dir]);
+  let engine=read(dir,'state.json');engine.button=0;engine.config.jev={...engineJev};fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify(engine));
   const out=JSON.parse(execFileSync(process.execPath,['engine/cli.js','step','--new-hand','--game-dir',dir]));engine=read(dir,'state.json');
   const {gameEpochOf}=await import('../publish-contract.js');
   const pending={schemaVersion:3,runtime:'jev',executionKind:'http',gameEpoch:gameEpochOf(engine.sessionToken),decisionId:out.next.decisionId,playerId:out.next.toAct,stateVersion:out.stateVersion,generation:1,budget:{softMs:25,hardMs:300},startedAt:new Date().toISOString(),
    ...(kind==='applied'?{status:'running',proposedAction:{action:'call'},closeConfirmed:true}:{status:'recovery_required',code:'INTERRUPTED',retryable:true,closeConfirmed:true,softWait:false})};
   if(kind==='applied')execFileSync(process.execPath,['engine/cli.js','step',pending.playerId,'call','--expect-version',String(pending.stateVersion),'--game-dir',dir]);
   const entries=[{decisionId:'d-0-preflop-0',generation:1,probabilities:{fold:0,call:1},questionVersion:'poker-choice-v1'}];
-  fs.writeFileSync(path.join(dir,'loop-state.json'),JSON.stringify({phase:'playing',opponentRuntime:'jev',jev:{...V1},sessionToken:engine.sessionToken,gameEpoch:pending.gameEpoch,pendingDecision:pending,metrics:[],notices:[],jevDiagnostics:{schemaVersion:1,entries,dropped:0}}));
+  fs.writeFileSync(path.join(dir,'loop-state.json'),JSON.stringify({phase:'playing',opponentRuntime:'jev',jev:{...loopJev},...(marker?{jevRolledForward:marker}:{}),sessionToken:engine.sessionToken,gameEpoch:pending.gameEpoch,pendingDecision:pending,metrics:[],notices:[],jevDiagnostics:{schemaVersion:1,entries,dropped:0}}));
   const engineBefore=fs.readFileSync(path.join(dir,'state.json')),handsBefore=treeOf(path.join(dir,'hands'));
   const writes=[],original=fs.renameSync;
   fs.renameSync=function(from,to,...rest){if(to===path.join(dir,'loop-state.json'))writes.push(JSON.parse(fs.readFileSync(from,'utf8')));return original.call(this,from,to,...rest);};
@@ -317,11 +326,11 @@ test('v1 store with a v3 pending rolls forward without touching the pending reco
   try{await loop.resume();}finally{fs.renameSync=original;}
   const ls=read(dir,'loop-state.json');
   assert.deepEqual(treeOf(path.join(dir,'hands')),handsBefore);
-  const marked=writes.findIndex(w=>w.jevRolledForward);assert.ok(marked>=0);
-  assert.equal(writes.filter(w=>w.jevRolledForward).every(w=>JSON.stringify(w.jevRolledForward)===JSON.stringify(ls.jevRolledForward)),true);
+  const marked=writes.findIndex(w=>w.jevRolledForward&&JSON.stringify(w.jevRolledForward)!==JSON.stringify(marker));assert.ok(marked>=0);
+  assert.equal(writes.slice(marked).every(w=>JSON.stringify(w.jevRolledForward)===JSON.stringify(ls.jevRolledForward)),true);
   // Every write of the resume, before and at the roll-forward write, carries the same pending bytes.
   if(kind==='recovery')for(const w of writes.slice(0,marked+1))assert.deepEqual(w.pendingDecision,pending);
-  assert.deepEqual(ls.jev,JEV_CONFIG);assert.deepEqual(ls.jevRolledForward.from,V1);assert.deepEqual(ls.jevDiagnostics.entries,entries);
+  assert.deepEqual(ls.jev,JEV_CONFIG);assert.deepEqual(ls.jevRolledForward.from,loopJev);assert.deepEqual(ls.jevDiagnostics.entries,entries);
   assert.deepEqual(fs.readFileSync(path.join(dir,'state.json')),engineBefore);
   if(kind==='applied')assert.equal(loop.pendingDecision,null);
   else assert.deepEqual(ls.pendingDecision,pending);

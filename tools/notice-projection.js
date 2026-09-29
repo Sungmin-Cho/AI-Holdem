@@ -5,9 +5,13 @@
  * only substitutions are an allowlisted runtime name or an integer count.
  * Anything else is counted, never echoed.
  */
-// Mirrors game-loop.js JEV_ROLL_FORWARD_NOTICE (a test pins the two together);
-// importing the loop here would drag its whole module graph into a pure helper.
-const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+// Mirrors game-loop.js JEV_ROLL_FORWARD_NOTICE (a test pins the current one to it);
+// importing the loop here would drag its whole module graph into a pure helper. Earlier
+// versions' notices stay recognised: stores already rolled forward still carry them.
+export const JEV_ROLL_FORWARD_NOTICES = Object.freeze([
+  'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.',
+  'JEV 결정 규칙을 v3로 roll-forward했습니다. 기존 기록은 보존됩니다.',
+]);
 
 export const MAX_PROJECTED_NOTICES = 10;
 const RUNTIME_NAMES = new Set(['claude', 'codex', 'grok']);
@@ -83,8 +87,8 @@ const RULES = [
     render: () => ({ text: '일부 결정은 상대 공략 평가를 남기지 못했어요.' }),
   },
   {
-    code: 'JEV_ROLLED_FORWARD', level: 'info', exact: JEV_ROLL_FORWARD_NOTICE,
-    render: () => ({ text: 'JEV 결정 규칙을 새 버전(v2)으로 올렸어요. 이전 기록은 그대로 보존됩니다.' }),
+    code: 'JEV_ROLLED_FORWARD', level: 'info', exact: JEV_ROLL_FORWARD_NOTICES,
+    render: () => ({ text: 'JEV 결정 규칙을 새 버전으로 올렸어요. 이전 기록은 그대로 보존됩니다.' }),
   },
   {
     code: 'POLICY_ROLLED_FORWARD', level: 'info', re: /^(?:policy|self-opponent strategy) roll-forward /,
@@ -146,7 +150,7 @@ function classify(raw) {
   if (typeof raw !== 'string') return null;
   for (const rule of RULES) {
     if (rule.exact !== undefined) {
-      if (raw === rule.exact) return { rule, ...rule.render() };
+      if ((Array.isArray(rule.exact) ? rule.exact : [rule.exact]).includes(raw)) return { rule, ...rule.render() };
       continue;
     }
     const match = rule.re.exec(raw);

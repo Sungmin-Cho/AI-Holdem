@@ -8,7 +8,7 @@ const fixture=JSON.parse(fs.readFileSync(new URL('./fixtures/jev-distributions-2
 const candidatesOf=probabilities=>Object.keys(probabilities).map(key=>key.startsWith('raise_to_')
  ?{key,action:'raise',amount:Number(key.slice('raise_to_'.length))}:{key,action:key});
 const argmaxKey=probabilities=>Object.entries(probabilities).reduce((best,e)=>e[1]>best[1]?e:best)[0];
-const select=(probabilities,unit,apiChoice=argmaxKey(probabilities))=>selectJevAction({probabilities,candidates:candidatesOf(probabilities),unit,apiChoice});
+const select=(probabilities,unit,apiChoice=argmaxKey(probabilities))=>selectJevAction({probabilities,candidates:candidatesOf(probabilities),unit,apiChoice,rule:'class-sample-v1'});
 const SELECTION_KEYS=['rule','unit','classMass','pruned','sampled','sizeRule','selectedKey','apiChoice'];
 const classOf=key=>key.startsWith('raise_to_')?'raise':key;
 // Independent weighted-median reference: integer hundredths, doubled comparison, no floats.
@@ -103,7 +103,7 @@ test('recorded 230 distributions: grid frequencies, floor, median, regression ca
 });
 test('input defence rejects mismatched keys, bad unit, empty candidates and a non-candidate API label',()=>{
  const probabilities={fold:.2,call:.8},candidates=candidatesOf(probabilities);
- const bad=args=>assert.throws(()=>selectJevAction({probabilities,candidates,unit:.5,apiChoice:'call',...args}),{code:'JEV_INPUT_INVALID'});
+ const bad=args=>assert.throws(()=>selectJevAction({probabilities,candidates,unit:.5,apiChoice:'call',rule:'class-sample-v1',...args}),{code:'JEV_INPUT_INVALID'});
  bad({probabilities:{fold:.2,call:.7,extra:.1}});bad({probabilities:{call:1}});bad({unit:1});bad({unit:-0.1});bad({unit:NaN});bad({unit:'0.5'});
  bad({candidates:[],probabilities:{}});bad({apiChoice:'raise_to_100'});bad({apiChoice:undefined});
  bad({probabilities:{fold:-0.1,call:1.1}});
@@ -114,4 +114,85 @@ test('selection unit is derived per generation and keeps the existing rng contra
  assert.notEqual(one,deriveUnit('jev-selection-v1','epoch','d-1-preflop-0','2'));
  assert.ok(one>=0&&one<1);
  assert.throws(()=>deriveUnit('jev-selection-v1','','d-1-preflop-0','1'),{code:'POLICY_RNG_INVALID'});
+});
+
+// #234: the 16 v2-gate violations (class masses only, from the v2 gate log; no cards). A = raise
+// all-in (commit), C = call-off (commit). Sizes are synthesised: the whole raise mass sits on
+// the all-in key. The v3 guard must remove the commit in exactly the 12 rows below 0.6.
+const V2_VIOLATIONS = [
+  ['A d-13-p', { fold: 0.44, call: 0.27, raise: 0.29 }, 'raise'], ['A d-19-r', { check: 0.24, raise: 0.76 }, 'raise'],
+  ['A d-21-t', { check: 0.47, raise: 0.53 }, 'raise'], ['A d-26-p', { fold: 0.15, call: 0.32, raise: 0.53 }, 'raise'],
+  ['A d-29-p', { fold: 0.25, call: 0.75 }, 'call'], ['A d-30-t16', { check: 0.29, raise: 0.71 }, 'raise'],
+  ['A d-30-t17', { fold: 0.54, call: 0.46 }, 'call'], ['B d-3-p', { fold: 0.26, call: 0.43, raise: 0.31 }, 'raise'],
+  ['B d-21-p8', { fold: 0.34, call: 0.26, raise: 0.40 }, 'raise'], ['B d-21-p11', { fold: 0.61, call: 0.39 }, 'call'],
+  ['B d-22-p', { fold: 0.81, call: 0.10, raise: 0.09 }, 'raise'], ['B d-24-p8', { fold: 0.45, call: 0.37, raise: 0.18 }, 'raise'],
+  ['B d-24-p9', { fold: 0.18, call: 0.82 }, 'call'], ['B d-24-p10', { fold: 0.71, call: 0.29 }, 'call'],
+  ['C d-1-f', { fold: 0.50, call: 0.12, raise: 0.38 }, 'raise'], ['C d-15-f', { fold: 0.54, call: 0.46 }, 'call'],
+];
+function violationRow(classes, commit) {
+  const probabilities = {}, candidates = [];
+  for (const [cls, mass] of Object.entries(classes)) {
+    const key = cls === 'raise' ? 'raise_to_5000' : cls;
+    probabilities[key] = mass;
+    candidates.push(cls === 'raise' ? { key, action: 'raise', amount: 5000 } : { key, action: cls });
+  }
+  return { probabilities, candidates, commitKey: commit === 'raise' ? 'raise_to_5000' : 'call' };
+}
+test('#234 class-sample-v2 removes the commit candidate in 12 of the 16 v2 violations, for every unit', () => {
+  let blocked = 0;
+  for (const [label, classes, commit] of V2_VIOLATIONS) {
+    const { probabilities, candidates, commitKey } = violationRow(classes, commit);
+    const guard = { deep: true, premium: false, commitKeys: [commitKey] };
+    const removed = probabilities[commitKey] < 0.6;
+    if (removed) blocked += 1;
+    for (let i = 0; i < 100; i++) {
+      const unit = (i + 0.5) / 100;
+      const out = selectJevAction({ probabilities, candidates, unit, apiChoice: commitKey, rule: 'class-sample-v2', guard });
+      assert.equal(out.selection.rule, 'class-sample-v2');
+      assert.equal(Boolean(out.selection.guard), removed, label);
+      if (removed) assert.notEqual(out.selection.selectedKey, commitKey, `${label} @ ${unit}`);
+      assert.equal(out.selection.apiChoice, commitKey, 'the recorded API choice is kept even when removed');
+    }
+  }
+  assert.equal(blocked, 12);
+});
+test('#234 the guard is deterministic and never applies to a preflop premium or a shallow stack', () => {
+  const { probabilities, candidates } = violationRow({ fold: 0.44, call: 0.27, raise: 0.29 }, 'raise');
+  const args = { probabilities, candidates, unit: 0.9, apiChoice: 'fold', rule: 'class-sample-v2' };
+  const deep = selectJevAction({ ...args, guard: { deep: true, premium: false, commitKeys: ['raise_to_5000'] } });
+  assert.deepEqual(selectJevAction({ ...args, guard: { deep: true, premium: false, commitKeys: ['raise_to_5000'] } }), deep);
+  assert.deepEqual(deep.selection.guard, { commit: ['raise_to_5000'], mass: 0.29 });
+  for (const guard of [{ deep: true, premium: true, commitKeys: ['raise_to_5000'] }, { deep: false, premium: false, commitKeys: ['raise_to_5000'] }, { deep: true, premium: false, commitKeys: [] }]) {
+    const out = selectJevAction({ ...args, guard });
+    assert.equal('guard' in out.selection, false, JSON.stringify(guard));
+    assert.equal(out.selection.selectedKey, 'raise_to_5000', 'unguarded, the same unit reaches the jam');
+  }
+  // Exactly 0.6 is kept (the floor is strict).
+  const edge = violationRow({ fold: 0.4, raise: 0.6 }, 'raise');
+  assert.equal('guard' in selectJevAction({ probabilities: edge.probabilities, candidates: edge.candidates, unit: 0.99, apiChoice: 'fold', rule: 'class-sample-v2', guard: { deep: true, premium: false, commitKeys: ['raise_to_5000'] } }).selection, false);
+  const guarded = (probabilities, commitKeys) => {
+    const candidates = Object.keys(probabilities).map(key => key.startsWith('raise_to_')
+      ? { key, action: 'raise', amount: Number(key.slice(9)) } : { key, action: key });
+    return 'guard' in selectJevAction({ probabilities, candidates, unit: 0.99, apiChoice: 'fold', rule: 'class-sample-v2',
+      guard: { deep: true, premium: false, commitKeys } }).selection;
+  };
+  // Hundredths summing to exactly 0.6 in integers stay unguarded even when the float sum is not 0.6.
+  assert.notEqual(0.07 + 0.53, 0.6);
+  assert.equal(guarded({ fold: 0.4, raise_to_4000: 0.07, raise_to_5000: 0.53 }, ['raise_to_4000', 'raise_to_5000']), false);
+  // Values just under the floor are never rounded up to it (r3: 0.5999999996 and 0.5999999999).
+  assert.equal(guarded({ fold: 0.4000000004, raise_to_5000: 0.5999999996 }, ['raise_to_5000']), true);
+  assert.equal(guarded({ fold: 0.4000000001, raise_to_5000: 0.5999999999 }, ['raise_to_5000']), true);
+  assert.equal(guarded({ fold: 0.41, raise_to_5000: 0.59 }, ['raise_to_5000']), true);
+});
+test('#234 the rule is explicit: v2 requires guard inputs, v1 refuses them, commit keys must be offered raise/call keys', () => {
+  const { probabilities, candidates } = violationRow({ fold: 0.44, call: 0.27, raise: 0.29 }, 'raise');
+  const base = { probabilities, candidates, unit: 0.5, apiChoice: 'fold' };
+  assert.throws(() => selectJevAction({ ...base, rule: 'class-sample-v2' }), { code: 'JEV_INPUT_INVALID' });
+  assert.throws(() => selectJevAction({ ...base, rule: 'class-sample-v1', guard: { deep: true, premium: false, commitKeys: [] } }), { code: 'JEV_INPUT_INVALID' });
+  assert.throws(() => selectJevAction({ ...base, rule: 'class-sample-v3' }), { code: 'JEV_INPUT_INVALID' });
+  for (const commitKeys of [['fold'], ['raise_to_9999']]) {
+    assert.throws(() => selectJevAction({ ...base, rule: 'class-sample-v2', guard: { deep: true, premium: false, commitKeys } }), { code: 'JEV_INPUT_INVALID' });
+  }
+  assert.throws(() => selectJevAction(base), { code: 'JEV_INPUT_INVALID' }, 'a missing rule is an error, never a silent v1');
+  assert.equal(selectJevAction({ ...base, rule: 'class-sample-v1' }).selection.rule, 'class-sample-v1');
 });
