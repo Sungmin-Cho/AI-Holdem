@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { startServer, publicSnapshot, projectForSeat } from '../server/server.js';
 import { HOST_ID } from '../publish-contract.js';
 import { createSessionControl, withActionGate } from '../tools/session-control.js';
-import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
 import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
@@ -299,4 +300,54 @@ test('the gate precheck runs inside the lock before the gate state and wins over
   let ran = false;
   assert.throws(() => withActionGate(dir, epoch, () => { ran = true; }, { precheck: seatMoved }), { code: 'NOT_YOUR_TURN' });
   assert.equal(ran, false);
+});
+
+// #251: in play the control lock's other holder is the loop, a different process, so each
+// attempt judges that owner's identity — on Windows a PowerShell read that by itself outlasts
+// the 250 ms product window. The attempts made after it must still accept the action once a
+// short hold ends. On Windows the hold is longer than the window (every attempt there is
+// slow); elsewhere attempts are cheap and the window alone covers a hold inside it.
+const FOREIGN_HOLD_MS = process.platform === 'win32' ? 300 : 100;
+const HOLDER = [
+  'const [dir, holdMs, stateUrl] = process.argv.slice(1);',
+  'const { acquireOwnedLock, releaseOwnedLock } = await import(stateUrl);',
+  "const lock = acquireOwnedLock(dir, 'session-control.lock.d');",
+  "process.stdout.write('held\\n');",
+  "setTimeout(() => { releaseOwnedLock(lock); process.stdout.write('released\\n'); }, Number(holdMs));",
+].join('\n');
+test('an action waits out a short control lock held by another process', async (t) => {
+  const f = await multiRelay(t);
+  createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const views = { user: viewFor(engine, 'user'), h1: viewFor(engine, 'h1') };
+  const published = await f.http('/api/publish', {
+    method: 'POST', body: { token: TOKEN, publishId: 1, view: views.user, views, viewFor: 'user', events: [] },
+  });
+  assert.equal(published.status, 200, JSON.stringify(published.json));
+  const legal = legalFor(engine);
+  const holder = registerOwnedProcess(spawn(process.execPath, [
+    '--input-type=module', '-e', HOLDER, f.dir, String(FOREIGN_HOLD_MS),
+    new URL('../engine/state.js', import.meta.url).href,
+  ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }), 'control-lock-holder');
+  let out = '';
+  let err = '';
+  holder.stderr.setEncoding('utf8').on('data', (chunk) => { err += chunk; });
+  const exited = new Promise((resolve) => holder.once('exit', resolve));
+  await new Promise((resolve, reject) => {
+    holder.stdout.setEncoding('utf8').on('data', (chunk) => {
+      out += chunk;
+      if (out.includes('held\n')) resolve();
+    });
+    exited.then((code) => reject(new Error(`the holder exited (${code}) before taking the lock: ${err}`)));
+  });
+  const response = await f.http('/api/action', {
+    method: 'POST', seat: legal.toAct === 'user' ? undefined : legal.toAct,
+    body: { token: TOKEN, decisionId: legal.decisionId, requestId: 'foreign-hold', action: legal.canCheck ? 'check' : 'call' },
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.json));
+  assert.equal(await exited, 0, err);
+  assert.equal(out, 'held\nreleased\n');
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), true, 'the action was received');
 });
