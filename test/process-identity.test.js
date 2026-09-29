@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  cacheSelfStartTime,
   canonicalizeWin32StartTime,
   createProcessStartTime,
   posixProcessStartTime,
@@ -90,4 +91,21 @@ test('win32 default processStartTime does not depend on ps and is one canonical 
   } finally {
     process.env.PATH = orig;
   }
+});
+
+test('#211 cacheSelfStartTime reads its own pid once, other pids every time, and retries a failed self read', () => {
+  const reads = [];
+  const read = (pid) => { reads.push(pid); return `start-${pid}`; };
+  const failing = cacheSelfStartTime((pid) => { reads.push(pid); return null; }, 7);
+  assert.equal(failing(7), null);
+  assert.equal(failing(7), null);
+  assert.deepEqual(reads, [7, 7], 'a null self read is not remembered');
+  reads.length = 0;
+  const cached = cacheSelfStartTime(read, 7);
+  assert.equal(cached(7), 'start-7');
+  assert.equal(cached('7'), 'start-7');
+  assert.equal(cached(8), 'start-8');
+  assert.equal(cached(8), 'start-8');
+  assert.equal(cached(7), 'start-7');
+  assert.deepEqual(reads, [7, 8, 8], 'only the first self read spawns; other pids are never cached');
 });

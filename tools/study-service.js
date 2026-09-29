@@ -324,6 +324,11 @@ function exactInode(file) {
     return { dev: stat.dev, ino: stat.ino };
   } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
 }
+function pidRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === 'EPERM'; }
+}
 function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   const startTimeOf = identityMemo ? memoizedStartTimeOf(identityMemo, ownedProcessStartTime) : undefined;
@@ -687,7 +692,17 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   try { response = await httpJson(value, '/internal/shutdown', { control: true, body: { expectedInstanceId }, deadline }); }
   catch { fail(); }
   if (response.status !== 200 || response.body.ok !== true) fail();
+  // #211: while the service pid still runs, the stop cannot have completed and no
+  // replacement can exist, so a kill(0) probe is enough to keep waiting. The full ACL and
+  // identity check (a PowerShell spawn each on Windows) runs once the pid is gone, and at
+  // least once a second so a reused pid can never stall the wait.
+  let lastFullCheck = -Infinity;
   while (platformNow() < deadline) {
+    if (pidRunning(value.pid) && platformNow() - lastFullCheck < 1000) {
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    lastFullCheck = platformNow();
     const { current, lock } = aclTransaction(ctx, () => {
       assertContext(ctx);
       return { current: readDescriptor(ctx), lock: readLock(ctx) };
