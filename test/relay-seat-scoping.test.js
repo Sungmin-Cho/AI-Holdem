@@ -7,11 +7,11 @@ import { HOST_ID } from '../publish-contract.js';
 import { createSessionControl, withActionGate } from '../tools/session-control.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { writeSecurityFixtures } from './helpers/security-fixtures.js';
-import { createGame, startHand } from '../engine/hand.js';
+import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
 import { newDeck } from '../engine/cards.js';
 import { viewFor } from '../engine/views.js';
 import { gameEpochOf } from '../publish-contract.js';
-import { saveState, writeJsonAtomic } from '../engine/state.js';
+import { saveState, writeJsonAtomic, acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
 
 const TOKEN = 'seat-scope-token';
 
@@ -116,6 +116,12 @@ async function multiRelay(t) {
     try { json = await response.json(); } catch { /* empty */ }
     return { status: response.status, json };
   };
+  // The relay reads state.json asynchronously while it initializes (hint proof), and the
+  // credentialed health probe waits for that read. On Windows an in-process open handle
+  // makes a test's state.json rename fail, and the rename's synchronous retries block the
+  // event loop the read needs to close its handle, so wait for it before writing state.json.
+  const health = await http('/api/health');
+  assert.equal(health.status, 200);
   return { dir, relay, state: started, http };
 }
 
@@ -192,4 +198,101 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
     // Card values must be absent; the card-free epoch digest may contain "2c".
     assert.equal(blob.includes(JSON.stringify(card)), false, card);
   }
+});
+
+// CONTROL_BUSY retries yield to the event loop; a publication in between can hand
+// the turn to another seat. The seat check must be repeated inside the locked
+// attempt, or a predicted next decision id would be accepted for the wrong seat.
+test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision', async (t) => {
+  const f = await multiRelay(t);
+  createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  assert.ok(['user', 'h1'].includes(actor), `a human acts first (${actor})`);
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  assert.notEqual(nextLegal.toAct, actor);
+  // The engine state moves first; the relay only learns of it from the publication below.
+  saveState(f.dir, next);
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-next', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.equal(response.json.code, 'NOT_YOUR_TURN');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), false);
+});
+
+test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is recorded', async (t) => {
+  const f = await multiRelay(t);
+  const control = createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  control.set('paused', { pauseIntent: true });
+  saveState(f.dir, next);
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-paused', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.deepEqual(response.json, { ok: false, code: 'NOT_YOUR_TURN' }, 'the seat error wins over GAME_PAUSED and carries no proof');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-cancellations.json')), false, 'no cancellation for another seat');
+});
+
+test('the gate precheck runs inside the lock before the gate state and wins over GAME_PAUSED', () => {
+  const dir = createOwnedTempDir('holdem-gate-precheck');
+  const epoch = gameEpochOf(TOKEN);
+  const control = createSessionControl(dir, epoch);
+  control.set('paused', { pauseIntent: true });
+  let closedCalls = 0;
+  const seatMoved = () => { throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' }); };
+  assert.throws(() => withActionGate(dir, epoch, () => 'ok', { precheck: seatMoved, onClosed: () => { closedCalls += 1; return { decisionId: 'd', requestId: 'q' }; } }),
+    (error) => error.code === 'NOT_YOUR_TURN' && !('cancelled' in error));
+  assert.equal(closedCalls, 0, 'no cancellation is recorded for a request whose seat moved');
+  control.set('playing', { pauseIntent: false, closedDecisionId: null });
+  let ran = false;
+  assert.throws(() => withActionGate(dir, epoch, () => { ran = true; }, { precheck: seatMoved }), { code: 'NOT_YOUR_TURN' });
+  assert.equal(ran, false);
 });

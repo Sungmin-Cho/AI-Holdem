@@ -527,6 +527,51 @@ test('published human deadline equals enforcement and only explicit resume renew
   await loop.pause();
 });
 
+// #235: a request refused at the pause gate carries durable cancellation proof, so
+// after resume the player can choose a different action and the refused request
+// (a retry or a late duplicate of an earlier POST) can never be applied.
+test('a pause-refused request is cancelled for good and a different action is applied once after resume', {timeout:process.platform==='win32'?300000:30000}, async t=>{
+  const root=createOwnedTempDir('holdem-pause-cancel');
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:60000,waitMs:60000}});
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,opponentRuntime:'policy'});
+  withMutation(root,state=>{state.button=(state.seats.findIndex(s=>s.playerId==='user')+state.seats.length-1)%state.seats.length;return {state};});
+  const running=loop.run();running.catch(()=>{});t.after(async()=>{await loop.requestStop();await running.catch(error=>{if(!['CHILD_FAILED','STOPPING'].includes(error.code))throw error;});});
+  const read=name=>JSON.parse(fs.readFileSync(path.join(root,name)));
+  const limit=Date.now()+10000;
+  while(Date.now()<limit) {try{if(read('ui-snapshot.json').turnDeadline && read('loop-state.json').humanTurn)break;}catch{}await sleep(10);}
+  const {decisionId}=read('loop-state.json').humanTurn;
+  const lock=read('lock.json');
+  const post=body=>fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({token:lock.sessionToken,decisionId,...body})}).then(async response=>({status:response.status,body:await response.json()}));
+  const status=()=>fetch(`http://127.0.0.1:${lock.port}/api/action-status?token=${lock.sessionToken}`).then(response=>response.json());
+  await loop.pause();
+  const refused=await post({requestId:'paused-call',action:'call'});
+  assert.equal(refused.status,409);
+  assert.deepEqual(refused.body,{ok:false,code:'GAME_PAUSED',cancelled:{decisionId,requestId:'paused-call'}});
+  assert.deepEqual((await status()).cancelled,['paused-call']);
+  assert.equal((await status()).paused,true);
+  await loop.resumePlay();
+  assert.equal(read('loop-state.json').humanTurn.decisionId,decisionId,'resume keeps the same decision');
+  assert.equal((await status()).paused,false);
+  assert.deepEqual((await post({requestId:'paused-call',action:'call'})).body,{ok:false,code:'ACTION_CANCELLED'});
+  assert.equal((await post({requestId:'after-resume-fold',action:'fold'})).status,200);
+  const applied=Date.now()+10000;
+  while(Date.now()<applied&&read('ui-action-receipt.json').phase!=='consumed')await sleep(10);
+  const receipt=read('ui-action-receipt.json');
+  assert.equal(receipt.requestId,'after-resume-fold');
+  assert.equal(receipt.action,'fold');
+  assert.equal(receipt.phase,'consumed','the new action was applied');
+  const engine=read('state.json');
+  const decisionHand=Number(decisionId.split('-')[1]);
+  const handActions=(engine.hand?.handNo===decisionHand?engine.hand.actions:engine.lastHand?.handNo===decisionHand?engine.lastHand.actions:null);
+  assert.ok(handActions,'the decided hand is still readable');
+  const userActions=handActions.filter(action=>action.playerId==='user');
+  assert.deepEqual(userActions.map(action=>action.action),['fold'],'exactly one user action, the new one, reached the engine');
+  assert.equal((await post({requestId:'paused-call',action:'call'})).body.code,'STALE_DECISION');
+});
+
 test('abort end-view publication failure is best effort and never enters relay recovery',
  {timeout:process.platform==='win32'?300000:30000},async t=>{
   const root=createOwnedTempDir('holdem-abort-view-failure');let abortPublishes=0;const events=[];

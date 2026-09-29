@@ -83,6 +83,7 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
       ms: Math.round(performance.now() - started),
       status: result.status ?? null,
       timedOut: result.error?.code === 'ETIMEDOUT',
+      self: id === process.pid,
     });
     if (result.status !== 0) return null;
     return canonicalizeWin32StartTime(result.stdout, result.stderr);
@@ -103,4 +104,24 @@ export function createProcessStartTime({
   return () => null;
 }
 
-export const processStartTime = createProcessStartTime();
+/**
+ * #211: this process's own (pid, start time) is fixed for its lifetime, so it is read once
+ * instead of spawning ps/PowerShell on every lock check. Other pids are always read fresh,
+ * and a failed self read (null) is retried rather than remembered.
+ */
+export function cacheSelfStartTime(read, selfPid = process.pid) {
+  let self = null;
+  return (pid) => {
+    if (Number(pid) !== selfPid) return read(pid);
+    if (self === null) self = read(pid);
+    return self;
+  };
+}
+
+// Only Windows pays a PowerShell process per read. POSIX `ps` is cheap, and tests
+// substitute it on PATH for their own pid, so POSIX keeps reading fresh.
+export function cacheSelfOnWin32(read, platform = process.platform) {
+  return platform === 'win32' ? cacheSelfStartTime(read) : read;
+}
+
+export const processStartTime = cacheSelfOnWin32(createProcessStartTime());

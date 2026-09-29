@@ -324,6 +324,11 @@ function exactInode(file) {
     return { dev: stat.dev, ino: stat.ino };
   } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
 }
+function pidRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === 'EPERM'; }
+}
 function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
   const startTimeOf = identityMemo ? memoizedStartTimeOf(identityMemo, ownedProcessStartTime) : undefined;
@@ -687,16 +692,40 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   try { response = await httpJson(value, '/internal/shutdown', { control: true, body: { expectedInstanceId }, deadline }); }
   catch { fail(); }
   if (response.status !== 200 || response.body.ok !== true) fail();
+  // #211: while the service pid still runs, the stop cannot have completed and no
+  // replacement can exist, so a kill(0) probe is enough to keep waiting. The full ACL and
+  // identity check (a PowerShell spawn each on Windows) runs once the pid is gone, at least
+  // once a second so a reused pid can never stall the wait, and on every poll of the last
+  // second so a finished stop is never reported as a timeout.
+  let lastFullCheck = -Infinity;
   while (platformNow() < deadline) {
-    const { current, lock } = aclTransaction(ctx, () => {
-      assertContext(ctx);
-      return { current: readDescriptor(ctx), lock: readLock(ctx) };
-    });
+    if (pidRunning(value.pid) && platformNow() - lastFullCheck < 1000 && deadline - platformNow() > 1000) {
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    let observed;
+    try {
+      observed = aclTransaction(ctx, () => {
+        assertContext(ctx);
+        return { current: readDescriptor(ctx), lock: readLock(ctx) };
+      });
+    } catch (error) {
+      // The service deletes its descriptor and lock while it stops. On Windows a file deleted
+      // while any handle (ours included) is open stays "delete pending": reading it fails as a
+      // corrupt file (EPERM), not a missing one. That clears on the next poll, so it is not a
+      // verdict; a file that stays unreadable still fails at the deadline below.
+      if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+      lastFullCheck = platformNow();
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    const { current, lock } = observed;
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
     // A replacement belongs to the next caller; it is never ours to stop.
     if (current.state === 'valid' && current.value.instanceId !== expectedInstanceId) fail('STUDY_IDENTITY_MISMATCH');
+    lastFullCheck = platformNow();
     await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
   }
   fail();

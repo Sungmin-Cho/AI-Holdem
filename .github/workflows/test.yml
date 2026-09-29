@@ -15,21 +15,24 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Windows baseline: main 2456291, run 34954055586, Node 20.x.
-# Run-tests minutes: loop 38.6 (game-loop 32.0), rest 56.3 + gate 1.2;
-# rest job reached 58/60 minutes. Job overhead was about one minute.
-# New partition: estimated run-tests minutes (verify on PR CI, not guarantees):
-#   study-a    study-service + app-command-store + policy-loop 17.7
-#   study-b    study-service-recovery                         11.6
-#   learning-a learning-integration + mistake-bank + publish  11.0
-#   learning-b learning-integration-session + action-receipts + drill-* 12.9
-#   loop       game-loop                                     32.0
-#   loop-b     game-loop-multiplayer + pace + JEV (CI time unmeasured)
-#   recovery   app-recovery-exit + release-verifier + server-security-gates 28.6
-#   rest       remaining files + GATE                        26.1
+# Windows baseline: main 8ca254b, run 36356028579, Node 20.x run-tests minutes:
+#   study-a    study-service + app-command-store + policy-loop + participant-api 24.4
+#   study-b    study-service-recovery + room-manager + session-summary* + final-summary 10.3
+#   learning-a learning-integration + mistake-bank + publish + multi-human-engine 8.4
+#   learning-b learning-integration-session + action-receipts + drill-*       9.7
+#   loop       game-loop 34.0 before the #210 split; about 25 after (estimate)
+#   loop-b     game-loop-multiplayer + pace + JEV 13.1, plus game-loop-finalize
+#              about 9 (estimate, before #213 re-enables its Windows skips)
+#   recovery   app-recovery-exit 25.3 + release-verifier + server-security-gates
+#              + relay-seat-scoping 32.4
+#   rest       remaining files + GATE                                    36.6
 # Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
-# If game-loop.test.js exceeds 36 min on Windows, split by topic starting
-# with coach recovery/finalize. Track app-recovery-exit's 22.1 min separately.
+# #210 split game-loop.test.js by topic: persisted coach recovery/finalize
+# moved to game-loop-finalize.test.js (loop-b), shared fixtures to
+# test/helpers/game-loop-fixtures.mjs. If either file exceeds 36 min on Windows,
+# split it again by topic. A test file missing from NAMED in
+# test/helpers/ci-shards.mjs lands in rest, which has no room for a large file.
+# Track app-recovery-exit against its 22.1 min baseline separately (#211).
 # Eight shards x Node 20/22 include the multiplayer loop partition.
 jobs:
   ui-browser:
@@ -181,6 +184,16 @@ jobs:
           if (Test-Path $file) { node test/helpers/proof-profile-report.mjs $file } else { echo 'no proofs.jsonl' }
           $log = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'study-children.log'
           if (Test-Path $log) { Get-Content $log }
+      - name: Upload Windows proof profile
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proofs-${{ matrix.shard }}-node${{ matrix.node-version }}
+          path: ${{ env.AI_HOLDEM_PLATFORM_DIAGNOSTICS }}/proofs.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+          # A re-run attempt uploads under the same name.
+          overwrite: true
   windows-suite:
     name: Windows suite
     needs: windows

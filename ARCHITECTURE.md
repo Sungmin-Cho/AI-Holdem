@@ -46,7 +46,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `shared/hand-replay.js` | 완료 핸드 복기 투영(`replayRecord`). 엔진 CLI와 서버가 같은 함수를 부른다. |
 | `tools/room-manager.js` | 로비 룸 상태(`open/locked/closed/error`), 참가 코드·토큰 세대, `lockForStart`/`bind`/`unlock`/`release`. |
 | `server/public/replay-format.js` | 복기 오버레이용 순수 행 모델(`formatReplay`). 표식 문구와 벳/레이즈 동사. |
-| `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. |
+| `server/action-receipts.js` | 접수·전달·소비/거절을 원자적 영속 receipt로 기록한다. UI 커밋 뒤 ACK를 기록하고 재시작 시 정확한 identity로 복구한다. 일시정지 gate가 거부한 요청의 취소 원장(`ui-action-cancellations.json`, 현재 결정 한정)도 소유하며, 기록된 요청은 이후 `ACTION_CANCELLED`로만 거부된다. |
 | `export/` | 핸드 히스토리 read-only export. 엔진 상태를 바꾸지 않는다. |
 | `engine/views.js` | 상태를 플레이어별 공개 뷰·핸드 요약·redacted 기록·통계로 투영(`viewFor`/`turnSummary`/`redactRecord`/`statsReport`). |
 | `engine/game-archive.js` | 게임 디렉터리 초기화, 이전 게임 vacate/archive, 서버 pid 생존 판정(`isAlive`), 사이드카 락 존중(내부 `assertLoopAllowsInit`). |
@@ -60,7 +60,8 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/game-loop.js` | 사이드카 본체 — 부트스트랩(loop 락 → `init` → 서버 기동), 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스를 한 detached 프로세스에서 오케스트레이션. |
 | `tools/player-decision.js` | LLM 결정 분류·베팅이 없는 스트리트의 bet 정규화·안전 진단 투영·교정 메시지. game-loop는 남은 예산 안에서 교정 1회 후 미해결 결정을 보존한다. |
 | `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). |
-| `tools/coach-control.js` | 코치 authority 상태기계 — `gameEpoch`/`activeOwnerSessionId`/핸드별 `generation`으로 큐·재개·중복 요청을 판정. |
+| `tools/coach-control.js` | 코치 authority 상태기계 — `gameEpoch`/`activeOwnerSessionId`/핸드별 `generation`으로 큐·재개·중복 요청을 판정. `.coach-authority.json`이 정본이다: released 전이는 선언과 writer 자신의 검증 결과(`release.verification`)를 행에 같은 원자 쓰기로 남기고, `.coach-adapter-trace.jsonl`은 `traceOutbox`로 뒤따라 맞추는 감사 mirror다(추가 실패가 커밋을 실패시키지 않는다). released는 종착 상태다. |
+| `tools/coach-evidence.js` | 영속 코치 행 판정(sidecar 읽기, tuple·identity 충돌, NOT_SPAWNED·legacy 적격성, lsof 스캐너, 시작 시각 관찰)을 loop와 cleanup writer가 공유하는 모듈. `--evidence`는 어떤 검증을 할지 고르는 선택자일 뿐 증거가 아니며, writer는 같은 판정을 자기 관찰로 다시 한다. POSIX 시작 시각은 zone이 없어 TZ 오프셋만큼 다른 값은 교체가 아니라 unknown이다. |
 | `tools/publish.js` | 게시 CLI — `engine/cli.js step` envelope의 공개분만 골라 서버에 POST하고 `publishId`를 관리. |
 | `publish-contract.js` | `server/`와 `tools/`가 공유하는 계약 하나 — body-byte 상한(65,536)·`publishId` 상한·`gameEpoch = sha256(sessionToken)` 파생. |
 | `server/server.js` | HTTP 중계 — `/api/events`(SSE), `/api/snapshot`, `/api/wait-action`, `/api/action`, `/api/publish`, `/api/health`. 토큰 검증만 하고 게임 규칙은 모른다. |

@@ -279,7 +279,14 @@ export async function startAppServer({
         json(res, 400, { code: "BAD_QUERY" });
         return;
       }
-    if (endpoint === "action" && snapshot.state !== "playing") {
+    // #235: while pausing/paused the relay's action gate decides, so a refusal can
+    // carry durable per-request cancellation proof. Other non-playing states keep
+    // the unproven refusal: a retry after recovery there is legitimate.
+    if (
+      endpoint === "action" &&
+      snapshot.state !== "playing" &&
+      !(["pausing", "paused"].includes(snapshot.state) && manager.session)
+    ) {
       json(res, 409, { code: "GAME_PAUSED" });
       return;
     }
