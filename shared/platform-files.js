@@ -53,7 +53,7 @@ export function setProofPhase(label) {
   currentPhase = label == null || label === '' ? null : String(label);
 }
 
-export function recordProofEvent({ kind, paths = 0, ms, status, timedOut }) {
+export function recordProofEvent({ kind, paths = 0, ms, status, timedOut, self }) {
   const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
   if (!dir) return;
   try {
@@ -66,6 +66,7 @@ export function recordProofEvent({ kind, paths = 0, ms, status, timedOut }) {
       status: status ?? null,
       timedOut: Boolean(timedOut),
       phase: currentPhase,
+      ...(self === undefined ? {} : { self: Boolean(self) }),
     })}\n`);
   } catch { /* Diagnostics must never change a privacy verdict. */ }
 }
