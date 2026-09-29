@@ -112,8 +112,9 @@ test('#249 the ACL proof script calls .NET only, never a cmdlet', () => {
   assert.match(script, /ToString\(\$inv\)/, 'rights are written in the invariant culture');
   assert.ok(script.includes("@('C:\\store\\.training','C:\\it''s')"), 'paths stay single-quoted literals');
   // As in the Get-Acl script, the reparse bit is read after the ACL and its rules.
-  assert.ok(script.indexOf('$after=[System.IO.File]::GetAttributes($p)') > script.indexOf('GetAccessRules('),
-    'attributes are read again after the rules');
+  const after = script.indexOf('$after=[System.IO.File]::GetAttributes($p)');
+  assert.ok(after > script.indexOf('GetAccessRules(') && after > script.indexOf('GetOwner('),
+    'attributes are read again last, after the rules and the owner');
   assert.match(script, /\(\$attr -bor \$after\) -band \[System\.IO\.FileAttributes\]::ReparsePoint/);
 });
 
@@ -211,46 +212,65 @@ test('#249 on real Windows ACLs the .NET-only script reads exactly what Get-Acl 
   assert.equal(verdict(generic, false), false, 'a generic right for a stranger is never read-only proof');
 });
 
-// The attributes are read after the ACL, so a directory swapped for a junction between the
-// two reads is refused (#249 r1). The proof child waits at exactly that point for the test.
-test('#249 a path swapped for a junction after its ACL was read is not private', {
-  skip: process.platform === 'win32' ? false : 'junctions and DACLs need Windows',
-}, async () => {
-  const system = process.env.SystemRoot || 'C:\\Windows';
-  const root = createOwnedTempDir('holdem-acl-swap');
-  const victim = path.join(root, 'victim');
-  const elsewhere = path.join(root, 'elsewhere');
-  fs.mkdirSync(victim);
-  fs.mkdirSync(elsewhere);
-  const ready = path.join(root, 'ready.flag');
-  const go = path.join(root, 'go.flag');
-  const pause = `[System.IO.File]::WriteAllText('${ready.replaceAll("'", "''")}', 'x'); `
-    + `while (-not [System.IO.File]::Exists('${go.replaceAll("'", "''")}')) { [System.Threading.Thread]::Sleep(10) }; `;
-  const script = files.aclProofScript([victim]);
-  const marker = '$after=[System.IO.File]::GetAttributes($p);';
-  assert.ok(script.includes(marker));
-  const child = spawn(path.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoProfile', '-NonInteractive', '-Command', script.replace(marker, pause + marker)],
-    { env: files.windowsPowerShellEnvironment(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  registerOwnedProcess(child, 'acl proof child');
-  let out = '';
-  let err = '';
-  child.stdout.on('data', (chunk) => { out += chunk; });
-  child.stderr.on('data', (chunk) => { err += chunk; });
-  const closed = new Promise((resolve) => child.once('close', resolve));
-  const deadline = Date.now() + 60_000;
-  while (!fs.existsSync(ready)) {
-    assert.ok(Date.now() < deadline && child.exitCode === null, `the proof child did not reach the pause: ${err}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  fs.renameSync(victim, `${victim}.moved`);
-  fs.symlinkSync(elsewhere, victim, 'junction');
-  fs.writeFileSync(go, 'x');
-  assert.equal(await closed, 0, err);
-  const [proof] = JSON.parse(out.replace(/^\uFEFF/, ''));
-  assert.equal(proof.reparse, true, 'the reparse point seen after the ACL read is reported');
-  assert.equal(files.privateAclAllowed(proof, false), false);
-});
+// The attributes are read again after the ACL, and a reparse point seen by either read counts
+// (#249 r1–r2). The proof child pauses at exactly that point while the test swaps the path:
+// a directory for a junction, and a junction for a directory.
+for (const [label, start, swap] of [
+  ['a directory swapped for a junction', (victim) => fs.mkdirSync(victim), (victim, elsewhere) => {
+    fs.renameSync(victim, `${victim}.moved`);
+    fs.symlinkSync(elsewhere, victim, 'junction');
+  }],
+  ['a junction swapped for a directory', (victim, elsewhere) => fs.symlinkSync(elsewhere, victim, 'junction'), (victim) => {
+    fs.rmdirSync(victim);
+    fs.mkdirSync(victim);
+  }],
+]) {
+  test(`#249 ${label} between the two attribute reads is not private`, {
+    skip: process.platform === 'win32' ? false : 'junctions and DACLs need Windows',
+  }, async () => {
+    const system = process.env.SystemRoot || 'C:\\Windows';
+    const root = createOwnedTempDir('holdem-acl-swap');
+    const victim = path.join(root, 'victim');
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    start(victim, elsewhere);
+    const ready = path.join(root, 'ready.flag');
+    const go = path.join(root, 'go.flag');
+    const pause = `[System.IO.File]::WriteAllText('${ready.replaceAll("'", "''")}', 'x'); `
+      + `while (-not [System.IO.File]::Exists('${go.replaceAll("'", "''")}')) { [System.Threading.Thread]::Sleep(10) }; `;
+    const script = files.aclProofScript([victim]);
+    const marker = '$after=[System.IO.File]::GetAttributes($p);';
+    assert.ok(script.includes(marker));
+    const child = spawn(path.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', script.replace(marker, pause + marker)],
+      { env: files.windowsPowerShellEnvironment(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    registerOwnedProcess(child, 'acl proof child');
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    const deadline = Date.now() + 60_000;
+    try {
+      while (!fs.existsSync(ready)) {
+        assert.ok(Date.now() < deadline && child.exitCode === null, `the proof child did not reach the pause: ${err}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      swap(victim, elsewhere);
+      fs.writeFileSync(go, 'x');
+      let timer;
+      const code = await Promise.race([closed, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`the proof child did not finish: ${err}`)), Math.max(1, deadline - Date.now()));
+      })]).finally(() => clearTimeout(timer));
+      assert.equal(code, 0, err);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+    const [proof] = JSON.parse(out.replace(/^\uFEFF/, ''));
+    assert.equal(proof.reparse, true, 'a reparse point seen by either attribute read is reported');
+    assert.equal(files.privateAclAllowed(proof, false), false);
+  });
+}
 
 test('one monotonic deadline bounds sequential ACL and identity children', () => {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runtime-budget-'));
