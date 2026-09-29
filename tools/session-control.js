@@ -158,7 +158,8 @@ export function createSessionControl(
 // `maxMs` is the last moment a later one may start, and one already running (a
 // synchronous identity read, capped at 15 s on Windows) is not interrupted. The
 // lock's own verdicts (fail-closed, dead-owner reclaim) are unchanged: this only
-// decides when to ask again. `onBusy` observes each busy attempt (tests only).
+// decides when to ask again. `onBusy` observes each busy attempt (tests only); an
+// error it throws ends the retries in place of CONTROL_BUSY.
 const CONTROL_RETRY_MIN_ATTEMPTS = 3;
 const CONTROL_RETRY_MAX_MS = 5000;
 const CONTROL_RETRY_SLEEP_MS = 20;

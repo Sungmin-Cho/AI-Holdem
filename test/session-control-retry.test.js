@@ -159,3 +159,12 @@ test('onBusy observes every busy attempt, including the one that ends the retrie
   }, { onBusy: (attempt) => other.push(attempt) }), { code: 'GAME_PAUSED' });
   assert.deepEqual(other, [], 'only CONTROL_BUSY is reported');
 });
+
+test('a throwing onBusy ends the retries with its own error', async () => {
+  let calls = 0;
+  await assert.rejects(retryControlWrite(() => {
+    calls += 1;
+    throw busy();
+  }, { onBusy: () => { throw Object.assign(new Error('HOOK'), { code: 'HOOK' }); } }), { code: 'HOOK' });
+  assert.equal(calls, 1);
+});

@@ -313,7 +313,7 @@ test('the gate precheck runs inside the lock before the gate state and wins over
 const FOREIGN_HOLD_MS = process.platform === 'win32' ? 300 : 100;
 // It takes the lock only when told to: registering it reads its identity synchronously
 // (PowerShell on Windows), which must not eat into the hold. A 60 s cap keeps a broken
-// test from leaving it behind.
+// test from leaving it behind, and the test gives up on it sooner.
 const HOLDER = [
   'const [dir, holdMs, stateUrl] = process.argv.slice(1);',
   'const { acquireOwnedLock, releaseOwnedLock } = await import(stateUrl);',
@@ -322,8 +322,13 @@ const HOLDER = [
   '  if (done) return; done = true; clearTimeout(cap);',
   "  releaseOwnedLock(lock); process.stdout.write('released\\n'); process.stdin.destroy();",
   '};',
-  'const cap = setTimeout(() => { if (lock) release(); }, 60_000);',
+  // The cap ends the child whether or not it ever took the lock, with a failing status.
+  'const cap = setTimeout(() => {',
+  '  process.exitCode = 3;',
+  '  if (lock) release(); else { done = true; process.stdin.destroy(); }',
+  '}, 60_000);',
   "process.stdin.setEncoding('utf8').on('data', (chunk) => {",
+  '  if (done) return;',
   '  input += chunk;',
   "  if (!lock && input.includes('go\\n')) {",
   "    lock = acquireOwnedLock(dir, 'session-control.lock.d'); heldAt = performance.now();",
@@ -370,7 +375,10 @@ test('an action waits out a short control lock held by another process', async (
     exited.then((code) => reject(new Error(`the holder exited (${code}) before taking the lock: ${err}`)));
   });
   holder.stdin.write('go\n');
-  await held;
+  let gaveUp;
+  await Promise.race([held, new Promise((_, reject) => {
+    gaveUp = setTimeout(() => reject(new Error(`the holder did not take the lock: ${err}`)), process.platform === 'win32' ? 30_000 : 10_000);
+  })]).finally(() => clearTimeout(gaveUp));
   const response = await f.http('/api/action', {
     method: 'POST', seat: legal.toAct === 'user' ? undefined : legal.toAct,
     body: { token: TOKEN, decisionId: legal.decisionId, requestId: 'foreign-hold', action: legal.canCheck ? 'check' : 'call' },
