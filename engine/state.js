@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { cacheSelfStartTime, processStartTime, win32ProcessStartTime, validWin32StartTime } from './process-identity.js';
+import { cacheSelfOnWin32, processStartTime, win32ProcessStartTime, validWin32StartTime } from './process-identity.js';
 
 export { processStartTime } from './process-identity.js';
 
@@ -661,7 +661,7 @@ export function parseOwnedLockIdentity(text) {
 /** Versioned identity for lifetime locks only; legacy processStartTime is unchanged. */
 let ownedStartTime = null;
 export function ownedProcessStartTime(pid) {
-  ownedStartTime ??= cacheSelfStartTime(readOwnedProcessStartTime);
+  ownedStartTime ??= cacheSelfOnWin32(readOwnedProcessStartTime);
   return ownedStartTime(pid);
 }
 function readOwnedProcessStartTime(pid) {

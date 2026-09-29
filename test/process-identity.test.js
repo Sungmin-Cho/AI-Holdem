@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  cacheSelfOnWin32,
   cacheSelfStartTime,
   canonicalizeWin32StartTime,
   createProcessStartTime,
@@ -108,4 +109,15 @@ test('#211 cacheSelfStartTime reads its own pid once, other pids every time, and
   assert.equal(cached(8), 'start-8');
   assert.equal(cached(7), 'start-7');
   assert.deepEqual(reads, [7, 8, 8], 'only the first self read spawns; other pids are never cached');
+});
+
+test('#211 the self cache applies on win32 only; POSIX reads stay fresh', () => {
+  let reads = 0;
+  const read = () => { reads += 1; return 'start'; };
+  const posix = cacheSelfOnWin32(read, 'darwin');
+  posix(process.pid); posix(process.pid);
+  assert.equal(reads, 2);
+  const win = cacheSelfOnWin32(read, 'win32');
+  win(process.pid); win(process.pid);
+  assert.equal(reads, 3);
 });

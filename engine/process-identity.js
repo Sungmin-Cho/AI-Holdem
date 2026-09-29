@@ -118,4 +118,10 @@ export function cacheSelfStartTime(read, selfPid = process.pid) {
   };
 }
 
-export const processStartTime = cacheSelfStartTime(createProcessStartTime());
+// Only Windows pays a process spawn (PowerShell) per read. POSIX `ps` is cheap, and tests
+// substitute it on PATH for their own pid, so POSIX keeps reading fresh.
+export function cacheSelfOnWin32(read, platform = process.platform) {
+  return platform === 'win32' ? cacheSelfStartTime(read) : read;
+}
+
+export const processStartTime = cacheSelfOnWin32(createProcessStartTime());
