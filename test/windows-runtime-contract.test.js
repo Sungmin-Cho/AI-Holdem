@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
 import * as files from '../shared/platform-files.js';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { win32ProcessStartTime } from '../engine/process-identity.js';
@@ -99,6 +100,177 @@ test('production child processes hide the Windows console', () => {
   assert.ok(hidden.length >= 9, `expected production spawn sites, found ${hidden.length}`);
   assert.deepEqual(missing, []);
 });
+
+// #249: the proof child's fixed start-up cost came from the Get-Acl and ConvertTo-Json
+// cmdlets; the script now calls .NET directly and writes the same JSON itself.
+test('#249 the ACL proof script calls .NET only, never a cmdlet', () => {
+  const script = files.aclProofScript(['C:\\store\\.training', "C:\\it's"]);
+  assert.doesNotMatch(script, /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/, 'no Verb-Noun cmdlet');
+  assert.match(script, /\[System\.IO\.Directory\]::GetAccessControl\(\$p\)/);
+  assert.match(script, /\[System\.IO\.File\]::GetAccessControl\(\$p\)/);
+  assert.match(script, /GetAccessRules\(\$true,\$true,\$sid\)/, 'explicit and inherited rules, as SIDs');
+  assert.match(script, /ToString\(\$inv\)/, 'rights are written in the invariant culture');
+  assert.ok(script.includes("@('C:\\store\\.training','C:\\it''s')"), 'paths stay single-quoted literals');
+  // As in the Get-Acl script, the reparse bit is read after the ACL and its rules.
+  const after = script.indexOf('$after=[System.IO.File]::GetAttributes($p)');
+  assert.ok(after > script.indexOf('GetAccessRules(') && after > script.indexOf('GetOwner('),
+    'attributes are read again last, after the rules and the owner');
+  assert.match(script, /\(\$attr -bor \$after\) -band \[System\.IO\.FileAttributes\]::ReparsePoint/);
+});
+
+test('#249 the JSON the proof script writes is judged exactly as before', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acl-proof-shape-'));
+  const user = 'S-1-5-21-1-2-3-1001';
+  const proof = (rules, extra = {}) => `{"user":"${user}","tokenOwner":null,"owner":"${user}","reparse":false,"rules":[${rules.join(',')}]${extra.tail ?? ''}}`;
+  const rule = (sid, rights, type = 'Allow') => `{"sid":"${sid}","type":"${type}","rights":${rights}}`;
+  const verdict = (stdout, privateMode = true) => {
+    const reasons = [];
+    let script;
+    const result = files.arePrivatePaths([{ file: dir, privateMode }], {
+      platform: 'win32',
+      spawn: (_exe, args) => { script = args.at(-1); return { status: 0, stdout, stderr: '' }; },
+      onUnproven: (reason) => reasons.push(reason),
+    });
+    assert.equal(script, files.aclProofScript([dir]));
+    return { result, reasons };
+  };
+  try {
+    // GENERIC_READ is a negative 32-bit value; SYSTEM holding it is still trusted.
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-5-18', -2147483648)])}]\r\n`).result, true);
+    assert.equal(verdict(`\uFEFF[${proof([rule(user, 2032127)])}]`).result, true, 'a BOM is tolerated as before');
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-1-0', 1179817)])}]`).result, false, 'Everyone may not read a private path');
+    assert.equal(verdict(`[${proof([rule(user, 2032127), rule('S-1-1-0', 1179817)])}]`, false).result, true, 'but may read a non-private one');
+    assert.equal(verdict(`[${proof([])}]`).result, false, 'no rule for the user is no proof');
+    assert.equal(verdict(`[${proof([rule(user, 2032127)]).replace('"reparse":false', '"reparse":true')}]`).result, false);
+    assert.equal(verdict(`[${proof([rule(user, 2032127)]).replace(`"owner":"${user}"`, '"owner":null')}]`).result, false, 'an unknown owner is no proof');
+    const broken = verdict(`[${proof([rule(user, 2032127)])},]`);
+    assert.equal(broken.result, false);
+    assert.match(broken.reasons.join(' '), /^error:/, 'malformed output is unproven');
+    assert.match(verdict('[]').reasons.join(' '), /^proofs:0\/1/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The script #249 replaced, kept only as the reference the .NET-only script is compared with.
+const GET_ACL_SCRIPT = (paths) => `$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); $me=$id.User.Value; $tokenOwner=$id.Owner.Value; $proofs=@(); foreach($p in @(${paths.map((file) => `'${file.replaceAll("'", "''")}'`).join(',')})) { $a=Get-Acl -LiteralPath $p; $rules=@(); foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { $rules+=@{sid=$r.IdentityReference.Value;type=$r.AccessControlType.ToString();rights=[long]$r.FileSystemRights} }; $proofs+=@{user=$me;tokenOwner=$tokenOwner;owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;reparse=(([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0);rules=$rules} }; ConvertTo-Json -InputObject @($proofs) -Depth 5 -Compress`;
+
+// A proof that silently drops one foreign ACE would still be valid JSON and could pass, so
+// the replacement is compared with Get-Acl on real DACLs: a private directory and file, a
+// directory with an explicit inheritable Everyone ACE, a file that inherits it, and a file
+// with its own explicit Everyone ACE — all in one call, in order.
+test('#249 on real Windows ACLs the .NET-only script reads exactly what Get-Acl read', {
+  skip: process.platform === 'win32' ? false : 'real DACLs need Windows',
+}, () => {
+  const system = process.env.SystemRoot || 'C:\\Windows';
+  const root = createOwnedTempDir('holdem-acl-diff');
+  const privateFile = path.join(root, 'private.json');
+  fs.writeFileSync(privateFile, '{}');
+  const shared = path.join(root, "it's [shared]");
+  fs.mkdirSync(shared);
+  const icacls = (...args) => {
+    const result = spawnSync(path.join(system, 'System32', 'icacls.exe'), args, { encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, 0, `icacls ${args.join(' ')}: ${result.stdout}${result.stderr}`);
+  };
+  icacls(shared, '/grant', '*S-1-1-0:(OI)(CI)(RX)');
+  const inherited = path.join(shared, 'inherited.json');
+  fs.writeFileSync(inherited, '{}');
+  const explicit = path.join(root, 'explicit.json');
+  fs.writeFileSync(explicit, '{}');
+  icacls(explicit, '/grant', '*S-1-1-0:(R)');
+  icacls(explicit, '/deny', '*S-1-5-7:(W)');
+  // CREATOR OWNER, inherit-only GENERIC_READ: a negative 32-bit rights value.
+  const generic = path.join(root, 'generic');
+  fs.mkdirSync(generic);
+  icacls(generic, '/grant', '*S-1-3-0:(OI)(CI)(IO)(GR)');
+  const all = [root, privateFile, shared, inherited, explicit, generic];
+  const powershell = (script) => spawnSync(path.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    { env: files.windowsPowerShellEnvironment(), encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true });
+  const run = (script) => {
+    const result = powershell(script);
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(String(result.stderr).trim(), '');
+    return JSON.parse(String(result.stdout).replace(/^\uFEFF/, ''));
+  };
+  const current = run(files.aclProofScript(all));
+  assert.deepEqual(current, run(GET_ACL_SCRIPT(all)));
+  const everyone = (proof) => proof.rules.filter((rule) => rule.sid === 'S-1-1-0');
+  assert.deepEqual(current.map((proof) => everyone(proof).length > 0), [false, false, true, true, true, false],
+    'the comparison covers explicit and inherited foreign ACEs');
+  assert.ok(current[4].rules.some((rule) => rule.type === 'Deny' && rule.sid === 'S-1-5-7'), 'a Deny ACE is carried');
+  assert.ok(current[5].rules.some((rule) => rule.sid === 'S-1-3-0' && rule.rights < 0), 'a negative rights value is carried');
+  assert.deepEqual(run(files.aclProofScript([])), [], 'no paths is an empty array');
+  const partial = powershell(files.aclProofScript([privateFile, path.join(root, 'missing.json')]));
+  assert.notEqual(partial.status, 0, 'one unreadable path fails the whole proof');
+  assert.doesNotMatch(String(partial.stdout), /\[/, 'and prints no partial proof');
+  const verdict = (file, privateMode) => files.arePrivatePaths([{ file, privateMode }]);
+  assert.equal(verdict(root, true), true);
+  assert.equal(verdict(privateFile, true), true);
+  for (const file of [shared, inherited, explicit]) {
+    assert.equal(verdict(file, true), false, `Everyone may read ${path.basename(file)}, so it is not private`);
+    assert.equal(verdict(file, false), true, `Everyone may only read ${path.basename(file)}`);
+  }
+  assert.equal(verdict(generic, false), false, 'a generic right for a stranger is never read-only proof');
+});
+
+// The attributes are read again after the ACL, and a reparse point seen by either read counts
+// (#249 r1–r2). The proof child pauses at exactly that point while the test swaps the path:
+// a directory for a junction, and a junction for a directory.
+for (const [label, start, swap] of [
+  ['a directory swapped for a junction', (victim) => fs.mkdirSync(victim), (victim, elsewhere) => {
+    fs.renameSync(victim, `${victim}.moved`);
+    fs.symlinkSync(elsewhere, victim, 'junction');
+  }],
+  ['a junction swapped for a directory', (victim, elsewhere) => fs.symlinkSync(elsewhere, victim, 'junction'), (victim) => {
+    fs.rmdirSync(victim);
+    fs.mkdirSync(victim);
+  }],
+]) {
+  test(`#249 ${label} between the two attribute reads is not private`, {
+    skip: process.platform === 'win32' ? false : 'junctions and DACLs need Windows',
+  }, async () => {
+    const system = process.env.SystemRoot || 'C:\\Windows';
+    const root = createOwnedTempDir('holdem-acl-swap');
+    const victim = path.join(root, 'victim');
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    start(victim, elsewhere);
+    const ready = path.join(root, 'ready.flag');
+    const go = path.join(root, 'go.flag');
+    const pause = `[System.IO.File]::WriteAllText('${ready.replaceAll("'", "''")}', 'x'); `
+      + `while (-not [System.IO.File]::Exists('${go.replaceAll("'", "''")}')) { [System.Threading.Thread]::Sleep(10) }; `;
+    const script = files.aclProofScript([victim]);
+    const marker = '$after=[System.IO.File]::GetAttributes($p);';
+    assert.ok(script.includes(marker));
+    const child = spawn(path.join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', script.replace(marker, pause + marker)],
+      { env: files.windowsPowerShellEnvironment(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    registerOwnedProcess(child, 'acl proof child');
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    const deadline = Date.now() + 60_000;
+    try {
+      while (!fs.existsSync(ready)) {
+        assert.ok(Date.now() < deadline && child.exitCode === null, `the proof child did not reach the pause: ${err}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      swap(victim, elsewhere);
+      fs.writeFileSync(go, 'x');
+      let timer;
+      const code = await Promise.race([closed, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`the proof child did not finish: ${err}`)), Math.max(1, deadline - Date.now()));
+      })]).finally(() => clearTimeout(timer));
+      assert.equal(code, 0, err);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+    const [proof] = JSON.parse(out.replace(/^\uFEFF/, ''));
+    assert.equal(proof.reparse, true, 'a reparse point seen by either attribute read is reported');
+    assert.equal(files.privateAclAllowed(proof, false), false);
+  });
+}
 
 test('one monotonic deadline bounds sequential ACL and identity children', () => {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'runtime-budget-'));

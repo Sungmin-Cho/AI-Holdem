@@ -53,9 +53,16 @@ function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail) {
   // formatStudyError renders from the code alone, so no path reaches a viewer.
   const error = new Error(detail ? `${code} ${detail}` : code); error.code = code; throw error;
 }
+// A win32 checkpoint is two PowerShell children. They once took about a second each, and
+// the 2x rule then started checkpoints about 6 s apart (2 s of work, 4 s of wait); cheaper
+// proofs (#249) would shrink that to under 2 s and triple the children every live service
+// — idle ones included, until they expire — keeps spawning, which starved other children
+// on CI. After a completed checkpoint, keep starts at least 6 s apart on win32 so the
+// saving lowers that load instead. The first checkpoint still waits only `minMs`.
+const WIN32_CHECKPOINT_PERIOD_MS = 6000;
 export function nextCheckpointDelay(minMs, lastDurationMs, platform = process.platform) {
-  if (platform !== 'win32') return minMs;
-  return Math.max(minMs, 2 * lastDurationMs);
+  if (platform !== 'win32' || !(lastDurationMs > 0)) return minMs;
+  return Math.max(minMs, 2 * lastDurationMs, WIN32_CHECKPOINT_PERIOD_MS - lastDurationMs);
 }
 export function memoizedStartTimeOf(memo, startTimeOf) {
   return (pid) => {
