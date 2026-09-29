@@ -748,3 +748,24 @@ export async function assert205UnconfirmedCommand(gameDir, command) {
   await assert.rejects(execFileAsync(command.program, command.args, { encoding: 'utf8', timeout: 5_000 }), (error) => JSON.parse(error.stdout.trim()).code === 'USAGE');
   assert.deepEqual(fs.readFileSync(path.join(gameDir, '.coach-authority.json')), before);
 }
+
+// #214: the cleanup writer (a real coach-control CLI child) observes the OS itself. A test
+// that fakes the loop's observations through seams must give the writer the same view, or
+// the writer correctly refuses a release the loop only believed in. Pass the returned path
+// as the loop's `coachCliPath`. The shim lives outside the repository test tree.
+export function writerObservationShim({ startTimes = {}, scan = null } = {}) {
+  const dir = createOwnedTempDir('holdem-writer-shim');
+  const file = path.join(dir, 'coach-writer-shim.mjs');
+  fs.writeFileSync(file, [
+    `import { runCoachControlCliMain } from ${JSON.stringify(pathToFileURL(COACH_CLI).href)};`,
+    `import { processStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/process-identity.js')).href)};`,
+    `const startTimes = ${JSON.stringify(Object.fromEntries(Object.entries(startTimes).map(([pid, value]) => [String(pid), value])))};`,
+    `const scan = ${JSON.stringify(scan)};`,
+    'await runCoachControlCliMain(process.argv.slice(2), {',
+    '  processStartTime: (pid) => (Object.hasOwn(startTimes, String(pid)) ? startTimes[String(pid)] : processStartTime(pid)),',
+    '  ...(scan ? { scanRuntimeProcesses: async () => scan } : {}),',
+    '});',
+    '',
+  ].join('\n'));
+  return file;
+}

@@ -4,7 +4,14 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { processStartTime as defaultProcessStartTime } from '../engine/process-identity.js';
+import {
+  createCoachEvidenceReader, sidecarTupleMismatch, rowIdentities, observeRecordedIdentity,
+  closeEvidenceReasons, notSpawnedHolds, legacyEligible, scanCoachRuntimeProcesses, DEFAULT_LSOF,
+  processAlive as defaultProcessAlive,
+} from './coach-evidence.js';
 import { readPersistedSolver } from './solver-runtime.js';
 import {
   MAX_PUBLISH_BODY_BYTES,
@@ -141,7 +148,15 @@ export function hasLiveLockHolder(gameDir) {
 }
 
 function sessionTokenOf(gameDir) {
-  const lock = readJsonFile(path.join(gameDir, 'lock.json'));
+  let lock;
+  try {
+    lock = readJsonFile(path.join(gameDir, 'lock.json'));
+  } catch (error) {
+    // #215: the recovery commands need only a lock.json carrying this game's sessionToken
+    // (no live or authenticated server); a missing one is that precondition, not INTERNAL.
+    if (error?.code === 'ENOENT') fail('NO_LOCK', '같은 sessionToken의 lock.json이 필요합니다.');
+    throw error;
+  }
   if (!lock || typeof lock.sessionToken !== 'string' || !lock.sessionToken) {
     fail('NO_LOCK', 'lock.json에서 sessionToken을 읽지 못했습니다.');
   }
@@ -576,11 +591,46 @@ function snapshotOccupies(snapshotFile, handNo) {
   return Boolean(note && migratableLegacyNote(note));
 }
 
+const TRACE_FILE = '.coach-adapter-trace.jsonl';
+
+// #216: the trace is a derived audit mirror of the authority file. A torn last line (a
+// crash mid-append) is isolated by a newline before the next row, never parsed as data.
 function appendTrace(gameDir, row) {
-  fs.appendFileSync(
-    path.join(gameDir, '.coach-adapter-trace.jsonl'),
-    `${JSON.stringify(row)}\n`,
-  );
+  const file = path.join(gameDir, TRACE_FILE);
+  let prefix = '';
+  try {
+    const size = fs.statSync(file).size;
+    if (size > 0) {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, size - 1);
+        if (last[0] !== 0x0a) prefix = '\n';
+      } finally { fs.closeSync(fd); }
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  fs.appendFileSync(file, `${prefix}${JSON.stringify(row)}\n`);
+}
+
+function traceAuditIds(gameDir) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(gameDir, TRACE_FILE), 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return new Set();
+    throw error;
+  }
+  const ids = new Set();
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const row = JSON.parse(line);
+      if (typeof row?.auditId === 'string') ids.add(row.auditId);
+    } catch { /* torn or foreign line: not an audit row */ }
+  }
+  return ids;
 }
 
 function sealUnavailable(auth, {
@@ -660,9 +710,49 @@ export function createCoachControl(deps = {}) {
   const writeAuthority = deps.writeAuthority ?? writeJsonAtomic;
   const lockTimeoutMs = deps.lockTimeoutMs ?? 20_000;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  // #214/#216 seams. Production: real append, kill(0), ps/PowerShell start time, lsof scan.
+  const appendTraceRow = deps.appendTrace ?? appendTrace;
+  const processAlive = deps.processAlive ?? defaultProcessAlive;
+  const startTimeOf = deps.processStartTime ?? defaultProcessStartTime;
+  const scanRuntimeProcesses = deps.scanRuntimeProcesses
+    ?? (() => scanCoachRuntimeProcesses({ lsofPath: DEFAULT_LSOF }));
+  const wallClock = deps.wallClock ?? (() => new Date());
 
-  function persist(gameDir, auth) {
+  // #216: the authority file is canonical. Trace rows are committed into `traceOutbox`
+  // with the state change they describe (one atomic authority write), appended after the
+  // commit, and removed from the outbox by the next persisting operation once the trace
+  // holds their `auditId`. An append failure never fails the committed operation.
+  function flushTraceOutbox(gameDir, auth) {
+    const pending = Array.isArray(auth.traceOutbox) ? auth.traceOutbox : [];
+    if (pending.length === 0) return;
+    let present;
+    try { present = traceAuditIds(gameDir); } catch { return; }
+    // In order: already mirrored rows leave the outbox; after the first failed append the
+    // rest wait too, so the trace never records them out of order.
+    const remaining = [];
+    let failed = false;
+    for (const entry of pending) {
+      if (present.has(entry?.auditId)) continue;
+      if (!failed) {
+        try { appendTraceRow(gameDir, entry); continue; } catch { failed = true; }
+      }
+      remaining.push(entry);
+    }
+    if (remaining.length > 0) auth.traceOutbox = remaining;
+    else delete auth.traceOutbox;
+  }
+
+  function persist(gameDir, auth, { trace = null } = {}) {
+    flushTraceOutbox(gameDir, auth);
+    if (trace) auth.traceOutbox = [...(auth.traceOutbox ?? []), trace];
     writeAuthority(authPath(gameDir), dehydrate(auth));
+    if (!trace) return null;
+    try {
+      appendTraceRow(gameDir, trace);
+      return 'recorded';
+    } catch {
+      return 'pending';
+    }
   }
 
   function loadOrInit(gameDir, owner) {
@@ -847,12 +937,11 @@ export function createCoachControl(deps = {}) {
       }
       hand.agentHandle = handle;
       hand.status = 'running';
-      persist(gameDir, auth);
-      appendTrace(gameDir, {
-        gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'bind-handle',
+      const audit = persist(gameDir, auth, { trace: {
+        auditId: randomUUID(), gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'bind-handle',
         handNo, generation, handle, outcome: 'ok',
-      });
-      return { ok: true };
+      } });
+      return { ok: true, audit };
     });
   }
 
@@ -1096,12 +1185,11 @@ export function createCoachControl(deps = {}) {
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
       auth.adapterState = 'disabled';
-      persist(gameDir, auth);
-      appendTrace(gameDir, {
-        gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'adapter-disable',
+      const audit = persist(gameDir, auth, { trace: {
+        auditId: randomUUID(), gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'adapter-disable',
         outcome: 'disabled', reason,
-      });
-      return { ok: true, adapterState: 'disabled', reason };
+      } });
+      return { ok: true, adapterState: 'disabled', reason, audit };
     });
   }
 
@@ -1124,6 +1212,102 @@ export function createCoachControl(deps = {}) {
   // manual operator recovery — e.g. a legacy row judgment g could not auto-recover on its
   // own. It is honoured only together with `operatorConfirmed === true`; the CLI itself
   // refuses `--row-owner` without `--operator-confirmed 1` before ever calling this.
+  const RELEASE_METHOD = Object.freeze({
+    IDENTITY_DEAD: 'identity', IDENTITY_REPLACED: 'identity', OWNER_RUNTIME_CLOSED: 'closure-receipt',
+    CLOSED_CONFIRMED: 'sidecar', ACCEPT_EVIDENCE: 'row-stamp', NOT_SPAWNED: 'sidecar-absence',
+    LEGACY_NO_RUNTIME_PROCESS: 'process-scan',
+  });
+  const rowFingerprint = (row) => JSON.stringify([
+    row.ownerSessionId, row.handNo, row.generation, row.attempt, row.agentHandle ?? null,
+    row.spawnEvidence ?? null, row.acceptEvidence ?? null, row.cleanupState,
+  ]);
+  const matchCleanupRow = (auth, { owner, handNo, generation, rowOwner, operatorConfirmed }) => (
+    [...auth.retiredAttempts].reverse().find((entry) => (
+      entry.handNo === handNo
+      && (generation == null || entry.generation === generation)
+      && (
+        entry.ownerSessionId === owner
+        || entry.cleanupEligible
+        || (operatorConfirmed === true && rowOwner != null && entry.ownerSessionId === rowOwner)
+      )
+    ))
+  );
+  const readClosures = (gameDir) => {
+    try {
+      const closures = readJsonFile(path.join(gameDir, 'loop-state.json'))?.coachRuntimeClosures;
+      return Array.isArray(closures) ? closures : null;
+    } catch { return null; }
+  };
+
+  // #214: everything the writer can observe about one retired row. Identity probes and the
+  // legacy scan run before the publish lock (identity death and replacement are monotonic);
+  // the in-lock step re-reads the non-monotonic files and compares this fingerprint.
+  async function observeReleaseRow(gameDir, auth, row, { scanLegacy }) {
+    const reader = createCoachEvidenceReader({ root: gameDir });
+    const sidecar = reader.readCoachSpawnSidecar(row.exactResultPath);
+    const attributable = reader.coachEvidenceAttributable(row.exactResultPath);
+    const tupleMismatch = sidecarTupleMismatch(sidecar, row, auth.gameEpoch);
+    const ids = rowIdentities(row, tupleMismatch ? null : sidecar);
+    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf }) : null);
+    const authorityState = probe(ids.authority);
+    const sidecarState = ids.sidecar && (!ids.authority || ids.conflict) ? probe(ids.sidecar) : authorityState;
+    const scan = scanLegacy && !ids.selected && legacyEligible(row, sidecar, attributable)
+      ? await scanRuntimeProcesses() : null;
+    return {
+      fingerprint: rowFingerprint(row),
+      sidecarKey: JSON.stringify([sidecar.phase, sidecar.data]),
+      tupleMismatch, conflict: ids.conflict, hasIdentity: Boolean(ids.selected),
+      identityStates: [authorityState, sidecarState].filter((state) => state !== null),
+      selectedState: ids.selected ? (ids.authority ? authorityState : sidecarState) : null,
+      scan,
+    };
+  }
+
+  function codedFail(code, message) { fail(code, message); }
+
+  // Decide a release under the publish lock. Returns the verification record or throws a
+  // coded refusal; a refusal writes nothing.
+  function verifyRelease(gameDir, auth, row, observed, { evidence, operatorConfirmed }) {
+    const reader = createCoachEvidenceReader({ root: gameDir });
+    const sidecar = reader.readCoachSpawnSidecar(row.exactResultPath);
+    if (JSON.stringify([sidecar.phase, sidecar.data]) !== observed.sidecarKey) {
+      codedFail('ROW_CHANGED', 'spawn sidecar가 검증 중에 바뀌었습니다. 다시 실행하세요.');
+    }
+    const attributable = reader.coachEvidenceAttributable(row.exactResultPath);
+    const summary = {
+      identity: observed.selectedState, sidecar: sidecar.phase,
+      ...(observed.tupleMismatch ? { tupleMismatch: true } : {}),
+      ...(observed.conflict ? { conflict: true } : {}),
+      ...(observed.scan ? { scan: observed.scan.status } : {}),
+    };
+    if (observed.identityStates.includes('alive')) {
+      codedFail('RELEASE_TARGET_ALIVE', '기록된 코치 프로세스가 아직 살아 있습니다. 종료된 뒤 다시 실행하세요.');
+    }
+    if (operatorConfirmed) {
+      const verified = !observed.tupleMismatch && !observed.conflict && observed.hasIdentity
+        && observed.identityStates.every((state) => state === 'dead' || state === 'replaced');
+      return { status: verified ? 'verified' : 'unverified', method: verified ? 'identity' : 'operator', observed: summary };
+    }
+    if (observed.tupleMismatch) codedFail('RELEASE_EVIDENCE_REFUTED', 'spawn sidecar가 이 행의 것이 아닙니다(SPAWN_EVIDENCE_MISMATCH).');
+    if (observed.conflict) codedFail('RELEASE_EVIDENCE_REFUTED', 'authority와 sidecar의 코치 identity가 다릅니다(IDENTITY_CONFLICT).');
+    const holds = new Set();
+    if (observed.selectedState === 'dead' || observed.selectedState === 'replaced') {
+      holds.add('IDENTITY_DEAD'); holds.add('IDENTITY_REPLACED');
+    }
+    for (const reason of closeEvidenceReasons(row, readClosures(gameDir), sidecar)) holds.add(reason);
+    if (notSpawnedHolds(row, sidecar, attributable)) holds.add('NOT_SPAWNED');
+    if (!observed.hasIdentity && legacyEligible(row, sidecar, attributable) && observed.scan?.status === 'clean') {
+      holds.add('LEGACY_NO_RUNTIME_PROCESS');
+    }
+    if (holds.has(evidence)) return { status: 'verified', method: RELEASE_METHOD[evidence], observed: summary };
+    const unobservable = ((evidence === 'IDENTITY_DEAD' || evidence === 'IDENTITY_REPLACED') && observed.selectedState === 'unknown')
+      || (evidence === 'LEGACY_NO_RUNTIME_PROCESS' && observed.scan?.status === 'unavailable');
+    codedFail(
+      unobservable ? 'RELEASE_EVIDENCE_UNVERIFIABLE' : 'RELEASE_EVIDENCE_REFUTED',
+      `${evidence} 선언을 이 writer가 관찰로 확인하지 못했습니다.`,
+    );
+  }
+
   async function recordCleanup({
     gameDir, owner, handNo, generation, cleanupState, rowOwner = null, operatorConfirmed = false, evidence = null,
   }) {
@@ -1141,32 +1325,63 @@ export function createCoachControl(deps = {}) {
     )) {
       fail('USAGE', RELEASE_DECLARATION_USAGE);
     }
+    const match = { owner, handNo, generation, rowOwner, operatorConfirmed };
+    // #214: probe before the lock. These `--evidence`/`--operator-confirmed` strings select
+    // what to verify; they are never taken as proof.
+    let observed = null;
+    if (cleanupState === 'released') {
+      let before = null;
+      try { before = loadAuthorityFile(gameDir); } catch { before = null; }
+      const row = before ? matchCleanupRow(before, match) : null;
+      if (row && row.cleanupState !== 'released') {
+        observed = await observeReleaseRow(gameDir, before, row, { scanLegacy: evidence === 'LEGACY_NO_RUNTIME_PROCESS' });
+      }
+    }
     return withLock(gameDir, () => {
       const { auth } = requireAuth(gameDir, { owner });
       const allowed = new Set(['cancelled', 'released', 'termination_unconfirmed', 'release_failed', 'pending']);
       if (!allowed.has(cleanupState)) fail('USAGE', `알 수 없는 cleanupState: ${cleanupState}`);
-      const row = [...auth.retiredAttempts].reverse().find((entry) => (
-        entry.handNo === handNo
-        && (generation == null || entry.generation === generation)
-        && (
-          entry.ownerSessionId === owner
-          || entry.cleanupEligible
-          || (operatorConfirmed === true && rowOwner != null && entry.ownerSessionId === rowOwner)
-        )
-      ));
+      const row = matchCleanupRow(auth, match);
       if (!row) fail('NO_RETIRED', '회수 대상 retired entry가 없습니다.');
+      // #214 D6: released is terminal. A repeat is idempotent and writes nothing.
+      if (row.cleanupState === 'released') {
+        if (cleanupState !== 'released') fail('ALREADY_RELEASED', '이미 released로 닫힌 행입니다.');
+        return {
+          ok: true, cleanupState: 'released', adapterState: auth.adapterState, idempotent: true,
+          ...(row.release?.verification ? { verification: row.release.verification } : {}),
+        };
+      }
+      let release = null;
+      if (cleanupState === 'released') {
+        if (!observed || observed.fingerprint !== rowFingerprint(row)) {
+          fail('ROW_CHANGED', '회수 대상 행이 검증 중에 바뀌었습니다. 다시 실행하세요.');
+        }
+        const verification = verifyRelease(gameDir, auth, row, observed, { evidence, operatorConfirmed });
+        release = {
+          auditId: randomUUID(), at: wallClock().toISOString(),
+          declared: evidence !== null ? { evidence } : { operatorConfirmed: true },
+          verification,
+        };
+        row.release = release;
+      } else {
+        delete row.release;
+      }
       row.cleanupState = cleanupState;
       if (cleanupState === 'termination_unconfirmed' || cleanupState === 'release_failed') {
         auth.adapterState = 'disabled';
       }
-      persist(gameDir, auth);
-      appendTrace(gameDir, {
+      const audit = persist(gameDir, auth, { trace: {
+        auditId: release?.auditId ?? randomUUID(),
         gameEpoch: auth.gameEpoch, ownerSessionId: owner, operation: 'cleanup-result',
         handNo, generation, outcome: cleanupState,
-        ...(cleanupState === 'released' && evidence !== null ? { evidence } : {}),
-        ...(cleanupState === 'released' && operatorConfirmed === true ? { operatorConfirmed: true } : {}),
-      });
-      return { ok: true, cleanupState, adapterState: auth.adapterState };
+        ...(release && evidence !== null ? { evidence } : {}),
+        ...(release && operatorConfirmed === true ? { operatorConfirmed: true } : {}),
+        ...(release ? { verification: release.verification } : {}),
+      } });
+      return {
+        ok: true, cleanupState, adapterState: auth.adapterState, audit,
+        ...(release ? { verification: release.verification } : {}),
+      };
     });
   }
 
@@ -1456,10 +1671,12 @@ function requireSpawnEvidence(opts) {
   }
 }
 
-async function cliMain() {
-  const command = process.argv[2];
-  const opts = parseCli(process.argv.slice(3));
-  const cc = createCoachControl();
+// `deps` reaches createCoachControl: a test CLI shim injects the writer's observations
+// (identity probes, runtime scan) the same way loop tests inject the loop's.
+export async function runCoachControlCli(argv = process.argv.slice(2), deps = {}) {
+  const command = argv[0];
+  const opts = parseCli(argv.slice(1));
+  const cc = createCoachControl(deps);
   const gameDir = path.resolve(opts['game-dir'] ?? 'game');
   let result;
   if (command === 'begin-owner') {
@@ -1600,8 +1817,16 @@ async function cliMain() {
 }
 
 const isDirect = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+export function runCoachControlCliMain(argv = process.argv.slice(2), deps = {}) {
+  return runCoachControlCli(argv, deps).catch((error) => {
+    const code = error instanceof CoachError ? error.code : 'INTERNAL';
+    fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error.message })}\n`);
+    process.exitCode = 1;
+  });
+}
+
 if (isDirect) {
-  cliMain().catch((error) => {
+  runCoachControlCli().catch((error) => {
     const code = error instanceof CoachError ? error.code : 'INTERNAL';
     fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error.message })}\n`);
     process.exit(1);

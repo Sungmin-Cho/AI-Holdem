@@ -1173,6 +1173,9 @@ async function cleanup205Fixture() {
   const fixture = setup();
   const { dir, owner, cc, snapshotFile, statsFile } = fixture;
   const reserved = await cc.reserve({ gameDir: dir, owner, handNo: 1, statsFile, snapshotFile });
+  // #214: the writer verifies an IDENTITY_DEAD declaration itself, so the row carries an
+  // identity that is really gone (a pid above every platform's pid range).
+  await cc.bindHandle({ gameDir: dir, owner, handNo: 1, generation: reserved.generation, handle: '4194303:Mon Sep 28 12:00:00 2026' });
   await cc.fence({ gameDir: dir, owner, handNo: 1, generation: reserved.generation, reason: 'test' });
   return { ...fixture, generation: reserved.generation };
 }

@@ -227,6 +227,8 @@ const KNOWN_CHILD_ERROR_CODES = new Set([
   'ADAPTER_DISABLED', 'ATTEMPT_TIMEOUT', 'FINALIZATION_ABORTED', 'HAND_ALREADY_PUBLISHED',
   'HAND_DEFERRED', 'HAND_SNAPSHOT_OCCUPIED', 'NO_RESULT', 'PUBLISH_FAILED',
   'QUEUE_ALREADY_SEALED', 'ROLLBACK_REFUSED', 'SUPERSEDED', 'INTERNAL',
+  // #214 writer refusals of a release declaration.
+  'RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED', 'ALREADY_RELEASED',
   // tools/publish.js
   'BAD_ENVELOPE', 'BAD_AUTHORITY', 'BAD_TRAINING_AUTHORITY', 'STALE_TRAINING_AUTHORITY',
   'UNSUPPORTED_TRAINING_AUTHORITY', 'STALE_ANNOTATION_AUTHORITY', 'PUBLISH_REJECTED',
@@ -276,8 +278,29 @@ export function buildBadChildOutputDetails({ script, exitCode, signal, stdout, s
 }
 
 
+// #215: what the halt observed about <root>/lock.json, kept apart from what the recovery
+// commands require (only a lock.json carrying this game's sessionToken). `authenticated`
+// means this loop instance itself verified the binding of exactly this lock (pid, port,
+// token) and the pid still has the verified start time — a fact at `observedAt`, not later.
+export function deriveServerLockObservation({ readLock, expectedToken, bindingVerified, processAlive, startTimeOf, now = () => new Date() }) {
+  const observedAt = now().toISOString();
+  let lock;
+  try { lock = readLock(); } catch { return { state: 'invalid', observedAt }; }
+  if (!lock) return { state: 'absent', observedAt };
+  if (typeof expectedToken !== 'string' || lock.sessionToken !== expectedToken) return { state: 'foreign', observedAt };
+  const verified = Boolean(bindingVerified)
+    && lock.serverPid === bindingVerified.pid
+    && lock.port === bindingVerified.port
+    && lock.sessionToken === bindingVerified.sessionToken
+    && processAlive(lock.serverPid)
+    && startTimeOf(lock.serverPid) === bindingVerified.startTime;
+  return { state: verified ? 'authenticated' : 'unverified', serverPid: lock.serverPid, observedAt };
+}
+
 export function persistedRecoveryClass(reason) {
-  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED'].includes(reason)
+  // #214: the cleanup writer observing the recorded coach alive is as live as the loop
+  // observing it — no recovery command, only "wait for pid N".
+  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED', 'RELEASE_TARGET_ALIVE'].includes(reason)
     ? 'live' : 'unverified';
 }
 
@@ -766,6 +789,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let serverChild = null;
   let serverPid = null;
   let serverIdentity = null;
+  // #215: {pid, startTime, port, sessionToken} of the lock whose binding this instance verified.
+  let serverBindingVerified = null;
   let serverAdopted = false;
   let serverStartupIdentityMissing = false;
   let logFd = null;
@@ -1737,6 +1762,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
           serverPid = existing.serverPid;
           serverIdentity = { pid: existing.serverPid, startTime };
+          serverBindingVerified = { pid: existing.serverPid, startTime, port: confirmed.port, sessionToken: confirmed.sessionToken };
           serverAdopted = serverChild === null;
           serverStartupIdentityMissing = false;
           if (compatible) return existing.port;
@@ -1774,7 +1800,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       serverPid = child.pid ?? null;
       serverAdopted = false;
       serverStartupIdentityMissing = false;
-      serverIdentity = null;
+      serverIdentity = null; serverBindingVerified = null;
       let spawnError = null;
       child.once('error', (error) => { spawnError = error; });
       const spawnedStartTime = serverPid === null ? null : startTimeOf(serverPid);
@@ -1842,6 +1868,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             || merged.port !== confirmed.port || merged.sessionToken !== sessionToken) {
             throw codedError('SERVER_IDENTITY_CHANGED', 'serverStartTime 병합이 서버 lock을 바꾸었습니다.');
           }
+          serverBindingVerified = { pid: child.pid, startTime: spawnedStartTime, port: merged.port, sessionToken };
           return merged.port;
         }
         await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
@@ -2119,7 +2146,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const clearDirectServerOwnership = () => {
     serverChild = null;
-    serverIdentity = null;
+    serverIdentity = null; serverBindingVerified = null;
     serverPid = null;
     serverAdopted = false;
     serverStartupIdentityMissing = false;
@@ -2247,7 +2274,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('SERVER_STOP_UNCONFIRMED', '재사용 서버 종료를 확인하지 못했습니다.');
       }
     }
-    serverIdentity = null;
+    serverIdentity = null; serverBindingVerified = null;
     serverPid = null;
     serverAdopted = false;
   };
@@ -2883,7 +2910,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           d9Checkpoint('after-stop-server');
         } else if (serverChild?.pid === expected.serverPid) {
           serverChild = null;
-          serverIdentity = null;
+          serverIdentity = null; serverBindingVerified = null;
           serverPid = null;
           serverAdopted = false;
           serverStartupIdentityMissing = false;
@@ -4323,6 +4350,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return withEvidence({ confirmed: false, reason: fallbackReason, cleanupState: 'termination_unconfirmed' });
   };
 
+  // The recorded cleanupState of exactly this attempt's retired row, or null.
+  const committedCleanupState = (attempt) => {
+    let authority;
+    try { authority = readCoachAuthority(); } catch { return null; }
+    const row = [...(authority?.retiredAttempts ?? [])].reverse().find((entry) => (
+      entry.ownerSessionId === attempt.ownerSessionId && entry.handNo === attempt.handNo
+      && entry.generation === attempt.generation && entry.attempt === attempt.attempt
+    ));
+    return row?.cleanupState ?? null;
+  };
+
   const persistedCoachAttempts = () => {
     const auth = readCoachAuthority();
     if (!auth) return { owner: null, attempts: [], authorityPresent: false };
@@ -4522,7 +4560,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ], { deadlineNs, deadlineError });
         } catch (error) {
           if (error.code === deadlineError().code) throw error;
-          childFailure = { reason: 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+          // #214/#216: a child can fail after its authority commit (a crash before the
+          // response, a lock-release error reported as INTERNAL). This closure only calls the
+          // child when the recorded state differs, so finding the requested state now means
+          // the transition committed. Anything else keeps the child's own refusal code.
+          if (committedCleanupState(attempt) === result.cleanupState) childFailure = null;
+          else {
+            const refused = ['RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED']
+              .includes(error.code);
+            childFailure = { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+          }
         }
       }
       const effectiveResult = childFailure === null
@@ -5771,9 +5818,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       code: 'COACH_HANDLE_UNRESOLVED',
       owner,
       attempts: unresolved,
+      // #215: requirement, then observation. The commands need only a lock.json that carries
+      // this sessionToken; `observed.serverLock` is what the halt saw, at `observedAt`.
       prerequisites: {
-        authenticatedServerLock: true,
-        sessionToken: readLoopState()?.sessionToken ?? null,
+        serverLockSessionToken: readLoopState()?.sessionToken ?? null,
+      },
+      observed: {
+        serverLock: deriveServerLockObservation({
+          readLock: readServerLock, expectedToken: readLoopState()?.sessionToken ?? null,
+          bindingVerified: serverBindingVerified, processAlive, startTimeOf,
+        }),
       },
       commands,
       ...(commands.some((cmd) => cmd.requiresOperatorConfirmation === true)
@@ -5797,7 +5851,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       base = `persisted 코치 authority 또는 handle을 확인할 수 없어 ${phase}를 중단합니다. authority 수동 복구가 필요합니다.`;
     }
     const confirmationNote = recovery.requiresOperatorConfirmation
-      ? 'halt.recovery.commands를 검토하고, 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행한 뒤 resume하세요.'
+      ? 'halt.recovery.commands를 검토하고, 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행한 뒤 resume하세요. 명령은 같은 sessionToken의 lock.json만 있으면 실행되며 서버가 떠 있을 필요는 없습니다.'
       : null;
     const reasons = [...new Set(unresolved.map((row) => row.reason).filter(Boolean))];
     return [base, unresolvedEvidenceGuidance(unresolved), confirmationNote, `reasons: ${reasons.join(', ')}`].filter(Boolean).join(' ');
@@ -7558,7 +7612,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         await assertServerBinding(lock);
         assertPinnedServerLock(pin);
         if (startTimeOf(lock.serverPid) !== startTime) throw codedError('SERVER_IDENTITY_MISMATCH', '종료 게임 relay identity 변경');
-        serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverAdopted = true;
+        serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverBindingVerified = {pid:serverPid,startTime,port:lock.port,sessionToken:lock.sessionToken};serverAdopted = true;
       }
     } finally {closeServerLockPin(pin);}
   };
