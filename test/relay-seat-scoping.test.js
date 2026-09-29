@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { startServer, publicSnapshot, projectForSeat } from '../server/server.js';
 import { HOST_ID } from '../publish-contract.js';
 import { createSessionControl, withActionGate } from '../tools/session-control.js';
@@ -308,12 +309,16 @@ test('the gate precheck runs inside the lock before the gate state and wins over
 // short hold ends. On Windows the hold is longer than the window (every attempt there is
 // slow); elsewhere attempts are cheap and the window alone covers a hold inside it.
 const FOREIGN_HOLD_MS = process.platform === 'win32' ? 300 : 100;
+// The holder takes the lock only when told to: registering it reads its identity
+// synchronously (PowerShell on Windows), which must not eat into the hold.
 const HOLDER = [
   'const [dir, holdMs, stateUrl] = process.argv.slice(1);',
   'const { acquireOwnedLock, releaseOwnedLock } = await import(stateUrl);',
-  "const lock = acquireOwnedLock(dir, 'session-control.lock.d');",
-  "process.stdout.write('held\\n');",
-  "setTimeout(() => { releaseOwnedLock(lock); process.stdout.write('released\\n'); }, Number(holdMs));",
+  "process.stdin.once('data', () => {",
+  "  const lock = acquireOwnedLock(dir, 'session-control.lock.d');",
+  "  process.stdout.write('held\\n');",
+  "  setTimeout(() => { releaseOwnedLock(lock); process.stdout.write('released\\n'); process.stdin.destroy(); }, Number(holdMs));",
+  '});',
 ].join('\n');
 test('an action waits out a short control lock held by another process', async (t) => {
   const f = await multiRelay(t);
@@ -330,23 +335,29 @@ test('an action waits out a short control lock held by another process', async (
   const holder = registerOwnedProcess(spawn(process.execPath, [
     '--input-type=module', '-e', HOLDER, f.dir, String(FOREIGN_HOLD_MS),
     new URL('../engine/state.js', import.meta.url).href,
-  ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }), 'control-lock-holder');
+  ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }), 'control-lock-holder');
   let out = '';
   let err = '';
   holder.stderr.setEncoding('utf8').on('data', (chunk) => { err += chunk; });
   const exited = new Promise((resolve) => holder.once('exit', resolve));
-  await new Promise((resolve, reject) => {
+  const held = new Promise((resolve, reject) => {
     holder.stdout.setEncoding('utf8').on('data', (chunk) => {
       out += chunk;
-      if (out.includes('held\n')) resolve();
+      if (out.includes('held\n')) resolve(performance.now());
     });
     exited.then((code) => reject(new Error(`the holder exited (${code}) before taking the lock: ${err}`)));
   });
+  holder.stdin.end('go\n');
+  const heldAt = await held;
   const response = await f.http('/api/action', {
     method: 'POST', seat: legal.toAct === 'user' ? undefined : legal.toAct,
     body: { token: TOKEN, decisionId: legal.decisionId, requestId: 'foreign-hold', action: legal.canCheck ? 'check' : 'call' },
   });
+  const waited = performance.now() - heldAt;
   assert.equal(response.status, 200, JSON.stringify(response.json));
+  // The lock is released FOREIGN_HOLD_MS after the holder reported it, so an action that
+  // really met the lock cannot be answered sooner. An uncontended one takes a few ms.
+  assert.ok(waited >= FOREIGN_HOLD_MS / 2, `the action did not meet the held lock (answered after ${Math.round(waited)} ms)`);
   assert.equal(await exited, 0, err);
   assert.equal(out, 'held\nreleased\n');
   assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), true, 'the action was received');
