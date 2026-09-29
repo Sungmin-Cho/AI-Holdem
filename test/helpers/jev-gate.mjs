@@ -1,4 +1,4 @@
-// JEV decision-rule v2 live gate: pure verdicts over archived hands + private loop-state.
+// JEV decision-rule live gate (v3 criteria): pure verdicts over archived hands + private loop-state.
 // These are heuristic sanity checks (no self-destruction, styles still visible), not a
 // measure of poker skill, profit or GTO quality.
 import fs from 'node:fs';
@@ -6,11 +6,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eval5, compareScore } from '../../engine/evaluator.js';
 import { rankValue } from '../../engine/cards.js';
-import { selectJevAction } from '../../tools/jev-player.js';
+import { selectJevAction, COMMIT_NEAR, GUARD_PREMIUMS } from '../../tools/jev-player.js';
+import { deriveUnit } from '../../training/policies/rng.js';
 
-// perRun also bounds a run below the diagnostics byte cap (256 KiB ≈ 400 v2 entries); a run past
-// it would drop entries and make ① unjudgeable.
-export const GATE_BUDGET = Object.freeze({ total: 1200, perRun: 400, expectedRun: 200 });
+// perRun keeps a run below the diagnostics byte cap (256 KiB): 300 worst-case v3 entries with a
+// guard record are about 227 KiB. The journey also stops at a hand boundary at 90% of the cap.
+export const GATE_BUDGET = Object.freeze({ total: 1200, perRun: 300, expectedRun: 240 });
+// v3 acceptance for ② (aggregate over every judged run): violation rate at most 1%.
+export const DESPERATION_RATE_MAX = 0.01;
+// The two selection-rule versions and the descriptor selectionVersion each must carry.
+const RULE_OF_SELECTION_VERSION = Object.freeze({ 'class-sample-v1': 'class-sample-v1', 'class-sample-v2': 'class-sample-v2' });
 export const MIN_DECISIONS = 100;
 export const DEEP_BB = 40;
 export const PREMIUM_CALL_SHARE = 0.2;
@@ -116,6 +121,24 @@ export function effectiveRemainingAt(hand, index) {
 export function isAllIn(a) {
   return (a.action === 'raise' && a.amount === a.maxRaiseTo) || (a.action === 'call' && a.callAmount >= a.stacks[a.playerId]);
 }
+// v3 ② definition: a raise within 5% of all-in, or a call of at least 95% of the stack, counts
+// as all-in too (stricter than isAllIn, which v2 used).
+export function isNearAllIn(a) {
+  return (a.action === 'raise' && a.amount >= COMMIT_NEAR * a.maxRaiseTo)
+    || (a.action === 'call' && a.callAmount >= COMMIT_NEAR * a.stacks[a.playerId]);
+}
+// class-sample-v2 guard inputs re-derived from the archive alone, independent of what the
+// loop recorded: deep, the commit candidate keys among the offered ones, premium exception.
+export function guardFromArchive(hand, index, candidateKeys) {
+  const a = hand.actions[index], bb = hand.blinds[1];
+  const commitKeys = candidateKeys.filter(key => (key.startsWith('raise_to_') && Number(key.slice(9)) >= COMMIT_NEAR * a.maxRaiseTo)
+    || (key === 'call' && a.callAmount >= COMMIT_NEAR * a.stacks[a.playerId]));
+  return {
+    deep: effectiveRemainingAt(hand, index) > DEEP_BB * bb,
+    commitKeys,
+    premium: a.street === 'preflop' && GUARD_PREMIUMS.includes(handClass(hand.holes[a.playerId])),
+  };
+}
 
 const candidatesOf = probabilities => Object.keys(probabilities).map(key => key.startsWith('raise_to_')
   ? { key, action: 'raise', amount: Number(key.slice('raise_to_'.length)) } : { key, action: key });
@@ -157,12 +180,28 @@ function judgeRun(run) {
   const singleLegal = new Set(metrics.filter(m => m.outcome === 'jev_single_legal').map(m => m.decisionId));
   const unexplained = [...archived.keys()].filter(id => !top.has(id) && !singleLegal.has(id)
     && !entries.some(e => e.decisionId === id && !e.selection));
+  // ① recomputation never trusts recorded inputs: the rule must match the entry's descriptor
+  // version, the unit is re-derived from the secret seed, the guard is re-derived from the
+  // archive, and the whole selection object must equal the recorded one.
+  const token = run.loopState?.sessionToken;
+  const mismatches = { rule: 0, unit: 0, selection: 0, action: 0 };
   const recomputed = [...top.values()].filter(e => {
-    const again = selectJevAction({ probabilities: e.probabilities, candidates: candidatesOf(e.probabilities),
-      unit: e.selection.unit, apiChoice: e.apiChoice });
-    const applied = archived.get(e.decisionId).action;
-    return again.selection.selectedKey === e.selection.selectedKey && applied.action === again.action.action
-      && (again.action.action !== 'raise' || applied.amount === again.action.amount);
+    const rule = RULE_OF_SELECTION_VERSION[e.selectionVersion];
+    if (!rule || e.selection.rule !== rule) { mismatches.rule += 1; return false; }
+    let unit;
+    try { unit = deriveUnit('jev-selection-v1', token, e.decisionId, String(e.generation)); } catch { unit = null; }
+    if (unit === null || unit !== e.selection.unit) { mismatches.unit += 1; return false; }
+    const { hand, index, action: applied } = archived.get(e.decisionId);
+    let again;
+    try {
+      again = selectJevAction({ probabilities: e.probabilities, candidates: candidatesOf(e.probabilities), unit, apiChoice: e.apiChoice,
+        rule, ...(rule === 'class-sample-v2' ? { guard: guardFromArchive(hand, index, Object.keys(e.probabilities)) } : {}) });
+    } catch { mismatches.selection += 1; return false; }
+    if (JSON.stringify(again.selection) !== JSON.stringify(e.selection)) { mismatches.selection += 1; return false; }
+    if (!(applied.action === again.action.action && (again.action.action !== 'raise' || applied.amount === again.action.amount))) {
+      mismatches.action += 1; return false;
+    }
+    return true;
   }).length;
   const pending = run.loopState?.pendingDecision;
   const reasons = [];
@@ -173,7 +212,7 @@ function judgeRun(run) {
   if (diagnostics.dropped !== 0 || diagnostics.historyIncomplete) reasons.push('진단 절단/손상');
   if (!(accepted.size === top.size && top.size === withEntry.length && withEntry.every(id => accepted.has(id))))
     reasons.push(`개수 불일치 accepted ${accepted.size} / entry ${top.size} / archive ${withEntry.length}`);
-  if (recomputed !== top.size) reasons.push(`재계산 ${recomputed}/${top.size}`);
+  if (recomputed !== top.size) reasons.push(`재계산 ${recomputed}/${top.size} (rule ${mismatches.rule}, unit ${mismatches.unit}, selection ${mismatches.selection}, action ${mismatches.action})`);
   if (missingArchive.size) reasons.push(`아카이브 없는 완료 핸드 entry ${missingArchive.size}`);
   if (unexplained.length) reasons.push(`entry·single-legal 없는 아카이브 AI 결정 ${unexplained.length}`);
   const one = { pass: reasons.length === 0, reasons, decisions: top.size, incomplete: incomplete.size, v1Entries,
@@ -183,7 +222,7 @@ function judgeRun(run) {
   for (const { hand, index, action } of archived.values()) {
     const hole = hand.holes[action.playerId], bb = hand.blinds[1];
     if (effectiveRemainingAt(hand, index) > DEEP_BB * bb && hopeless(hole, action.board, action.street)) {
-      deep.push({ decisionId: action.decisionId, allIn: isAllIn(action) });
+      deep.push({ decisionId: action.decisionId, allIn: isAllIn(action), nearAllIn: isNearAllIn(action) });
     }
     if (action.street === 'preflop' && isPremium(hole) && action.callAmount > 0
       && action.callAmount <= PREMIUM_CALL_SHARE * action.stacks[action.playerId]) {
@@ -198,13 +237,24 @@ function judgeRun(run) {
         vpip: pre.some(a => a.action === 'call' || a.action === 'raise'), pfr: pre.some(a => a.action === 'raise') });
     }
   }
-  const two = { pass: deep.every(d => !d.allIn), opportunities: deep.length, violations: deep.filter(d => d.allIn).map(d => d.decisionId) };
+  // Per run ② is reported; the verdict is on the aggregate (gateSessions).
+  const two = { opportunities: deep.length, violations: deep.filter(d => d.nearAllIn).map(d => d.decisionId),
+    v2Violations: deep.filter(d => d.allIn).length };
   const four = { pass: premium.every(p => !p.folded), opportunities: premium.length, violations: premium.filter(p => p.folded).map(p => p.decisionId) };
   const busted = (limit = Infinity) => hands.filter(h => h.handNo <= limit)
     .flatMap(h => Object.entries(h.endStacks ?? {}).filter(([id, stack]) => ai.has(id) && stack === 0 && Object.hasOwn(h.holes, id)).map(([id]) => id));
   const three = run.mode === 'tournament'
     ? { applies: true, pass: new Set(busted(EARLY_HANDS)).size <= 1, bustedEarly: [...new Set(busted(EARLY_HANDS))].length }
     : { applies: false, zeroStackFirst5: busted(EARLY_HANDS).length, zeroStackAll: busted().length };
+  // Sample completeness: a cash run must reach its hand limit, a tournament must finish its
+  // first five hands (or the whole game), and the journey itself must have passed.
+  const inconclusive = [];
+  if (run.journeyPass === false) inconclusive.push('저니 실패(result.pass false)');
+  if (run.mode !== 'tournament' && Number.isSafeInteger(run.handLimit) && hands.length < run.handLimit) {
+    inconclusive.push(`완료 핸드 ${hands.length} < handLimit ${run.handLimit}${run.stoppedBy ? ` (${run.stoppedBy})` : ''}`);
+  }
+  if (run.mode === 'tournament' && !run.gameOver
+    && ![1, 2, 3, 4, 5].every(n => hands.some(h => h.handNo === n))) inconclusive.push('토너먼트 첫 5핸드 미완료');
   const sampled = [...top.values()];
   const offTop = sampled.filter(e => {
     const mass = e.selection.classMass;
@@ -217,8 +267,8 @@ function judgeRun(run) {
     modelMsP50: percentile(model, 0.5), modelMsP90: percentile(model, 0.9),
     tokens: entries.reduce((sum, e) => ({ input: sum.input + (e.usage?.input_tokens ?? 0), output: sum.output + (e.usage?.output_tokens ?? 0) }), { input: 0, output: 0 }),
     entryBytes: Buffer.byteLength(JSON.stringify(entries), 'utf8'), requests: run.requests ?? null, stoppedBy: run.stoppedBy ?? null };
-  const pass = one.pass && two.pass && four.pass && (!three.applies || three.pass);
-  return { run: { name: run.name, mode: run.mode, hands: hands.length, pass, one, two, three, four, report }, vpip };
+  const pass = one.pass && four.pass && (!three.applies || three.pass);
+  return { run: { name: run.name, mode: run.mode, hands: hands.length, pass, inconclusive, one, two, three, four, report }, vpip };
 }
 
 export function gateSessions(runs) {
@@ -236,11 +286,29 @@ export function gateSessions(runs) {
     const v = rate(rows.filter(r => r.vpip).length), p = rate(rows.filter(r => r.pfr).length);
     const judged = opportunities >= MIN_OPPORTUNITIES;
     const [lo, hi] = VPIP_BANDS[archetype];
-    const pass = !judged || (v >= lo && v <= hi && (PFR_MAX[archetype] === undefined || p <= PFR_MAX[archetype]));
-    vpip[archetype] = { opportunities, vpip: v, pfr: p, judged, pass, band: [lo, hi], ...(judged ? {} : { note: '표본 부족 — 보류' }) };
+    const pass = judged && v >= lo && v <= hi && (PFR_MAX[archetype] === undefined || p <= PFR_MAX[archetype]);
+    vpip[archetype] = { opportunities, vpip: v, pfr: p, judged, pass, band: [lo, hi], ...(judged ? {} : { note: '표본 부족' }) };
   }
-  const pooled = { vpip, pass: Object.values(vpip).every(r => r.pass) };
-  return { perRun, pooled, verdict: perRun.every(r => r.pass) && pooled.pass ? 'PASS' : 'FAIL' };
+  const opportunities = perRun.reduce((sum, r) => sum + r.two.opportunities, 0);
+  const violations = perRun.reduce((sum, r) => sum + r.two.violations.length, 0);
+  const v2Violations = perRun.reduce((sum, r) => sum + r.two.v2Violations, 0);
+  const rate = opportunities ? violations / opportunities : null;
+  const desperation = { opportunities, violations, rate, v2Violations, v2Rate: opportunities ? v2Violations / opportunities : null,
+    zeroRule: violations === 0 ? '달성' : '미달', pass: rate !== null && rate <= DESPERATION_RATE_MAX,
+    byMode: Object.fromEntries(['cash-training', 'tournament'].map(mode => {
+      const rows = perRun.filter(r => (r.mode === 'tournament') === (mode === 'tournament'));
+      return [mode, { opportunities: rows.reduce((s, r) => s + r.two.opportunities, 0), violations: rows.reduce((s, r) => s + r.two.violations.length, 0) }];
+    })) };
+  const pooled = { vpip, desperation, pass: desperation.pass && Object.values(vpip).every(r => r.pass) };
+  const inconclusive = [
+    ...perRun.flatMap(r => r.inconclusive.map(reason => `${r.name}: ${reason}`)),
+    ...(opportunities === 0 ? ['② 기회 0건'] : []),
+    ...Object.entries(vpip).filter(([, r]) => !r.judged).map(([archetype, r]) => `⑤ ${archetype} 기회 ${r.opportunities} < ${MIN_OPPORTUNITIES}`),
+    ...(perRun.some(r => r.mode === 'tournament') ? [] : ['③ 토너먼트 실행 없음']),
+  ];
+  const failed = perRun.some(r => !r.pass) || (opportunities > 0 && !desperation.pass)
+    || Object.values(vpip).some(r => r.judged && !r.pass);
+  return { perRun, pooled, inconclusive, verdict: failed ? 'FAIL' : inconclusive.length ? 'INCONCLUSIVE' : 'PASS' };
 }
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -257,6 +325,8 @@ export function loadGateRun(dir) {
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
     loopState: readJson(path.join(session, 'loop-state.json')), players: readJson(path.join(session, 'players.json')),
     requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null,
+    journeyPass: typeof result.pass === 'boolean' ? result.pass : null,
+    handLimit: engine.config?.handLimit ?? null, gameOver: engine.gameOver === true,
     unfinishedHand: aborted || engine.hand ? engine.handNo : null };
 }
 

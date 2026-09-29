@@ -11,6 +11,21 @@ export const DEFAULT_LIVE_OPTIONS=Object.freeze({hands:2,ai:2,mode:'cash-trainin
 // With an explicit request budget the journey stops at a hand boundary before the cap;
 // the reserve covers the AI decisions of the hand still in progress.
 const HAND_RESERVE=40;
+// The private diagnostics are bounded by bytes, not entries (tools/jev-diagnostics.js). The
+// journey stops at a hand boundary once they reach this share of the cap, so a gate run
+// never silently drops the entries ① must recompute.
+const DIAGNOSTICS_STOP_SHARE=0.9;
+export function diagnosticsBudgetShare(loopState){
+ const d=loopState?.jevDiagnostics;if(!d||!Array.isArray(d.entries))return 0;
+ const base=Buffer.byteLength(JSON.stringify({...loopState,jevDiagnostics:{schemaVersion:1,entries:[],dropped:d.dropped??0}}));
+ const budget=Math.max(1,Math.min(256*1024,2*1024*1024-64*1024-base));
+ return d.entries.reduce((sum,e)=>sum+Buffer.byteLength(JSON.stringify(e))+1,0)/budget;
+}
+// Gate evidence holds hole cards and private probabilities: owner-only permissions.
+function privateTree(dir){
+ if(!fs.existsSync(dir))return;fs.chmodSync(dir,0o700);
+ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,entry.name);if(entry.isDirectory())privateTree(p);else fs.chmodSync(p,0o600);}
+}
 export function parseLiveArgs(argv){
  const value=name=>{const i=argv.indexOf(name);return i<0?undefined:argv[i+1];};
  const int=(name,fallback)=>{const raw=value(name);if(raw===undefined)return fallback;const n=Number(raw);if(!Number.isSafeInteger(n)||n<1)throw new Error(`${name} must be a positive integer`);return n;};
@@ -59,10 +74,13 @@ export async function runJevLiveJourney(outDir,input={}) {
   await wait(async()=>{
    const s=app.manager.snapshot();if(s.state==='error'||s.pendingDecision?.status==='recovery_required')throw new Error(s.error??s.pendingDecision.code);
    if(s.state==='completed')return true;
-   if(requests.length>=softCap&&s.state==='playing'){
+   let reason=null;
+   if(requests.length>=softCap)reason='max-requests';
+   else{try{if(diagnosticsBudgetShare(JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json'))))>=DIAGNOSTICS_STOP_SHARE)reason='diagnostics-budget';}catch{}}
+   if(reason&&s.state==='playing'){
     flaggedHand??=loopHand();
     // Stop at the next hand boundary so every archived hand is complete.
-    if(loopHand()>flaggedHand){stoppedBy='max-requests';await command('pause');await command('end');return true;}
+    if(loopHand()>flaggedHand){stoppedBy=reason;await command('pause');await command('end');return true;}
    }
    return false;
   },options.waitMs);
@@ -74,7 +92,7 @@ export async function runJevLiveJourney(outDir,input={}) {
    if(options.mode==='tournament')assert.equal(engine.gameOver,true);else assert.equal(engine.handNo,options.hands);
   }
   assert.equal(fs.existsSync(path.join(sessionDir,'.player-sessions.json')),false);
-  for(const key of ['probabilities','classMass','selectedKey','apiChoice'])assert.equal(JSON.stringify(app.manager.snapshot()).includes(key),false,key);
+  for(const key of ['probabilities','classMass','selectedKey','apiChoice','commitKeys','"guard"'])assert.equal(JSON.stringify(app.manager.snapshot()).includes(key),false,key);
   const diagnostics=loop.jevDiagnostics.entries;
   summary={node:process.version,browser:'agent-browser@0.36.0',mode:options.mode,hands:engine.handNo,aiCount:engine.config.aiCount,humanPolicy:options.humanPolicy,
    upper:'disabled; factual feedback',models:[...new Set(diagnostics.map(d=>d.model))],actors:[...new Set(diagnostics.map(d=>d.actor))],decisions:diagnostics.length,
@@ -84,13 +102,15 @@ export async function runJevLiveJourney(outDir,input={}) {
   try{
    await browser(['close']);await app?.close();
    if(options.keepStore&&sessionDir&&fs.existsSync(sessionDir))fs.cpSync(sessionDir,path.join(outDir,'session'),{recursive:true});
+   privateTree(outDir);
    const study=await inspectStudyService(root);if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});assert.equal(hashTree(userStore),before);workspace.close();
   }catch(error){failure??=error;}
   globalThis.fetch=originalFetch;
   // Written after the app service is closed so late requests are counted.
   fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify(failure
    ?{pass:false,code:failure.code??null,message:failure.message,stoppedBy,maxRequests:cap,requests}
-   :{pass:true,...summary,stoppedBy,maxRequests:cap,...(options.keepStore?{sessionDir:path.join(outDir,'session')}:{}),requests},null,2));
+   :{pass:true,...summary,stoppedBy,maxRequests:cap,...(options.keepStore?{sessionDir:path.join(outDir,'session')}:{}),requests},null,2),{mode:0o600});
+  try{fs.chmodSync(path.join(outDir,'result.json'),0o600);}catch{}
  }
  if(failure)throw failure;
 }

@@ -3,7 +3,7 @@ import { JEV_CONFIG, validateJevConfig, validateOpponentRuntime, resolveOpponent
 import { validJevPending, sameJevIdentity } from '../shared/jev-pending.js';
 import { boundJevDiagnostics } from './jev-diagnostics.js';
 import { createJevRuntime, preflightJev } from './jev-runtime.js';
-import { buildJevCandidates, projectJevState, jevError, selectJevAction } from './jev-player.js';
+import { buildJevCandidates, projectJevState, jevError, selectJevAction, jevGuardContext } from './jev-player.js';
 import { deriveUnit } from '../training/policies/rng.js';
 import {appendBoundedMetric} from '../shared/runtime-bounds.js';
 import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
@@ -792,7 +792,7 @@ export async function settleUntilIdle(pending, stopped = () => false) {
   }
 }
 
-export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v3로 roll-forward했습니다. 기존 기록은 보존됩니다.';
 const UPPER_UNAVAILABLE_NOTICE = '상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.';
 const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
   ({questionVersion, candidateVersion, projectionVersion, ...(selectionVersion ? {selectionVersion} : {})});
@@ -2649,8 +2649,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!sameJevIdentity(readLoopState()?.pendingDecision,record) || readLoopState().gameEpoch !== record.gameEpoch) throw jevError('STALE_PLAYER_DECISION');
       let chosen = result.action, siblings = {};
       if (result.diagnostics) {
+        const rule = JEV_CONFIG.selectionVersion;
         const selected = (opts.selectJevAction ?? selectJevAction)({probabilities:result.diagnostics.probabilities,candidates,
-          unit:selectionUnit,apiChoice:result.diagnostics.apiChoice});
+          unit:selectionUnit,apiChoice:result.diagnostics.apiChoice,rule,
+          ...(rule === 'class-sample-v2' ? {guard:jevGuardContext(peek.snapshot,peek.legal,candidates)} : {})});
         chosen = selected.action;
         const stored = readLoopState().jevDiagnostics ?? {schemaVersion:1,entries:[],dropped:0};
         const entries = [...stored.entries,{...result.diagnostics,decisionId:record.decisionId,generation:record.generation,actor:state.actor,

@@ -8,6 +8,7 @@ import {createGameLoop,prepareGameSession} from '../tools/game-loop.js';
 import {createJevRuntime} from '../tools/jev-runtime.js';
 import {validJevPending} from '../shared/jev-pending.js';
 import {JEV_CONFIG,JEV_CONFIG_LEGACY} from '../shared/opponent-runtime.js';
+import {guardFromArchive} from './helpers/jev-gate.mjs';
 import {selectJevAction} from '../tools/jev-player.js';
 import {deriveUnit} from '../training/policies/rng.js';
 const SCALE=process.platform==='win32'?10:1;
@@ -32,19 +33,25 @@ function archivedActions(dir){
  return [...hands,...(read(dir,'state.json').hand?.actions??[])];
 }
 // D6: for each decision with a selection entry, the highest generation's selectedKey is what the engine applied.
+function archivedHands(dir){
+ const hands=fs.existsSync(path.join(dir,'hands'))?fs.readdirSync(path.join(dir,'hands')).filter(n=>/^hand-.*\.json$/.test(n)).map(n=>read(path.join(dir,'hands'),n)):[];
+ const live=read(dir,'state.json').hand;return live?[...hands,live]:hands;
+}
 function assertRecomputed(dir){
- const ls=read(dir,'loop-state.json'),top=new Map(),actions=archivedActions(dir);
+ const ls=read(dir,'loop-state.json'),top=new Map(),actions=archivedActions(dir),hands=archivedHands(dir);
  for(const e of ls.jevDiagnostics.entries){if(!e.selection)continue;const prev=top.get(e.decisionId);if(!prev||e.generation>prev.generation)top.set(e.decisionId,e);}
  for(const [id,e] of top){
   assert.equal(e.selection.unit,deriveUnit('jev-selection-v1',ls.sessionToken,id,String(e.generation)));
   // Public inputs alone (gameEpoch is sent to every participant) must not reproduce the draw.
   assert.notEqual(e.selection.unit,deriveUnit('jev-selection-v1',ls.gameEpoch,id,String(e.generation)));
-  const again=selectJevAction({probabilities:e.probabilities,candidates:candidatesOf(Object.keys(e.probabilities)),unit:e.selection.unit,apiChoice:e.apiChoice});
+  const hand=hands.find(h=>h.actions?.some(a=>a.decisionId===id&&a.playerId!=='user'));
+  const guard=guardFromArchive(hand,hand.actions.findIndex(a=>a.decisionId===id&&a.playerId!=='user'),Object.keys(e.probabilities));
+  const again=selectJevAction({probabilities:e.probabilities,candidates:candidatesOf(Object.keys(e.probabilities)),unit:e.selection.unit,apiChoice:e.apiChoice,rule:'class-sample-v2',guard});
   assert.deepEqual(again.selection,e.selection);
   const applied=actions.filter(a=>a.decisionId===id&&a.playerId!=='user');assert.equal(applied.length,1,id);
   assert.equal(applied[0].action,again.action.action);
   if(again.action.action==='raise')assert.equal(applied[0].amount,again.action.amount);
-  assert.equal(e.selectionVersion,'class-sample-v1');assert.equal(e.questionVersion,'poker-choice-v2');assert.equal(e.selection.apiChoice,e.apiChoice);
+  assert.equal(e.selectionVersion,'class-sample-v2');assert.equal(e.selection.rule,'class-sample-v2');assert.equal(e.questionVersion,'poker-choice-v3');assert.equal(e.selection.apiChoice,e.apiChoice);
  }
  return top.size;
 }

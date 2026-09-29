@@ -101,6 +101,17 @@ test('the projection mirrors the loop JEV notice constant exactly', () => {
   assert.ok(source.includes(`'${JEV_ROLL_FORWARD_NOTICE}'`));
 });
 
+test('#234 the v2 and the v3 JEV roll-forward notices are both recognised and fold into one item', () => {
+  const v2 = 'JEV 결정 규칙을 v2로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+  assert.notEqual(v2, JEV_ROLL_FORWARD_NOTICE, 'the loop now writes the v3 notice');
+  const out = projectNotices([v2, JEV_ROLL_FORWARD_NOTICE]);
+  assert.equal(out.unclassified, 0);
+  assert.equal(out.items.length, 1);
+  assert.equal(out.items[0].code, 'JEV_ROLLED_FORWARD');
+  assert.equal(out.items[0].count, 2);
+  assert.doesNotMatch(JSON.stringify(out), /v2|v3|roll-forward/);
+});
+
 test('items are capped; the remainder is reported as omitted', () => {
   const raw = Array.from({ length: 14 }, (_, i) => `컨테인먼트 실패(${['claude', 'codex', 'grok'][i % 3]}/m): x`)
     .concat(['적격 플레이어 런타임이 없습니다 — 게임을 시작하지 않습니다.', '상위 모델 런타임이 없습니다 — x',

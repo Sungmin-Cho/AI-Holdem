@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
-import {gateSessions,hopeless,chen,isPremium,effectiveRemainingAt,runCap,mayRerun,loadGateRun,MIN_DECISIONS} from './helpers/jev-gate.mjs';
+import {gateSessions,hopeless,chen,isPremium,effectiveRemainingAt,runCap,mayRerun,loadGateRun,MIN_DECISIONS,guardFromArchive} from './helpers/jev-gate.mjs';
+import {deriveUnit} from '../training/policies/rng.js';
 import {selectJevAction} from '../tools/jev-player.js';
 
 const players=[{playerId:'user'},{playerId:'p1',archetype:'TAG'},{playerId:'p2',archetype:'Nit'}];
@@ -14,17 +15,29 @@ function action(playerId,act,{street='preflop',amount=0,callAmount=50,maxRaiseTo
 function hand(handNo,actions,{holes={user:cards('2c 3d'),p1:cards('9c 8d'),p2:cards('7c 2d')},endStacks={user:5000,p1:5000,p2:5000},posts=[]}={}){
  return {handNo,blinds:[25,50],holes,posts,actions,endStacks,startStacks:{user:5000,p1:5000,p2:5000}};
 }
+const TOKEN='gate-session-token';
+const candidatesOf=probabilities=>Object.keys(probabilities).map(key=>key.startsWith('raise_to_')?{key,action:'raise',amount:Number(key.slice(9))}:{key,action:key});
+// One recorded v3 decision exactly as the loop makes it: unit from the secret seed, guard
+// inputs from the same public state the archive keeps.
+function decide(decisionId,probabilities,apiChoice,archivedHand,generation=1){
+ const unit=deriveUnit('jev-selection-v1',TOKEN,decisionId,String(generation));
+ const guard=guardFromArchive(archivedHand,archivedHand.actions.findIndex(a=>a.decisionId===decisionId),Object.keys(probabilities));
+ return selectJevAction({probabilities,candidates:candidatesOf(probabilities),unit,apiChoice,rule:'class-sample-v2',guard});
+}
+const entryOf=(decisionId,probabilities,apiChoice,selected,generation=1)=>({decisionId,generation,probabilities,apiChoice,selectionVersion:'class-sample-v2',
+ selection:selected.selection,usage:{input_tokens:10,output_tokens:1}});
 // n clean decisions: each AI action is exactly what the recorded selection chose.
-function cleanRun(name,n=MIN_DECISIONS,{mode='cash-training',hands:handsOut=[],entries:entriesOut=[],metrics:metricsOut=[]}={}){
+function cleanRun(name,n=MIN_DECISIONS,{mode='cash-training',hands:handsOut=[],entries:entriesOut=[],metrics:metricsOut=[],probabilities:base={fold:0.5,call:0.5}}={}){
  const hands=[],entries=[],metrics=[];
  for(let i=1;i<=n;i++){
-  const decisionId=`d-${i}-preflop-0`,probabilities={fold:0.5,call:0.5},unit=(i%10)/10+0.05;
-  const selected=selectJevAction({probabilities,candidates:[{key:'fold',action:'fold'},{key:'call',action:'call'}],unit,apiChoice:'fold'});
+  const decisionId=`d-${i}-preflop-0`,probabilities={...base};
+  const probe=hand(i,[action('p1','fold',{decisionId})]);
+  const selected=decide(decisionId,probabilities,'fold',probe);
   hands.push(hand(i,[action('p1',selected.action.action,{decisionId,amount:selected.action.action==='call'?50:0})]));
-  entries.push({decisionId,generation:1,probabilities,apiChoice:'fold',selection:selected.selection,usage:{input_tokens:10,output_tokens:1}});
+  entries.push(entryOf(decisionId,probabilities,'fold',selected));
   metrics.push({runtime:'jev',decisionId,outcome:'jev_accepted',modelMs:200+i});
  }
- return {name,mode,players,hands:[...hands,...handsOut],loopState:{jevDiagnostics:{schemaVersion:1,entries:[...entries,...entriesOut],dropped:0},metrics:[...metrics,...metricsOut]}};
+ return {name,mode,players,hands:[...hands,...handsOut],loopState:{sessionToken:TOKEN,jevDiagnostics:{schemaVersion:1,entries:[...entries,...entriesOut],dropped:0},metrics:[...metrics,...metricsOut]}};
 }
 
 test('hopeless hands: made hands with hole cards, draws on flop/turn and two overcards are excluded',()=>{
@@ -56,9 +69,12 @@ test('effective remaining counts an all-in opponent bet and ignores folded seats
 });
 test('a clean run passes; count cross-check tolerates single-legal metrics and a retried generation',()=>{
  const base=cleanRun('A');
- // Generation 1 left an entry that was never applied; generation 2 is the applied one.
- const retried=base.loopState.jevDiagnostics.entries[0];retried.generation=2;
- base.loopState.jevDiagnostics.entries.unshift({...retried,generation:1,selection:{...retried.selection,selectedKey:retried.selection.selectedKey==='fold'?'call':'fold'}});
+ // Generation 1 left an entry that was never applied; generation 2 (its own seeded unit) is the applied one.
+ const first=base.loopState.jevDiagnostics.entries[0],id=first.decisionId;
+ const again=decide(id,first.probabilities,'fold',base.hands[0],2);
+ base.hands[0].actions[0]={...base.hands[0].actions[0],action:again.action.action,amount:again.action.action==='call'?50:0};
+ base.loopState.jevDiagnostics.entries[0]=entryOf(id,first.probabilities,'fold',again,2);
+ base.loopState.jevDiagnostics.entries.unshift({...first,selection:{...first.selection,selectedKey:first.selection.selectedKey==='fold'?'call':'fold'}});
  base.loopState.metrics.push({runtime:'jev',decisionId:'d-x-single',outcome:'jev_single_legal'});
  const result=gateSessions([base]);
  assert.equal(result.perRun[0].one.pass,true,JSON.stringify(result.perRun[0].one.reasons));assert.equal(result.perRun[0].one.decisions,MIN_DECISIONS);
@@ -89,7 +105,8 @@ test('deep hopeless all-ins, premium folds and early tournament busts fail their
   action('p1','raise',{street:'flop',decisionId:'d-200-flop-0',amount:2600,maxRaiseTo:2600,board:cards('2s Kc 9s'),stacks:{user:2600,p1:2600,p2:5000}})],
   {holes:{user:cards('2c 3d'),p1:cards('Ac 5c'),p2:cards('7c 2d')}})]});
  // 52bb shove with Ac5c on 2s Kc 9s: deep (52bb > 40bb) and hopeless.
- const [c]=gateSessions([shove]).perRun;assert.equal(c.two.pass,false);assert.deepEqual(c.two.violations,['d-200-flop-0']);assert.ok(c.two.opportunities>=1);
+ const shoveGate=gateSessions([shove]);const [c]=shoveGate.perRun;assert.deepEqual(c.two.violations,['d-200-flop-0']);assert.ok(c.two.opportunities>=1);
+ assert.equal(shoveGate.pooled.desperation.pass,false,'one violation in a handful of opportunities is far above 1%');assert.equal(shoveGate.pooled.desperation.zeroRule,'미달');
  const aces={holes:{user:cards('2c 3d'),p1:cards('As Ah'),p2:cards('7c 2d')}};
  const premium=cleanRun('P',MIN_DECISIONS,{hands:[hand(201,[action('p1','fold',{decisionId:'d-201-preflop-0',callAmount:150})],aces),
   hand(202,[action('p1','fold',{street:'flop',decisionId:'d-202-flop-0',callAmount:150,board:cards('Ks Kh 2c')})],aces),
@@ -106,12 +123,12 @@ test('pooled VPIP counts each (run, seat, hand) once and holds judgement below 3
  const result=gateSessions([a,b]);
  assert.equal(result.pooled.vpip.TAG.opportunities,2*MIN_DECISIONS);
  assert.equal(result.pooled.vpip.Nit.opportunities,2*MIN_DECISIONS);assert.equal(result.pooled.vpip.Nit.vpip,0);assert.equal(result.pooled.vpip.Nit.pass,false);
- assert.equal(result.pooled.vpip.LAG.judged,false);assert.equal(result.pooled.vpip.LAG.note,'표본 부족 — 보류');assert.equal(result.pooled.vpip.LAG.pass,true);
- assert.equal(result.verdict,'FAIL');
+ assert.equal(result.pooled.vpip.LAG.judged,false);assert.equal(result.pooled.vpip.LAG.note,'표본 부족');assert.equal(result.pooled.vpip.LAG.pass,false,'an unjudged style never passes');
+ assert.equal(result.verdict,'FAIL','a judged style out of band fails');
 });
 test('request budget: per-run cap never exceeds the approved total; rerun only with a typical run left',()=>{
- assert.equal(runCap(0),400);assert.equal(runCap(950),250);assert.equal(runCap(1200),0);assert.equal(runCap(1300),0);
- assert.equal(mayRerun(950),true);assert.equal(mayRerun(1000),false);
+ assert.equal(runCap(0),300);assert.equal(runCap(950),250);assert.equal(runCap(1200),0);assert.equal(runCap(1300),0);
+ assert.equal(mayRerun(950),true);assert.equal(mayRerun(960),false);
 });
 test('live journey options keep the default opt-in contract and validate gate flags',async()=>{
  const {parseLiveArgs,DEFAULT_LIVE_OPTIONS}=await import('./browser/jev-live-play.mjs');
@@ -148,4 +165,76 @@ test('loadGateRun excuses only a hand the engine reports as interrupted',()=>{
  assert.equal(loadGateRun(store({handNo:1,audit:{schemaVersion:1,hand:null,completedHands:1}})).unfinishedHand,null,'ended between hands');
  assert.equal(loadGateRun(store({handNo:2,live:{street:'turn'}})).unfinishedHand,2,'live hand');
  assert.equal(loadGateRun(store({handNo:1})).unfinishedHand,null,'completed');
+});
+
+// A deep decision facing all-in where the guard removed the jam (commit mass 0.3 < 0.6).
+function guardedRun(name){
+ const run=cleanRun(name);
+ const decisionId='d-300-preflop-3',probabilities={fold:0.5,call:0.2,raise_to_5000:0.3};
+ const probe=hand(300,[action('p1','fold',{decisionId,callAmount:400})],{holes:{user:cards('2c 3d'),p1:cards('9c 7d'),p2:cards('7c 2d')}});
+ const selected=decide(decisionId,probabilities,'fold',probe);
+ assert.deepEqual(selected.selection.guard,{commit:['raise_to_5000'],mass:0.3});
+ run.hands.push(hand(300,[action('p1',selected.action.action,{decisionId,callAmount:400,amount:selected.action.action==='call'?400:0})],{holes:{user:cards('2c 3d'),p1:cards('9c 7d'),p2:cards('7c 2d')}}));
+ run.loopState.jevDiagnostics.entries.push(entryOf(decisionId,probabilities,'fold',selected));
+ run.loopState.metrics.push({runtime:'jev',decisionId,outcome:'jev_accepted',modelMs:300});
+ return {run,decisionId};
+}
+test('#234 ① recomputes from the seed and the archive: tampered unit, rule or guard fails even when the action stays',()=>{
+ const {run}=guardedRun('G');
+ assert.equal(gateSessions([run]).perRun[0].one.pass,true,JSON.stringify(gateSessions([run]).perRun[0].one.reasons));
+ const tamper=[
+  e=>{delete e.selection.guard;},
+  e=>{e.selection.guard.mass=0.61;},
+  e=>{e.selection.guard.commit=['call'];},
+  e=>{e.selection.rule='class-sample-v1';},
+  e=>{e.selectionVersion='class-sample-v1';},
+  e=>{e.selection.unit=e.selection.unit/2;},
+ ];
+ for(const [i,change] of tamper.entries()){
+  const {run:bad,decisionId}=guardedRun(`T${i}`);
+  change(bad.loopState.jevDiagnostics.entries.find(e=>e.decisionId===decisionId));
+  const [r]=gateSessions([bad]).perRun;
+  assert.equal(r.one.pass,false,`tamper ${i} must fail ①`);assert.ok(r.one.reasons.some(x=>x.startsWith('재계산')),JSON.stringify(r.one.reasons));
+ }
+});
+test('#234 ② is judged on the aggregate rate; zero opportunities, short runs and failed journeys are inconclusive',()=>{
+ // No failing judged criterion, but personas unjudged, no ② opportunity and no tournament:
+ // INCONCLUSIVE, never PASS. (Only TAG plays here, inside its band.)
+ const quietRun=cleanRun('Q',MIN_DECISIONS,{probabilities:{fold:0.75,call:0.25}});quietRun.players=players.filter(p=>p.playerId!=='p2');
+ const quiet=gateSessions([quietRun]);
+ assert.equal(quiet.pooled.vpip.TAG.pass,true,JSON.stringify(quiet.pooled.vpip.TAG));
+ assert.equal(quiet.verdict,'INCONCLUSIVE',JSON.stringify(quiet.inconclusive));assert.ok(quiet.inconclusive.includes('② 기회 0건'));assert.ok(quiet.inconclusive.includes('③ 토너먼트 실행 없음'));
+ const short=cleanRun('S');short.handLimit=MIN_DECISIONS+5;short.stoppedBy='diagnostics-budget';
+ assert.ok(gateSessions([short]).inconclusive.some(r=>r.includes('handLimit')&&r.includes('diagnostics-budget')));
+ const failedJourney=cleanRun('J');failedJourney.journeyPass=false;
+ assert.ok(gateSessions([failedJourney]).inconclusive.some(r=>r.includes('저니 실패')));
+ const tournament=cleanRun('T',MIN_DECISIONS,{mode:'tournament'});tournament.hands=tournament.hands.filter(h=>h.handNo!==3);
+ tournament.loopState.jevDiagnostics.entries=tournament.loopState.jevDiagnostics.entries.filter(e=>e.decisionId!=='d-3-preflop-0');
+ tournament.loopState.metrics=tournament.loopState.metrics.filter(m=>m.decisionId!=='d-3-preflop-0');
+ assert.ok(gateSessions([tournament]).inconclusive.some(r=>r.includes('첫 5핸드')));
+ // One violation among 150 aggregate opportunities is under 1%; among 50 it is not.
+ const deepHand=(n,allIn)=>hand(1000+n,[action('p1',allIn?'raise':'fold',{street:'flop',decisionId:`d-${1000+n}-flop-0`,amount:allIn?2600:0,maxRaiseTo:2600,board:cards('2s Kc 9s'),stacks:{user:2600,p1:2600,p2:5000}})],
+  {holes:{user:cards('2c 3d'),p1:cards('Ac 5c'),p2:cards('7c 2d')}});
+ const withDeep=(count,violations)=>{const run=cleanRun('D');for(let n=0;n<count;n++){const h=deepHand(n,n<violations);run.hands.push(h);run.loopState.metrics.push({runtime:'jev',decisionId:h.actions[0].decisionId,outcome:'jev_single_legal'});}return run;};
+ const low=gateSessions([withDeep(150,1)]).pooled.desperation;assert.equal(low.opportunities,150);assert.equal(low.violations,1);assert.equal(low.pass,true);assert.equal(low.zeroRule,'미달');
+ const high=gateSessions([withDeep(50,1)]).pooled.desperation;assert.equal(high.pass,false);
+ // A near-all-in (within 5%) counts under v3 but not under the v2 definition.
+ const near=cleanRun('N');const h=deepHand(0,false);h.actions[0]={...h.actions[0],action:'raise',amount:2500};near.hands.push(h);
+ near.loopState.metrics.push({runtime:'jev',decisionId:h.actions[0].decisionId,outcome:'jev_single_legal'});
+ const nd=gateSessions([near]).pooled.desperation;assert.equal(nd.violations,1);assert.equal(nd.v2Violations,0);
+});
+test('#234 a gate run capped at 300 requests keeps every worst-case v3 entry (dropped 0)',async()=>{
+ const {boundJevDiagnostics}=await import('../tools/jev-diagnostics.js');
+ const {GATE_BUDGET}=await import('./helpers/jev-gate.mjs');
+ const keys=['fold','call','raise_to_12345','raise_to_23456','raise_to_34567','raise_to_45678','raise_to_49999'];
+ const probabilities=Object.fromEntries(keys.map((k,i)=>[k,[0.13,0.14,0.15,0.16,0.14,0.13,0.14][i]]));
+ const entry=i=>({model:'jev-1.13.0',confidence:0.16,probabilitySum:0.99,probabilities,usage:{input_tokens:1999,output_tokens:99},apiChoice:'raise_to_45678',
+  decisionId:`d-${100+i%20}-river-${100+i}`,generation:12,actor:'seat_6',questionVersion:'poker-choice-v3',candidateVersion:'legal-menu-v3',projectionVersion:2,selectionVersion:'class-sample-v2',
+  selection:{rule:'class-sample-v2',unit:0.12345678901234567,classMass:{fold:0.13,call:0.14,raise:0.72},pruned:['check'],sampled:'raise',sizeRule:'weighted-median',
+   selectedKey:'raise_to_34567',apiChoice:'raise_to_45678',guard:{commit:['raise_to_49999','call'],mass:0.27}}});
+ const state={phase:'playing',metrics:Array.from({length:GATE_BUDGET.perRun},(_,i)=>({runtime:'jev',decisionId:`d-${i}-flop-1`,outcome:'jev_accepted',modelMs:300})),
+  jevDiagnostics:{schemaVersion:1,entries:Array.from({length:GATE_BUDGET.perRun},(_,i)=>entry(i)),dropped:0}};
+ boundJevDiagnostics(state);
+ assert.equal(state.jevDiagnostics.dropped,0,`${Buffer.byteLength(JSON.stringify(entry(0)))} B/entry`);
+ assert.equal(state.jevDiagnostics.entries.length,GATE_BUDGET.perRun);
 });

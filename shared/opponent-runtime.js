@@ -1,12 +1,16 @@
 // Browser-safe persisted contract. Never infer a new runtime from a damaged descriptor.
 export const OPPONENT_RUNTIMES = Object.freeze(['policy', 'llm', 'jev']);
 export const JEV_CONFIG = Object.freeze({ schemaVersion: 1, model: 'jev-1.13.0',
-  questionVersion: 'poker-choice-v2', candidateVersion: 'legal-menu-v2', projectionVersion: 2,
-  selectionVersion: 'class-sample-v1' });
-// Known older descriptors that a resume may roll forward to JEV_CONFIG exactly once.
+  questionVersion: 'poker-choice-v3', candidateVersion: 'legal-menu-v3', projectionVersion: 2,
+  selectionVersion: 'class-sample-v2' });
+// Known older descriptors that a resume may roll forward to JEV_CONFIG (v1 and v2 both go
+// straight to the current one; the loop copy then marks the store as rolled forward).
 export const JEV_CONFIG_LEGACY = Object.freeze([
   Object.freeze({ schemaVersion: 1, model: 'jev-1.13.0',
     questionVersion: 'poker-choice-v1', candidateVersion: 'legal-menu-v1', projectionVersion: 1 }),
+  Object.freeze({ schemaVersion: 1, model: 'jev-1.13.0',
+    questionVersion: 'poker-choice-v2', candidateVersion: 'legal-menu-v2', projectionVersion: 2,
+    selectionVersion: 'class-sample-v1' }),
 ]);
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function sameDescriptor(value, reference) {
