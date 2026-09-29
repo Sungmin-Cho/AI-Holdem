@@ -2649,6 +2649,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!sameJevIdentity(readLoopState()?.pendingDecision,record) || readLoopState().gameEpoch !== record.gameEpoch) throw jevError('STALE_PLAYER_DECISION');
       let chosen = result.action, siblings = {};
       if (result.diagnostics) {
+        // validateJevConfig admits only a stored descriptor equal to JEV_CONFIG (older ones are
+        // rolled forward first), so this is the store's own selectionVersion.
         const rule = JEV_CONFIG.selectionVersion;
         const selected = (opts.selectJevAction ?? selectJevAction)({probabilities:result.diagnostics.probabilities,candidates,
           unit:selectionUnit,apiChoice:result.diagnostics.apiChoice,rule,

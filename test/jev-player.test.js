@@ -201,3 +201,19 @@ test('guard context: deep beyond 40bb, commit keys within 5% of all-in or a 95% 
   assert.equal(jevGuardContext({...deep,holeCards:hole},legal,candidates).premium,premium,hole.join(''));
  assert.equal(jevGuardContext({...deep,street:'flop',board:['2h','3c','4s'],holeCards:['Ah','Ad']},legal,candidates).premium,false,'postflop has no premium exception');
 });
+// #234 r3: the ladder on an engine-played street, not hand-made priorActions: a full raise to
+// 150, then two short all-ins (180, 200). The small blind still faces one full raise.
+test('#234 consecutive short all-ins on a real engine street keep the one-raise ladder',()=>{
+ const peek=st=>{const legal=legalFor(st);return {legal,snapshot:snapshotDecision(st,legal.toAct,null,{blinds:blindsForLevel(st.level,st.config.blinds0),legal})};};
+ let st=createGame({aiCount:4,startStack:5000,levelEvery:100});st.button=0;
+ const order=[];let dry=startHand(structuredClone(st)).state;
+ for(let i=0;i<3;i++){const id=legalFor(dry).toAct;order.push(id);dry=applyAction(dry,id,'fold').state;}
+ st.seats.find(s=>s.playerId===order[1]).stack=180;st.seats.find(s=>s.playerId===order[2]).stack=200;
+ st=startHand(st).state;
+ st=applyAction(st,order[0],'raise',150).state;st=applyAction(st,order[1],'raise',180).state;st=applyAction(st,order[2],'raise',200).state;
+ const {snapshot,legal}=peek(st);
+ assert.deepEqual(snapshot.priorActions.filter(a=>a.action==='raise').map(a=>a.amount),[150,180,200]);
+ assert.equal(fullRaisesThisStreet(snapshot,50),1);
+ assert.equal(legal.minRaiseTo,300,'the engine also keeps the last full raise (100)');
+ assert.deepEqual(buildJevCandidates(snapshot,legal).map(c=>c.key),['fold','call','raise_to_300','raise_to_600','raise_to_680','raise_to_800']);
+});

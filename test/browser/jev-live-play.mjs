@@ -11,18 +11,18 @@ export const DEFAULT_LIVE_OPTIONS=Object.freeze({hands:2,ai:2,mode:'cash-trainin
 // With an explicit request budget the journey stops at a hand boundary before the cap;
 // the reserve covers the AI decisions of the hand still in progress.
 const HAND_RESERVE=40;
-// The private diagnostics are bounded by bytes, not entries (tools/jev-diagnostics.js). The
-// journey stops at a hand boundary once they reach this share of the cap, so a gate run
-// never silently drops the entries ① must recompute.
-const DIAGNOSTICS_STOP_SHARE=0.9;
-export function diagnosticsBudgetShare(loopState){
- const d=loopState?.jevDiagnostics;if(!d||!Array.isArray(d.entries))return 0;
- const base=Buffer.byteLength(JSON.stringify({...loopState,jevDiagnostics:{schemaVersion:1,entries:[],dropped:d.dropped??0}}));
- const budget=Math.max(1,Math.min(256*1024,2*1024*1024-64*1024-base));
- return d.entries.reduce((sum,e)=>sum+Buffer.byteLength(JSON.stringify(e))+1,0)/budget;
+// The loop keeps at most 256 KiB of private diagnostics and drops the oldest entries past it
+// (tools/jev-diagnostics.js). The journey copies each entry the moment it appears, so the gate
+// can restore a truncated run: it accepts the mirror only when the loop's kept entries equal
+// its tail and it holds exactly kept + dropped entries.
+export function newMirrorEntries(loopState,seen){
+ const entries=loopState?.jevDiagnostics?.entries;if(!Array.isArray(entries))return [];
+ const fresh=[];
+ for(const entry of entries){const key=`${entry?.decisionId}#${entry?.generation}`;if(seen.has(key))continue;seen.add(key);fresh.push(entry);}
+ return fresh;
 }
 // Gate evidence holds hole cards and private probabilities: owner-only permissions.
-function privateTree(dir){
+export function privateTree(dir){
  if(!fs.existsSync(dir))return;fs.chmodSync(dir,0o700);
  for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,entry.name);if(entry.isDirectory())privateTree(p);else fs.chmodSync(p,0o600);}
 }
@@ -41,7 +41,17 @@ export async function runJevLiveJourney(outDir,input={}) {
  const options={...DEFAULT_LIVE_OPTIONS,...input},cap=options.maxRequests??40,softCap=options.maxRequests===null?Infinity:Math.max(1,cap-HAND_RESERVE);
  const workspace=createBrowserWorkspace(),root=workspace.root,userStore=path.resolve('game'),before=hashTree(userStore);
  const session=`jev-${randomUUID()}`,originalFetch=globalThis.fetch,requests=[];let app,failure,summary=null,stoppedBy=null,sessionDir=null;
- fs.mkdirSync(outDir,{recursive:true});
+ // Owner-only from the first byte: files this process and its browser children create are 0600/0700.
+ const umask=process.umask(0o077);
+ fs.mkdirSync(outDir,{recursive:true,mode:0o700});fs.chmodSync(outDir,0o700);
+ const mirrorFile=path.join(outDir,'diagnostics-mirror.jsonl'),mirrored=new Set();let mirrorTimer=null;
+ const mirrorOnce=()=>{
+  if(!sessionDir)return;
+  let loopState;try{loopState=JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json'),'utf8'));}catch{return;}
+  const fresh=newMirrorEntries(loopState,mirrored);
+  if(fresh.length)fs.appendFileSync(mirrorFile,fresh.map(e=>JSON.stringify(e)+'\n').join(''),{mode:0o600});
+ };
+ const shot=async name=>{const file=path.join(outDir,name);await browser(['screenshot',file]);fs.chmodSync(file,0o600);};
  const browser=async args=>{const r=await runOwnedCommand('npx',['--yes','--prefer-offline','agent-browser@0.36.0','--session',session,'--json',...args],{timeoutMs:45000});
  assert.equal(r.exitCode,0,`browser ${args[0]} failed`);const data=JSON.parse(r.stdout);assert.notEqual(data.success,false);return data.data;};
  const evaluate=async expr=>{const data=await browser(['eval',expr]);return data?.result??data;};
@@ -63,10 +73,10 @@ export async function runJevLiveJourney(outDir,input={}) {
   await browser(['open',app.url]);await browser(['set','viewport','1280','900']);await browser(['snapshot','-i']);
   await wait(()=>evaluate("document.querySelector('#status')?.textContent==='로비'"));
   await evaluate("document.querySelector('details').open=true");await browser(['snapshot','-i']);
-  await browser(['select','[name=opponentRuntime]','jev']);await browser(['screenshot',path.join(outDir,'jev-lobby.png')]);
+  await browser(['select','[name=opponentRuntime]','jev']);await shot('jev-lobby.png');
   await browser(['click','#start']);
   await wait(()=>app.manager.snapshot().state==='playing');await browser(['snapshot','-i']);
-  sessionDir=app.manager.current.sessionDir;
+  sessionDir=app.manager.current.sessionDir;mirrorTimer=setInterval(mirrorOnce,100);
   const buttons=JSON.stringify(options.humanPolicy==='check-fold'?['btn-check','btn-fold']:['btn-check','btn-call','btn-fold']);
   await evaluate(`window.__jevDriver=setInterval(()=>{const doc=document.querySelector('#table')?.contentDocument;for(const id of ${buttons}){const b=doc?.getElementById(id);if(b&&!b.disabled&&!b.hidden&&b.getClientRects().length){b.click();break;}}const skip=document.querySelector('#skip-result');if(skip&&!skip.hidden&&!skip.disabled)skip.click();},120)`);
   const loopHand=()=>JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json'))).handNo;
@@ -74,9 +84,7 @@ export async function runJevLiveJourney(outDir,input={}) {
   await wait(async()=>{
    const s=app.manager.snapshot();if(s.state==='error'||s.pendingDecision?.status==='recovery_required')throw new Error(s.error??s.pendingDecision.code);
    if(s.state==='completed')return true;
-   let reason=null;
-   if(requests.length>=softCap)reason='max-requests';
-   else{try{if(diagnosticsBudgetShare(JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json'))))>=DIAGNOSTICS_STOP_SHARE)reason='diagnostics-budget';}catch{}}
+   const reason=requests.length>=softCap?'max-requests':null;
    if(reason&&s.state==='playing'){
     flaggedHand??=loopHand();
     // Stop at the next hand boundary so every archived hand is complete.
@@ -84,7 +92,7 @@ export async function runJevLiveJourney(outDir,input={}) {
    }
    return false;
   },options.waitMs);
-  await evaluate('clearInterval(window.__jevDriver)');await browser(['snapshot','-i']);await browser(['screenshot',path.join(outDir,'jev-completed.png')]);
+  await evaluate('clearInterval(window.__jevDriver)');await browser(['snapshot','-i']);await shot('jev-completed.png');
   const engine=JSON.parse(fs.readFileSync(path.join(sessionDir,'state.json'))),loop=JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json')));
   assert.equal(engine.config.opponentRuntime,'jev');assert.ok(requests.length>0);assert.ok(loop.metrics.some(m=>m.runtime==='jev'));
   if(stoppedBy===null){
@@ -97,20 +105,25 @@ export async function runJevLiveJourney(outDir,input={}) {
   summary={node:process.version,browser:'agent-browser@0.36.0',mode:options.mode,hands:engine.handNo,aiCount:engine.config.aiCount,humanPolicy:options.humanPolicy,
    upper:'disabled; factual feedback',models:[...new Set(diagnostics.map(d=>d.model))],actors:[...new Set(diagnostics.map(d=>d.actor))],decisions:diagnostics.length,
    usage:diagnostics.reduce((a,d)=>({input_tokens:a.input_tokens+(d.usage?.input_tokens??0),output_tokens:a.output_tokens+(d.usage?.output_tokens??0)}),{input_tokens:0,output_tokens:0})};
- }catch(error){failure=error;try{await browser(['screenshot',path.join(outDir,'failure.png')]);}catch{}}
+ }catch(error){failure=error;try{await shot('failure.png');}catch{}}
  finally{
-  try{
-   await browser(['close']);await app?.close();
-   if(options.keepStore&&sessionDir&&fs.existsSync(sessionDir))fs.cpSync(sessionDir,path.join(outDir,'session'),{recursive:true});
-   privateTree(outDir);
-   const study=await inspectStudyService(root);if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});assert.equal(hashTree(userStore),before);workspace.close();
-  }catch(error){failure??=error;}
+  clearInterval(mirrorTimer);
+  // Each step runs even when an earlier one fails; the first failure is reported.
+  const step=async fn=>{try{await fn();}catch(error){failure??=error;}};
+  await step(()=>browser(['close']));await step(()=>app?.close());
+  // After the app closed, so the last entries are mirrored before the workspace is removed.
+  await step(mirrorOnce);
+  await step(()=>{if(options.keepStore&&sessionDir&&fs.existsSync(sessionDir))fs.cpSync(sessionDir,path.join(outDir,'session'),{recursive:true});});
+  await step(async()=>{const study=await inspectStudyService(root);if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});});
+  await step(()=>{assert.equal(hashTree(userStore),before);workspace.close();});
   globalThis.fetch=originalFetch;
   // Written after the app service is closed so late requests are counted.
-  fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify(failure
+  await step(()=>fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify(failure
    ?{pass:false,code:failure.code??null,message:failure.message,stoppedBy,maxRequests:cap,requests}
-   :{pass:true,...summary,stoppedBy,maxRequests:cap,...(options.keepStore?{sessionDir:path.join(outDir,'session')}:{}),requests},null,2),{mode:0o600});
-  try{fs.chmodSync(path.join(outDir,'result.json'),0o600);}catch{}
+   :{pass:true,...summary,stoppedBy,maxRequests:cap,...(options.keepStore?{sessionDir:path.join(outDir,'session')}:{}),requests},null,2),{mode:0o600}));
+  // Independent of every step above: evidence is owner-only however the run ended.
+  await step(()=>privateTree(outDir));
+  process.umask(umask);
  }
  if(failure)throw failure;
 }

@@ -6,16 +6,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eval5, compareScore } from '../../engine/evaluator.js';
 import { rankValue } from '../../engine/cards.js';
-import { selectJevAction, COMMIT_NEAR, GUARD_PREMIUMS } from '../../tools/jev-player.js';
+import { selectJevAction, buildJevCandidates, COMMIT_NEAR, GUARD_PREMIUMS } from '../../tools/jev-player.js';
+import { JEV_CONFIG } from '../../shared/opponent-runtime.js';
 import { deriveUnit } from '../../training/policies/rng.js';
 
-// perRun keeps a run below the diagnostics byte cap (256 KiB): 300 worst-case v3 entries with a
-// guard record are about 227 KiB. The journey also stops at a hand boundary at 90% of the cap.
+// The approved request budget. The loop keeps at most 256 KiB of private diagnostics, so the
+// journey mirrors every entry into the private evidence as it appears (diagnostics-mirror.jsonl);
+// a run whose truncated diagnostics the mirror cannot restore is INCONCLUSIVE.
 export const GATE_BUDGET = Object.freeze({ total: 1200, perRun: 300, expectedRun: 240 });
 // v3 acceptance for ② (aggregate over every judged run): violation rate at most 1%.
 export const DESPERATION_RATE_MAX = 0.01;
-// The two selection-rule versions and the descriptor selectionVersion each must carry.
-const RULE_OF_SELECTION_VERSION = Object.freeze({ 'class-sample-v1': 'class-sample-v1', 'class-sample-v2': 'class-sample-v2' });
+// Every judged entry must carry the whole current (v3) version tuple: an entry recorded under
+// another question, menu, projection or selection version is never recomputed as v3.
+const VERSION_KEYS = Object.freeze(['questionVersion', 'candidateVersion', 'projectionVersion', 'selectionVersion']);
+const sameVersions = e => VERSION_KEYS.every(key => e?.[key] === JEV_CONFIG[key]);
 export const MIN_DECISIONS = 100;
 export const DEEP_BB = 40;
 export const PREMIUM_CALL_SHARE = 0.2;
@@ -140,8 +144,27 @@ export function guardFromArchive(hand, index, candidateKeys) {
   };
 }
 
-const candidatesOf = probabilities => Object.keys(probabilities).map(key => key.startsWith('raise_to_')
-  ? { key, action: 'raise', amount: Number(key.slice('raise_to_'.length)) } : { key, action: key });
+// The v3 menu re-derived from the archive alone: the action record keeps the legal range, the
+// pot, the street bet and every stack before the action. canRaise is not archived, so the
+// offered keys must equal either the no-raise menu or the full v3 menu for that state.
+export function menuFromArchive(hand, index) {
+  const a = hand.actions[index], { bets, folded } = tableAt(hand, index);
+  const snapshot = { street: a.street, blinds: hand.blinds, currentBet: a.currentBet, potBefore: a.potTotal,
+    actorBet: a.maxRaiseTo - a.stacks[a.playerId], actorId: a.playerId,
+    priorActions: hand.actions.slice(0, index).map(p => ({ playerId: p.playerId, street: p.street, action: p.action, amount: p.amount })),
+    publicSeats: Object.keys(hand.holes).map(id => ({ playerId: id, stack: a.stacks[id] ?? 0, bet: bets[id] ?? 0,
+      folded: folded.has(id), out: false })) };
+  const legal = { canCheck: a.callAmount === 0, callAmount: a.callAmount, minRaiseTo: a.minRaiseTo, maxRaiseTo: a.maxRaiseTo };
+  const menus = [];
+  for (const canRaise of [false, true]) {
+    try { menus.push(buildJevCandidates(snapshot, { ...legal, canRaise })); } catch { /* not a legal menu */ }
+  }
+  return menus;
+}
+const sameKeys = (menu, probabilities) => {
+  const keys = Object.keys(probabilities);
+  return menu.length === keys.length && menu.every(c => Object.hasOwn(probabilities, c.key));
+};
 const percentile = (values, p) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -156,7 +179,15 @@ function judgeRun(run) {
     if (ai.has(action.playerId)) archived.set(action.decisionId, { hand, index, action });
   }));
   const diagnostics = run.loopState?.jevDiagnostics ?? { entries: [], dropped: 0 };
-  const entries = diagnostics.entries ?? [];
+  const kept = diagnostics.entries ?? [];
+  // The loop drops its oldest entries past the byte cap. The journey's mirror restores them only
+  // when the kept entries are byte-equal to its tail and it holds exactly kept + dropped entries.
+  const mirror = Array.isArray(run.mirror) ? run.mirror : null;
+  const mirrorMatches = mirror !== null && !diagnostics.historyIncomplete
+    && mirror.length === kept.length + diagnostics.dropped
+    && kept.every((e, i) => JSON.stringify(e) === JSON.stringify(mirror[mirror.length - kept.length + i]));
+  const truncated = diagnostics.historyIncomplete === true || (diagnostics.dropped !== 0 && !mirrorMatches);
+  const entries = diagnostics.dropped !== 0 && mirrorMatches ? mirror : kept;
   const v1Entries = entries.filter(e => !e.selection).length;
   // Only the hand the engine itself reports as unfinished (End's .aborted-hand.json or a live hand)
   // may lack an archive; every other unarchived entry is a missing record.
@@ -180,22 +211,25 @@ function judgeRun(run) {
   const singleLegal = new Set(metrics.filter(m => m.outcome === 'jev_single_legal').map(m => m.decisionId));
   const unexplained = [...archived.keys()].filter(id => !top.has(id) && !singleLegal.has(id)
     && !entries.some(e => e.decisionId === id && !e.selection));
-  // ① recomputation never trusts recorded inputs: the rule must match the entry's descriptor
-  // version, the unit is re-derived from the secret seed, the guard is re-derived from the
-  // archive, and the whole selection object must equal the recorded one.
+  // ① recomputation never trusts recorded inputs: the entry must carry the whole v3 version
+  // tuple, its keys must be the v3 menu rebuilt from the archive, the unit is re-derived from
+  // the secret seed, the guard is re-derived from the archive, and the whole selection object
+  // must equal the recorded one.
   const token = run.loopState?.sessionToken;
-  const mismatches = { rule: 0, unit: 0, selection: 0, action: 0 };
+  const mismatches = { version: 0, menu: 0, unit: 0, selection: 0, action: 0 };
+  const rule = JEV_CONFIG.selectionVersion;
   const recomputed = [...top.values()].filter(e => {
-    const rule = RULE_OF_SELECTION_VERSION[e.selectionVersion];
-    if (!rule || e.selection.rule !== rule) { mismatches.rule += 1; return false; }
+    if (!sameVersions(e) || e.selection.rule !== rule) { mismatches.version += 1; return false; }
+    const { hand, index, action: applied } = archived.get(e.decisionId);
+    const candidates = menuFromArchive(hand, index).find(menu => sameKeys(menu, e.probabilities));
+    if (!candidates) { mismatches.menu += 1; return false; }
     let unit;
     try { unit = deriveUnit('jev-selection-v1', token, e.decisionId, String(e.generation)); } catch { unit = null; }
     if (unit === null || unit !== e.selection.unit) { mismatches.unit += 1; return false; }
-    const { hand, index, action: applied } = archived.get(e.decisionId);
     let again;
     try {
-      again = selectJevAction({ probabilities: e.probabilities, candidates: candidatesOf(e.probabilities), unit, apiChoice: e.apiChoice,
-        rule, ...(rule === 'class-sample-v2' ? { guard: guardFromArchive(hand, index, Object.keys(e.probabilities)) } : {}) });
+      again = selectJevAction({ probabilities: e.probabilities, candidates, unit, apiChoice: e.apiChoice,
+        rule, guard: guardFromArchive(hand, index, Object.keys(e.probabilities)) });
     } catch { mismatches.selection += 1; return false; }
     if (JSON.stringify(again.selection) !== JSON.stringify(e.selection)) { mismatches.selection += 1; return false; }
     if (!(applied.action === again.action.action && (again.action.action !== 'raise' || applied.amount === again.action.amount))) {
@@ -209,14 +243,17 @@ function judgeRun(run) {
   if (top.size < MIN_DECISIONS) reasons.push(`결정 ${top.size} < ${MIN_DECISIONS}`);
   if (failures.length) reasons.push(`실패 ${failures.length}`);
   if (pending && pending.status !== 'running') reasons.push(`pending ${pending.status}`);
-  if (diagnostics.dropped !== 0 || diagnostics.historyIncomplete) reasons.push('진단 절단/손상');
   if (!(accepted.size === top.size && top.size === withEntry.length && withEntry.every(id => accepted.has(id))))
     reasons.push(`개수 불일치 accepted ${accepted.size} / entry ${top.size} / archive ${withEntry.length}`);
-  if (recomputed !== top.size) reasons.push(`재계산 ${recomputed}/${top.size} (rule ${mismatches.rule}, unit ${mismatches.unit}, selection ${mismatches.selection}, action ${mismatches.action})`);
+  if (recomputed !== top.size) reasons.push(`재계산 ${recomputed}/${top.size} (version ${mismatches.version}, menu ${mismatches.menu}, unit ${mismatches.unit}, selection ${mismatches.selection}, action ${mismatches.action})`);
   if (missingArchive.size) reasons.push(`아카이브 없는 완료 핸드 entry ${missingArchive.size}`);
   if (unexplained.length) reasons.push(`entry·single-legal 없는 아카이브 AI 결정 ${unexplained.length}`);
-  const one = { pass: reasons.length === 0, reasons, decisions: top.size, incomplete: incomplete.size, v1Entries,
-    failures: failures.length, recomputed };
+  // Truncated diagnostics cannot be judged either way: the run is INCONCLUSIVE, not FAIL.
+  const one = truncated
+    ? { judged: false, pass: null, reasons: ['진단 절단/손상 — 미러로 복원 불가'], decisions: top.size, incomplete: incomplete.size, v1Entries,
+      failures: failures.length, recomputed }
+    : { judged: true, pass: reasons.length === 0, reasons, decisions: top.size, incomplete: incomplete.size, v1Entries,
+      failures: failures.length, recomputed, ...(diagnostics.dropped !== 0 ? { restoredFromMirror: diagnostics.dropped } : {}) };
 
   const deep = [], premium = [], vpip = new Map();
   for (const { hand, index, action } of archived.values()) {
@@ -247,14 +284,18 @@ function judgeRun(run) {
     ? { applies: true, pass: new Set(busted(EARLY_HANDS)).size <= 1, bustedEarly: [...new Set(busted(EARLY_HANDS))].length }
     : { applies: false, zeroStackFirst5: busted(EARLY_HANDS).length, zeroStackAll: busted().length };
   // Sample completeness: a cash run must reach its hand limit, a tournament must finish its
-  // first five hands (or the whole game), and the journey itself must have passed.
+  // first five hands however it ended (End also sets gameOver), the journey itself must have
+  // passed, and the run must stay inside its approved request cap.
   const inconclusive = [];
+  if (truncated) inconclusive.push('진단 절단/손상(미러 없음 또는 불일치)');
   if (run.journeyPass === false) inconclusive.push('저니 실패(result.pass false)');
+  else if (run.journeyPass !== true) inconclusive.push('저니 결과 없음(result.json)');
+  if (!Number.isSafeInteger(run.requests)) inconclusive.push('요청 수 기록 없음');
+  else if (run.requests > GATE_BUDGET.perRun) inconclusive.push(`요청 ${run.requests} > 실행 상한 ${GATE_BUDGET.perRun}`);
   if (run.mode !== 'tournament' && Number.isSafeInteger(run.handLimit) && hands.length < run.handLimit) {
     inconclusive.push(`완료 핸드 ${hands.length} < handLimit ${run.handLimit}${run.stoppedBy ? ` (${run.stoppedBy})` : ''}`);
   }
-  if (run.mode === 'tournament' && !run.gameOver
-    && ![1, 2, 3, 4, 5].every(n => hands.some(h => h.handNo === n))) inconclusive.push('토너먼트 첫 5핸드 미완료');
+  if (run.mode === 'tournament' && ![1, 2, 3, 4, 5].every(n => hands.some(h => h.handNo === n))) inconclusive.push('토너먼트 첫 5핸드 미완료');
   const sampled = [...top.values()];
   const offTop = sampled.filter(e => {
     const mass = e.selection.classMass;
@@ -267,12 +308,13 @@ function judgeRun(run) {
     modelMsP50: percentile(model, 0.5), modelMsP90: percentile(model, 0.9),
     tokens: entries.reduce((sum, e) => ({ input: sum.input + (e.usage?.input_tokens ?? 0), output: sum.output + (e.usage?.output_tokens ?? 0) }), { input: 0, output: 0 }),
     entryBytes: Buffer.byteLength(JSON.stringify(entries), 'utf8'), requests: run.requests ?? null, stoppedBy: run.stoppedBy ?? null };
-  const pass = one.pass && four.pass && (!three.applies || three.pass);
+  const pass = (one.judged ? one.pass : true) && four.pass && (!three.applies || three.pass);
   return { run: { name: run.name, mode: run.mode, hands: hands.length, pass, inconclusive, one, two, three, four, report }, vpip };
 }
 
 export function gateSessions(runs) {
   const perRun = [], pooledRows = new Map();
+  const spent = runs.reduce((sum, run) => sum + (Number.isSafeInteger(run.requests) ? run.requests : 0), 0);
   for (const run of runs) {
     const judged = judgeRun(run);
     perRun.push(judged.run);
@@ -305,6 +347,7 @@ export function gateSessions(runs) {
     ...(opportunities === 0 ? ['② 기회 0건'] : []),
     ...Object.entries(vpip).filter(([, r]) => !r.judged).map(([archetype, r]) => `⑤ ${archetype} 기회 ${r.opportunities} < ${MIN_OPPORTUNITIES}`),
     ...(perRun.some(r => r.mode === 'tournament') ? [] : ['③ 토너먼트 실행 없음']),
+    ...(spent > GATE_BUDGET.total ? [`판정 실행 요청 합계 ${spent} > 승인 예산 ${GATE_BUDGET.total}`] : []),
   ];
   const failed = perRun.some(r => !r.pass) || (opportunities > 0 && !desperation.pass)
     || Object.values(vpip).some(r => r.judged && !r.pass);
@@ -322,9 +365,11 @@ export function loadGateRun(dir) {
   const aborted = fs.existsSync(audit) && readJson(audit).hand != null;
   const handsDir = path.join(session, 'hands');
   const hands = fs.existsSync(handsDir) ? fs.readdirSync(handsDir).filter(n => /^hand-.*\.json$/.test(n)).map(n => readJson(path.join(handsDir, n))) : [];
+  const mirrorFile = path.join(dir, 'diagnostics-mirror.jsonl');
+  const mirror = fs.existsSync(mirrorFile) ? fs.readFileSync(mirrorFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : null;
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
     loopState: readJson(path.join(session, 'loop-state.json')), players: readJson(path.join(session, 'players.json')),
-    requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null,
+    requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null, mirror,
     journeyPass: typeof result.pass === 'boolean' ? result.pass : null,
     handLimit: engine.config?.handLimit ?? null, gameOver: engine.gameOver === true,
     unfinishedHand: aborted || engine.hand ? engine.handNo : null };

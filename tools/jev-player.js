@@ -210,11 +210,21 @@ const CLASS_ORDER = ['fold', 'check', 'call', 'raise'];
 // Sums of hundredths carry float noise; class masses are compared at 1e-9.
 const clean = n => Math.round(n * 1e9) / 1e9;
 export const SELECTION_RULES = Object.freeze(['class-sample-v1', 'class-sample-v2']);
+// The guard's "below 0.6" is strict on the values as given. API hundredths are summed as
+// integers (0.29 + 0.31 is exactly 0.6, not 0.6 minus float noise); any other value is summed
+// as is, so 0.5999999999 stays below the floor instead of rounding up to it.
+const isHundredth = n => n === Math.round(n * 100) / 100;
+function commitMass(values) {
+  return values.every(isHundredth)
+    ? values.reduce((sum, n) => sum + Math.round(n * 100), 0) / 100
+    : values.reduce((sum, n) => sum + n, 0);
+}
 // Executes validated probabilities: sample a class, then take the weighted-median raise size.
 // class-sample-v2 first removes deep-stack commit candidates whose summed probability is
 // below COMMIT_MASS_FLOOR (never for a preflop premium). The removal is a deterministic
-// transform before the single draw — the same unit, never a redraw.
-export function selectJevAction({ probabilities, candidates, unit, apiChoice, rule = 'class-sample-v1', guard }) {
+// transform before the single draw — the same unit, never a redraw. `rule` is required: the
+// caller names the descriptor's selectionVersion, so a missing rule never silently means v1.
+export function selectJevAction({ probabilities, candidates, unit, apiChoice, rule, guard }) {
   if (!Array.isArray(candidates) || candidates.length === 0 || !probabilities || typeof probabilities !== 'object'
     || Array.isArray(probabilities) || Object.keys(probabilities).length !== candidates.length
     || candidates.some(c => !c || !Object.hasOwn(probabilities, c.key) || !CLASS_ORDER.includes(c.action)
@@ -228,10 +238,10 @@ export function selectJevAction({ probabilities, candidates, unit, apiChoice, ru
     if (!guard || typeof guard.deep !== 'boolean' || typeof guard.premium !== 'boolean' || !Array.isArray(guard.commitKeys)
       || guard.commitKeys.some(key => !candidates.some(c => c.key === key && (c.action === 'raise' || c.action === 'call')))) bad();
     if (guard.deep && !guard.premium && guard.commitKeys.length) {
-      const mass = clean(guard.commitKeys.reduce((sum, key) => sum + probabilities[key], 0));
+      const mass = commitMass(guard.commitKeys.map(key => probabilities[key]));
       if (mass < COMMIT_MASS_FLOOR) {
         eligible = candidates.filter(c => !guard.commitKeys.includes(c.key));
-        guardRecord = { commit: [...guard.commitKeys], mass };
+        guardRecord = { commit: [...guard.commitKeys], mass: clean(mass) };
       }
     }
   } else if (guard !== undefined) bad();
