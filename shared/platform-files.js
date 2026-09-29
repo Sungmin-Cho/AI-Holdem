@@ -110,9 +110,12 @@ export function isPrivatePath(file, { platform = process.platform, spawn = spawn
 // per child (a 1-path and a 7-path proof both took ~1.0 s, a .NET-only identity read
 // 0.2 s), and ACL proofs were 87% of Windows proof time (#249). The reads are the
 // ones Get-Acl makes — DirectorySecurity or FileSecurity with Access|Owner|Group —
-// and the JSON has the same shape. Every string value is a SID or Allow/Deny, so it
-// needs no escaping; rights are written in the invariant culture (GENERIC_* bits
-// are negative). Anything malformed fails JSON.parse and stays unproven.
+// and the JSON has the same shape. The attributes are read again after the rules, as
+// the Get-Acl script did, so a path swapped for a junction after its ACL was read is
+// still refused; a reparse point seen by either read counts. Every string value is a
+// SID or Allow/Deny, so it needs no escaping; rights are written in the invariant
+// culture (GENERIC_* bits are negative). Anything malformed fails JSON.parse and stays
+// unproven.
 export function aclProofScript(files) {
   const paths = files.map((file) => quote(file)).join(',');
   return [
@@ -128,7 +131,8 @@ export function aclProofScript(files) {
       + 'if (($attr -band [System.IO.FileAttributes]::Directory) -ne 0) { $a=[System.IO.Directory]::GetAccessControl($p) } else { $a=[System.IO.File]::GetAccessControl($p) }; '
       + '$rules=[System.Collections.Generic.List[string]]::new(); '
       + `foreach($r in $a.GetAccessRules($true,$true,$sid)) { $rules.Add('{"sid":' + (q ($r.IdentityReference.Value)) + ',"type":' + (q ($r.AccessControlType.ToString())) + ',"rights":' + ([long]$r.FileSystemRights).ToString($inv) + '}') }; `
-      + `$reparse=$(if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { 'true' } else { 'false' }); `
+      + '$after=[System.IO.File]::GetAttributes($p); '
+      + `$reparse=$(if ((($attr -bor $after) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { 'true' } else { 'false' }); `
       + `$proofs.Add($head + ',"owner":' + (q ($a.GetOwner($sid).Value)) + ',"reparse":' + $reparse + ',"rules":[' + ($rules -join ',') + ']}') }`,
     "'[' + ($proofs -join ',') + ']'",
   ].join('; ');
