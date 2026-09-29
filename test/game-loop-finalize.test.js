@@ -502,10 +502,11 @@ test('Task 7A r1: persisted coach workers를 shared deadline으로 동시에 닫
   assert.equal((await loop.run()).phase, 'done');
 });
 
-// A start-time string for the same pid that provably belongs to another process: 7 s off
-// the observed reading, which no time-zone offset can explain (#214 D4a).
-function replacedStartTime(startTime) {
-  return new Date(Date.parse(startTime) + 7_000).toISOString();
+// A start-time string for the same pid that provably belongs to another process: seconds off
+// the observed reading, which no time-zone offset can explain (#214 D4a). The UTC `o` form
+// parses on every platform and is the canonical Win32 reading.
+function replacedStartTime(startTime, offsetMs = 7_000) {
+  return new Date(Date.parse(startTime) + offsetMs).toISOString();
 }
 
 test('Task 7A full review: persisted pid startTime mismatch는 다른 pid identity에 signal하지 않고 prior cleanup을 released로 닫는다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
@@ -5877,7 +5878,10 @@ async function recovery205Fixture(t, { foreign = false, mixed = false, identity 
   const signals = [];
   let armed = false;
   const base = process.hrtime.bigint();
-  const writerView = identity === 'unknown' ? null : identity === 'replaced' ? `${startTime}0` : startTime;
+  // r4: a parseable replacement on every platform, 14 s off — distinct from both the live
+  // reading and the +7 s handles the #216 tests store.
+  const replacedView = replacedStartTime(startTime, 14_000);
+  const writerView = identity === 'unknown' ? null : identity === 'replaced' ? replacedView : startTime;
   const loop = createGameLoop({ gameDir, resolver: resolverForCoach(makeAdapter(), makeCoachAdapter()), opts: {
     port: 0, waitMs: 0, pollMs: 10,
     coachCliPath: coachCliPath ?? writerObservationShim({ startTimes: { [orphan.pid]: writerView } }),
@@ -5886,7 +5890,7 @@ async function recovery205Fixture(t, { foreign = false, mixed = false, identity 
     processStartTime: (pid) => {
       if (pid !== orphan.pid) return processStartTime(pid);
       if (jump) armed = true;
-      return identity === 'unknown' ? null : identity === 'replaced' ? `${startTime}0` : startTime;
+      return identity === 'unknown' ? null : identity === 'replaced' ? replacedView : startTime;
     },
     signalProcess: (pid, signal) => {
       if (pid === orphan.pid) signals.push(signal);
@@ -5999,7 +6003,7 @@ test('#216 a cleanup child that dies after its commit still counts as released',
   const authorityPath = path.join(f.gameDir, '.coach-authority.json');
   const authority = readJson(authorityPath);
   const [pid] = authority.hands['1'].agentHandle.split(':');
-  authority.hands['1'].agentHandle = `${pid}:${new Date(Date.parse(processStartTime(Number(pid))) + 7_000).toISOString()}`;
+  authority.hands['1'].agentHandle = `${pid}:${replacedStartTime(processStartTime(Number(pid)))}`;
   writeJsonAtomic(authorityPath, authority);
   assert.equal((await f.loop.resume()).phase, 'playing');
   const after = readJson(authorityPath);
@@ -6027,7 +6031,7 @@ test('#216 a cleanup child whose committed answer misses the deadline still coun
   const authorityPath = path.join(f.gameDir, '.coach-authority.json');
   const authority = readJson(authorityPath);
   const [pid] = authority.hands['1'].agentHandle.split(':');
-  authority.hands['1'].agentHandle = `${pid}:${new Date(Date.parse(processStartTime(Number(pid))) + 7_000).toISOString()}`;
+  authority.hands['1'].agentHandle = `${pid}:${replacedStartTime(processStartTime(Number(pid)))}`;
   writeJsonAtomic(authorityPath, authority);
   assert.equal((await f.loop.resume()).phase, 'playing');
   const after = readJson(authorityPath);

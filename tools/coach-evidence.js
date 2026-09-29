@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { validWin32StartTime } from '../engine/process-identity.js';
 
 export const SIDECAR_MAX_BYTES = 64 * 1024;
 // #192 I2: undefined (not 0) on a platform that has no O_NOFOLLOW (e.g. Windows) so callers
@@ -153,21 +154,34 @@ export function legacyEligible(row, sidecar, attributable) {
 // POSIX `ps -o lstart=` prints local wall time without a zone (engine/process-identity.js),
 // so the same process reads differently from two time zones. Two readings that differ by a
 // whole number of 15-minute steps within ±26 hours (UTC−12 … UTC+14) may be one process and
-// are never proof of replacement (#214 D4a). Win32 readings carry their offset (ISO `o`).
+// are never proof of replacement (#214 D4a).
 const TZ_STEP_MS = 15 * 60 * 1000;
 const TZ_SPAN_MS = 26 * 60 * 60 * 1000;
+// Win32 readings are UTC `o` strings with up to seven fraction digits: 100 ns ticks. They
+// are compared as text after padding the fraction, never through Date (milliseconds only).
+function win32Ticks(value) {
+  if (!validWin32StartTime(value)) return null;
+  const [whole, fraction = ''] = value.slice(0, -1).split('.');
+  return `${whole}.${fraction.padEnd(7, '0')}`;
+}
 // Compare a recorded start time with a fresh reading of the same pid: 'same', 'different',
-// or 'unknown'. A reading either side cannot parse is never proof of anything. Win32
-// readings carry their UTC offset, so equal instants are the same process and different
-// instants are not. POSIX readings are zone-less wall times: a whole number of 15-minute
-// steps within ±26 hours may be the same process read from another time zone.
+// or 'unknown'. A reading either side cannot parse is never proof of anything, even when the
+// two strings are equal.
+// - win32: equal ticks are the same process, any other tick is not.
+// - POSIX: only the identical text is the same process. Different text that parses to the
+//   same instant (a DST fold) or differs by a whole number of 15-minute steps within ±26
+//   hours may be one process read from another zone: unknown. Anything else is different.
 export function compareStartTimes(recorded, current, { platform = process.platform } = {}) {
-  if (recorded === current) return 'same';
+  if (platform === 'win32') {
+    const a = win32Ticks(recorded);
+    const b = win32Ticks(current);
+    if (a === null || b === null) return 'unknown';
+    return a === b ? 'same' : 'different';
+  }
   const a = Date.parse(recorded);
   const b = Date.parse(current);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return 'unknown';
-  if (a === b) return 'same';
-  if (platform === 'win32') return 'different';
+  if (recorded === current) return 'same';
   const diff = Math.abs(a - b);
   return diff <= TZ_SPAN_MS && diff % TZ_STEP_MS === 0 ? 'unknown' : 'different';
 }

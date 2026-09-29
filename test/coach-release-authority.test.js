@@ -108,6 +108,24 @@ test('#214 hook and absence declarations need their durable evidence, and an ali
   await assert.rejects(foreign.cleanup({ evidence: 'CLOSED_CONFIRMED' }), { code: 'RELEASE_EVIDENCE_REFUTED' }, 'a foreign tuple is never evidence');
 });
 
+// r4: when a foreign sidecar tuple or an identity conflict coincides with a live identity, the
+// declared-evidence path refutes first (the loop's Step 0 order) and the operator path refuses
+// the live identity first. Neither writes anything.
+test('#214 refusal precedence: tuple mismatch or conflict with a live identity', async () => {
+  const cases = [
+    ['tuple mismatch', { handle: `${LIVE_PID}:${START}`, sidecar: { phase: 'closed-confirmed', generation: 99 }, deps: observed({ [LIVE_PID]: START }) }],
+    ['conflict', { handle: `${LIVE_PID}:${START}`, sidecar: { phase: 'identity', pid: DEAD_PID, startTime: START }, deps: observed({ [LIVE_PID]: START, [DEAD_PID]: 'dead' }) }],
+  ];
+  for (const [label, shape] of cases) {
+    for (const [fields, code] of [[{ evidence: 'IDENTITY_DEAD' }, 'RELEASE_EVIDENCE_REFUTED'], [{ evidence: 'CLOSED_CONFIRMED' }, 'RELEASE_EVIDENCE_REFUTED'], [{ operatorConfirmed: true }, 'RELEASE_TARGET_ALIVE']]) {
+      const f = await fixture(shape);
+      const before = bytes(f.dir);
+      await assert.rejects(f.cleanup(fields), { code }, `${label} ${JSON.stringify(fields)}`);
+      assert.deepEqual(bytes(f.dir), before, `${label}: a refusal writes nothing`);
+    }
+  }
+});
+
 test('#214 a legacy release needs the writer’s own clean runtime scan', async () => {
   for (const [scan, expected] of [[{ status: 'clean' }, 'verified'], [{ status: 'candidates', candidates: [{ pid: 7, cwd: '/tmp/ai-holdem-coach-x' }] }, 'RELEASE_EVIDENCE_REFUTED'], [{ status: 'unavailable', reason: 'LSOF_MISSING' }, 'RELEASE_EVIDENCE_UNVERIFIABLE']]) {
     let scans = 0;
@@ -244,18 +262,32 @@ test('#215 the server-lock observation distinguishes absent, invalid, foreign, u
   assert.deepEqual(deriveServerLockObservation({ ...base, readLock: () => lock }), { state: 'authenticated', serverPid: 4242, observedAt: '2026-09-29T00:00:00.000Z' });
 });
 
-test('#214 D4a start-time comparison: unparseable is unknown, win32 instants are exact, POSIX zone steps are ambiguous', () => {
-  const iso = '2026-09-28T12:00:00.0000000+09:00';
-  assert.equal(compareStartTimes(iso, iso, { platform: 'win32' }), 'same');
-  assert.equal(compareStartTimes('2026-09-28T03:00:00.000Z', iso, { platform: 'win32' }), 'same', 'the same instant in another offset');
-  assert.equal(compareStartTimes('2026-09-28T03:00:07.000Z', iso, { platform: 'win32' }), 'different');
-  assert.equal(compareStartTimes('garbage', iso, { platform: 'win32' }), 'unknown', 'a malformed record never proves replacement');
+test('#214 D4a start-time comparison: unparseable is unknown, win32 ticks are exact, POSIX zone steps are ambiguous', () => {
+  const tick = '2026-09-28T03:00:00.1234567Z';
+  assert.equal(compareStartTimes(tick, tick, { platform: 'win32' }), 'same');
+  assert.equal(compareStartTimes('2026-09-28T03:00:00.123Z', '2026-09-28T03:00:00.1230000Z', { platform: 'win32' }), 'same', 'the same tick with fewer digits');
+  // r4: 100 ns apart inside one millisecond is another process.
+  assert.equal(compareStartTimes('2026-09-28T03:00:00.0000001Z', '2026-09-28T03:00:00.0000002Z', { platform: 'win32' }), 'different');
+  assert.equal(compareStartTimes(tick, '2026-09-28T03:00:00.1239999Z', { platform: 'win32' }), 'different');
+  assert.equal(compareStartTimes('2026-09-28T03:00:07.000Z', tick, { platform: 'win32' }), 'different');
+  // Only the canonical UTC reading the engine records is evidence; anything else proves nothing.
+  for (const other of ['garbage', '2026-09-28T12:00:00.1234567+09:00', `${tick}0`, 'Mon Sep 28 12:00:00 2026']) {
+    assert.equal(compareStartTimes(other, tick, { platform: 'win32' }), 'unknown', other);
+    assert.equal(compareStartTimes(other, other, { platform: 'win32' }), 'unknown', `${other} twice`);
+  }
+  assert.equal(compareStartTimes(START, START, { platform: 'darwin' }), 'same');
   assert.equal(compareStartTimes(START, 'Mon Sep 28 12:00:07 2026', { platform: 'darwin' }), 'different');
   for (const hours of [1, 9, 19, 26]) {
     assert.equal(compareStartTimes(START, new Date(Date.parse(START) + hours * 3_600_000).toString(), { platform: 'linux' }), 'unknown', `${hours} h`);
   }
   assert.equal(compareStartTimes(START, new Date(Date.parse(START) + 27 * 3_600_000).toString(), { platform: 'linux' }), 'different', 'beyond any zone pair');
+  // r4: equal unparseable text is still unknown, and different text at the same parsed instant
+  // (a DST fold such as 02:30 and 03:30 on a spring-forward night) is never 'same'.
   assert.equal(compareStartTimes(START, 'not a time', { platform: 'linux' }), 'unknown');
+  assert.equal(compareStartTimes('not a time', 'not a time', { platform: 'linux' }), 'unknown');
+  const sameInstant = new Date(Date.parse(START)).toISOString();
+  assert.notEqual(sameInstant, START);
+  assert.equal(compareStartTimes(START, sameInstant, { platform: 'darwin' }), 'unknown');
 });
 
 test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {
