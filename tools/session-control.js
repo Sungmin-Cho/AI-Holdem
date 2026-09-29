@@ -154,10 +154,11 @@ export function createSessionControl(
 // A busy attempt judges the lock's current holder. For a holder in another process
 // that is an identity read, which on Windows spawns PowerShell and alone can outlast
 // `timeoutMs` (#251). `minAttempts` still retries after such a slow judgement — a
-// holder keeps this lock only for a few file writes. `maxMs` is the last moment an
-// attempt may start; one already running (a synchronous identity read, capped at
-// 15 s on Windows) is not interrupted. The lock's own verdicts (fail-closed,
-// dead-owner reclaim) are unchanged: this only decides when to ask again.
+// holder keeps this lock only for a few file writes. The first attempt always runs;
+// `maxMs` is the last moment a later one may start, and one already running (a
+// synchronous identity read, capped at 15 s on Windows) is not interrupted. The
+// lock's own verdicts (fail-closed, dead-owner reclaim) are unchanged: this only
+// decides when to ask again. `onBusy` observes each busy attempt (tests only).
 const CONTROL_RETRY_MIN_ATTEMPTS = 3;
 const CONTROL_RETRY_MAX_MS = 5000;
 const CONTROL_RETRY_SLEEP_MS = 20;
@@ -167,6 +168,7 @@ export async function retryControlWrite(write, {
   maxMs = Math.max(timeoutMs, CONTROL_RETRY_MAX_MS),
   now = () => performance.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  onBusy = () => {},
 } = {}) {
   const started = now();
   // Checked after a failure and again after the pause, so no attempt starts late.
@@ -178,7 +180,9 @@ export async function retryControlWrite(write, {
     try {
       return write();
     } catch (error) {
-      if (error.code !== "CONTROL_BUSY" || !mayRetry(attempt)) throw error;
+      if (error.code !== "CONTROL_BUSY") throw error;
+      onBusy(attempt);
+      if (!mayRetry(attempt)) throw error;
       await sleep(CONTROL_RETRY_SLEEP_MS);
       if (!mayRetry(attempt)) throw error;
     }

@@ -144,3 +144,18 @@ test('#251: with the real clock, a slow synchronous attempt is still retried', a
   assert.equal(result, 'accepted');
   assert.equal(calls, 2);
 });
+
+test('onBusy observes every busy attempt, including the one that ends the retries', async () => {
+  const c = clock();
+  const seen = [];
+  await assert.rejects(retryControlWrite(() => {
+    c.spend(400);
+    throw busy();
+  }, { timeoutMs: 250, now: c.now, sleep: c.sleep, onBusy: (attempt) => seen.push(attempt) }), { code: 'CONTROL_BUSY' });
+  assert.deepEqual(seen, [1, 2, 3]);
+  const other = [];
+  await assert.rejects(retryControlWrite(() => {
+    throw Object.assign(new Error('GAME_PAUSED'), { code: 'GAME_PAUSED' });
+  }, { onBusy: (attempt) => other.push(attempt) }), { code: 'GAME_PAUSED' });
+  assert.deepEqual(other, [], 'only CONTROL_BUSY is reported');
+});
