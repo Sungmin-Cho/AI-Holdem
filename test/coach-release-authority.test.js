@@ -9,7 +9,7 @@ import { writeJsonAtomic } from '../engine/state.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { deriveServerLockObservation } from '../tools/game-loop.js';
-import { compareStartTimes } from '../tools/coach-evidence.js';
+import { compareStartTimes, observeRecordedIdentity, rowIdentities } from '../tools/coach-evidence.js';
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
 const TOKEN = 'tok-coach-release';
@@ -321,6 +321,93 @@ test('#214 win32 writer: alive, replaced and refusal precedence with UTC tick ha
   await assert.rejects(mismatch.cleanup({ evidence: 'CLOSED_CONFIRMED' }), { code: 'RELEASE_EVIDENCE_REFUTED' });
   const mismatch2 = await fixture({ handle: `${LIVE_PID}:${TICK}`, sidecar: { phase: 'closed-confirmed', generation: 99 }, deps: win({ [LIVE_PID]: 'live' }) });
   await assert.rejects(mismatch2.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
+});
+
+// #247: coach handles record the owned start time: no time zone, compared exactly.
+const OWNED = {
+  utc: 'utc-v1:Mon Sep 28 12:00:00 2026',
+  win32: 'win32-v1:2026-09-28T03:00:00.1234567Z',
+};
+test('#247 owned start times: equal is the same process, unequal is a replacement only where the start time is fixed', () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    for (const value of Object.values(OWNED)) {
+      assert.equal(compareStartTimes(value, value, { platform }), 'same', `${value} on ${platform}`);
+    }
+    // A Windows creation FILETIME never moves: 100 ns later is another process.
+    assert.equal(compareStartTimes(OWNED.win32, 'win32-v1:2026-09-28T03:00:00.1234568Z', { platform }), 'different');
+    for (const [a, b] of [
+      [OWNED.utc, OWNED.win32], [OWNED.win32, OWNED.utc], [OWNED.utc, START], [START, OWNED.utc],
+      [OWNED.win32, '2026-09-28T03:00:00.1234567Z'], ['utc-v1:garbage', 'utc-v1:garbage'],
+      ['win32-v1:2026-09-28T03:00:00.123Z', 'win32-v1:2026-09-28T03:00:00.123Z'],
+    ]) {
+      assert.equal(compareStartTimes(a, b, { platform }), 'unknown', `${a} vs ${b} on ${platform}`);
+    }
+  }
+  // macOS keeps the start time taken at fork: another reading is another process, whole hours
+  // apart included (the reading has no zone to explain them).
+  assert.equal(compareStartTimes(OWNED.utc, 'utc-v1:Mon Sep 28 12:00:07 2026', { platform: 'darwin' }), 'different');
+  assert.equal(compareStartTimes(OWNED.utc, 'utc-v1:Mon Sep 28 13:00:00 2026', { platform: 'darwin' }), 'different');
+  // Linux derives it from the boot time, which follows clock steps: a mismatch proves nothing.
+  assert.equal(compareStartTimes(OWNED.utc, 'utc-v1:Mon Sep 28 12:00:07 2026', { platform: 'linux' }), 'unknown');
+  assert.equal(compareStartTimes(OWNED.utc, 'utc-v1:Mon Sep 28 13:00:00 2026', { platform: 'linux' }), 'unknown');
+});
+
+test('#247 a changed zone and a reused pid never make an owned handle alive', () => {
+  const calls = { legacy: 0, owned: 0 };
+  // Recorded at 12:00 UTC. The pid now belongs to a process that started at 13:00 UTC; the
+  // legacy reader, an hour behind, prints the text a legacy record would have, but an owned
+  // record never asks it.
+  const legacyReader = () => { calls.legacy += 1; return START; };
+  const ownedReader = () => { calls.owned += 1; return 'utc-v1:Mon Sep 28 13:00:00 2026'; };
+  const observe = (startTime, readers, platform = 'darwin') => observeRecordedIdentity({ pid: LIVE_PID, startTime }, {
+    processAlive: () => true, platform, ...readers,
+  });
+  assert.equal(observe(OWNED.utc, { startTimeOf: legacyReader, ownedStartTimeOf: ownedReader }), 'replaced');
+  assert.equal(observe(OWNED.utc, { startTimeOf: legacyReader, ownedStartTimeOf: ownedReader }, 'linux'), 'unknown',
+    'on Linux it is not alive either, and nothing is released on its strength');
+  assert.deepEqual(calls, { legacy: 0, owned: 2 });
+  assert.equal(observe(OWNED.utc, { startTimeOf: legacyReader }), 'unknown', 'without the owned reader it is never alive');
+  assert.equal(observe(OWNED.utc, { startTimeOf: legacyReader, ownedStartTimeOf: () => null }), 'unknown');
+  for (const platform of ['linux', 'darwin']) {
+    assert.equal(observe(OWNED.utc, { startTimeOf: legacyReader, ownedStartTimeOf: () => OWNED.utc }, platform), 'alive');
+  }
+  assert.equal(observe(OWNED.win32, { startTimeOf: legacyReader, ownedStartTimeOf: () => OWNED.utc }), 'unknown', 'another kind proves nothing');
+  // A legacy record keeps its reader and its rules (#214 D4a).
+  calls.legacy = 0; calls.owned = 0;
+  assert.equal(observe(START, { startTimeOf: legacyReader, ownedStartTimeOf: ownedReader }), 'alive');
+  assert.deepEqual(calls, { legacy: 1, owned: 0 });
+  assert.equal(observeRecordedIdentity({ pid: DEAD_PID, startTime: OWNED.utc }, {
+    processAlive: () => false, startTimeOf: legacyReader, ownedStartTimeOf: ownedReader,
+  }), 'dead');
+});
+
+test('#247 an authority handle and a sidecar identity in different forms are a conflict', () => {
+  for (const [authority, sidecar] of [[OWNED.utc, START], [START, OWNED.utc], [OWNED.win32, OWNED.utc]]) {
+    const ids = rowIdentities({ agentHandle: `${LIVE_PID}:${authority}` }, { phase: 'identity', data: { pid: LIVE_PID, startTime: sidecar } });
+    assert.equal(ids.conflict, true, `${authority} vs ${sidecar}`);
+  }
+  const same = rowIdentities({ agentHandle: `${LIVE_PID}:${OWNED.utc}` }, { phase: 'identity', data: { pid: LIVE_PID, startTime: OWNED.utc } });
+  assert.equal(same.conflict, false);
+  assert.deepEqual(same.selected, { pid: LIVE_PID, startTime: OWNED.utc }, 'the whole owned value survives the handle parser');
+});
+
+test('#247 writer: owned handles are alive, replaced or unverifiable by the owned reader alone', async () => {
+  const deps = (current, platform = 'darwin') => ({
+    processAlive: () => true,
+    processStartTime: () => { throw new Error('an owned handle must not read the legacy start time'); },
+    ownedProcessStartTime: () => current,
+    platform,
+  });
+  const alive = await fixture({ handle: `${LIVE_PID}:${OWNED.utc}`, deps: deps(OWNED.utc) });
+  await assert.rejects(alive.cleanup({ evidence: 'IDENTITY_DEAD' }), { code: 'RELEASE_TARGET_ALIVE' });
+  await assert.rejects(alive.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
+  const replaced = await fixture({ handle: `${LIVE_PID}:${OWNED.win32}`, deps: deps('win32-v1:2026-09-28T03:00:07.1234567Z', 'win32') });
+  assert.equal((await replaced.cleanup({ evidence: 'IDENTITY_REPLACED' })).verification.status, 'verified');
+  const linux = await fixture({ handle: `${LIVE_PID}:${OWNED.utc}`, deps: deps('utc-v1:Mon Sep 28 12:00:07 2026', 'linux') });
+  await assert.rejects(linux.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' },
+    'a Linux mismatch is no proof of replacement');
+  const unreadable = await fixture({ handle: `${LIVE_PID}:${OWNED.win32}`, deps: deps(null, 'win32') });
+  await assert.rejects(unreadable.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' });
 });
 
 test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {

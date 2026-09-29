@@ -4146,7 +4146,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #214 D4a: the same observation the cleanup writer makes. A start time that may differ
   // only by a time-zone offset is 'unknown', never proof of replacement.
   const persistedCoachIdentityState = (identity) => {
-    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf });
+    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf });
     return observed === 'replaced' ? 'mismatch' : observed;
   };
 

@@ -104,7 +104,9 @@ export async function seedQueuedCoach(gameDir, owner, handNo = 1, { acceptEviden
   return reserved;
 }
 
-export async function seedRunningCoach(gameDir, owner, handNo, child) {
+// `startTimeOf` picks the recorded form: legacy by default, `ownedProcessStartTime` for the
+// handles a current runtime writes (#247).
+export async function seedRunningCoach(gameDir, owner, handNo, child, { startTimeOf = processStartTime } = {}) {
   const stats = JSON.parse((await execFileAsync(process.execPath, [
     CLI, 'stats', '--game-dir', gameDir,
   ], { encoding: 'utf8', timeout: 5_000 })).stdout.trim());
@@ -116,7 +118,7 @@ export async function seedRunningCoach(gameDir, owner, handNo, child) {
     statsFile: statsPath, snapshotFile: path.join(gameDir, 'ui-snapshot.json'),
   });
   const startTime = await waitFor(
-    () => processStartTime(child.pid),
+    () => startTimeOf(child.pid),
     `coach orphan ${child.pid} start identity was not observable`,
   );
   await cc.bindHandle({
