@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { withNamedLock, writeJsonAtomic, coachProcessStartTime as defaultCoachProcessStartTime } from '../engine/state.js';
 import { processStartTime as defaultProcessStartTime } from '../engine/process-identity.js';
 import {
   createCoachEvidenceReader, sidecarTupleMismatch, rowIdentities, observeRecordedIdentity,
@@ -714,6 +714,7 @@ export function createCoachControl(deps = {}) {
   const appendTraceRow = deps.appendTrace ?? appendTrace;
   const processAlive = deps.processAlive ?? defaultProcessAlive;
   const startTimeOf = deps.processStartTime ?? defaultProcessStartTime;
+  const coachStartTimeOf = deps.coachProcessStartTime ?? defaultCoachProcessStartTime;
   const scanRuntimeProcesses = deps.scanRuntimeProcesses
     ?? (() => scanCoachRuntimeProcesses({ lsofPath: DEFAULT_LSOF }));
   const wallClock = deps.wallClock ?? (() => new Date());
@@ -1252,7 +1253,7 @@ export function createCoachControl(deps = {}) {
     const attributable = reader.coachEvidenceAttributable(row.exactResultPath);
     const tupleMismatch = sidecarTupleMismatch(sidecar, row, auth.gameEpoch);
     const ids = rowIdentities(row, tupleMismatch ? null : sidecar);
-    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf, platform }) : null);
+    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf, coachStartTimeOf, platform }) : null);
     const authorityState = probe(ids.authority);
     const sidecarState = ids.sidecar && (!ids.authority || ids.conflict) ? probe(ids.sidecar) : authorityState;
     const scan = scanLegacy && !ids.selected && legacyEligible(row, sidecar, attributable)

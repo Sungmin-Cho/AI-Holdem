@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   processStartTime,
+  coachProcessStartTime,
   readOwnedLock,
   writeJsonAtomic,
   acquireOwnedLock,
@@ -586,6 +587,88 @@ test('#214 a start time that differs only by a time-zone offset is unknown, not 
   assert.notEqual(readJson(authorityPath).retiredAttempts.find((row) => row.generation === 1)?.cleanupState, 'released');
 });
 
+
+// #247: another reading of the same kind as a recorded coach start time — seconds later
+// for utc-v1/win32-v1 (keeping the seven Windows fraction digits), later ticks for linux-v1.
+function replacedCoachStartTime(value) {
+  const kind = value.slice(0, value.indexOf(':'));
+  if (kind === 'linux-v1') {
+    const cut = value.lastIndexOf(':');
+    return `${value.slice(0, cut + 1)}${Number(value.slice(cut + 1)) + 700}`;
+  }
+  if (kind === 'win32-v1') {
+    const iso = value.slice('win32-v1:'.length);
+    return `win32-v1:${new Date(Date.parse(iso) + 7_000).toISOString().slice(0, 19)}${iso.slice(19)}`;
+  }
+  const d = new Date(Date.parse(`${value.slice('utc-v1:'.length)} UTC`) + 7_000);
+  const two = (n) => String(n).padStart(2, '0');
+  return `utc-v1:${'SunMonTueWedThuFriSat'.slice(d.getUTCDay() * 3, d.getUTCDay() * 3 + 3)} ${'JanFebMarAprMayJunJulAugSepOctNovDec'.slice(d.getUTCMonth() * 3, d.getUTCMonth() * 3 + 3)} ${String(d.getUTCDate()).padStart(2, ' ')} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
+
+test('#247 a live coach recorded with the coach start time is confirmed by that reader and terminated', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: coachProcessStartTime });
+  assert.match(seeded.startTime, /^(?:utc|win32|linux)-v1:/);
+  let legacyReads = 0;
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      processStartTime: (pid) => {
+        if (pid === orphan.pid) legacyReads += 1;
+        return processStartTime(pid);
+      },
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(signals.includes('SIGTERM'), true, 'a confirmed coach is signalled');
+  await waitUntilDead(orphan.pid);
+  assert.equal(legacyReads, 0, 'a qualified handle is never read with the legacy reader');
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+    .find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
+test('#247 a coach start time of the same kind that moved is a replacement: released without a signal', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: coachProcessStartTime });
+  const authorityPath = path.join(gameDir, '.coach-authority.json');
+  const authority = readJson(authorityPath);
+  authority.hands['1'].agentHandle = `${orphan.pid}:${replacedCoachStartTime(seeded.startTime)}`;
+  fs.writeFileSync(authorityPath, JSON.stringify(authority));
+  const signalled = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+    },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'the process now holding the pid was left alone');
+  assert.equal(readJson(authorityPath).retiredAttempts.find((row) => row.generation === 1)?.cleanupState, 'released');
+});
 
 test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 없이 durable recovery로 중단한다', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();

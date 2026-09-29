@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { processStartTime as defaultProcessStartTime } from '../engine/state.js';
+import { coachProcessStartTime as defaultProcessStartTime } from '../engine/state.js';
 import { personaGuidance } from './persona-guidance.js';
 import {
   grokSessionDir,

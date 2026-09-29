@@ -9,7 +9,7 @@ import { writeJsonAtomic } from '../engine/state.js';
 import { gameEpochOf } from '../publish-contract.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { deriveServerLockObservation } from '../tools/game-loop.js';
-import { compareStartTimes } from '../tools/coach-evidence.js';
+import { compareStartTimes, observeRecordedIdentity } from '../tools/coach-evidence.js';
 
 const OWNER = '11111111-1111-4111-8111-111111111111';
 const TOKEN = 'tok-coach-release';
@@ -321,6 +321,77 @@ test('#214 win32 writer: alive, replaced and refusal precedence with UTC tick ha
   await assert.rejects(mismatch.cleanup({ evidence: 'CLOSED_CONFIRMED' }), { code: 'RELEASE_EVIDENCE_REFUTED' });
   const mismatch2 = await fixture({ handle: `${LIVE_PID}:${TICK}`, sidecar: { phase: 'closed-confirmed', generation: 99 }, deps: win({ [LIVE_PID]: 'live' }) });
   await assert.rejects(mismatch2.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
+});
+
+// #247: coach handles are recorded in a form no clock or zone change can move — Linux
+// boot id + start tick, macOS absolute start in UTC, Windows creation FILETIME.
+const BOOT = '0f8c4a2e-1b2c-4d5e-8f90-a1b2c3d4e5f6';
+const QUALIFIED = {
+  linux: `linux-v1:${BOOT}:987654`,
+  utc: 'utc-v1:Mon Sep 28 12:00:00 2026',
+  win32: 'win32-v1:2026-09-28T03:00:00.1234567Z',
+};
+test('#247 qualified start times compare exactly and only with their own kind', () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    for (const value of Object.values(QUALIFIED)) {
+      assert.equal(compareStartTimes(value, value, { platform }), 'same', `${value} on ${platform}`);
+    }
+    assert.equal(compareStartTimes(QUALIFIED.linux, `linux-v1:${BOOT}:987655`, { platform }), 'different', 'one tick later is another process');
+    assert.equal(compareStartTimes(QUALIFIED.linux, 'linux-v1:1f8c4a2e-1b2c-4d5e-8f90-a1b2c3d4e5f6:987654', { platform }), 'different', 'another boot');
+    assert.equal(compareStartTimes(QUALIFIED.utc, 'utc-v1:Mon Sep 28 12:00:07 2026', { platform }), 'different');
+    assert.equal(compareStartTimes(QUALIFIED.win32, 'win32-v1:2026-09-28T03:00:00.1234568Z', { platform }), 'different', '100 ns later');
+    // A whole number of hours apart is no longer "maybe another zone": the reading has none.
+    assert.equal(compareStartTimes(QUALIFIED.utc, 'utc-v1:Mon Sep 28 13:00:00 2026', { platform }), 'different');
+    for (const [a, b] of [
+      [QUALIFIED.linux, QUALIFIED.utc], [QUALIFIED.utc, QUALIFIED.win32], [QUALIFIED.win32, QUALIFIED.linux],
+      [QUALIFIED.utc, START], [START, QUALIFIED.utc], [QUALIFIED.win32, '2026-09-28T03:00:00.1234567Z'],
+      ['utc-v1:garbage', 'utc-v1:garbage'], ['win32-v1:2026-09-28T03:00:00.123Z', 'win32-v1:2026-09-28T03:00:00.123Z'],
+      [`linux-v1:${BOOT}:01`, `linux-v1:${BOOT}:01`], ['linux-v1:not-a-boot-id:5', 'linux-v1:not-a-boot-id:5'],
+    ]) {
+      assert.equal(compareStartTimes(a, b, { platform }), 'unknown', `${a} vs ${b} on ${platform}`);
+    }
+  }
+});
+
+test('#247 a changed zone and a reused pid never make a qualified handle alive', () => {
+  const calls = { legacy: 0, coach: 0 };
+  // Recorded at 12:00 UTC. The pid now belongs to a process that started at 13:00 UTC; the
+  // legacy reader, an hour behind, prints the recorded text, but a qualified record never
+  // asks it.
+  const legacyReader = () => { calls.legacy += 1; return START; };
+  const coachReader = () => { calls.coach += 1; return 'utc-v1:Mon Sep 28 13:00:00 2026'; };
+  const observe = (startTime, readers) => observeRecordedIdentity({ pid: LIVE_PID, startTime }, {
+    processAlive: () => true, platform: 'darwin', ...readers,
+  });
+  assert.equal(observe(QUALIFIED.utc, { startTimeOf: legacyReader, coachStartTimeOf: coachReader }), 'replaced');
+  assert.deepEqual(calls, { legacy: 0, coach: 1 });
+  assert.equal(observe(QUALIFIED.utc, { startTimeOf: legacyReader }), 'unknown', 'without the coach reader it is never alive');
+  assert.equal(observe(QUALIFIED.utc, { startTimeOf: legacyReader, coachStartTimeOf: () => null }), 'unknown');
+  assert.equal(observe(QUALIFIED.utc, { startTimeOf: legacyReader, coachStartTimeOf: () => QUALIFIED.utc }), 'alive');
+  assert.equal(observe(QUALIFIED.linux, { startTimeOf: legacyReader, coachStartTimeOf: () => QUALIFIED.utc }), 'unknown', 'another kind proves nothing');
+  // A legacy record keeps its reader and its rules (#214 D4a).
+  calls.legacy = 0; calls.coach = 0;
+  assert.equal(observe(START, { startTimeOf: legacyReader, coachStartTimeOf: coachReader }), 'alive');
+  assert.deepEqual(calls, { legacy: 1, coach: 0 });
+  assert.equal(observeRecordedIdentity({ pid: DEAD_PID, startTime: QUALIFIED.utc }, {
+    processAlive: () => false, startTimeOf: legacyReader, coachStartTimeOf: coachReader,
+  }), 'dead');
+});
+
+test('#247 writer: qualified handles are alive, replaced or unverifiable by the coach reader alone', async () => {
+  const deps = (current) => ({
+    processAlive: () => true,
+    processStartTime: () => { throw new Error('a qualified handle must not read the legacy start time'); },
+    coachProcessStartTime: () => current,
+    platform: 'darwin',
+  });
+  const alive = await fixture({ handle: `${LIVE_PID}:${QUALIFIED.utc}`, deps: deps(QUALIFIED.utc) });
+  await assert.rejects(alive.cleanup({ evidence: 'IDENTITY_DEAD' }), { code: 'RELEASE_TARGET_ALIVE' });
+  await assert.rejects(alive.cleanup({ operatorConfirmed: true }), { code: 'RELEASE_TARGET_ALIVE' });
+  const replaced = await fixture({ handle: `${LIVE_PID}:${QUALIFIED.linux}`, deps: deps(`linux-v1:${BOOT}:987655`) });
+  assert.equal((await replaced.cleanup({ evidence: 'IDENTITY_REPLACED' })).verification.status, 'verified');
+  const unreadable = await fixture({ handle: `${LIVE_PID}:${QUALIFIED.win32}`, deps: deps(null) });
+  await assert.rejects(unreadable.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' });
 });
 
 test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {
