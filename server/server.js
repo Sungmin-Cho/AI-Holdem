@@ -1055,8 +1055,10 @@ function serveStatic(pathname, res) {
   });
 }
 
-// `actionControlRetryMs` bounds how long an action waits out CONTROL_BUSY; only tests change it.
-export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250 }) {
+// `actionControlRetryMs` is how long an action keeps retrying CONTROL_BUSY; a slow first
+// attempt is still followed by the minimum retries (#251). `onActionControlBusy` observes
+// each busy attempt. Only tests set either.
+export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
   const trustedStudyUrl = validatedStudyUrl(studyUrl);
@@ -1524,7 +1526,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         // #235: a pause refusal records a durable per-request cancellation under the
         // same control lock, so the client may release the request and choose again.
         onClosed: (control) => receiptStore.cancel(body, currentDecisionId(), control.controlRevision),
-      }), {timeoutMs:actionControlRetryMs});
+      }), {timeoutMs:actionControlRetryMs, onBusy:onActionControlBusy});
       else receiptStore.accept(body, current);
       clearHintClients(current);
       deliverSlot();
