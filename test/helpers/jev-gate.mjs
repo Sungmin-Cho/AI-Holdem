@@ -305,9 +305,8 @@ function judgeRun(run) {
   // tournament must finish its first five hands however it ended (End also sets gameOver),
   // and the journey must have passed; those runs are still judged.
   const evidence = [];
-  if (!(sameDescriptor(run.birthDescriptor) && sameDescriptor(run.loopState?.jev) && !run.loopState?.jevRolledForward)) {
-    evidence.push('현재 descriptor로 시작한 store가 아님');
-  }
+  const bornCurrent = sameDescriptor(run.birthDescriptor) && sameDescriptor(run.loopState?.jev) && !run.loopState?.jevRolledForward;
+  if (!bornCurrent) evidence.push('현재 descriptor로 시작한 store가 아님');
   if (truncated) evidence.push('진단 절단/손상(미러 없음 또는 불일치)');
   if (run.journeyPass !== true && run.journeyPass !== false) evidence.push('저니 결과 없음(result.json)');
   if (!Number.isSafeInteger(run.requests)) evidence.push('요청 수 기록 없음');
@@ -315,7 +314,10 @@ function judgeRun(run) {
   if (run.stoppedBy === 'request-cap') evidence.push('요청 상한 도달로 결정 중 중단');
   const judged = evidence.length === 0;
   const inconclusive = [...evidence];
-  if (run.journeyPass === false && run.stoppedBy !== 'request-cap') inconclusive.push('저니 실패(result.pass false)');
+  // A journey that failed a product check (runtime error, leaked private field, player
+  // sessions, changed user store) is a product failure, not a short sample.
+  const productFailure = run.journeyPass === false && run.failureKind === 'product';
+  if (run.journeyPass === false && run.stoppedBy !== 'request-cap' && !productFailure) inconclusive.push('저니 실패(result.pass false)');
   if (run.mode !== 'tournament' && Number.isSafeInteger(run.handLimit) && hands.length < run.handLimit) {
     inconclusive.push(`완료 핸드 ${hands.length} < handLimit ${run.handLimit}${run.stoppedBy ? ` (${run.stoppedBy})` : ''}`);
   }
@@ -332,8 +334,14 @@ function judgeRun(run) {
     modelMsP50: percentile(model, 0.5), modelMsP90: percentile(model, 0.9),
     tokens: entries.reduce((sum, e) => ({ input: sum.input + (e.usage?.input_tokens ?? 0), output: sum.output + (e.usage?.output_tokens ?? 0) }), { input: 0, output: 0 }),
     entryBytes: Buffer.byteLength(JSON.stringify(entries), 'utf8'), requests: run.requests ?? null, stoppedBy: run.stoppedBy ?? null };
-  const pass = judged ? (one.judged ? one.pass : true) && four.pass && (!three.applies || three.pass) : null;
-  return { run: { name: run.name, mode: run.mode, hands: hands.length, judged, pass, inconclusive, one, two, three, four, report }, vpip: judged ? vpip : new Map() };
+  // A run with incomplete evidence is not judged on ① or pooled, but a violation its completed
+  // hands already prove (④ a premium fold, ③ an early bust) still fails it — unless the store
+  // was not born under the current descriptor, when nothing in it is a v3 result.
+  const archiveProven = four.pass && (!three.applies || three.pass);
+  const pass = judged ? (one.judged ? one.pass : true) && archiveProven && !productFailure
+    : bornCurrent && (!archiveProven || productFailure) ? false : null;
+  return { run: { name: run.name, mode: run.mode, hands: hands.length, judged, pass, inconclusive, one, two, three, four, report,
+    ...(productFailure ? { productFailure: run.failureMessage ?? true } : {}) }, vpip: judged ? vpip : new Map() };
 }
 
 export function gateSessions(runs) {
@@ -375,7 +383,7 @@ export function gateSessions(runs) {
     ...(judgedRuns.some(r => r.mode === 'tournament') ? [] : ['③ 토너먼트 실행 없음']),
     ...(spent > GATE_BUDGET.total ? [`판정 실행 요청 합계 ${spent} > 승인 예산 ${GATE_BUDGET.total}`] : []),
   ];
-  const failed = judgedRuns.some(r => !r.pass) || (opportunities > 0 && !desperation.pass)
+  const failed = perRun.some(r => r.pass === false) || (opportunities > 0 && !desperation.pass)
     || Object.values(vpip).some(r => r.judged && !r.pass);
   return { perRun, pooled, inconclusive, verdict: failed ? 'FAIL' : inconclusive.length ? 'INCONCLUSIVE' : 'PASS' };
 }
@@ -400,7 +408,8 @@ export function loadGateRun(dir) {
   return { name: path.basename(dir), mode: engine.config?.mode ?? 'tournament', hands,
     loopState: readJson(path.join(session, 'loop-state.json')), players: readJson(path.join(session, 'players.json')),
     requests: Array.isArray(result.requests) ? result.requests.length : null, stoppedBy: result.stoppedBy ?? null, mirror,
-    journeyPass: typeof result.pass === 'boolean' ? result.pass : null,
+    journeyPass: typeof result.pass === 'boolean' ? result.pass : null, failureKind: result.failureKind ?? null,
+    failureMessage: typeof result.message === 'string' ? result.message.slice(0, 200) : null,
     handLimit: engine.config?.handLimit ?? null, gameOver: engine.gameOver === true, birthDescriptor: engine.config?.jev ?? null,
     unfinishedHand: aborted || engine.hand ? engine.handNo : null };
 }

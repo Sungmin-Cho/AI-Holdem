@@ -21,6 +21,33 @@ export function newMirrorEntries(loopState,seen){
  for(const entry of entries){const key=`${entry?.decisionId}#${entry?.generation}`;if(seen.has(key))continue;seen.add(key);fresh.push(entry);}
  return fresh;
 }
+// Real-provider requests beyond `cap` never leave this process: the call fails, `onCap` marks
+// the run, and the gate reads that as a spent budget, not a product defect.
+export function createCappedFetch(originalFetch,{cap,requests,onCap}){
+ return async(url,options)=>{
+  if(!String(url).startsWith('https://api.typesafe.ai/'))return originalFetch(url,options);
+  if(requests.length>=cap){onCap();throw new Error(`real-play request cap ${cap} reached`);}
+  const started=Date.now(),row={};requests.push(row);
+  try{const response=await originalFetch(url,options);row.status=response.status;row.ms=Date.now()-started;const body=await response.clone().json();const a=body.answers?.action;row.answerCheck={model:body.model,type:a?.type,choice:a?.choice,confidence:a?.confidence,probabilities:a?.probabilities,sum:Object.values(a?.probabilities??{}).reduce((x,y)=>x+y,0),usage:body.usage};return response;}
+  catch(e){row.failed=true;row.ms=Date.now()-started;throw e;}
+ };
+}
+// A failed journey says why, so the gate can tell a product defect from a spent budget or a
+// harness problem: `product` for a product check (runtime error, leaked private field, player
+// sessions, wrong runtime, user store changed), `request-cap` for the cap, else `harness`.
+const productCheck=(ok,message)=>{if(!ok)throw Object.assign(new Error(message),{productFailure:true});};
+export function failureKindOf(error,stoppedBy){
+ if(stoppedBy==='request-cap')return 'request-cap';
+ return error?.productFailure===true?'product':'harness';
+}
+// One run per directory: a reused one could mix an earlier session into this run's evidence.
+// The claim file is created exclusively, so two runs started together cannot share it.
+export function claimOutDir(outDir){
+ if(fs.existsSync(outDir)&&fs.readdirSync(outDir).length)throw new Error(`--out-dir must be new or empty: ${outDir}`);
+ fs.mkdirSync(outDir,{recursive:true,mode:0o700});
+ try{fs.writeFileSync(path.join(outDir,'.run-claim'),`${process.pid}\n`,{flag:'wx',mode:0o600});}
+ catch(error){if(error.code==='EEXIST')throw new Error(`--out-dir is claimed by another run: ${outDir}`);throw error;}
+}
 // Gate evidence holds hole cards and private probabilities: owner-only permissions.
 export function privateTree(dir){
  if(!fs.existsSync(dir))return;fs.chmodSync(dir,0o700);
@@ -39,8 +66,7 @@ export function parseLiveArgs(argv){
 }
 export async function runJevLiveJourney(outDir,input={}) {
  const options={...DEFAULT_LIVE_OPTIONS,...input},cap=options.maxRequests??40,softCap=options.maxRequests===null?Infinity:Math.max(1,cap-HAND_RESERVE);
- // One run per directory: a reused one could mix an earlier session into this run's evidence.
- if(fs.existsSync(outDir)&&fs.readdirSync(outDir).length)throw new Error(`--out-dir must be new or empty: ${outDir}`);
+ claimOutDir(outDir);
  const workspace=createBrowserWorkspace(),root=workspace.root,userStore=path.resolve('game'),before=hashTree(userStore);
  const session=`jev-${randomUUID()}`,originalFetch=globalThis.fetch,requests=[];let app,failure,summary=null,stoppedBy=null,sessionDir=null;
  // Owner-only from the first byte: files this process and its browser children create are 0600/0700.
@@ -58,13 +84,7 @@ export async function runJevLiveJourney(outDir,input={}) {
  assert.equal(r.exitCode,0,`browser ${args[0]} failed`);const data=JSON.parse(r.stdout);assert.notEqual(data.success,false);return data.data;};
  const evaluate=async expr=>{const data=await browser(['eval',expr]);return data?.result??data;};
  const wait=async(fn,ms=90000)=>{const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,150));}throw new Error('JEV live journey timeout');};
- globalThis.fetch=async(url,options)=>{
-  if(String(url).startsWith('https://api.typesafe.ai/')){
-   // Hitting the cap mid-hand fails that decision; the gate reads it as a spent budget, not a defect.
-   if(requests.length>=cap){stoppedBy='request-cap';throw new Error(`real-play request cap ${cap} reached`);}const started=Date.now();const row={};requests.push(row);
-   try{const response=await originalFetch(url,options);row.status=response.status;row.ms=Date.now()-started;const body=await response.clone().json();const a=body.answers?.action;row.answerCheck={model:body.model,type:a?.type,choice:a?.choice,confidence:a?.confidence,probabilities:a?.probabilities,sum:Object.values(a?.probabilities??{}).reduce((a,b)=>a+b,0),usage:body.usage};return response;}catch(e){row.failed=true;row.ms=Date.now()-started;throw e;}
-  }return originalFetch(url,options);
- };
+ globalThis.fetch=createCappedFetch(originalFetch,{cap,requests,onCap:()=>{stoppedBy='request-cap';}});
  const command=async kind=>{
   const s=app.manager.snapshot(),row=app.manager.command({requestId:randomUUID(),expectedInstanceId:s.instanceId,expectedAppRevision:s.appRevision,expectedGameId:s.gameId,expectedSelectionVersion:s.selectionVersion,kind});
   let receipt;await wait(()=>{receipt=app.manager.receipt(row.requestId);return receipt.status!=='accepted';});
@@ -85,7 +105,7 @@ export async function runJevLiveJourney(outDir,input={}) {
   const loopHand=()=>JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json'))).handNo;
   let flaggedHand=null;
   await wait(async()=>{
-   const s=app.manager.snapshot();if(s.state==='error'||s.pendingDecision?.status==='recovery_required')throw new Error(s.error??s.pendingDecision.code);
+   const s=app.manager.snapshot();productCheck(!(s.state==='error'||s.pendingDecision?.status==='recovery_required'),s.error??s.pendingDecision?.code);
    if(s.state==='completed')return true;
    const reason=requests.length>=softCap?'max-requests':null;
    if(reason&&s.state==='playing'){
@@ -97,13 +117,13 @@ export async function runJevLiveJourney(outDir,input={}) {
   },options.waitMs);
   await evaluate('clearInterval(window.__jevDriver)');await browser(['snapshot','-i']);await shot('jev-completed.png');
   const engine=JSON.parse(fs.readFileSync(path.join(sessionDir,'state.json'))),loop=JSON.parse(fs.readFileSync(path.join(sessionDir,'loop-state.json')));
-  assert.equal(engine.config.opponentRuntime,'jev');assert.ok(requests.length>0);assert.ok(loop.metrics.some(m=>m.runtime==='jev'));
+  productCheck(engine.config.opponentRuntime==='jev','opponentRuntime is not jev');assert.ok(requests.length>0);productCheck(loop.metrics.some(m=>m.runtime==='jev'),'no jev metric');
   if(stoppedBy===null){
    assert.equal(loop.phase,'done');
    if(options.mode==='tournament')assert.equal(engine.gameOver,true);else assert.equal(engine.handNo,options.hands);
   }
-  assert.equal(fs.existsSync(path.join(sessionDir,'.player-sessions.json')),false);
-  for(const key of ['probabilities','classMass','selectedKey','apiChoice','commitKeys','"guard"'])assert.equal(JSON.stringify(app.manager.snapshot()).includes(key),false,key);
+  productCheck(!fs.existsSync(path.join(sessionDir,'.player-sessions.json')),'player sessions were created');
+  for(const key of ['probabilities','classMass','selectedKey','apiChoice','commitKeys','"guard"'])productCheck(!JSON.stringify(app.manager.snapshot()).includes(key),`private field in the host snapshot: ${key}`);
   const diagnostics=loop.jevDiagnostics.entries;
   summary={node:process.version,browser:'agent-browser@0.36.0',mode:options.mode,hands:engine.handNo,aiCount:engine.config.aiCount,humanPolicy:options.humanPolicy,
    upper:'disabled; factual feedback',models:[...new Set(diagnostics.map(d=>d.model))],actors:[...new Set(diagnostics.map(d=>d.actor))],decisions:diagnostics.length,
@@ -118,11 +138,11 @@ export async function runJevLiveJourney(outDir,input={}) {
   await step(mirrorOnce);
   await step(()=>{if(options.keepStore&&sessionDir&&fs.existsSync(sessionDir))fs.cpSync(sessionDir,path.join(outDir,'session'),{recursive:true});});
   await step(async()=>{const study=await inspectStudyService(root);if(study.status==='running')await stopStudyService(root,{expectedInstanceId:study.instanceId});});
-  await step(()=>{assert.equal(hashTree(userStore),before);workspace.close();});
+  await step(()=>{productCheck(hashTree(userStore)===before,'the user store changed');workspace.close();});
   globalThis.fetch=originalFetch;
   // Written after the app service is closed so late requests are counted.
   await step(()=>fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify(failure
-   ?{pass:false,code:failure.code??null,message:failure.message,stoppedBy,maxRequests:cap,requests}
+   ?{pass:false,failureKind:failureKindOf(failure,stoppedBy),code:failure.code??null,message:failure.message,stoppedBy,maxRequests:cap,requests}
    :{pass:true,...summary,stoppedBy,maxRequests:cap,...(options.keepStore?{sessionDir:path.join(outDir,'session')}:{}),requests},null,2),{mode:0o600}));
   // Independent of every step above: evidence is owner-only however the run ended.
   await step(()=>privateTree(outDir));

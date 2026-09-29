@@ -461,3 +461,59 @@ test('#234 r4: a short all-in does not reopen the street for the opener, in the 
   assert.deepEqual(menuFromArchive(st.lastHand,index),menu,decisionId);
  }
 });
+
+// r5: evidence problems never hide a violation the completed hands already prove.
+test('#234 r5: a capped run still FAILs on a premium fold its archives prove; a cap-only failure stays INCONCLUSIVE',()=>{
+ const good=()=>[passingRun('A'),passingRun('B'),passingRun('T',{mode:'tournament'})];
+ const capped=cleanRun('C');capped.journeyPass=false;capped.stoppedBy='request-cap';
+ capped.loopState.metrics.push({runtime:'jev',decisionId:'d-101-flop-1',outcome:'JEV_NETWORK'});
+ assert.equal(gateSessions([...good(),capped]).verdict,'INCONCLUSIVE');
+ const aces={holes:{user:cards('2c 3d'),p1:cards('As Ah'),p2:cards('7c 2d')}};
+ capped.hands.push(hand(150,[action('p1','fold',{decisionId:'d-150-preflop-0',callAmount:150})],aces));
+ capped.loopState.metrics.push({runtime:'jev',decisionId:'d-150-preflop-0',outcome:'jev_single_legal'});
+ const result=gateSessions([...good(),capped]);
+ assert.equal(result.perRun[3].judged,false);assert.equal(result.perRun[3].pass,false);assert.equal(result.perRun[3].four.pass,false);
+ assert.equal(result.verdict,'FAIL');
+ // A store not born under the current descriptor proves nothing about v3, even with a violation.
+ capped.loopState.jev={...JEV_CONFIG_LEGACY[1]};
+ const old=gateSessions([...good(),capped]);assert.equal(old.perRun[3].pass,null);assert.equal(old.verdict,'INCONCLUSIVE');
+});
+test('#234 r5: the evidence directory is claimed exclusively',async()=>{
+ const {claimOutDir}=await import('./browser/jev-live-play.mjs');
+ const dir=path.join(createOwnedTempDir('jev-claim'),'run');
+ claimOutDir(dir);
+ assert.equal(fs.existsSync(path.join(dir,'.run-claim')),true);
+ assert.throws(()=>claimOutDir(dir),/new or empty/);
+ // Two runs that both saw the directory empty: the second exclusive create loses.
+ const race=path.join(createOwnedTempDir('jev-claim-race'),'run');fs.mkdirSync(race);
+ const exists=fs.existsSync,readdir=fs.readdirSync;
+ fs.readdirSync=(p,...rest)=>p===race?[]:readdir(p,...rest);
+ try{claimOutDir(race);assert.throws(()=>claimOutDir(race),/claimed by another run/);}
+ finally{fs.readdirSync=readdir;}
+ assert.equal(exists(path.join(race,'.run-claim')),true);
+});
+// r5: a journey that failed a product check FAILs the gate; a harness failure is a short sample.
+test('#234 r5: a product-check journey failure FAILs; a harness failure stays a judged, inconclusive sample',()=>{
+ const good=()=>[passingRun('A'),passingRun('B'),passingRun('T',{mode:'tournament'})];
+ const leaked=passingRun('L');leaked.journeyPass=false;leaked.failureKind='product';leaked.failureMessage='private field in the host snapshot: probabilities';
+ let result=gateSessions([...good(),leaked]);
+ assert.equal(result.perRun[3].pass,false);assert.equal(result.perRun[3].productFailure,'private field in the host snapshot: probabilities');
+ assert.equal(result.verdict,'FAIL');
+ const flaky=passingRun('H');flaky.journeyPass=false;flaky.failureKind='harness';
+ result=gateSessions([...good(),flaky]);
+ assert.equal(result.perRun[3].judged,true);assert.equal(result.perRun[3].pass,true);
+ assert.equal(result.verdict,'INCONCLUSIVE');assert.ok(result.inconclusive.some(r=>r.includes('저니 실패')));
+});
+test('#234 r5: the capped fetch never sends past the cap, marks the run and passes other hosts through',async()=>{
+ const {createCappedFetch,failureKindOf}=await import('./browser/jev-live-play.mjs');
+ const sent=[],requests=[];let capped=0;
+ const upstream=async url=>{sent.push(String(url));return new Response(JSON.stringify({model:'jev-1.13.0',answers:{action:{type:'choice',choice:'fold',confidence:1,probabilities:{fold:1}}}}),{headers:{'content-type':'application/json'}});};
+ const f=createCappedFetch(upstream,{cap:2,requests,onCap:()=>{capped++;}});
+ await f('https://api.typesafe.ai/v1/x');await f('http://127.0.0.1:1/local');await f('https://api.typesafe.ai/v1/x');
+ await assert.rejects(f('https://api.typesafe.ai/v1/x'),/request cap 2 reached/);
+ assert.equal(requests.length,2);assert.equal(capped,1);assert.equal(sent.filter(u=>u.startsWith('https://api.typesafe.ai/')).length,2);
+ assert.equal(sent.includes('http://127.0.0.1:1/local'),true);assert.equal(requests[0].answerCheck.choice,'fold');
+ assert.equal(failureKindOf(Object.assign(new Error('x'),{productFailure:true}),'request-cap'),'request-cap');
+ assert.equal(failureKindOf(Object.assign(new Error('x'),{productFailure:true}),null),'product');
+ assert.equal(failureKindOf(new Error('browser failed'),null),'harness');
+});
