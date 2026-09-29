@@ -104,7 +104,7 @@ export async function seedQueuedCoach(gameDir, owner, handNo = 1, { acceptEviden
   return reserved;
 }
 
-// `startTimeOf` picks the recorded form: legacy by default, `coachProcessStartTime` for the
+// `startTimeOf` picks the recorded form: legacy by default, `ownedProcessStartTime` for the
 // handles a current runtime writes (#247).
 export async function seedRunningCoach(gameDir, owner, handNo, child, { startTimeOf = processStartTime } = {}) {
   const stats = JSON.parse((await execFileAsync(process.execPath, [
@@ -755,21 +755,21 @@ export async function assert205UnconfirmedCommand(gameDir, command) {
 // that fakes the loop's observations through seams must give the writer the same view, or
 // the writer correctly refuses a release the loop only believed in. Pass the returned path
 // as the loop's `coachCliPath`. The shim lives outside the repository test tree.
-// `startTimes` answers the legacy reader, `coachStartTimes` the reader of qualified handles.
-export function writerObservationShim({ startTimes = {}, coachStartTimes = {}, scan = null } = {}) {
+// `startTimes` answers the legacy reader, `ownedStartTimes` the reader of owned handles.
+export function writerObservationShim({ startTimes = {}, ownedStartTimes = {}, scan = null } = {}) {
   const dir = createOwnedTempDir('holdem-writer-shim');
   const file = path.join(dir, 'coach-writer-shim.mjs');
   const byPid = (values) => JSON.stringify(Object.fromEntries(Object.entries(values).map(([pid, value]) => [String(pid), value])));
   fs.writeFileSync(file, [
     `import { runCoachControlCliMain } from ${JSON.stringify(pathToFileURL(COACH_CLI).href)};`,
     `import { processStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/process-identity.js')).href)};`,
-    `import { coachProcessStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/state.js')).href)};`,
+    `import { ownedProcessStartTime } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'engine/state.js')).href)};`,
     `const startTimes = ${byPid(startTimes)};`,
-    `const coachStartTimes = ${byPid(coachStartTimes)};`,
+    `const ownedStartTimes = ${byPid(ownedStartTimes)};`,
     `const scan = ${JSON.stringify(scan)};`,
     'await runCoachControlCliMain(process.argv.slice(2), {',
     '  processStartTime: (pid) => (Object.hasOwn(startTimes, String(pid)) ? startTimes[String(pid)] : processStartTime(pid)),',
-    '  coachProcessStartTime: (pid) => (Object.hasOwn(coachStartTimes, String(pid)) ? coachStartTimes[String(pid)] : coachProcessStartTime(pid)),',
+    '  ownedProcessStartTime: (pid) => (Object.hasOwn(ownedStartTimes, String(pid)) ? ownedStartTimes[String(pid)] : ownedProcessStartTime(pid)),',
     '  ...(scan ? { scanRuntimeProcesses: async () => scan } : {}),',
     '});',
     '',

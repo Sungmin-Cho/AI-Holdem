@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { coachProcessStartTime as defaultProcessStartTime } from '../engine/state.js';
+import { ownedProcessStartTime as defaultProcessStartTime } from '../engine/state.js';
 import { personaGuidance } from './persona-guidance.js';
 import {
   grokSessionDir,
@@ -697,6 +697,7 @@ export function createPlayerRuntime(kind, opts = {}) {
   const argvBuilder = opts.argvBuilder ?? ((purpose, model, sessionId, modelArgs) => runtime.spec(purpose, model, sessionId, modelArgs));
   const cwdRoot = opts.cwdRoot ?? os.tmpdir();
   const envExtra = opts.env ?? {};
+  // #247: coach handles carry the zone-free owned start time (`utc-v1:`/`win32-v1:`).
   const startTimeOf = opts.processStartTime ?? defaultProcessStartTime;
   const graceMs = opts.terminateGraceMs ?? TERMINATE_GRACE_MS;
   const killWaitMs = opts.terminateKillWaitMs ?? TERMINATE_KILL_WAIT_MS;

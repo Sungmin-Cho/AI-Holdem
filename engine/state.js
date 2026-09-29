@@ -678,35 +678,6 @@ function readOwnedProcessStartTime(pid) {
   } catch { return null; }
 }
 
-// #247: coach handles need a start time no clock or time-zone change can move. Linux
-// `ps lstart` is boot time plus start ticks, and the kernel's boot time follows the wall
-// clock, so a clock step rewrites every process's reading; /proc gives the boot id and the
-// start tick directly. macOS keeps the absolute start time taken at fork and Windows a
-// creation FILETIME, so their owned readings already hold still. Coach handles only: the
-// lifetime-lock wire (`validOwnedIdentity`, `parseOwnedLockIdentity`) is unchanged.
-const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const LINUX_START = /^linux-v1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(?:0|[1-9]\d*)$/;
-export function linuxProcessStartTime(pid, { readFile = fs.readFileSync } = {}) {
-  if (!Number.isSafeInteger(pid) || pid < 1) return null;
-  try {
-    const bootId = String(readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
-    if (!BOOT_ID.test(bootId)) return null;
-    // The command name may hold spaces and parentheses; the fields after its closing
-    // parenthesis start with field 3 (state), so field 22 (starttime) is at index 19.
-    const stat = String(readFile(`/proc/${pid}/stat`, 'utf8'));
-    const close = stat.lastIndexOf(')');
-    if (close < 0) return null;
-    const start = stat.slice(close + 2).split(' ')[19];
-    return /^(?:0|[1-9]\d*)$/.test(start ?? '') ? `linux-v1:${bootId}:${start}` : null;
-  } catch { return null; }
-}
-export function coachProcessStartTime(pid) {
-  return process.platform === 'linux' ? linuxProcessStartTime(pid) : ownedProcessStartTime(pid);
-}
-export function validCoachStartTime(value) {
-  return typeof value === 'string' && (LINUX_START.test(value) || validOwnedIdentity(value));
-}
-
 /**
  * Owned 락(수명 보유 — `game/loop.lock.d/` 등)의 현재 기록을 읽는다. 락 경로가
  * 없을 때만 null이다. 기록이 partial/legacy/malformed/unreadable이면 존재는 하지만

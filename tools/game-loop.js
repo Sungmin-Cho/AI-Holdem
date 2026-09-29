@@ -28,7 +28,6 @@ import {
   acquireOwnedLock,
   processStartTime,
   ownedProcessStartTime,
-  coachProcessStartTime,
   readOwnedLock,
   releaseOwnedLock,
   verifyOwnedLock,
@@ -717,8 +716,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
   const ownedStartTimeOf = opts.ownedProcessStartTime ?? ownedProcessStartTime;
-  // #247: persisted coach handles recorded by `coachProcessStartTime` are read back with it.
-  const coachStartTimeOf = opts.coachProcessStartTime ?? coachProcessStartTime;
   const listenerOwnedByFn = opts.listenerOwnedBy ?? createListenerOwnedBy({
     lsofPath,
     timeoutMs: osVerifyMs,
@@ -4149,7 +4146,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #214 D4a: the same observation the cleanup writer makes. A start time that may differ
   // only by a time-zone offset is 'unknown', never proof of replacement.
   const persistedCoachIdentityState = (identity) => {
-    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, coachStartTimeOf });
+    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf });
     return observed === 'replaced' ? 'mismatch' : observed;
   };
 
