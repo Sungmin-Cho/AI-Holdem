@@ -23,6 +23,14 @@ test("command matrix and setup authority are explicit", () => {
   assert.deepEqual(ALLOWED_COMMANDS.playing, ["pause"]);
   assert.deepEqual(ALLOWED_COMMANDS.pausing, []);
   assert.deepEqual(ALLOWED_COMMANDS.error, ['resume', 'end', 'restart']);
+  assert.throws(
+    () => validateCommand({ ...base, kind: "start", setup: { participants: [] } }),
+    { code: "BAD_COMMAND" },
+  );
+  assert.throws(
+    () => validateCommand({ ...base, kind: "start", setup: { hostName: "호스트" } }),
+    { code: "BAD_COMMAND" },
+  );
 });
 test('freshSession is a boolean authority limited to retry-decision', () => {
   const base = {requestId:'fresh',expectedInstanceId:'app',expectedAppRevision:0,

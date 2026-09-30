@@ -50,8 +50,19 @@ test('identity memo reuses startTimeOf only inside one transaction', () => {
 
 test('nextCheckpointDelay stretches only on win32 after a slow checkpoint', () => {
   assert.equal(nextCheckpointDelay(1000, 6000, 'win32'), 12000);
-  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 1000);
   assert.equal(nextCheckpointDelay(1000, 6000, 'linux'), 1000);
+  assert.equal(nextCheckpointDelay(50, 100, 'linux'), 50);
+});
+
+// #249: cheaper proofs must not multiply the PowerShell children an idle service spawns.
+test('win32 checkpoints start at least 6 s apart after the first, however fast they were', () => {
+  assert.equal(nextCheckpointDelay(1000, 0, 'win32'), 1000, 'the first checkpoint keeps its own delay');
+  assert.equal(nextCheckpointDelay(50, 0, 'win32'), 50);
+  assert.equal(nextCheckpointDelay(1000, 550, 'win32'), 5450, 'two ~260 ms proofs: 6 s start to start');
+  assert.equal(nextCheckpointDelay(1000, 100, 'win32'), 5900);
+  assert.equal(nextCheckpointDelay(50, 100, 'win32'), 5900);
+  assert.equal(nextCheckpointDelay(1000, 2100, 'win32'), 4200, 'two ~1 s proofs: unchanged from before #249');
+  assert.equal(nextCheckpointDelay(8000, 100, 'win32'), 8000);
 });
 
 test('live wait retries transport resets while the same owner is alive', () => {
@@ -202,4 +213,53 @@ test('after-proof failure on a thrown body keeps the caller error code', () => {
     );
     assert.equal(n, 2);
   } finally { fs.rmSync(ctx.root, { recursive: true, force: true }); }
+});
+
+test('a lock replaced at the same path during a failed ACL proof is re-proved', () => {
+  const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');
+  fs.mkdirSync(lock);let calls=0;
+  try {
+    const prove=(entries,{onUnproven})=>{
+      calls++;
+      if(calls===1) {
+        fs.renameSync(lock,path.join(ctx.root,'retired-lock'));
+        fs.mkdirSync(lock);
+        onUnproven('powershell:status=1 error=none stderr=Get-Acl Cannot find path');
+        return false;
+      }
+      assert.ok(entries.some(entry=>entry.file===lock));return true;
+    };
+    assert.equal(aclTransaction(ctx,()=>42,{platform:'win32',prove}),42);
+    assert.equal(calls,3,'replacement before-proof must succeed before final after-proof');
+  } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('same-path replacement never bypasses a failing replacement ACL proof', () => {
+  const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+  try {
+    const prove=()=>{calls++;if(calls===1){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);}return false;};
+    assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});
+    assert.equal(calls,2);
+  } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+
+test('successful proof of a retired lock cannot authorize its unproved replacement',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{calls++;if(calls===1){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);return true;}return false;};
+  assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});assert.equal(calls,2);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('replacing the same lock on every proof exhausts the fixed retry cap',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{fs.renameSync(lock,path.join(ctx.root,`retired-${++calls}`));fs.mkdirSync(lock);return false;};
+  assert.throws(()=>aclTransaction(ctx,()=>assert.fail('must not enter'),{platform:'win32',prove}),{code:'STUDY_DESCRIPTOR_CORRUPT'});assert.equal(calls,11);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
+});
+test('client after-proof re-proves a replacement rather than trusting the retired identity',()=>{
+ const ctx=storeCtx(),lock=path.join(ctx.root,'loop.lock.d');fs.mkdirSync(lock);let calls=0;
+ try {
+  const prove=()=>{calls++;if(calls===2){fs.renameSync(lock,path.join(ctx.root,'retired-lock'));fs.mkdirSync(lock);return false;}return true;};
+  assert.equal(withClientAclScope(()=>aclTransaction(ctx,()=>42,{platform:'win32',prove}),{platform:'win32',prove}),42);assert.equal(calls,3);
+ } finally {fs.rmSync(ctx.root,{recursive:true,force:true});}
 });

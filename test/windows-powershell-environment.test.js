@@ -44,7 +44,7 @@ test('every Windows PowerShell production spawn receives a sanitized environment
   if(netstat(exe)) return {status:1,stdout:'',stderr:''};
   captured.push({exe,args,opts});
   const script=args.at(-1);
-  if(script.includes('Get-Acl')) return {status:0,stdout:JSON.stringify([proof]),stderr:''};
+  if(script.includes('GetAccessControl')) return {status:0,stdout:JSON.stringify([proof]),stderr:''};
   if(script.includes('GetProcessById')) return {status:0,stdout:'2026-09-07T00:00:00.0000000Z',stderr:''};
   if(script.includes('Get-NetTCPConnection')) return {status:0,stdout:JSON.stringify({OwningProcess:123,LocalAddress:'127.0.0.1',LocalPort:3210,State:2}),stderr:''};
   return {status:0,stdout:'',stderr:''};

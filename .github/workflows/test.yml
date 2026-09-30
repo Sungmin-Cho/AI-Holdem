@@ -15,16 +15,25 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Windows shards (worst minutes on 925fbb2 attempts 1–3, Windows suite green):
-#   study-a    study-service                         15.2
-#   study-b    study-service-recovery                21.1
-#   learning-a learning-integration + mistake-bank + publish 17.9
-#   learning-b learning-integration-session + action-receipts + drill-* 20.4
-#   loop       game-loop + release-verifier + server-security-gates 27.0
-#   rest       remaining test files + step 6 GATE    29.6
-# G5 (file ≤ 20, shard ≤ 22) missed: keep file cap 45 min and job 60.
-# Rebalance only by moving NAMED's small files (mistake-bank, publish,
-# action-receipts, drill-*). Those cannot shrink rest/loop; do not split files.
+# Windows baseline: main 8ca254b, run 36356028579, Node 20.x run-tests minutes:
+#   study-a    study-service + app-command-store + policy-loop + participant-api 24.4
+#   study-b    study-service-recovery + room-manager + session-summary* + final-summary 10.3
+#   learning-a learning-integration + mistake-bank + publish + multi-human-engine 8.4
+#   learning-b learning-integration-session + action-receipts + drill-*       9.7
+#   loop       game-loop 34.0 before the #210 split; about 25 after (estimate)
+#   loop-b     game-loop-multiplayer + pace + JEV 13.1, plus game-loop-finalize
+#              about 9 (estimate, before #213 re-enables its Windows skips)
+#   recovery   app-recovery-exit 25.3 + release-verifier + server-security-gates
+#              + relay-seat-scoping 32.4
+#   rest       remaining files + GATE                                    36.6
+# Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
+# #210 split game-loop.test.js by topic: persisted coach recovery/finalize
+# moved to game-loop-finalize.test.js (loop-b), shared fixtures to
+# test/helpers/game-loop-fixtures.mjs. If either file exceeds 36 min on Windows,
+# split it again by topic. A test file missing from NAMED in
+# test/helpers/ci-shards.mjs lands in rest, which has no room for a large file.
+# Track app-recovery-exit against its 22.1 min baseline separately (#211).
+# Eight shards x Node 20/22 include the multiplayer loop partition.
 jobs:
   ui-browser:
     name: UI browser
@@ -35,14 +44,33 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22.x
+      - name: Install project dependencies
+        run: npm ci
       - name: Install pinned browser and dependencies
         run: npx --yes agent-browser@0.36.0 install --with-deps
+      - name: Prepare protected default game store
+        run: mkdir -p "$GITHUB_WORKSPACE/game"
       - name: Check UI presentation
         run: npm run test:ui:browser -- --ci
       - name: Fresh-session recovery browser journey
         run: node test/browser/fresh-session-journey.mjs --out-dir output/playwright/ui-journey/fresh-session
       - name: Unverifiable recovery exit browser journey
         run: node test/browser/recovery-exit-journey.mjs --out-dir output/playwright/ui-journey/recovery-exit
+      - name: Multiplayer spectator real-play journey
+        run: node test/browser/spectator-journey.mjs --out-dir output/playwright/ui-journey/spectator
+      - name: JEV recovery browser journey
+        run: node test/browser/jev-journey.mjs --out-dir output/playwright/ui-journey/jev
+      - name: Lobby session browser journey
+        run: npm run test:lobby:browser
+      - name: Multiplayer browser journey
+        run: npm run test:multiplayer:browser
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 26.0.0
+      - name: Install project dependencies
+        run: npm ci
+      - name: Learning browser journey
+        run: node test/browser/learning-journey.mjs --out-dir output/playwright/ui-journey/learning --user-store-dir "$GITHUB_WORKSPACE/game"
       - name: Preserve UI check results and screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -59,6 +87,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.12.0
+      - name: Install project dependencies
+        run: npm ci
       - name: Prepare cold Windows privacy dependencies
         timeout-minutes: 3
         run: node test/helpers/windows-privacy-probe.mjs --cold-start
@@ -87,6 +117,8 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Install project dependencies
+        run: npm ci
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Run tests
@@ -107,6 +139,8 @@ jobs:
           - learning-a
           - learning-b
           - loop
+          - loop-b
+          - recovery
           - rest
     steps:
       - name: Check out repository
@@ -117,6 +151,8 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Install project dependencies
+        run: npm ci
       - name: Prepare Windows diagnostics directory
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'holdem-diag'
@@ -136,6 +172,9 @@ jobs:
       - name: Verify learning runtime on the runner platform
         if: matrix.shard == 'rest'
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Verify fresh retry recovery before the long study shard
+        if: matrix.shard == 'study-a'
+        run: node --test --test-name-pattern="fresh retry command forwards" test/app-command-store.test.js
       - name: Run tests
         run: npm run test:ci:windows -- ${{ matrix.shard }}
       - name: Report Windows proof profile
@@ -145,6 +184,16 @@ jobs:
           if (Test-Path $file) { node test/helpers/proof-profile-report.mjs $file } else { echo 'no proofs.jsonl' }
           $log = Join-Path $env:AI_HOLDEM_PLATFORM_DIAGNOSTICS 'study-children.log'
           if (Test-Path $log) { Get-Content $log }
+      - name: Upload Windows proof profile
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proofs-${{ matrix.shard }}-node${{ matrix.node-version }}
+          path: ${{ env.AI_HOLDEM_PLATFORM_DIAGNOSTICS }}/proofs.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+          # A re-run attempt uploads under the same name.
+          overwrite: true
   windows-suite:
     name: Windows suite
     needs: windows

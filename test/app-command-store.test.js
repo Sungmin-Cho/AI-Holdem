@@ -246,7 +246,11 @@ test('fresh retry command forwards app authority and warms a new LLM seat sessio
     manager = createSessionManager({ storeDir: root,
       resolver: async () => ({ player: adapter, upper: null, notices: [] }) });
     await manager.initialize();
-    assert.equal(manager.snapshot().state, 'paused');
+    const recovered = manager.snapshot();
+    assert.equal(recovered.state, 'paused', JSON.stringify({
+      freshSession, state: recovered.state, error: recovered.error,
+      receiptError: manager.receipt(abandoned.requestId)?.error,
+    }));
     assert.equal(manager.receipt(abandoned.requestId).status, 'failed');
     assert.equal(manager.receipt(abandoned.requestId).error, 'RETRY_NOT_APPLIED');
     assert.equal(calls.length, beforeWarmups);
@@ -389,6 +393,12 @@ test(
   async (t) => {
     const root = createOwnedTempDir("lobby-bootstrap-failure");
     let fail = true;
+    // An LLM game still blocks on the runtime probe, so a probe failure fails
+    // bootstrap. (Policy games probe the upper model in the background and fall
+    // back instead of failing.)
+    const player = { kind: "fake",
+      async warmup({ playerId }) { return { sessionId: `session-${playerId}`, raw: "ready" }; },
+      async decide() { return { raw: "invalid" }; }, async dispose() {} };
     const manager = createSessionManager({
       storeDir: root,
       resolver: async () => {
@@ -396,22 +406,29 @@ test(
           throw Object.assign(new Error("probe failure"), {
             code: "NO_PLAYER_RUNTIME",
           });
-        return resolver();
+        return { player, upper: null, notices: [] };
       },
     });
     t.after(() => manager.close());
     await manager.initialize();
-    const start = { ...payload(manager), setup: { aiCount: 1 } };
+    const start = { ...payload(manager), setup: { aiCount: 1, opponentRuntime: "llm" } };
     manager.command(start);
     assert.equal((await settle(manager, start.requestId)).status, "failed");
     assert.ok(manager.snapshot().gameId);
     assert.equal(manager.snapshot().state, "error");
+    assert.equal(manager.session,null);
+    const {startAppServer}=await import('../tools/app-server.js');
+    const app=await startAppServer({manager,token:'recovery-transport',storeDir:root,publicPort:0});t.after(()=>app.close());
+    const gameBefore=manager.snapshot();
+    const response=await fetch(`${app.origin}/api/game/${gameBefore.gameId}/events`,{headers:{authorization:'Bearer recovery-transport','x-game-epoch':gameBefore.gameEpoch}});
+    assert.equal(response.status,503);assert.equal((await response.json()).code,'SESSION_UNAVAILABLE');
     fail = false;
     const resume = payload(manager, "resume");
     manager.command(resume);
     const recovered = await settle(manager, resume.requestId);
     assert.equal(recovered.status, "succeeded", recovered.error);
     assert.equal(manager.snapshot().state, "playing");
+    assert.equal(manager.snapshot().gameId,gameBefore.gameId);
   },
 );
 test(
@@ -486,3 +503,45 @@ test("lobby notices an external loop owner has exited", async () => {
   assert.ok(manager.snapshot().allowedCommands.includes("resume"));
   await manager.close();
 });
+
+for (const pace of [undefined, 'normal']) {
+  test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
+    const expectSuccess=async requestId=>{const receipt=await settle(manager,requestId);assert.equal(receipt.status,'succeeded',JSON.stringify({requestId,status:receipt.status,error:receipt.error}));};
+    const root=createOwnedTempDir('lobby-pace');
+    let manager=createSessionManager({storeDir:root,resolver});
+    t.after(()=>manager.close());
+    await manager.initialize();
+    const start={...payload(manager),setup:{aiCount:1,hands:2,...(pace?{pace}:{})}};
+    manager.command(start);await expectSuccess(start.requestId);
+    let pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
+    assert.equal(manager.snapshot().setup.pace,pace);
+    await manager.close();
+    manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
+    const resume=payload(manager,'resume');manager.command(resume);await expectSuccess(resume.requestId);
+    const dir=manager.current.sessionDir;let holdSeen=false;const decisions=new Set();
+    const deadline=Date.now()+(process.platform==='win32'?120000:20000);
+    while(Date.now()<deadline) {
+      const snap=JSON.parse(fs.readFileSync(path.join(dir,'ui-snapshot.json')));
+      if(snap.resultHold) {
+        holdSeen=true;assert.equal(pace,'normal');
+        assert.equal(Date.parse(snap.resultHold.until)-Date.parse(snap.resultHold.startAt),3500+800*snap.resultHold.runoutStreets);
+        manager.session.loop.skipHandResult(snap.resultHold.handNo);
+      }
+      if(snap.view.handNo>=2)break;
+      const legal=snap.view.legal;
+      if(snap.view.toAct==='user' && legal?.decisionId && !decisions.has(legal.decisionId)) {
+        const lock=JSON.parse(fs.readFileSync(path.join(dir,'lock.json')));
+        const response=await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({token:lock.sessionToken,decisionId:legal.decisionId,requestId:randomUUID(),action:legal.canCheck?'check':'fold'})});
+        assert.equal(response.ok,true);decisions.add(legal.decisionId);
+      }
+      await new Promise(r=>setTimeout(r,10));
+    }
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dir,'state.json'))).handNo>=2);
+    assert.equal(holdSeen,pace==='normal');
+    pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
+    const restart=payload(manager,'restart');manager.command(restart);await expectSuccess(restart.requestId);
+    assert.notEqual(manager.current.sessionDir,dir);
+    assert.equal(manager.snapshot().setup.pace,pace);
+  });
+}

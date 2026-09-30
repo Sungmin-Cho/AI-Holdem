@@ -1,19 +1,13 @@
 import { prepareGameSession } from "./game-loop.js";
 import { resolveCurrentSession } from "../engine/session-catalog.js";
-import { resolveRuntimes } from "./player-runtime.js";
+import { createProductionResolver } from "./player-runtime.js";
 export async function launchSession(
   args,
   { resolver, loopOptions = {}, onReserve, onLoop } = {},
 ) {
   const runtimeResolver =
     resolver ??
-    (({ need, canaryAbsPath, registerAdapter }) =>
-      resolveRuntimes({
-        need,
-        canaryAbsPath,
-        preferred: args.playerRuntime ?? null,
-        onAdapterCreated: registerAdapter,
-      }));
+    createProductionResolver({ preferred: args.playerRuntime ?? null });
   const { loop, preparedInitialization, current: targetCurrent } = await prepareGameSession(args, {
     resolver: runtimeResolver,
     loopOptions,

@@ -1,0 +1,3045 @@
+{
+  "exportedAt": "2026-09-22",
+  "source": "loop-state.jevDiagnostics probabilities of three JEV games (no cards, no names, no session ids)",
+  "count": 230,
+  "entries": [
+    {
+      "decisionId": "d-1-preflop-0",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.87,
+      "probabilities": {
+        "fold": 0.03,
+        "call": 0.89,
+        "raise_to_100": 0.03,
+        "raise_to_150": 0.04,
+        "raise_to_200": 0.01,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-1",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.38,
+      "probabilities": {
+        "fold": 0.04,
+        "call": 0.05,
+        "raise_to_100": 0.07,
+        "raise_to_150": 0.24,
+        "raise_to_200": 0.49,
+        "raise_to_5000": 0.11
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-2",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.2,
+      "probabilities": {
+        "fold": 0.34,
+        "call": 0.13,
+        "raise_to_350": 0.12,
+        "raise_to_600": 0.21,
+        "raise_to_800": 0.18,
+        "raise_to_5000": 0.02
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.32,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.2,
+        "raise_to_350": 0.12,
+        "raise_to_600": 0.44,
+        "raise_to_800": 0.19,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-4",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "fold": 0.99,
+        "call": 0.01,
+        "raise_to_1000": 0,
+        "raise_to_1800": 0,
+        "raise_to_2400": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-5",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.31,
+      "probabilities": {
+        "fold": 0.43,
+        "call": 0.04,
+        "raise_to_1000": 0.1,
+        "raise_to_1800": 0.16,
+        "raise_to_2400": 0.24,
+        "raise_to_5000": 0.03
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-9",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.9,
+      "probabilities": {
+        "fold": 0.07,
+        "call": 0.92,
+        "raise_to_1000": 0.01,
+        "raise_to_1800": 0,
+        "raise_to_2400": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-10",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.14,
+      "probabilities": {
+        "fold": 0.13,
+        "call": 0.1,
+        "raise_to_1000": 0.13,
+        "raise_to_1800": 0.26,
+        "raise_to_2400": 0.29000000000000004,
+        "raise_to_5000": 0.09
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-11",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.11,
+      "probabilities": {
+        "fold": 0.2,
+        "call": 0.34,
+        "raise_to_4200": 0.29,
+        "raise_to_5000": 0.17
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-14",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.87,
+      "probabilities": {
+        "fold": 0.08,
+        "call": 0.9,
+        "raise_to_4200": 0.01,
+        "raise_to_5000": 0.01
+      }
+    },
+    {
+      "decisionId": "d-1-flop-15",
+      "street": "flop",
+      "archetype": "CallingStation",
+      "confidence": 0.9,
+      "probabilities": {
+        "check": 0.93,
+        "raise_to_50": 0.01,
+        "raise_to_2600": 0.06
+      }
+    },
+    {
+      "decisionId": "d-1-flop-16",
+      "street": "flop",
+      "archetype": "Maniac",
+      "confidence": 0.78,
+      "probabilities": {
+        "check": 0.13,
+        "raise_to_50": 0.01,
+        "raise_to_2600": 0.86
+      }
+    },
+    {
+      "decisionId": "d-1-flop-17",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.73,
+      "probabilities": {
+        "fold": 0.14,
+        "call": 0.86
+      }
+    },
+    {
+      "decisionId": "d-1-flop-19",
+      "street": "flop",
+      "archetype": "CallingStation",
+      "confidence": 0.8,
+      "probabilities": {
+        "fold": 0.1,
+        "call": 0.9
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.59,
+      "probabilities": {
+        "fold": 0.66,
+        "call": 0.02,
+        "raise_to_100": 0.04,
+        "raise_to_150": 0.12,
+        "raise_to_200": 0.16,
+        "raise_to_20625": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "fold": 1,
+        "call": 0,
+        "raise_to_100": 0,
+        "raise_to_150": 0,
+        "raise_to_200": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-2",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.5,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.02,
+        "raise_to_100": 0.03,
+        "raise_to_150": 0.34,
+        "raise_to_200": 0.59,
+        "raise_to_5000": 0.02
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-5",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.3,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.08,
+        "raise_to_350": 0.05,
+        "raise_to_600": 0.22,
+        "raise_to_800": 0.22,
+        "raise_to_5000": 0.41
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-6",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.29,
+      "probabilities": {
+        "fold": 0.64,
+        "call": 0.36
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.98,
+      "probabilities": {
+        "fold": 0.98,
+        "call": 0.01,
+        "raise_to_100": 0,
+        "raise_to_150": 0.01,
+        "raise_to_200": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-1",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.3,
+      "probabilities": {
+        "fold": 0.12,
+        "call": 0.06,
+        "raise_to_100": 0.07,
+        "raise_to_150": 0.3,
+        "raise_to_200": 0.41,
+        "raise_to_4800": 0.04
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-4",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.14,
+      "probabilities": {
+        "fold": 0.09,
+        "call": 0.2,
+        "raise_to_350": 0.11,
+        "raise_to_600": 0.27,
+        "raise_to_800": 0.28,
+        "raise_to_5225": 0.05
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-5",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.72,
+      "probabilities": {
+        "fold": 0.77,
+        "call": 0.08,
+        "raise_to_1400": 0.06,
+        "raise_to_2400": 0.06,
+        "raise_to_3200": 0.03,
+        "raise_to_20625": 0
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-6",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.12,
+      "probabilities": {
+        "fold": 0.16,
+        "call": 0.08,
+        "raise_to_1400": 0.22,
+        "raise_to_2400": 0.27,
+        "raise_to_3200": 0.17,
+        "raise_to_4800": 0.1
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-8",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.21,
+      "probabilities": {
+        "fold": 0.22,
+        "call": 0.2,
+        "raise_to_4000": 0.4,
+        "raise_to_5225": 0.18
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-9",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.41,
+      "probabilities": {
+        "fold": 0.31,
+        "call": 0.08,
+        "raise_to_4800": 0.61
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-10",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.24,
+      "probabilities": {
+        "fold": 0.62,
+        "call": 0.38
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-0",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.39,
+      "probabilities": {
+        "fold": 0.08,
+        "call": 0.04,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.32,
+        "raise_to_200": 0.49,
+        "raise_to_9050": 0.02
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-3",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.14,
+      "probabilities": {
+        "fold": 0.1,
+        "call": 0.17,
+        "raise_to_350": 0.09,
+        "raise_to_600": 0.29000000000000004,
+        "raise_to_800": 0.23,
+        "raise_to_1225": 0.12
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-4",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.48,
+      "probabilities": {
+        "fold": 0.57,
+        "call": 0.13,
+        "raise_to_1000": 0.05,
+        "raise_to_1800": 0.1,
+        "raise_to_2400": 0.14,
+        "raise_to_20575": 0.01
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-5",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.6,
+      "probabilities": {
+        "fold": 0.67,
+        "call": 0.25,
+        "raise_to_1000": 0.03,
+        "raise_to_1800": 0.02,
+        "raise_to_2400": 0.02,
+        "raise_to_5000": 0.01
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-6",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.1,
+        "call": 0.08,
+        "raise_to_1000": 0.13,
+        "raise_to_1800": 0.3,
+        "raise_to_2400": 0.35,
+        "raise_to_9050": 0.04
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-8",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.08,
+      "probabilities": {
+        "fold": 0.54,
+        "call": 0.46
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-2",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.11,
+      "probabilities": {
+        "fold": 0.25,
+        "call": 0.13,
+        "raise_to_100": 0.1,
+        "raise_to_150": 0.15,
+        "raise_to_200": 0.22,
+        "raise_to_625": 0.15
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.21,
+      "probabilities": {
+        "fold": 0.18,
+        "call": 0.21,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.2,
+        "raise_to_200": 0.33999999999999997,
+        "raise_to_20550": 0.02
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-4",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.96,
+      "probabilities": {
+        "fold": 0.97,
+        "call": 0.03,
+        "raise_to_350": 0,
+        "raise_to_600": 0,
+        "raise_to_800": 0,
+        "raise_to_4950": 0
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-5",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.13,
+      "probabilities": {
+        "fold": 0.21,
+        "call": 0.1,
+        "raise_to_350": 0.11,
+        "raise_to_600": 0.27,
+        "raise_to_800": 0.25,
+        "raise_to_9925": 0.06
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-7",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.17,
+      "probabilities": {
+        "fold": 0.3,
+        "call": 0.2,
+        "raise_to_1000": 0.08,
+        "raise_to_1800": 0.17,
+        "raise_to_2400": 0.23,
+        "raise_to_20550": 0.02
+      }
+    },
+    {
+      "decisionId": "d-5-flop-8",
+      "street": "flop",
+      "archetype": "LAG",
+      "confidence": 0.21,
+      "probabilities": {
+        "check": 0.23,
+        "raise_to_50": 0,
+        "raise_to_475": 0.01,
+        "raise_to_950": 0.33,
+        "raise_to_1425": 0.34,
+        "raise_to_9325": 0.08
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-1",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.47,
+      "probabilities": {
+        "fold": 0.5700000000000001,
+        "call": 0.08,
+        "raise_to_100": 0.06,
+        "raise_to_150": 0.09,
+        "raise_to_200": 0.11,
+        "raise_to_625": 0.09
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.24,
+      "probabilities": {
+        "fold": 0.19,
+        "call": 0.2,
+        "raise_to_100": 0.06,
+        "raise_to_150": 0.18,
+        "raise_to_200": 0.36,
+        "raise_to_20350": 0.01
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-3",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "fold": 0.99,
+        "call": 0.01,
+        "raise_to_350": 0,
+        "raise_to_600": 0,
+        "raise_to_800": 0,
+        "raise_to_4925": 0
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-4",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.17,
+      "probabilities": {
+        "fold": 0.14,
+        "call": 0.11,
+        "raise_to_350": 0.13,
+        "raise_to_600": 0.31,
+        "raise_to_800": 0.26,
+        "raise_to_10750": 0.05
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-7",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.54,
+      "probabilities": {
+        "fold": 0.62,
+        "call": 0.1,
+        "raise_to_1744": 0.13,
+        "raise_to_3516": 0.09,
+        "raise_to_4688": 0.05,
+        "raise_to_20350": 0.01
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-8",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.14,
+      "probabilities": {
+        "fold": 0.18,
+        "call": 0.14,
+        "raise_to_1744": 0.29000000000000004,
+        "raise_to_3516": 0.17,
+        "raise_to_4688": 0.14,
+        "raise_to_10750": 0.07
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-10",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.41,
+      "probabilities": {
+        "fold": 0.3,
+        "call": 0.7
+      }
+    },
+    {
+      "decisionId": "d-7-preflop-0",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.39,
+      "probabilities": {
+        "fold": 0.5,
+        "call": 0.05,
+        "raise_to_100": 0.08,
+        "raise_to_150": 0.11,
+        "raise_to_200": 0.1,
+        "raise_to_625": 0.16
+      }
+    },
+    {
+      "decisionId": "d-7-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.62,
+      "probabilities": {
+        "fold": 0.68,
+        "call": 0.03,
+        "raise_to_100": 0.04,
+        "raise_to_150": 0.1,
+        "raise_to_200": 0.15,
+        "raise_to_20150": 0
+      }
+    },
+    {
+      "decisionId": "d-7-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.81,
+      "probabilities": {
+        "fold": 0.83,
+        "call": 0.11,
+        "raise_to_100": 0.02,
+        "raise_to_150": 0.02,
+        "raise_to_200": 0.02,
+        "raise_to_4925": 0
+      }
+    },
+    {
+      "decisionId": "d-7-preflop-3",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.35,
+      "probabilities": {
+        "fold": 0.08,
+        "call": 0.08,
+        "raise_to_100": 0.06,
+        "raise_to_150": 0.29,
+        "raise_to_200": 0.46,
+        "raise_to_7375": 0.03
+      }
+    },
+    {
+      "decisionId": "d-7-flop-8",
+      "street": "flop",
+      "archetype": "LAG",
+      "confidence": 0.25,
+      "probabilities": {
+        "check": 0.08,
+        "raise_to_50": 0,
+        "raise_to_200": 0.16,
+        "raise_to_400": 0.39,
+        "raise_to_600": 0.35,
+        "raise_to_7175": 0.02
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.85,
+      "probabilities": {
+        "fold": 0.88,
+        "call": 0.01,
+        "raise_to_100": 0.01,
+        "raise_to_150": 0.05,
+        "raise_to_200": 0.05,
+        "raise_to_20150": 0
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.25,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.15,
+        "raise_to_100": 0.09,
+        "raise_to_150": 0.35,
+        "raise_to_200": 0.38,
+        "raise_to_4925": 0.01
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-2",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.33,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.03,
+        "raise_to_350": 0.08,
+        "raise_to_600": 0.42,
+        "raise_to_800": 0.44,
+        "raise_to_7775": 0.03
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-5",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.01,
+      "probabilities": {
+        "fold": 0.5,
+        "call": 0.5
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-6",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.23,
+      "probabilities": {
+        "fold": 0.27,
+        "call": 0.36,
+        "raise_to_1400": 0.14,
+        "raise_to_2400": 0.14,
+        "raise_to_3200": 0.07,
+        "raise_to_4925": 0.02
+      }
+    },
+    {
+      "decisionId": "d-8-flop-7",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.45,
+      "probabilities": {
+        "check": 0.54,
+        "raise_to_50": 0,
+        "raise_to_750": 0.1,
+        "raise_to_1500": 0.23,
+        "raise_to_2250": 0.11,
+        "raise_to_4125": 0.02
+      }
+    },
+    {
+      "decisionId": "d-8-flop-8",
+      "street": "flop",
+      "archetype": "LAG",
+      "confidence": 0.4,
+      "probabilities": {
+        "check": 0.07,
+        "raise_to_50": 0,
+        "raise_to_750": 0.07,
+        "raise_to_1500": 0.5,
+        "raise_to_2250": 0.33,
+        "raise_to_6975": 0.03
+      }
+    },
+    {
+      "decisionId": "d-8-flop-9",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.41,
+      "probabilities": {
+        "fold": 0.35,
+        "call": 0.53,
+        "raise_to_3000": 0.04,
+        "raise_to_3250": 0.04,
+        "raise_to_4125": 0.04
+      }
+    },
+    {
+      "decisionId": "d-8-turn-10",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.63,
+      "probabilities": {
+        "check": 0.72,
+        "raise_to_50": 0,
+        "raise_to_1750": 0.08,
+        "raise_to_2625": 0.2
+      }
+    },
+    {
+      "decisionId": "d-8-turn-11",
+      "street": "turn",
+      "archetype": "LAG",
+      "confidence": 0.28,
+      "probabilities": {
+        "check": 0.04,
+        "raise_to_50": 0,
+        "raise_to_1750": 0.14,
+        "raise_to_3500": 0.41000000000000003,
+        "raise_to_5250": 0.2,
+        "raise_to_5475": 0.21
+      }
+    },
+    {
+      "decisionId": "d-8-turn-12",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.35,
+      "probabilities": {
+        "fold": 0.67,
+        "call": 0.33
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-0",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.24,
+      "probabilities": {
+        "fold": 0.18,
+        "call": 0.07,
+        "raise_to_200": 0.08,
+        "raise_to_300": 0.36,
+        "raise_to_400": 0.3,
+        "raise_to_10725": 0.01
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.84,
+      "probabilities": {
+        "fold": 0.87,
+        "call": 0.02,
+        "raise_to_2100": 0.04,
+        "raise_to_3600": 0.05,
+        "raise_to_4800": 0.02,
+        "raise_to_20150": 0
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-4",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.96,
+      "probabilities": {
+        "fold": 0.97,
+        "call": 0.02,
+        "raise_to_2100": 0.01,
+        "raise_to_2625": 0
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-5",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.15,
+      "probabilities": {
+        "fold": 0.23,
+        "call": 0.09,
+        "raise_to_2100": 0.25,
+        "raise_to_3600": 0.27999999999999997,
+        "raise_to_4800": 0.11,
+        "raise_to_10725": 0.04
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-7",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.34,
+      "probabilities": {
+        "fold": 0.33,
+        "call": 0.67
+      }
+    },
+    {
+      "decisionId": "d-10-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "fold": 0.6,
+        "call": 0.19,
+        "raise_to_200": 0.05,
+        "raise_to_300": 0.08,
+        "raise_to_400": 0.08,
+        "raise_to_20100": 0
+      }
+    },
+    {
+      "decisionId": "d-10-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.74,
+      "probabilities": {
+        "fold": 0.79,
+        "call": 0.21,
+        "raise_to_200": 0,
+        "raise_to_300": 0,
+        "raise_to_400": 0,
+        "raise_to_2525": 0
+      }
+    },
+    {
+      "decisionId": "d-10-preflop-3",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.29,
+      "probabilities": {
+        "check": 0.18,
+        "raise_to_200": 0.09,
+        "raise_to_300": 0.26,
+        "raise_to_400": 0.43,
+        "raise_to_15600": 0.04
+      }
+    },
+    {
+      "decisionId": "d-10-flop-5",
+      "street": "flop",
+      "archetype": "LAG",
+      "confidence": 0.31,
+      "probabilities": {
+        "check": 0.27,
+        "raise_to_100": 0.01,
+        "raise_to_283": 0.01,
+        "raise_to_567": 0.19,
+        "raise_to_850": 0.42,
+        "raise_to_15200": 0.1
+      }
+    },
+    {
+      "decisionId": "d-10-turn-7",
+      "street": "turn",
+      "archetype": "LAG",
+      "confidence": 0.37,
+      "probabilities": {
+        "check": 0.05,
+        "raise_to_100": 0,
+        "raise_to_850": 0.01,
+        "raise_to_1700": 0.38,
+        "raise_to_2550": 0.47,
+        "raise_to_14350": 0.09
+      }
+    },
+    {
+      "decisionId": "d-10-turn-9",
+      "street": "turn",
+      "archetype": "LAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "fold": 0.24,
+        "call": 0.76
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.35,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.05,
+        "raise_to_200": 0.06,
+        "raise_to_300": 0.46,
+        "raise_to_400": 0.36,
+        "raise_to_20100": 0.02
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.8,
+      "probabilities": {
+        "fold": 0.83,
+        "call": 0.12,
+        "raise_to_500": 0.02,
+        "raise_to_900": 0.02,
+        "raise_to_1200": 0.01,
+        "raise_to_2475": 0
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-2",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.18,
+      "probabilities": {
+        "fold": 0.09,
+        "call": 0.08,
+        "raise_to_500": 0.15,
+        "raise_to_900": 0.32,
+        "raise_to_1200": 0.31,
+        "raise_to_8825": 0.05
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-4",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.19,
+      "probabilities": {
+        "fold": 0.09,
+        "call": 0.15,
+        "raise_to_1500": 0.11,
+        "raise_to_2700": 0.33,
+        "raise_to_3600": 0.31,
+        "raise_to_20100": 0.01
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-5",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.13,
+      "probabilities": {
+        "fold": 0.11,
+        "call": 0.11,
+        "raise_to_4500": 0.31,
+        "raise_to_8100": 0.21,
+        "raise_to_8825": 0.26
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-7",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.48,
+        "call": 0.38,
+        "raise_to_20100": 0.14
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-8",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.19,
+      "probabilities": {
+        "fold": 0.59,
+        "call": 0.41
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "fold": 1,
+        "call": 0,
+        "raise_to_200": 0,
+        "raise_to_300": 0,
+        "raise_to_400": 0,
+        "raise_to_2475": 0
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-1",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.3,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.06,
+        "raise_to_200": 0.08,
+        "raise_to_300": 0.39,
+        "raise_to_400": 0.42,
+        "raise_to_4325": 0.03
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.33,
+      "probabilities": {
+        "fold": 0.01,
+        "call": 0.1,
+        "raise_to_700": 0.09,
+        "raise_to_1200": 0.27,
+        "raise_to_1600": 0.45,
+        "raise_to_17400": 0.08
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-4",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.21,
+      "probabilities": {
+        "fold": 0.1,
+        "call": 0.1,
+        "raise_to_2800": 0.39,
+        "raise_to_4325": 0.41
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-5",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.55,
+      "probabilities": {
+        "fold": 0.23,
+        "call": 0.77
+      }
+    },
+    {
+      "decisionId": "d-13-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.25,
+      "probabilities": {
+        "fold": 0.2,
+        "call": 0.37,
+        "raise_to_200": 0.14,
+        "raise_to_300": 0.17,
+        "raise_to_400": 0.11,
+        "raise_to_21775": 0.01
+      }
+    },
+    {
+      "decisionId": "d-13-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.9,
+      "probabilities": {
+        "check": 0.92,
+        "raise_to_200": 0.04,
+        "raise_to_300": 0.03,
+        "raise_to_400": 0.01,
+        "raise_to_2475": 0
+      }
+    },
+    {
+      "decisionId": "d-13-flop-3",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "check": 0.62,
+        "raise_to_100": 0.03,
+        "raise_to_133": 0.04,
+        "raise_to_200": 0.31,
+        "raise_to_21675": 0
+      }
+    },
+    {
+      "decisionId": "d-13-flop-4",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "check": 0.99,
+        "raise_to_100": 0,
+        "raise_to_133": 0,
+        "raise_to_200": 0.01,
+        "raise_to_2375": 0
+      }
+    },
+    {
+      "decisionId": "d-13-turn-5",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.65,
+      "probabilities": {
+        "check": 0.72,
+        "raise_to_100": 0.03,
+        "raise_to_133": 0.02,
+        "raise_to_200": 0.22,
+        "raise_to_21675": 0.01
+      }
+    },
+    {
+      "decisionId": "d-13-turn-6",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.99,
+      "probabilities": {
+        "check": 1,
+        "raise_to_100": 0,
+        "raise_to_133": 0,
+        "raise_to_200": 0,
+        "raise_to_2375": 0
+      }
+    },
+    {
+      "decisionId": "d-13-river-7",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.61,
+      "probabilities": {
+        "check": 0.69,
+        "raise_to_100": 0.04,
+        "raise_to_133": 0.03,
+        "raise_to_200": 0.22,
+        "raise_to_21675": 0.02
+      }
+    },
+    {
+      "decisionId": "d-13-river-8",
+      "street": "river",
+      "archetype": "Nit",
+      "confidence": 0.98,
+      "probabilities": {
+        "check": 1,
+        "raise_to_100": 0,
+        "raise_to_133": 0,
+        "raise_to_200": 0,
+        "raise_to_2375": 0
+      }
+    },
+    {
+      "decisionId": "d-14-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.4,
+      "probabilities": {
+        "fold": 0.01,
+        "call": 0.06,
+        "raise_to_200": 0.05,
+        "raise_to_300": 0.5,
+        "raise_to_400": 0.34,
+        "raise_to_21875": 0.04
+      }
+    },
+    {
+      "decisionId": "d-14-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.97,
+      "probabilities": {
+        "fold": 0.98,
+        "call": 0.02,
+        "raise_to_500": 0,
+        "raise_to_900": 0,
+        "raise_to_1200": 0,
+        "raise_to_2375": 0
+      }
+    },
+    {
+      "decisionId": "d-15-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.32,
+      "probabilities": {
+        "fold": 0.43,
+        "call": 0.38,
+        "raise_to_200": 0.05,
+        "raise_to_300": 0.09,
+        "raise_to_400": 0.04,
+        "raise_to_2325": 0.01
+      }
+    },
+    {
+      "decisionId": "d-15-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.49,
+      "probabilities": {
+        "check": 0.59,
+        "raise_to_200": 0.11,
+        "raise_to_300": 0.16,
+        "raise_to_400": 0.13,
+        "raise_to_22025": 0.01
+      }
+    },
+    {
+      "decisionId": "d-15-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.57,
+      "probabilities": {
+        "check": 0.66,
+        "raise_to_100": 0.03,
+        "raise_to_133": 0.04,
+        "raise_to_200": 0.26,
+        "raise_to_21925": 0.01
+      }
+    },
+    {
+      "decisionId": "d-15-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.5,
+      "probabilities": {
+        "fold": 0.57,
+        "call": 0.21,
+        "raise_to_1528": 0.09,
+        "raise_to_1916": 0.06,
+        "raise_to_2492": 0.05,
+        "raise_to_21925": 0.02
+      }
+    },
+    {
+      "decisionId": "d-16-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.34,
+      "probabilities": {
+        "fold": 0.45,
+        "call": 0.32,
+        "raise_to_200": 0.1,
+        "raise_to_300": 0.08,
+        "raise_to_400": 0.05,
+        "raise_to_21925": 0
+      }
+    },
+    {
+      "decisionId": "d-17-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.32,
+      "probabilities": {
+        "fold": 0.04,
+        "call": 0.13,
+        "raise_to_300": 0.08,
+        "raise_to_450": 0.43,
+        "raise_to_600": 0.31,
+        "raise_to_21875": 0.01
+      }
+    },
+    {
+      "decisionId": "d-17-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.93,
+      "probabilities": {
+        "fold": 0.95,
+        "call": 0.04,
+        "raise_to_750": 0.01,
+        "raise_to_1350": 0,
+        "raise_to_1800": 0,
+        "raise_to_2375": 0
+      }
+    },
+    {
+      "decisionId": "d-17-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.11,
+      "probabilities": {
+        "fold": 0.26,
+        "call": 0.22,
+        "raise_to_2796": 0.24,
+        "raise_to_4869": 0.19,
+        "raise_to_6492": 0.07,
+        "raise_to_21875": 0.02
+      }
+    },
+    {
+      "decisionId": "d-18-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.87,
+      "probabilities": {
+        "fold": 0.89,
+        "call": 0.06,
+        "raise_to_300": 0.02,
+        "raise_to_450": 0.02,
+        "raise_to_600": 0.01,
+        "raise_to_2300": 0
+      }
+    },
+    {
+      "decisionId": "d-18-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.49,
+      "probabilities": {
+        "check": 0.59,
+        "raise_to_300": 0.1,
+        "raise_to_450": 0.14,
+        "raise_to_600": 0.16,
+        "raise_to_21425": 0.01
+      }
+    },
+    {
+      "decisionId": "d-18-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.39,
+      "probabilities": {
+        "check": 0.51,
+        "raise_to_150": 0.04,
+        "raise_to_200": 0.07,
+        "raise_to_300": 0.37,
+        "raise_to_21275": 0.01
+      }
+    },
+    {
+      "decisionId": "d-18-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.3,
+      "probabilities": {
+        "fold": 0.23,
+        "call": 0.43,
+        "raise_to_3928": 0.13,
+        "raise_to_4783": 0.07,
+        "raise_to_6192": 0.07,
+        "raise_to_21275": 0.07
+      }
+    },
+    {
+      "decisionId": "d-18-river-8",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.5,
+      "probabilities": {
+        "check": 0.58,
+        "raise_to_150": 0.01,
+        "raise_to_1409": 0.02,
+        "raise_to_2819": 0.11,
+        "raise_to_4228": 0.17,
+        "raise_to_19311": 0.11
+      }
+    },
+    {
+      "decisionId": "d-19-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.2,
+      "probabilities": {
+        "fold": 0.08,
+        "call": 0.2,
+        "raise_to_1258": 0.14,
+        "raise_to_2112": 0.33,
+        "raise_to_2816": 0.22,
+        "raise_to_23539": 0.03
+      }
+    },
+    {
+      "decisionId": "d-19-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.95,
+      "probabilities": {
+        "fold": 0.96,
+        "call": 0.02,
+        "raise_to_2300": 0.02
+      }
+    },
+    {
+      "decisionId": "d-19-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.25,
+      "probabilities": {
+        "check": 0.38,
+        "raise_to_150": 0,
+        "raise_to_1458": 0.03,
+        "raise_to_2916": 0.24,
+        "raise_to_4374": 0.32,
+        "raise_to_21427": 0.03
+      }
+    },
+    {
+      "decisionId": "d-19-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.31,
+      "probabilities": {
+        "check": 0.43,
+        "raise_to_150": 0,
+        "raise_to_1458": 0.07,
+        "raise_to_2916": 0.21,
+        "raise_to_4374": 0.25,
+        "raise_to_21427": 0.04
+      }
+    },
+    {
+      "decisionId": "d-19-turn-8",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.2,
+      "probabilities": {
+        "fold": 0.08,
+        "call": 0.32,
+        "raise_to_6730": 0.25,
+        "raise_to_7066": 0.17,
+        "raise_to_10768": 0.1,
+        "raise_to_14469": 0.05,
+        "raise_to_21427": 0.03
+      }
+    },
+    {
+      "decisionId": "d-19-river-9",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.23,
+      "probabilities": {
+        "check": 0.35,
+        "raise_to_150": 0,
+        "raise_to_3701": 0.02,
+        "raise_to_7403": 0.1,
+        "raise_to_11104": 0.19,
+        "raise_to_18062": 0.34
+      }
+    },
+    {
+      "decisionId": "d-20-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.26,
+      "probabilities": {
+        "fold": 0.06,
+        "call": 0.16,
+        "raise_to_300": 0.07,
+        "raise_to_450": 0.4,
+        "raise_to_600": 0.31,
+        "raise_to_29166": 0
+      }
+    },
+    {
+      "decisionId": "d-20-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.82,
+      "probabilities": {
+        "fold": 0.84,
+        "call": 0.11,
+        "raise_to_750": 0.03,
+        "raise_to_1350": 0.01,
+        "raise_to_1800": 0.01,
+        "raise_to_2150": 0
+      }
+    },
+    {
+      "decisionId": "d-20-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.28,
+      "probabilities": {
+        "check": 0.24,
+        "raise_to_150": 0,
+        "raise_to_325": 0.03,
+        "raise_to_650": 0.41000000000000003,
+        "raise_to_975": 0.31,
+        "raise_to_28716": 0.01
+      }
+    },
+    {
+      "decisionId": "d-21-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.85,
+      "probabilities": {
+        "fold": 0.87,
+        "call": 0.1,
+        "raise_to_300": 0.01,
+        "raise_to_450": 0.01,
+        "raise_to_600": 0.01,
+        "raise_to_2075": 0
+      }
+    },
+    {
+      "decisionId": "d-21-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.51,
+      "probabilities": {
+        "check": 0.61,
+        "raise_to_300": 0.1,
+        "raise_to_450": 0.13,
+        "raise_to_600": 0.15,
+        "raise_to_29691": 0.01
+      }
+    },
+    {
+      "decisionId": "d-21-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.35,
+      "probabilities": {
+        "check": 0.48,
+        "raise_to_150": 0.07,
+        "raise_to_200": 0.08,
+        "raise_to_300": 0.36,
+        "raise_to_29541": 0.01
+      }
+    },
+    {
+      "decisionId": "d-21-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.65,
+      "probabilities": {
+        "check": 0.71,
+        "raise_to_150": 0.03,
+        "raise_to_200": 0.04,
+        "raise_to_300": 0.21,
+        "raise_to_29541": 0.01
+      }
+    },
+    {
+      "decisionId": "d-21-river-8",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.41,
+      "probabilities": {
+        "fold": 0.09,
+        "call": 0.51,
+        "raise_to_6796": 0.19,
+        "raise_to_8129": 0.07,
+        "raise_to_10494": 0.06,
+        "raise_to_29541": 0.08
+      }
+    },
+    {
+      "decisionId": "d-22-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.21,
+      "probabilities": {
+        "fold": 0.34,
+        "call": 0.3,
+        "raise_to_300": 0.12,
+        "raise_to_450": 0.15,
+        "raise_to_600": 0.08,
+        "raise_to_33239": 0.01
+      }
+    },
+    {
+      "decisionId": "d-23-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.89,
+      "probabilities": {
+        "fold": 0.91,
+        "call": 0.01,
+        "raise_to_300": 0.02,
+        "raise_to_450": 0.03,
+        "raise_to_600": 0.03,
+        "raise_to_33164": 0
+      }
+    },
+    {
+      "decisionId": "d-23-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.72,
+      "probabilities": {
+        "fold": 0.77,
+        "call": 0.22,
+        "raise_to_300": 0.01,
+        "raise_to_450": 0,
+        "raise_to_600": 0,
+        "raise_to_2150": 0
+      }
+    },
+    {
+      "decisionId": "d-24-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.97,
+      "probabilities": {
+        "fold": 0.98,
+        "call": 0.02,
+        "raise_to_300": 0,
+        "raise_to_450": 0,
+        "raise_to_600": 0,
+        "raise_to_2075": 0
+      }
+    },
+    {
+      "decisionId": "d-24-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.45,
+      "probabilities": {
+        "fold": 0.72,
+        "call": 0.28
+      }
+    },
+    {
+      "decisionId": "d-25-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "fold": 0.6,
+        "call": 0.26,
+        "raise_to_400": 0.07,
+        "raise_to_600": 0.05,
+        "raise_to_800": 0.02,
+        "raise_to_33014": 0
+      }
+    },
+    {
+      "decisionId": "d-26-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.41,
+      "probabilities": {
+        "fold": 0.01,
+        "call": 0.08,
+        "raise_to_400": 0.07,
+        "raise_to_600": 0.5,
+        "raise_to_800": 0.33,
+        "raise_to_32914": 0.01
+      }
+    },
+    {
+      "decisionId": "d-26-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.94,
+      "probabilities": {
+        "fold": 0.96,
+        "call": 0.04,
+        "raise_to_1000": 0,
+        "raise_to_1800": 0,
+        "raise_to_2175": 0
+      }
+    },
+    {
+      "decisionId": "d-26-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.45,
+      "probabilities": {
+        "check": 0.19,
+        "raise_to_200": 0.01,
+        "raise_to_433": 0.02,
+        "raise_to_867": 0.22,
+        "raise_to_1300": 0.54,
+        "raise_to_32314": 0.02
+      }
+    },
+    {
+      "decisionId": "d-27-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.96,
+      "probabilities": {
+        "fold": 0.98,
+        "call": 0.02,
+        "raise_to_400": 0,
+        "raise_to_600": 0,
+        "raise_to_800": 0,
+        "raise_to_2075": 0
+      }
+    },
+    {
+      "decisionId": "d-27-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.87,
+      "probabilities": {
+        "fold": 0.88,
+        "call": 0.04,
+        "raise_to_1562": 0.04,
+        "raise_to_2643": 0.02,
+        "raise_to_3524": 0.02,
+        "raise_to_33614": 0
+      }
+    },
+    {
+      "decisionId": "d-28-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.81,
+      "probabilities": {
+        "fold": 0.85,
+        "call": 0.04,
+        "raise_to_1154": 0.05,
+        "raise_to_2031": 0.03,
+        "raise_to_2708": 0.03,
+        "raise_to_33414": 0
+      }
+    },
+    {
+      "decisionId": "d-28-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.89,
+      "probabilities": {
+        "fold": 0.92,
+        "call": 0.07,
+        "raise_to_1154": 0.01,
+        "raise_to_2031": 0,
+        "raise_to_2075": 0
+      }
+    },
+    {
+      "decisionId": "d-29-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.18,
+      "probabilities": {
+        "fold": 0.22,
+        "call": 0.18,
+        "raise_to_400": 0.08,
+        "raise_to_600": 0.32,
+        "raise_to_800": 0.2,
+        "raise_to_33314": 0
+      }
+    },
+    {
+      "decisionId": "d-29-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.94,
+      "probabilities": {
+        "fold": 0.95,
+        "call": 0.03,
+        "raise_to_1000": 0.01,
+        "raise_to_1800": 0.01,
+        "raise_to_1875": 0
+      }
+    },
+    {
+      "decisionId": "d-29-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.32,
+      "probabilities": {
+        "check": 0.29,
+        "raise_to_200": 0,
+        "raise_to_433": 0.04,
+        "raise_to_867": 0.23,
+        "raise_to_1300": 0.43,
+        "raise_to_32714": 0.01
+      }
+    },
+    {
+      "decisionId": "d-30-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.74,
+      "probabilities": {
+        "fold": 0.78,
+        "call": 0.17,
+        "raise_to_400": 0.02,
+        "raise_to_600": 0.02,
+        "raise_to_800": 0.01,
+        "raise_to_1775": 0
+      }
+    },
+    {
+      "decisionId": "d-30-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.68,
+      "probabilities": {
+        "check": 0.75,
+        "raise_to_400": 0.08,
+        "raise_to_600": 0.1,
+        "raise_to_800": 0.07,
+        "raise_to_34014": 0
+      }
+    },
+    {
+      "decisionId": "d-30-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.63,
+      "probabilities": {
+        "check": 0.71,
+        "raise_to_200": 0.02,
+        "raise_to_267": 0.02,
+        "raise_to_400": 0.25,
+        "raise_to_33814": 0
+      }
+    },
+    {
+      "decisionId": "d-30-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.29,
+      "probabilities": {
+        "fold": 0.12,
+        "call": 0.41,
+        "raise_to_2786": 0.19,
+        "raise_to_3517": 0.15,
+        "raise_to_4579": 0.1,
+        "raise_to_33814": 0.03
+      }
+    },
+    {
+      "decisionId": "d-30-river-8",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.49,
+      "probabilities": {
+        "check": 0.57,
+        "raise_to_200": 0.01,
+        "raise_to_1062": 0.02,
+        "raise_to_2124": 0.12,
+        "raise_to_3186": 0.23,
+        "raise_to_32421": 0.05
+      }
+    },
+    {
+      "decisionId": "d-31-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.14,
+        "call": 0.36,
+        "raise_to_400": 0.16,
+        "raise_to_600": 0.18,
+        "raise_to_800": 0.15,
+        "raise_to_35607": 0.01
+      }
+    },
+    {
+      "decisionId": "d-31-preflop-2",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.53,
+      "probabilities": {
+        "check": 0.62,
+        "raise_to_400": 0.07,
+        "raise_to_600": 0.15,
+        "raise_to_800": 0.1,
+        "raise_to_1775": 0.06
+      }
+    },
+    {
+      "decisionId": "d-31-flop-3",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.29,
+      "probabilities": {
+        "check": 0.34,
+        "raise_to_200": 0.02,
+        "raise_to_400": 0.2,
+        "raise_to_600": 0.44,
+        "raise_to_35407": 0
+      }
+    },
+    {
+      "decisionId": "d-31-flop-4",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.61,
+      "probabilities": {
+        "fold": 0.04,
+        "call": 0.7,
+        "raise_to_1200": 0.1,
+        "raise_to_1575": 0.16
+      }
+    },
+    {
+      "decisionId": "d-31-turn-6",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.18,
+      "probabilities": {
+        "check": 0.3,
+        "raise_to_200": 0,
+        "raise_to_800": 0.04,
+        "raise_to_1600": 0.32,
+        "raise_to_2400": 0.32,
+        "raise_to_34807": 0.02
+      }
+    },
+    {
+      "decisionId": "d-31-turn-7",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.56,
+      "probabilities": {
+        "fold": 0.22,
+        "call": 0.78
+      }
+    },
+    {
+      "decisionId": "d-32-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.27,
+      "probabilities": {
+        "fold": 0.39,
+        "call": 0.14,
+        "raise_to_400": 0.09,
+        "raise_to_600": 0.23,
+        "raise_to_800": 0.15,
+        "raise_to_33832": 0
+      }
+    },
+    {
+      "decisionId": "d-32-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.7,
+      "probabilities": {
+        "fold": 0.75,
+        "call": 0.23,
+        "raise_to_400": 0.01,
+        "raise_to_600": 0.01,
+        "raise_to_800": 0,
+        "raise_to_4350": 0
+      }
+    },
+    {
+      "decisionId": "d-33-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.87,
+      "probabilities": {
+        "fold": 0.9,
+        "call": 0.07,
+        "raise_to_600": 0.01,
+        "raise_to_900": 0.01,
+        "raise_to_1200": 0.01,
+        "raise_to_4250": 0
+      }
+    },
+    {
+      "decisionId": "d-33-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.13,
+      "probabilities": {
+        "check": 0.27,
+        "raise_to_600": 0.14,
+        "raise_to_900": 0.3,
+        "raise_to_1200": 0.28,
+        "raise_to_33832": 0.01
+      }
+    },
+    {
+      "decisionId": "d-33-preflop-4",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.25,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.36,
+        "raise_to_2830": 0.38,
+        "raise_to_5595": 0.13,
+        "raise_to_7460": 0.06,
+        "raise_to_33832": 0.02
+      }
+    },
+    {
+      "decisionId": "d-33-preflop-6",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.39,
+      "probabilities": {
+        "fold": 0.3,
+        "call": 0.7
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-0",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.34,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.01,
+        "raise_to_100": 0.04,
+        "raise_to_150": 0.23,
+        "raise_to_200": 0.45,
+        "raise_to_5000": 0.27
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-4",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.32,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.07,
+        "raise_to_350": 0.09,
+        "raise_to_600": 0.43,
+        "raise_to_800": 0.34,
+        "raise_to_5000": 0.02
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-5",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.96,
+      "probabilities": {
+        "fold": 0.98,
+        "call": 0.02,
+        "raise_to_1000": 0,
+        "raise_to_1800": 0,
+        "raise_to_2400": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-6",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.9,
+      "probabilities": {
+        "fold": 0.07,
+        "call": 0.92,
+        "raise_to_1000": 0.01,
+        "raise_to_1800": 0,
+        "raise_to_2400": 0,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-7",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.07,
+        "call": 0.16,
+        "raise_to_1000": 0.07,
+        "raise_to_1800": 0.24000000000000002,
+        "raise_to_2400": 0.36,
+        "raise_to_5000": 0.1
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-8",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.19,
+      "probabilities": {
+        "fold": 0.16,
+        "call": 0.18,
+        "raise_to_4200": 0.39,
+        "raise_to_5000": 0.27
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-9",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.68,
+      "probabilities": {
+        "fold": 0.09,
+        "call": 0.12,
+        "raise_to_5000": 0.79
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-10",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.03,
+      "probabilities": {
+        "fold": 0.48,
+        "call": 0.52
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-11",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.49,
+      "probabilities": {
+        "fold": 0.26,
+        "call": 0.74
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-12",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.05,
+      "probabilities": {
+        "fold": 0.48,
+        "call": 0.52
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-13",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.45,
+      "probabilities": {
+        "fold": 0.28,
+        "call": 0.72
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.71,
+      "probabilities": {
+        "fold": 0.77,
+        "call": 0.16,
+        "raise_to_100": 0.02,
+        "raise_to_150": 0.03,
+        "raise_to_200": 0.02,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.85,
+      "probabilities": {
+        "fold": 0.88,
+        "call": 0.02,
+        "raise_to_100": 0.02,
+        "raise_to_150": 0.04,
+        "raise_to_200": 0.04,
+        "raise_to_25000": 0
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-0",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.81,
+      "probabilities": {
+        "fold": 0.84,
+        "call": 0.05,
+        "raise_to_100": 0.02,
+        "raise_to_150": 0.04,
+        "raise_to_200": 0.05,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-3-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.75,
+      "probabilities": {
+        "fold": 0.79,
+        "call": 0.02,
+        "raise_to_100": 0.03,
+        "raise_to_150": 0.07,
+        "raise_to_200": 0.09,
+        "raise_to_25000": 0
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.83,
+      "probabilities": {
+        "fold": 0.87,
+        "call": 0.01,
+        "raise_to_100": 0.02,
+        "raise_to_150": 0.04,
+        "raise_to_200": 0.06,
+        "raise_to_25000": 0
+      }
+    },
+    {
+      "decisionId": "d-4-preflop-4",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.83,
+      "probabilities": {
+        "fold": 0.86,
+        "call": 0.12,
+        "raise_to_466": 0.01,
+        "raise_to_774": 0,
+        "raise_to_1032": 0.01,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-3",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.32,
+      "probabilities": {
+        "fold": 0.15,
+        "call": 0.44,
+        "raise_to_200": 0.05,
+        "raise_to_375": 0.18,
+        "raise_to_500": 0.12,
+        "raise_to_4950": 0.06
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-4",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.26,
+      "probabilities": {
+        "fold": 0.04,
+        "call": 0.24,
+        "raise_to_200": 0.15,
+        "raise_to_375": 0.38,
+        "raise_to_500": 0.18,
+        "raise_to_25000": 0.01
+      }
+    },
+    {
+      "decisionId": "d-5-preflop-7",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.47,
+      "probabilities": {
+        "fold": 0.19,
+        "call": 0.56,
+        "raise_to_625": 0.06,
+        "raise_to_1125": 0.07,
+        "raise_to_1500": 0.08,
+        "raise_to_4950": 0.04
+      }
+    },
+    {
+      "decisionId": "d-5-flop-8",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.59,
+      "probabilities": {
+        "check": 0.65,
+        "raise_to_50": 0,
+        "raise_to_500": 0.12,
+        "raise_to_1000": 0.12,
+        "raise_to_1500": 0.1,
+        "raise_to_4575": 0.01
+      }
+    },
+    {
+      "decisionId": "d-5-flop-9",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.2,
+      "probabilities": {
+        "check": 0.16,
+        "raise_to_50": 0,
+        "raise_to_500": 0.27,
+        "raise_to_1000": 0.33,
+        "raise_to_1500": 0.24,
+        "raise_to_24625": 0
+      }
+    },
+    {
+      "decisionId": "d-5-flop-12",
+      "street": "flop",
+      "archetype": "Nit",
+      "confidence": 0.47,
+      "probabilities": {
+        "fold": 0.18,
+        "call": 0.57,
+        "raise_to_3000": 0.05,
+        "raise_to_4167": 0.06,
+        "raise_to_4575": 0.14
+      }
+    },
+    {
+      "decisionId": "d-5-flop-13",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.21,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.32,
+        "raise_to_3000": 0.24,
+        "raise_to_4500": 0.22,
+        "raise_to_7000": 0.1,
+        "raise_to_9500": 0.05,
+        "raise_to_24625": 0.02
+      }
+    },
+    {
+      "decisionId": "d-5-turn-14",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.56,
+      "probabilities": {
+        "check": 0.67,
+        "raise_to_50": 0,
+        "raise_to_2500": 0.11,
+        "raise_to_2575": 0.22
+      }
+    },
+    {
+      "decisionId": "d-5-turn-15",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.14,
+      "probabilities": {
+        "check": 0.15,
+        "raise_to_50": 0,
+        "raise_to_2500": 0.28,
+        "raise_to_5000": 0.27,
+        "raise_to_7500": 0.26,
+        "raise_to_22625": 0.04
+      }
+    },
+    {
+      "decisionId": "d-5-turn-17",
+      "street": "turn",
+      "archetype": "Nit",
+      "confidence": 0.11,
+      "probabilities": {
+        "fold": 0.44,
+        "call": 0.56
+      }
+    },
+    {
+      "decisionId": "d-5-turn-18",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.64,
+      "probabilities": {
+        "fold": 0.18,
+        "call": 0.82
+      }
+    },
+    {
+      "decisionId": "d-6-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.37,
+      "probabilities": {
+        "fold": 0.47,
+        "call": 0.13,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.18,
+        "raise_to_200": 0.17,
+        "raise_to_19950": 0
+      }
+    },
+    {
+      "decisionId": "d-7-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.28,
+      "probabilities": {
+        "fold": 0.2,
+        "call": 0.08,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.27,
+        "raise_to_200": 0.39,
+        "raise_to_19950": 0.01
+      }
+    },
+    {
+      "decisionId": "d-7-flop-5",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.15,
+      "probabilities": {
+        "fold": 0.24,
+        "call": 0.28,
+        "raise_to_488": 0.21,
+        "raise_to_548": 0.16,
+        "raise_to_853": 0.07,
+        "raise_to_1157": 0.04,
+        "raise_to_19750": 0
+      }
+    },
+    {
+      "decisionId": "d-7-turn-7",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.26,
+      "probabilities": {
+        "check": 0.24,
+        "raise_to_50": 0,
+        "raise_to_304": 0.09,
+        "raise_to_609": 0.4,
+        "raise_to_913": 0.26,
+        "raise_to_19506": 0.01
+      }
+    },
+    {
+      "decisionId": "d-7-river-10",
+      "street": "river",
+      "archetype": "TAG",
+      "confidence": 0.18,
+      "probabilities": {
+        "check": 0.31,
+        "raise_to_50": 0.01,
+        "raise_to_710": 0.18,
+        "raise_to_1421": 0.21,
+        "raise_to_2131": 0.25,
+        "raise_to_18897": 0.04
+      }
+    },
+    {
+      "decisionId": "d-8-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.23,
+      "probabilities": {
+        "check": 0.23,
+        "raise_to_100": 0.09,
+        "raise_to_150": 0.27,
+        "raise_to_200": 0.39,
+        "raise_to_18897": 0.02
+      }
+    },
+    {
+      "decisionId": "d-8-flop-6",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.56,
+      "probabilities": {
+        "check": 0.13,
+        "raise_to_50": 0.01,
+        "raise_to_133": 0.04,
+        "raise_to_267": 0.17,
+        "raise_to_400": 0.63,
+        "raise_to_18697": 0.02
+      }
+    },
+    {
+      "decisionId": "d-9-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.27,
+      "probabilities": {
+        "fold": 0.39,
+        "call": 0.35,
+        "raise_to_200": 0.1,
+        "raise_to_300": 0.1,
+        "raise_to_400": 0.06,
+        "raise_to_19097": 0
+      }
+    },
+    {
+      "decisionId": "d-10-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.88,
+      "probabilities": {
+        "fold": 0.9,
+        "call": 0.02,
+        "raise_to_502": 0.03,
+        "raise_to_903": 0.03,
+        "raise_to_1204": 0.02,
+        "raise_to_19047": 0
+      }
+    },
+    {
+      "decisionId": "d-11-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.04,
+        "raise_to_200": 0.06,
+        "raise_to_300": 0.61,
+        "raise_to_400": 0.27,
+        "raise_to_19047": 0
+      }
+    },
+    {
+      "decisionId": "d-11-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.39,
+      "probabilities": {
+        "check": 0.21,
+        "raise_to_100": 0,
+        "raise_to_250": 0.01,
+        "raise_to_500": 0.25,
+        "raise_to_750": 0.49,
+        "raise_to_18747": 0.04
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.2,
+      "probabilities": {
+        "fold": 0.03,
+        "call": 0.22,
+        "raise_to_900": 0.13,
+        "raise_to_1500": 0.25,
+        "raise_to_2000": 0.33,
+        "raise_to_19497": 0.04
+      }
+    },
+    {
+      "decisionId": "d-12-preflop-6",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.4,
+      "probabilities": {
+        "fold": 0.3,
+        "call": 0.7
+      }
+    },
+    {
+      "decisionId": "d-13-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.19,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.23,
+        "raise_to_200": 0.13,
+        "raise_to_300": 0.32,
+        "raise_to_400": 0.28,
+        "raise_to_22359": 0.01
+      }
+    },
+    {
+      "decisionId": "d-13-flop-4",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.28,
+      "probabilities": {
+        "check": 0.35,
+        "raise_to_100": 0.01,
+        "raise_to_233": 0.04,
+        "raise_to_467": 0.2,
+        "raise_to_700": 0.39,
+        "raise_to_22059": 0.01
+      }
+    },
+    {
+      "decisionId": "d-14-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.52,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.05,
+        "raise_to_200": 0.07,
+        "raise_to_300": 0.59,
+        "raise_to_400": 0.28,
+        "raise_to_22759": 0.01
+      }
+    },
+    {
+      "decisionId": "d-14-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.13,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.27,
+        "raise_to_700": 0.27,
+        "raise_to_1500": 0.24,
+        "raise_to_2000": 0.16,
+        "raise_to_22759": 0.01
+      }
+    },
+    {
+      "decisionId": "d-14-preflop-5",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.11,
+        "call": 0.29,
+        "raise_to_3700": 0.35,
+        "raise_to_6600": 0.17,
+        "raise_to_8800": 0.06,
+        "raise_to_22759": 0.02
+      }
+    },
+    {
+      "decisionId": "d-14-flop-8",
+      "street": "flop",
+      "archetype": "TAG",
+      "confidence": 0.23,
+      "probabilities": {
+        "check": 0.12,
+        "raise_to_100": 0,
+        "raise_to_2500": 0.2,
+        "raise_to_5000": 0.35,
+        "raise_to_7500": 0.32,
+        "raise_to_19059": 0.01
+      }
+    },
+    {
+      "decisionId": "d-14-turn-11",
+      "street": "turn",
+      "archetype": "TAG",
+      "confidence": 0.24,
+      "probabilities": {
+        "check": 0.13,
+        "raise_to_100": 0,
+        "raise_to_5833": 0.26,
+        "raise_to_11667": 0.4,
+        "raise_to_14059": 0.21
+      }
+    },
+    {
+      "decisionId": "d-15-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.85,
+      "probabilities": {
+        "fold": 0.87,
+        "call": 0.03,
+        "raise_to_954": 0.04,
+        "raise_to_1581": 0.03,
+        "raise_to_2108": 0.03,
+        "raise_to_38733": 0
+      }
+    },
+    {
+      "decisionId": "d-16-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.4,
+      "probabilities": {
+        "fold": 0.5,
+        "call": 0.26,
+        "raise_to_200": 0.08,
+        "raise_to_300": 0.09,
+        "raise_to_400": 0.06,
+        "raise_to_38633": 0.01
+      }
+    },
+    {
+      "decisionId": "d-18-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.66,
+      "probabilities": {
+        "fold": 0.72,
+        "call": 0.13,
+        "raise_to_300": 0.05,
+        "raise_to_450": 0.06,
+        "raise_to_600": 0.04,
+        "raise_to_38658": 0
+      }
+    },
+    {
+      "decisionId": "d-20-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.17,
+      "probabilities": {
+        "fold": 0.31,
+        "call": 0.27,
+        "raise_to_300": 0.12,
+        "raise_to_450": 0.18,
+        "raise_to_600": 0.11,
+        "raise_to_38658": 0.01
+      }
+    },
+    {
+      "decisionId": "d-22-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.18,
+      "probabilities": {
+        "fold": 0.06,
+        "call": 0.25,
+        "raise_to_300": 0.16,
+        "raise_to_450": 0.31,
+        "raise_to_600": 0.21,
+        "raise_to_38658": 0.01
+      }
+    },
+    {
+      "decisionId": "d-24-preflop-0",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.15,
+      "probabilities": {
+        "fold": 0.26,
+        "call": 0.27999999999999997,
+        "raise_to_300": 0.12,
+        "raise_to_450": 0.2,
+        "raise_to_600": 0.13,
+        "raise_to_38883": 0.01
+      }
+    },
+    {
+      "decisionId": "d-24-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.66,
+      "probabilities": {
+        "fold": 0.72,
+        "call": 0.14,
+        "raise_to_4518": 0.1,
+        "raise_to_7002": 0.02,
+        "raise_to_9336": 0.02,
+        "raise_to_38883": 0
+      }
+    },
+    {
+      "decisionId": "d-25-preflop-1",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.22,
+      "probabilities": {
+        "fold": 0.12,
+        "call": 0.16,
+        "raise_to_2024": 0.21,
+        "raise_to_3336": 0.36,
+        "raise_to_4448": 0.13,
+        "raise_to_38733": 0.02
+      }
+    },
+    {
+      "decisionId": "d-25-preflop-3",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.35,
+      "probabilities": {
+        "fold": 0.33,
+        "call": 0.67
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-0",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.72,
+      "probabilities": {
+        "fold": 0.1,
+        "call": 0.78,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.05,
+        "raise_to_200": 0.02,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-1",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.5,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.03,
+        "raise_to_100": 0.05,
+        "raise_to_150": 0.29,
+        "raise_to_200": 0.58,
+        "raise_to_5000": 0.05
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-3",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.15,
+      "probabilities": {
+        "fold": 0.16,
+        "call": 0.08,
+        "raise_to_350": 0.09,
+        "raise_to_600": 0.28,
+        "raise_to_800": 0.29,
+        "raise_to_5000": 0.1
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-4",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.6,
+      "probabilities": {
+        "fold": 0.67,
+        "call": 0.23,
+        "raise_to_1400": 0.05,
+        "raise_to_2400": 0.03,
+        "raise_to_3200": 0.01,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-5",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.16,
+      "probabilities": {
+        "fold": 0.2,
+        "call": 0.19,
+        "raise_to_1400": 0.19,
+        "raise_to_2400": 0.3,
+        "raise_to_3200": 0.11,
+        "raise_to_5000": 0.01
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-6",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.2,
+      "probabilities": {
+        "fold": 0.11,
+        "call": 0.18,
+        "raise_to_4000": 0.4,
+        "raise_to_5000": 0.31
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-7",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.35,
+      "probabilities": {
+        "fold": 0.33,
+        "call": 0.1,
+        "raise_to_5000": 0.56
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-8",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.72,
+      "probabilities": {
+        "fold": 0.14,
+        "call": 0.86
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-9",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.48,
+      "probabilities": {
+        "fold": 0.26,
+        "call": 0.74
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-10",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.07,
+      "probabilities": {
+        "fold": 0.53,
+        "call": 0.47
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-11",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.28,
+      "probabilities": {
+        "fold": 0.64,
+        "call": 0.36
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-12",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.49,
+      "probabilities": {
+        "fold": 0.75,
+        "call": 0.25
+      }
+    },
+    {
+      "decisionId": "d-1-preflop-13",
+      "street": "preflop",
+      "archetype": "Trickster",
+      "confidence": 0.17,
+      "probabilities": {
+        "fold": 0.42,
+        "call": 0.58
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-0",
+      "street": "preflop",
+      "archetype": "Maniac",
+      "confidence": 0.39,
+      "probabilities": {
+        "fold": 0.05,
+        "call": 0.03,
+        "raise_to_100": 0.04,
+        "raise_to_150": 0.23,
+        "raise_to_200": 0.5,
+        "raise_to_4200": 0.15
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-1",
+      "street": "preflop",
+      "archetype": "Nit",
+      "confidence": 0.57,
+      "probabilities": {
+        "fold": 0.64,
+        "call": 0.23,
+        "raise_to_350": 0.05,
+        "raise_to_600": 0.05,
+        "raise_to_800": 0.03,
+        "raise_to_5000": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-2",
+      "street": "preflop",
+      "archetype": "TAG",
+      "confidence": 0.89,
+      "probabilities": {
+        "fold": 0.91,
+        "call": 0.02,
+        "raise_to_350": 0.02,
+        "raise_to_600": 0.03,
+        "raise_to_800": 0.02,
+        "raise_to_2600": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-3",
+      "street": "preflop",
+      "archetype": "CallingStation",
+      "confidence": 0.96,
+      "probabilities": {
+        "fold": 0,
+        "call": 0.98,
+        "raise_to_350": 0.01,
+        "raise_to_600": 0.01,
+        "raise_to_800": 0,
+        "raise_to_23400": 0
+      }
+    },
+    {
+      "decisionId": "d-2-preflop-4",
+      "street": "preflop",
+      "archetype": "LAG",
+      "confidence": 0.26,
+      "probabilities": {
+        "fold": 0.02,
+        "call": 0.09,
+        "raise_to_350": 0.11,
+        "raise_to_600": 0.39,
+        "raise_to_800": 0.36,
+        "raise_to_4800": 0.03
+      }
+    }
+  ]
+}

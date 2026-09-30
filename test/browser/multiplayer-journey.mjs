@@ -1,0 +1,454 @@
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { startAppService } from "../../tools/app-service.js";
+import {
+  inspectStudyService,
+  stopStudyService,
+} from "../../tools/study-service.js";
+import {
+  createBrowserWorkspace,
+  runOwnedCommand,
+  hashTree,
+} from "../helpers/learning-browser-fixture.mjs";
+
+export const requiredJourneyChecks = [
+  "lan-join-url",
+  "name-taken",
+  "two-guests-start",
+  "guest-table-booted",
+  "skip-hidden-multi",
+  "guest-table-viewport",
+  "guest-single-header",
+  "guest-embed-fit",
+  "guest-cards-hidden-from-others",
+  "guest-action-insecure-context",
+  "turn-deadline-ticks",
+  "pause-banner",
+  "end-final-stacks",
+  "participant-survives-stopping",
+  "late-join-waits-for-next-game",
+  "room-closed-offline",
+  "real-user-store-unchanged",
+  "owned-cleanup",
+];
+
+function lanIPv4() {
+  for (const rows of Object.values(os.networkInterfaces() ?? {})) {
+    for (const row of rows ?? []) {
+      if (!row.internal && row.family === "IPv4") return row.address;
+    }
+  }
+  return null;
+}
+
+export function makeBrowser(session) {
+  return async (args) => {
+    const r = await runOwnedCommand(
+      "npx",
+      ["--yes", "--prefer-offline", "agent-browser@0.36.0", "--session", session, "--json", ...args],
+      { timeoutMs: 45_000 },
+    );
+    assert.equal(
+      r.exitCode,
+      0,
+      `${args[0]}: ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
+    );
+    const result = JSON.parse(r.stdout);
+    assert.notEqual(result.success, false, JSON.stringify(result));
+    return result.data;
+  };
+}
+
+export async function runMultiplayerJourney(outDir) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const workspace = createBrowserWorkspace();
+  const root = workspace.root;
+  const userStore = path.resolve("game");
+  const before = hashTree(userStore);
+  const lan = lanIPv4();
+  const checks = [];
+  const check = (name) => checks.push(name);
+  let failure;
+  let app;
+  const host = makeBrowser(`mp-host-${randomUUID()}`);
+  const guestA = makeBrowser(`mp-a-${randomUUID()}`);
+  const guestB = makeBrowser(`mp-b-${randomUUID()}`);
+  const evaluate = (browser) => async (expr) => {
+    const data = await browser(["eval", expr]);
+    return data?.result ?? data;
+  };
+  const wait = async (predicate, label) => {
+    for (let i = 0; i < 200; i++) {
+      if (await predicate()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`journey timeout: ${label}`);
+  };
+  const click = async (browser, selector) => {
+    await browser(["snapshot", "-i"]);
+    await evaluate(browser)(
+      `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center'})`,
+    );
+    await browser(["click", selector]);
+  };
+  try {
+    if (!lan) {
+      throw new Error("NO_LAN_IPV4 (insecure-context join cannot be verified)");
+    }
+    app = await startAppService(root, {
+      resolver: async () => ({ player: null, upper: null, notices: [] }),
+      publicPort: 0,
+    });
+    app.manager.setPrefill({pace:'normal'});
+    assert.ok(app.publicPort, "public listener did not bind");
+    await host(["open", app.url]);
+    await host(["set", "viewport", "1280", "900"]);
+    await wait(
+      () => evaluate(host)("document.querySelector('#status')?.textContent==='로비'"),
+      "host lobby",
+    );
+    await host(["select", "#action-timeout", "30"]);
+    await host(["select", "#total-seats", "6"]);
+    await click(host, "#room-open");
+    await wait(
+      () => evaluate(host)("document.querySelector('#room-panel')?.hidden===false"),
+      "room panel",
+    );
+    const joinHref = await evaluate(host)(`([...document.querySelectorAll('#join-links li')]
+      .map((item) => item.textContent)
+      .find((href) => href.includes(${JSON.stringify(lan)})))`);
+    assert.ok(joinHref, `no LAN join link for ${lan}`);
+    check("lan-join-url");
+
+    await guestA(["open", joinHref]);
+    await guestA(["set", "viewport", "1280", "600"]);
+    await guestA(["fill", "#join-name", "민준"]);
+    await click(guestA, "#join-submit");
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#waiting')?.hidden===false"),
+      "guest A waiting",
+    );
+
+    await guestB(["open", joinHref]);
+    await guestB(["set", "viewport", "1280", "600"]);
+    await guestB(["fill", "#join-name", "민준"]);
+    await click(guestB, "#join-submit");
+    await wait(
+      () => evaluate(guestB)("document.querySelector('#join-error')?.textContent?.includes('이미 쓰인 이름')"),
+      "duplicate name",
+    );
+    check("name-taken");
+    await guestB(["fill", "#join-name", "서연"]);
+    await click(guestB, "#join-submit");
+    await wait(
+      () => evaluate(guestB)("document.querySelector('#waiting')?.hidden===false"),
+      "guest B waiting",
+    );
+
+    await click(host, "summary");
+    await host(["fill", 'input[name="hands"]', "4"]);
+    await click(host, "#start");
+    await wait(
+      () => app.manager.snapshot().state === "playing" && !app.manager.snapshot().pendingRequestId,
+      "playing",
+    );
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#playing')?.hidden===false"),
+      "guest A table",
+    );
+    await wait(
+      () => evaluate(guestB)("document.querySelector('#playing')?.hidden===false"),
+      "guest B table",
+    );
+    const players = JSON.parse(
+      fs.readFileSync(path.join(app.manager.current.sessionDir, "players.json"), "utf8"),
+    );
+    assert.equal(players.filter((row) => row.kind === "human").length, 3);
+    assert.equal(players.filter((row) => row.kind === "ai").length, 3);
+    check("two-guests-start");
+
+    const engine = JSON.parse(
+      fs.readFileSync(path.join(app.manager.current.sessionDir, "state.json"), "utf8"),
+    );
+    const hidden = engine.hand?.holes?.h1 ?? engine.lastHand?.holes?.h1 ?? [];
+    assert.equal(hidden.length, 2, "guest A hole cards missing from engine state");
+    const tableText = async (browser) => evaluate(browser)(
+      "document.querySelector('#table')?.contentDocument?.documentElement?.innerHTML ?? document.documentElement.innerHTML",
+    );
+    await wait(
+      async () => {
+        const html = await tableText(guestA);
+        return typeof html === "string" && html.length > 0;
+      },
+      "guest A iframe",
+    );
+    // The table buttons are enabled in static markup, so a click alone cannot
+    // prove app.js ran. Require the participant-mode DOM and a live connection.
+    const tableBooted = (browser) => evaluate(browser)(`(() => {
+      const doc = document.querySelector('#table')?.contentDocument;
+      return doc?.body?.classList.contains('participant-mode') === true
+        && doc?.querySelector('#conn-text')?.textContent === '연결됨';
+    })()`);
+    await wait(async () => (await tableBooted(guestA)) === true, "guest A table booted");
+    await wait(async () => (await tableBooted(guestB)) === true, "guest B table booted");
+    check("guest-table-booted");
+    // The browser default iframe is 300x150; the join page must size it to the viewport.
+    const tableHeight = (browser) => evaluate(browser)(
+      "document.querySelector('#table')?.getBoundingClientRect().height ?? 0",
+    );
+    await wait(async () => Number(await tableHeight(guestA)) >= 400, "guest A table fills the viewport");
+    check("guest-table-viewport");
+    // The join page answers the table's handshake: the table hides its own top
+    // bar and the join header carries the hand context (one header, not two).
+    const singleHeader = (browser) => evaluate(browser)(`(() => {
+      const doc = document.querySelector('#table')?.contentDocument;
+      const topbar = doc?.querySelector('.topbar');
+      const context = document.querySelector('#shell-context');
+      return doc?.body?.classList.contains('embedded') === true
+        && (topbar ? doc.defaultView.getComputedStyle(topbar).display === 'none' : false)
+        && context?.hidden === false && context.textContent.includes('핸드');
+    })()`);
+    await wait(async () => (await singleHeader(guestA)) === true, "guest A single header");
+    check("guest-single-header");
+    // Keyboard tab order on a participant table skips the host-only tabs.
+    const tabWalk = await evaluate(guestA)(`(() => {
+      const doc = document.querySelector('#table').contentDocument;
+      doc.querySelector('#tab-log').focus();
+      doc.querySelector('.tabs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      const result = { focus: doc.activeElement?.id, coach: doc.querySelector('#panel-coach')?.hidden !== false, training: doc.querySelector('#panel-training')?.hidden !== false };
+      doc.querySelector('#tab-log').click();
+      return result;
+    })()`);
+    assert.deepEqual(tabWalk, { focus: "tab-participants", coach: true, training: true });
+    await guestA(["screenshot", path.join(outDir, "guest-a-table.png")]);
+    await guestB(["set", "viewport", "390", "844"]);
+    await wait(async () => (await singleHeader(guestB)) === true, "guest B single header on a phone");
+    await guestB(["screenshot", path.join(outDir, "guest-b-table-mobile.png")]);
+    await guestB(["set", "viewport", "1280", "600"]);
+    const embedStates = [];
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `guest A table at ${width}x${height}`);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `guest ${width}x${height}`);
+      embedStates.push(`turn-${width}x${height}`);
+    }
+    await guestA(["set", "viewport", "1280", "600"]);
+    // cardNode renders faces and Korean aria labels, not raw two-character
+    // codes. A whole-document substring can instead match a capability token.
+    const guestCardVisibility = browser => evaluate(browser)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      const seat=doc?.querySelector('.seat[data-player-id="h1"]');
+      return {backs:seat?.querySelectorAll('.card--back').length,
+        faces:seat?.querySelectorAll('.card[role="img"]').length};
+    })()`);
+    assert.deepEqual(await guestCardVisibility(host),{backs:2,faces:0});
+    assert.deepEqual(await guestCardVisibility(guestB),{backs:2,faces:0});
+    assert.deepEqual(await guestCardVisibility(guestA),{backs:0,faces:2});
+    check("guest-cards-hidden-from-others");
+
+    await wait(async () => evaluate(guestA)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      return doc?.querySelector('#btn-fold')?.disabled===false;
+    })()`), 'guest A active before countdown');
+    const countdown = browser => evaluate(browser)(`(() => {
+      const doc=document.querySelector('#table')?.contentDocument;
+      const text=doc?.querySelector('.is-to-act .plate-deadline')?.textContent;
+      return Number(text?.match(/([0-9]+)초/)?.[1]);
+    })()`);
+    const before=await countdown(guestA);
+    const observerBefore=await countdown(guestB);
+    assert.ok(before>0 && observerBefore>0,'both actor and other player see countdown');
+    await new Promise(resolve=>setTimeout(resolve,2100));
+    const after=await countdown(guestA),observerAfter=await countdown(guestB);
+    assert.ok(after>0 && after<before,'actor countdown ticks without new frames');
+    assert.ok(observerAfter>0 && observerAfter<observerBefore,'other player countdown ticks');
+    check('turn-deadline-ticks');
+
+    await wait(
+      async () => {
+        const acted = await evaluate(guestA)(`(() => {
+          const doc = document.querySelector('#table')?.contentDocument;
+          const fold = doc?.querySelector('#btn-fold');
+          const call = doc?.querySelector('#btn-call');
+          const checkBtn = doc?.querySelector('#btn-check');
+          const btn = [fold, call, checkBtn].find((node) => node && !node.disabled);
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })()`);
+        return acted === true;
+      },
+      "guest A action",
+    );
+    check("guest-action-insecure-context");
+    // At the result frame: guest A's table clock is frozen so its strip stays up,
+    // and the host pauses so no next hand replaces it — the paused measurement
+    // below then sees a real result inside the participant iframe.
+    for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
+      const doc=document.querySelector('#table')?.contentDocument;
+      if(doc?.querySelector('#hand-result')?.hidden===false){
+        window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true};
+        if(${JSON.stringify(browser===guestA)}){const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;}
+        if(${JSON.stringify(browser===host)}){const menu=document.querySelector('#menu');if(menu&&!menu.disabled&&!menu.hidden)menu.click();}
+        clearInterval(window.__handDriver);return;
+      }
+      const button=['#btn-check','#btn-fold','#btn-call'].map(id=>doc?.querySelector(id)).find(el=>el&&!el.disabled&&!el.hidden);
+      button?.click();
+    },60)`);
+    // Observe each client at its rendered result frame, before the next hand
+    // legitimately removes the banner while other browser commands run.
+    for(const browser of [host,guestA,guestB]){
+      await wait(()=>evaluate(browser)('Boolean(window.__handResultCheck)'), 'each client receives hand result');
+      assert.equal(await evaluate(browser)('window.__handResultCheck.skipHidden'),true);
+    }
+    check('skip-hidden-multi');
+
+
+    if (app.manager.snapshot().state === "playing") await click(host, "#menu");
+    await wait(
+      () => app.manager.snapshot().state === "paused",
+      "paused",
+    );
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#pause-banner')?.hidden===false"),
+      "pause banner",
+    );
+    // The pause sits over the table, below the header, without pushing the table
+    // down or covering a plate, the board or the pot; measured on a laptop and a phone.
+    for (const [width, height] of [[1280, 800], [390, 667]]) {
+      await guestA(["set", "viewport", String(width), String(height)]);
+      await wait(async () => (await evaluate(guestA)(EMBED_FIT_SCRIPT)) !== null, `paused guest table at ${width}x${height}`);
+      await guestA(["screenshot", path.join(outDir, `guest-paused-result-${width}x${height}.png`)]);
+      assertEmbedFit(await evaluate(guestA)(EMBED_FIT_SCRIPT), `paused guest ${width}x${height}`);
+      const pauseGeometry = await evaluate(guestA)(`(() => {
+        const banner = document.querySelector('#pause-banner').getBoundingClientRect();
+        const header = document.querySelector('.app-header').getBoundingClientRect();
+        const frame = document.querySelector('#table').getBoundingClientRect();
+        const doc = document.querySelector('#table').contentDocument;
+        const covered = [...doc.querySelectorAll('.plate, #board .card, #pots')].filter((n) => n.getClientRects().length).some((n) => {
+          const r = n.getBoundingClientRect(), top = r.top + frame.top, left = r.left + frame.left;
+          return banner.left < left + r.width - 1 && banner.right > left + 1 && banner.top < top + r.height - 1 && banner.bottom > top + 1;
+        });
+        return { banner: banner.top >= header.bottom - 1 && banner.bottom <= frame.top + 80 && banner.left >= 0 && banner.right <= innerWidth + 1,
+          overlay: getComputedStyle(document.querySelector('#pause-banner')).position === 'absolute', covered };
+      })()`);
+      assert.deepEqual(pauseGeometry, { banner: true, overlay: true, covered: false }, `${width}x${height}`);
+      const fit = await evaluate(guestA)(EMBED_FIT_SCRIPT);
+      assert.ok(fit.result, `the held result is on screen at ${width}x${height}: ${JSON.stringify(fit)}`);
+      embedStates.push(`paused-result-${width}x${height}`);
+    }
+    await evaluate(guestA)("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
+    await guestA(["set", "viewport", "1280", "600"]);
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-result-1280x800", "paused-result-390x667"]);
+    check("guest-embed-fit");
+    check("pause-banner");
+    await click(host, "#resume");
+    await wait(
+      () => app.manager.snapshot().state === "playing",
+      "resumed",
+    );
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#pause-banner')?.hidden===true"),
+      "pause banner cleared",
+    );
+
+    await click(host, "#menu");
+    await wait(() => app.manager.snapshot().state === "paused", "pause to end");
+    await evaluate(guestA)("window.__endingDocument=document.querySelector('#table').contentDocument;window.__stoppingFrames=[];window.__endWatch=setInterval(()=>{const f=document.querySelector('#table');window.__stoppingFrames.push(f.contentDocument===window.__endingDocument && !document.querySelector('#playing').hidden)},20)");
+    await click(host, "#end");
+    await click(host, "#confirm-yes");
+    await wait(
+      () => ["ended", "completed"].includes(app.manager.snapshot().state),
+      "ended",
+    );
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#final')?.hidden===false"),
+      "final stacks",
+    );
+    const stackText = await evaluate(guestA)("document.querySelector('#final-stacks')?.innerText ?? ''");
+    // The participant's final panel keeps every text at 12px or larger (A5).
+    const finalSmall = await evaluate(guestA)("[...document.querySelectorAll('#final *')].filter(n=>n.getClientRects().length&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.tagName)");
+    assert.deepEqual(finalSmall, [], 'participant final text under 12px');
+    assert.match(String(stackText), /민준|서연|호스트/);
+    check("end-final-stacks");
+    const retained=await evaluate(guestA)("clearInterval(window.__endWatch);({same:document.querySelector('#table').contentDocument===window.__endingDocument,samples:window.__stoppingFrames,visible:!document.querySelector('#playing').hidden})");
+    assert.equal(retained.same,true);assert.equal(retained.visible,true);assert.ok(retained.samples.length>0 && retained.samples.every(Boolean));
+    check("participant-survives-stopping");
+
+    await click(guestA,'#leave');
+    await guestA(['open',joinHref]);
+    await guestA(['fill','#join-name','새 참가자']);
+    await click(guestA,'#join-submit');
+    await wait(()=>evaluate(guestA)("!document.querySelector('#waiting').hidden && document.querySelector('#join-form').hidden"),'late participant waiting');
+    assert.equal(await evaluate(guestA)("document.querySelector('#playing').hidden && document.querySelector('#final').hidden && !document.querySelector('#table').getAttribute('src')"),true);
+    check('late-join-waits-for-next-game');
+
+    await click(host, "#result-modes");
+    await wait(
+      () => evaluate(host)("document.querySelector('#setup')?.hidden===false && document.querySelector('#room-close')?.disabled===false"),
+      "setup with closable room",
+    );
+    await click(host, "#room-close");
+    await wait(
+      () => evaluate(host)("document.querySelector('#room-status')?.dataset.status==='closed'"),
+      "room closed",
+    );
+    await wait(
+      () => evaluate(guestA)("document.querySelector('#join-error')?.textContent?.includes('닫혔거나')"),
+      "guest offline",
+    );
+    check("room-closed-offline");
+    await host(["screenshot", path.join(outDir, "host.png")]);
+    await guestA(["screenshot", path.join(outDir, "guest-a.png")]);
+  } catch (error) {
+    failure = error;
+    try {
+      await host(["screenshot", path.join(outDir, "failure-host.png")]);
+      await guestA(["screenshot", path.join(outDir, "failure-guest.png")]);
+    } catch { /* best-effort */ }
+  } finally {
+    const cleanup = await cleanupJourney({ failure, steps: [
+      ...[host, guestA, guestB].map(browser => () => browser(['close'])),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
+    const result = {
+      schemaVersion: 1,
+      pass: !failure && requiredJourneyChecks.every((name) => checks.includes(name)),
+      node: process.version,
+      browser: "agent-browser@0.36.0",
+      lan,
+      checks,
+      pending: requiredJourneyChecks.filter((name) => !checks.includes(name)),
+      error: failure?.message,
+      cleanupErrors: cleanup.errors.map(error => error.message),
+    };
+    fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
+  }
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
+}
+
+if (
+  !process.env.NODE_TEST_CONTEXT
+  && process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i = process.argv.lastIndexOf("--out-dir");
+    if (i < 0) throw new Error("--out-dir required");
+    await runMultiplayerJourney(path.resolve(process.argv[i + 1]));
+    console.log("Multiplayer browser journey PASS");
+  }
+}

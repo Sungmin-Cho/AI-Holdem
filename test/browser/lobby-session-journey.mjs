@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -17,19 +18,27 @@ import {
 export const requiredJourneyChecks = [
   "missing-module-visible-error",
   "bare-lobby-no-init",
+  "help-menu-focus-return",
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
+  "host-iframe-survives-error-resume",
+  "host-embed-fit",
   "setup-back-no-resume",
   "menu-close-reopen",
+  "pause-lock-immediate",
   "restart-new-id",
   "abort-summary",
+  "final-overlay-ended",
   "completed-review-reload",
   "command-reconnect",
   "study-paused-roundtrip",
   "keyboard-mobile",
   "real-user-store-unchanged",
   "owned-cleanup",
+  "hand-result-hold-respected",
+  "pause-during-ai-interval",
+  "skip-advances",
 ];
 export async function runLobbyJourney(outDir) {
   fs.mkdirSync(outDir, { recursive: true });
@@ -46,6 +55,7 @@ export async function runLobbyJourney(outDir) {
       "npx",
       [
         "--yes",
+        "--prefer-offline",
         "agent-browser@0.36.0",
         "--session",
         session,
@@ -57,7 +67,7 @@ export async function runLobbyJourney(outDir) {
     assert.equal(
       r.exitCode,
       0,
-      `${args[0]}: ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
+      `${args[0]} (timeout=${r.timedOut}, signal=${r.signal}, spawn=${r.spawnError}): ${r.stderr} ${r.stdout.replace(/token=[^\s"&]+/g, "token=[redacted]")}`,
     );
     const result = JSON.parse(r.stdout);
     assert.notEqual(result.success, false, JSON.stringify(result));
@@ -68,18 +78,20 @@ export async function runLobbyJourney(outDir) {
     return data?.result ?? data;
   };
   const check = (name) => checks.push(name);
-  const wait = async (predicate) => {
-    for (let i = 0; i < 200; i++) {
+  const wait = async (predicate, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (await predicate()) return;
       await new Promise((r) => setTimeout(r, 100));
     }
     throw new Error("journey state timeout " + app.manager.snapshot().state);
   };
-  const state = (expected) =>
+  const state = (expected, timeoutMs) =>
     wait(
       () =>
         app.manager.snapshot().state === expected &&
         !app.manager.snapshot().pendingRequestId,
+      timeoutMs,
     );
   const click = async (selector) => {
     await browser(["snapshot", "-i"]);
@@ -96,6 +108,7 @@ export async function runLobbyJourney(outDir) {
     app = await startAppService(root, {
       resolver: async () => ({ player: null, upper: null, notices: [] }),
     });
+    app.manager.setPrefill({pace:'instant'});
     // Reproduce an already-running server whose allowlist predates the UI update.
     outdatedServer = http.createServer(async (req, res) => {
       if (req.url === '/shared/game-setup.js') {
@@ -125,6 +138,18 @@ export async function runLobbyJourney(outDir) {
     assert.equal(await evaluate("location.hash"), "");
     check("bare-lobby-no-init");
     await browser(["screenshot", path.join(outDir, "lobby.png")]);
+    // Keyboard: menu → 도움말 → close: focus lands back on the visible menu button.
+    await browser(["focus", "#help-menu"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!document.querySelector('#help-menu-list').hidden"));
+    await browser(["focus", "#open-help"]);await browser(["press", "Enter"]);
+    await wait(() => evaluate("!!document.querySelector('#help-panel[open]')"));
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    await wait(() => evaluate("!document.querySelector('#help-panel[open]') && document.activeElement?.id==='help-menu'"));
+    check("help-menu-focus-return");
+    await browser(["set", "viewport", "390", "844"]);
+    const lobbyTargets = await evaluate("[...document.querySelectorAll('#setup button, #setup select, #setup input, #setup summary, .app-header button')].filter(n=>n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'&&!n.closest('[hidden]')).filter(n=>n.type!=='radio'&&n.type!=='checkbox').map(n=>({id:n.id||n.name||n.className,h:Math.round(n.getBoundingClientRect().height)})).filter(t=>t.h<44)");
+    assert.deepEqual(lobbyTargets, [], "every lobby control is a 44px target on a phone");
+    await browser(["set", "viewport", "1280", "900"]);
     assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
     await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");
@@ -143,8 +168,80 @@ export async function runLobbyJourney(outDir) {
         "document.querySelector('#table').contentDocument.querySelector('#action-status')?.textContent.length>0",
       ),
     );
+    // Keep authentication identity valid so the action reaches the real loop.
+    // Damage only this owned fixture while an actual user action is pending.
+    // The real loop fails and cleans up; restore the bytes before ordinary resume.
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    await evaluate("window.__recoveryDocument=document.querySelector('#table').contentDocument");
+    const engineFile=path.join(app.manager.current.sessionDir,'state.json');
+    const engineBeforeFault=fs.readFileSync(engineFile);
+    const beforeFault=app.manager.snapshot();
+    try {
+      fs.writeFileSync(engineFile,JSON.stringify({...JSON.parse(engineBeforeFault),seats:null}));
+      await evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold').click()");
+      await state('error');
+      assert.equal(app.manager.session,null);
+      const unavailable=await fetch(`${app.origin}/api/game/${beforeFault.gameId}/events`,{headers:{authorization:`Bearer ${app.token}`,'x-game-epoch':beforeFault.gameEpoch}});
+      assert.equal(unavailable.status,503);assert.equal((await unavailable.json()).code,'SESSION_UNAVAILABLE');
+    } finally {fs.writeFileSync(engineFile,engineBeforeFault);}
+    // The manager reaches error before the browser's polling render does. Wait
+    // for the actual recovery control to own its click point after layout.
+    await wait(()=>evaluate(`(() => {
+      const button=document.querySelector('#recover');
+      if(!button || button.hidden || button.disabled || document.body.classList.contains('has-game'))return false;
+      const r=button.getBoundingClientRect();
+      return r.width>0 && r.height>0 && button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+    })()`));
+    await click('#recover');await state('playing');
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold')?.disabled===false"));
+    assert.equal(app.manager.snapshot().gameId,beforeFault.gameId);
+    assert.equal(await evaluate("document.querySelector('#table').contentDocument===window.__recoveryDocument && !document.querySelector('#game').hidden"),true);
+    check('host-iframe-survives-error-resume');
+    const embedStates = [];
+    const measureEmbed = async (stateName, expectResult = false) => {
+      for (const [width, height] of [[1280, 800], [390, 667]]) {
+        await browser(["set", "viewport", String(width), String(height)]);
+        await wait(async () => (await evaluate(EMBED_FIT_SCRIPT)) !== null);
+        const fit = await evaluate(EMBED_FIT_SCRIPT);
+        await browser(["screenshot", path.join(outDir, `host-embed-${stateName}-${width}x${height}.png`)]);
+        assertEmbedFit(fit, `host ${stateName} ${width}x${height}`);
+        if (expectResult) assert.ok(fit.result, `the held result is on screen: ${JSON.stringify(fit)}`);
+        embedStates.push(`${stateName}-${width}x${height}`);
+      }
+      await browser(["set", "viewport", "1280", "900"]);
+    };
+    await measureEmbed("turn");
+    // R3: the menu opens and the table locks at the click, while the pause POST is
+    // still held; closing the menu keeps the lock until the pause settles.
+    await evaluate(`(() => {
+      const original = window.fetch;
+      window.__pauseGate = new Promise((resolve) => { window.__releasePause = resolve; });
+      window.fetch = async (url, options) => {
+        if (String(url) === '/api/commands' && options?.method === 'POST' && JSON.parse(options.body).kind === 'pause') {
+          window.fetch = original;
+          await window.__pauseGate;
+        }
+        return original(url, options);
+      };
+    })()`);
     await click("#menu");
+    assert.deepEqual(await evaluate("({open:document.querySelector('#pause-dialog').open,inert:document.querySelector('#table').inert,veil:!document.querySelector('#table-lock').hidden})"),{open:true,inert:true,veil:true});
+    // Closed with the menu's own button: an Esc cancel here followed by the later
+    // viewport emulation change and Esc (keyboard-mobile) hung headless Chrome's
+    // renderer in agent-browser (Page.enable unanswered); the button path does not.
+    await click("#close-menu");
+    assert.deepEqual(await evaluate("({open:document.querySelector('#pause-dialog').open,inert:document.querySelector('#table').inert,veil:!document.querySelector('#table-lock').hidden})"),{open:false,inert:true,veil:true});
+    await evaluate("window.__releasePause()");
     await state("paused");
+    // A menu the user dismissed while pausing stays closed; the table stays locked.
+    await wait(() => evaluate("!document.querySelector('#pause-dialog').open && document.querySelector('#table').inert && document.querySelector('#table-lock').hidden && !document.querySelector('#menu').disabled"));
+    await click("#menu");
+    await wait(() => evaluate("document.querySelector('#pause-dialog').open && document.activeElement?.id==='resume'"));
+    check('pause-lock-immediate');
+    // Paused with the menu open: the same fit, the table locked under the menu.
+    await measureEmbed("paused");
+    assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667"]);
+    check('host-embed-fit');
     const paused = hashTree(app.manager.current.sessionDir);
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(hashTree(app.manager.current.sessionDir), paused);
@@ -217,6 +314,7 @@ export async function runLobbyJourney(outDir) {
     );
     await click("#menu");
     await state("paused");
+    await evaluate("window.__endingFrame=document.querySelector('#table').contentDocument");
     await click("#end");
     await click("#confirm-yes");
     await state("ended");
@@ -227,6 +325,9 @@ export async function runLobbyJourney(outDir) {
       ),
     );
     check("abort-summary");
+    await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#review-overlay')?.hidden===false"));
+    assert.equal(await evaluate("!document.querySelector('#game').hidden && document.querySelector('#table').contentDocument===window.__endingFrame"),true);
+    check("final-overlay-ended");
     await click("#result-modes");
     await browser(["check", 'input[value="cash-training"]']);
     await browser(["select", "#ai-count", "1"]);
@@ -262,6 +363,61 @@ export async function runLobbyJourney(outDir) {
     await browser(['frame','#table']);await browser(['snapshot','-i']);await browser(['click','#review-close']);await browser(['frame','main']);
     check("completed-review-reload");
     await browser(["screenshot", path.join(outDir, "completed.png")]);
+    // Exercise real app -> loop pacing, not a mocked skip method.
+    await click('#result-modes');
+    await evaluate("document.querySelector('details').open=true");
+    await browser(['fill','input[name="hands"]','4']);
+    await browser(['select','[name="pace"]','fast']);
+    await browser(['select','#ai-count','1']);
+    await evaluate(`(() => {
+      window.__pace={paused:false,skipClicked:false,resultPaused:false};
+      window.__paceDriver=setInterval(()=>{
+        const doc=document.querySelector('#table')?.contentDocument;if(!doc)return;
+        if(document.querySelector('#status')?.textContent!=='게임 중')return;
+        const thinking=doc.querySelector('#thinking'),menu=document.querySelector('#menu');
+        if(!window.__pace.paused && thinking && !thinking.hidden && !menu.disabled){window.__pace.paused=true;menu.click();return;}
+        const result=doc.querySelector('#hand-result'),skip=doc.querySelector('.hand-result-skip');
+        // Hand 1's result: freeze the table clock (the strip stays up) and pause,
+        // so the host iframe can be measured with a real held result.
+        if(window.__pace.paused && !window.__pace.resultPaused && result?.dataset.handNo==='1' && !result.hidden && !menu.disabled){
+          const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;window.__pace.resultPaused=true;menu.click();return;}
+        if(result?.dataset.handNo==='2' && !result.hidden && skip && !skip.hidden && !skip.disabled){window.__pace.skipClicked=true;skip.click();}
+        const button=['#btn-check','#btn-call','#btn-fold'].map(id=>doc.querySelector(id)).find(node=>node&&!node.disabled&&!node.hidden);
+        if(button)button.click();
+      },30);
+    })()`);
+    const holds=new Map(),advances=new Map();let lastHand=0;
+    const paceWatch=setInterval(()=>{
+      try {
+        const snap=JSON.parse(fs.readFileSync(path.join(app.manager.current.sessionDir,'ui-snapshot.json')));
+        if(snap.resultHold&&!holds.has(snap.resultHold.handNo))holds.set(snap.resultHold.handNo,snap.resultHold);
+        const hand=readEngine().handNo;
+        if(hand>lastHand){advances.set(hand,Date.now());lastHand=hand;}
+      } catch {}
+    },20);
+    try {
+      await click('#start');await state('paused');
+      const pausedState=hashTree(app.manager.current.sessionDir);
+      await new Promise(resolve=>setTimeout(resolve,500));assert.equal(hashTree(app.manager.current.sessionDir),pausedState);
+      check('pause-during-ai-interval');
+      await click('#resume');
+      await wait(() => evaluate('window.__pace.resultPaused===true'), 60000);
+      await state('paused');
+      await measureEmbed("paused-result", true);
+      await evaluate("(()=>{const w=document.querySelector('#table').contentWindow;if(w.__realNow){w.Date.now=w.__realNow;delete w.__realNow;}return true})()");
+      assert.deepEqual(embedStates, ["turn-1280x800", "turn-390x667", "paused-1280x800", "paused-390x667", "paused-result-1280x800", "paused-result-390x667"]);
+      await click('#resume');
+      // Four paced hands plus finalization can exceed the ordinary UI wait on CI.
+      await state('completed', 60000);
+      assert.ok(holds.has(1)&&advances.has(2));
+      assert.ok(advances.get(2)>=Date.parse(holds.get(1).until),'next hand preceded server hold deadline');
+      check('hand-result-hold-respected');
+      assert.equal(await evaluate('window.__pace.skipClicked'),true);
+      assert.ok(holds.has(2)&&advances.has(3));
+      assert.ok(advances.get(3)<Date.parse(holds.get(2).until),'skip did not shorten the active wait');
+      check('skip-advances');
+    } finally {clearInterval(paceWatch);await evaluate('clearInterval(window.__paceDriver)');}
+
   } catch (error) {
     failure = error;
     try {
@@ -278,16 +434,19 @@ export async function runLobbyJourney(outDir) {
       await browser(["screenshot", path.join(outDir, "failure.png")]);
     } catch {}
   } finally {
-    await browser(["close"]).catch(() => {});
-    if (outdatedServer) await new Promise(resolve => outdatedServer.close(resolve));
-    await app?.close();
-    const study = await inspectStudyService(root);
-    if (study.status === "running")
-      await stopStudyService(root, { expectedInstanceId: study.instanceId });
-    assert.equal(hashTree(userStore), before);
-    check("real-user-store-unchanged");
-    workspace.close();
-    check("owned-cleanup");
+    const cleanup = await cleanupJourney({ failure, steps: [
+      () => browser(['close']),
+      () => outdatedServer && new Promise(resolve => outdatedServer.close(resolve)),
+      () => app?.close(),
+      async () => { const study = await inspectStudyService(root);
+        if (study.status === 'running') await stopStudyService(root, { expectedInstanceId: study.instanceId }); },
+      () => { assert.equal(hashTree(userStore), before); checks.push('real-user-store-unchanged'); },
+      () => workspace.close(),
+    ] });
+    failure = cleanup.failure;
+    if (!cleanup.errors.length) checks.push('owned-cleanup');
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
     const result = {
       schemaVersion: 1,
       pass: !failure && requiredJourneyChecks.every((x) => checks.includes(x)),
@@ -296,21 +455,24 @@ export async function runLobbyJourney(outDir) {
       checks,
       pending: requiredJourneyChecks.filter((x) => !checks.includes(x)),
       error: failure?.message,
+      cleanupErrors: cleanup.errors.map(error => error.message),
     };
     fs.writeFileSync(
       path.join(outDir, "result.json"),
       JSON.stringify(result, null, 2),
     );
   }
-  if (failure) throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if (
   !process.env.NODE_TEST_CONTEXT &&
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  const i = process.argv.indexOf("--out-dir");
-  if (i < 0) throw new Error("--out-dir required");
-  await runLobbyJourney(path.resolve(process.argv[i + 1]));
-  console.log("Lobby browser journey PASS");
+  if (!selfTestJourney(requiredJourneyChecks)) {
+    const i = process.argv.lastIndexOf("--out-dir");
+    if (i < 0) throw new Error("--out-dir required");
+    await runLobbyJourney(path.resolve(process.argv[i + 1]));
+    console.log("Lobby browser journey PASS");
+  }
 }

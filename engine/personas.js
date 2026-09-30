@@ -1,12 +1,9 @@
 import { randomInt } from 'node:crypto';
+import { PERSONA_NAMES } from '../shared/reserved-names.js';
 
 export const ARCHETYPES = ['TAG', 'LAG', 'Nit', 'CallingStation', 'Maniac', 'Trickster'];
 
-const NAMES = [
-  '김민준', '이서연', '박지훈', '최수빈', '정도윤', '강예은', '조현우', '윤하은',
-  '장서준', '임지아', '한도현', '오유진', '서준혁', '신채원', '권태민', '황나연',
-  '안건우', '송다은', '류시우', '배지민', '문재윤', '노수아', '백현준', '남예린',
-];
+const NAMES = PERSONA_NAMES;
 
 const PROFILES = {
   TAG: {
@@ -35,8 +32,13 @@ const PROFILES = {
   },
 };
 
-function shuffledNames(count) {
-  const names = [...NAMES];
+function shuffledNames(count, excludeNames = []) {
+  const excluded = new Set(
+    (Array.isArray(excludeNames) ? excludeNames : [])
+      .map((name) => String(name).trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const names = NAMES.filter((name) => !excluded.has(name.toLowerCase()));
   for (let i = names.length - 1; i > 0; i -= 1) {
     const j = randomInt(i + 1);
     [names[i], names[j]] = [names[j], names[i]];
@@ -57,13 +59,19 @@ function shuffledArchetypes(count) {
   return archetypes.slice(0, count);
 }
 
-export function generatePersonas(n) {
-  if (!Number.isInteger(n) || n < 0 || n > NAMES.length) {
-    throw new RangeError(`n must be an integer from 0 to ${NAMES.length}`);
+export function generatePersonas(n, { excludeNames } = {}) {
+  const excluded = new Set(
+    (Array.isArray(excludeNames) ? excludeNames : [])
+      .map((name) => String(name).trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const poolSize = NAMES.filter((name) => !excluded.has(name.toLowerCase())).length;
+  if (!Number.isInteger(n) || n < 0 || n > poolSize) {
+    throw new RangeError(`n must be an integer from 0 to ${poolSize}`);
   }
 
   const archetypes = shuffledArchetypes(n);
-  return shuffledNames(n).map((name, index) => {
+  return shuffledNames(n, excludeNames).map((name, index) => {
     const archetype = archetypes[index];
     const profile = PROFILES[archetype];
     return {

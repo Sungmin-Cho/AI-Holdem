@@ -318,11 +318,6 @@ export function readPersistedSolver(gameDir, { processStartTime: startTimeOf = p
   return { state: occupancy.live ? 'live' : 'dead', record: rec };
 }
 
-export function hasPersistedLiveSolver(gameDir) {
-  const rec = readPersistedSolver(gameDir);
-  return rec.state === 'live' || rec.state === 'unreadable';
-}
-
 function persistSolver(gameDir, record) {
   writeJsonAtomic(solverRecordPath(gameDir), record);
 }

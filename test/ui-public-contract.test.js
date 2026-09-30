@@ -44,9 +44,32 @@ test('new public fields survive relay persistence/reload; new assets respect app
     const snap=await fetch(`http://127.0.0.1:${relay.port}/api/snapshot?token=ui-contract-fixture`).then(r=>r.json());
     assert.deepEqual(snap.view,view);
     app=await startAppService(workspace.root,{resolver:async()=>({player:null,upper:null,notices:[]})});
-    for(const asset of ['/design-tokens.css','/table-design.css','/chip-format.js','/shared/game-setup.js','/shared/player-budget.js'])assert.equal((await fetch(app.origin+asset)).status,200,asset);
+    for(const asset of ['/design-tokens.css','/table.css','/chip-format.js','/shared/game-setup.js','/shared/player-budget.js'])assert.equal((await fetch(app.origin+asset)).status,200,asset);
+    // The pre-redesign stylesheets are gone; table.css carries the table.
+    for(const asset of ['/style.css','/table-design.css'])assert.equal((await fetch(app.origin+asset)).status,404,asset);
     assert.equal((await fetch(app.origin+'/shared/platform-files.js')).status,404);
     const css=await fetch(app.origin+'/design-tokens.css');assert.match(css.headers.get('content-type'),/css/);
     assert.ok([...fs.readFileSync('server/public/design-tokens.css')].every(n=>n<128));
   }finally{await app?.close();await relay?.close();workspace.close();}
+});
+test('participant chrome and action path omit host-only surfaces', () => {
+  const app = fs.readFileSync(new URL('../server/public/app.js', import.meta.url), 'utf8');
+  const transport = fs.readFileSync(new URL('../server/public/app-transport.js', import.meta.url), 'utf8');
+  assert.match(app, /participantMode/);
+  assert.match(app, /tab-coach/);
+  assert.match(app, /intent-note/);
+  assert.match(app, /formatNarration/);
+  assert.match(transport, /holdem-participant-token/);
+  assert.match(transport, /\/api\/p\/game/);
+  assert.match(app, /participant \? undefined/);
+  assert.match(app, /delete payload\.note/);
+  // A guest device never holds the host token; the table must read its own key.
+  assert.match(transport, /export function authToken/);
+  assert.match(app, /appGameId \? authToken\(\)/);
+  assert.equal(app.includes("sessionStorage.getItem('holdem-app-token')"), false);
+  // The join page must size the participant iframe; the browser default is 300x150.
+  const join = fs.readFileSync(new URL('../server/public/join.js', import.meta.url), 'utf8');
+  const lobbyCss = fs.readFileSync(new URL('../server/public/lobby.css', import.meta.url), 'utf8');
+  assert.match(join, /classList\.toggle\('has-game'/);
+  assert.match(lobbyCss, /body\.has-game #table/);
 });

@@ -113,7 +113,9 @@ test('S8 full: default 20-hand production session records support then study rem
   try {
     await until(() => readFirstFixtureRecord(fake.log, initialCli.child), initialCli);
     initialCli.requestStop();
-    assert.equal((await within(initialCli.closed, 8000, 'default20 initialized CLI stop')).code, 0);
+    // The policy default no longer waits for the held upper probe: relay and study
+    // startup are underway when this stop lands, which is slow on Windows.
+    assert.equal((await within(initialCli.closed, scaled(15000), 'default20 initialized CLI stop')).code, 0);
     const selected = JSON.parse(fs.readFileSync(path.join(storeDir, '.session-store/current.json')));
     gameDir = path.join(storeDir, '.session-store', selected.sessionRel);
     const stateFile = path.join(gameDir, 'state.json');
@@ -471,9 +473,10 @@ test('S8 full: actual store CLI forwards port zero to an ephemeral authenticated
   assert.match(captureCliRelay(gameDir).args, /--port 0(?: |$)/);
   assert.equal((await relayRequest(lock, '/api/snapshot')).status, 200);
   await waitValue(async () => (await relayRequest(lock, '/api/snapshot')).body.view?.legal?.toAct === 'user');
-  // Deliberately leave the protected wait unresolved to exercise failure cleanup.
+  // Explicitly exercise forced cleanup: a visible user turn does not prove the
+  // CLI has entered its protected wait, so graceful shutdown can still win.
   // The default20 journey separately proves graceful delivery and once-only resume.
-  await cleanupCli(cli, gameDir);
+  await cleanupCli(cli, gameDir, { force: true });
   assert.equal(cli.child.signalCode, 'SIGKILL');
   assert.throws(() => process.kill(lock.serverPid, 0), (error) => error.code === 'ESRCH');
   assert.equal((await inspectStudyService(storeDir)).status, 'running');

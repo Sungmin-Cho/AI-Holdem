@@ -14,6 +14,7 @@ import {initializePreparedSession} from '../tools/game-loop.js';
 import {resolveSessionReference} from '../tools/reference-source.js';
 import {sealPreparation} from '../tools/session-preparation.js';
 import {setupToArgs} from '../shared/game-setup.js';
+import {inspectStudyService,stopStudyService} from '../tools/study-service.js';
 
 const TIMEOUT=process.platform==='win32'?300000:30000;
 const body=(manager,kind)=>{const s=manager.snapshot();return {requestId:randomUUID(),kind,
@@ -25,6 +26,37 @@ const settle=async(manager,id)=>{
   throw new Error('receipt timeout');
 };
 const read=file=>JSON.parse(fs.readFileSync(file));
+// #211: a failing receipt assertion must name the recovery path, not only the status. The
+// diagnostics carry codes and phases only — never tokens, so never an error message (a
+// JSON.parse error quotes the file it read, and loop-state.json holds the sessionToken).
+function receiptDiagnostics(manager,row){
+  const safe=fn=>{try{return fn();}catch(error){return `unreadable: ${typeof error?.code==='string'?error.code:'error'}`;}};
+  const snapshot=safe(()=>manager.snapshot());
+  const dir=safe(()=>manager.current?.sessionDir);
+  const loopState=typeof dir==='string'?safe(()=>read(path.join(dir,'loop-state.json'))):null;
+  const log=typeof dir==='string'?safe(()=>fs.readFileSync(path.join(dir,'loop.log'),'utf8').trim().split('\n').slice(-8)
+    .map(line=>{try{const e=JSON.parse(line);return `${e.event}${e.code?`:${e.code}`:''}`;}catch{return 'unparseable';}})):null;
+  return JSON.stringify({
+    receipt:{status:row?.status,error:row?.error,kind:row?.kind,completedAt:row?.completedAt,recovery:row?.recovery?.kind},
+    snapshot:typeof snapshot==='object'?{state:snapshot?.state,error:snapshot?.error,recoveryExit:snapshot?.recoveryExit,allowedCommands:snapshot?.allowedCommands}:snapshot,
+    loopState:loopState&&typeof loopState==='object'&&!Array.isArray(loopState)?{phase:loopState.phase,halt:loopState.halt?.code,haltRecovery:loopState.halt?.recovery?.code,aborting:Boolean(loopState.aborting)}
+      :typeof loopState==='string'&&loopState.startsWith('unreadable: ')?loopState:loopState===null?null:'non-object',
+    log,
+  });
+}
+const assertReceipt=(manager,row,status)=>assert.equal(row?.status,status,receiptDiagnostics(manager,row));
+test('#211 receipt diagnostics never carry a token, even from a torn or non-object loop-state',()=>{
+  const secret='f'.repeat(64);
+  for(const body of [`{"sessionToken":"${secret}","phase":`,JSON.stringify(secret),JSON.stringify([secret])]){
+    const dir=createOwnedTempDir('holdem-receipt-diag');
+    fs.writeFileSync(path.join(dir,'loop-state.json'),body);
+    fs.writeFileSync(path.join(dir,'loop.log'),`${JSON.stringify({event:'halt',code:'X',sessionToken:secret})}\n{"torn":"${secret}`);
+    const manager={snapshot:()=>({state:'error',error:'SESSION_RECOVERABLE',allowedCommands:['end']}),current:{sessionDir:dir}};
+    const text=receiptDiagnostics(manager,{status:'failed',error:'X',kind:'end'});
+    assert.equal(text.includes(secret.slice(0,8)),false,text);
+    assert.match(text,/"state":"error"/);
+  }
+});
 const write=(file,value)=>fs.writeFileSync(file,JSON.stringify(value));
 const engineEnd=async(root,operationId)=>promisify(execFile)(process.execPath,[path.resolve('engine/cli.js'),
   'end','--result','abort','--operation-id',operationId,'--game-dir',root]);
@@ -50,10 +82,18 @@ async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=n
   let calls=0;
   const resolver=resolverOverride??(async()=>{calls++;return {player:null,upper:null,notices:[]};});
   let manager=createSessionManager({storeDir:root,resolver});
-  t.after(()=>manager.close());
+  t.after(async()=>{
+    try { await manager.close(); }
+    finally {
+      // App shutdown deliberately preserves study. Each owned test store must
+      // stop its service instead of accumulating Windows proof children.
+      const study=await inspectStudyService(root);
+      if(study.status==='running') await stopStudyService(root,{expectedInstanceId:study.instanceId});
+    }
+  });
   await manager.initialize();
   const start={...body(manager,'start'),setup:{aiCount:1,opponentRuntime:'policy'}};
-  manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');
+  manager.command(start);assertReceipt(manager,await settle(manager,start.requestId),'succeeded');
   const pause=body(manager,'pause');manager.command(pause);await settle(manager,pause.requestId);
   const gameDir=manager.current.sessionDir;
   await manager.close();
@@ -72,7 +112,7 @@ async function damagedStore(t,{phase='playing',gameOver=false,resolverOverride=n
 }
 
 test('#197 recovery exit gate follows engine/loop phases and exposes the wired exit commands',{timeout:TIMEOUT},async t=>{
-  assert.deepEqual(contract.ABORTABLE_ERROR_CODES,['BAD_PLAYER_RECOVERY']);
+  assert.deepEqual(contract.ABORTABLE_ERROR_CODES,['BAD_PLAYER_RECOVERY','ROOM_UNBOUND','INVALID_OPPONENT_RUNTIME','OPPONENT_RUNTIME_MISMATCH','JEV_CONFIG_UNSUPPORTED']);
   assert.equal(Object.isFrozen(contract.ABORTABLE_ERROR_CODES),true);
   for(const [phase,gameOver,mode] of [['playing',false,'abort'],['playing',true,'finalize'],['finalizing',true,'finalize']])await t.test(`${phase}-${gameOver}`,async st=>{
     const {manager}=await damagedStore(st,{phase,gameOver});
@@ -138,7 +178,7 @@ test('#197 post-engine publication or relay failure remains recoverable across m
     try {
       const request=body(f.manager,'end');f.manager.command(request);row=await settle(f.manager,request.requestId);
     } finally {fs.renameSync=rename;}
-    assert.equal(row.status,'failed');
+    assertReceipt(f.manager,row,'failed');
     assert.equal(read(path.join(f.gameDir,'state.json')).result,'abort');
     assert.equal(f.manager.snapshot().state,'error','engine abort alone is not proof of cleanup');
     assert.deepEqual(f.manager.snapshot().recoveryExit,{mode:'abort'});
@@ -151,7 +191,7 @@ test('#197 post-engine publication or relay failure remains recoverable across m
     if(fault==='relay-identity')fs.unlinkSync(lock); // Only the fake lock created above; never signal its PID.
     const before=fs.readFileSync(path.join(f.gameDir,'state.json'));
     const retry=body(restored,'end');restored.command(retry);
-    assert.equal((await settle(restored,retry.requestId)).status,'succeeded');
+    assertReceipt(restored,await settle(restored,retry.requestId),'succeeded');
     assert.equal(restored.snapshot().state,'ended');
     assert.equal(read(file).aborting,undefined);
     assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
@@ -203,7 +243,7 @@ test('#197 explicit end and restart use a pinned recovery journal and preserve t
     const count=f.calls(), request=body(manager,kind);
     manager.command(request);assert.equal(manager.command(request).requestId,request.requestId);
     const receipt=await settle(manager,request.requestId);
-    assert.equal(receipt.status,'succeeded');
+    assertReceipt(manager,receipt,'succeeded');
     assert.equal(receipt.recovery.kind,'abort-unrecoverable');assert.equal(receipt.recovery.gameId,oldId);
     assert.equal(receipt.recovery.mode,'abort');
     const after=read(path.join(f.gameDir,'state.json'));
@@ -227,7 +267,7 @@ test('#197 accepted recovery journals finish end or restart parked, never replay
     write(path.join(f.root,'.app','commands',request.requestId+'.json'),row);
     const restored=createSessionManager({storeDir:f.root,resolver:f.resolver});st.after(()=>restored.close());
     await restored.initialize();
-    assert.equal(restored.receipt(request.requestId).status,'succeeded');
+    assertReceipt(restored,restored.receipt(request.requestId),'succeeded');
     assert.equal(restored.snapshot().state,kind==='end'?'ended':'paused');
     assert.equal(read(path.join(f.gameDir,'state.json')).result,'abort');
     if(kind==='restart')assert.notEqual(restored.snapshot().gameId,s.gameId);
@@ -256,14 +296,14 @@ test('#197 a validated abort checkpoint permits end after a different recovery e
   assert.equal(restored.snapshot().error,'SESSION_RECOVERABLE');
   assert.deepEqual(restored.snapshot().recoveryExit,{mode:'abort'});
   const request=body(restored,'end');restored.command(request);
-  assert.equal((await settle(restored,request.requestId)).status,'succeeded');
+  assertReceipt(restored,await settle(restored,request.requestId),'succeeded');
   assert.equal(read(path.join(f.gameDir,'state.json')).abortOperationId,'engine-cut');
 });
 test('#197 resume of an already aborted target consumes GAME_ENDED without running after lock release',{timeout:TIMEOUT},async t=>{
   const f=await damagedStore(t);
   await promisify(execFile)(process.execPath,[path.resolve('engine/cli.js'),'end','--result','abort','--operation-id','external-end','--game-dir',f.gameDir]);
   const request=body(f.manager,'resume');f.manager.command(request);
-  assert.equal((await settle(f.manager,request.requestId)).status,'succeeded');
+  assertReceipt(f.manager,await settle(f.manager,request.requestId),'succeeded');
   assert.equal(f.manager.snapshot().state,'ended');
   const before=fs.readFileSync(path.join(f.gameDir,'loop-state.json'));
   await new Promise(r=>setTimeout(r,30));
@@ -274,12 +314,14 @@ test('#197 finalize end retains the engine outcome and finishes with no player d
   const before=fs.readFileSync(path.join(f.gameDir,'state.json'));
   const request=body(f.manager,'end');f.manager.command(request);
   const row=await settle(f.manager,request.requestId);
-  assert.equal(row.status,'succeeded');assert.equal(row.recovery.mode,'finalize');
+  assert.equal(row.status,'succeeded',JSON.stringify({status:row.status,error:row.error,state:f.manager.snapshot().state,managerError:f.manager.snapshot().error}));assert.equal(row.recovery.mode,'finalize');
   assert.equal(f.manager.snapshot().state,'completed');
   assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
 });
-test('#197 accepted recovery restart converges each reservation crash window to a fresh parked game with zero decisions',{timeout:TIMEOUT},async t=>{
-  for(const window of ['no-reservation','reservation-saved','staging-written','selector-committed'])await t.test(window,async st=>{
+// Four real Windows recovery lifecycles share this parent budget. Individual
+// cases remain bounded; ACL/identity proofs are not relaxed for slow runners.
+test('#197 accepted recovery restart converges each reservation crash window to a fresh parked game with zero decisions',{timeout:process.platform==='win32'?600000:TIMEOUT},async t=>{
+  for(const window of ['no-reservation','reservation-saved','staging-written','selector-committed'])await t.test(window,{timeout:process.platform==='win32'?150000:TIMEOUT},async st=>{
     const f=await damagedStore(st),before=f.manager.snapshot(),request=body(f.manager,'restart');
     const row={...request,setup:before.setup,payload:JSON.stringify(request),status:'accepted',
       recovery:{kind:'abort-unrecoverable',mode:'abort',gameId:before.gameId,selectionVersion:before.selectionVersion,gameEpoch:before.gameEpoch}};
@@ -293,7 +335,7 @@ test('#197 accepted recovery restart converges each reservation crash window to 
     const restored=createSessionManager({storeDir:f.root,resolver:f.resolver});st.after(()=>restored.close());
     await restored.initialize();
     const receipt=restored.receipt(request.requestId);
-    assert.equal(receipt.status,'succeeded');
+    assertReceipt(restored,receipt,'succeeded');
     assertParkedFreshGame(restored,before.gameId);
     assert.equal(read(path.join(f.gameDir,'state.json')).result,'abort');
   });

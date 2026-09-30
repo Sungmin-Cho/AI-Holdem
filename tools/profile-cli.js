@@ -250,11 +250,6 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   };
 }
 
-export async function applyEvaluation(storeDir, evaluation) {
-  const store = createProfileStore(storeDir);
-  return store.apply(evaluation);
-}
-
 async function resignMistakes(storeDir, { oldToNew = {}, byEvaluationId = {} }) {
   await createMistakeBank(storeDir).migrateDigests({ oldToNew, byEvaluationId });
 }

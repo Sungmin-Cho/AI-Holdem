@@ -1,3 +1,5 @@
+import { CONTRAST_SCRIPT } from './ui-presentation-journey.mjs';
+import { finishJourney, selfTestJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -65,7 +67,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     trace.push({ operation: args[0], args: args.slice(1).map(sanitize), viewport,
       exitCode: receipt.exitCode, signal: receipt.signal, timedOut: receipt.timedOut,
       stdoutSha256: createHash('sha256').update(sanitize(receipt.stdout)).digest('hex'), stderr: sanitize(receipt.stderr) });
-    assert.equal(receipt.exitCode, 0, `agent-browser ${args[0]} failed`);
+    assert.equal(receipt.exitCode, 0, `agent-browser ${args[0]} failed: ${sanitize(receipt.stdout).slice(0, 3000)}`);
     assert.equal(receipt.timedOut, false); assert.equal(receipt.signal, null);
     if (!json) return receipt.stdout;
     const response = JSON.parse(receipt.stdout);
@@ -75,6 +77,12 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
   const evaluate = async (expression) => {
     const data = await browser(['eval', expression]);
     return data?.result ?? data;
+  };
+  // The finish button can sit on the viewport's bottom edge (its centre off
+  // screen) depending on text wrapping; bring it into view before clicking.
+  const clickNext = async () => {
+    await evaluate("document.querySelector('#next').scrollIntoView({block:'center'})");
+    await browser(['click', '#next']);
   };
   async function setViewport(width, height) {
     await browser(['set', 'viewport', String(width), String(height)]);
@@ -243,8 +251,18 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
         && card.contains(document.activeElement) && document.activeElement.dataset.focus === 'practice';
     })()`));
     await browser(['click','#tab-log']);
-    await browser(['wait','#log-list .replay-open:not([disabled])']);
-    await browser(['focus','#log-list .replay-open:not([disabled])']);
+    // reachUserTurn may finish hands before the user ever acts. Those replays
+    // legitimately have no learning card; exercise the hand whose real action
+    // and training pipeline this journey completed above.
+    const replaySnapshot = await fixture.snapshot();
+    const replayHandNo = firstSnapshot.view.handNo;
+    assert.ok(replaySnapshot.training.some(item => item.handNo === replayHandNo
+      && item.decisionId === firstLegal.decisionId && item.evaluationId));
+    const replayLogIndex = replaySnapshot.log.findIndex(item => item.type === 'hand_start' && item.handNo === replayHandNo);
+    assert.ok(replayLogIndex >= 0);
+    const replaySelector = `#log-list [data-log-index="${replayLogIndex}"] .replay-open:not([disabled])`;
+    await browser(['wait',replaySelector]);
+    await browser(['focus',replaySelector]);
     assert.equal(await evaluate(`(()=>{const index=document.activeElement.closest('[data-log-index]').dataset.logIndex;const select=document.querySelector('#display-unit');select.value='chips';select.dispatchEvent(new Event('change'));return document.activeElement.closest('[data-log-index]')?.dataset.logIndex===index;})()`),true);
     await browser(['press','Enter']);
     await browser(['wait','#replay-body .replay-study']);
@@ -311,7 +329,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     const mobileFeedback = await evaluate('!document.querySelector("#next").hidden && !document.querySelector("#feedback").hidden');
 
     await setViewport(1280, 900);
-    await browser(['click', '#next']);
+    await clickNext();
     await browser(['wait', '#actions button:not([disabled])']);
     await browser(['snapshot', '-i']);
     await browser(['click', '#actions button:not([disabled])']);
@@ -340,7 +358,7 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       }
       const hasNext = await evaluate('!document.querySelector("#next").hidden');
       if (!hasNext) break;
-      await browser(['click', '#next']);
+      await clickNext();
       await waitForExpression(`document.querySelector('#actions button:not([disabled])')
         || document.querySelector('#prompt').textContent.includes('완료했습니다')`, 'next study question');
       const hasAnswer = await evaluate('Boolean(document.querySelector("#actions button:not([disabled])"))');
@@ -351,7 +369,17 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     assert.equal(terminalAfterFinalAnswer && completedSummaryBeforeFinish, true,
       'the final answer must bind authoritative completion and summary before finish or retest');
     await browser(['screenshot', path.join(output, 'study-final-answer-desktop.png')]);
-    await browser(['click', '#next']);
+    // The study room's diagram, hand cards and bars in each theme (A2 computed contrast).
+    const studyContrast = [];
+    for (const theme of ['b', 'a', 'c']) {
+      await evaluate(theme === 'b' ? "document.documentElement.removeAttribute('data-theme')" : `document.documentElement.setAttribute('data-theme','${theme}')`);
+      const { checked, out } = await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(['.spot-seat', '.spot-tag', '.rank-card', '.hand-kind', '.freq-label', '.freq-value', '.freq-mine', '.feedback-title', '.question-title', '.metric-value', '#source', '.study-honesty span'])})`);
+      assert.ok(checked >= 10, `study contrast measured ${checked} elements`);
+      studyContrast.push(...out.map((row) => ({ theme, ...row })));
+    }
+    await evaluate("document.documentElement.removeAttribute('data-theme')");
+    assert.deepEqual(studyContrast, [], JSON.stringify(studyContrast));
+    await clickNext();
     await waitForExpression('document.querySelector("#prompt").textContent.includes("완료했습니다")', 'explicit assessment finish');
     await waitForExpression('document.querySelector("#assessments button")?.disabled === true', 'assessment retest summary');
     const summaryEvidence = await evaluate(`document.querySelector('#source').textContent.includes('휴리스틱')
@@ -420,6 +448,13 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     if (result.pending.some((name) => name !== 'real-user-store-unchanged')) result.blocked = 'COMBINED_BACKEND_SCENARIOS_PENDING';
   } catch (error) {
     result.error = sanitize(error.message);
+    if (browserStarted) {
+      try {
+        const detail=await evaluate("({focus:document.activeElement?.className,focusedLogIndex:document.activeElement?.closest('[data-log-index]')?.dataset.logIndex,replayHidden:document.querySelector('#replay-overlay')?.hidden,replayTitle:document.querySelector('#replay-title')?.textContent,replayStudyCount:document.querySelectorAll('#replay-body .replay-study').length})");
+        fs.writeFileSync(path.join(output,'failure-ui.json'),sanitize(JSON.stringify(detail,null,2)),{mode:0o600});
+        await browser(['screenshot',path.join(output,'failure.png')]);
+      } catch { /* Preserve the original failure even if the browser is unavailable. */ }
+    }
   } finally {
     const cleanupErrors = [];
     if (browserStarted) try { await browser(['close']); } catch (error) { cleanupErrors.push(sanitize(error.message)); }
@@ -431,6 +466,10 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     if (result.userStore.unchanged) check('real-user-store-unchanged', true, { observedViewports: [] });
     result.cleanup = { pass: cleanupErrors.length === 0, errors: cleanupErrors };
     result.pass = !result.blocked && !result.error && result.pending.length === 0 && result.cleanup.pass && result.userStore.unchanged;
+    try {
+      finishJourney({ required: requiredJourneyChecks, recorded: result.checks.map(row => row.name),
+        failure: result.error || result.blocked ? new Error(result.error || result.blocked) : !result.cleanup.pass ? new Error(cleanupErrors.join('; ')) : null });
+    } catch (error) { result.pass = false; result.error ??= sanitize(error.message); }
     fs.writeFileSync(path.join(output, 'trace.json'), `${JSON.stringify(trace, null, 2)}\n`, { mode: 0o600 });
     fs.writeFileSync(path.join(output, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   }
@@ -493,9 +532,9 @@ if (direct && !browserCliEnabled()) {
   process.stdout.write('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT\n');
   process.exit(0);
 }
-else if (direct) {
+else if (direct && !selfTestJourney(requiredJourneyChecks)) {
   const args = parseJourneyArgs(process.argv.slice(2));
   const result = await runLearningJourney(args);
   process.stdout.write(`${JSON.stringify({ pass: result.pass, pending: result.pending, blocked: result.blocked, error: result.error })}\n`);
-  if (!result.pass) process.exitCode = 1;
+  finishJourney({ required: requiredJourneyChecks, recorded: result.checks.map(row => row.name), failure: result.pass ? null : new Error(result.error || result.blocked || 'JOURNEY_FAILED') });
 }

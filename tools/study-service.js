@@ -53,9 +53,16 @@ function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail) {
   // formatStudyError renders from the code alone, so no path reaches a viewer.
   const error = new Error(detail ? `${code} ${detail}` : code); error.code = code; throw error;
 }
+// A win32 checkpoint is two PowerShell children. They once took about a second each, and
+// the 2x rule then started checkpoints about 6 s apart (2 s of work, 4 s of wait); cheaper
+// proofs (#249) would shrink that to under 2 s and triple the children every live service
+// — idle ones included, until they expire — keeps spawning, which starved other children
+// on CI. After a completed checkpoint, keep starts at least 6 s apart on win32 so the
+// saving lowers that load instead. The first checkpoint still waits only `minMs`.
+const WIN32_CHECKPOINT_PERIOD_MS = 6000;
 export function nextCheckpointDelay(minMs, lastDurationMs, platform = process.platform) {
-  if (platform !== 'win32') return minMs;
-  return Math.max(minMs, 2 * lastDurationMs);
+  if (platform !== 'win32' || !(lastDurationMs > 0)) return minMs;
+  return Math.max(minMs, 2 * lastDurationMs, WIN32_CHECKPOINT_PERIOD_MS - lastDurationMs);
 }
 export function memoizedStartTimeOf(memo, startTimeOf) {
   return (pid) => {
@@ -126,9 +133,9 @@ function rememberProved(file) {
 // descriptor's absence. A path that is gone is absent, not unproven. Re-prove for
 // as long as the listing keeps changing under the proof; only a listing that held
 // still across a proof makes an unproven path final. The bound is the number of
-// candidates: a listing can only change that many times before it is empty.
+// candidates plus a small retry allowance. Replacements can keep changing the
+// identity at one pathname, so exhausting this fixed cap always fails closed.
 function proveEntries(candidates, phase, prove = arePrivatePaths) {
-  const listing = (entries) => entries.map(({ file }) => file).join('\u0000');
   // A symlink is never a private path, and every read of one is refused on
   // its own. Listing it here would veto the whole transaction instead — an
   // owner could not release its own lock beside a symlinked descriptor.
@@ -137,9 +144,15 @@ function proveEntries(candidates, phase, prove = arePrivatePaths) {
   let transportTries = 0;
   for (let attempt = 0; attempt <= candidates.length + 3; attempt += 1) {
     reasons = [];
-    if (prove(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } })) return entries;
+    // Release/reacquire can restore the same paths while a Windows ACL child
+    // still observes the retired lock. Re-prove the replacement identity.
+    const before = presentListing(candidates);
+    entries = candidates.filter(({ file }) => present(file));
+    const proved = prove(entries, { onUnproven: (reason) => { if (reasons.length < 4) reasons.push(reason); } });
+    const after = presentListing(candidates);
+    if (proved && after === before) return entries;
     const relisted = candidates.filter(({ file }) => present(file));
-    const listingChanged = listing(relisted) !== listing(entries);
+    const listingChanged = after !== before;
     const transport = reasons.some((reason) => /powershell:.*error=ETIMEDOUT/.test(reason));
     if (listingChanged) entries = relisted;
     else if (transport && transportTries < 3) transportTries += 1;
@@ -317,6 +330,11 @@ function exactInode(file) {
     const stat = fs.lstatSync(file, { bigint: true });
     return { dev: stat.dev, ino: stat.ino };
   } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
+}
+function pidRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === 'EPERM'; }
 }
 function identityStatus(pid, startTime) {
   platformTimeout(WAIT_MS);
@@ -681,16 +699,40 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   try { response = await httpJson(value, '/internal/shutdown', { control: true, body: { expectedInstanceId }, deadline }); }
   catch { fail(); }
   if (response.status !== 200 || response.body.ok !== true) fail();
+  // #211: while the service pid still runs, the stop cannot have completed and no
+  // replacement can exist, so a kill(0) probe is enough to keep waiting. The full ACL and
+  // identity check (a PowerShell spawn each on Windows) runs once the pid is gone, at least
+  // once a second so a reused pid can never stall the wait, and on every poll of the last
+  // second so a finished stop is never reported as a timeout.
+  let lastFullCheck = -Infinity;
   while (platformNow() < deadline) {
-    const { current, lock } = aclTransaction(ctx, () => {
-      assertContext(ctx);
-      return { current: readDescriptor(ctx), lock: readLock(ctx) };
-    });
+    if (pidRunning(value.pid) && platformNow() - lastFullCheck < 1000 && deadline - platformNow() > 1000) {
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    let observed;
+    try {
+      observed = aclTransaction(ctx, () => {
+        assertContext(ctx);
+        return { current: readDescriptor(ctx), lock: readLock(ctx) };
+      });
+    } catch (error) {
+      // The service deletes its descriptor and lock while it stops. On Windows a file deleted
+      // while any handle (ours included) is open stays "delete pending": reading it fails as a
+      // corrupt file (EPERM), not a missing one. That clears on the next poll, so it is not a
+      // verdict; a file that stays unreadable still fails at the deadline below.
+      if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') throw error;
+      lastFullCheck = platformNow();
+      await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
+      continue;
+    }
+    const { current, lock } = observed;
     if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
     // A replacement belongs to the next caller; it is never ours to stop.
     if (current.state === 'valid' && current.value.instanceId !== expectedInstanceId) fail('STUDY_IDENTITY_MISMATCH');
+    lastFullCheck = platformNow();
     await sleep(Math.max(1, Math.min(25, deadline - platformNow())));
   }
   fail();

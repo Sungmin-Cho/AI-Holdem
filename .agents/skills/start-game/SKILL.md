@@ -19,6 +19,8 @@ metadata:
 
 명시한 모드·AI 수·스택·블라인드·핸드 수·상대 방식·공개 옵션은 로비 기본 선택으로 보존한다. 구조화 JSON 파일을 작성하고 위 명령에 `--setup-file <absolute-json-file>`을 추가한다. 허용 키는 `shared/game-setup.js`의 SETUP_KEYS이며 `aiCount`는 숫자 1~8이다. raw shell 옵션/모델 문장을 JSON 값이나 argv에 끼워 넣지 않는다. 충돌한 옵션은 검증 오류를 보고하고 임의로 버리지 않는다. cash의 칩 단위 `stack`을 명시했다면 `stackBb`를 추가하지 않는다. 로비 토너먼트의 기본 상대 방식은 policy이며 명시 LLM은 유지한다.
 
+로비 **온라인 세션**은 공개 포트 8899(옵션 `--public-port`, 표시 호스트는 `--public-host`)로 LAN 참가 링크를 만든다. HTTP가 기본이고 `--tls-cert`/`--tls-key`가 있으면 HTTPS다. 멀티 세션은 앱으로만 재개한다.
+
 웹 메뉴는 일시정지, 계속하기, 같은 설정의 새 게임, 모드 선택, 게임 종료를 제공한다. 메뉴 닫기·Escape·모드 선택에서 돌아가기는 자동 재개가 아니다. 모드 변경/재시작/종료 확인은 웹 UI에서 처리한다. 앱 종료는 `npm run app:stop -- <absolute-store>`이고 학습 서비스는 독립적으로 유지된다.
 
 기존 standalone loop가 살아 있으면 로비는 외부 실행 상태를 표시한다. 해당 loop를 탈취하거나 강제 종료하지 않는다. 인증된 앱 서비스가 있다면 `resume` 요청도 로비로 연결하여 웹에서 계속하도록 한다. 앱 서비스가 없는 기존 standalone 게임에 사용자가 **명시적으로 legacy 직접 실행 또는 `resume`을 요청했을 때만 아래 기존 §1~§7 절차를 사용한다**. 새 게임 요청에 아래 직접 실행 절차를 적용하지 않는다. 중도 종료는 `phase: aborted`, 정상 완료는 `phase: done`이며 둘을 혼동하지 않는다.
@@ -102,7 +104,7 @@ node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game
 2. `phase`가 `bootstrap`을 지남(`playing` 이후) — 정상 기동이다.
 3. `resume-check`의 **`loopPidAlive:false`** — 사이드카 pid가 사망했다. `/tmp/ai-holdem-boot.log`를 보고 중단한다.
 
-런타임 probe 사다리(런타임 × 플레이어/상위 모델/컨테인먼트, grok 콜드 1회 ~25s)가 있어 부트가 수십 초를 넘을 수 있다. **pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다** — 중단하거나 `--force`로 다시 띄우지 마라.
+런타임 probe 사다리(런타임 × 플레이어/상위 모델/컨테인먼트)가 있어 부트가 수십 초를 넘을 수 있다. grok은 격리 홈(`~/.ai-holdem/runtime-home/…`, 지워도 됨)에서 inspect·세션 감사를 돌며, 카나리 거부 왕복이 각 25–50 s라 부트가 1–2분(Grok 호스트는 2–3분) 걸릴 수 있다. grok 탈락 notice의 코드(`RUNTIME_HOME_*`·`GROK_*`)가 어떤 검사에서 떨어졌는지를 말한다. **pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다** — 중단하거나 `--force`로 다시 띄우지 마라.
 
 2번에 도달하면 `loop-state.json`의 `port`·`sessionToken`으로 브라우저를 연다.
 
@@ -122,7 +124,7 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 **딜러는 개입하지 않는다.** 핸드 안 AI 액션 경로의 딜러 LLM 라운드는 **0회**이고, 그것이 이 구조의 성공 기준이다. 액션 전달·워치독·코치 스폰·게시·서버 재기동은 전부 사이드카가 한다.
 
-사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다.
+사용자가 진행 상황을 물으면 **선택된 `$SESSION_DIR/loop-state.json`을 한 번 읽고** 답한다: `phase`, `handNo`, `notices`, 그리고 결정별 `metrics`(`{playerId, decisionId, runtime, outcome, elapsedMs, modelMs, parseMs, stepMs, publishMs}`) 요약. `pendingDecision`이 `recovery_required`면 웹 UI의 재시도 버튼으로 복구한다. `retryWillCorrect`가 참이면 교정 안내를 함께 보낸다. `loop.log`의 `player-decision-rejected`로 직전 회신의 안전한 요약을 확인한다. 상세 로그는 `$SESSION_DIR/loop.log`다. `metrics`는 최근 5,000건이며 버린 개수는 `metricsDropped`에 누적된다. `metricsDropped > 0`이면 이 배열만으로 게임 전체의 실패율·지연 분포를 계산하지 않는다. 진단 이력은 기존 loop-state로 재개하면 유지된다. loop-state가 없어 재구성한 경우에는 `metrics`와 `metricsDropped`가 0부터 시작하므로, 폐기 누계가 0이어도 게임 전체 표본이라고 단정하지 않는다. 참가 요청 주소 목록은 1,024개 초과 시 60초가 지난 항목을 청소하며 활성 주소 수의 하드 상한은 아니다.
 
 ---
 
@@ -157,7 +159,7 @@ legacy 정지 게임은 `node tools/game-loop.js --game-dir /absolute/game --res
 `/start-game resume` 또는 사전 점검에서 이어하기를 고른 경우. **분기는 `resume-check`의 `loopPidAlive` 하나다.**
 
 - **`loopPidAlive: true` → attach.** 사이드카를 **다시 띄우지 않는다**(loop 락이 살아 있는 선점자를 거부하므로 이것이 유일한 정상 경로다). `loop-state.json`을 읽어 "게임 진행 중"과 `phase`·`handNo`를 보고하고, 사용자가 원하면 §4처럼 종료까지 관찰만 한다. 브라우저가 닫혔으면 `port`·`sessionToken`으로 다시 열어 준다.
-- **`loopPidAlive: false` → `--resume` 기동.** 새 게임 기동과 같은 문면이되 `--ai`·`--force` 자리에 `--resume`이 온다.
+- **`loopPidAlive: false` → `--resume` 기동.** 새 게임 기동과 같은 문면이되 `--ai`·`--force` 자리에 `--resume`이 온다. 멀티 세션(`humanCount > 1`)은 앱 관리 모드가 아니면 `MULTIPLAYER_REQUIRES_APP`로 거부되므로 웹 로비에서 재개한다.
 
 ```bash
 nohup node tools/game-loop.js --store-dir game --resume \
@@ -178,6 +180,8 @@ nohup node tools/game-loop.js --store-dir game --resume \
 ```bash
 node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 ```
+
+멀티 세션이 current이면 롤백 전에 게임을 종료하고 룸을 닫는다. S0+S1(엔진 계약·복기·relay)은 한 단위로만 revert한다.
 
 **이 변경을 되돌리거나(revert) 새 버전을 얹기 전에는 아래 3단계를 순서대로 밟는다.** detached 사이드카는 revert 뒤에도 메모리에 올린 코드로 계속 돌기 때문에 revert 단독으로는 부족하다.
 
@@ -221,3 +225,20 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 관찰 지점: `$SESSION_DIR/loop-state.json`(phase·port·sessionToken·notices·metrics·halt·finishedAt), `$SESSION_DIR/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태와 게시 경로는 딜러가 열지 않는다.
 
 새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
+
+
+## 진행 속도
+
+새 로비 게임의 진행 속도는 보통(`normal`)이다. 사용자는 즉시/빠름/보통/느림을 고를 수 있다. 기록된 `pace`는 재개·같은 설정 재시작에서도 유지하며, 기록이 없는 예전 게임은 즉시(`instant`)다. legacy CLI는 `--pace instant|fast|normal|slow`를 받는다. 일시정지 후 남은 결과 대기를 다시 기다리지 않는다. 사람 좌석이 하나일 때만 현재 핸드 결과 대기를 건너뛴다.
+
+이 기능을 revert할 때는 게임을 먼저 종료하고 해당 세션 `.app-setup.json`의 `pace` 키를 제거한다. 진행 중인 게임의 설정을 임의로 바꾸지 않는다.
+
+### 결과 화면과 수동 제어
+
+단독 인간 호스트의 결과 건너뛰기는 `POST /api/game/:gameId/skip-result`, soft 대기 중 AI 취소는 `POST /api/app/interrupt-decision`을 웹 UI가 호출한다. 취소 뒤 종료 확인된 복구 상태에서 재시도한다. 종료 결과는 리뷰 대기와 독립적으로 먼저 표시되며 테이블을 유지한다. 종료 요약은 호스트 `GET /api/game/:gameId/summary`, 참가자 `GET /api/p/game/:gameId/summary`로 읽는다. 참가자 요약은 토큰당 2초 제한이며 모든 요청은 인증·현재 게임 세대와 종료 상태 검사를 받는다.
+
+## JEV 테이블 모드
+
+사용자가 JEV 상대를 요청하면 새 게임 로비의 상대 행동 방식을 `jev`로 지정한다. 모든 AI 좌석은 JEV, 인간 좌석은 그대로다. `--opponent-runtime jev`는 legacy CLI에도 전달할 수 있지만 새 게임 시작 정본은 앱 로비다. 서버 `TYPESAFE_API_KEY`를 사용하며 키 값을 출력하거나 클라이언트에 넣지 않는다. JEV 플레이어는 Node SDK 내부 HTTP이고 상위 코치/리뷰 CLI만 검사한다. AI 0이면 SDK/키 검사를 생략한다. 저장된 모델은 유지하고, 알려진 v1·v2 질문·후보·투영·선택 버전은 재개 시 v3로 roll-forward한다(loop-state 기록과 호스트 로비 알림).
+
+원격 오류는 일시정지 후 명시적 재시도 또는 종료로 처리하며 자동 LLM/정책 대체가 없다. JEV에는 새 LLM 세션 재시도가 없다. `JEV_REQUEST_CLOSE_UNCONFIRMED`는 README의 소유 앱 프로세스 종료·사망 확인 절차를 따른다. 락 파일을 직접 지우거나 종료 미확인을 성공으로 보고하지 않는다. 기존 진행 중 JEV 게임은 호환 버전에서 종료한 뒤 downgrade한다.

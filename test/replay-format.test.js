@@ -305,7 +305,7 @@ test('UI markup, overlay, note, and handReplays wiring are present', () => {
   assert.doesNotMatch(app, /\/api\/replay/);
   assert.doesNotMatch(app, /selectHandRecord/);
 
-  const css = read('server/public/style.css');
+  const css = read('server/public/table.css');
   assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important/);
   assert.equal((css.match(/\[hidden\]\s*\{\s*display:\s*none\s*!important/g) ?? []).length >= 1, true);
   assert.match(css, /\.replay-/);
@@ -345,7 +345,7 @@ test('H10 documents replay reveal, notes, and server recompute', () => {
   assert.match(arch, /publish-contract\.js.*re-export|re-export.*publish-contract\.js/);
   assert.match(arch, /표식|handReplay/);
 
-  const readme = read('README.md');
+  const readme = read('docs/operations.ko.md');
   assert.match(readme, /--showdown-policy open\|standard/);
   assert.match(readme, /--replay-reveal all\|showdown/);
   assert.match(readme, /복기 뷰/);

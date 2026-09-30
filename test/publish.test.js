@@ -330,6 +330,60 @@ test('publish --view-only: 이벤트는 빼되 안내 메시지는 싣는다', a
   }
 });
 
+test('publish --narration-code keeps params JSON that follows the code', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    const before = (await snapshotOf(started.port)).log.length;
+    await run(dir, [
+      '--from', turnFile(dir, sampleTurn()),
+      '--view-only',
+      '--narration-code', 'LEVEL_UP',
+      '--narration-params', JSON.stringify({ sb: 50, bb: 100 }),
+    ]);
+    const log = (await snapshotOf(started.port)).log;
+    assert.equal(log.length, before + 1);
+    assert.deepEqual(log.at(-1), { type: 'narration', code: 'LEVEL_UP', params: { sb: 50, bb: 100 } });
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish --narration-code without params still publishes the code', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    await run(dir, ['--from', turnFile(dir, sampleTurn())]);
+    await run(dir, [
+      '--from', turnFile(dir, sampleTurn()),
+      '--view-only',
+      '--narration-code', 'ILLEGAL_RETRY',
+    ]);
+    assert.deepEqual((await snapshotOf(started.port)).log.at(-1), {
+      type: 'narration', code: 'ILLEGAL_RETRY', params: {},
+    });
+  } finally {
+    await started.close();
+  }
+});
+
+test('publish --narration-params that is not JSON is USAGE', async () => {
+  const dir = tmpDir();
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
+  try {
+    const failed = await runFailing(dir, [
+      '--from', turnFile(dir, sampleTurn()),
+      '--narration-code', 'LEVEL_UP',
+      '--narration-params', 'not-json',
+    ]);
+    assert.equal(failed.json.code, 'USAGE');
+    assert.match(failed.json.message, /narration-params는 JSON/);
+  } finally {
+    await started.close();
+  }
+});
+
 test('reply-channel.txt가 있어도 next.message는 summary 원문이다', async () => {
   const dir = tmpDir();
   const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });

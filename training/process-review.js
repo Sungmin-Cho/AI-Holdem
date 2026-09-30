@@ -8,7 +8,7 @@ const chips = (value) => Number.isSafeInteger(value) && value >= 0;
 const handNumber = (value) => Number.isSafeInteger(value) && value > 0;
 const decisionId = (value) => typeof value === 'string' && value.length <= 96
   && /^d-[1-9][0-9]*-(?:preflop|flop|turn|river)-[0-9]+$/.test(value);
-const playerId = (value) => typeof value === 'string' && /^(?:user|p[1-9][0-9]?)$/.test(value);
+const playerId = (value) => typeof value === 'string' && /^(?:user|h[1-8]|p[1-9][0-9]?)$/.test(value);
 const position = (value) => value === null || (typeof value === 'string'
   && /^(?:BTN(?:\/SB)?|SB|BB|CO|HJ|UTG(?:\+[1-9])?)$/.test(value));
 

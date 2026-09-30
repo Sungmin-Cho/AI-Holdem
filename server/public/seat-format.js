@@ -1,11 +1,14 @@
+import {actionVerbs} from './replay-format.js';
 /** No private cards or replay objects are accepted by this state projector. */
+export const viewerId = view => Object.hasOwn(view ?? {}, 'viewer') ? view.viewer : 'user';
+export const isSpectating = view => viewerId(view) === null && Object.hasOwn(view ?? {}, 'holeCardsByPlayerId');
 export function seatPresentation(view, seat) {
   const out = view?.mode !== 'cash-training' && seat.out === true;
   const playing = view?.handInProgress !== false;
   const active = !out && playing && !view?.gameOver && view?.toAct === seat.playerId;
   const folded = !out && playing && Boolean(seat.folded);
   const allIn = !out && playing && Boolean(seat.allIn);
-  const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === 'user' ? '내 차례' : '행동 중')
+  const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === viewerId(view) ? '내 차례' : '행동 중')
     : view?.mode !== 'cash-training' && typeof seat.out !== 'boolean' ? '상태 확인 불가' : '플레이 중';
   return {out, active, folded, allIn, status, showBacks: !out && playing && !folded && Boolean(view?.street),
     showButton: !out && playing && Boolean(seat.isButton),
@@ -47,4 +50,24 @@ export function blindPositions(view) {
   const next = offset => live[(at + offset) % live.length].playerId;
   if (live.length === 2) return {[next(0)]: 'D/SB', [next(1)]: 'BB'};
   return {[next(0)]: 'D', [next(1)]: 'SB', [next(2)]: 'BB'};
+}
+
+
+export function lastActionsBySeat(log) {
+  const rows=Array.isArray(log)?log:[];
+  const verbs=actionVerbs(rows);
+  const labels={check:'체크',call:'콜',fold:'폴드',bet:'벳',raise:'레이즈'};
+  let actions={};
+  for(const event of rows) {
+    // Blinds are not actions: the position badge and the felt chips already show
+    // them, and repeating "SB 0.5 BB" beside the bet marker doubled the number.
+    if(event.type==='hand_start' || event.type==='street')actions={};
+    else if(event.type==='action') {
+      const verb=verbs.get(event);
+      if(!labels[verb])continue;
+      actions[event.playerId]={label:event.allIn?'올인':labels[verb],
+        amount:['bet','raise'].includes(verb) && Number.isSafeInteger(event.amount)?event.amount:null};
+    }
+  }
+  return actions;
 }

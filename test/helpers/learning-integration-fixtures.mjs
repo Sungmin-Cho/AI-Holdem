@@ -211,12 +211,15 @@ export function captureCliRelay(gameDir) {
   return { pid: lock.serverPid, startTime, args };
 }
 
-export async function cleanupCli(cli, gameDir) {
+export async function cleanupCli(cli, gameDir, { force = false } = {}) {
   const relay = captureCliRelay(gameDir);
   if (cli.child.exitCode === null && cli.child.signalCode === null) {
-    cli.requestStop();
-    try { await within(cli.closed, 1000, 'fixture cleanup CLI'); }
-    catch { cli.child.kill('SIGKILL'); }
+    if (force) cli.child.kill('SIGKILL');
+    else {
+      cli.requestStop();
+      try { await within(cli.closed, 1000, 'fixture cleanup CLI'); }
+      catch { cli.child.kill('SIGKILL'); }
+    }
   }
   await within(cli.closed, 4000, 'fixture cleanup CLI after signal');
   if (relay) {

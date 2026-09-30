@@ -16,8 +16,41 @@ export function bbRaiseTo(legal, bb, multiple) {
     && Number.isSafeInteger(amount) ? amount : null;
 }
 
+/** Verb for the primary wager button, sharing replay-format actionVerbs' rule:
+ * a street with chips already in (preflop always, blinds count) makes the
+ * wager a raise, an empty street makes it a bet, and the maximum is all-in. */
+export function primaryVerb(view, amount) {
+  const legal = view?.legal;
+  if (legal && Number.isSafeInteger(amount) && Number.isSafeInteger(legal.maxRaiseTo) && amount >= legal.maxRaiseTo) return 'allin';
+  const wagered = view?.street === 'preflop'
+    || (view?.seats ?? []).some((seat) => Number.isSafeInteger(seat.bet) && seat.bet > 0);
+  return wagered ? 'raise' : 'bet';
+}
+export const PRIMARY_VERB_LABEL = Object.freeze({ bet: '벳', raise: '레이즈', allin: '올인' });
+
 export function reviewDismissalAfterUpdate(dismissed) {
   return dismissed === true;
+}
+
+export function formatTurnDeadline(deadline, now = Date.now()) {
+  const at = deadline && typeof deadline === 'object' ? deadline.at : deadline;
+  if (typeof at !== 'string') return null;
+  const ms = Date.parse(at) - now;
+  if (!Number.isFinite(ms)) return null;
+  if (ms <= 0) return '제한 시간 종료';
+  return `남은 시간 ${Math.ceil(ms / 1000)}초`;
+}
+
+export function formatNarration(item, seats = []) {
+  if (!item || typeof item !== 'object') return '';
+  const nameOf = (id) => seats.find((seat) => seat.playerId === id)?.name
+    ?? (id === 'user' ? '호스트' : id === undefined ? '' : `참가자 ${String(id).replace(/^h/, '')}`);
+  if (item.code === 'TIMEOUT_FOLD') return `${nameOf(item.params?.playerId)} 시간 초과로 폴드했습니다.`;
+  if (item.code === 'TIMEOUT_CHECK') return `${nameOf(item.params?.playerId)} 시간 초과로 체크했습니다.`;
+  if (item.code === 'LEVEL_UP') return `블라인드가 ${item.params?.sb}/${item.params?.bb}로 올랐습니다.`;
+  if (item.code === 'RESYNC') return '상태를 다시 맞췄습니다.';
+  if (item.code === 'ILLEGAL_RETRY') return '잘못된 행동이 있어 다시 시도합니다.';
+  return typeof item.text === 'string' ? item.text : '';
 }
 
 export function studyLink(value, selectors = {}) {
@@ -33,4 +66,19 @@ export function studyLink(value, selectors = {}) {
     }
     return url.href;
   } catch { return null; }
+}
+
+
+export function retainTurnDeadline(previous, incoming, previousView, view) {
+  const deadline = incoming === undefined ? previous : incoming;
+  if (!deadline || !view?.toAct || view.handInProgress === false) return null;
+  if (incoming === undefined && (previousView?.toAct !== view.toAct || previousView?.handNo !== view.handNo)) return null;
+  if ((Object.hasOwn(view,'viewer') ? view.viewer : 'user') === view.toAct && view.legal?.decisionId !== deadline.decisionId) return null;
+  return deadline;
+}
+
+export function serverClockOffset(dateHeader, receivedAt = Date.now(), requestedAt = receivedAt) {
+  const at = typeof dateHeader === 'string' ? Date.parse(dateHeader) : NaN;
+  // HTTP Date has one-second precision; use its midpoint and half the round trip.
+  return Number.isFinite(at) ? at + 500 + Math.max(0,receivedAt-requestedAt)/2 - receivedAt : 0;
 }

@@ -53,7 +53,7 @@ export function setProofPhase(label) {
   currentPhase = label == null || label === '' ? null : String(label);
 }
 
-export function recordProofEvent({ kind, paths = 0, ms, status, timedOut }) {
+export function recordProofEvent({ kind, paths = 0, ms, status, timedOut, self }) {
   const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
   if (!dir) return;
   try {
@@ -66,6 +66,7 @@ export function recordProofEvent({ kind, paths = 0, ms, status, timedOut }) {
       status: status ?? null,
       timedOut: Boolean(timedOut),
       phase: currentPhase,
+      ...(self === undefined ? {} : { self: Boolean(self) }),
     })}\n`);
   } catch { /* Diagnostics must never change a privacy verdict. */ }
 }
@@ -104,6 +105,40 @@ export function isPrivatePath(file, { platform = process.platform, spawn = spawn
   return arePrivatePaths([{ file, privateMode }], { platform, spawn, onUnproven });
 }
 
+// One PowerShell child proves every listed path. It calls .NET directly instead of
+// Get-Acl and ConvertTo-Json: those two cmdlets cost about 0.8 s of fixed start-up
+// per child (a 1-path and a 7-path proof both took ~1.0 s, a .NET-only identity read
+// 0.2 s), and ACL proofs were 87% of Windows proof time (#249). The reads are the
+// ones Get-Acl makes — DirectorySecurity or FileSecurity with Access|Owner|Group —
+// and the JSON has the same shape. The attributes are read again last, after the rules
+// and the owner, as the Get-Acl script did, so a path swapped for a junction after its
+// ACL was read is still refused; a reparse point seen by either read counts. Every string value is a
+// SID or Allow/Deny, so it needs no escaping; rights are written in the invariant
+// culture (GENERIC_* bits are negative). Anything malformed fails JSON.parse and stays
+// unproven.
+export function aclProofScript(files) {
+  const paths = files.map((file) => quote(file)).join(',');
+  return [
+    "$ErrorActionPreference='Stop'",
+    "function q($v) { if ($null -eq $v) { 'null' } else { '\"' + $v + '\"' } }",
+    '$sid=[System.Security.Principal.SecurityIdentifier]',
+    '$inv=[System.Globalization.CultureInfo]::InvariantCulture',
+    '$id=[System.Security.Principal.WindowsIdentity]::GetCurrent()',
+    `$head='{"user":' + (q ($id.User.Value)) + ',"tokenOwner":' + (q ($id.Owner.Value))`,
+    '$proofs=[System.Collections.Generic.List[string]]::new()',
+    `foreach($p in @(${paths})) { `
+      + '$attr=[System.IO.File]::GetAttributes($p); '
+      + 'if (($attr -band [System.IO.FileAttributes]::Directory) -ne 0) { $a=[System.IO.Directory]::GetAccessControl($p) } else { $a=[System.IO.File]::GetAccessControl($p) }; '
+      + '$rules=[System.Collections.Generic.List[string]]::new(); '
+      + `foreach($r in $a.GetAccessRules($true,$true,$sid)) { $rules.Add('{"sid":' + (q ($r.IdentityReference.Value)) + ',"type":' + (q ($r.AccessControlType.ToString())) + ',"rights":' + ([long]$r.FileSystemRights).ToString($inv) + '}') }; `
+      + '$owner=(q ($a.GetOwner($sid).Value)); '
+      + '$after=[System.IO.File]::GetAttributes($p); '
+      + `$reparse=$(if ((($attr -bor $after) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { 'true' } else { 'false' }); `
+      + `$proofs.Add($head + ',"owner":' + $owner + ',"reparse":' + $reparse + ',"rules":[' + ($rules -join ',') + ']}') }`,
+    "'[' + ($proofs -join ',') + ']'",
+  ].join('; ');
+}
+
 // A path that cannot be proved is not the same claim as a path proved public,
 // and callers that are told only "false" cannot tell the two apart. The verdict
 // stays conservative either way; onUnproven carries the reason for the verdict.
@@ -113,8 +148,7 @@ export function arePrivatePaths(entries, { platform = process.platform, spawn = 
   try {
     const shape = entries.find(({ file }) => { const st = fs.lstatSync(file); return st.isSymbolicLink() || !(st.isFile() || st.isDirectory()); });
     if (shape) return unproven(`shape:${shape.file}`);
-    const paths = entries.map(({ file }) => quote(file)).join(',');
-    const script = `$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); $me=$id.User.Value; $tokenOwner=$id.Owner.Value; $proofs=@(); foreach($p in @(${paths})) { $a=Get-Acl -LiteralPath $p; $rules=@(); foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { $rules+=@{sid=$r.IdentityReference.Value;type=$r.AccessControlType.ToString();rights=[long]$r.FileSystemRights} }; $proofs+=@{user=$me;tokenOwner=$tokenOwner;owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;reparse=(([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0);rules=$rules} }; ConvertTo-Json -InputObject @($proofs) -Depth 5 -Compress`;
+    const script = aclProofScript(entries.map(({ file }) => file));
     const result = powershell(script, spawn, { kind: 'acl', paths: entries.length });
     if (result.status !== 0 || String(result.stderr ?? '').trim()) {
       return unproven(`powershell:status=${result.status} error=${result.error?.code ?? 'none'} stderr=${String(result.stderr ?? '').trim().slice(0, 300)}`);

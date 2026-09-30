@@ -11,6 +11,7 @@ import {
   SELF_ARCHETYPES,
   VERSION_V2,
 } from '../training/policies/catalog.js';
+import { isHumanSeat } from '../shared/seat-roles.js';
 import { validatePolicyOutput } from '../training/policies/contracts.js';
 import { applyDeviations } from '../training/policies/deviation.js';
 import { loadPreflopDataset } from './preflop-dataset.js';
@@ -119,7 +120,7 @@ export function stampPlayerPolicies(gameDir, { onNotice } = {}) {
   const derivedRolled = [];
   let derivedRolledFrom = null;
   for (const player of players) {
-    if (player.playerId === 'user') continue;
+    if (isHumanSeat(player) || player.playerId === 'user') continue;
     if (player.policy) {
       const { config, rolledForwardFrom } = resolveStoredPolicy(player.policy, { derived });
       if (rolledForwardFrom) {

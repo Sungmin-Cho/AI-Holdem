@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  GATE, NAMED, DEFAULT_FILE_TIMEOUT_MS, partition, shardFiles, runArgv, repoRootFrom,
+  GATE, NAMED, SHARD_NAMES, DEFAULT_FILE_TIMEOUT_MS, partition, shardFiles, runArgv, repoRootFrom,
 } from './helpers/ci-shards.mjs';
 
 const ROOT = repoRootFrom();
@@ -65,4 +65,25 @@ test('run argv includes concurrency 1 and the 45-minute file timeout', () => {
   assert.equal(argv.includes('--test-concurrency=1'), true);
   assert.equal(argv.includes(`--test-timeout=${DEFAULT_FILE_TIMEOUT_MS}`), true);
   assert.equal(DEFAULT_FILE_TIMEOUT_MS, 2_700_000);
+});
+
+
+test('#206 named partitions reserve headroom for Windows recovery', () => {
+  assert.deepEqual(new Set(Object.keys(NAMED)), new Set(['study-a', 'study-b', 'learning-a', 'learning-b', 'loop', 'loop-b', 'recovery']));
+  assert.deepEqual(NAMED.loop, ['game-loop.test.js']);
+  assert.deepEqual(NAMED['loop-b'], ['game-loop-multiplayer.test.js', 'pace-loop.test.js', 'jev-loop.test.js', 'jev-session.test.js', 'game-loop-finalize.test.js']);
+  assert.deepEqual(NAMED.recovery, ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js', 'relay-seat-scoping.test.js']);
+  assert.deepEqual(NAMED['study-a'], ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js']);
+  assert.deepEqual(NAMED['study-b'], ['study-service-recovery.test.js', 'room-manager.test.js', 'session-summary.test.js', 'session-summary-api.test.js', 'final-summary.test.js']);
+  assert.deepEqual(NAMED['learning-a'], ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js']);
+  assert.deepEqual(NAMED['learning-b'], ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js']);
+});
+
+test('#206 Windows workflow matrix includes every shard exactly once', () => {
+  const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/test.yml'), 'utf8');
+  const block = workflow.match(/^\s+shard:\r?\n((?:[ \t]+- [a-z-]+\r?\n)+)/m);
+  assert.ok(block, 'Windows matrix.shard block missing');
+  const names = [...block[1].matchAll(/- ([a-z-]+)/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(names), new Set(SHARD_NAMES));
+  assert.equal(names.length, SHARD_NAMES.length);
 });

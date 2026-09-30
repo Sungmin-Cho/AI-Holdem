@@ -40,3 +40,34 @@ test("setup rejects invalid, conflicting and unsafe input", () => {
   ])
     assert.throws(() => normalizeSetup(input), { code: "INVALID_SETUP" });
 });
+test("multiplayer setup keys are idempotent and reject conflicting counts", () => {
+  const participants = [
+    { playerId: "h1", name: "민준", participantId: "a" },
+    { playerId: "h2", name: "서연", participantId: "b" },
+  ];
+  const once = normalizeSetup({
+    totalSeats: 6,
+    participants,
+    aiCount: 3,
+    actionTimeoutSec: 60,
+  });
+  assert.equal(once.aiCount, 3);
+  assert.equal(once.actionTimeoutSec, 60);
+  assert.deepEqual(normalizeSetup(once), once);
+  assert.throws(
+    () => normalizeSetup({ totalSeats: 6, participants, aiCount: 4 }),
+    { code: "INVALID_SETUP" },
+  );
+  assert.throws(
+    () => normalizeSetup({ totalSeats: 6, participants, hints: "on", actionTimeoutSec: 60 }),
+    { code: "INVALID_SETUP" },
+  );
+  assert.throws(
+    () => normalizeSetup({ totalSeats: 3, participants: [participants[0]], aiCount: 0, mirrorSelf: true, actionTimeoutSec: 60 }),
+    { code: "INVALID_SETUP" },
+  );
+  const empty = normalizeSetup({ totalSeats: 6, participants: [] });
+  assert.equal(empty.aiCount, 5);
+  assert.equal(empty.actionTimeoutSec, 0);
+  assert.equal("participants" in empty, false);
+});

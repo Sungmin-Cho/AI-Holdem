@@ -1,3 +1,4 @@
+import { validateOpponentRuntime, validateJevConfig, JEV_CONFIG } from '../shared/opponent-runtime.js';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -309,8 +310,12 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const startTimeOf = deps.processStartTime ?? processStartTime;
   const {
     aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
-    opponentRuntime, showdownPolicy, replayReveal, hints, dealBias,
+    opponentRuntime = 'llm', jevConfig, showdownPolicy, replayReveal, hints, dealBias,
+    participants, hostName,
   } = flags;
+  validateOpponentRuntime(opponentRuntime);
+  const jev = opponentRuntime === 'jev' ? validateJevConfig(jevConfig ?? JEV_CONFIG) : undefined;
+  if (jevConfig !== undefined && opponentRuntime !== 'jev') throwCoded('JEV_CONFIG_UNSUPPORTED', 'JEV config requires JEV runtime');
   if(dealBias!==undefined && !['off','light','strong'].includes(dealBias)) throwCoded('BAD_CONFIG','invalid deal bias');
 
   // 살아 있는 남의 loop는 force로도 엔진이 죽이지 않는다 — 정지는 부트스트랩/롤백
@@ -348,7 +353,11 @@ export function initGameDir(gameDir, flags, deps = {}) {
     const vacated = vacateLive(gameDir, io);
     const archivedTo = closed ?? vacated ?? null;
 
-    const personas = generatePersonas(aiCount);
+    const participantList = Array.isArray(participants) ? participants : [];
+    const resolvedHostName = hostName ?? (participantList.length ? '호스트' : '나');
+    const personas = generatePersonas(aiCount, {
+      excludeNames: [resolvedHostName, ...participantList.map((row) => row.name)],
+    });
     const state = createGame({
       aiCount,
       startStack,
@@ -362,13 +371,28 @@ export function initGameDir(gameDir, flags, deps = {}) {
       replayReveal,
       hints,
       dealBias,
+      participants: participantList.length ? participantList : undefined,
+      hostName: resolvedHostName,
     });
+    state.config.opponentRuntime = opponentRuntime;
+    if (jev) state.config.jev = jev;
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');
     }
     const players = [
-      { playerId: 'user', seat: 0, name: '나' },
-      ...personas,
+      { playerId: 'user', seat: 0, name: resolvedHostName, kind: 'human' },
+      ...participantList.map((row, index) => ({
+        playerId: row.playerId,
+        seat: index + 1,
+        name: row.name.trim(),
+        kind: 'human',
+        participantId: row.participantId,
+      })),
+      ...personas.map((persona, index) => ({
+        ...persona,
+        seat: 1 + participantList.length + index,
+        kind: 'ai',
+      })),
     ];
     writeJsonAtomic(path.join(gameDir, 'players.json'), players);
     saveState(gameDir, state);

@@ -1,8 +1,10 @@
+import { evaluate7 } from './evaluator.js';
 import { blindsForLevel, legalFor } from './hand.js';
 import { seatedFromButton, positionsOf } from './positions.js';
 import { buildPots } from './sidepots.js';
 import { SAFE_ACTION_KEYS } from '../shared/hand-replay.js';
 import {dealSelectionFields} from '../shared/deal-selection.js';
+import { HOST_ID, isHumanSeat, seatLabel } from '../shared/seat-roles.js';
 
 export { SAFE_ACTION_KEYS };
 
@@ -25,12 +27,19 @@ function currentHandData(state) {
 
 function publicPots(hand) {
   if (!hand) return [];
-  if (Array.isArray(hand.pots)) return structuredClone(hand.pots);
+  if (Array.isArray(hand.pots)) {
+    return structuredClone(hand.pots).map((pot, potIndex) => ({
+      potIndex: pot.potIndex ?? potIndex,
+      amount: pot.amount,
+      eligible: [...(pot.eligible ?? [])],
+      winners: (pot.winners ?? []).map((winner) => ({ ...winner })),
+    }));
+  }
   const pots = buildPots(
     new Map(Object.entries(hand.contribs ?? {})),
     new Set(hand.folded ?? []),
   );
-  return pots.map((pot, potIndex) => ({ potIndex, ...pot }));
+  return pots.map((pot, potIndex) => ({ potIndex, winners: [], ...pot }));
 }
 
 function publicSeat(state, hand, seat) {
@@ -43,7 +52,14 @@ function publicSeat(state, hand, seat) {
     folded: Boolean(hand?.folded?.includes(seat.playerId)),
     allIn: Boolean(hand?.allIn?.includes(seat.playerId)),
     isButton: state.seats[state.button]?.playerId === seat.playerId,
+    kind: isHumanSeat(seat) ? 'human' : 'ai',
   };
+}
+
+function displayName(state, pid) {
+  const seat = state.seats.find((entry) => entry.playerId === pid);
+  if (seat && isHumanSeat(seat)) return seatLabel(seat);
+  return seat?.name ?? pid;
 }
 
 export function viewFor(state, playerId) {
@@ -64,11 +80,13 @@ export function viewFor(state, playerId) {
     toAct: legal?.toAct ?? null,
     myCards: [...(hand?.holes?.[playerId] ?? [])],
     gameOver: Boolean(state.gameOver),
+    viewer: playerId,
   };
 
   if (state.hand && legal?.toAct === playerId) view.legal = structuredClone(legal);
   if (state.result != null) view.result = state.result;
-  if(playerId==='user' && state.config?.dealSelectionContractVersion===1) view.dealBias=state.config.dealBias;
+  if (state.winnerId) view.winnerId = state.winnerId;
+  if(playerId===HOST_ID && state.config?.dealSelectionContractVersion===1) view.dealBias=state.config.dealBias;
   if (state.config?.mode) view.mode = state.config.mode;
   if (state.config?.handLimit != null) view.handLimit = state.config.handLimit;
   if (state.sessionNet) view.sessionNet = structuredClone(state.sessionNet);
@@ -79,13 +97,28 @@ export function userView(state) {
   return viewFor(state, 'user');
 }
 
+// Deliberately constructed from public fields; never spread a private hand/state.
+export function spectatorView(state) {
+  const view = viewFor(state, null);
+  delete view.legal;
+  view.viewerRole = state.gameOver ? 'finished' : 'spectator';
+  view.holeCardsByPlayerId = {};
+  const hand = currentHandData(state);
+  if (!state.gameOver) {
+    for (const seat of state.seats) {
+      if (hand?.holes?.[seat.playerId]) view.holeCardsByPlayerId[seat.playerId] = [...hand.holes[seat.playerId]];
+    }
+  }
+  return view;
+}
+
 const STREET_KO = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION_KO = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈' };
 
 function completedHandObservation(state) {
   const record = state.lastHand;
   if (!record || !Number.isInteger(record.handNo)) return null;
-  const nameOf = (pid) => state.seats.find((seat) => seat.playerId === pid)?.name ?? pid;
+  const nameOf = (pid) => displayName(state, pid);
   const actions = (record.actions ?? []).slice(-12).map((entry) => {
     const amount = entry.action === 'raise' || entry.action === 'call' ? ` ${entry.amount}` : '';
     return `${STREET_KO[entry.street] ?? entry.street} ${nameOf(entry.playerId)} ${ACTION_KO[entry.action] ?? entry.action}${amount}`;
@@ -100,7 +133,7 @@ function completedHandObservation(state) {
     const pfr = sample > 0 ? (raw.pfr ?? 0) / sample : 0;
     const calls = raw.calls ?? 0;
     const af = calls > 0 ? (raw.betsRaises ?? 0) / calls : (raw.betsRaises ?? 0);
-    return `${seat.name}(표본 ${sample}, VPIP ${vpip.toFixed(2)}, PFR ${pfr.toFixed(2)}, AF ${af.toFixed(2)})`;
+    return `${displayName(state, seat.playerId)}(표본 ${sample}, VPIP ${vpip.toFixed(2)}, PFR ${pfr.toFixed(2)}, AF ${af.toFixed(2)})`;
   });
   return [
     `최근 완료 핸드 공개 관측: 핸드 ${record.handNo}; 액션 ${actions.length ? actions.join(' → ') : '없음'}; 공개 쇼다운 ${reveals.length ? reveals.join(' / ') : '없음'}`,
@@ -108,7 +141,27 @@ function completedHandObservation(state) {
   ];
 }
 
-export function turnSummary(state, playerId) {
+function decisionAid(state, playerId, legal, view, evaluate) {
+  try {
+    const hand = state.hand;
+    const me = state.seats.find(seat => seat.playerId === playerId);
+    const opponents = state.seats.filter(seat => seat.playerId !== playerId && !seat.out && !hand.folded.includes(seat.playerId));
+    const bb = view.blinds[1];
+    const remainingEffectiveStack = Math.min(me.stack, Math.max(0, ...opponents.map(seat => seat.stack)));
+    const partialCall = hand.currentBet - (hand.bets[playerId] ?? 0) > me.stack;
+    const call = legal.callAmount;
+    const parts = [partialCall ? '부분 올인 콜(필요 승률 생략)' : call === 0 ? '콜 비용 없음'
+      : `필요 승률 ${Math.round(100 * call / (legal.potTotal + call))}% (콜 ${call} / 최종 팟 ${legal.potTotal + call})`,
+    `내 스택 ${(me.stack / bb).toFixed(1)}BB`, `유효 잔여 스택 ${(remainingEffectiveStack / bb).toFixed(1)}BB`];
+    if (legal.potTotal > 0) parts.push(`SPR ${(remainingEffectiveStack / legal.potTotal).toFixed(1)}`);
+    parts.push(`남은 상대 ${opponents.length}명(올인 ${opponents.filter(seat => hand.allIn.includes(seat.playerId)).length}명)`);
+    const cards = [...view.myCards, ...view.board];
+    if (cards.length >= 5) parts.push(`현재 메이드: ${evaluate(cards).name}`);
+    return `판단 보조: ${parts.join(' | ')}`;
+  } catch { return null; } // Optional advice must never prevent the policy/LLM turn.
+}
+
+export function turnSummary(state, playerId, { evaluate = evaluate7 } = {}) {
   const legal = legalFor(state);
   if (legal.handOver || legal.toAct !== playerId) return null;
 
@@ -116,7 +169,7 @@ export function turnSummary(state, playerId) {
   const pos = positionsOf(state);
   const hand = state.hand;
   const me = state.seats.find((seat) => seat.playerId === playerId);
-  const nameOf = (pid) => state.seats.find((seat) => seat.playerId === pid)?.name ?? pid;
+  const nameOf = (pid) => displayName(state, pid);
   const [sb, bb] = view.blinds;
 
   // Unequal blinds split the pot too; the breakdown only informs a decision once someone is all-in.
@@ -129,7 +182,7 @@ export function turnSummary(state, playerId) {
     const status = hand?.folded?.includes(seat.playerId) ? '폴드'
       : hand?.allIn?.includes(seat.playerId) ? '올인' : '참여';
     const bet = hand?.bets?.[seat.playerId] ?? 0;
-    return `${seat.name}(${pos[seat.playerId]}, 스택 ${seat.stack}, 이번 스트리트 ${bet}, ${status})`;
+    return `${nameOf(seat.playerId)}(${pos[seat.playerId]}, 스택 ${seat.stack}, 이번 스트리트 ${bet}, ${status})`;
   });
 
   const actions = (hand?.actions ?? []).map((entry) => {
@@ -149,11 +202,12 @@ export function turnSummary(state, playerId) {
   }
 
   const lines = [
-    `[핸드 ${view.handNo} / ${STREET_KO[view.street] ?? view.street}] 당신: ${me.name} (${pos[playerId]}, 스택 ${me.stack}) | decisionId: ${legal.decisionId}`,
+    `[핸드 ${view.handNo} / ${STREET_KO[view.street] ?? view.street}] 당신: ${nameOf(playerId)} (${pos[playerId]}, 스택 ${me.stack}) | decisionId: ${legal.decisionId}`,
     `홀카드: ${view.myCards.join(' ')} | 보드: ${view.board.length ? view.board.join(' ') : '없음'}`,
     `팟: ${pots} | 블라인드 ${sb}/${bb} | 내 이번 스트리트 베팅: ${hand?.bets?.[playerId] ?? 0}`,
     `생존자: ${survivors.join(' / ')}`,
     `이번 핸드 공개 액션: ${actions.length ? actions.join(' → ') : '없음'}`,
+    ...[decisionAid(state, playerId, legal, view, evaluate)].filter(Boolean),
     `가능한 액션: ${choices.join(' / ')}`,
     `legal 수치: canCheck=${legal.canCheck} callAmount=${legal.callAmount} canRaise=${legal.canRaise} minRaiseTo=${legal.minRaiseTo} maxRaiseTo=${legal.maxRaiseTo} currentBet=${hand.currentBet ?? 0}`,
   ];
@@ -162,7 +216,7 @@ export function turnSummary(state, playerId) {
   }
   const observation = completedHandObservation(state);
   if (observation) lines.push(...observation);
-  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","action":"fold|check|call|raise","amount":숫자?,"reason":"한 줄 사유(선택)"}`);
+  lines.push(`JSON 한 줄로 응답: {"decisionId":"${legal.decisionId}","reason":"한 줄 사유(선택)","action":"fold|check|call|raise","amount":숫자?}`);
   return lines.join('\n');
 }
 

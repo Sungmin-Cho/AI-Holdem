@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
@@ -235,13 +236,17 @@ for(const operation of ['inspect','stop']) {
     const pidBytes=fs.readFileSync(path.join(lockPath(storeDir),'pid'));
     const api=await service();const signals=[];const kill=process.kill;
     process.kill=(pid,signal)=>{if(signal!==0)signals.push({pid,signal});return kill(pid,signal);};
-    const started=Date.now();
+    const started=performance.now();
     try {
       const call=operation==='inspect' ? api.inspectStudyService(storeDir)
         : api.stopStudyService(storeDir,{expectedInstanceId:randomUUID()});
       await assert.rejects(call,{code:'STUDY_DESCRIPTOR_CORRUPT'});
-      const elapsed=Date.now()-started;
-      assert.ok(elapsed>=CLIENT_WAIT_MS-500&&elapsed<CLIENT_WAIT_MS+500,`repair deadline was ${elapsed}ms against a ${CLIENT_WAIT_MS}ms budget`);
+      const elapsed=performance.now()-started;
+      // The service keeps its original deadline. Allow bounded Windows child
+      // shutdown/scheduler overhead when measuring return time; exact budget
+      // consumption is covered with an injected clock in windows-runtime-contract.
+      const returnSlackMs=process.platform==='win32'?2000:500;
+      assert.ok(elapsed>=CLIENT_WAIT_MS-500&&elapsed<CLIENT_WAIT_MS+returnSlackMs,`repair deadline was ${elapsed}ms against a ${CLIENT_WAIT_MS}ms budget`);
       assert.deepEqual(signals,[]);
       assert.equal(fs.readFileSync(descriptorPath(storeDir),'utf8'),raw);
       assert.deepEqual(fs.readFileSync(path.join(lockPath(storeDir),'pid')),pidBytes);

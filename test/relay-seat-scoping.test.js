@@ -1,0 +1,391 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { startServer, publicSnapshot, projectForSeat } from '../server/server.js';
+import { HOST_ID } from '../publish-contract.js';
+import { createSessionControl, withActionGate } from '../tools/session-control.js';
+import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+import { writeSecurityFixtures } from './helpers/security-fixtures.js';
+import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
+import { newDeck } from '../engine/cards.js';
+import { viewFor } from '../engine/views.js';
+import { gameEpochOf } from '../publish-contract.js';
+import { saveState, writeJsonAtomic, acquireOwnedLock, releaseOwnedLock } from '../engine/state.js';
+
+const TOKEN = 'seat-scope-token';
+
+function people() {
+  return [{ playerId: 'h1', name: '민준', participantId: 'part-1' }];
+}
+
+test('projectForSeat: 참가자는 호스트 채널 키가 없고 호스트는 views를 제거한다', () => {
+  const payload = {
+    view: { viewer: 'user', myCards: ['As', 'Kd'] },
+    views: {
+      user: { viewer: 'user', myCards: ['As', 'Kd'] },
+      h1: { viewer: 'h1', myCards: ['7h', '2c'] },
+    },
+    events: [{ type: 'action' }],
+    messages: [{ type: 'narration', code: 'RESYNC', params: {} }],
+    coach: [{ handNo: 1, text: 'secret' }],
+    training: [{ handNo: 1, reason: 'x' }],
+    trainingAnnotations: [],
+    handReplays: [],
+    review: 'review',
+    hint: { status: 'supported' },
+    studyUrl: 'http://127.0.0.1:1/#token=ab',
+    turnDeadline: { decisionId: 'd-1-preflop-0', at: '2026-01-01T00:00:00.000Z' },
+  };
+  const host = projectForSeat(payload, HOST_ID);
+  assert.equal('views' in host, false);
+  assert.equal('coach' in host, true);
+  const guest = projectForSeat(payload, 'h1');
+  assert.deepEqual(Object.keys(guest).sort(), ['events', 'messages', 'turnDeadline', 'view']);
+  assert.deepEqual(guest.view.myCards, ['7h', '2c']);
+  for (const key of ['coach', 'training', 'trainingAnnotations', 'handReplays', 'review', 'hint', 'views', 'studyUrl']) {
+    assert.equal(key in guest, false, key);
+  }
+  const empty = projectForSeat({ coach: [{ text: 'only' }] }, 'h1');
+  assert.deepEqual(empty, {});
+});
+
+test('closeDecision은 playing에서만 기록하고 pausing이면 건너뛴다', () => {
+  const dir = createOwnedTempDir('holdem-close-decision');
+  const epoch = 'ab'.repeat(32);
+  const playing = createSessionControl(dir, epoch);
+  assert.deepEqual(playing.closeDecision('d-1-preflop-0'), { closed: true });
+  assert.equal(playing.read().closedDecisionId, 'd-1-preflop-0');
+  playing.set('pausing');
+  assert.equal(playing.read().closedDecisionId, null);
+  const pausedDir = createOwnedTempDir('holdem-close-paused');
+  const pausing = createSessionControl(pausedDir, epoch, { startPaused: true });
+  assert.deepEqual(pausing.closeDecision('d-1-preflop-0'), { closed: false });
+  assert.equal(pausing.read().closedDecisionId, undefined);
+  assert.throws(
+    () => withActionGate(dir, epoch, () => {}, { decisionId: 'd-1-preflop-0' }),
+    { code: 'GAME_PAUSED' },
+  );
+});
+
+test('DECISION_CLOSED는 같은 결정만 거부한다', () => {
+  const dir = createOwnedTempDir('holdem-closed-gate');
+  const epoch = gameEpochOf(TOKEN);
+  const control = createSessionControl(dir, epoch);
+  control.closeDecision('d-1-preflop-0');
+  assert.throws(
+    () => withActionGate(dir, epoch, () => 'ok', { decisionId: 'd-1-preflop-0' }),
+    { code: 'DECISION_CLOSED' },
+  );
+  assert.equal(withActionGate(dir, epoch, () => 'ok', { decisionId: 'd-1-preflop-1' }), 'ok');
+});
+
+async function multiRelay(t, serverOptions = {}) {
+  const dir = createOwnedTempDir('holdem-relay-multi');
+  const state = createGame({
+    aiCount: 1,
+    participants: people(),
+    hostName: '호스트',
+    names: ['AI'],
+  });
+  state.button = state.seats.length - 1;
+  const started = startHand(state, { deck: [...newDeck()] }).state;
+  fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, 'players.json'), [
+    { playerId: 'user', seat: 0, name: '호스트', kind: 'human' },
+    { playerId: 'h1', seat: 1, name: '민준', kind: 'human', participantId: 'part-1' },
+    { playerId: 'p1', seat: 2, name: 'AI', kind: 'ai' },
+  ]);
+  saveState(dir, started);
+  const relay = await startServer({ gameDir: dir, port: 0, token: TOKEN, controlProtocolVersion: 1, ...serverOptions });
+  registerOwnedServer(relay.server, 'relay-multi');
+  t.after(async () => { if (relay.server.listening) await relay.close(); });
+  const http = async (pathname, { method = 'GET', body, seat, headers = {} } = {}) => {
+    const url = new URL(pathname, `http://127.0.0.1:${relay.port}`);
+    url.searchParams.set('token', TOKEN);
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        ...(seat ? { 'x-seat': seat } : {}),
+        ...headers,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    let json = null;
+    try { json = await response.json(); } catch { /* empty */ }
+    return { status: response.status, json };
+  };
+  // The relay reads state.json asynchronously while it initializes (hint proof), and the
+  // credentialed health probe waits for that read. On Windows an in-process open handle
+  // makes a test's state.json rename fail, and the rename's synchronous retries block the
+  // event loop the read needs to close its handle, so wait for it before writing state.json.
+  const health = await http('/api/health');
+  assert.equal(health.status, 200);
+  return { dir, relay, state: started, http };
+}
+
+test('참가자 있는 세션의 step 게시에서 views 없으면 VIEWS_REQUIRED', async (t) => {
+  const f = await multiRelay(t);
+  const published = await f.http('/api/publish', {
+    method: 'POST',
+    body: { token: TOKEN, publishId: 1, view: { handNo: 1, viewer: 'user' }, viewFor: 'user' },
+  });
+  assert.equal(published.status, 400);
+  assert.equal(published.json.code, 'VIEWS_REQUIRED');
+});
+
+test('x-seat 위조와 참가자 note와 NOT_YOUR_TURN', async (t) => {
+  const f = await multiRelay(t);
+  assert.equal((await f.http('/api/snapshot', { seat: 'p1' })).status, 400);
+  assert.equal((await f.http('/api/snapshot', { seat: 'h9' })).json.code, 'BAD_SEAT');
+  const action = await f.http('/api/action', {
+    method: 'POST',
+    seat: 'h1',
+    body: { token: TOKEN, decisionId: 'd-1-preflop-0', action: 'call', note: 'secret' },
+  });
+  assert.equal(action.status, 400);
+  assert.equal(action.json.code, 'BAD_ACTION');
+});
+
+test('ui-snapshot history에는 views가 없고 구 형식은 user view로 복원된다', async (t) => {
+  const dir = createOwnedTempDir('holdem-snapshot-views');
+  writeSecurityFixtures(dir, { state: { sessionToken: TOKEN } });
+  const snapPath = path.join(dir, 'ui-snapshot.json');
+  fs.writeFileSync(snapPath, JSON.stringify({
+    revision: 1,
+    view: { handNo: 1, toAct: 'user', legal: { decisionId: 'd-1-preflop-0', toAct: 'user' } },
+    views: { h1: { myCards: ['As', 'Ah'] }, user: { myCards: ['Kd', 'Kc'] } },
+    log: [],
+    coach: [],
+    history: [{ revision: 1, at: 't', payload: { view: { handNo: 1 }, views: { h1: { myCards: ['As', 'Ah'] } } } }],
+  }));
+  const { loadUiState } = await import('../server/server.js');
+  const loaded = loadUiState(dir, TOKEN);
+  assert.equal('h1' in (loaded.views ?? {}), false);
+  assert.equal(loaded.views.user.handNo, 1);
+  assert.equal(loaded.decision.decisionId, 'd-1-preflop-0');
+  assert.equal('views' in loaded.history[0].payload, false);
+  assert.equal(JSON.stringify(loaded).includes('As'), false);
+  const projected = publicSnapshot(loaded, null, 'h1');
+  assert.equal('coach' in projected, false);
+  assert.equal('studyUrl' in projected, false);
+});
+
+test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없다', async (t) => {
+  const f = await multiRelay(t);
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const views = { user: viewFor(engine, 'user'), h1: viewFor(engine, 'h1') };
+  const published = await f.http('/api/publish', {
+    method: 'POST',
+    body: {
+      token: TOKEN,
+      publishId: 1,
+      view: views.user,
+      views,
+      viewFor: 'user',
+      events: [],
+    },
+  });
+  assert.equal(published.status, 200, JSON.stringify(published.json));
+  const raw = JSON.parse(fs.readFileSync(path.join(f.dir, 'ui-snapshot.json'), 'utf8'));
+  assert.equal('views' in raw, false);
+  assert.equal((raw.history ?? []).some((row) => row.payload && 'views' in row.payload), false);
+  const blob = JSON.stringify(raw);
+  for (const card of views.h1.myCards) {
+    // Card values must be absent; the card-free epoch digest may contain "2c".
+    assert.equal(blob.includes(JSON.stringify(card)), false, card);
+  }
+});
+
+// CONTROL_BUSY retries yield to the event loop; a publication in between can hand
+// the turn to another seat. The seat check must be repeated inside the locked
+// attempt, or a predicted next decision id would be accepted for the wrong seat.
+// The race needs the action to still be retrying when the lock is released. The product
+// window (250 ms) can close first on a loaded Windows runner (the publication and the lock's
+// identity checks run inside it), so these tests widen it; the order of events is unchanged.
+const RACE_WINDOW = { actionControlRetryMs: 10_000 };
+test('a CONTROL_BUSY retry re-checks the seat before accepting the next decision', async (t) => {
+  const f = await multiRelay(t, RACE_WINDOW);
+  createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  assert.ok(['user', 'h1'].includes(actor), `a human acts first (${actor})`);
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  assert.notEqual(nextLegal.toAct, actor);
+  // The engine state moves first; the relay only learns of it from the publication below.
+  saveState(f.dir, next);
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-next', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.equal(response.json.code, 'NOT_YOUR_TURN');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), false);
+});
+
+test('a CONTROL_BUSY retry re-checks the seat before a pause cancellation is recorded', async (t) => {
+  const f = await multiRelay(t, RACE_WINDOW);
+  const control = createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const publish = async (state, publishId) => {
+    const views = { user: viewFor(state, 'user'), h1: viewFor(state, 'h1') };
+    const published = await f.http('/api/publish', {
+      method: 'POST', body: { token: TOKEN, publishId, view: views.user, views, viewFor: 'user', events: [] },
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  };
+  await publish(engine, 1);
+  const first = legalFor(engine);
+  const actor = first.toAct;
+  const next = { ...applyAction(engine, actor, first.canCheck ? 'check' : 'call').state, sessionToken: TOKEN };
+  const nextLegal = legalFor(next);
+  control.set('paused', { pauseIntent: true });
+  saveState(f.dir, next);
+  const lock = acquireOwnedLock(f.dir, 'session-control.lock.d');
+  let released = false;
+  try {
+    const pending = f.http('/api/action', {
+      method: 'POST', seat: actor === 'user' ? undefined : actor,
+      body: { token: TOKEN, decisionId: nextLegal.decisionId, requestId: 'predicted-paused', action: 'fold' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await publish(next, 2);
+    releaseOwnedLock(lock);
+    released = true;
+    const response = await pending;
+    assert.equal(response.status, 409, JSON.stringify(response.json));
+    assert.deepEqual(response.json, { ok: false, code: 'NOT_YOUR_TURN' }, 'the seat error wins over GAME_PAUSED and carries no proof');
+  } finally { if (!released) releaseOwnedLock(lock); }
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-cancellations.json')), false, 'no cancellation for another seat');
+});
+
+test('the gate precheck runs inside the lock before the gate state and wins over GAME_PAUSED', () => {
+  const dir = createOwnedTempDir('holdem-gate-precheck');
+  const epoch = gameEpochOf(TOKEN);
+  const control = createSessionControl(dir, epoch);
+  control.set('paused', { pauseIntent: true });
+  let closedCalls = 0;
+  const seatMoved = () => { throw Object.assign(new Error('NOT_YOUR_TURN'), { code: 'NOT_YOUR_TURN' }); };
+  assert.throws(() => withActionGate(dir, epoch, () => 'ok', { precheck: seatMoved, onClosed: () => { closedCalls += 1; return { decisionId: 'd', requestId: 'q' }; } }),
+    (error) => error.code === 'NOT_YOUR_TURN' && !('cancelled' in error));
+  assert.equal(closedCalls, 0, 'no cancellation is recorded for a request whose seat moved');
+  control.set('playing', { pauseIntent: false, closedDecisionId: null });
+  let ran = false;
+  assert.throws(() => withActionGate(dir, epoch, () => { ran = true; }, { precheck: seatMoved }), { code: 'NOT_YOUR_TURN' });
+  assert.equal(ran, false);
+});
+
+// #251: in play the control lock's other holder is the loop, a different process, so each
+// attempt judges that owner's identity — on Windows a PowerShell read that by itself outlasts
+// the 250 ms product window. The attempts made after it must still accept the action.
+//
+// The holder releases only after both (a) FOREIGN_HOLD_MS since it took the lock and (b) the
+// relay reporting that an attempt met the lock, so a 200 can only follow real contention. On
+// Windows the hold outlasts the product window, which one slow attempt used to end; elsewhere
+// attempts are cheap and the window alone covers a hold inside it.
+const FOREIGN_HOLD_MS = process.platform === 'win32' ? 300 : 100;
+// It takes the lock only when told to: registering it reads its identity synchronously
+// (PowerShell on Windows), which must not eat into the hold. A 60 s cap keeps a broken
+// test from leaving it behind, and the test gives up on it sooner.
+const HOLDER = [
+  'const [dir, holdMs, stateUrl] = process.argv.slice(1);',
+  'const { acquireOwnedLock, releaseOwnedLock } = await import(stateUrl);',
+  'let lock = null, heldAt = 0, met = false, done = false, input = "";',
+  'const release = () => {',
+  '  if (done) return; done = true; clearTimeout(cap);',
+  "  releaseOwnedLock(lock); process.stdout.write('released\\n'); process.stdin.destroy();",
+  '};',
+  // The cap ends the child whether or not it ever took the lock, with a failing status.
+  'const cap = setTimeout(() => {',
+  '  process.exitCode = 3;',
+  '  if (lock) release(); else { done = true; process.stdin.destroy(); }',
+  '}, 60_000);',
+  "process.stdin.setEncoding('utf8').on('data', (chunk) => {",
+  '  if (done) return;',
+  '  input += chunk;',
+  "  if (!lock && input.includes('go\\n')) {",
+  "    lock = acquireOwnedLock(dir, 'session-control.lock.d'); heldAt = performance.now();",
+  "    process.stdout.write('held\\n');",
+  '  }',
+  "  if (lock && !met && input.includes('busy\\n')) {",
+  '    met = true;',
+  '    setTimeout(release, Math.max(0, Number(holdMs) - (performance.now() - heldAt)));',
+  '  }',
+  '});',
+].join('\n');
+test('an action waits out a short control lock held by another process', async (t) => {
+  let holder;
+  let busyAttempts = 0;
+  const f = await multiRelay(t, {
+    onActionControlBusy: () => {
+      busyAttempts += 1;
+      if (busyAttempts === 1) holder.stdin.end('busy\n');
+    },
+  });
+  createSessionControl(f.dir, gameEpochOf(TOKEN));
+  const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
+  engine.sessionToken = TOKEN;
+  saveState(f.dir, engine);
+  const views = { user: viewFor(engine, 'user'), h1: viewFor(engine, 'h1') };
+  const published = await f.http('/api/publish', {
+    method: 'POST', body: { token: TOKEN, publishId: 1, view: views.user, views, viewFor: 'user', events: [] },
+  });
+  assert.equal(published.status, 200, JSON.stringify(published.json));
+  const legal = legalFor(engine);
+  holder = registerOwnedProcess(spawn(process.execPath, [
+    '--input-type=module', '-e', HOLDER, f.dir, String(FOREIGN_HOLD_MS),
+    new URL('../engine/state.js', import.meta.url).href,
+  ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }), 'control-lock-holder');
+  let out = '';
+  let err = '';
+  holder.stderr.setEncoding('utf8').on('data', (chunk) => { err += chunk; });
+  const exited = new Promise((resolve) => holder.once('exit', resolve));
+  const held = new Promise((resolve, reject) => {
+    holder.stdout.setEncoding('utf8').on('data', (chunk) => {
+      out += chunk;
+      if (out.includes('held\n')) resolve();
+    });
+    exited.then((code) => reject(new Error(`the holder exited (${code}) before taking the lock: ${err}`)));
+  });
+  holder.stdin.write('go\n');
+  let gaveUp;
+  await Promise.race([held, new Promise((_, reject) => {
+    gaveUp = setTimeout(() => reject(new Error(`the holder did not take the lock: ${err}`)), process.platform === 'win32' ? 30_000 : 10_000);
+  })]).finally(() => clearTimeout(gaveUp));
+  const response = await f.http('/api/action', {
+    method: 'POST', seat: legal.toAct === 'user' ? undefined : legal.toAct,
+    body: { token: TOKEN, decisionId: legal.decisionId, requestId: 'foreign-hold', action: legal.canCheck ? 'check' : 'call' },
+  });
+  assert.equal(response.status, 200, `${JSON.stringify(response.json)} after ${busyAttempts} busy attempt(s)`);
+  assert.ok(busyAttempts >= 1, 'the action met the held lock');
+  assert.equal(await exited, 0, err);
+  assert.equal(out, 'held\nreleased\n');
+  assert.equal(fs.existsSync(path.join(f.dir, 'ui-action-receipt.json')), true, 'the action was received');
+});

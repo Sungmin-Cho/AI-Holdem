@@ -49,7 +49,7 @@ test('스킬 §2: 새 store는 policy 학습 n=5이고 명시 토너먼트는 n=
 });
 
 test('S8 문서: 기본 학습, 독립 study 소유권과 버전 보존 복구를 안내한다', () => {
-  for (const file of ['README.md', 'AGENTS.md', 'ARCHITECTURE.md', SKILL]) {
+  for (const file of ['docs/operations.ko.md', 'AGENTS.md', 'ARCHITECTURE.md', SKILL]) {
     const doc = read(file);
     assert.match(doc, /policy/);
     assert.match(doc, /100BB/);
@@ -58,7 +58,7 @@ test('S8 문서: 기본 학습, 독립 study 소유권과 버전 보존 복구�
     assert.match(doc, /휴리스틱/);
     assert.match(doc, /v2/);
   }
-  const readme = read('README.md');
+  const readme = read('docs/operations.ko.md');
   assert.match(readme, /npm run study -- \/absolute\/store/);
   assert.match(readme, /--mode tournament/);
   assert.match(readme, /roll-forward/);
@@ -238,8 +238,8 @@ test('호스트 에이전트 정의 파일이 없다', () => {
   assert.ok(!fs.existsSync(path.join(ROOT, '.grok/agents/holdem-player.md')));
 });
 
-test('README: 사이드카 소유·런타임 어댑터·loopPidAlive·metrics·스모크 체크리스트', () => {
-  const readme = read('README.md');
+test('운영 가이드: 사이드카 소유·런타임 어댑터·loopPidAlive·metrics·스모크 체크리스트', () => {
+  const readme = read('docs/operations.ko.md');
   assert.match(readme, /tools\/game-loop\.js/);
   assert.match(readme, /tools\/player-runtime\.js/);
   assert.match(readme, /tools\/player-prompt\.md/);
@@ -270,7 +270,7 @@ test('AGENTS: 사이드카가 루프를 소유하고 호스트 플레이어 정�
 });
 
 test('#194 recovery documentation matches outcomes and correction events',()=>{
-  const skill=read(SKILL),readme=read('README.md');
+  const skill=read(SKILL),readme=read('docs/operations.ko.md');
   for(const doc of [skill,readme]) assert.doesNotMatch(doc,/forced_default/);
   for(const word of ['recovery_required','player-decision-rejected']) assert.ok(skill.includes(word));
   for(const event of ['player-decision-rejected','player-decision-normalized','player-correction','player-correction-skipped','player-diagnostics-quarantined','player-recovery-required']) assert.ok(readme.includes(event));
@@ -279,10 +279,10 @@ test('#194 recovery documentation matches outcomes and correction events',()=>{
 });
 
 test('fresh retry documentation distinguishes authorization, memory loss and execution',()=>{
-  for(const doc of [read(SKILL),read('README.md')]) {
+  for(const doc of [read(SKILL),read('docs/operations.ko.md')]) {
     for(const word of ['BAD_PLAYER_RECOVERY','--abort-unrecoverable','loop-state.unverified.json','loop-state.abandoned.','player-recovery-abandoned']) assert.ok(doc.includes(word),word);
   }
-  for(const doc of [read(SKILL),read('README.md')]) {
+  for(const doc of [read(SKILL),read('docs/operations.ko.md')]) {
     for(const word of ['--fresh-session','대화 기억','player-session-recreate-failed','freshSession','인가']) assert.ok(doc.includes(word),word);
   }
 });

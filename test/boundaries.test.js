@@ -134,17 +134,26 @@ const SERVER_ALLOWED_CONTAINMENT = new Set(['openContained', 'writeContained']);
 const CONTAINMENT_MODULE = 'tools/training-store.js';
 const SERVER_ALLOWED_REFERENCE = 'shared/reference.js';
 
-test('server imports only the publish contract and named containment primitives', () => {
+test('server imports only contracts, named containment and pure viewer projection primitives', () => {
   const offenders = [];
   for (const edge of edgesFrom('server')) {
     if (layerOf(edge.to) === null) continue;
     if (edge.to === 'publish-contract.js') continue;
     if (layerOf(edge.to) === 'server') continue;
+    // Only this projection adapter may inspect the canonical engine view. These
+    // functions are pure readers; game mutation/state I/O remain forbidden.
+    if (edge.from === 'server/viewer-projection.js' && edge.to === 'engine/views.js'
+      && !edge.dynamic && edge.bindings?.length
+      && edge.bindings.every(name=>['viewFor','spectatorView'].includes(name))) continue;
+    if (edge.from === 'server/server.js' && edge.to === 'shared/viewer-access.js'
+      && !edge.dynamic && edge.bindings?.length
+      && edge.bindings.every(name=>['SPECTATOR_ID','viewerRole','spectatorAudience'].includes(name))) continue;
     // Lobby previews reuse the same pure validator as the authoritative server.
     if (edge.from === 'server/public/lobby.js' && edge.to === 'shared/game-setup.js'
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite'] };
+    // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
@@ -178,7 +187,7 @@ test('the server writes only its UI, receipt and lock files, never its security 
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
     const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
-      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json']) : new Set();
+      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json', 'ui-action-cancellations.json']) : new Set();
     for (const call of source.matchAll(/\bwriteRelayJsonAtomic\(([^\n]*)/g)) {
       if (source.slice(Math.max(0, call.index - 16), call.index).endsWith('function ')) {
         if (relative !== 'server/action-receipts.js') offenders.push(`${relative} -> unowned writer declaration`);
@@ -188,7 +197,8 @@ test('the server writes only its UI, receipt and lock files, never its security 
       if (!relayTargets.has(target)) offenders.push(`${relative} -> unapproved relay destination`);
     }
     if (relative === 'server/action-receipts.js') {
-      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes("const CANCELLATION_FILE = 'ui-action-cancellations.json';"));
       assert.ok(source.includes('!owners.has(owner) || !RELAY_FILES.has(name)'));
     }
     for (const call of source.matchAll(/writeJsonAtomic\(\s*path\.join\(([^)]*)\)/g)) {

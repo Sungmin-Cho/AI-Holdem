@@ -1,0 +1,591 @@
+{
+  "date": "2026-09-22",
+  "scope": "Temporary owned stores; synthetic poker data; upper LLM disabled; not a poker strength evaluation",
+  "requests_total_including_failed_and_aborted": 37,
+  "failed_live_reproduction_requests": 11,
+  "synthetic_requests_including_abort": 6,
+  "evidence": [
+    {
+      "source": "output/playwright/jev-live-verified/result.json",
+      "sha256": "67688e76cb1ccb076c2d5ac1df015d9f205521f9b1917cba6338e62bd2e8a6fb",
+      "result": {
+        "pass": true,
+        "node": "v26.0.0",
+        "browser": "agent-browser@0.36.0",
+        "hands": 2,
+        "aiCount": 2,
+        "upper": "disabled; factual feedback",
+        "requests": [
+          {
+            "status": 200,
+            "ms": 585,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_200",
+              "confidence": 0.54,
+              "probabilities": {
+                "raise_to_100": 0.02,
+                "raise_to_150": 0.27,
+                "raise_to_5000": 0.09,
+                "call": 0,
+                "raise_to_200": 0.62,
+                "fold": 0
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 840,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 228,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "fold",
+              "confidence": 0.86,
+              "probabilities": {
+                "fold": 0.89,
+                "raise_to_800": 0.01,
+                "raise_to_350": 0.03,
+                "raise_to_600": 0.03,
+                "raise_to_5000": 0,
+                "call": 0.04
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 886,
+                "output_tokens": 80
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 293,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_425",
+              "confidence": 0.54,
+              "probabilities": {
+                "raise_to_283": 0.23,
+                "raise_to_142": 0.02,
+                "raise_to_425": 0.62,
+                "check": 0.04,
+                "raise_to_50": 0,
+                "raise_to_4800": 0.09
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1013,
+                "output_tokens": 89
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 213,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_1275",
+              "confidence": 0.38,
+              "probabilities": {
+                "raise_to_1275": 0.49,
+                "raise_to_4375": 0.17,
+                "raise_to_50": 0,
+                "check": 0.01,
+                "raise_to_850": 0.32,
+                "raise_to_425": 0.01
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1128,
+                "output_tokens": 91
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 202,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_3100",
+              "confidence": 0.5,
+              "probabilities": {
+                "raise_to_1275": 0.04,
+                "check": 0.1,
+                "raise_to_2550": 0.26,
+                "raise_to_3100": 0.6,
+                "raise_to_50": 0
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1216,
+                "output_tokens": 80
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 265,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_200",
+              "confidence": 0.13,
+              "probabilities": {
+                "call": 0.16,
+                "raise_to_5000": 0,
+                "raise_to_100": 0.07,
+                "raise_to_150": 0.23,
+                "raise_to_200": 0.28,
+                "fold": 0.26
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 841,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 236,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_600",
+              "confidence": 0.32,
+              "probabilities": {
+                "raise_to_800": 0.29,
+                "raise_to_350": 0.11,
+                "raise_to_5000": 0.01,
+                "raise_to_600": 0.44,
+                "call": 0.12,
+                "fold": 0.03
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 926,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 268,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "fold",
+              "confidence": 0.52,
+              "probabilities": {
+                "raise_to_1000": 0.09,
+                "raise_to_2400": 0.08,
+                "fold": 0.59,
+                "raise_to_5000": 0.01,
+                "raise_to_1800": 0.07,
+                "call": 0.16
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 974,
+                "output_tokens": 83
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 249,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_1400",
+              "confidence": 0.61,
+              "probabilities": {
+                "raise_to_1400": 0.68,
+                "raise_to_467": 0.03,
+                "raise_to_50": 0,
+                "raise_to_4400": 0.05,
+                "check": 0.07,
+                "raise_to_933": 0.17
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1094,
+                "output_tokens": 91
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 246,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_3000",
+              "confidence": 0.36,
+              "probabilities": {
+                "raise_to_3000": 0.49,
+                "raise_to_1400": 0.09,
+                "check": 0.07,
+                "raise_to_2800": 0.35,
+                "raise_to_50": 0
+              },
+              "sum": 0.9999999999999999,
+              "usage": {
+                "input_tokens": 1183,
+                "output_tokens": 80
+              }
+            }
+          }
+        ],
+        "models": [
+          "jev-1.13.0"
+        ],
+        "actors": [
+          "seat_1",
+          "seat_2"
+        ],
+        "decisions": 10,
+        "usage": {
+          "input_tokens": 10101,
+          "output_tokens": 849
+        }
+      }
+    },
+    {
+      "source": "output/playwright/jev-live-final/result.json",
+      "sha256": "5da5523cfc51ef6175d6cd77281ee964449acd0f6e9186e6784ded127149408f",
+      "result": {
+        "pass": true,
+        "node": "v26.0.0",
+        "browser": "agent-browser@0.36.0",
+        "hands": 2,
+        "aiCount": 2,
+        "upper": "disabled; factual feedback",
+        "requests": [
+          {
+            "status": 200,
+            "ms": 611,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_200",
+              "confidence": 0.45,
+              "probabilities": {
+                "raise_to_150": 0.25,
+                "raise_to_100": 0.03,
+                "raise_to_5000": 0.16,
+                "fold": 0,
+                "raise_to_200": 0.55,
+                "call": 0.01
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 839,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 249,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_600",
+              "confidence": 0.14,
+              "probabilities": {
+                "fold": 0.07,
+                "raise_to_600": 0.27,
+                "raise_to_350": 0.11,
+                "call": 0.25,
+                "raise_to_5000": 0.04,
+                "raise_to_800": 0.26
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 927,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 244,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_2400",
+              "confidence": 0.23,
+              "probabilities": {
+                "raise_to_1800": 0.3,
+                "raise_to_2400": 0.35,
+                "raise_to_5000": 0.17,
+                "raise_to_1000": 0.11,
+                "call": 0.06,
+                "fold": 0.01
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 972,
+                "output_tokens": 89
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 328,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_5000",
+              "confidence": 0.14,
+              "probabilities": {
+                "raise_to_4200": 0.32,
+                "call": 0.13,
+                "fold": 0.2,
+                "raise_to_5000": 0.35
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 997,
+                "output_tokens": 63
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 212,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "call",
+              "confidence": 0.58,
+              "probabilities": {
+                "fold": 0.21,
+                "call": 0.79
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 971,
+                "output_tokens": 31
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 238,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_200",
+              "confidence": 0.14,
+              "probabilities": {
+                "raise_to_100": 0.16,
+                "raise_to_5000": 0.05,
+                "call": 0.23,
+                "raise_to_150": 0.25,
+                "fold": 0.03,
+                "raise_to_200": 0.28
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 882,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 213,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_600",
+              "confidence": 0.2,
+              "probabilities": {
+                "call": 0.11,
+                "fold": 0.05,
+                "raise_to_350": 0.1,
+                "raise_to_5000": 0.09,
+                "raise_to_600": 0.34,
+                "raise_to_800": 0.31
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 923,
+                "output_tokens": 85
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 227,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_1800",
+              "confidence": 0.13,
+              "probabilities": {
+                "fold": 0.05,
+                "raise_to_1000": 0.15,
+                "call": 0.2,
+                "raise_to_1800": 0.28,
+                "raise_to_2400": 0.24,
+                "raise_to_5000": 0.08
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1012,
+                "output_tokens": 89
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 271,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "raise_to_5000",
+              "confidence": 0.27,
+              "probabilities": {
+                "fold": 0.11,
+                "raise_to_3000": 0.35,
+                "call": 0.09,
+                "raise_to_5000": 0.45
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 992,
+                "output_tokens": 63
+              }
+            }
+          },
+          {
+            "status": 200,
+            "ms": 243,
+            "answerCheck": {
+              "model": "jev-1.13.0",
+              "type": "choice",
+              "choice": "call",
+              "confidence": 0.46,
+              "probabilities": {
+                "fold": 0.27,
+                "call": 0.73
+              },
+              "sum": 1,
+              "usage": {
+                "input_tokens": 1009,
+                "output_tokens": 31
+              }
+            }
+          }
+        ],
+        "models": [
+          "jev-1.13.0"
+        ],
+        "actors": [
+          "seat_2",
+          "seat_1"
+        ],
+        "decisions": 10,
+        "usage": {
+          "input_tokens": 9524,
+          "output_tokens": 706
+        }
+      }
+    },
+    {
+      "source": "output/playwright/jev-street-smoke/result.json",
+      "sha256": "7c0203da6ddbca32bd679835cff952b08a9c3c9246804154924778ed0b5c1558",
+      "result": {
+        "requests": 3,
+        "results": [
+          {
+            "street": "flop",
+            "pass": true,
+            "ms": 608,
+            "candidates": 6,
+            "action": {
+              "action": "raise",
+              "amount": 400
+            },
+            "model": "jev-1.13.0",
+            "confidence": 0.37,
+            "probabilitySum": 0.9999999999999999,
+            "probabilities": {
+              "check": 0.26,
+              "raise_to_50": 0.02,
+              "raise_to_133": 0.05,
+              "raise_to_267": 0.12,
+              "raise_to_400": 0.47,
+              "raise_to_4800": 0.08
+            },
+            "usage": {
+              "input_tokens": 804,
+              "output_tokens": 89
+            }
+          },
+          {
+            "street": "turn",
+            "pass": true,
+            "ms": 259,
+            "candidates": 6,
+            "action": {
+              "action": "raise",
+              "amount": 400
+            },
+            "model": "jev-1.13.0",
+            "confidence": 0.36,
+            "probabilitySum": 1,
+            "probabilities": {
+              "check": 0.28,
+              "raise_to_50": 0.01,
+              "raise_to_133": 0.03,
+              "raise_to_267": 0.07,
+              "raise_to_400": 0.47,
+              "raise_to_4800": 0.14
+            },
+            "usage": {
+              "input_tokens": 807,
+              "output_tokens": 89
+            }
+          },
+          {
+            "street": "river",
+            "pass": true,
+            "ms": 225,
+            "candidates": 6,
+            "action": {
+              "action": "raise",
+              "amount": 400
+            },
+            "model": "jev-1.13.0",
+            "confidence": 0.32,
+            "probabilitySum": 1,
+            "probabilities": {
+              "check": 0.27,
+              "raise_to_50": 0.01,
+              "raise_to_133": 0.02,
+              "raise_to_267": 0.04,
+              "raise_to_400": 0.44,
+              "raise_to_4800": 0.22
+            },
+            "usage": {
+              "input_tokens": 812,
+              "output_tokens": 89
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+import { JEV_CONFIG, validateJevConfig, validateOpponentRuntime, resolveOpponentRuntime, jevRollForwardOf } from '../shared/opponent-runtime.js';
+import { validJevPending, sameJevIdentity } from '../shared/jev-pending.js';
+import { boundJevDiagnostics } from './jev-diagnostics.js';
+import { createJevRuntime, preflightJev } from './jev-runtime.js';
+import { buildJevCandidates, projectJevState, jevError, selectJevAction, jevGuardContext } from './jev-player.js';
+import { deriveUnit } from '../training/policies/rng.js';
+import {appendBoundedMetric} from '../shared/runtime-bounds.js';
 import { classifyDecision, validatedDecision, legalFromMessage, projectRejectionForSink, validateDiagnostics, validateRawDiagnostics, retryWillCorrect, correctionMessage, CORRECTABLE_DETAILS } from './player-decision.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
@@ -10,9 +17,11 @@ import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
 import { cliModeDefaults } from '../shared/game-setup.js';
+import { paceFor } from '../shared/pace.js';
 import {checkDealBiasResume} from '../shared/deal-selection.js';
 import { playerBudget, playerFailureCategory } from '../shared/player-budget.js';
 import { createSessionControl, retryControlWrite } from './session-control.js';
+import { HOST_ID, aiRowsOf, isHumanSeat } from '../shared/seat-roles.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -28,10 +37,10 @@ import { createListenerOwnedBy } from './listener-ownership.js';
 import { createRelayRootOwner, writeRelayJsonAtomic } from '../server/action-receipts.js';
 import {
   buildPlayerPrompt,
+  createProductionResolver,
   extractJsonLine,
   isArgvSafeSessionId,
   RUNTIME_TABLE,
-  resolveRuntimes,
 } from './player-runtime.js';
 import {
   coachNoteStrings,
@@ -42,6 +51,18 @@ import {
 } from '../publish-contract.js';
 import { normalizeFreeText, REASON_MAX_BYTES, REASON_MAX_CHARS } from '../shared/free-text.js';
 import { canStartReplacement } from './coach-control.js';
+import {
+  SIDECAR_NOFOLLOW, DEFAULT_LSOF, RELEASE_REASONS, readSidecarFileWithoutNoFollow,
+  consultCoachCloseEvidence, scanCoachRuntimeProcesses, parseLsofCwdRecords, legacyCoachRuntimeCandidates,
+  createCoachEvidenceReader, parsePersistedCoachHandle, validSidecarIdentity, sidecarTupleMismatch, rowIdentities,
+  notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive,
+} from './coach-evidence.js';
+// Re-exported for existing importers (tests and tools) of these names.
+export {
+  readSidecarFileWithoutNoFollow, consultCoachCloseEvidence, scanCoachRuntimeProcesses,
+  parseLsofCwdRecords, legacyCoachRuntimeCandidates,
+};
+export const LOOP_RELEASE_REASONS = RELEASE_REASONS;
 import { createTrainingControl, enterExplanationCutoff } from './training-control.js';
 import { decide as decidePolicy, readDerivedPolicyConfigs, stampPlayerPolicies } from './policy-player.js';
 import {
@@ -73,6 +94,7 @@ import {
   sealExploitAnnotations,
   toRunnerHandle,
   trainingAggregate,
+  EXPLAIN_HELD,
 } from './training-pipeline.js';
 import {
   completeSessionStoreMigration,
@@ -90,6 +112,7 @@ import {
   prepareSession,
   resolveCurrentSession,
 } from '../engine/session-catalog.js';
+import { projectNotices } from './notice-projection.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -98,6 +121,8 @@ const COACH_CLI = path.join(ROOT, 'tools/coach-control.js');
 const SERVER_CLI = path.join(ROOT, 'server/server.js');
 const LOOP_LOCK = 'loop.lock.d';
 const COACH_GENERATION_MS = 120_000;
+// A first attempt plus one replacement, with room for the coach CLI steps.
+const COACH_BACKLOG_WAIT_MS = 2 * COACH_GENERATION_MS + 10_000;
 const REVIEW_GENERATION_MS = 300_000;
 const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+내 성향 통계(?:[ \t]|$)/m,
@@ -108,7 +133,19 @@ const REVIEW_HEADING_PATTERNS = Object.freeze([
 const FINAL_PHASES = new Set(['finalizing', 'review_generated', 'review_published']);
 // §5 종료 시퀀스: finalDeadlineMono = now + 20s, resultWaitCutoffMono = finalDeadline - 10s.
 // Win32 ACL proofs spent ~72s in a 20-hand session under that POSIX ceiling.
-const FINALIZE_BUDGET_MS = process.platform === 'win32' ? 200_000 : 20_000;
+export function platformBudgetScale(platform = process.platform) {
+  return platform === 'win32' ? 10 : 1;
+}
+
+export function defaultReclaimBudgets(platform = process.platform) {
+  const scale = platformBudgetScale(platform);
+  return {
+    finalizeBudgetMs: 20_000 * scale,
+    orphanTerminateGraceMs: 5_000 * scale,
+    orphanTerminateKillWaitMs: 2_000 * scale,
+    resumeReclaimResidualMs: 5_000 * scale,
+  };
+}
 const FINALIZE_CUTOFF_LEAD_MS = 10_000;
 // A finalization halt is a retryable operator condition: the next --resume re-enters the
 // same checkpoint. repair_failed/NO_PLAYER_RUNTIME keep their own play-time boundaries.
@@ -118,7 +155,6 @@ const RESUMABLE_FINAL_HALTS = new Set([
   'REVIEW_FAILED',
   'REVIEW_GATE_CLOSED',
 ]);
-const DEFAULT_LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((candidate) => fs.existsSync(candidate)) ?? null;
 const DEFAULT_WAIT_NETWORK_MARGIN_MS = 11_000;
 // 127.0.0.1 왕복 한 번의 상한. health는 실패해도 startup 루프가 다시 돌지만
 // `assertAuthenticatedServer`의 두 프로브는 재시도가 없어서, 느린 기기에서 스냅샷
@@ -172,51 +208,6 @@ function codedError(code, message, extra = {}) {
   return error;
 }
 
-// #192 I2: undefined (not 0) on a platform that has no O_NOFOLLOW (e.g. Windows) so callers
-// can tell "no such flag exists" apart from "flag value is 0" and use
-// `readSidecarFileWithoutNoFollow` there instead of opening with no protection at all.
-const SIDECAR_NOFOLLOW = fs.constants.O_NOFOLLOW;
-
-// #192 oK1: sidecar read for a platform without O_NOFOLLOW. `lstat` first rejects anything
-// that is not a regular file, then the file is opened without the flag and `fstat` on that
-// fd must report the same dev and ino. A path swapped to a symlink or another file between
-// the two calls therefore reads as `invalid`, never as evidence, which closes the TOCTOU
-// window without refusing every sidecar (refusing them all disabled the O7 spawn guard and
-// the sidecar judgments on Windows). A file that disappears after `lstat` is `invalid`, not
-// `absent`, because absence was not observed atomically. `fsImpl` is a test seam.
-export function readSidecarFileWithoutNoFollow(filePath, { maxBytes, fsImpl = fs } = {}) {
-  let before;
-  try {
-    before = fsImpl.lstatSync(filePath, { bigint: true });
-  } catch (error) {
-    return { status: error?.code === 'ENOENT' ? 'absent' : 'invalid' };
-  }
-  if (before.isSymbolicLink() || !before.isFile()) return { status: 'invalid' };
-  let fd;
-  try {
-    fd = fsImpl.openSync(filePath, 'r');
-  } catch {
-    return { status: 'invalid' };
-  }
-  try {
-    const after = fsImpl.fstatSync(fd, { bigint: true });
-    if (
-      !after.isFile()
-      || after.dev !== before.dev
-      || after.ino !== before.ino
-      || after.nlink !== 1n
-      || after.size > BigInt(maxBytes)
-    ) {
-      return { status: 'invalid' };
-    }
-    return { status: 'ok', text: fsImpl.readFileSync(fd, 'utf8') };
-  } catch {
-    return { status: 'invalid' };
-  } finally {
-    try { fsImpl.closeSync(fd); } catch { /* best effort */ }
-  }
-}
-
 // #192 D5 (design memo §4 D5, G11): top-level error `code` values the three coach/publish/
 // engine CLI children can legitimately print on their own stdout — every `fail(...)`/
 // `bail(...)` (CoachError/ToolError) call and every literal top-level `code:` field in
@@ -236,6 +227,8 @@ const KNOWN_CHILD_ERROR_CODES = new Set([
   'ADAPTER_DISABLED', 'ATTEMPT_TIMEOUT', 'FINALIZATION_ABORTED', 'HAND_ALREADY_PUBLISHED',
   'HAND_DEFERRED', 'HAND_SNAPSHOT_OCCUPIED', 'NO_RESULT', 'PUBLISH_FAILED',
   'QUEUE_ALREADY_SEALED', 'ROLLBACK_REFUSED', 'SUPERSEDED', 'INTERNAL',
+  // #214 writer refusals of a release declaration.
+  'RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED', 'ALREADY_RELEASED',
   // tools/publish.js
   'BAD_ENVELOPE', 'BAD_AUTHORITY', 'BAD_TRAINING_AUTHORITY', 'STALE_TRAINING_AUTHORITY',
   'UNSUPPORTED_TRAINING_AUTHORITY', 'STALE_ANNOTATION_AUTHORITY', 'PUBLISH_REJECTED',
@@ -284,33 +277,44 @@ export function buildBadChildOutputDetails({ script, exitCode, signal, stdout, s
   };
 }
 
-// #192 §3/§4 D2: evidence that closes a persisted coach row without any live identity check.
-// Order follows the design memo: c → closed-confirmed → f. Every hit releases the row, so
-// the order only decides which reason string is reported.
-// - c: `closures` is `loop-state.coachRuntimeClosures`, `requestStop`'s success-path receipt
-//   (§3 E1). It lists every owner some loop instance durably confirmed fully stopped, so a
-//   row whose `ownerSessionId` appears there closes regardless of any other evidence.
-// - closed-confirmed (#192 O2): the caller (`terminatePersistedCoachAttempt` Step 0) already
-//   rejected any sidecar whose tuple does not match this exact row and epoch, so the phase is
-//   trusted at face value. `sidecar` is optional for callers that have none.
-// - f: `acceptEvidence` (`closed-child` or `no-spawn`, written by `accept` in
-//   tools/coach-control.js) is copied onto the attempt by `persistedCoachAttempts()`.
-// Pure function of its inputs with no disk reads, so consulting it twice for the same attempt
-// (the H2 fast path and the post-poll fallback) is always safe. Returns `{ reason }` when
-// evidence closes the row, otherwise `null`.
-export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
-  if (Array.isArray(closures) && closures.some((entry) => (
-    entry && typeof entry === 'object' && entry.ownerSessionId === attempt?.ownerSessionId
-  ))) {
-    return { reason: 'OWNER_RUNTIME_CLOSED' };
-  }
-  if (sidecar?.phase === 'closed-confirmed') {
-    return { reason: 'CLOSED_CONFIRMED' };
-  }
-  if (attempt?.acceptEvidence === 'closed-child' || attempt?.acceptEvidence === 'no-spawn') {
-    return { reason: 'ACCEPT_EVIDENCE' };
-  }
-  return null;
+
+// #215: what the halt observed about <root>/lock.json, kept apart from what the recovery
+// commands require (only a lock.json carrying this game's sessionToken). `authenticated`
+// means this loop instance itself verified the binding of exactly this lock (pid, port,
+// token) and the pid still has the verified start time — a fact at `observedAt`, not later.
+export function deriveServerLockObservation({ readLock, expectedToken, bindingVerified, processAlive, startTimeOf, now = () => new Date() }) {
+  const observedAt = now().toISOString();
+  let lock;
+  try { lock = readLock(); } catch { return { state: 'invalid', observedAt }; }
+  if (!lock) return { state: 'absent', observedAt };
+  if (typeof expectedToken !== 'string' || lock.sessionToken !== expectedToken) return { state: 'foreign', observedAt };
+  const verified = Boolean(bindingVerified)
+    && lock.serverPid === bindingVerified.pid
+    && lock.port === bindingVerified.port
+    && lock.sessionToken === bindingVerified.sessionToken
+    && processAlive(lock.serverPid)
+    && startTimeOf(lock.serverPid) === bindingVerified.startTime;
+  return { state: verified ? 'authenticated' : 'unverified', serverPid: lock.serverPid, observedAt };
+}
+
+// Whether an authenticated relay found at adoption can keep serving this loop. A relay
+// lacking a capability this loop relies on is replaced through the normal
+// `server-capability-replaced` path instead of being reused.
+export function relayHealthCompatible(health, { responseOk, managed, study, snapshotStudyUrl, hints }) {
+  return responseOk === true && health?.ok === true && health.protocolVersion === 2
+    && health.capabilities?.actionReceipts === true
+    // #235: a managed relay from before the pause cancellation ledger would keep
+    // refusing paused actions without proof; replace it like any stale relay.
+    && (!managed || health.capabilities?.actionCancellations === 1)
+    && (!study || (health.capabilities?.studyLink === true && snapshotStudyUrl === study.studyUrl))
+    && (hints !== 'on' || health.capabilities?.preActionHints === 1);
+}
+
+export function persistedRecoveryClass(reason) {
+  // #214: the cleanup writer observing the recorded coach alive is as live as the loop
+  // observing it — no recovery command, only "wait for pid N".
+  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED', 'RELEASE_TARGET_ALIVE'].includes(reason)
+    ? 'live' : 'unverified';
 }
 
 // #192 D5/O5: distinguishes, for an operator halted on unresolved coach rows, whether any
@@ -325,9 +329,17 @@ export function consultCoachCloseEvidence(attempt, closures, sidecar = null) {
 // nonexistent legacy row. Returns null when no category applies, leaving the base message
 // unchanged.
 export function unresolvedEvidenceGuidance(unresolved) {
+  const live = unresolved.filter((row) => persistedRecoveryClass(row?.reason) === 'live');
+  if (live.length > 0) {
+    const pids = [...new Set(live.flatMap((row) => [
+      ...(row.evidence?.identity?.pid != null ? [row.evidence.identity.pid] : []),
+      ...(row.evidence?.legacyScanPids ?? []),
+    ]))];
+    return `코치 프로세스${pids.length ? `(pid: ${pids.join(', ')})` : ''}의 종료를 확인한 뒤 resume하세요. 쓰기 권한이 있는 행(cleanupAuthorized)은 다음 resume이 자동으로 released 처리하고, 권한 없는 행은 종료 확인 뒤 --row-owner … --operator-confirmed 1로 닫습니다.`;
+  }
   const withEvidence = unresolved.filter((row) => row?.evidence);
   if (withEvidence.some((row) => row.evidence.sidecar === 'intent')) {
-    return 'spawn이 실제로 시작됐을 수 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 halt.recovery.commands를 실행하세요.';
+    return 'spawn이 실제로 시작됐을 수 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 halt.recovery.commands를 검토하고 --operator-confirmed 1을 붙여 실행하세요.';
   }
   // A row whose path could not be attributed to the current root is checked first: even a
   // row that also happens to have no handle/spawnEvidence/sidecar is not "legacy with no
@@ -336,18 +348,8 @@ export function unresolvedEvidenceGuidance(unresolved) {
   if (withEvidence.length > 0 && withEvidence.every((row) => row.evidence.attributable === false)) {
     return '게임 디렉터리가 이동했거나 경로를 확인할 수 없는 행입니다. halt.recovery.commands 실행 전에 게임 디렉터리 위치를 먼저 확인하세요.';
   }
-  // #192 O1/L1 부록 v3.2: judgment g가 legacy 행을 프로세스 스캔으로 판정했지만 여전히
-  // unresolved로 남은 두 경우 — 후보 프로세스가 있거나(fail-closed), 조회 자체가
-  // 불가능했던 경우 — 는 일반 "증거 없는 legacy" 문구보다 구체적인 안내가 필요하다.
-  // g는 sidecar가 absent인 행에만 적용되므로 이 두 reason은 항상 evidence를 동반한다.
-  if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT')) {
-    const pids = [...new Set(withEvidence.flatMap((row) => row.evidence?.legacyScanPids ?? []))];
-    return pids.length > 0
-      ? `legacy 행과 연결됐을 수 있는 coach CLI 프로세스(pid: ${pids.join(', ')})가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.`
-      : 'legacy 행과 연결됐을 수 있는 coach CLI 프로세스가 남아 있습니다. 해당 프로세스를 모두 종료한 뒤 resume하세요.';
-  }
   if (withEvidence.length > 0 && withEvidence.every((row) => row.reason === 'LEGACY_SCAN_UNAVAILABLE')) {
-    return 'legacy 행의 coach 런타임 프로세스 여부를 확인할 수 없습니다. halt.recovery.commands를 검토해 실행하세요.';
+    return 'legacy 행의 coach 런타임 프로세스 여부를 확인할 수 없습니다. halt.recovery.commands를 검토하고 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행하세요.';
   }
   // Genuinely evidence-free legacy: no handle was ever recorded, no new-protocol stamp, and
   // the sidecar has never been seen at all (not merely unreadable/invalid/moved).
@@ -362,145 +364,6 @@ export function unresolvedEvidenceGuidance(unresolved) {
   // authority/epoch/owner/deadline/adapter-disable failure, not a coach-row evidence
   // classification — neither wording applies, and claiming "legacy" would mislead.
   return null;
-}
-
-// #192 O1/L1 부록 v3.2: legacy 행 자동 복구용 프로세스 스캐너. player-runtime.js의
-// ensureCwd()는 코치 CLI 자식을 `realpath(os.tmpdir())/ai-holdem-<kind>-XXXXXX` 전용
-// cwd에서 띄운다 — 그 경로 관례를 `lsof -d cwd` 출력과 대조해 이 uid 아래 아직 남아
-// 있을 수 있는 코치 런타임 프로세스를 찾는다. 실제 판정(judgment g)은
-// createGameLoop 안 `terminatePersistedCoachAttempt`가 소유한다 — 아래 함수들은
-// 순수 파싱/매칭이라 픽스처 문자열만으로 단위 테스트할 수 있다.
-function aiHoldemCwdSegment(cwd) {
-  return String(cwd ?? '').split(/[\\/]+/).some((segment) => segment.startsWith('ai-holdem-'));
-}
-
-// `lsof -n -P -a -u <uid> -d cwd -Fpn`은 프로세스마다 `p<pid>` 레코드 하나, 그 식별
-// 대상 파일디스크립터를 밝히는 `f<fd>` 레코드 하나(`-F`가 지정한 필드와 무관하게
-// lsof가 항상 내보내는 필수 식별 필드 — 실측: 이 머신에서 `-Fpn` 출력도 예외 없이
-// `p`마다 `fcwd`가 끼어 있다), 그리고 그 파일의 이름(여기서는 cwd 경로)을 담은
-// `n<path>` 레코드 하나로 된 `(p, f, n)` 삼중항이 반복되는 구조다. 이 순서가 깨지거나
-// (짝이 맞지 않는 p/f/n, 알 수 없는 레코드 태그, 중간에 잘린 삼중항) 하면 전체 출력을
-// 신뢰할 수 없다는 뜻이므로 `null`을 반환한다 — 호출자는 이를 "조회 불가"로 취급해야
-// 하며, 절대 "매칭되는 후보 0개"로 착각해서는 안 된다. 빈 문자열만은 예외로, 프로세스가
-// 하나도 나열되지 않은 정상적인 빈 표를 뜻하므로 빈 배열을 반환한다.
-export function parseLsofCwdRecords(stdout) {
-  const text = String(stdout ?? '');
-  if (text.trim() === '') return [];
-  const lines = text.split(/\r?\n/).filter((line) => line !== '');
-  const records = [];
-  let i = 0;
-  while (i < lines.length) {
-    const pLine = lines[i];
-    if (pLine[0] !== 'p') return null;
-    const pid = Number(pLine.slice(1));
-    if (!Number.isInteger(pid) || pid <= 0) return null;
-    // #192 J2: a cwd query only ever emits `fcwd` — a numeric fd, a blank tag, or anything
-    // else means this triple is not the cwd fd we asked for and the whole listing can no
-    // longer be trusted as "exactly the p/fcwd/n triple" the design requires.
-    const fLine = lines[i + 1];
-    if (fLine !== 'fcwd') return null;
-    const nLine = lines[i + 2];
-    if (!nLine || nLine[0] !== 'n') return null;
-    let cwd = nLine.slice(1);
-    // A process whose cwd was itself deleted from disk still has a real, trustworthy path —
-    // lsof only appends `(deleted)`. Strip it before matching so a legacy `ai-holdem-*` cwd
-    // that has since been removed is still a candidate below.
-    const deletedSuffix = ' (deleted)';
-    if (cwd.endsWith(deletedSuffix)) cwd = cwd.slice(0, -deletedSuffix.length);
-    // #192 J2: an empty name, a relative name, or an lsof annotation such as
-    // `(readlink: Permission denied)` / `(stat: ...)` (seen on Linux when this uid's own
-    // process cannot have its cwd read) means lsof could not actually verify this process's
-    // cwd — never let that read as "no candidate here". Fail the whole listing instead.
-    if (cwd === '' || !cwd.startsWith('/') || cwd.includes('(readlink:') || cwd.includes('(stat:')) return null;
-    records.push({ pid, cwd });
-    i += 3;
-  }
-  return records;
-}
-
-// player-runtime.js가 코치 CLI를 띄우는 cwd 관례(`ai-holdem-<kind>-XXXXXX`)와 대조해
-// 후보 프로세스만 골라낸다. `excludePid`는 이 loop 프로세스 자신이다 — 스캔이 자기
-// 자신을 legacy 코치 런타임으로 오인해서는 안 된다.
-// #192 sJ2: 이 cwd-구성요소 규칙은 지원 코치 CLI(claude·codex·grok)가 자신의 프로세스
-// 트리 전체(래퍼·네이티브 바이너리·자식 프로세스 모두)에서 런타임 cwd를 계속 유지한다는
-// 전제에 의존한다. 오케스트레이터가 2026-09-14 이 머신에서
-// `createPlayerRuntime(kind).oneshotStart({ tier: 'upper' })` 실제 경로로 세 CLI를 띄워
-// 250ms 간격으로 `ps`+`lsof -d cwd`로 프로세스 트리를 표본 조사했다: codex(codex-cli
-// 0.154.0, model gpt-5.6-sol, node 래퍼 → 네이티브 codex 바이너리 → node_repl 자식),
-// claude(2.1.270, model opus, 단일 프로세스), grok(1.0.25, model grok-4.6, 사용자 훅 스크립트·lsof·
-// awk·sort 자식 포함 11개 프로세스) 전부 — cwd를 관측할 수 있었던 모든 프로세스가
-// `ai-holdem-<kind>-*` cwd를 유지했다. chdir, 다른 cwd로의 재실행, 데몬화된 helper는
-// 어느 CLI에서도 관측되지 않았다(grok의 세 단명 자식은 cwd 없는 종료된 `(bash)`/`(git)`
-// 항목으로만 나타났다). CLI가 업데이트되면 이 전제는 달라질 수 있다 — 그래서 (J2가 이미
-// 보장하듯) 목록에 있는 어떤 프로세스든 cwd를 관측할 수 없으면 전체 스캔을 clean이
-// 아니라 unavailable로 처리한다(`parseLsofCwdRecords`의 `CWD_UNVERIFIABLE`).
-export function legacyCoachRuntimeCandidates(records, { excludePid = null } = {}) {
-  return records
-    .filter((record) => record.pid !== excludePid && aiHoldemCwdSegment(record.cwd))
-    .map((record) => ({ pid: record.pid, cwd: record.cwd }));
-}
-
-// 기본 스캐너 구현: POSIX에서 이 프로세스 uid 아래, cwd fd 하나만(`-d cwd`) 골라
-// `-Fpn`으로 pid/경로 쌍만 받는다. 서버 소유 확인과 달리 exit 1 + 빈 출력을 "매칭 없음"으로
-// 읽지 않는다: 이 uid 조회에는 스캔하는 프로세스 자신이 반드시 나와야 하므로, 자기 pid가
-// 없는 결과는 전부 조회 불가다(#192 구현 리뷰 전 오케스트레이터 검토).
-export function scanCoachRuntimeProcesses({
-  lsofPath, timeoutMs = 5_000, excludePid = process.pid, selfPid = process.pid, execFileFn = execFile,
-  // #192 CI: platform and uid are parameters so the POSIX branch below can be exercised from
-  // a win32 runner, where `process.platform` would short-circuit every scanner test and
-  // `process.getuid` does not exist at all. Production passes neither.
-  platform = process.platform,
-  uid = undefined,
-} = {}) {
-  if (platform === 'win32') {
-    return Promise.resolve({ status: 'unavailable', reason: 'WIN32_UNSUPPORTED' });
-  }
-  if (!lsofPath) return Promise.resolve({ status: 'unavailable', reason: 'LSOF_MISSING' });
-  let scanUid = uid;
-  if (scanUid === undefined) {
-    try {
-      scanUid = process.getuid?.();
-    } catch {
-      scanUid = undefined;
-    }
-  }
-  if (!Number.isInteger(scanUid)) return Promise.resolve({ status: 'unavailable', reason: 'UID_UNAVAILABLE' });
-  return new Promise((resolve) => {
-    execFileFn(lsofPath, [
-      '-n', '-P', '-a', '-u', String(scanUid), '-d', 'cwd', '-Fpn',
-    ], {
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      killSignal: 'SIGKILL',
-      maxBuffer: 1024 * 1024,
-    }, (error, stdout) => {
-      // A scan of this uid always includes the scanning process itself, so "no output" is
-      // never proof of "no coach runtime process": lsof exits 1 with nothing when it could
-      // not observe anything at all. #192 J2: trust only a clean exit (status 0) — a
-      // parseable listing on a non-zero exit (including exit 1 with a candidate-looking
-      // record) is never trusted either, since a partial/erroring listing can silently omit
-      // processes it failed to enumerate.
-      if (String(stdout ?? '').trim() === '') {
-        resolve({ status: 'unavailable', reason: error?.killed ? 'LSOF_TIMEOUT' : 'LSOF_NO_OUTPUT' });
-        return;
-      }
-      if (error) {
-        resolve({ status: 'unavailable', reason: error.killed ? 'LSOF_TIMEOUT' : 'LSOF_FAILED' });
-        return;
-      }
-      const records = parseLsofCwdRecords(stdout);
-      if (records === null) {
-        resolve({ status: 'unavailable', reason: 'CWD_UNVERIFIABLE' });
-        return;
-      }
-      if (!records.some((record) => record.pid === selfPid)) {
-        resolve({ status: 'unavailable', reason: 'SELF_NOT_OBSERVED' });
-        return;
-      }
-      const candidates = legacyCoachRuntimeCandidates(records, { excludePid });
-      resolve(candidates.length > 0 ? { status: 'candidates', candidates } : { status: 'clean' });
-    });
-  });
 }
 
 function readJsonOptional(filePath, label) {
@@ -570,7 +433,8 @@ export function engineInitFlags(args = {}) {
   if (args.mode !== undefined) extra.push('--mode', String(args.mode));
   if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
   if (args.hands !== undefined) extra.push('--hands', String(args.hands));
-  if (args.opponentRuntime === 'policy') extra.push('--opponent-runtime', 'policy');
+  if (args.opponentRuntime !== undefined) extra.push('--opponent-runtime', validateOpponentRuntime(args.opponentRuntime));
+  if (args.jevConfigFile) extra.push('--jev-config-file', args.jevConfigFile);
   if (args.showdownPolicy !== undefined) extra.push('--showdown-policy', String(args.showdownPolicy));
   if (args.hints !== undefined) extra.push('--hints',String(args.hints));
   if (args.dealBias !== undefined) extra.push('--deal-bias',String(args.dealBias));
@@ -582,7 +446,7 @@ export const applyModeDefaults = cliModeDefaults;
 
 export function gtoEvalNotice(config = {}) {
   if (config.mode !== 'cash-training') return null;
-  const seats = Number(config.aiCount) + 1;
+  const seats = Number(config.aiCount) + (config.humanCount ?? 1);
   const stackBb = config.startStackBb;
   const badSeats = !Number.isFinite(seats) || ![6, 8, 9].includes(seats);
   const badStack = !Number.isFinite(stackBb) || stackBb !== 100;
@@ -631,6 +495,7 @@ export function parseGameLoopArgs(argv) {
     ['--player-runtime', 'playerRuntime'],
     ['--practice-focus-file', 'practiceFocusFile'],
     ['--mode', 'mode'],
+    ['--pace', 'pace'],
     ['--stack-bb', 'stackBb'],
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
@@ -676,9 +541,10 @@ export function parseGameLoopArgs(argv) {
   if (parsed.port !== undefined && (parsed.port < 0 || parsed.port > 65535)) {
     throw codedError('USAGE', '--port는 0..65535 정수여야 합니다.');
   }
-  if (parsed.opponentRuntime != null && parsed.opponentRuntime !== 'llm' && parsed.opponentRuntime !== 'policy') {
-    throw codedError('USAGE', '--opponent-runtime는 llm 또는 policy입니다.');
+  if (parsed.opponentRuntime != null && !['llm', 'policy', 'jev'].includes(parsed.opponentRuntime)) {
+    throw codedError('USAGE', '--opponent-runtime는 llm, policy 또는 jev입니다.');
   }
+  try { paceFor(parsed); } catch { throw codedError('USAGE', '--pace는 instant, fast, normal 또는 slow입니다.'); }
   if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
     throw codedError('USAGE', '--solver는 [a-z0-9-] 64자 이내 adapterId입니다.');
   }
@@ -744,6 +610,23 @@ export function exitCodeFor(error) {
   return 5;
 }
 
+/** Waits until `pending()` is empty, re-reading it after every round: work that
+ * finishes during the wait can register follow-ups (an evaluation starting its
+ * solve), and the pause barrier must not declare `paused` while any of them can
+ * still write. Stops early once `stopped()` is true. */
+export async function settleUntilIdle(pending, stopped = () => false) {
+  for (;;) {
+    const current = pending();
+    if (current.length === 0 || stopped()) return;
+    await Promise.allSettled(current);
+  }
+}
+
+export const JEV_ROLL_FORWARD_NOTICE = 'JEV 결정 규칙을 v3로 roll-forward했습니다. 기존 기록은 보존됩니다.';
+const UPPER_UNAVAILABLE_NOTICE = '상위 모델 런타임이 없습니다 — LLM 코치·리뷰 피드백을 제공할 수 없습니다.';
+const jevVersions = ({questionVersion, candidateVersion, projectionVersion, selectionVersion}) =>
+  ({questionVersion, candidateVersion, projectionVersion, ...(selectionVersion ? {selectionVersion} : {})});
+
 function isoNow(now) {
   const value = now();
   if (value instanceof Date) return value.toISOString();
@@ -771,17 +654,6 @@ function writeTextAtomic(filePath, value) {
   }
 }
 
-function processAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === 'ESRCH') return false;
-    if (error.code === 'EPERM') return true;
-    throw error;
-  }
-}
 
 export { validatedDecision, legalFromMessage };
 
@@ -804,14 +676,16 @@ export function validatedUserAction(raw) {
   return action;
 }
 
-export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = resolveRuntimes, opts = {} }) {
+export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle = null, resolver = createProductionResolver({ preferred: null }), opts = {} }) {
   if (!gameDir) throw codedError('USAGE', 'gameDir가 필요합니다.');
   if (typeof resolver !== 'function') throw codedError('USAGE', 'resolver가 필요합니다.');
-  const requestedOpponentRuntime = opts.opponentRuntime === 'policy' ? 'policy' : 'llm';
+  let requestedOpponentRuntime = opts.opponentRuntime === undefined ? 'llm' : validateOpponentRuntime(opts.opponentRuntime);
 
   const root = path.resolve(gameDir);
   const lockRoot = path.resolve(lockDir);
   const now = opts.now ?? (() => new Date());
+  const pace = paceFor(opts);
+  const paceNow = () => new Date(now()).getTime();
   const requestedPort = opts.port ?? 8877;
   const pollMs = opts.pollMs ?? 20;
   // 아래 셋은 전부 "정상인데 느린" 기기에 대한 인내심이지 지연 예산이 아니다. 이
@@ -828,14 +702,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // publish.js compares --deadline-monotonic-ns against its own process.hrtime.bigint(),
   // which is the system monotonic clock: the two processes share the origin.
   const monotonicNs = opts.monotonicNs ?? (() => process.hrtime.bigint());
-  const finalizeBudgetMs = opts.finalizeBudgetMs ?? FINALIZE_BUDGET_MS;
+  const budgetPlatform = opts.budgetPlatform ?? process.platform;
+  const budgetDefaults = defaultReclaimBudgets(budgetPlatform);
+  const finalizeBudgetMs = opts.finalizeBudgetMs ?? budgetDefaults.finalizeBudgetMs;
   const finalizeCutoffLeadMs = Math.min(
     opts.finalizeCutoffLeadMs ?? FINALIZE_CUTOFF_LEAD_MS,
     finalizeBudgetMs,
   );
-  const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? 5_000;
-  const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? 2_000;
-  const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? 5_000;
+  const orphanTerminateGraceMs = opts.orphanTerminateGraceMs ?? budgetDefaults.orphanTerminateGraceMs;
+  const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? budgetDefaults.orphanTerminateKillWaitMs;
+  const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? budgetDefaults.resumeReclaimResidualMs;
   const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
@@ -865,6 +741,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // root's `stat` failure (as opposed to the sidecar file's own missing-ness) needs real
   // filesystem/mount manipulation a test cannot do portably.
   const statGameRoot = opts.statGameRoot ?? fs.statSync;
+  const { coachSpawnEvidencePath, readCoachSpawnSidecar, coachEvidenceAttributable } = createCoachEvidenceReader({
+    root, statGameRoot: (dir) => statGameRoot(dir), sidecarNoFollowFlag,
+  });
   // #192 O4-rest 6: test seam for the coach CLI child path (§5 "새 loop·구 CLI") — defaults
   // to the real tools/coach-control.js. A test can point this at a shim script that strips
   // E3's protocol flags (`--spawn-evidence`/`--accept-evidence`) before delegating to the
@@ -923,6 +802,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let serverChild = null;
   let serverPid = null;
   let serverIdentity = null;
+  // #215: {pid, startTime, port, sessionToken} of the lock whose binding this instance verified.
+  let serverBindingVerified = null;
   let serverAdopted = false;
   let serverStartupIdentityMissing = false;
   let logFd = null;
@@ -940,7 +821,62 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let control = null;
   let recoveringControl = false;
   let pauseRequested = !!opts.startPaused;
+  // R1: closed from the moment a pause is requested (before the control write)
+  // until play resumes or finalization takes over. While closed no new training
+  // pipeline, solve, evaluator or explainer starts; each hand that wanted one is
+  // remembered here and registered again when the gate reopens.
+  // A paused recovery (startPaused) starts closed too: reconcile on resume must
+  // queue, not run, the work it finds while control already says pausing.
+  let trainingAdmissionClosed = !!opts.startPaused;
+  const admissionDeferredHands = new Set();
+  // Hands whose pipeline was still running when their re-registration came due.
+  const relaunchAfter = new Set();
+  // The running pipeline task per hand, so "after the last hand" can join one
+  // that is already going instead of treating it as absent.
+  const trainingTaskByHand = new Map();
+  // Hand of each running solve (by decisionId), recorded when the gate closes.
+  const solveHandOf = new Map();
+  // While a finished game's last hand is being explained, other hands may
+  // still evaluate or solve but must not take the explain lock ahead of it.
+  let finalizationPriorityHand = null;
+  // The hand whose priority already ran its course in this process (so a
+  // later finalize() reconcile does not set it again).
+  let finalizationPriorityDone = null;
+  const trainingMayRun = (handNo) => !resultWaitPassed()
+    && (!trainingAdmissionClosed || handNo === finalizationPriorityHand);
+  const trainingMayExplain = (handNo) => trainingMayRun(handNo)
+    && (finalizationPriorityHand === null || handNo === finalizationPriorityHand);
   let waitController = null;
+  let resultHoldState = null;
+  let resultHoldController = null;
+  let policyPaceController = null;
+  let lastPlayPublishAt = null;
+  const paceSleep = async (ms, kind) => {
+    if (ms <= 0 || stopRequested || pauseRequested) return;
+    const controller = new AbortController();
+    if (kind === 'result') resultHoldController = controller;
+    else policyPaceController = controller;
+    try {
+      if (opts.paceSleep) await opts.paceSleep(ms, { signal: controller.signal, kind });
+      else await new Promise(resolve => {
+        const finish = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolve(); };
+        const timer = setTimeout(finish, ms);
+        controller.signal.addEventListener('abort', finish, { once: true });
+        if (controller.signal.aborted) finish();
+      });
+    } finally {
+      if (resultHoldController === controller) resultHoldController = null;
+      if (policyPaceController === controller) policyPaceController = null;
+    }
+  };
+  const skipHandResult = handNo => {
+    if (!resultHoldState || resultHoldState.handNo !== handNo || stopRequested
+      || (readJsonOptional(playersPath, 'PLAYERS') ?? []).filter(isHumanSeat).length !== 1) return { skipped: false };
+    resultHoldState.skipped = true;
+    resultHoldController?.abort();
+    return { skipped: true };
+  };
+
   let parkWake = null;
   let pauseCompletion = null;
   let resolvePause = null;
@@ -952,9 +888,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return promise;
   };
   let stopPromise = null;
+  let stopAttemptSequence = 0;
   let pendingFinalStatePatch = null;
   let atomicTransition = null;
   let resolverPromise = null;
+  // Host lobby progress only (boot screen, coach chip); kept in memory, never
+  // written to loop-state.
+  let bootState = null;
+  let bootProbe = null;
+  let upperResolved = false;
+  const markBootStage = (stage) => {
+    const at = new Date().toISOString();
+    bootState = { stage, startedAt: bootState?.startedAt ?? at, stageAt: at };
+  };
   let studyPromise = null;
   let finalizationCutoff = false;
   let publishDeadlineNs = null;
@@ -1013,13 +959,31 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return finalizationDeadlineNs;
   };
 
+  // #213: observation-only test seam, called once each time a result-wait cutoff is
+  // installed, so a test can place a monotonic clock jump relative to it. The return value
+  // is ignored, and neither a throw nor a rejected promise from it reaches finalization.
+  const notifyFinalizationDeadline = (deadlineNs, resultWaitCutoffNs) => {
+    if (typeof opts.onFinalizationDeadline !== 'function') return;
+    try {
+      const observed = opts.onFinalizationDeadline({ deadlineNs, resultWaitCutoffNs });
+      if (observed && typeof observed.then === 'function') observed.then(null, () => {});
+    } catch {
+      // Observation only.
+    }
+  };
+
   const ensureFinalizationResultWaitCutoff = () => {
     const deadlineNs = ensureFinalizationDeadline();
     if (finalizeResultWaitCutoffNs === null) {
       finalizeResultWaitCutoffNs = deadlineNs - BigInt(finalizeCutoffLeadMs) * 1_000_000n;
+      notifyFinalizationDeadline(deadlineNs, finalizeResultWaitCutoffNs);
     }
     return { deadlineNs, resultWaitCutoffNs: finalizeResultWaitCutoffNs };
   };
+  // Past the result-wait cutoff time nothing new should start: the finalization
+  // sweep may already have listed the children it will end. Every training
+  // admission path checks it — the cutoff flag itself is set only later.
+  const resultWaitPassed = () => finalizeResultWaitCutoffNs !== null && monotonicNs() >= finalizeResultWaitCutoffNs;
 
   const assertFinalizationDeadline = () => {
     if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
@@ -1259,7 +1223,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete next[key];
     }
+    const quarantinedJevDiagnostics = boundJevDiagnostics(next);
     writeJsonAtomic(loopStatePath, next);
+    if (quarantinedJevDiagnostics) log('jev-diagnostics-quarantined', {});
     return next;
   };
 
@@ -1476,7 +1442,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         const response = await fetch(
           `http://127.0.0.1:${port}/api/snapshot?token=${encodeURIComponent(token)}`,
-          { signal: controller.signal },
+          { signal: controller.signal, headers: { 'x-loop-probe': '1' } },
         );
         let body = null;
         try { body = await response.json(); } catch { /* validated by caller */ }
@@ -1547,7 +1513,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const matchesStoreRelay = async ({ port, sessionToken }, snapshot, study, { stopAware }) => {
-    if (!study) return true;
+    if (!study && !managed) return true;
     const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
       headers: { 'x-session-token': sessionToken },
       signal: AbortSignal.timeout(assertAndBoundFinalizationMs(localHttpProbeMs)),
@@ -1556,10 +1522,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let health = null;
     try { health = await response.json(); } catch { /* incompatible owned relay */ }
     if (stopAware) assertNotStopping();
-    return response.ok && health?.ok === true && health.protocolVersion === 2
-      && health.capabilities?.actionReceipts === true && health.capabilities?.studyLink === true
-      && (opts.hints !== 'on' || health.capabilities?.preActionHints === 1)
-      && snapshot.studyUrl === study.studyUrl;
+    return relayHealthCompatible(health, {
+      responseOk: response.ok, managed, study, snapshotStudyUrl: snapshot.studyUrl, hints: opts.hints,
+    });
   };
 
   const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
@@ -1799,8 +1764,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (startTimeOf(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
           }
-          const compatible = study ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
-          if (study) {
+          const compatible = study || managed ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
+          if (study || managed) {
             assertPinnedServerLock(pin);
             if (startTimeOf(existing.serverPid) !== startTime) {
               throw codedError('SERVER_IDENTITY_CHANGED', 'store relay identity가 capability 검증 중 바뀌었습니다.');
@@ -1809,6 +1774,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           serverChild = serverChild?.pid === existing.serverPid ? serverChild : null;
           serverPid = existing.serverPid;
           serverIdentity = { pid: existing.serverPid, startTime };
+          serverBindingVerified = { pid: existing.serverPid, startTime, port: confirmed.port, sessionToken: confirmed.sessionToken };
           serverAdopted = serverChild === null;
           serverStartupIdentityMissing = false;
           if (compatible) return existing.port;
@@ -1846,7 +1812,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       serverPid = child.pid ?? null;
       serverAdopted = false;
       serverStartupIdentityMissing = false;
-      serverIdentity = null;
+      serverIdentity = null; serverBindingVerified = null;
       let spawnError = null;
       child.once('error', (error) => { spawnError = error; });
       const spawnedStartTime = serverPid === null ? null : startTimeOf(serverPid);
@@ -1914,6 +1880,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             || merged.port !== confirmed.port || merged.sessionToken !== sessionToken) {
             throw codedError('SERVER_IDENTITY_CHANGED', 'serverStartTime 병합이 서버 lock을 바꾸었습니다.');
           }
+          serverBindingVerified = { pid: child.pid, startTime: spawnedStartTime, port: merged.port, sessionToken };
           return merged.port;
         }
         await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
@@ -1949,24 +1916,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (stopRequested) startAdapterDisposal(adapter);
   };
 
-  const createCanaryAndResolve = async (need) => {
-    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+  const invokeResolverWithCanary = async (need) => {
     const canaryAbsPath = path.join(root, `.runtime-canary-${randomUUID()}`);
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(canaryAbsPath, `SIDECAR_CANARY_${randomBytes(24).toString('hex')}`);
     canaries.add(canaryAbsPath);
-    const invocation = Promise.resolve().then(() => resolver({
-      need,
-      canaryAbsPath,
-      registerAdapter,
-    }));
-    resolverPromise = invocation;
     try {
-      const resolved = await invocation;
-      assertNotStopping();
-      return resolved;
+      return await Promise.resolve().then(() => resolver({
+        need,
+        canaryAbsPath,
+        registerAdapter,
+        lockRoot,
+        onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
+          bootProbe = { tier, runtime, round, ok, elapsedMs };
+          if (ok !== null) log('runtime-probe', bootProbe);
+        },
+      }));
     } finally {
-      if (resolverPromise === invocation) resolverPromise = null;
       try { fs.unlinkSync(canaryAbsPath); } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }
@@ -1974,9 +1940,75 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  const createCanaryAndResolve = async (need) => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const invocation = invokeResolverWithCanary(need);
+    resolverPromise = invocation;
+    try {
+      const resolved = await invocation;
+      assertNotStopping();
+      return resolved;
+    } finally {
+      if (resolverPromise === invocation) resolverPromise = null;
+    }
+  };
+
+  // R2 (design §11.2): a new policy/JEV game opens the table while the upper-model
+  // probe runs. The probe, its merge into loop-state and adapter registration are
+  // one owned promise in `resolverPromise`, so stop, pause and finalization wait
+  // for all of it. Coach and explanation work wait for it before reading
+  // `upperAdapter`; a result that lands after stop is dropped (its adapter still
+  // closes through registerAdapter). Resume keeps the blocking probe: persisted
+  // coach reclaim scans runtime processes and resumed descriptors are already
+  // reserved, so neither may overlap a probe.
+  const startUpperResolveInBackground = () => {
+    if (resolverPromise) throw codedError('RESOLVER_OVERLAP', 'runtime resolver 호출이 중첩됐습니다.');
+    const gameEpoch = readLoopState()?.gameEpoch ?? null;
+    const sameLiveGame = () => {
+      if (stopRequested) return false;
+      try { return (readLoopState()?.gameEpoch ?? null) === gameEpoch; } catch { return false; }
+    };
+    const owned = (async () => {
+      let resolved;
+      try {
+        resolved = await invokeResolverWithCanary('upper-only');
+      } catch (error) {
+        if (!sameLiveGame()) return;
+        log('upper-resolve-error', { code: error.code ?? 'ERROR' });
+        resolved = { player: null, upper: null, notices: [UPPER_UNAVAILABLE_NOTICE] };
+      }
+      if (!sameLiveGame()) {
+        registerAdapter(resolved?.upper ?? null);
+        return;
+      }
+      upperAdapter = resolved?.upper ?? null;
+      upperResolved = true;
+      registerAdapter(upperAdapter);
+      const notices = Array.isArray(readLoopState()?.notices) ? [...readLoopState().notices] : [];
+      for (const notice of Array.isArray(resolved?.notices) ? resolved.notices : []) {
+        if (!notices.includes(notice)) notices.push(notice);
+      }
+      writeLoopState({ notices, upperRuntime: upperAdapter?.kind ?? null });
+      log('upper-resolved', { upperRuntime: upperAdapter?.kind ?? null });
+    })();
+    const tracked = owned.finally(() => {
+      if (resolverPromise === tracked) resolverPromise = null;
+    });
+    tracked.catch((error) => log('upper-resolve-merge-error', { code: error?.code ?? 'ERROR' }));
+    resolverPromise = tracked;
+  };
+
+  const settleUpperResolution = async () => {
+    const pending = resolverPromise;
+    if (pending) {
+      try { await pending; } catch { /* the owned promise logs and falls back */ }
+    }
+  };
+
   const selectAdapters = (resolved) => {
     playerAdapter = resolved.player ?? null;
     upperAdapter = resolved.upper ?? null;
+    upperResolved = true;
     registerAdapter(playerAdapter);
     registerAdapter(upperAdapter);
   };
@@ -1996,6 +2028,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     deadlineAt = null,
     purpose = 'repair-warmup',
     onWarmupClosed = null,
+    signal,
   } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
     const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
@@ -2005,7 +2038,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let result, code='RESPONSE_RECEIVED';
     const started=monotonicNow();
     try { result = await playerAdapter.warmup({
-      playerId: persona.playerId, prompt, ...(timeoutMs === null ? {} : { timeoutMs }),
+      playerId: persona.playerId, prompt, signal, ...(timeoutMs === null ? {} : { timeoutMs }),
     }); } catch(error) {code=error.code??'CLI_FAILED';throw error;}
     finally {
       if(deadlineAt!==null) log('player-call',{purpose,
@@ -2025,6 +2058,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       runtime: playerAdapter.kind,
       sessionId: result.sessionId,
       createdAt,
+      runtimeHomeId: result.runtimeHomeId ?? playerAdapter.runtimeHomeId ?? null,
     };
     if (typeof onWarmupClosed === 'function') await onWarmupClosed(session.sessionId);
     return session;
@@ -2034,7 +2068,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!playerAdapter) throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
     const players = readJsonOptional(playersPath, 'PLAYERS');
     if (!Array.isArray(players)) throw codedError('BAD_PLAYERS', 'players.json이 배열이 아닙니다.');
-    const aiPlayers = players.filter((player) => player.playerId !== 'user');
+    const aiPlayers = aiRowsOf(players);
     const createdAt = readLoopState()?.startedAt ?? isoNow(now);
     let existing = {};
     if (reuseExisting) {
@@ -2059,12 +2093,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         && isArgvSafeSessionId(prior.sessionId)
         && typeof prior.createdAt === 'string'
         && prior.createdAt !== ''
+        && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null)
       ) {
         restoredPlayerSessions.add(persona.playerId);
         return [persona.playerId, {
           runtime: prior.runtime,
           sessionId: prior.sessionId,
           createdAt: prior.createdAt,
+          runtimeHomeId: prior.runtimeHomeId ?? null,
         }];
       }
       restoredPlayerSessions.delete(persona.playerId);
@@ -2085,16 +2121,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     deadlineAt,
     reason,
     onWarmupClosed = null,
+    signal,
   }) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const persona = Array.isArray(players)
-      ? players.find((player) => player?.playerId === playerId && playerId !== 'user')
+      ? players.find((player) => player?.playerId === playerId && !isHumanSeat(player))
       : null;
     if (!persona) throw codedError('BAD_PLAYERS', `복구할 플레이어 ${playerId} 페르소나가 없습니다.`);
     const repaired = await createPlayerSession(persona, isoNow(now), {
       deadlineAt,
       purpose: reason === 'user_fresh_session' ? 'fresh-warmup' : 'repair-warmup',
-      onWarmupClosed,
+      onWarmupClosed,signal,
     });
     if (stopRequested) throw codedError('STOPPING', '세션 기록 전에 loop 정지가 요청되었습니다.');
     const nextSessions = { ...(playerSessions ?? {}), [playerId]: repaired };
@@ -2111,17 +2148,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return repaired;
   };
 
-  const repairRestoredPlayerSession = async (playerId, { deadlineAt }) => {
+  const repairRestoredPlayerSession = async (playerId, { deadlineAt, signal }) => {
     if (!restoredPlayerSessions.has(playerId)) return null;
     // Consume-before-await prevents a failed repair from recursively recreating the same
     // persisted child. A later process resume may still retry the old on-disk entry.
     restoredPlayerSessions.delete(playerId);
-    return recreatePlayerSession(playerId, { deadlineAt, reason: 'restored_session_repair' });
+    return recreatePlayerSession(playerId, { deadlineAt, signal, reason: 'restored_session_repair' });
   };
 
   const clearDirectServerOwnership = () => {
     serverChild = null;
-    serverIdentity = null;
+    serverIdentity = null; serverBindingVerified = null;
     serverPid = null;
     serverAdopted = false;
     serverStartupIdentityMissing = false;
@@ -2249,7 +2286,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('SERVER_STOP_UNCONFIRMED', '재사용 서버 종료를 확인하지 못했습니다.');
       }
     }
-    serverIdentity = null;
+    serverIdentity = null; serverBindingVerified = null;
     serverPid = null;
     serverAdopted = false;
   };
@@ -2356,6 +2393,150 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return cleaned;
   };
 
+  let activeDecision=null;
+  const interruptDecision=async({gameEpoch,decisionId,generation}={})=>{
+    const active=activeDecision,pending=readLoopState()?.pendingDecision;
+    const same=value=>value && value.gameEpoch===gameEpoch && value.decisionId===decisionId && value.generation===generation;
+    if(!active || !same(active.identity) || !same(pending) || pending.status!=='running' || pending.softWait!==true || pending.proposedAction)return {interrupted:false};
+    active.controller.abort();
+    await active.settled;
+    const outcome=readLoopState()?.pendingDecision;
+    return {interrupted:!!(same(outcome) && outcome.status==='recovery_required' && outcome.code==='INTERRUPTED' && outcome.closeConfirmed===true)};
+  };
+  let jevRuntime = null;
+  let jevResyncIdentity = null;
+  const decideWithJev = async (next, stateVersion) => {
+    const previous = readLoopState()?.pendingDecision;
+    if (previous && (!validJevPending(previous) || previous.proposedAction || previous.status !== 'retry_authorized')) return {kind:'recovery_required'};
+    if (previous && (previous.decisionId !== next.decisionId || previous.stateVersion !== stateVersion
+      || previous.playerId !== next.toAct || previous.gameEpoch !== readLoopState().gameEpoch)) throw jevError('STALE_PLAYER_DECISION');
+    const budget = currentWatchdog(), startedAt = monotonicNow();
+    let record = {schemaVersion:3,runtime:'jev',executionKind:'http',gameEpoch:readLoopState().gameEpoch,
+      decisionId:next.decisionId,stateVersion,playerId:next.toAct,generation:(previous?.generation ?? 0)+1,
+      status:'running',budget,startedAt:isoNow(now)};
+    // Durability precedes even the fallible engine projection.
+    writeLoopState({pendingDecision:record,playerBudget:budget});
+    ownedPlayerAttempt = record;
+    // Sibling keys ride the same write; memory adopts the record only once it is durable.
+    const commit = (patch, siblings = {}) => {
+      if (!sameJevIdentity(readLoopState()?.pendingDecision, record) || !ownedLockStillVerified()) throw jevError('STALE_PLAYER_DECISION');
+      const next = {...record,...patch};
+      writeLoopState({pendingDecision:next,...siblings});
+      record = next;
+    };
+    let selectionUnit;
+    let settle;
+    const active = {identity:record,controller:new AbortController(),settled:new Promise(resolve => {settle=resolve;})};
+    activeDecision = active;
+    // hardTimedOut records that the hard timer ended the request: a timer can fire a
+    // fraction of a millisecond before the monotonic clock reads hardMs elapsed.
+    let httpStarted = false, softTimer, hardTimer, modelMs = 0, hardTimedOut = false;
+    const signal = active.controller.signal;
+    const lateSettlement = async () => {
+      const current = readLoopState()?.pendingDecision;
+      if (!ownedLockStillVerified() || !sameJevIdentity(current, record) || current.status !== 'unsafe'
+        || current.code !== 'JEV_REQUEST_CLOSE_UNCONFIRMED' || current.proposedAction) return;
+      // HTTP had no engine capability. Re-read the actual turn before allowing a retry.
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const hand = engine?.hand;
+      const decisionId = hand ? `d-${engine.handNo}-${hand.street}-${hand.actionIndex}` : null;
+      if (engine?.stateVersion !== record.stateVersion || decisionId !== record.decisionId
+        || engine.seats?.[hand?.toActIdx]?.playerId !== record.playerId
+        || gameEpochOf(engine.sessionToken) !== record.gameEpoch) return;
+      commit({status:'recovery_required',code:'INTERRUPTED',closeConfirmed:true,retryable:true,softWait:false});
+      if (stopRequested) {
+        // Settlement may precede the failed stop's persisted error. Wait for that
+        // whole attempt before retrying only its closure failure.
+        const stopAttempt = stopAttemptSequence;
+        await stopPromise?.catch(() => {});
+        const cleanup = readLoopState()?.cleanupError;
+        if (!stopPromise && stopAttemptSequence === stopAttempt && ownedLockStillVerified()
+          && cleanup?.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED'
+          && cleanup.details?.stopAttempt === stopAttempt && cleanup.details?.jevClosureOnly === true) await requestStop();
+      }
+    };
+    try {
+      // Drawn before any response exists, so the provider cannot steer the class sample. The
+      // private sessionToken (clients only see its hash, gameEpoch) keeps players from predicting it.
+      selectionUnit = deriveUnit('jev-selection-v1', readLoopState().sessionToken, record.decisionId, String(record.generation));
+      softTimer = setTimeout(() => {
+        try { if (record.status === 'running' && !record.proposedAction) commit({softWait:true}); }
+        catch { active.controller.abort(); }
+      }, budget.softMs);
+      hardTimer = setTimeout(() => { hardTimedOut = true; active.controller.abort(); }, budget.hardMs);
+      const peek = await runCli(['decision-peek','--for',next.toAct,'--expect-version',String(stateVersion)]);
+      const candidates = buildJevCandidates(peek.snapshot, peek.legal);
+      const player = (readJsonOptional(playersPath, 'PLAYERS') ?? []).find(p => p.playerId === next.toAct);
+      const state = projectJevState(peek.snapshot, peek.legal, player?.archetype);
+      if (stopRequested || signal.aborted) throw Object.assign(jevError('INTERRUPTED',true),{closeConfirmed:true});
+      let result;
+      if (candidates.length === 1) {
+        const candidate = candidates[0];
+        result = {action:{action:candidate.action,...(candidate.amount === undefined ? {} : {amount:candidate.amount})}};
+      } else {
+        if (!jevRuntime || jevRuntime.phase === 'disposed') jevRuntime = (opts.createJevRuntime ?? createJevRuntime)({onLateSettlement:lateSettlement});
+        // A fresh instance binds each generation's closure observer.
+        else if (jevRuntime.phase === 'idle') { await jevRuntime.dispose(); jevRuntime = (opts.createJevRuntime ?? createJevRuntime)({onLateSettlement:lateSettlement}); }
+        const remaining = Math.floor(budget.hardMs - (monotonicNow() - startedAt));
+        if (remaining <= 0) throw jevError('JEV_TIMEOUT',true);
+        const modelStarted = monotonicNow();
+        httpStarted = true;
+        try { result = await jevRuntime.decide({state,candidates,signal,timeoutMs:remaining}); }
+        finally { modelMs = Math.max(0,monotonicNow()-modelStarted); }
+      }
+      if (stopRequested || signal.aborted) throw Object.assign(jevError('INTERRUPTED',true),{closeConfirmed:true});
+      if (!sameJevIdentity(readLoopState()?.pendingDecision,record) || readLoopState().gameEpoch !== record.gameEpoch) throw jevError('STALE_PLAYER_DECISION');
+      let chosen = result.action, siblings = {};
+      if (result.diagnostics) {
+        // validateJevConfig admits only a stored descriptor equal to JEV_CONFIG (older ones are
+        // rolled forward first), so this is the store's own selectionVersion.
+        const rule = JEV_CONFIG.selectionVersion;
+        const selected = (opts.selectJevAction ?? selectJevAction)({probabilities:result.diagnostics.probabilities,candidates,
+          unit:selectionUnit,apiChoice:result.diagnostics.apiChoice,rule,
+          ...(rule === 'class-sample-v2' ? {guard:jevGuardContext(peek.snapshot,peek.legal,candidates)} : {})});
+        chosen = selected.action;
+        const stored = readLoopState().jevDiagnostics ?? {schemaVersion:1,entries:[],dropped:0};
+        const entries = [...stored.entries,{...result.diagnostics,decisionId:record.decisionId,generation:record.generation,actor:state.actor,
+          questionVersion:JEV_CONFIG.questionVersion,candidateVersion:JEV_CONFIG.candidateVersion,projectionVersion:JEV_CONFIG.projectionVersion,
+          selectionVersion:JEV_CONFIG.selectionVersion,selection:selected.selection}];
+        const dropped = Math.max(0,entries.length-5000);
+        siblings = {jevDiagnostics:{schemaVersion:1,entries:entries.slice(-5000),dropped:stored.dropped+dropped,
+          ...(stored.historyIncomplete ? {historyIncomplete:true} : {})}};
+      }
+      // One write: the diagnostics entry exists exactly when its proposal is durable.
+      commit({closeConfirmed:true,proposedAction:chosen},siblings);
+      clearTimeout(softTimer); clearTimeout(hardTimer);
+      const atomicUnit = beginAtomicTransition(), stepStarted = monotonicNow();
+      try {
+        const args = ['step',next.toAct,chosen.action];
+        if (chosen.action === 'raise') args.push(String(chosen.amount));
+        const envelope = await runCli([...args,'--expect-version',String(stateVersion)]);
+        writeLoopState({pendingDecision:undefined});
+        return {envelope,atomicUnit,startedAt,modelMs,parseMs:0,stepMs:Math.max(0,monotonicNow()-stepStarted),
+          outcome:candidates.length === 1 ? 'jev_single_legal' : 'jev_accepted'};
+      } catch (error) { atomicUnit.finish(); throw error; }
+    } catch (error) {
+      if (error.code === 'VERSION_MISMATCH' && !httpStarted && !record.proposedAction && sameJevIdentity(readLoopState()?.pendingDecision,record)) {
+        jevResyncIdentity = record;
+        throw error;
+      }
+      if (!sameJevIdentity(readLoopState()?.pendingDecision,record)) throw error;
+      const unconfirmed = error.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED';
+      const unsafe = unconfirmed || !!record.proposedAction;
+      const cancelled = !unsafe && (stopRequested || signal.aborted);
+      const code = unsafe ? (unconfirmed ? 'JEV_REQUEST_CLOSE_UNCONFIRMED' : 'JEV_ENGINE_APPLY_UNCONFIRMED')
+        : (hardTimedOut || monotonicNow()-startedAt >= budget.hardMs ? 'JEV_TIMEOUT' : cancelled ? 'INTERRUPTED' : error.code?.startsWith('JEV_') || error.code === 'INTERRUPTED' ? error.code : 'JEV_INPUT_INVALID');
+      commit({status:unsafe ? 'unsafe' : 'recovery_required',code,closeConfirmed:!!record.proposedAction || !unsafe,retryable:!unsafe && (cancelled || error.retryable === true),softWait:false});
+      appendMetric({runtime:'jev',playerId:record.playerId,decisionId:record.decisionId,outcome:code,
+        elapsedMs:Math.max(0,monotonicNow()-startedAt),modelMs,censored:code === 'JEV_TIMEOUT' || unconfirmed});
+      log('jev-decision-failed',{code,decisionId:record.decisionId,generation:record.generation});
+      return {kind:'recovery_required'};
+    } finally {
+      clearTimeout(softTimer); clearTimeout(hardTimer);
+      if (activeDecision === active) activeDecision = null;
+      settle();
+    }
+  };
   const decideWithWatchdog = async (next, stateVersion) => {
     if (!playerAdapter || typeof playerAdapter.decide !== 'function') {
       throw codedError('NO_PLAYER_RUNTIME', 'AI 결정을 수행할 플레이어 어댑터가 없습니다.');
@@ -2407,6 +2588,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return record;
     };
     beginPending();
+    let settleAttempt;
+    const active={identity:{gameEpoch:record.gameEpoch,decisionId:record.decisionId,generation:record.generation},controller:new AbortController(),settled:new Promise(resolve=>{settleAttempt=resolve;})};
+    activeDecision=active;
+    const signal=active.controller.signal;
+    try {
     let callNo = 1;
     let lastRejection = inherited;
     let candidate = null;
@@ -2415,13 +2601,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let softDeadlineAt;
     const floor = Math.min(minRepairFloorMs, Math.ceil(watchdog.hardMs / 8));
     const correctionSkip = () => {
+      if (signal.aborted) return 'interrupted';
       if (stopRequested) return 'stop';
       if (pauseRequested) return 'pause';
       const remaining = deadlineAt - monotonicNow();
       return remaining <= 0 || remaining < floor ? 'budget' : null;
     };
-    const logSkipped = reason => log('player-correction-skipped', {decisionId:next.decisionId,
-      generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+    const logSkipped = reason => {
+      if (reason === 'interrupted') failureCode = 'INTERRUPTED';
+      log('player-correction-skipped', {decisionId:next.decisionId,
+        generation:record.generation, reason, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
+    };
     const rejectionContext = {generation:record.generation, decisionId:record.decisionId, gameEpoch:record.gameEpoch};
     const rejectDecision = (rejection) => {
       lastRejection = projectRejectionForSink({v:1, ...rejectionContext, callNo, code:rejection.code,
@@ -2490,7 +2680,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           callNo, detail:lastRejection.detail, remainingMs:Math.ceil(deadlineAt - monotonicNow())});
         message = correctionMessage(next.message, lastRejection, rejectionContext);
         timeoutMs = Math.ceil(deadlineAt - monotonicNow());
-        const finalSkip = stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
+        const finalSkip = signal.aborted ? 'interrupted' : stopRequested ? 'stop' : pauseRequested ? 'pause' : timeoutMs <= 0 || timeoutMs < floor ? 'budget_after_commit' : null;
         if (finalSkip) {
           callNo -= 1; corrections = 0;
           commitPending({diagnostics:{...record.diagnostics, callNo, corrections}});
@@ -2502,16 +2692,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         softDeadlineAt = monotonicNow() + watchdog.softMs;
       }
       const softTimer = setTimeout(() => {
-        if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
-        if (record.proposedAction || record.softWait) return;
-        try { commitPending({softWait:true}); }
-        catch (error) {
-          // The awaited decision path reports stale identity. A timer must not
-          // turn that recoverable rejection into an uncaught process exception.
-          if (error.code === 'STALE_PLAYER_DECISION') return;
-          throw error;
+        try {
+          if (stopRequested || readLoopState()?.pendingDecision?.generation !== record.generation) return;
+          if (record.proposedAction || record.softWait) return;
+          commitPending({softWait:true});
+          log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
+        } catch (error) {
+          if (error?.code === 'STALE_PLAYER_DECISION') return;
+          // Timer diagnostics cannot terminate the awaited decision path. Even
+          // the logger may fail; the normal decision path retains authority.
+          try { log('player-soft-wait-error', { decisionId: next.decisionId, generation: record.generation, code: error?.code ?? 'ERROR' }); } catch {}
         }
-        log('player-soft-wait', { decisionId: next.decisionId, budget: watchdog });
       }, Math.max(0, softDeadlineAt - monotonicNow()));
       let round;
       try {
@@ -2520,7 +2711,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (stopRequested) return { kind: 'recovery_required' };
         try {
           session = await recreatePlayerSession(next.toAct, {
-            deadlineAt,
+            deadlineAt,signal,
             reason: 'user_fresh_session',
             onWarmupClosed: async (freshSessionId) => commitPending({
               closeConfirmed: true,
@@ -2558,7 +2749,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             round = {ok:false, error:codedError('TIMEOUT', '새 세션 기록 뒤 결정 예산이 만료됐습니다.'), modelMs:0};
           } else {
             round = await decideOnce({
-              playerId: next.toAct,
+              playerId: next.toAct,signal,
               sessionId: session.sessionId,
               message,
             }, timeoutMs, { callNo });
@@ -2566,7 +2757,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       } else {
         round = await decideOnce({
-          playerId: next.toAct,
+          playerId: next.toAct,signal,
           sessionId: session.sessionId,
           message,
         }, timeoutMs, { callNo });
@@ -2594,7 +2785,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (remainingBeforeRepair < minRepairMs) continue;
         let repaired = null;
         try {
-          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt });
+          repaired = await repairRestoredPlayerSession(next.toAct, { deadlineAt,signal });
         } catch (error) {
           if (error.code === 'STOPPING') return { kind: 'recovery_required' };
           if (isFatalRepairFailure(error)) throw error;
@@ -2619,7 +2810,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             const remainingForCall = Math.max(0, Math.ceil(deadlineAt - monotonicNow()));
             if (remainingForCall > 0) {
               round = await decideOnce({
-                playerId: next.toAct,
+                playerId: next.toAct,signal,
                 sessionId: session.sessionId,
                 message: attemptMessage,
               }, remainingForCall, { callNo });
@@ -2683,12 +2874,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // termination/identity failures above are the fail-closed exception. This
     // also applies to repair warmup calls through the same runtime.runOnce.
     commitPending({ status: 'recovery_required', code: failureCode,
+      ...(failureCode === 'INTERRUPTED' ? {softWait:false} : {}),
       category: playerFailureCategory(failureCode), elapsedMs: Math.max(0, monotonicNow() - startedAt),
       closeConfirmed: true, sessionRepaired, diagnostics:{...record.diagnostics,
         ...(lastRejection && ['INVALID_DECISION','ILLEGAL_ACTION'].includes(failureCode) ? {detail:lastRejection.detail} : {})} });
     log('player-recovery-required', { decisionId: next.decisionId, generation: record.generation, code: failureCode,
       detail:record.diagnostics.detail, corrections:record.diagnostics.corrections, callNo });
     return { kind: 'recovery_required' };
+    } finally {if(activeDecision===active)activeDecision=null;settleAttempt();}
   };
 
   const recoverServerForPublish = async () => {
@@ -2733,7 +2926,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           d9Checkpoint('after-stop-server');
         } else if (serverChild?.pid === expected.serverPid) {
           serverChild = null;
-          serverIdentity = null;
+          serverIdentity = null; serverBindingVerified = null;
           serverPid = null;
           serverAdopted = false;
           serverStartupIdentityMissing = false;
@@ -2896,6 +3089,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         toRunnerHandle(trainingHooks.explain(evaluation)),
       );
     }
+    if (resolverPromise) {
+      // R2: hold the explanation until the background probe settles. Terminating
+      // while waiting cancels the call before any child starts.
+      let cancelled = false;
+      let started = null;
+      const waiting = {
+        promise: settleUpperResolution().then(() => {
+          if (cancelled || stopRequested) return null;
+          // A pause (or the finalization priority) that closed while this
+          // waited: start nothing and let the pipeline re-register the hand.
+          if (!trainingMayExplain(evaluation.handNo)) return EXPLAIN_HELD;
+          started = explainForPipeline(evaluation);
+          return started.promise;
+        }),
+        terminate: async () => {
+          cancelled = true;
+          return started ? started.terminate() : { confirmed: true };
+        },
+      };
+      return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, waiting);
+    }
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
       return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
     }
@@ -2924,25 +3138,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const startSolveTask = (task) => {
     if (!trainingOn) return;
+    if (trainingAdmissionClosed && task.handNo !== finalizationPriorityHand) { queueDeferredHand(task.handNo); return; }
     // 권위의 solveTasks는 자식이 실제로 뜬 뒤에야 보인다. 그 사이에 같은
     // 파이프라인이 다시 돌면 같은 결정에 두 자식이 뜨므로 로컬 in-flight 집합이
     // 먼저 막는다.
     if (solveInFlight.has(task.decisionId)) return;
     solveInFlight.add(task.decisionId);
+    solveHandOf.set(task.decisionId, task.handNo);
     const loop = readLoopState();
+    let held = false;
+    let accepted = false;
     trackTrainingTask(task.handNo, () => runSolveTask({
       ...task,
       gameEpoch: task.gameEpoch ?? loop?.gameEpoch,
       owner: task.owner ?? loop?.ownerSessionId,
       storeDir,
       solve: solveForPipeline,
-      shouldStop: () => stopRequested || finalizationCutoff,
+      // A solve still queued on the solve lock when a pause closes the gate
+      // leaves its pending entry as is (the SOLVE_CUTOFF path) and re-registers.
+      shouldStop: () => {
+        if (stopRequested || finalizationCutoff || resultWaitPassed()) return true;
+        const closed = trainingAdmissionClosed && task.handNo !== finalizationPriorityHand;
+        if (closed) held = true;
+        return closed;
+      },
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
       },
       consume: consumeTrainingNow,
-    }).finally(() => solveInFlight.delete(task.decisionId)));
+    }).then((result) => { accepted = result?.ok === true; return result; }).finally(() => {
+      solveInFlight.delete(task.decisionId);
+      solveHandOf.delete(task.decisionId);
+      // A solve that was held re-registers; one that accepted its evaluation
+      // runs the hand's pipeline once more so the new item gets explained.
+      if (held || accepted) readmitTrainingHand(task.handNo);
+      else settleDeferredRecord(task.handNo);
+    }));
   };
 
   const runTrainingPipeline = async (handNo) => {
@@ -2957,6 +3189,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       explain: explainForPipeline,
       solverAdapterId,
       startSolve: startSolveTask,
+      admit: () => trainingMayRun(handNo),
+      admitExplain: () => trainingMayExplain(handNo),
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -2968,15 +3202,106 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const launchTrainingPipeline = (handNo) => {
-    if (!trainingOn) return;
-    if (trainingInFlightHands.has(handNo)) return;
+    if (!trainingOn) return null;
+    if (!trainingMayRun(handNo)) { queueDeferredHand(handNo); return null; }
+    if (trainingInFlightHands.has(handNo)) return null;
     trainingInFlightHands.add(handNo);
-    trackTrainingTask(handNo, async () => {
+    let result = null;
+    const task = trackTrainingTask(handNo, async () => {
       try {
-        return await runTrainingPipeline(handNo);
+        result = await runTrainingPipeline(handNo);
+        return result;
       } finally {
         trainingInFlightHands.delete(handNo);
+        trainingTaskByHand.delete(handNo);
+        // Same turn as the in-flight release, so a reopen in between cannot lose it.
+        if (result?.deferred === true) readmitTrainingHand(handNo);
+        else if (result?.ok === true) settleDeferredRecord(handNo);
+        if (relaunchAfter.delete(handNo)) readmitTrainingHand(handNo);
       }
+    });
+    trainingTaskByHand.set(handNo, task);
+    return task;
+  };
+  const joinOrLaunchTraining = (handNo) => trainingTaskByHand.get(handNo) ?? launchTrainingPipeline(handNo);
+
+  // A hand whose work a pause held back: queue it while the gate is closed, or
+  // register it now (after its running pipeline, if one is still going).
+  const readmitTrainingHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested) return;
+    // Past the result-wait time or the finalization cutoff nothing new starts
+    // (the sweep may already list the children it ends); the record and
+    // pending entries stay for the cutoff seal.
+    const priority = finalizationPriorityHand !== null && handNo === finalizationPriorityHand;
+    if ((trainingAdmissionClosed && !priority) || finalizationCutoff || resultWaitPassed()
+      || (finalizationPriorityHand !== null && !priority)) queueDeferredHand(handNo);
+    else if (trainingInFlightHands.has(handNo)) relaunchAfter.add(handNo);
+    else launchTrainingPipeline(handNo);
+  };
+
+  // loop-state `trainingDeferredHands` is the durable copy of the queue: a hand
+  // leaves it only once its pipeline has run through without deferring, so a
+  // restart at any point still registers it (reconcile reads it back). Writes
+  // happen inside work the pause barrier waits for, never after stop.
+  const writeDeferredRecord = (change) => {
+    if (stopRequested) return;
+    const current = new Set((readLoopState()?.trainingDeferredHands ?? []).filter(Number.isInteger));
+    const next = new Set(current);
+    change(next);
+    if (next.size === current.size && [...next].every((handNo) => current.has(handNo))) return;
+    writeLoopState({ trainingDeferredHands: next.size ? [...next].sort((a, b) => a - b) : undefined });
+  };
+  // A hand leaves the record once nothing of it is queued or still running.
+  const settleDeferredRecord = (handNo) => {
+    if (admissionDeferredHands.has(handNo) || trainingInFlightHands.has(handNo)
+      || [...solveHandOf.values()].includes(handNo)) return;
+    writeDeferredRecord((set) => set.delete(handNo));
+  };
+  const queueDeferredHand = (handNo) => {
+    if (!Number.isInteger(handNo) || stopRequested) return;
+    admissionDeferredHands.add(handNo);
+    writeDeferredRecord((set) => set.add(handNo));
+  };
+
+  const drainDeferredHands = () => {
+    if (stopRequested || trainingAdmissionClosed || finalizationCutoff || resultWaitPassed() || finalizationPriorityHand !== null) return 0;
+    const hands = [...admissionDeferredHands];
+    admissionDeferredHands.clear();
+    for (const handNo of hands) readmitTrainingHand(handNo);
+    if (hands.length) log('training-admission-reopened', { hands });
+    return hands.length;
+  };
+  // Closing records what is still running first: a pipeline or solve that is
+  // about to be held back (or a stop/crash before it reports) is found again.
+  const closeTrainingAdmission = () => {
+    trainingAdmissionClosed = true;
+    const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
+    if (running.length) writeDeferredRecord((set) => { for (const handNo of running) set.add(handNo); });
+  };
+  const openTrainingAdmission = () => { trainingAdmissionClosed = false; };
+  const reopenTrainingAdmission = () => { openTrainingAdmission(); return drainDeferredHands(); };
+  // Once the game is over the game-over branch registers held-back hands after
+  // the last hand; anywhere else they go now.
+  const reopenUnlessFinalizing = () => (gameOverPending ? openTrainingAdmission() : reopenTrainingAdmission());
+  // Finalization: the last hand explains first. Its priority ends when its
+  // pipeline is done; then the hands that yielded (held back by a pause or by
+  // the priority) are registered — unless the cutoff has passed, in which case
+  // they are sealed unavailable like any unfinished explanation.
+  const lastHandBusy = (handNo) => trainingInFlightHands.has(handNo) || relaunchAfter.has(handNo)
+    || admissionDeferredHands.has(handNo) || [...solveHandOf.values()].includes(handNo);
+  const endFinalizationPriorityAfter = (handNo, lastTask) => {
+    trackTrainingTask(null, async () => {
+      await lastTask;
+      // The last hand's solves and the re-run that explains their results count
+      // too: hold the priority until nothing of that hand is running.
+      while (lastHandBusy(handNo) && !stopRequested && !finalizationCutoff && !resultWaitPassed()) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (finalizationPriorityHand === handNo) {
+        finalizationPriorityHand = null;
+        finalizationPriorityDone = handNo;
+      }
+      drainDeferredHands();
     });
   };
 
@@ -3093,7 +3418,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return confirmed && tasksSettled && solverConfirmed;
   };
 
-  const reconcileTrainingNow = async () => {
+  const reconcileTrainingNow = async ({ finalizing = false } = {}) => {
     if (!trainingOn) return;
     trainingProducerOpen = true;
     try {
@@ -3126,7 +3451,27 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const lastHandNo = engine?.lastHand?.handNo;
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
-      for (const handNo of pendingHands) launchTrainingPipeline(handNo);
+      if (stopRequested) return;
+      // R1 (b): hands a pause held back (recorded, so a restart still has them;
+      // an explanation that simply failed is not retried here).
+      for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
+        if (Number.isInteger(handNo)) pendingHands.add(handNo);
+      }
+      // At finalization the last hand has priority at the explain lock: the
+      // others start now (evaluation and solves run before the cutoff) but
+      // explain only after it. The last hand's pipeline is joined if the
+      // game-over branch already started it.
+      // In this process the game-over branch usually set (or already finished)
+      // the priority; only a restart into finalization sets it here.
+      const priorityHere = finalizing && Number.isInteger(lastHandNo) && lastHandNo >= 1
+        && finalizationPriorityHand === null && finalizationPriorityDone !== lastHandNo;
+      if (priorityHere) finalizationPriorityHand = lastHandNo;
+      let lastTask = null;
+      for (const handNo of pendingHands) {
+        const task = handNo === lastHandNo ? joinOrLaunchTraining(handNo) : launchTrainingPipeline(handNo);
+        if (handNo === lastHandNo) lastTask = task;
+      }
+      if (priorityHere) endFinalizationPriorityAfter(lastHandNo, lastTask);
       log('training-reconcile-registered', { hands: [...pendingHands] });
       await consumeTrainingNow();
     } catch (error) {
@@ -3207,7 +3552,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     readJsonOptional(coachSnapshotPath, 'UI_SNAPSHOT')?.view?.gameOver === true
   );
 
-  const ensureGameOverViewPublished = async () => {
+  const ensureGameOverViewPublished = async ({ recover = true } = {}) => {
+    const publish = recover ? executePublish : runPublish;
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     if (engine?.gameOver !== true) return;
     for (let step = 0; step < 4; step += 1) {
@@ -3215,18 +3561,48 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         if (fs.existsSync(publishAttemptPath)) {
           if (!fs.existsSync(turnPath)) writeJsonAtomic(turnPath, { ok: true });
-          await executePublish(['--from', turnPath, '--retry']);
+          await publish(['--from', turnPath, '--retry']);
           continue;
         }
         const envelope = await runCli(['step']);
         writeJsonAtomic(turnPath, envelope);
-        await executePublish(['--from', turnPath, '--view-only']);
+        await publish(['--from', turnPath, '--view-only']);
       } catch (error) {
         if (error.code === 'ATTEMPT_PENDING') continue;
         appendNotice(`gameOver 뷰 게시 실패: ${error.code ?? 'ERROR'}`);
         return;
       }
     }
+  };
+
+  const publishAbortEndView = async () => {
+    let pin;
+    try {
+      const engine=readJsonOptional(engineStatePath,'ENGINE_STATE');
+      if(engine?.result!=='abort' || engine.gameOver!==true || !serverIdentity || !serverPid)return;
+      pin=openServerLockPin();
+      if(!pin)return;
+      const lock=assertPinnedServerLock(pin);
+      if(lock.sessionToken!==engine.sessionToken || lock.serverPid!==serverPid ||
+        serverIdentity.pid!==serverPid || startTimeOf(serverPid)!==serverIdentity.startTime || !processAlive(serverPid))return;
+      await assertServerBinding(lock);
+      assertPinnedServerLock(pin);
+      if(startTimeOf(serverPid)!==serverIdentity.startTime)return;
+      await ensureGameOverViewPublished({ recover: false });
+    } catch(error) {
+      appendNotice(`중도 종료 뷰 게시를 생략했습니다: ${error.code??'ERROR'}`);
+    } finally {closeServerLockPin(pin);}
+  };
+
+  const humanDeadline = (next, { renew = false } = {}) => {
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    if (timeoutMs <= 0 || next?.kind !== 'user') return null;
+    let humanTurn = readLoopState()?.humanTurn;
+    if (renew || !humanTurn || humanTurn.decisionId !== next.decisionId) {
+      humanTurn = {decisionId:next.decisionId, playerId:next.toAct, deadlineAt:Date.now()+timeoutMs};
+      writeLoopState({humanTurn});
+    }
+    return humanTurn;
   };
 
   const publishEnvelope = async (envelope, flags = []) => {
@@ -3236,98 +3612,132 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('PLAYTIME_PUBLISH_STOPPED', 'game-over cutoff 이후 play-time 게시를 시작하지 않습니다.');
     }
     envelope = await prepareHintEnvelope(envelope);
+    let hold = null;
+    if (envelope.handOver === true && !envelope.gameOver && !flags.includes('--view-only') && !flags.includes('--retry')) {
+      const events = envelope.events ?? [];
+      const runoutStreets = events.some(event => event.type === 'showdown' || event.type === 'pot_award')
+        ? events.filter(event => event.type === 'street').length : 0;
+      const start = paceNow();
+      const until = start + pace.handResultDwellMs + runoutStreets * pace.runoutStepMs;
+      if (until > start) {
+        hold = { handNo: envelope.view?.handNo ?? envelope.handNo, startAt: new Date(start).toISOString(), until: new Date(until).toISOString(), runoutStepMs: pace.runoutStepMs, runoutStreets };
+        flags = [...flags, '--result-hold', [hold.handNo, hold.startAt, hold.until, hold.runoutStepMs, hold.runoutStreets].join('|')];
+      }
+    }
     writeJsonAtomic(turnPath, envelope);
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    const hasDeadline = flags.some((flag) => flag === '--turn-deadline' || String(flag).startsWith('--turn-deadline'));
+    if (timeoutMs > 0 && envelope.next?.kind === 'user' && !hasDeadline) {
+      const deadline = humanDeadline(envelope.next);
+      flags = ['--turn-deadline', `${deadline.decisionId}:${new Date(deadline.deadlineAt).toISOString()}`, ...flags];
+    }
     let currentArgs = ['--from', turnPath, ...flags];
     let args = currentArgs;
     let resolvingPending = false;
     const recovered = new Set();
     let out;
-    for (;;) {
-      try {
-        // A retry with a still-present record publishes the old exact body; once that
-        // succeeds the current transition must still publish. If the record vanished
-        // before invocation, --retry publishes the current turn itself and is terminal.
-        const resolvingRecordedBody = resolvingPending
-          && fs.existsSync(path.join(root, '.publish-attempt.json'));
-        out = await executePublish(args);
-        if (resolvingPending && resolvingRecordedBody) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        break;
-      } catch (error) {
-        const code = error.code;
-        if (code === 'NO_ATTEMPT' && resolvingPending) {
-          resolvingPending = false;
-          args = currentArgs;
-          continue;
-        }
-        if (recovered.has(code)) throw error;
-        if (code === 'ATTEMPT_PENDING') {
-          recovered.add(code);
-          assertNotStopping();
-          await opts.attemptPendingCheckpoint?.();
-          assertNotStopping();
-          resolvingPending = true;
-          args = ['--from', turnPath, '--retry'];
-          continue;
-        }
-        if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
-          recovered.add(code);
-          assertNotStopping();
-          const pendingPath = path.join(root, '.publish-attempt.json');
-          try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    // Register before invoking the publisher: the browser can receive the hold
+    // before its ACK returns. Keep any skip/pause admitted in that interval.
+    const registeredHold = hold ? { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested } : null;
+    if (registeredHold) resultHoldState = registeredHold;
+    try {
+      for (;;) {
+        try {
+          // A retry with a still-present record publishes the old exact body; once that
+          // succeeds the current transition must still publish. If the record vanished
+          // before invocation, --retry publishes the current turn itself and is terminal.
+          const resolvingRecordedBody = resolvingPending
+            && fs.existsSync(path.join(root, '.publish-attempt.json'));
+          out = await executePublish(args);
+          if (resolvingPending && resolvingRecordedBody) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          const synchronized = await runCli(['step']);
-          assertNotStopping();
-          writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
-          const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
-          if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
-          const recoveryFlags = flags.filter((flag) => flag !== '--retry' && flag !== '--view-only');
-          currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
-          args = currentArgs;
-          resolvingPending = false;
-          log('publish-recovery', { code, mode: 'view-only-resync' });
-          continue;
-        }
-        if (code === 'BAD_SNAPSHOT') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          const snapshotPath = path.join(root, 'ui-snapshot.json');
-          try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
-            if (unlinkError.code !== 'ENOENT') throw unlinkError;
+          break;
+        } catch (error) {
+          const code = error.code;
+          if (code === 'NO_ATTEMPT' && resolvingPending) {
+            resolvingPending = false;
+            args = currentArgs;
+            continue;
           }
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'snapshot-rebuild' });
-          continue;
+          if (recovered.has(code)) throw error;
+          if (code === 'ATTEMPT_PENDING') {
+            recovered.add(code);
+            assertNotStopping();
+            await opts.attemptPendingCheckpoint?.();
+            assertNotStopping();
+            resolvingPending = true;
+            args = ['--from', turnPath, '--retry'];
+            continue;
+          }
+          if (code === 'BAD_ATTEMPT' || code === 'BAD_ATTEMPT_VERSION') {
+            recovered.add(code);
+            assertNotStopping();
+            const pendingPath = path.join(root, '.publish-attempt.json');
+            try { fs.unlinkSync(pendingPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            const synchronized = await runCli(['step']);
+            assertNotStopping();
+            writeJsonAtomic(turnPath, await prepareHintEnvelope(synchronized));
+            const lastNo = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.lastHand?.handNo;
+            if (Number.isInteger(lastNo) && lastNo >= 1) unionReplayPending([lastNo]);
+            if (resultHoldState === registeredHold) resultHoldState = null;
+            hold = null;
+            const recoveryFlags = flags.filter((flag,index) => flag !== '--retry' && flag !== '--view-only'
+              && flag !== '--result-hold' && flags[index-1] !== '--result-hold'
+              && flag !== '--turn-deadline' && flags[index-1] !== '--turn-deadline' && !String(flag).startsWith('--turn-deadline='));
+            const recoveredDeadline=humanDeadline(synchronized.next);
+            if(recoveredDeadline)recoveryFlags.push('--turn-deadline',`${recoveredDeadline.decisionId}:${new Date(recoveredDeadline.deadlineAt).toISOString()}`);
+            currentArgs = ['--from', turnPath, '--view-only', ...recoveryFlags];
+            args = currentArgs;
+            resolvingPending = false;
+            log('publish-recovery', { code, mode: 'view-only-resync' });
+            continue;
+          }
+          if (code === 'BAD_SNAPSHOT') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            const snapshotPath = path.join(root, 'ui-snapshot.json');
+            try { fs.unlinkSync(snapshotPath); } catch (unlinkError) {
+              if (unlinkError.code !== 'ENOENT') throw unlinkError;
+            }
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'snapshot-rebuild' });
+            continue;
+          }
+          if (code === 'PUBLISH_ID_REUSED') {
+            recovered.add(code);
+            assertNotStopping();
+            appendNotice('publishId 재사용 감지: 새 id로 재게시');
+            log('publish-recovery', { code, mode: 'fresh-id-republish' });
+            continue;
+          }
+          if (code === 'LOCK_TIMEOUT') {
+            recovered.add(code);
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'retry-once' });
+            continue;
+          }
+          if (code === 'NO_LOCK') {
+            recovered.add(code);
+            await recoverServerForPublish();
+            assertNotStopping();
+            log('publish-recovery', { code, mode: 'server-lock-rebuild' });
+            continue;
+          }
+          throw error;
         }
-        if (code === 'PUBLISH_ID_REUSED') {
-          recovered.add(code);
-          assertNotStopping();
-          appendNotice('publishId 재사용 감지: 새 id로 재게시');
-          log('publish-recovery', { code, mode: 'fresh-id-republish' });
-          continue;
-        }
-        if (code === 'LOCK_TIMEOUT') {
-          recovered.add(code);
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'retry-once' });
-          continue;
-        }
-        if (code === 'NO_LOCK') {
-          recovered.add(code);
-          await recoverServerForPublish();
-          assertNotStopping();
-          log('publish-recovery', { code, mode: 'server-lock-rebuild' });
-          continue;
-        }
-        throw error;
       }
+    } catch (error) {
+      if (resultHoldState === registeredHold) resultHoldState = null;
+      throw error;
     }
+    if (envelope.view !== undefined && !flags.includes('--view-only') && !flags.includes('--retry')) lastPlayPublishAt = paceNow();
     const patch = {};
     if (Number.isInteger(out.publishId)) patch.lastPublishId = out.publishId;
     if (Number.isInteger(out.handNo)) patch.handNo = out.handNo;
@@ -3356,17 +3766,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const coachDenyPath = (handNo) => path.join(root, `.coach-deny-${handNo}.json`);
   const coachAuthorityPath = path.join(root, '.coach-authority.json');
   const coachAttemptKey = (handNo, generation) => `${handNo}:${generation}`;
-
-  // #192 E2: the spawn sidecar for one attempt's exact result path. Always resolved
-  // against the CURRENT game root by basename alone — the row's own stored absolute
-  // directory is never trusted, so an archived/relocated game or a legacy `--game-dir`
-  // row can never resolve someone else's sidecar by accident.
-  const coachSpawnEvidencePath = (exactResultPath) => {
-    if (typeof exactResultPath !== 'string') return null;
-    const base = path.basename(exactResultPath);
-    if (!base.endsWith('.result.json')) return null;
-    return path.join(root, base.replace(/\.result\.json$/, '.spawn.json'));
-  };
 
   // D2/FO-1: the single transition every coach-attempt termination site must go
   // through. A record leaves coachAttempts only on confirmed close evidence (or when
@@ -3564,7 +3963,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     players: readJsonOptional(playersPath, 'PLAYERS'),
     engineState: readJsonOptional(engineStatePath, 'ENGINE_STATE'),
     records: [fullHandRecord(handNo)],
-  });
+  }, { alwaysDenyHumanSeats: true });
 
   const coachForbiddenLiterals = (handNo) => {
     const { cards, others } = coachForbiddenDetailed(handNo);
@@ -3582,7 +3981,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);
-    if (literals.length === 0) {
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    const aiCount = aiRowsOf(Array.isArray(players) ? players : []).length;
+    if (literals.length === 0 && aiCount !== 0) {
       throw codedError('BAD_COACH_DENY', `핸드 ${handNo} private literal deny 목록이 비어 있습니다.`);
     }
     const filePath = coachDenyPath(handNo);
@@ -3742,26 +4143,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return canonicalEpoch;
   };
 
-  const parsePersistedCoachHandle = (raw) => {
-    if (typeof raw !== 'string') return null;
-    const separator = raw.indexOf(':');
-    if (separator <= 0 || separator === raw.length - 1) return null;
-    const pid = Number(raw.slice(0, separator));
-    // Windows start times contain colons, so everything after the first separator is
-    // preserved verbatim for a valid value — only the literal sentinels a lost/unverifiable
-    // startTime would stringify to (`"null"`, `"undefined"`) or blank text are rejected.
-    const startTime = raw.slice(separator + 1);
-    if (!Number.isSafeInteger(pid) || pid < 1) return null;
-    const trimmed = startTime.trim();
-    if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') return null;
-    return { pid, startTime };
-  };
-
-  const persistedCoachIdentityState = ({ pid, startTime }) => {
-    if (!processAlive(pid)) return 'dead';
-    const current = startTimeOf(pid);
-    if (current === null) return 'unknown';
-    return current === startTime ? 'alive' : 'mismatch';
+  // #214 D4a: the same observation the cleanup writer makes. A start time that may differ
+  // only by a time-zone offset is 'unknown', never proof of replacement.
+  const persistedCoachIdentityState = (identity) => {
+    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf });
+    return observed === 'replaced' ? 'mismatch' : observed;
   };
 
   const waitForPersistedCoachDeath = async (identity, maxWaitMs, deadlineNs) => {
@@ -3784,96 +4170,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (remaining <= 0) return 'unknown';
       await sleep(Math.min(pollMs, remaining));
     }
-  };
-
-  // #192 E2/S2b/I2: read the per-attempt spawn sidecar. The fd this reads from is pinned to
-  // the exact inode the checks below validate — a separate `lstat` followed by a re-open by
-  // pathname leaves a TOCTOU window where the path can be replaced (hard link, swapped file)
-  // between the check and the read. Where `O_NOFOLLOW` is defined, opening with it refuses a
-  // symlink atomically at the syscall; where the platform has no such flag, a pre-open
-  // `lstat` symlink check is the (strictly weaker) fallback. Missing is only ever classified
-  // `absent` — the strongest "we would have seen it" claim — when ENOENT AND the root
-  // directory itself still stats; an unmounted/relocated root must never masquerade as
-  // "confirmed no spawn happened". Any other failure (not a regular file, hard-linked
-  // (`nlink !== 1`), oversized, unreadable, unparseable) is `invalid`.
-  const SIDECAR_MAX_BYTES = 64 * 1024;
-  const readCoachSpawnSidecar = (exactResultPath) => {
-    const sidecarPath = coachSpawnEvidencePath(exactResultPath);
-    if (!sidecarPath) return { phase: 'invalid', data: null, path: null };
-    const invalid = () => ({ phase: 'invalid', data: null, path: sidecarPath });
-    const absentOrInvalid = () => {
-      try {
-        statGameRoot(root);
-        return { phase: 'absent', data: null, path: sidecarPath };
-      } catch {
-        return invalid();
-      }
-    };
-    const classify = (text) => {
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return invalid();
-      }
-      const phase = typeof data?.phase === 'string' ? data.phase : null;
-      if (!['intent', 'aborted-before-spawn', 'identity', 'identity-unavailable', 'closed-confirmed'].includes(phase)) {
-        return { phase: 'invalid', data, path: sidecarPath };
-      }
-      return { phase, data, path: sidecarPath };
-    };
-    if (sidecarNoFollowFlag === undefined) {
-      // #192 sJ5/oK1: no atomic open-refusing-a-symlink exists here. The fallback reader
-      // pins the opened fd to the inode `lstat` saw, so a swap between the two calls is
-      // `invalid` while an untouched regular file is still readable evidence.
-      const read = readSidecarFileWithoutNoFollow(sidecarPath, { maxBytes: SIDECAR_MAX_BYTES });
-      if (read.status === 'absent') return absentOrInvalid();
-      if (read.status !== 'ok') return invalid();
-      return classify(read.text);
-    }
-    let fd;
-    try {
-      fd = fs.openSync(sidecarPath, fs.constants.O_RDONLY | sidecarNoFollowFlag);
-    } catch (error) {
-      return error.code === 'ENOENT' ? absentOrInvalid() : invalid();
-    }
-    try {
-      const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.nlink !== 1 || stat.size > SIDECAR_MAX_BYTES) return invalid();
-      let text;
-      try {
-        text = fs.readFileSync(fd, 'utf8');
-      } catch {
-        return invalid();
-      }
-      return classify(text);
-    } finally {
-      fs.closeSync(fd);
-    }
-  };
-
-  // E2: a row's stored exactResultPath is only trusted for identity/NOT_SPAWNED purposes
-  // when its directory still resolves to the current root. Any error (missing, moved,
-  // permission) means not attributable.
-  const coachEvidenceAttributable = (exactResultPath) => {
-    if (typeof exactResultPath !== 'string' || exactResultPath === '') return false;
-    try {
-      return fs.realpathSync(path.dirname(exactResultPath)) === fs.realpathSync(root);
-    } catch {
-      return false;
-    }
-  };
-
-  // §D1-equivalent validation for the sidecar's own {pid, startTime} pair: a positive
-  // integer pid and a non-empty startTime that is not the literal "null"/"undefined".
-  const validSidecarIdentity = (data) => {
-    const pid = data?.pid;
-    const startTime = data?.startTime;
-    if (!Number.isSafeInteger(pid) || pid < 1) return null;
-    if (typeof startTime !== 'string') return null;
-    const trimmed = startTime.trim();
-    if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined') return null;
-    return { pid, startTime };
   };
 
   // #192 O7: phases that must never be downgraded back to `intent`/`aborted-before-spawn` by
@@ -3913,7 +4209,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } else {
       state = initial;
     }
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     // A different startTime proves that the recorded process identity is gone. Never
     // signal the replacement pid; close the stale record as released instead.
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
@@ -3931,7 +4227,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateGraceMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     if (state !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
     if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
@@ -3942,7 +4238,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
     }
     state = await waitForPersistedCoachDeath(identity, orphanTerminateKillWaitMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released' };
+    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
     return {
       outcome: 'unconfirmed',
@@ -3970,28 +4266,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     };
     const withEvidence = (result) => ({ ...result, evidence });
 
-    const authorityIdentity = parsePersistedCoachHandle(attempt.agentHandle);
-    const sidecarIdentity = sidecar.phase === 'identity' ? validSidecarIdentity(sidecar.data) : null;
-
     // Step 0: any sidecar carrying a tuple must match this exact row/epoch before it can be
     // trusted for anything below. A stale or replayed tuple can never resolve to a/b/c/d/f;
-    // fail closed instead of trusting foreign evidence.
-    if (sidecar.data && typeof sidecar.data === 'object') {
-      const tuple = sidecar.data;
-      const tupleMismatch = tuple.gameEpoch !== gameEpoch
-        || tuple.owner !== attempt.ownerSessionId
-        || tuple.handNo !== attempt.handNo
-        || tuple.generation !== attempt.generation
-        || tuple.attempt !== attempt.attempt;
-      if (tupleMismatch) {
-        return withEvidence({
-          confirmed: false, reason: 'SPAWN_EVIDENCE_MISMATCH', cleanupState: 'termination_unconfirmed',
-        });
-      }
+    // fail closed instead of trusting foreign evidence. (Shared with the #214 writer.)
+    if (sidecarTupleMismatch(sidecar, attempt, gameEpoch)) {
+      return withEvidence({
+        confirmed: false, reason: 'SPAWN_EVIDENCE_MISMATCH', cleanupState: 'termination_unconfirmed',
+      });
     }
-    if (authorityIdentity && sidecarIdentity && (
-      authorityIdentity.pid !== sidecarIdentity.pid || authorityIdentity.startTime !== sidecarIdentity.startTime
-    )) {
+    const identities = rowIdentities(attempt, sidecar);
+    if (identities.conflict) {
       return withEvidence({
         confirmed: false, reason: 'IDENTITY_CONFLICT', cleanupState: 'termination_unconfirmed',
       });
@@ -3999,8 +4283,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
     // a: the authority handle itself parses. b: it does not, but a tuple-matched (step 0
     // already passed) sidecar identity does — resolve through the same path either way.
-    const identity = authorityIdentity ?? sidecarIdentity;
+    const identity = identities.selected;
     if (identity) {
+      evidence.identity = { pid: identity.pid, startTime: identity.startTime };
       const outcome = await resolvePersistedCoachIdentity(identity, deadlineNs, identityDeadlineNs, attempt, closures, sidecar);
       return withEvidence(outcome.outcome === 'released'
         ? { confirmed: true, ...(outcome.reason ? { reason: outcome.reason } : {}), cleanupState: 'released' }
@@ -4015,9 +4300,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // d: no handle was ever recorded (a malformed string handle does not count — only a
     // genuinely absent one), the new-protocol stamp is present, the row is attributable to
     // this root, and the sidecar proves the spawn step itself was never reached.
-    const handleIsNullish = attempt.agentHandle === null || attempt.agentHandle === undefined;
-    const notSpawnedSidecar = sidecar.phase === 'absent' || sidecar.phase === 'aborted-before-spawn';
-    if (handleIsNullish && attempt.spawnEvidence === 1 && attributable && notSpawnedSidecar) {
+    if (notSpawnedHolds(attempt, sidecar, attributable)) {
       return withEvidence({ confirmed: true, reason: 'NOT_SPAWNED', cleanupState: 'released' });
     }
 
@@ -4026,11 +4309,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // 프로토콜 행(spawnEvidence===1)·acceptEvidence가 있는 행·sidecar가 한 번이라도
     // 관측된 행(‘absent’가 아닌 모든 phase)·경로 귀속 안 되는 행은 절대 g를 타지
     // 않는다. closure당 한 번만 lazy하게 스캔한다(`getLegacyScan`이 그 캐시를 쥔다).
-    const legacyEligible = attempt.spawnEvidence !== 1
-      && attempt.acceptEvidence == null
-      && sidecar.phase === 'absent'
-      && attributable;
-    if (legacyEligible && getLegacyScan) {
+    if (legacyEligible(attempt, sidecar, attributable) && getLegacyScan) {
       // #192 J4: bound the scan by the same identity deadline the classifier already uses
       // elsewhere in this function — an unbounded `await` here can otherwise push a
       // following `cleanup-result` past the closure's own deadline, surfacing a generic
@@ -4085,6 +4364,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ? 'SPAWN_INTENT_ONLY'
           : 'IDENTITY_UNAVAILABLE';
     return withEvidence({ confirmed: false, reason: fallbackReason, cleanupState: 'termination_unconfirmed' });
+  };
+
+  // The recorded cleanupState of exactly this attempt's retired row, or null.
+  const committedCleanupState = (attempt) => {
+    let authority;
+    try { authority = readCoachAuthority(); } catch { return null; }
+    const row = [...(authority?.retiredAttempts ?? [])].reverse().find((entry) => (
+      entry.ownerSessionId === attempt.ownerSessionId && entry.handNo === attempt.handNo
+      && entry.generation === attempt.generation && entry.attempt === attempt.attempt
+    ));
+    return row?.cleanupState ?? null;
   };
 
   const persistedCoachAttempts = () => {
@@ -4282,10 +4572,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             '--hand', String(attempt.handNo),
             '--generation', String(attempt.generation),
             '--cleanup-state', result.cleanupState,
+            ...(result.cleanupState === 'released' ? ['--evidence', result.reason] : []),
           ], { deadlineNs, deadlineError });
         } catch (error) {
-          if (error.code === deadlineError().code) throw error;
-          childFailure = { reason: 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+          // #214/#216: a child can fail after its authority commit (a crash before the
+          // response, a lock-release error reported as INTERNAL, a success that arrived past
+          // the deadline). This closure only calls the child when the recorded state differs,
+          // so finding the requested state now means the transition committed — whatever the
+          // failure, including a deadline. Otherwise a deadline still ends the closure.
+          if (committedCleanupState(attempt) === result.cleanupState) childFailure = null;
+          else if (error.code === deadlineError().code) throw error;
+          else {
+            const refused = ['RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED']
+              .includes(error.code);
+            childFailure = { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+          }
         }
       }
       const effectiveResult = childFailure === null
@@ -4365,6 +4666,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   );
 
   const reclaimPersistedCoachWorkersForResume = async (completedHands, { policyMode = false } = {}) => {
+    log('resume-reclaim-budget', {
+      graceMs: orphanTerminateGraceMs,
+      killWaitMs: orphanTerminateKillWaitMs,
+      residualMs: resumeReclaimResidualMs,
+      scale: platformBudgetScale(budgetPlatform),
+    });
     const budgetMs = orphanTerminateGraceMs + orphanTerminateKillWaitMs + resumeReclaimResidualMs;
     const deadlineNs = monotonicNs() + BigInt(budgetMs) * 1_000_000n;
     const identityDeadlineNs = deadlineNs - BigInt(resumeReclaimResidualMs) * 1_000_000n;
@@ -4524,8 +4831,55 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '--spawn-evidence', '1',
   ]);
 
+  // A coach that stops because play is pausing while no child of its runs (any
+  // point before spawn, or after attempt 1's termination was confirmed) keeps its
+  // hand here and starts again on resume or when the game ends. The relaunch
+  // reserves afresh: `reserve` retires whatever reservation the hand still holds
+  // (including a descriptor a paused recovery handed over), so no stale deadline
+  // survives a long pause. Without this the hand would sit unspawned and the
+  // heartbeat or the finalization cutoff would seal it unavailable even though
+  // the upper model is there. Stop and cutoff still end the work as before.
+  const pauseDeferredCoachHands = new Set();
+  const deferCoachIfPaused = (handNo) => {
+    if (!coachWorkSuspended()) return false;
+    if (pauseRequested && !stopRequested && !finalizationCutoff) pauseDeferredCoachHands.add(handNo);
+    return true;
+  };
+  /** Starts every deferred hand again; returns how many were started. */
+  const relaunchPauseDeferredCoach = () => {
+    const hands = [...pauseDeferredCoachHands].sort((a, b) => a - b);
+    pauseDeferredCoachHands.clear();
+    for (const handNo of hands) launchCoachPipeline(handNo);
+    return hands.length;
+  };
+  // Once the last hand is over a pause can no longer park (the game finalizes
+  // instead); pause() answers `finalizing` and the app reports finalizing.
+  let gameOverPending = false;
+  const releasePauseForFinalization = () => {
+    // Finalization owns the remaining training (R1 (b)): the gate opens even if
+    // the pause itself has not reached pauseRequested yet; explanations wait for
+    // the last hand (finalizationPriorityHand) and held-back hands follow it.
+    if (trainingAdmissionClosed) openTrainingAdmission();
+    if (!pauseRequested) return;
+    pauseRequested = false;
+    resolvePause?.({ state: 'finalizing' });
+    resolvePause = null;
+  };
+  // Set once a coach task had to wait for the background probe; the last hand
+  // then lets that backlog finish before the finalization clock starts.
+  let coachProbeBacklog = false;
+
   const coachPipeline = async (handNo, { descriptor: initialDescriptor = null, prepared = null } = {}) => {
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
+    if (resolverPromise) {
+      // R2: finish the background probe first so this hand gets the LLM note, not
+      // the upper-unavailable fallback. The task stays in coachTasks, so a pause
+      // barrier waits for it; if play paused meanwhile, the check after capture
+      // defers the hand to resume/finalization instead of reserving now.
+      coachProbeBacklog = true;
+      await settleUpperResolution();
+      if (stopRequested || finalizationCutoff) return;
+    }
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') throw codedError('NO_COACH_OWNER', '코치 ownerSessionId가 없습니다.');
     const upperUsable = upperAdapter && typeof upperAdapter.oneshotStart === 'function';
@@ -4560,12 +4914,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (typeof opts.coachCaptureCheckpoint === 'function') {
       await opts.coachCaptureCheckpoint({ handNo });
     }
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
     const denyDetailed = coachForbiddenDetailed(handNo);
     const deny = writeCoachDeny(handNo);
     let descriptor = initialDescriptor;
     if (!descriptor) {
-      if (coachWorkSuspended()) return;
+      if (deferCoachIfPaused(handNo)) return;
       try {
         descriptor = await reserveCoach(owner, handNo, 1, inputs.stats.path);
       } catch (reserveError) {
@@ -4583,7 +4937,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return;
       }
     }
-    if (coachWorkSuspended()) return;
+    if (deferCoachIfPaused(handNo)) return;
     const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
     if (eligibleProcessInput(processInput).hands.length === 0) {
       await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
@@ -4626,7 +4980,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // later step in that same branch (e.g. fenceCurrentGeneration()) throws.
       let identityUnavailableReason = null;
       try {
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo)) return;
         if (typeof opts.coachSpawnCheckpoint === 'function') {
           const checkpointResult = await opts.coachSpawnCheckpoint({ handNo, attempt });
           // #192 O4: narrow test seam — a real `pause()` winning the race while this
@@ -4654,7 +5008,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 S4 E1: also require that this exact instance is the one that minted
         // `owner` (`issuedOwners`), not merely that loop-state's `ownerSessionId` still
         // reads back the same string this coachPipeline call started with.
-        if (coachWorkSuspended()) return;
+        if (deferCoachIfPaused(handNo)) return;
         assertBeforeResultWaitCutoff();
         const spawnLoopState = readLoopState();
         if (spawnLoopState?.ownerSessionId !== owner || !issuedOwners.has(owner)) return;
@@ -4956,7 +5310,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           });
           return;
         }
-        if (coachWorkSuspended()) return;
+        // Attempt 1's child is confirmed gone: a pause here keeps the hand too.
+        if (deferCoachIfPaused(handNo)) return;
         if (attempt === 1) {
           if (!coachReplacementAllowed()) {
             appendNotice(`핸드 ${handNo} 코치 교체 예산(5초)이 남지 않아 고정 문구로 대체합니다.`);
@@ -4970,7 +5325,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             return;
           }
           try {
-            if (coachWorkSuspended()) return;
+            if (deferCoachIfPaused(handNo)) return;
             descriptor = await reserveCoach(owner, handNo, 2, inputs.stats.path);
           } catch (reserveError) {
             if (reserveError.code !== 'ADAPTER_DISABLED') throw reserveError;
@@ -5442,14 +5797,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         '--generation', String(attempt.generation),
         '--cleanup-state', 'released',
       ];
-      // #192 J5/K1: a `LEGACY_RUNTIME_PROCESS_PRESENT` row already named its candidate pids
-      // (see `unresolvedEvidenceGuidance`). The correct recovery action there is to stop
-      // those processes and resume, never a `cleanup-result` command. This holds for a
-      // write-authorized row too, so the check runs before the authorized branch and no
-      // command is emitted at all.
-      if (attempt.reason === 'LEGACY_RUNTIME_PROCESS_PRESENT') return [];
+      // LIVE takes precedence over both write authorization and foreign ownership.
+      if (persistedRecoveryClass(attempt.reason) === 'live') return [];
       if (attempt.cleanupAuthorized) {
-        return [{ program: process.execPath, args: [...base, '--game-dir', root] }];
+        return [{ program: process.execPath, args: [...base, '--game-dir', root], requiresOperatorConfirmation: true }];
       }
       // #192 O1/L1/J5: a genuinely foreign row (its own ownerSessionId differs from the
       // current owner, and it is not cleanupEligible — e.g. a legacy row judgment g could
@@ -5484,9 +5835,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       code: 'COACH_HANDLE_UNRESOLVED',
       owner,
       attempts: unresolved,
+      // #215: requirement, then observation. The commands need only a lock.json that carries
+      // this sessionToken; `observed.serverLock` is what the halt saw, at `observedAt`.
       prerequisites: {
-        authenticatedServerLock: true,
-        sessionToken: readLoopState()?.sessionToken ?? null,
+        serverLockSessionToken: readLoopState()?.sessionToken ?? null,
+      },
+      observed: {
+        serverLock: deriveServerLockObservation({
+          readLock: readServerLock, expectedToken: readLoopState()?.sessionToken ?? null,
+          bindingVerified: serverBindingVerified, processAlive, startTimeOf,
+        }),
       },
       commands,
       ...(commands.some((cmd) => cmd.requiresOperatorConfirmation === true)
@@ -5495,24 +5853,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     };
   };
 
+  const persistedCoachRecoveryMessage = (recovery, phase) => {
+    const unresolved = recovery.attempts;
+    let base;
+    if (unresolved.some((row) => persistedRecoveryClass(row.reason) === 'live')) {
+      base = `코치 프로세스가 아직 종료되지 않아 ${phase}를 중단합니다.`;
+    } else if (unresolved.length > 0 && unresolved.every((row) => (
+      row.handNo == null && row.reason === 'RESUME_RECLAIM_DEADLINE_EXCEEDED'
+    ))) {
+      base = `persisted coach 회수 deadline이 초과돼 ${phase}를 중단합니다. 다시 resume하세요.`;
+    } else if (recovery.commands.length > 0) {
+      base = `persisted 코치 handle identity를 확인할 수 없어 ${phase}를 중단합니다.`;
+    } else {
+      base = `persisted 코치 authority 또는 handle을 확인할 수 없어 ${phase}를 중단합니다. authority 수동 복구가 필요합니다.`;
+    }
+    const confirmationNote = recovery.requiresOperatorConfirmation
+      ? 'halt.recovery.commands를 검토하고, 이 게임의 coach CLI 자식이 남아있지 않은지 직접 확인한 뒤 --operator-confirmed 1을 붙여 실행한 뒤 resume하세요. 명령은 같은 sessionToken의 lock.json만 있으면 실행되며 서버가 떠 있을 필요는 없습니다.'
+      : null;
+    const reasons = [...new Set(unresolved.map((row) => row.reason).filter(Boolean))];
+    return [base, unresolvedEvidenceGuidance(unresolved), confirmationNote, `reasons: ${reasons.join(', ')}`].filter(Boolean).join(' ');
+  };
+
   const haltForPersistedCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
-    const commands = recovery.commands;
-    const base = commands.length > 0
-      ? 'persisted 코치 handle identity를 확인할 수 없어 owner 교대를 중단합니다. 같은 sessionToken의 인증 server lock을 복구하고 halt.recovery.commands를 검토·실행한 뒤 resume하세요.'
-      : 'persisted 코치 handle identity와 cleanup owner를 확인할 수 없어 owner 교대를 중단합니다. authority 수동 복구가 필요합니다.';
-    // #192 D5: append operator guidance that distinguishes a row whose spawn sidecar shows
-    // `intent` (a spawn may genuinely have happened) from a row with no evidence at all
-    // (legacy pre-stamp, or a synthetic authority-level failure row) — each needs a
-    // different manual check before resuming.
-    const guidance = unresolvedEvidenceGuidance(unresolved);
-    // #192 J5: when at least one emitted command still needs `--operator-confirmed 1`
-    // appended by hand, say so explicitly — the command itself deliberately no longer
-    // carries that flag pre-filled.
-    const confirmationNote = recovery.requiresOperatorConfirmation
-      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
-      : null;
-    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
+    const message = persistedCoachRecoveryMessage(recovery, 'finalize');
     appendNotice(message);
     const current = readLoopState()?.finalization ?? baseFinalizationCheckpoint();
     writeLoopState({
@@ -5535,16 +5899,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const haltForPlayingCoachRecovery = ({ owner, unresolved }) => {
     const recovery = persistedCoachRecovery({ owner, unresolved });
-    const base = recovery.commands.length > 0
-      ? 'persisted 코치 handle identity를 확인할 수 없어 playing owner 교대를 중단합니다. 인증 server lock 아래 cleanup-result를 검토·실행한 뒤 resume하세요.'
-      : 'persisted 코치 authority 또는 handle을 확인할 수 없어 playing owner 교대를 중단합니다. 수동 복구가 필요합니다.';
-    // #192 D5: same intent-vs-no-evidence guidance as haltForPersistedCoachRecovery.
-    const guidance = unresolvedEvidenceGuidance(unresolved);
-    // #192 J5: same operator-confirmation note as haltForPersistedCoachRecovery.
-    const confirmationNote = recovery.requiresOperatorConfirmation
-      ? '--row-owner 명령에는 --operator-confirmed 1이 빠져 있습니다. 이 게임의 coach CLI 자식이 남아있지 않은지 확인한 뒤 그 값을 추가해 실행하세요.'
-      : null;
-    const message = [base, guidance, confirmationNote].filter(Boolean).join(' ');
+    const message = persistedCoachRecoveryMessage(recovery, 'playing owner 교대');
     appendNotice(message);
     writeLoopState({ halt: { code: 'COACH_HANDLE_UNRESOLVED', message, recovery } });
     log('resume-halt', { code: 'COACH_HANDLE_UNRESOLVED' });
@@ -5853,8 +6208,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const cutoff = readLoopState()?.finalization?.cutoff;
       if (cutoff?.reviewGate !== 'open' || cutoff.terminationConfirmed !== true
-        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed
-        || stats.user.sample !== completed) {
+        || cutoff.completed !== completed || engine.lastHand?.handNo !== completed) {
+        throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
+      }
+      const hostDealtHands = Array.from({ length: completed }, (_, i) => i + 1)
+        .filter((handNo) => {
+          try {
+            const record = fullHandRecord(handNo);
+            return record && Object.hasOwn(record.holes ?? {}, HOST_ID);
+          } catch { return false; }
+        }).length;
+      if (stats.user.sample !== hostDealtHands) {
         throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
       }
       // Read derived evidence before optional sections can downgrade its errors.
@@ -6216,6 +6580,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         'finalize는 finalizing phase에서만 실행할 수 있습니다.',
       );
     }
+    // R2: a background probe settles before any finalization budget starts.
+    await settleUpperResolution();
+    if (stopRequested) return readLoopState();
+    // A paused recovery (startPaused) that lands in finalization never parks;
+    // release its pause so coach work it deferred can run.
+    releasePauseForFinalization();
+    relaunchPauseDeferredCoach();
     // finalDeadline/resultWaitCutoff는 owner transfer를 포함한 이 종료 시도에서 한
     // 번만 정한다. finalizing resume은 begin-owner 전에 이미 같은 값을 설치한다.
     const {
@@ -6225,7 +6596,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const checkpoint = baseFinalizationCheckpoint();
     writeLoopState({ finalization: checkpoint });
     log('finalize-start', { budgetMs: finalizeBudgetMs, resultWaitMs: checkpoint.resultWaitMs });
-    await reconcileTrainingNow();
+    await reconcileTrainingNow({ finalizing: true });
 
     const owner = readLoopState()?.ownerSessionId;
     if (typeof owner !== 'string' || owner === '') {
@@ -6416,8 +6787,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const appendMetric = (metric) => {
     const state = readLoopState();
-    const metrics = Array.isArray(state?.metrics) ? [...state.metrics, metric] : [metric];
-    writeLoopState({ metrics });
+    writeLoopState(appendBoundedMetric(state, metric));
   };
 
   const waitOnlyForUser = async (out, { drain = false } = {}) => {
@@ -6437,9 +6807,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if(pauseRequested&&!drain)return {...current,controlInterrupted:true};
     const controller = new AbortController();
     if (!drain) waitController = controller;
-    const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(drain ? 0 : waitMs)});
+    const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+    let waitFor = drain ? 0 : waitMs;
+    if (!drain && timeoutMs > 0 && current.next?.kind === 'user') {
+      const humanTurn = humanDeadline(current.next);
+      waitFor = Math.max(0, Math.min(waitMs, humanTurn.deadlineAt - Date.now()));
+    }
+    const query = new URLSearchParams({token:lock.sessionToken, expectDecisionId:current.next.decisionId, timeoutMs:String(waitFor)});
     try {
-      const response = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {signal:AbortSignal.any([controller.signal,AbortSignal.timeout((drain ? 0 : waitMs)+10000)])});
+      const response = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {signal:AbortSignal.any([controller.signal,AbortSignal.timeout(waitFor+10000)])});
       if (!response.ok) throw codedError('WAIT_FAILED', 'relay wait failed');
       return { ...current, userAction: await response.json(), controlInterrupted: undefined, waitError: undefined };
     } catch (error) {
@@ -6452,16 +6828,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const pause = () => {
     if (!managed || readLoopState()?.phase !== 'playing' || terminalOperation || stopRequested) throw codedError('INVALID_TRANSITION', '현재 상태에서는 일시정지할 수 없습니다.');
     if (pauseCompletion) return pauseCompletion;
+    if (gameOverPending) return Promise.resolve({ state: 'finalizing' });
     if(control.read().playState==='paused')return Promise.resolve({state:'paused'});
     pauseCompletion = (async()=>{
+      // R1 (a): the gate closes before the durable pausing write, so training
+      // work that lands while that write is in flight is already held back.
+      closeTrainingAdmission();
       await retryControlWrite(()=>control.set('pausing',{pauseIntent:true}));
       if(stopRequested)return {state:'stopped'};
-      if(readLoopState()?.phase!=='playing')return {state:'finalizing'};
+      if(readLoopState()?.phase!=='playing'){reopenUnlessFinalizing();return {state:'finalizing'};}
       pauseRequested=true;
+      if (resultHoldState) resultHoldState.skipped = true;
+      resultHoldController?.abort();
+      policyPaceController?.abort();
       const ack=new Promise(resolve=>{resolvePause=resolve;});
       waitController?.abort();
       return ack;
-    })().catch(error=>{pauseCompletion=null;throw error;});
+    })().catch(error=>{pauseCompletion=null;reopenUnlessFinalizing();throw error;});
     return pauseCompletion;
   };
   const resumePlay = async () => {
@@ -6470,29 +6853,43 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       throw codedError('PLAYER_RECOVERY_REQUIRED', 'LLM 결정을 재시도하거나 게임을 종료하세요.');
     }
     const current = await runCli(['step']);
-    await publishEnvelope(current, ['--view-only']);
-    await retryControlWrite(()=>control.set('playing', {pauseIntent:false}));
+    await retryControlWrite(()=>control.set('playing', {pauseIntent:false, closedDecisionId:null}));
+    const deadline = humanDeadline(current.next, {renew:true});
+    const deadlineFlags = deadline
+      ? ['--turn-deadline', `${deadline.decisionId}:${new Date(deadline.deadlineAt).toISOString()}`]
+      : [];
+    await publishEnvelope(current, ['--view-only', ...deadlineFlags]);
     assertNotStopping();
     pauseRequested = false;
     pauseCompletion = null;
+    reopenTrainingAdmission();
+    // R1 (c): a coach note accepted while pausing stayed in Q (publication is
+    // deferred during a pause). Publish it once now, before the next hand,
+    // rather than at game end. Every coach task settled before paused.
+    if (Object.keys(readCoachAuthority()?.publishQueue ?? {}).length) {
+      try { await drainQueuedCoachPublications(); }
+      catch (error) { log('coach-resume-drain-error', { code: error.code ?? 'ERROR' }); }
+    }
     parkWake?.();
+    relaunchPauseDeferredCoach();
   };
   const retryDecision = async (decisionId, { freshAuthorization = null } = {}) => {
     if (stopRequested || terminalOperation || (managed && control?.read().playState !== 'paused')) {
       throw codedError('INVALID_TRANSITION', '복구 대기 상태에서만 재시도할 수 있습니다.');
     }
     let pending = readLoopState()?.pendingDecision;
-    if (!pending || ![1, 2].includes(pending.schemaVersion) || pending.status !== 'recovery_required'
+    if (!pending || ![1, 2, 3].includes(pending.schemaVersion) || (pending.schemaVersion === 3 && (!validJevPending(pending) || !pending.retryable || pending.proposedAction)) || pending.status !== 'recovery_required'
       || pending.closeConfirmed !== true || pending.decisionId !== decisionId) {
       throw codedError('PLAYER_RECOVERY_REQUIRED', '종료 확인된 미해결 결정이 필요합니다.');
     }
+    if (pending.schemaVersion === 3 && freshAuthorization !== null) throw codedError('BAD_FRESH_AUTHORIZATION', 'JEV에는 LLM 세션이 없습니다.');
     if (freshAuthorization !== null && (
       typeof freshAuthorization !== 'object'
       || Array.isArray(freshAuthorization)
       || !['app', 'legacy', 'api'].includes(freshAuthorization.source)
       || !(typeof freshAuthorization.requestId === 'string' || freshAuthorization.requestId === null)
     )) throw codedError('BAD_FRESH_AUTHORIZATION', '새 세션 재시도 권한이 올바르지 않습니다.');
-    const check = validateDiagnostics(pending.diagnostics, pending);
+    const check = pending.schemaVersion === 3 ? {ok:true} : validateDiagnostics(pending.diagnostics, pending);
     if (!check.ok) pending = quarantineDiagnostics(pending, check.reason);
     const current = await runCli(['step']);
     if (current.next?.decisionId !== pending.decisionId || current.next?.toAct !== pending.playerId
@@ -6535,6 +6932,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
   const endGame = async (operationId) => {
+    const pending = readLoopState()?.pendingDecision;
+    if (pending?.schemaVersion === 3 && pending.status === 'unsafe' && pending.code !== 'JEV_ENGINE_APPLY_UNCONFIRMED') throw jevError(pending.code);
     if (!managed || control?.read().playState !== 'paused') throw codedError('INVALID_TRANSITION','종료 전에 일시정지가 필요합니다.');
     await retryControlWrite(()=>control.set('stopping', {terminalIntent:{operationId,kind:'end'}}));
     assertNotStopping();
@@ -6562,10 +6961,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (drained.userAction && !drained.userAction.timeout) out = await handleUserTurn(drained);
     }
-    await Promise.allSettled([...coachTasks, ...trainingTasks, ...auxiliaryTasks]);
+    await settleUntilIdle(
+      () => [...coachTasks, ...trainingTasks, ...auxiliaryTasks, ...(resolverPromise ? [resolverPromise] : [])],
+      () => stopRequested,
+    );
     if (stopRequested) return out;
     if (out?.gameOver || readJsonOptional(engineStatePath,'ENGINE_STATE')?.gameOver) {
       pauseRequested = false;
+      // The game-over branch registers held-back hands after the last hand.
+      openTrainingAdmission();
       resolvePause?.({state:'finalizing'}); resolvePause = null;
       return out;
     }
@@ -6579,6 +6983,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await runCli(['end','--result','abort','--operation-id',terminalOperation]);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,endedAt:isoNow(now)});
       await retryControlWrite(()=>control.set('aborted'));
+      await publishAbortEndView();
       await requestStop();
       return null;
     }
@@ -6599,13 +7004,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const republishAfterRejectedUserAction = async (code, submitted) => {
     const synchronized = await runCli(['step']);
-    const narration = code === 'VERSION_MISMATCH'
-      ? '게임 상태가 변경되어 최신 결정으로 다시 기다립니다.'
-      : '입력한 액션이 허용되지 않아 같은 결정을 다시 기다립니다.';
     const phase = synchronized.next?.decisionId === submitted.decisionId ? 'rejected' : 'consumed';
     const actionAck = userActionAck(submitted, phase, code);
     log('user-action-rejected', { code, decisionId: synchronized.next?.decisionId ?? null });
-    return publishEnvelope({ ...synchronized, actionAck }, ['--narration', narration, ...waitFlags()]);
+    const narrationCode = code === 'VERSION_MISMATCH' ? 'RESYNC' : 'ILLEGAL_RETRY';
+    return publishEnvelope({ ...synchronized, actionAck }, ['--narration-code', narrationCode, ...waitFlags()]);
   };
 
   const handleUserTurn = async (out) => {
@@ -6626,7 +7029,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
 
     const submitted = out.userAction;
+    if (out.controlInterrupted) return out;
     if (!submitted || submitted.timeout) {
+      const timeoutMs = Number(opts.actionTimeoutMs) || 0;
+      const humanTurn = readLoopState()?.humanTurn;
+      const remaining = timeoutMs > 0 && humanTurn?.decisionId === next.decisionId
+        ? humanTurn.deadlineAt - Date.now()
+        : timeoutMs > 0 ? timeoutMs : Infinity;
+      if (remaining > 0) {
+        log('user-wait-timeout', { decisionId: next.decisionId });
+        return waitOnlyForUser(out);
+      }
+      if (managed && control) {
+        const closed = control.closeDecision(next.decisionId);
+        if (!closed.closed) return out;
+        const drained = await waitOnlyForUser(out, { drain: true });
+        if (drained.userAction && !drained.userAction.timeout) return handleUserTurn(drained);
+        const legal = await runCli(['legal']);
+        const narrationCode = legal.canCheck ? 'TIMEOUT_CHECK' : 'TIMEOUT_FOLD';
+        return runAtomicStepPublish(
+          ['step', next.toAct ?? HOST_ID, '--force-default', '--expect-version', String(out.stateVersion)],
+          ['--narration-code', narrationCode, '--narration-params', JSON.stringify({ playerId: next.toAct ?? HOST_ID }), ...waitFlags()],
+        );
+      }
       log('user-wait-timeout', { decisionId: next.decisionId });
       return waitOnlyForUser(out);
     }
@@ -6649,13 +7074,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('user-note-ignored', { type: typeof submitted.note });
     }
 
-    const stepArgs = ['step', 'user', action.action];
+    const actor = next.toAct ?? HOST_ID;
+    const stepArgs = ['step', actor, action.action];
     if (action.amount !== undefined) stepArgs.push(String(action.amount));
     stepArgs.push('--expect-version', String(out.stateVersion));
-    if (action.note) {
+    if (action.note && actor === HOST_ID) {
       const metaPath = path.join(root, '.decision-meta.json');
       writeJsonAtomic(metaPath, { decisionId: next.decisionId, note: action.note });
       stepArgs.push('--meta-file', metaPath);
+    } else if (action.note && actor !== HOST_ID) {
+      log('user-note-ignored', { playerId: actor });
     }
     const actionAck = userActionAck(submitted, 'consumed', 'ACTION_APPLIED');
     try {
@@ -6716,14 +7144,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } catch { /* best-effort, mirrors persistCleanupFailure's log handling */ }
   };
 
-  // #192 L2: `cause` carries the original stop error's code only when there was one (the
-  // pure success-path caller has none — `stopError` is already null by the time it checks
-  // lock ownership, since an earlier stopError would have exited through the
-  // `persistCleanupFailure(stopError)` branch first).
-  const loopLockLostError = (cause) => codedError(
+  const loopLockLostError = () => codedError(
     'LOOP_LOCK_LOST',
     'loop 락을 잃어 stop 결과를 기록하지 않았습니다.',
-    cause ? { details: { cause } } : {},
   );
 
   const persistCleanupFailure = (error) => {
@@ -6771,11 +7194,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
+    if (activeDecision?.identity.runtime === 'jev') activeDecision.controller.abort();
+    resultHoldController?.abort();
+    policyPaceController?.abort();
     waitController?.abort();
     parkWake?.();
     resolvePause?.({state:"stopped"});
+    const stopAttempt = ++stopAttemptSequence;
     const attempt = (async () => {
-      let stopError = null;
+      const stopErrors = [];
       // #192 L2: even the "stopping" marker is a write into loop-state. An instance whose
       // loop lock was removed or replaced must not stamp it onto the state of whichever
       // instance owns the game now. Remember the loss so the final block below refuses too.
@@ -6787,9 +7214,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
           }
         } catch (error) {
-          stopError = error;
+          stopErrors.push(error);
         }
       }
+      if (jevRuntime) {
+        try { await jevRuntime.dispose(); } catch (error) { stopErrors.push(error); }
+      }
+      if (activeDecision?.identity.runtime === 'jev') await activeDecision.settled;
       const inFlight = atomicTransition;
       if (inFlight) {
         // The mutation and its matching publish are one recoverable unit. Its own
@@ -6832,7 +7263,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const undisposableCoachAdapter = hasCoachAdapterWithoutDispose || hasCoachAdapterWithUndeclaredConfirmation;
       const disposalResults = await Promise.allSettled([...adapterDisposals.values()]);
       const disposalFailure = disposalResults.find((result) => result.status === 'rejected');
-      if (disposalFailure) stopError ??= disposalFailure.reason;
+      for (const result of disposalResults) if (result.status === 'rejected') stopErrors.push(result.reason);
       // Coach work is nonblocking only with respect to the next hand. Shutdown still owns
       // every task until the upper adapter has cancelled it and its authority/file work settles.
       for (const handle of trainingAttempts.values()) {
@@ -6843,18 +7274,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       try {
         await terminateActiveChildren();
       } catch (error) {
-        stopError ??= error;
+        stopErrors.push(error);
       }
       try {
         await stopServer();
       } catch (error) {
-        stopError ??= error;
+        stopErrors.push(error);
       }
       if (!disposalFailure) adapters.clear();
       for (const canary of [...canaries]) {
         try { fs.unlinkSync(canary); } catch (error) {
           if (error.code !== 'ENOENT') {
-            stopError ??= error;
+            stopErrors.push(error);
             continue;
           }
         }
@@ -6866,10 +7297,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           fs.closeSync(logFd);
           logFd = null;
         } catch (error) {
-          stopError ??= error;
+          stopErrors.push(error);
         }
       }
-      if (stopError) {
+      if (stopErrors.length) {
+        let stopError = stopErrors[0];
+        if (jevRuntime) stopError = Object.assign(codedError(stopError.code ?? 'ERROR', stopError.message ?? 'Cleanup failed'), {
+          details: {...stopError.details, stopAttempt,
+            jevClosureOnly: stopErrors.length === 1 && stopError.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED',
+            stopFailures: stopErrors.map(error => ({code:error.code ?? 'ERROR'}))},
+        });
         throw persistCleanupFailure(stopError) ?? stopError;
       }
 
@@ -6932,7 +7369,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
               && ['gameEpoch','decisionId','generation'].every(key => pending[key] === ownedPlayerAttempt[key])
               && pending.status === 'running';
             pendingPatch = {pendingDecision: interrupted
-              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false}
+              ? {...pending, status: 'recovery_required', code: 'INTERRUPTED', closeConfirmed: true, softWait: false, ...(pending.schemaVersion === 3 ? {retryable:true} : {})}
               : pending};
           }
           writeLoopState({
@@ -6959,7 +7396,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // persistCleanupFailure — that would try to write a cleanupError, which is exactly
         // what "do not write loop-state when the lock is lost" forbids.
         logLoopLockLostOnStop();
-        throw loopLockLostError(null);
+        throw loopLockLostError();
       }
     })();
     stopPromise = attempt;
@@ -6990,6 +7427,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     hints,
     dealBias,
   } = {}) => {
+    if (opponentRuntime !== undefined) {
+      validateOpponentRuntime(opponentRuntime);
+      if (opts.opponentRuntime !== undefined && opponentRuntime !== opts.opponentRuntime) throw jevError('OPPONENT_RUNTIME_MISMATCH');
+      requestedOpponentRuntime = opponentRuntime;
+    }
     if (skipLock) {
       if (!lockHandle) throw codedError('LOCKED', 'launcher loop lock handle이 없습니다.');
     } else {
@@ -7004,6 +7446,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // engine init의 legacy readLock은 malformed/falsy 값을 부재로 접는다. 파괴적
       // archive/init 경계에 들어가기 전에 sidecar의 strict schema로 먼저 차단한다.
       readServerLock();
+      markBootStage('sweep');
       let sweepNotices = [];
       let sweepFailed = 0;
       let sweepDetails = [];
@@ -7025,6 +7468,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           log('profile-sweep-error', { code: error.code ?? 'ERROR' });
         }
       }
+      if (!preinitialized && (opponentRuntime ?? opponentRuntimeOf()) === 'jev' && ai !== 0) await (opts.jevPreflight ?? preflightJev)();
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
         stack, levelEvery, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
@@ -7057,7 +7501,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ...(initialized.archivedTo ? { archivedTo: initialized.archivedTo } : {}),
         notices: [],
         metrics: [],
+        metricsDropped: 0,
         playerBudget: undefined,
+        ...(opponentRuntimeOf() === 'jev' ? {jev: validateJevConfig(readJsonOptional(engineStatePath, 'ENGINE_STATE').config.jev), jevDiagnostics:{schemaVersion:1,entries:[],dropped:0}} : {}),
       });
       // #192 S4 E1: only an owner this instance itself just durably wrote counts —
       // writeLoopState throwing above (e.g. a write failure) leaves this line unreached.
@@ -7115,7 +7561,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           appendNotice(notice);
         }
       }
-      const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
+      const backgroundUpper = opponentRuntimeOf() !== 'llm';
+      let resolved = null;
+      if (!backgroundUpper) {
+        markBootStage('runtime-probe');
+        resolved = await createCanaryAndResolve('player+upper');
+      }
       const gtoNotice = gtoEvalNotice(readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config);
       const existingNotices = Array.isArray(readLoopState()?.notices) ? readLoopState().notices : [];
       const notices = [
@@ -7127,15 +7578,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // 하지 않아 평가가 왜 비어 있는지 알 길이 없었다.
         ...(trainingOn ? [] : ['이 세션은 레거시 --game-dir라 training이 꺼져 있습니다. 학습 평가를 남기려면 --store-dir로 시작하세요.']),
       ];
-      selectAdapters(resolved ?? {});
+      if (resolved) selectAdapters(resolved);
       writeLoopState({
         notices,
         playerRuntime: playerAdapter?.kind ?? null,
         upperRuntime: upperAdapter?.kind ?? null,
         opponentRuntime: opponentRuntimeOf(),
       });
-      if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
+      if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
+      if (backgroundUpper) startUpperResolveInBackground();
 
+      markBootStage('relay');
       const port = await ensureServer(initialized.sessionToken);
       writeLoopState({ port });
       installPracticeFocus({
@@ -7144,8 +7597,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         practiceFocusFile,
         onNotice: appendNotice,
       });
-      if (!policyMode) await warmPlayers();
+      if (opponentRuntimeOf() === 'llm') {
+        markBootStage('player-warmup');
+        await warmPlayers();
+      }
       const state = writeLoopState({ phase: 'playing' });
+      markBootStage('ready');
       log('bootstrap-playing', { port });
       return state;
     } catch (error) {
@@ -7155,7 +7612,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // #192 L2: same rule as resume — a lost loop lock must not hide why bootstrap
         // failed; other cleanup failures keep surfacing as before.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('bootstrap-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
+        log('bootstrap-cleanup-lock-lost', {});
       }
       throw error;
     }
@@ -7172,7 +7629,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         await assertServerBinding(lock);
         assertPinnedServerLock(pin);
         if (startTimeOf(lock.serverPid) !== startTime) throw codedError('SERVER_IDENTITY_MISMATCH', '종료 게임 relay identity 변경');
-        serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverAdopted = true;
+        serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverBindingVerified = {pid:serverPid,startTime,port:lock.port,sessionToken:lock.sessionToken};serverAdopted = true;
       }
     } finally {closeServerLockPin(pin);}
   };
@@ -7197,6 +7654,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await adoptAbortedRelay(engineState);
       writeLoopState({phase:'aborted',result:'abort',pendingDecision:undefined,aborting:undefined,endedAt:readLoopState()?.endedAt ?? isoNow(now)});
     } finally {unit.finish();}
+    await publishAbortEndView();
     await requestStop();
     return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
   };
@@ -7230,7 +7688,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (!matches) throw codedError('ABANDON_SIDECAR_CONFLICT','기존 감사 파일이 달라 덮어쓰지 않습니다.');
       }
       checkpoint={operationId,mode};
-      const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason:'BAD_PLAYER_RECOVERY'};
+      const reason=['BAD_PLAYER_RECOVERY','ROOM_UNBOUND'].includes(opts.abortUnrecoverable?.reason)
+        ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
+      const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason};
       state=writeLoopState({pendingDecision:undefined,aborting:checkpoint,abandonedPendingDecision:audit});
       preserveLoopState=false;
       logAbandonedRecovery(audit);
@@ -7245,6 +7705,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else writeLoopState({aborting:undefined});
     } finally {unit.finish();}
     if (checkpoint.mode==='abort') {
+      await publishAbortEndView();
       await requestStop();
       return {ok:true,code:'GAME_ENDED',resumed:false,phase:'aborted'};
     }
@@ -7259,6 +7720,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
       const policyMode = opponentRuntimeOf() === 'policy'
         || existingState.opponentRuntime === 'policy';
+      markBootStage('runtime-probe');
       const resolved = await createCanaryAndResolve('upper-only');
       selectAdapters(resolved ?? {});
       const notices = [
@@ -7280,8 +7742,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         assertSelfOpponentsConsistent({ root, players });
         stampPlayerPolicies(root, { onNotice: appendNotice });
       }
+      markBootStage('relay');
       const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
-      return writeLoopState({ port });
+      const written = writeLoopState({ port });
+      markBootStage('ready');
+      return written;
     }
     if (phase === 'done') {
       await ensureStudyForOwner();
@@ -7298,7 +7763,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!engineState) throw codedError('NO_GAME', 'engine state가 없습니다.');
 
     const policyMode = opponentRuntimeOf() === 'policy' || existingState.opponentRuntime === 'policy';
-    const resolved = await createCanaryAndResolve(policyMode ? 'upper-only' : 'player+upper');
+    markBootStage('runtime-probe');
+    const resolved = await createCanaryAndResolve(opponentRuntimeOf() === 'llm' ? 'player+upper' : 'upper-only');
     selectAdapters(resolved ?? {});
     const notices = [
       ...(Array.isArray(existingState.notices) ? existingState.notices : []),
@@ -7308,13 +7774,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       notices,
       playerRuntime: playerAdapter?.kind ?? null,
       upperRuntime: upperAdapter?.kind ?? null,
-      opponentRuntime: policyMode ? 'policy' : (existingState.opponentRuntime ?? 'llm'),
+      opponentRuntime: opponentRuntimeOf(),
       ...(existingState.halt?.code === 'NO_PLAYER_RUNTIME' && playerAdapter ? { halt: undefined } : {}),
     });
-    if (!policyMode && !playerAdapter) await haltNoPlayer(notices);
+    if (opponentRuntimeOf() === 'llm' && !playerAdapter) await haltNoPlayer(notices);
     const desiredPort = Number.isSafeInteger(existingState.port) && existingState.port > 0
       ? existingState.port
       : requestedPort;
+    markBootStage('relay');
     const port = await ensureServer(engineState.sessionToken, { port: desiredPort });
     writeLoopState({ port });
     // #192 D6 (FO-3): persisted-coach reclaim is a playing-resume step, not a player-restore
@@ -7327,10 +7794,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const players = readJsonOptional(playersPath, 'PLAYERS') ?? [];
       assertSelfOpponentsConsistent({ root, players });
       stampPlayerPolicies(root, { onNotice: appendNotice });
-    } else {
+    } else if (opponentRuntimeOf() === 'llm') {
+      markBootStage('player-warmup');
       await restorePlayers();
     }
-    return writeLoopState({ phase: 'playing' });
+    const playing = writeLoopState({ phase: 'playing' });
+    markBootStage('ready');
+    return playing;
   };
 
   const resume = async ({ skipLock = false } = {}) => {
@@ -7372,7 +7842,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // first hint capability await can enter shutdown and serialize its bytes.
       if (state?.phase !== 'done' && state?.pendingDecision) {
         const p = state.pendingDecision;
-        if (![1, 2].includes(p.schemaVersion) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
+        if (![1, 2, 3].includes(p.schemaVersion) || (p.schemaVersion === 3 && !validJevPending(p)) || p.gameEpoch !== canonicalEpoch || !Number.isSafeInteger(p.generation) || p.generation < 1
           || !['running', 'recovery_required', 'retry_authorized', 'unsafe'].includes(p.status)) {
           try {
             writeContained(root,['loop-state.unverified.json'],fs.readFileSync(loopStatePath),{mode:'create'});
@@ -7384,6 +7854,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
           throw codedError('BAD_PLAYER_RECOVERY', '미해결 결정 기록을 검증할 수 없습니다.');
         }
+      }
+      const resolvedOpponentRuntime = resolveOpponentRuntime(engineState, { loop: state, setup: readJsonOptional(path.join(root, '.app-setup.json'), 'APP_SETUP'), explicit: opts.opponentRuntime });
+      // The loop copy decides: once it holds the current descriptor, nothing is recorded again.
+      const jevRoll = resolvedOpponentRuntime === 'jev' ? jevRollForwardOf(engineState, state) : null;
+      if ((engineState.config?.humanCount ?? 1) > 1 && !managed) {
+        throw codedError('MULTIPLAYER_REQUIRES_APP', '멀티플레이어 세션은 앱으로만 재개합니다.');
       }
       opts.hints=checkHintResume(engineState.config, opts.hints);
       opts.dealBias=checkDealBiasResume(engineState.config,opts.dealBias);
@@ -7400,11 +7876,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           p = withoutAuthorization;
           state = writeLoopState({pendingDecision:p});
         }
-        const check = validateDiagnostics(p.diagnostics, p);
+        const check = p.schemaVersion === 3 ? {ok:true} : validateDiagnostics(p.diagnostics, p);
         if (!check.ok) { p = quarantineDiagnostics(p, check.reason); state = readLoopState(); }
         const applied = [...(engineState.hand?.actions ?? []), ...(engineState.lastHand?.actions ?? [])]
           .find((action) => action.decisionId === p.decisionId && action.playerId === p.playerId);
-        if (applied && p.proposedAction && p.closeConfirmed === true
+        if (applied && p.proposedAction && (p.schemaVersion === 3 || p.closeConfirmed === true)
           && applied.action === p.proposedAction.action
           && (applied.action !== 'raise' || applied.amount === p.proposedAction.amount)) {
           state = writeLoopState({ pendingDecision: undefined });
@@ -7412,11 +7888,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         } else {
         // A persisted running child has no post-crash close receipt. Do not
         // convert parent death into permission to spawn another model call.
-        if (p.status === 'running') state = writeLoopState({ pendingDecision: { ...p, softWait: false,
+        if (p.schemaVersion === 3) {
+          const canRecover = !p.proposedAction && (p.status !== 'unsafe' || p.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED');
+          state = writeLoopState({pendingDecision:{...p,softWait:false,
+            status:canRecover ? 'recovery_required' : 'unsafe',closeConfirmed:canRecover || !!p.proposedAction,
+            retryable:canRecover && (p.status === 'recovery_required' ? p.retryable : true),
+            code:canRecover ? (p.status === 'recovery_required' ? p.code : 'INTERRUPTED') : 'JEV_ENGINE_APPLY_UNCONFIRMED'}});
+        } else if (p.status === 'running') state = writeLoopState({ pendingDecision: { ...p, softWait: false,
           status: p.closeConfirmed === true ? 'recovery_required' : 'unsafe',
           code: p.closeConfirmed === true ? 'INTERRUPTED' : 'CHILD_CLOSE_UNCONFIRMED' } });
-        if (p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
-        if (managed) pauseRequested = true;
+        if (p.schemaVersion !== 3 && p.status === 'retry_authorized') state = writeLoopState({ pendingDecision: { ...p, softWait: false, status: 'recovery_required' } });
+        if (managed) { closeTrainingAdmission(); pauseRequested = true; }
         }
       }
       if (state?.playerBudget) playerBudget(state.playerBudget);
@@ -7455,6 +7937,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           : []),
         ...trainingMigrationNotices,
       ])];
+      // Conditional spread only: writeLoopState deletes keys whose patch value is undefined.
+      // The notice rides the same write as the marker it announces.
+      const jevRollPatch = jevRoll?.rolledForward
+        ? { jev: jevRoll.config, jevRolledForward: { from: jevRoll.from, at: isoNow(now) },
+          notices: [...new Set([...resumeNotices, JEV_ROLL_FORWARD_NOTICE])] } : {};
       if (trainingMigrationError) {
         const code = trainingMigrationError.code ?? 'TRAINING_MIGRATION_FAILED';
         const message = `training authority 마이그레이션을 완료할 수 없습니다 (${code}).`;
@@ -7467,6 +7954,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
 
       const ownerSessionId = randomUUID();
+      // Logged before the marker write: a crash in between leaves no marker, so the next
+      // resume records again (marker exactly once, log at least once).
+      if (jevRoll?.rolledForward) log('jev-config-rolled-forward', { from: jevVersions(jevRoll.from), to: jevVersions(jevRoll.config) });
       if (!state) {
         const phase = engineState.gameOver ? 'finalizing' : 'playing';
         state = writeLoopState({
@@ -7483,10 +7973,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           startedAt: isoNow(now),
           notices: resumeNotices,
           metrics: [],
-          opponentRuntime: engineState.policySeed ? 'policy' : requestedOpponentRuntime,
+          metricsDropped: 0,
+          opponentRuntime: resolvedOpponentRuntime,
+          ...(resolvedOpponentRuntime === 'jev' ? { jev: jevRoll.config, jevDiagnostics: {schemaVersion:1,entries:[],dropped:0}, ...jevRollPatch } : {}),
         });
       } else {
-        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices });
+        state = writeLoopState({ ownerSessionId, stopping: false, notices: resumeNotices, opponentRuntime: resolvedOpponentRuntime, ...jevRollPatch });
       }
       // #192 S4 E1: same rule as bootstrap — only after the write above has actually
       // succeeded does this instance count `ownerSessionId` as its own issued owner. A
@@ -7510,8 +8002,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         } catch (error) {
           const code = error.code ?? 'TRAINING_OWNER_TAKEOVER_FAILED';
           const message = `training owner 교대를 완료할 수 없습니다 (${code}).`;
+          // Start from the notices just written, which may carry the roll-forward notice.
           const notices = [...new Set([
-            ...resumeNotices,
+            ...(Array.isArray(state.notices) ? state.notices : resumeNotices),
             `training owner halt: ${code}`,
           ])];
           state = writeLoopState({
@@ -7546,7 +8039,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ? async () => {
             const persisted = await reclaimPersistedCoachWorkersForResume(
               Number(engineState.lastHand?.handNo ?? 0),
-              { policyMode: opponentRuntimeOf() === 'policy' },
+              { policyMode: opponentRuntimeOf() !== 'llm' },
             );
             if (!persisted.confirmed) throw haltForPlayingCoachRecovery(persisted);
             if (priorPlayingRecoveryHalt && persisted.authorityPresent !== true) {
@@ -7593,7 +8086,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // resume (for example FINALIZATION_ABORTED) stays the reported error. Any other
         // cleanup failure keeps surfacing exactly as before this slice.
         if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
-        log('resume-cleanup-lock-lost', { cause: stopError?.details?.cause ?? null });
+        log('resume-cleanup-lock-lost', {});
       }
       throw translated;
     }
@@ -7647,7 +8140,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!opts.retryDecisionId) throw codedError('PLAYER_RECOVERY_REQUIRED', '미해결 결정을 보존했습니다. --resume --retry-decision <decisionId>로 재시도하세요.');
       await retryDecision(opts.retryDecisionId, {freshAuthorization: opts.freshAuthorization ?? null});
     }
-    if (managed && pauseRequested) { await pauseBarrier(await runCli(['step'])); if (stopRequested) return readLoopState(); }
+    if (managed && pauseRequested) {
+      // A restored paused session must publish a verified current projection
+      // before parking, including legacy snapshots without a viewer anchor.
+      const current = await runCli(['step']);
+      if (fs.existsSync(path.join(root, '.publish-attempt.json'))) await publishEnvelope(current, ['--retry']);
+      await publishEnvelope(current, ['--view-only']);
+      await pauseBarrier(current);
+      if (stopRequested) return readLoopState();
+    }
     if (resumeEntryPending) {
       const current = await runCli(['step']);
       if (fs.existsSync(path.join(root, '.publish-attempt.json'))) {
@@ -7683,10 +8184,32 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopRequested || out === null) break;
       await checkArchivePending(out);
       if (out.handOver) {
-        const userBusted = Array.isArray(out.control?.bust) && out.control.bust.includes('user');
-        const ending = out.gameOver || userBusted;
-        if (ending) ensureFinalizationResultWaitCutoff();
-        launchTrainingPipeline(out.handNo);
+        const ending = out.gameOver;
+        if (ending) {
+          gameOverPending = true;
+          // The last hand explains first. Its pipeline starts here, before the
+          // probe and coach waits (outside the finalization clock), and
+          // explanations still waiting at the lock yield to it from now on;
+          // other hands may keep evaluating and solving.
+          finalizationPriorityHand = out.handNo;
+          endFinalizationPriorityAfter(out.handNo, joinOrLaunchTraining(out.handNo));
+          // A pending pause cannot park any more: release it first so coach work
+          // it deferred runs now, before the finalization clock.
+          releasePauseForFinalization();
+          const relaunched = relaunchPauseDeferredCoach();
+          // R2: never let the background probe spend the finalization budget.
+          await settleUpperResolution();
+          if (stopRequested) break;
+          // Coach work a slow probe or a pause held back gets its own time (bounded
+          // by the coach generation limit) instead of the last hand's result-wait
+          // window.
+          if (coachProbeBacklog || relaunched > 0) {
+            await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), COACH_BACKLOG_WAIT_MS);
+            if (stopRequested) break;
+          }
+          ensureFinalizationResultWaitCutoff();
+        }
+        if (!ending) launchTrainingPipeline(out.handNo);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
         try {
           await heartbeatCoach();
@@ -7698,18 +8221,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         launchCoachPipeline(out.handNo);
         if (ending) {
           pauseRequested=false;resolvePause?.({state:'finalizing'});resolvePause=null;
+          relaunchPauseDeferredCoach();
           // §5 finalizing 1: handOver 분기가 이미 async로 띄운 마지막 핸드 generation을
           // 그대로 둔다. 여기서 reserve를 다시 부르면 그 prior가 discard된다.
           writeLoopState({ phase: 'finalizing', handNo: out.handNo });
           return await runFinalization();
         }
         if (stopRequested) break;
+        if (resultHoldState && !resultHoldState.skipped) {
+          await paceSleep(Math.max(0, resultHoldState.until - paceNow()), 'result');
+          if (stopRequested) break;
+          out = await pauseBarrier(out);
+          if (stopRequested || out === null) break;
+        }
         out = await pauseBarrier(out);
         if (stopRequested || out === null) break;
+        resultHoldState = null;
         out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
           const narration = started.events?.find((event) => event.type === 'level_up');
           return narration
-            ? ['--narration', `블라인드 ${narration.sb}/${narration.bb}`, ...waitFlags()]
+            ? ['--narration-code', 'LEVEL_UP', '--narration-params', JSON.stringify({ sb: narration.sb, bb: narration.bb }), ...waitFlags()]
             : waitFlags();
         });
         continue;
@@ -7729,17 +8260,28 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('BAD_NEXT', '다음 행동자 계약이 ai/user가 아닙니다.');
       }
 
+      if (opponentRuntimeOf() !== 'llm' && pace.aiActionIntervalMs > 0 && lastPlayPublishAt !== null) {
+        await paceSleep(Math.max(0, pace.aiActionIntervalMs - (paceNow() - lastPlayPublishAt)), 'policy');
+        if (stopRequested) break;
+        out = await pauseBarrier(out);
+        if (stopRequested || out === null) break;
+        if (out.handOver || out.next?.kind !== 'ai') continue;
+      }
       const next = out.next;
       let decision;
       try {
         decision = opponentRuntimeOf() === 'policy'
           ? await decideWithPolicy(next, out.stateVersion)
+          : opponentRuntimeOf() === 'jev' ? await decideWithJev(next, out.stateVersion)
           : await decideWithWatchdog(next, out.stateVersion);
       } catch (error) {
         if (stopRequested && error.code !== 'STOPPING') break;
         if (error.code !== 'VERSION_MISMATCH') throw error;
         const synchronized = await runCli(['step']);
-        writeLoopState({ pendingDecision: undefined });
+        if (opponentRuntimeOf() !== 'jev' || sameJevIdentity(readLoopState()?.pendingDecision, jevResyncIdentity)) {
+          writeLoopState({ pendingDecision: undefined });
+          jevResyncIdentity = null;
+        } else throw codedError('STALE_PLAYER_DECISION', 'JEV resync identity changed');
         log('version-resync', {
           staleDecisionId: next.decisionId,
           stateVersion: synchronized.stateVersion,
@@ -7750,6 +8292,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (decision.kind === 'recovery_required') {
         if (stopRequested) break;
         if (!managed) throw codedError('PLAYER_RECOVERY_REQUIRED', 'LLM 결정이 미해결 상태로 저장되었습니다. 명시적으로 재시도하거나 종료하세요.');
+        // An automatic recovery pause closes the training gate like a user pause.
+        closeTrainingAdmission();
         pauseRequested = true;
         await retryControlWrite(() => control.set('pausing', { pauseIntent: true }));
         out = await publishEnvelope(await runCli(['step']), ['--view-only']);
@@ -7760,7 +8304,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const metric = {
         playerId: next.toAct,
         decisionId: next.decisionId,
-        runtime: opponentRuntimeOf() === 'policy' ? 'policy' : playerAdapter.kind,
+        runtime: opponentRuntimeOf() === 'llm' ? playerAdapter.kind : opponentRuntimeOf(),
         outcome: decision.outcome,
         elapsedMs,
         modelMs: decision.modelMs,
@@ -7795,12 +8339,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     resume,
     run,
     coachPipeline,
-    pause, resumePlay, retryDecision, endGame,
+    pause, resumePlay, retryDecision, endGame, skipHandResult, interruptDecision,
     get pendingDecision() { return readLoopState()?.pendingDecision ?? null; },
     get playState() { return control?.read().playState ?? null; },
     requestStop,
     get stopping() { return stopRequested; },
     get serverPid() { return serverPid; },
+    // Host lobby read-only progress (tools/session-manager.js snapshot). No
+    // tokens, paths or PIDs: stage names, runtime names, counts and times.
+    get bootStage() {
+      return bootState ? { ...bootState, ...(bootProbe ? { probe: { ...bootProbe } } : {}) } : null;
+    },
+    get pauseProgress() {
+      const waiting = { coach: coachTasks.size, training: trainingTasks.size, evaluate: 0, solve: 0, explain: 0,
+        other: auxiliaryTasks.size, resolver: resolverPromise !== null };
+      for (const key of trainingAttempts.keys()) {
+        const kind = String(key).slice(String(key).lastIndexOf(':') + 1);
+        if (kind === 'evaluate' || kind === 'solve' || kind === 'explain') waiting[kind] += 1;
+      }
+      return waiting;
+    },
+    get gameOverPending() { return gameOverPending; },
+    get upperStatus() {
+      if (resolverPromise !== null) return 'probing';
+      if (!upperResolved) return null;
+      return upperAdapter && !coachAdapterDisabled ? 'ready' : 'unavailable';
+    },
+    get noticesProjected() { return projectNotices(readLoopState()?.notices); },
   };
 }
 
@@ -7811,7 +8376,21 @@ export async function initializePreparedSession(gameDir, args) {
       if(error || caps?.preActionHints!==1 || caps?.hintContractVersion!==1) reject(codedError('HINT_CAPABILITY_UNAVAILABLE','engine hint capability missing'));else resolve();
     }));
   }
+  if (args.opponentRuntime === 'jev') {
+    const file = path.join(gameDir, '.jev-config.json');
+    writeJsonAtomic(file, validateJevConfig(args.jevConfig ?? JEV_CONFIG));
+    args = { ...args, jevConfigFile: file };
+  }
   const initArgs = ['init', '--ai', String(args.ai), '--game-dir', gameDir, ...engineInitFlags(args)];
+  if (Array.isArray(args.participants) && args.participants.length >= 1) {
+    const file = path.join(gameDir, '.participants.json');
+    writeJsonAtomic(file, {
+      schemaVersion: 1,
+      hostName: args.hostName ?? '호스트',
+      participants: args.participants,
+    });
+    initArgs.push('--participants-file', file);
+  }
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [ENGINE_CLI, ...initArgs], childSpawnOptions({
       encoding: 'utf8',
@@ -7834,7 +8413,8 @@ export async function initializePreparedSession(gameDir, args) {
 }
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
-  loopOptions = { ...loopOptions, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+  if (!args.resume && args.opponentRuntime === 'jev' && args.ai !== 0) await (loopOptions.jevPreflight ?? preflightJev)();
+  loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
     ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
@@ -7965,12 +8545,7 @@ async function main() {
     const args = applyModeDefaults(parseGameLoopArgs(process.argv.slice(2)));
     validateSelfOpponentArgs(args);
     if (!args.resume && args.ai === undefined) throw codedError('USAGE', '--ai가 필요합니다.');
-    const resolver = ({ need, canaryAbsPath, registerAdapter }) => resolveRuntimes({
-      need,
-      canaryAbsPath,
-      preferred: args.playerRuntime ?? null,
-      onAdapterCreated: registerAdapter,
-    });
+    const resolver = createProductionResolver({ preferred: args.playerRuntime ?? null });
     ({ loop, preparedInitialization } = await prepareGameSession(args, { resolver }));
     process.once('SIGTERM', () => {
       if (handlingSignal) return;

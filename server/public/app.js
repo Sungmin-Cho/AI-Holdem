@@ -1,15 +1,27 @@
-import {appGameId, appEpoch, appFetch, eventStream} from './app-transport.js';
+import {finalScreen} from './final-summary.js';
+import {paintFinalPanel} from './final-panel.js';
+import {buildHandResult} from './hand-result.js';
+import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
-import { applyTrainingAnnotation, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
+import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
+import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
+import { mountReplayer } from './replayer.js';
+import { helpButton } from './help-panel.js';
+import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
+import { DISPLAY_KEYS, saveDisplaySetting } from './display-settings.js';
 
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink } from './table-controls.js';
-import { createActionController } from './action-controller.js';
-import {formatAmount, formatSignedAmount, readPreference, writePreference} from './chip-format.js';
-import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint} from './seat-format.js';
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { createActionController, formatActionNotice } from './action-controller.js';
+import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
+import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
+import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
+import {createShellEmbed} from './shell-embed.js';
+import {renderCard, renderMiniCard} from './card-render.js';
+import {diffViews, createMotionPlayer} from './motion.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SUIT = {
@@ -21,7 +33,22 @@ const SUIT = {
 const STREET = { preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버' };
 const ACTION = { fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' };
 
-const ui = { hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+// Inside the host lobby the parent header shows hand, blinds, net and connection
+// once it answers the handshake; until then (or without a parent) this page keeps
+// its own top bar.
+const shellEmbed = createShellEmbed({
+  gameId: appGameId,
+  gameEpoch: appEpoch,
+  onReady: () => document.body.classList.add('embedded'),
+});
+let shellConn = 'retry';
+let shellRetries = 0;
+const ui = { sessionEnded: false, handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+let serverOffsetMs = 0;
+let announcedDeadline = null;
+let renderedDeadlineKey = null;
+let thinkingTurn = null;
+let skipHiddenForHand = null;
 let pendingAction = true;
 let revisionAtHintClear=-1;
 const hintState=createHintState();
@@ -51,6 +78,47 @@ let displayUnit = readPreference();
 const amountEditor = createAmountEditor();
 
 const $ = (id) => document.getElementById(id);
+if (participantMode) {
+  for (const id of ['tab-coach', 'tab-training', 'panel-coach', 'panel-training', 'study-open']) {
+    const node = $(id);
+    if (node) node.hidden = true;
+  }
+  const intent = $('intent-note');
+  if (intent) {
+    intent.hidden = true;
+    intent.closest('.intent-note-wrap')?.setAttribute('hidden', '');
+  }
+  document.body.classList.add('participant-mode');
+}
+// "5,000 칩으로" / "100 BB로": the particle follows the unit's final sound.
+const withParticle = (amount) => `${amount}${/칩$/.test(amount) ? '으로' : '로'}`;
+// The cash reset line lives in the result strip; hold it across strip rebuilds.
+const cashResetNote = $('cash-reset-note');
+// Decorative motion: off for reduced-motion users and the "reduce" display setting.
+const motion = createMotionPlayer({ enabled: () => !matchMedia('(prefers-reduced-motion: reduce)').matches && document.documentElement.dataset.motion !== 'reduce' });
+let motionInput = { source: 'snapshot', contiguous: false };
+let motionFrame = null;
+let awardBaseline = null;
+// Inside paint() the award waits for paint's own motion.play() (which ends
+// running motion first); the 250ms result repaint plays it at once.
+let painting = false;
+let pendingAward = null;
+// Set while a same-revision snapshot repaints: nothing moved, so nothing is cancelled.
+let keepingMotion = false;
+function playAwardSoon(playerIds) {
+  if (painting) pendingAward = playerIds;
+  else motion.playAward(playerIds, { table: $('table') });
+}
+// First-turn guide: a card at the top of the side panel, outlines only.
+const onboarding = createOnboarding({
+  steps: participantMode ? PARTICIPANT_ONBOARDING_STEPS : undefined,
+  container: () => document.querySelector('aside.side'),
+  targets: {
+    seat: () => document.querySelector('.seat.is-hero .plate'),
+    actions: () => $('action-bar'),
+    side: () => document.querySelector('.side .tabs'),
+  },
+});
 const dialogs = createDialogController(document, () => {
   if(openReplayHandNo != null && $('replay-overlay').hidden)openReplayHandNo=null;
   queueMicrotask(()=>paintReview(ui.view));
@@ -115,39 +183,18 @@ function cardLabel(parsed) {
   return `${parsed.rank} ${parsed.suit?.name ?? ''}`.trim();
 }
 
-function cardNode(code, { faceDown = false, small = false, hero = false, slot = false } = {}) {
-  const node = el('div', 'card');
-  if (small) node.classList.add('card--sm');
-  if (hero) node.classList.add('card--hero');
-  if (slot) {
-    node.classList.add('card--slot');
-    return node;
-  }
-  if (faceDown || !code) {
-    node.classList.add('card--back');
-    return node;
-  }
-  const parsed = formatCard(code);
-  if (parsed.red) node.classList.add('is-red');
-  node.setAttribute('role', 'img');
-  node.setAttribute('aria-label', cardLabel(parsed));
-  const rank = el('span', parsed.rank === '10' ? 'card-rank is-ten' : 'card-rank', parsed.rank);
-  node.append(rank);
-  if (parsed.suit) node.append(svgUse(parsed.suit.id, 'card-suit'), svgUse(parsed.suit.id, 'card-pip'));
-  return node;
+// One renderer for every card surface (card-render.js): suit classes drive the
+// four-/two-colour deck preference through design tokens.
+function cardNode(code, options = {}) {
+  return renderCard(code, options);
 }
 
 function miniCard(code) {
-  const parsed = formatCard(code);
-  const node = el('span', parsed.red ? 'mini-card is-red' : 'mini-card');
-  node.setAttribute('aria-label', cardLabel(parsed));
-  node.append(document.createTextNode(parsed.rank));
-  if (parsed.suit) node.append(svgUse(parsed.suit.id, 'mini-suit'));
-  return node;
+  return renderMiniCard(code);
 }
 
 function playerName(playerId) {
-  if (playerId === 'user') return '나';
+  if (playerId === viewerId(ui.view)) return '나';
   const seat = ui.view?.seats?.find((s) => s.playerId === playerId);
   return seat?.name ?? playerId ?? '';
 }
@@ -171,7 +218,7 @@ function revealedCards() {
 }
 
 function myBetOf(view) {
-  const seat = view?.seats?.find((s) => s.playerId === 'user');
+  const seat = view?.seats?.find((s) => s.playerId === viewerId(view));
   return seat?.bet ?? 0;
 }
 
@@ -181,12 +228,35 @@ function handsUntilLevel(view) {
   return every - ((view.handNo - 1) % every);
 }
 
-function setConn(on) {
+function setConn(on, text = null) {
   if(!on)hideHint();
   const box = $('conn');
-  $('conn-text').textContent = on ? '연결됨' : '재접속 중…';
+  $('conn-text').textContent = text ?? (on ? '연결됨' : '재접속 중…');
   box.classList.toggle('on', on);
   box.classList.toggle('off', !on);
+  shellConn = on ? 'on' : ui.sessionEnded ? 'ended' : 'retry';
+  if (on) shellRetries = 0;
+  shellEmbed.send(shellContext(ui.view));
+}
+
+/** Public header context for the lobby shell: no cards, decisions or tokens,
+ * and the session net only for the viewer's own seat. */
+function shellContext(view) {
+  const cash = view?.mode === 'cash-training';
+  const net = view?.sessionNet?.[viewerId(view)];
+  return {
+    handNo: Number.isSafeInteger(view?.handNo) ? view.handNo : null,
+    handLimit: Number.isSafeInteger(view?.handLimit) ? view.handLimit : null,
+    level: view && !cash && Number.isSafeInteger(view.level) ? view.level + 1 : null,
+    blinds: Array.isArray(view?.blinds) && view.blinds.length === 2 ? [view.blinds[0], view.blinds[1]] : null,
+    levelLeft: view && !cash ? handsUntilLevel(view) : null,
+    sessionNet: cash && !isSpectating(view) && Number.isSafeInteger(net) ? net : null,
+    conn: ui.sessionEnded ? 'ended' : shellConn,
+    retryCount: shellRetries,
+    gameOver: view?.gameOver === true,
+    handInProgress: view?.handInProgress !== false,
+    mode: view?.mode ?? null,
+  };
 }
 
 function showBootError(text) {
@@ -203,10 +273,20 @@ function paintParticipants(view) {
   const signature=JSON.stringify([view?.seats,view?.handInProgress,view?.toAct,displayUnit,view?.blinds]);
   if(list._signature===signature)return;
   list._signature=signature;list.replaceChildren();
-  for(const seat of view?.seats??[]) {
-    const row=el('div','participant-row');
-    row.append(el('strong','',seat.name??seat.playerId),el('span','',seatPresentation(view,seat).status),amountNode(seat.stack));
-    list.append(row);
+  if(view?.seats?.length) {
+    const table=el('table','participants-table');
+    const head=el('tr');
+    for(const label of ['이름','상태','스택'])head.append(el('th','',label));
+    table.append(el('caption','',participantSummary(view)),el('thead'),el('tbody'));
+    table.tHead.append(head);
+    for(const seat of view.seats) {
+      const row=el('tr',`participant-row${seat.playerId===viewerId(view)?' is-hero':''}`);
+      const stack=el('td');stack.append(amountNode(seat.stack));
+      row.append(el('th','',seat.playerId===viewerId(view)?'나':(seat.name??seat.playerId)),el('td','',seatPresentation(view,seat).status),stack);
+      row.firstChild.scope='row';
+      table.tBodies[0].append(row);
+    }
+    list.append(table);
   }
   paintSeatDetails();
 }
@@ -262,11 +342,16 @@ function paintTop(view) {
   $('game-mode').textContent = cash ? '캐시 연습' : '토너먼트';
   if(view?.dealBias && view.dealBias!=='off') $('game-mode').textContent += ' · 유리한 딜 (평가 제외)';
   for (const row of document.querySelectorAll('[data-tournament-meta]')) row.hidden = cash;
-  const net = view?.sessionNet?.user;
-  $('session-net').closest('.meta-seg').hidden = !cash;
+  const net = view?.sessionNet?.[viewerId(view)];
+  $('session-net').closest('.meta-seg').hidden = !cash || isSpectating(view);
   $('session-net').textContent = amountText(net, view?.blinds?.[1], true);
   $('participants-summary').textContent = view ? participantSummary(view) : '참가자 —';
-  $('cash-reset-note').hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
+  cashResetNote.hidden = !(cash && view.handInProgress === false && !view.gameOver && view.handNo > 0);
+  // Cash stacks are already restored in the view, so the viewer's stack is the next start.
+  const restored = view?.seats?.find((seat) => seat.playerId === viewerId(view))?.stack;
+  cashResetNote.textContent = Number.isSafeInteger(restored)
+    ? `다음 핸드는 ${withParticle(formatAmount(restored, view.blinds?.[1], displayUnit).primary)} 다시 시작합니다.`
+    : '다음 핸드는 시작 스택으로 다시 시작합니다.';
   $('learning-scope').textContent = cash
     ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
     : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
@@ -278,8 +363,11 @@ function paintTop(view) {
 
 function paintBoard(view) {
   const board = $('board');
-  board.replaceChildren();
   const cards = view?.board ?? [];
+  const signature = JSON.stringify(cards);
+  if (board.dataset.cards === signature) return;
+  board.dataset.cards = signature;
+  board.replaceChildren();
   for (let i = 0; i < 5; i += 1) {
     board.append(cards[i] ? cardNode(cards[i]) : cardNode(null, { slot: true }));
   }
@@ -299,7 +387,8 @@ function paintPots(view) {
   const pot = aggregatePot(view);
   box.hidden = pot.kind === 'hidden';
   if (pot.kind !== 'ready') {box.append(el('span', 'pot-label', pot.kind === 'mismatch' ? '팟 정보 확인 중' : '팟 정보 없음'));return;}
-  box.append(el('span', 'pot-label', view.handInProgress === true ? '현재 베팅 포함 총액' : '팟 합계'), amountNode(pot.total, view.blinds?.[1], 'pot-amount num'));
+  // "팟" during the hand already counts this street's bets (the usual table convention).
+  box.append(el('span', 'pot-label', view.handInProgress === true ? '팟' : '팟 합계'), amountNode(pot.total, view.blinds?.[1], 'pot-amount num'));
   if (showPotBreakdown(view)) {
     const detail = el('details', 'pot-detail');detail.append(el('summary', '', '정산 팟 상세'));
     detail.open = Boolean(wasOpen);
@@ -333,7 +422,11 @@ function avatarRing() {
 
 function seatCards(seat, view, revealed, mucks) {
   const box = el('div', 'seat-cards');
-  if (seat.playerId === 'user') {
+  if (isSpectating(view)) {
+    for (const code of view.holeCardsByPlayerId[seat.playerId] ?? []) box.append(cardNode(code, {small:true}));
+    return box;
+  }
+  if (seat.playerId === viewerId(view)) {
     for (const code of view.myCards ?? []) box.append(cardNode(code, { hero: true }));
     return box;
   }
@@ -363,14 +456,15 @@ function paintSeats(view) {
   $('table').classList.toggle('is-crowded', seats.length >= 7);
   if (!seats.length) {seatRoot.replaceChildren();paintParticipants(view);return;}
 
-  const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === 'user'));
+  const userIdx = Math.max(0, seats.findIndex((s) => s.playerId === viewerId(view)));
   const { map: revealed, mucks } = revealedCards();
   const n = seats.length;
   const positions = blindPositions(view);
+  const lastActions = lastActionsBySeat(ui.log);
 
   for (let i = 0; i < n; i += 1) {
     const seat = seats[(userIdx + i) % n];
-    const isHero = seat.playerId === 'user';
+    const isHero = seat.playerId === viewerId(view);
     const state = seatPresentation(view, seat);
     const active = state.active;
 
@@ -382,7 +476,8 @@ function paintSeats(view) {
     if (state.folded) node.classList.add('is-folded');
     if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
-    const at = ovalPoint(i, n, 38, 40);
+    // Leave room for rotated hero cards beside the lower seats on dense tables.
+    const at = ovalPoint(i, n, n >= 8 ? 40 : 38, 40);
     node.dataset.side = at.x < 50 ? 'left' : 'right';
     node.dataset.betBand = at.y > 75 ? 'lower' : at.y < 16 ? 'top' : at.y < 40 ? 'upper' : 'middle';
     node.dataset.betEdge = at.y < 25 || at.y > 75 ? 'bottom' : at.x < 50 ? 'right' : 'left';
@@ -410,7 +505,24 @@ function paintSeats(view) {
     );
     plate.append(avatarWrap, info);
 
-    plate.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    // One status line per plate: out > all-in > fold > turn > last action > nothing.
+    const statusGroup=el('span','plate-status');
+    const lastAction = lastActions[seat.playerId];
+    if (lastAction) plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
+    if (state.out || state.allIn || state.folded) {
+      statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+    } else if (active) {
+      const thinking = !isHero && seat.kind === 'ai';
+      statusGroup.append(el('span', `plate-tag is-turn${thinking ? ' plate-thinking' : ''}`, thinking ? plateThinkingText() : state.status));
+    } else if (lastAction) {
+      const badge = el('span', 'plate-action', lastAction.label);
+      if (lastAction.amount != null) badge.append(el('span','plate-action-amount', ` ${formatAmount(lastAction.amount,view.blinds?.[1],displayUnit).primary}`));
+      statusGroup.append(badge);
+    } else if (state.status !== '플레이 중') {
+      statusGroup.append(el('span', 'plate-tag', state.status));
+    }
+    plate.append(statusGroup);
+    if (active) plate.append(el('span', 'plate-deadline'));
     const position = positions[seat.playerId];
     if (state.showButton || position) {
       const badge = el('span', `dealer-btn${position?.includes('SB') ? ' is-sb' : position === 'BB' ? ' is-bb' : ''}`, position ?? 'D');
@@ -429,7 +541,8 @@ function paintSeats(view) {
     if(!node.parentNode)seatRoot.append(node);
     previous.delete(seat.playerId);
 
-    if (state.showBet && !isHero) {
+    // One place for committed chips on every seat, the viewer's included.
+    if (state.showBet) {
       const marker = el('span', 'bet-marker');
       marker.setAttribute('aria-hidden', 'true');
       marker.dataset.playerId = seat.playerId;
@@ -442,24 +555,87 @@ function paintSeats(view) {
   paintParticipants(view);
 }
 
+// The acting AI's plate counts up with the stage status line (same turn clock).
+function plateThinkingText() {
+  const seconds = thinkingTurn ? Math.max(0, Math.floor((Date.now() - thinkingTurn.start) / 1000)) : 0;
+  return `생각 중 · ${seconds}초`;
+}
+function paintPlateThinking() {
+  const node = document.querySelector('.seat.is-to-act .plate-thinking');
+  if (node && node.textContent !== plateThinkingText()) node.textContent = plateThinkingText();
+}
+
 function paintThinking(view) {
   const box = $('thinking');
   const idle = $('idle-hint');
-  if (!view) {
-    box.hidden = true;
-    idle.hidden = false;
-    idle.textContent = '게임을 기다리는 중…';
-    return;
-  }
-  idle.hidden = true;
-  if (view.toAct && view.toAct !== 'user' && !view.gameOver) {
-    box.hidden = false;
-    box.textContent = `${playerName(view.toAct)} 생각 중…`;
-    return;
-  }
-  box.hidden = true;
-  box.textContent = '';
+  idle.hidden = !!view;
+  if (!view) idle.textContent = '게임을 기다리는 중…';
+  const actor = view?.seats?.find(seat=>seat.playerId===view.toAct);
+  const active = view?.handInProgress === true && !view.gameOver && actor?.kind === 'ai';
+  if (!active) {thinkingTurn=null;box.hidden=true;box.textContent='';$('thinking-announcement').textContent='';return;}
+  const actionCount=(ui.log??[]).filter(event=>event.type==='action').length;
+  const key = `${view.handNo}:${view.street}:${view.toAct}:${actionCount}`;
+  if (thinkingTurn?.key !== key) thinkingTurn={key,start:Date.now()};
+  const seconds=Math.max(0,Math.floor((Date.now()-thinkingTurn.start)/1000));
+  box.hidden=false;
+  const text=`${playerName(view.toAct)} 생각 중… ${seconds}초${seconds>=25?' · 오래 걸리고 있습니다':''}`;
+  if(box.textContent!==text)box.textContent=text;
+  const announcement=`${playerName(view.toAct)} 생각 중${seconds>=25?' · 오래 걸리고 있습니다':''}`;
+  if($('thinking-announcement').textContent!==announcement)$('thinking-announcement').textContent=announcement;
 }
+
+function paintHandResult(handNo = ui.handResult?.handNo) {
+  if (handNo !== ui.handResult?.handNo) return;
+  const box=$('hand-result'),result=ui.handResult,view=ui.view;
+  const frame=handResultFrame({result,hold:ui.resultHold,log:ui.log,view,
+    now:Date.now()+serverOffsetMs,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches});
+  paintBoard({...view,board:frame.board});
+  const winners=new Set(frame.visible ? result?.winners.map(row=>row.playerId) : []);
+  for(const seat of document.querySelectorAll('.seat'))seat.classList.toggle('is-winner',winners.has(seat.dataset.playerId));
+  box.hidden=!frame.visible;
+  // Pot → winners once, when this hand's held result first shows live (not after a jump, not instant pace).
+  const baseline=awardBaseline;awardBaseline={handNo:result?.handNo??null,visible:frame.visible};
+  if(result && baseline && frame.visible && ui.resultHold?.handNo===result.handNo && !(baseline.handNo===result.handNo && baseline.visible)
+    && motionInput.source==='live' && motionInput.contiguous)
+    playAwardSoon(result.winners.map(row=>row.playerId));
+  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;return;}
+  if(!frame.visible)return;
+  if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
+    box.dataset.handNo=String(result.handNo);box.dataset.unit=displayUnit;box.replaceChildren();
+    const bb=view.blinds?.[1],short=(value)=>formatAmount(value,bb,displayUnit).primary;
+    box.append(el('strong','hand-result-title','핸드 '+result.handNo+' 결과'));
+    // "팟 N 획득" is what a winner collected, never their profit; profit is the viewer's own line.
+    const winnerLines=result.winners.map(winner=>`${playerName(winner.playerId)} 승리 · ${winner.handName ?? (result.kind==='uncontested'?'상대 전원 폴드':'쇼다운')} · 팟 ${short(winner.total)} 획득`);
+    for(const line of winnerLines.slice(0,3))box.append(el('div','hand-result-winner',line));
+    if(winnerLines.length>3)box.append(el('div','hand-result-pot',`외 ${winnerLines.length-3}명`));
+    if(result.pots.length>1) {
+      const potLines=result.pots.map(pot=>`${pot.potIndex===0?'메인 팟':`사이드 팟 ${pot.potIndex}`} · ${pot.winners.map(row=>`${playerName(row.playerId)} ${short(row.share)}`).join(', ')}`);
+      for(const line of potLines.slice(0,3))box.append(el('div','hand-result-pot',line));
+      if(potLines.length>3)box.append(el('div','hand-result-pot',`외 ${potLines.length-3}개 팟`));
+    }
+    if(result.myNet!==null)box.append(el('div',`hand-result-net ${result.myNet>0?'is-pos':result.myNet<0?'is-neg':''}`,`내 손익 ${formatSignedAmount(result.myNet,bb,displayUnit).primary}`));
+    box.append(cashResetNote);
+    const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');box.append(counter);
+    const skip=el('button','btn btn-ghost hand-result-skip','건너뛰기');skip.type='button';
+    skip.onclick=async()=>{
+      const captured=result.handNo;const hadFocus=document.activeElement===skip;skip.disabled=true;
+      try {
+        const response=await appFetch('skip-result',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handNo:captured})});
+        const body=await response.json();
+        if(!response.ok || body.skipped!==true)throw Error('SKIP_UNAVAILABLE');
+      } catch { /* Both rejection and success hide this hand's skip control. */ }
+      finally {if(ui.handResult?.handNo===captured){skip.hidden=true;skipHiddenForHand=captured;if(hadFocus)$('tab-log').focus();}}
+    };
+    box.append(skip);
+  }
+  const countdown=box.querySelector('.hand-result-countdown');
+  const text=frame.remainingSeconds===null?'':`다음 핸드 ${frame.remainingSeconds}초`;
+  if(countdown.textContent!==text)countdown.textContent=text;
+  box.querySelector('.hand-result-skip').hidden=!(appGameId && !participantMode && !isSpectating(view)
+    && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
+}
+setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
+
 
 function writeAmountField(value) {
   const input = $('raise-amount');
@@ -471,6 +647,10 @@ function markAmountValid(valid) {
   $('raise-amount').closest('.amount-field').classList.toggle('is-invalid', !valid);
   $('raise-amount').setAttribute('aria-invalid', String(!valid));
   $('amount-error').textContent = !valid ? '칩 정수와 합법 범위를 확인해 주세요.' : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 ${amountEditor.state.value.toLocaleString('ko-KR')} 칩을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
+  if ($('amount-error').textContent && matchMedia('(max-width:600px)').matches) {
+    $('action-bar').classList.add('options-expanded');
+    $('action-options-toggle').setAttribute('aria-expanded','true');
+  }
 }
 
 function setRaiseTo(value, { fromInput = false } = {}) {
@@ -478,7 +658,7 @@ function setRaiseTo(value, { fromInput = false } = {}) {
   if (!legal || pendingAction) return;
   raiseTo = fromInput ? amountEditor.state.value : amountEditor.choose(value, legal).value;
   $('raise-slider').value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   if (!fromInput) $('raise-amount').value = amountEditor.state.text;
 }
 
@@ -489,7 +669,7 @@ function commitAmount() {
   const state = amountEditor.commit(legal);
   raiseTo = state.value; input.value = state.text;
   $('raise-slider').value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
 }
 
@@ -504,6 +684,21 @@ function adoptDecision(legal) {
   }
 }
 
+// "내 차례 · 콜 1 BB 또는 레이즈" — what this decision allows, in the display unit.
+function turnPrompt(view) {
+  const legal = view?.legal;
+  if (!legal) return null;
+  const verb = legal.canRaise ? PRIMARY_VERB_LABEL[primaryVerb(view, legal.minRaiseTo)] : null;
+  if (legal.canCheck) return verb ? `내 차례 · 체크 또는 ${verb}` : '내 차례 · 체크할 수 있습니다';
+  const call = `콜 ${amountText(legal.callAmount)}`;
+  return verb ? `내 차례 · ${call} 또는 ${verb}` : `내 차례 · ${call}`;
+}
+
+// "벳 6 BB" / "레이즈 15 BB" / "올인 97 BB" — the amount is the street total.
+function raiseLabel(amount) {
+  return PRIMARY_VERB_LABEL[primaryVerb(ui.view, amount)];
+}
+
 function syncRaisePanel(legal) {
   adoptDecision(legal);
   raiseTo = clampRaiseTo(raiseTo, legal);
@@ -511,18 +706,24 @@ function syncRaisePanel(legal) {
   slider.min = String(legal.minRaiseTo);
   slider.max = String(legal.maxRaiseTo);
   slider.value = String(raiseTo);
-  setBtnLabel($('btn-raise'), '총액 레이즈', raiseTo);
+  setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   writeAmountField(raiseTo);
   $('raise-range').textContent = `이번 스트리트 총액 · 최소 ${amountText(legal.minRaiseTo)} · 최대 ${amountText(legal.maxRaiseTo)}`;
 }
 
+function paintEndedControls() {
+  pendingAction=true;
+  $('action-status').textContent='종료된 게임 기록입니다.';
+  for(const id of ['action-bar','action-reconcile','action-retry','action-notice'])$(id).hidden=true;
+}
+const POSTFLOP_PRESETS = new Set(['third', 'threequarter']);
 function paintActionBar(view) {
   const bar = $('action-bar');
   const legal = view?.legal;
-  const mine = Boolean(legal) && !view?.gameOver;
+  const mine = Boolean(legal) && !view?.gameOver && !ui.sessionEnded && !isSpectating(view);
   bar.hidden = !mine;
   if (!mine) return;
-  const hero=view.seats?.find(s=>s.playerId==='user');
+  const hero=view.seats?.find(s=>s.playerId===viewerId(view));
   const pot=aggregatePot(view);
   const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
   $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
@@ -545,9 +746,12 @@ function paintActionBar(view) {
   const amount = $('raise-amount');
   amount.disabled = raiseOff;
   amount.closest('.amount-field').classList.toggle('is-disabled', raiseOff);
+  // Preflop adds the reference sizes; later streets add ⅓ and ¾ pot.
   for (const btn of $('raise-panel').querySelectorAll('[data-preset]')) {
     const multiple = btn.dataset.preset === 'rfi' ? 2.5 : btn.dataset.preset === 'threebet' ? 8.5 : null;
-    const available = multiple === null || (view.street === 'preflop' && bbRaiseTo(legal, view.blinds?.[1], multiple) !== null);
+    const postflopOnly = POSTFLOP_PRESETS.has(btn.dataset.preset);
+    const available = multiple !== null ? view.street === 'preflop' && bbRaiseTo(legal, view.blinds?.[1], multiple) !== null
+      : !postflopOnly || view.street !== 'preflop';
     btn.hidden = !available;
     btn.disabled = raiseOff || !available;
   }
@@ -652,10 +856,65 @@ function logNode(item, verb, bb) {
       return row;
     }
     case 'narration':
-      return el('div', 'log-note', item.text ?? '');
+      return el('div', 'log-note', formatNarration(item, ui.view?.seats ?? []) || (item.text ?? ''));
     default:
       return el('div', 'log-row', item.text ?? item.type ?? '');
   }
+}
+
+const expandedLogHands = new Set();
+
+// Past hands fold to their divider and a one-line result; the latest hand stays
+// open, and so does a hand the reader is scrolled into when a new one starts.
+function groupLogHands(list, contexts, readingIndex = null) {
+  const handOf = [];
+  const awards = new Map();
+  let hand = 0;
+  ui.log.forEach((item, i) => {
+    if (item.type === 'hand_start') hand = item.handNo;
+    handOf[i] = hand;
+    if (item.type !== 'pot_award') return;
+    const award = awards.get(hand) ?? { amount: 0, bb: contexts[i], winners: [] };
+    award.amount += Number.isSafeInteger(item.amount) ? item.amount : 0;
+    for (const winner of item.winners ?? []) if (!award.winners.includes(winner.playerId)) award.winners.push(winner.playerId);
+    awards.set(hand, award);
+  });
+  const reading = readingIndex == null ? null : handOf[Number(readingIndex)];
+  if (reading && reading !== hand && !list._pastHands?.has(reading)) expandedLogHands.add(reading);
+  const pastHands = new Set();
+  for (const row of list.children) {
+    const i = Number(row.dataset.logIndex);
+    const rowHand = handOf[i];
+    const past = rowHand > 0 && rowHand !== hand;
+    if (past) pastHands.add(rowHand);
+    const open = !past || expandedLogHands.has(rowHand);
+    if (ui.log[i]?.type === 'hand_start') paintLogHandHead(row, rowHand, past, open, awards.get(rowHand));
+    else row.classList.toggle('is-collapsed', !open);
+  }
+  list._pastHands = pastHands;
+}
+
+function paintLogHandHead(row, handNo, past, open, award) {
+  row.classList.toggle('is-past', past);
+  let toggle = row.querySelector('.log-hand-toggle');
+  let summary = row.querySelector('.log-hand-summary');
+  if (!past) {toggle?.remove();summary?.remove();return;}
+  if (!toggle) {
+    toggle = el('button', 'log-hand-toggle');
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => {
+      if (expandedLogHands.has(handNo)) expandedLogHands.delete(handNo); else expandedLogHands.add(handNo);
+      groupLogHands($('log-list'), logBlindContexts(ui.log, ui.handReplays));
+    });
+    row.querySelector('.log-divider-text')?.prepend(toggle);
+  }
+  toggle.textContent = open ? '▾' : '▸';
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', `핸드 ${handNo} 기록 ${open ? '접기' : '펼치기'}`);
+  if (!summary) {summary = el('div', 'log-hand-summary');row.append(summary);}
+  summary.textContent = award?.winners.length
+    ? `승자 ${award.winners.map(playerName).join(', ')} · 팟 ${formatAmount(award.amount, award.bb, displayUnit).primary}`
+    : '결과 기록 없음';
 }
 
 function paintLog() {
@@ -674,7 +933,7 @@ function paintLog() {
   const anchorIndex=anchor?.dataset.logIndex;
   const anchorOffset=anchor?.getBoundingClientRect().top-list.getBoundingClientRect().top;
   const contexts=logBlindContexts(ui.log,ui.handReplays);
-  const keys=ui.log.map((item,i)=>{const replay=item.type==='hand_start'?ui.handReplays?.[item.handNo]:null;return JSON.stringify([item,contexts[i],displayUnit,replay?{unavailable:replay.unavailable??false,reason:replay.reason??null}:null]);});
+  const keys=ui.log.map((item,i)=>{const replay=item.type==='hand_start'?ui.handReplays?.[item.handNo]:null;return JSON.stringify([item,contexts[i],displayUnit,viewerId(ui.view),replay?{unavailable:replay.unavailable??false,reason:replay.reason??null}:null]);});
   if(JSON.stringify(oldKeys)===JSON.stringify(keys))return;
   const appendOnly=oldKeys.length>0 && oldKeys.every((key,i)=>key===keys[i]);
   const verbs = actionVerbs(ui.log);
@@ -688,9 +947,12 @@ function paintLog() {
     row.dataset.logIndex=String(i);
     if(appendOnly)list.append(row);else rows.push(row);
   }
-  if(!appendOnly) {
-    list.replaceChildren(...rows);
-    if(focusedRow)list.querySelector(`[data-log-index="${focusedRow.dataset.logIndex}"] button`)?.focus({preventScroll:true});
+  if(!appendOnly) list.replaceChildren(...rows);
+  groupLogHands(list, contexts, stick ? null : anchorIndex);
+  // Rebuilt rows lose focus; return it to the same control (replay or fold toggle).
+  if(!appendOnly && focusedRow) {
+    const control=focused.classList.contains('log-hand-toggle') ? '.log-hand-toggle' : '.replay-open';
+    list.querySelector(`[data-log-index="${focusedRow.dataset.logIndex}"] ${control}`)?.focus({preventScroll:true});
   }
   list._keys=keys;
   if (stick) {list.scrollTop = list.scrollHeight;list._unread=0;$('log-new').hidden=true;}
@@ -703,9 +965,18 @@ function paintLog() {
   }
 }
 
+// A coach card names its hand with the viewer's cards and board when the
+// replay is ready, and links straight to that replay.
+function coachReplay(handNo) {
+  const replay = ui.handReplays?.[handNo];
+  if (!replay || replay.unavailable === true || ['REPLAY_NOT_COMPLETED', 'REPLAY_UNAVAILABLE'].includes(replay.reason)) return null;
+  return { cards: replay.holes?.[viewerId(ui.view)] ?? [], board: replay.board ?? [] };
+}
+
 function paintCoach() {
   const list = $('coach-list');
-  const signature=JSON.stringify(ui.coach);
+  const replays = ui.coach.map((note) => coachReplay(note.handNo));
+  const signature=JSON.stringify([ui.coach, replays]);
   if(list._signature===signature)return;
   list._signature=signature;
   if (!ui.coach.length) {
@@ -713,13 +984,28 @@ function paintCoach() {
     return;
   }
   list.replaceChildren();
-  for (const note of ui.coach) {
+  for (const [index, note] of ui.coach.entries()) {
     const box = el('div', 'coach-note');
     if (note.unavailable) box.classList.add('is-unavailable');
-    box.append(
-      el('div', 'coach-hand', `핸드 ${note.handNo}`),
-      el('div', 'coach-text', note.text ?? ''),
-    );
+    const head = el('div', 'coach-head');
+    head.append(el('div', 'coach-hand', `핸드 ${note.handNo}`));
+    const replay = replays[index];
+    if (replay && (replay.cards.length || replay.board.length)) {
+      const cards = el('span', 'coach-cards');
+      cards.setAttribute('role', 'group');
+      cards.setAttribute('aria-label', [replay.cards.length ? `내 카드 ${replay.cards.map(code => cardLabel(formatCard(code))).join(', ')}` : '', replay.board.length ? `보드 ${replay.board.map(code => cardLabel(formatCard(code))).join(', ')}` : ''].filter(Boolean).join(' · '));
+      for (const code of replay.cards) cards.append(miniCard(code));
+      if (replay.cards.length && replay.board.length) cards.append(el('span', 'coach-cards-sep', '·'));
+      for (const code of replay.board) cards.append(miniCard(code));
+      head.append(cards);
+    }
+    box.append(head, el('div', 'coach-text', note.text ?? ''));
+    if (replay) {
+      const open = el('button', 'coach-replay', '복기에서 보기');
+      open.type = 'button';
+      open.addEventListener('click', () => openReplay(note.handNo));
+      box.append(open);
+    }
     list.append(box);
   }
 }
@@ -753,6 +1039,14 @@ function paintTraining() {
     return;
   }
   for (const empty of list.querySelectorAll('.coach-empty')) empty.remove();
+  const group = trainingExcludedGroup(list);
+  const excludedList = group.querySelector('.training-excluded-list');
+  const excluded = ui.training.filter(trainingExcluded);
+  if (excluded.length < ui.training.length) list.querySelector('.training-none')?.remove();
+  else if (!list.querySelector('.training-none')) list.prepend(el('div', 'training-none', '기준표로 평가한 결정이 아직 없습니다. 아래 집계 제외 결정은 기록으로만 남습니다.'));
+  group.hidden = !excluded.length;
+  const postflop = excluded.filter((item) => ['flop', 'turn', 'river'].includes(item.street) || String(item.spotKey ?? '').startsWith('postflop-')).length;
+  group.querySelector('.training-excluded-count').textContent = `기준표 밖·집계 제외 결정 ${excluded.length}개${postflop ? ` (포스트플랍 ${postflop})` : ''}`;
   const existing = new Map([...list.querySelectorAll('[data-evaluation-id]')].map((node) => [node.dataset.evaluationId, node]));
   for (const item of ui.training) {
     const key = detailKey(item);
@@ -765,8 +1059,9 @@ function paintTraining() {
         if (box.open) void loadTrainingDetail(ui.training.find((row) => row.evaluationId === box.dataset.evaluationId));
       });
       box.append(el('summary', 'training-summary'), el('div', 'training-body'));
-      list.append(box);
     }
+    const home = trainingExcluded(item) ? excludedList : list;
+    if (box.parentNode !== home) {if (home === list) list.insertBefore(box, group); else excludedList.append(box);}
     existing.delete(item.evaluationId);
     const signature = JSON.stringify([card, authenticatedStudyUrl, detailErrors.has(key)]);
     if (box._signature === signature) continue;
@@ -803,8 +1098,42 @@ function paintTraining() {
     if (box.open && !detailCache.has(key) && !detailErrors.has(key)) void loadTrainingDetail(item);
   }
   for (const node of existing.values()) node.remove();
+  if (list.lastElementChild !== group) list.append(group);
   list.scrollTop = scroll.list;
   panel.scrollTop = scroll.panel;
+}
+
+// Decisions outside the reference table, forfeited by the watchdog, or scored
+// against a synthetic source are records, not assessments: one folded summary
+// row instead of a card each.
+function trainingExcluded(item) {
+  return excludedFromAssessment(item);
+}
+
+function trainingExcludedGroup(list) {
+  let group = list.querySelector('.training-excluded');
+  if (group) return group;
+  group = el('div', 'training-excluded');
+  const toggle = el('button', 'training-excluded-toggle');
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', 'training-excluded-list');
+  toggle.append(el('span', 'training-excluded-count'), el('span', 'training-excluded-hint', '펼치기'));
+  toggle.addEventListener('click', () => setTrainingExcludedOpen(toggle.getAttribute('aria-expanded') !== 'true'));
+  const items = el('div', 'training-excluded-list');
+  items.id = 'training-excluded-list';
+  items.hidden = true;
+  group.append(toggle, items);
+  list.append(group);
+  return group;
+}
+
+function setTrainingExcludedOpen(open) {
+  const group = $('training-list')?.querySelector('.training-excluded');
+  if (!group) return;
+  group.querySelector('.training-excluded-toggle').setAttribute('aria-expanded', String(open));
+  group.querySelector('.training-excluded-hint').textContent = open ? '접기' : '펼치기';
+  group.querySelector('.training-excluded-list').hidden = !open;
 }
 
 let openReplayHandNo = null;
@@ -812,7 +1141,7 @@ let openReplayHandNo = null;
 function seatNames() {
   const names = { user: '나' };
   for (const seat of ui.view?.seats ?? []) {
-    names[seat.playerId] = seat.playerId === 'user' ? '나' : (seat.name ?? seat.playerId);
+    names[seat.playerId] = seat.playerId === viewerId(ui.view) ? '나' : (seat.name ?? seat.playerId);
   }
   return names;
 }
@@ -827,43 +1156,66 @@ function replayViewFor(handNo) {
   });
 }
 
-function paintReplay() {
-  const overlay = $('replay-overlay');
-  if (!overlay) return;
-  if (openReplayHandNo == null) {
-    overlay.hidden = true;
-    return;
+// Replayer state survives repaints (coach updates, unit changes) of the same hand.
+let replayUi = { step: 0, playing: false, speed: 1, listOpen: false };
+let replayModel = null;
+let replayMount = null;
+let replayTimer = null;
+
+function stopReplayPlayback() {
+  clearTimeout(replayTimer); replayTimer = null;
+  replayUi.playing = false;
+}
+function scheduleReplayTick() {
+  clearTimeout(replayTimer);
+  replayTimer = setTimeout(() => {
+    if (!replayUi.playing || !replayModel || openReplayHandNo == null) return;
+    setReplayStep(replayUi.step + 1, { auto: true });
+    if (replayUi.playing) scheduleReplayTick();
+  }, 1400 / replayUi.speed);
+}
+function setReplayStep(index, { auto = false } = {}) {
+  if (!replayModel) return;
+  const lastIndex = replayModel.steps.length - 1;
+  if (!auto) stopReplayPlayback();
+  replayUi.step = Math.max(0, Math.min(lastIndex, index));
+  if (replayUi.step >= lastIndex) stopReplayPlayback();
+  replayMount?.paint();
+}
+function toggleReplayPlayback() {
+  if (!replayModel) return;
+  if (replayUi.playing) stopReplayPlayback();
+  else {
+    if (replayUi.step >= replayModel.steps.length - 1) replayUi.step = 0;
+    replayUi.playing = true;
+    scheduleReplayTick();
   }
-  overlay.hidden = false;
-  const view = replayViewFor(openReplayHandNo);
-  const title = $('replay-title');
-  const disclaimer = $('replay-disclaimer');
-  const body = $('replay-body');
-  const signature=JSON.stringify([view,displayUnit]);
-  if(body._signature===signature)return;
-  body._signature=signature;
-  const scroll=body.scrollTop;
-  const focusedStudy=body.contains(document.activeElement) ? document.activeElement.dataset.studyId : null;
-  body.replaceChildren();
-  if (view.kind === 'marker') {
-    title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
-    disclaimer.textContent = '';
-    body.append(el('p', 'replay-marker', view.message));
-    return;
-  }
-  title.textContent = `핸드 ${view.header.handNo} 복기`;
-  disclaimer.textContent = `${view.header.disclaimer}. ${view.header.reliability}`;
-  const meta = el('div', 'replay-meta');
-  if (view.header.blinds) {
-    meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
-  }
-  if (view.header.winners.length) {
-    meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
-  }
-  body.append(meta);
+  replayMount?.paint();
+}
+function setReplaySpeed(speed) {
+  replayUi.speed = speed;
+  if (replayUi.playing) scheduleReplayTick();
+  replayMount?.paint();
+}
+
+function openStudyCard(evaluationId) {
+  closeReplay();
+  selectTab('training');
+  const card = document.querySelector(`[data-evaluation-id="${evaluationId}"]`);
+  if (card?.closest('.training-excluded')) setTrainingExcludedOpen(true);
+  if (card instanceof HTMLDetailsElement) card.open = true;
+  card?.scrollIntoView({ block: 'nearest' });
+  card?.querySelector('summary')?.focus({preventScroll:true});
+}
+
+// The text replay: the fallback when the record cannot be drawn, and the
+// "목록 보기" view beside the visual replayer.
+function replayList(view) {
+  const bb = view.header.blinds?.[1] ?? null;
+  const list = el('div', 'replay-list');
   const board = el('div', 'replay-board');
   for (const code of view.header.board) board.append(miniCard(code));
-  if (view.header.board.length) body.append(board);
+  if (view.header.board.length) list.append(board);
   for (const street of view.streets) {
     const block = el('section', 'replay-street');
     block.append(el('h2', 'replay-street-name', street.label));
@@ -872,8 +1224,8 @@ function paintReplay() {
       const who = [row.name, row.position].filter(Boolean).join(' · ');
       line.append(el('span', 'replay-name', who));
       line.append(el('span', `replay-act is-${row.verb}`, row.verbLabel ?? row.verb));
-      if (row.amount != null) line.append(el('span', 'replay-amount num', amountText(row.amount,view.header.blinds?.[1]??null)));
-      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${amountText(row.pot,view.header.blinds?.[1]??null)}`));
+      if (row.amount != null) line.append(el('span', 'replay-amount num', amountText(row.amount,bb)));
+      if (row.pot != null) line.append(el('span', 'replay-pot num', `팟 ${amountText(row.pot,bb)}`));
       if (row.cards) {
         const cards = el('span', 'replay-cards');
         for (const code of row.cards) cards.append(miniCard(code));
@@ -894,71 +1246,231 @@ function paintReplay() {
         const link = el('button', 'replay-study', '학습 카드');
         link.type = 'button';
         link.dataset.studyId=row.study.evaluationId;
-        link.addEventListener('click', () => {
-          closeReplay();
-          selectTab('training');
-          const card = document.querySelector(`[data-evaluation-id="${row.study.evaluationId}"]`);
-          if (card instanceof HTMLDetailsElement) card.open = true;
-          card?.scrollIntoView({ block: 'nearest' });
-          card?.querySelector('summary')?.focus({preventScroll:true});
-        });
+        link.dataset.focusKey=`list-study-${row.study.evaluationId}`;
+        link.addEventListener('click', () => openStudyCard(row.study.evaluationId));
         line.append(link);
       }
       block.append(line);
     }
-    body.append(block);
+    list.append(block);
+  }
+  return list;
+}
+
+function paintReplay() {
+  const overlay = $('replay-overlay');
+  if (!overlay) return;
+  if (openReplayHandNo == null) {
+    overlay.hidden = true;
+    return;
+  }
+  overlay.hidden = false;
+  const view = replayViewFor(openReplayHandNo);
+  const title = $('replay-title');
+  const disclaimer = $('replay-disclaimer');
+  const body = $('replay-body');
+  const signature=JSON.stringify([view,displayUnit,replayUi.listOpen]);
+  if(body._signature===signature){replayMount?.paint();return;}
+  body._signature=signature;
+  const scroll=body.scrollTop;
+  // The timeline scrolls on its own; a rebuild (coach note, unit, list toggle) keeps its place.
+  const timelineScroll=body.querySelector('.replayer-timeline')?.scrollTop ?? null;
+  const active=body.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey=active?.dataset.focusKey ?? null;
+  const focusedStudy=active?.dataset.studyId ?? null;
+  body.replaceChildren();
+  replayMount=null;replayModel=null;
+  if (view.kind === 'marker') {
+    stopReplayPlayback();
+    title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
+    disclaimer.textContent = '';
+    body.append(el('p', 'replay-marker', view.message));
+    return;
+  }
+  title.textContent = `핸드 ${view.header.handNo} 복기`;
+  disclaimer.textContent = `${view.header.disclaimer}. ${view.header.reliability}`;
+  const meta = el('div', 'replay-meta');
+  if (view.header.blinds) {
+    meta.append(el('span', 'replay-blinds', `블라인드 ${formatChip(view.header.blinds[0])}/${formatChip(view.header.blinds[1])}`));
+  }
+  const replay = ui.handReplays?.[openReplayHandNo];
+  const names = seatNames();
+  if (typeof replay?.button === 'string') meta.append(el('span', 'replay-button', `버튼 ${names[replay.button] ?? replay.button}`));
+  if (view.header.winners.length) {
+    meta.append(el('span', 'replay-winners', `승자 ${view.header.winners.join(', ')}`));
+  }
+  body.append(meta);
+  const model = buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, (ui.view?.seats ?? []).map((seat) => seat.playerId)) });
+  if (model.ok) {
+    replayModel = model;
+    replayUi.step = Math.min(replayUi.step, model.steps.length - 1);
+    const bb = view.header.blinds?.[1] ?? null;
+    replayMount = mountReplayer(body, {
+      replay, view, model,
+      name: (playerId) => names[playerId] ?? (playerId === 'user' ? '나' : playerId),
+      viewer: viewerId(ui.view) ?? 'user',
+      amount: (value) => amountText(value, bb),
+      short: (value) => formatAmount(value, bb, displayUnit).primary,
+      state: () => replayUi,
+      onStep: (index) => setReplayStep(index),
+      onPlay: toggleReplayPlayback,
+      onSpeed: setReplaySpeed,
+      onStudy: openStudyCard,
+    });
+    const timeline = replayMount.root.querySelector('.replayer-timeline');
+    if (timeline && timelineScroll !== null) timeline.scrollTop = timelineScroll;
+    const toggle = el('button', 'btn btn-ghost replayer-list-toggle', replayUi.listOpen ? '목록 닫기' : '목록 보기');
+    toggle.type = 'button';
+    toggle.dataset.focusKey = 'list-toggle';
+    toggle.setAttribute('aria-expanded', String(replayUi.listOpen));
+    toggle.addEventListener('click', () => { replayUi.listOpen = !replayUi.listOpen; paintReplay(); });
+    body.append(toggle);
+    if (replayUi.listOpen) body.append(replayList(view));
+  } else {
+    stopReplayPlayback();
+    body.append(el('p', 'replay-marker replay-fallback', '이 핸드는 기록된 숫자로 테이블을 다시 그릴 수 없어 목록으로 보여 드립니다.'));
+    body.append(replayList(view));
   }
   if (view.coachSummary) body.append(el('p', 'replay-summary', view.coachSummary));
   body.scrollTop=scroll;
-  if(focusedStudy)[...body.querySelectorAll('[data-study-id]')].find(node=>node.dataset.studyId===focusedStudy)?.focus({preventScroll:true});
+  const restore=(focusKey && [...body.querySelectorAll('[data-focus-key]')].find((node)=>node.dataset.focusKey===focusKey))
+    ?? (focusedStudy && [...body.querySelectorAll('[data-study-id]')].find((node)=>node.dataset.studyId===focusedStudy));
+  restore?.focus({preventScroll:true});
 }
 
 function openReplay(handNo) {
+  stopReplayPlayback();
+  replayUi = { step: 0, playing: false, speed: replayUi.speed, listOpen: false };
+  // A new hand starts from the top: nothing of the previous replay carries over.
+  $('replay-body')._signature = null;
+  $('replay-body').replaceChildren();
+  $('replay-body').scrollTop = 0;
   openReplayHandNo = handNo;
   paintReplay();
   dialogs.open($('replay-overlay'),closeReplay);
 }
 
 function closeReplay() {
+  stopReplayPlayback();
   openReplayHandNo = null;
+  replayMount = null; replayModel = null;
   const overlay = $('replay-overlay');
   if (overlay) overlay.hidden = true;
   if(dialogs.active===overlay)dialogs.close();
 }
 
-function paintReview(view) {
-  const overlay = $('review-overlay');
-  $('review-reopen').hidden = !ui.review;
-  const dismissed = overlay.dataset.dismissed === 'true';
-  const show = Boolean(view?.gameOver && ui.review) && !dismissed && (!dialogs.active || dialogs.active===overlay);
-  overlay.hidden = !show;
-  if (!show) {
-    if(dialogs.active===overlay)dialogs.close();
-    return;
-  }
-  if(dialogs.active!==overlay)dialogs.open(overlay,()=>{overlay.dataset.dismissed='true';dialogs.close();});
-  const result = $('review-result');
-  result.textContent = view.result === 'win' ? '우승'
-    : view.result === 'lose' ? '패배'
-      : view.result === 'completed' ? '세션 완료'
-        : '';
-  result.classList.toggle('is-win', view.result === 'win');
-  result.classList.toggle('is-lose', view.result === 'lose');
-  const review = $('review-body');
-  if (review._source !== ui.review) {
-    const scroll = review.scrollTop;
-    review.innerHTML = renderMarkdown(reviewBody(ui.review));
-    review._source = ui.review; review.scrollTop = scroll;
+
+const terminalRecord=new URLSearchParams(location.search).get('terminal')==='1';
+let finalSummary=null,summaryPhase=null,summaryLoading=false,summaryVersion=0,finalPanelKey=null,reviewSeen;
+async function loadFinalSummary() {
+  if(finalSummary || summaryLoading || !appGameId)return;
+  const ended=!!(ui.sessionEnded||terminalRecord);
+  if(summaryPhase===ended)return;
+  summaryPhase=ended;summaryLoading=true;
+  try {
+    for(let attempt=0;attempt<4;attempt++) {
+      if(attempt)await new Promise(resolve=>setTimeout(resolve,2500));
+      try {
+        const response=await appFetch('summary',{signal:AbortSignal.timeout(8000)});
+        if(!response.ok)throw new Error('SUMMARY_UNAVAILABLE');
+        finalSummary=await response.json();summaryVersion++;paintReview(ui.view);return;
+      } catch { /* Bounded retries retain the public-view fallback. */ }
+    }
+  } finally {
+    summaryLoading=false;
+    // Ending can open the state gate while the initial bounded series is in flight.
+    if(!finalSummary && !!(ui.sessionEnded||terminalRecord)!==ended)void loadFinalSummary();
   }
 }
+// Each review heading becomes a section the reader can fold; the practice plan
+// for the next game stays open, stands out, and links to the study room.
+function foldReviewSections(review) {
+  const children=[...review.childNodes];let section=null;
+  review.replaceChildren();
+  for(const child of children){
+    if(child.nodeName==='H2'){
+      const practice=/다음 게임에서 연습할 것/.test(child.textContent);
+      section=document.createElement('details');section.className=`review-section${practice?' is-practice':''}`;
+      section.open=practice||!review.querySelector('details');
+      const summary=document.createElement('summary');summary.append(...child.childNodes);section.append(summary);
+      review.append(section);
+      if(practice&&authenticatedStudyUrl&&!participantMode){const link=document.createElement('a');link.className='study-link review-practice-link';link.href=authenticatedStudyUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='학습실에서 연습하기';section._cta=link;}
+      continue;
+    }
+    (section??review).append(child);
+  }
+  for(const details of review.querySelectorAll('details.is-practice'))if(details._cta)details.append(details._cta);
+}
+function paintReview(view) {
+  const state=finalScreen({view,sessionEnded:ui.sessionEnded,terminal:terminalRecord,review:ui.review});
+  const overlay=$('review-overlay'),reopen=$('review-reopen');
+  reopen.hidden=!state.open;
+  reopen.textContent='결과 다시 보기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
+  if(state.open)void loadFinalSummary();
+  const show=state.open && overlay.dataset.dismissed!=='true' && (!dialogs.active || dialogs.active===overlay);
+  overlay.hidden=!show;
+  if(!show){if(dialogs.active===overlay)dialogs.close();return;}
+  reviewSeen=ui.review;
+  if(dialogs.active!==overlay)dialogs.open(overlay,()=>{overlay.dataset.dismissed='true';dialogs.close();});
+  const result=$('review-result');
+  const title=view?.result==='win'?'우승':view?.result==='lose'?'패배':view?.result==='abort'?'중도 종료':'세션 완료';
+  result.textContent=title+(Number.isSafeInteger(finalSummary?.handCount)?` · 완료 ${finalSummary.handCount}핸드`:'');
+  result.classList.toggle('is-win',view?.result==='win');result.classList.toggle('is-lose',view?.result==='lose');
+  const spectator=isSpectating(view),viewer=spectator?null:viewerId(view);
+  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays)]);
+  if(key!==finalPanelKey){
+    finalPanelKey=key;
+    paintFinalPanel($('final-summary'),{summary:finalSummary,view,viewer,
+      onReplay:participantMode||spectator?null:handNo=>{if(!ui.handReplays[handNo])return;overlay.dataset.dismissed='true';dialogs.close();openReplay(handNo);},
+      canReplay:handNo=>!!ui.handReplays[handNo]});
+    const last=$('final-last-hand');last.replaceChildren();
+    const hand=buildHandResult({log:ui.log,view:view?{...view,gameOver:false}:view,viewer,prior:null});
+    last.hidden=!hand;
+    if(hand){const heading=document.createElement('h2');heading.textContent='마지막 핸드';last.append(heading);
+      const bb=view?.mode==='cash-training'?view.blinds?.[1]:null;
+      for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} 승리${winner.handName?' · '+winner.handName:''} · 팟 ${formatAmount(winner.total,bb,'bb').primary} 획득`;last.append(row);}}
+  }
+  const section=$('final-review-section');section.hidden=participantMode||spectator;
+  const review=$('review-body');
+  const source=ui.review??state.review;
+  if(review._source!==source){
+    const scroll=review.scrollTop;
+    if(ui.review){review.innerHTML=renderMarkdown(reviewBody(ui.review));foldReviewSections(review);}
+    else review.textContent=state.review==='pending'?'종합 리뷰 생성 중… 보통 1~4분':'종합 리뷰가 없습니다';
+    review._source=source;review.scrollTop=scroll;
+  }
+  const study=$('final-study');study.hidden=!authenticatedStudyUrl||participantMode||spectator;
+  if(!study.hidden)study.href=authenticatedStudyUrl;
+}
 
-function paint() {
+function paint({ keepMotion = false } = {}) {
+  painting = true; keepingMotion = keepMotion;
+  try { paintFrame(); }
+  finally { painting = false; keepingMotion = false; }
+  if (pendingAward) { const winners = pendingAward; pendingAward = null; motion.playAward(winners, { table: $('table') }); }
+}
+
+function paintFrame() {
   const view = ui.view;
+  ui.handPrior=captureHandPrior(ui.handPrior,{view,log:ui.log,viewer:viewerId(view)});
+  ui.handResult=updateHandResult(ui.handResult,{view,log:ui.log,viewer:viewerId(view),prior:ui.handPrior});
+  const spectator = isSpectating(view);
+  document.body.classList.toggle('spectator-mode', spectator);
+  const banner = $('spectator-banner');
+  banner.hidden = !spectator;
+  banner.textContent = view?.gameOver ? '게임이 종료되었습니다.' : '관전 중 · 모든 카드 실시간 공개';
+  for (const name of ['coach','training']) {
+    $(`tab-${name}`).hidden = spectator || participantMode;
+    $(`panel-${name}`).hidden = spectator || participantMode || selectedTab !== name;
+  }
+  if (spectator && ['coach','training'].includes(selectedTab)) selectTab('log');
   paintTop(view);
-  paintBoard(view);
   paintPots(view);
   paintSeats(view);
+  paintHandResult();
+  paintTurnDeadline();
   paintThinking(view);
+  paintPlateThinking();
   paintActionBar(view);
   paintHint();
   paintLog();
@@ -969,6 +1481,19 @@ function paint() {
   paintUnread();
   paintReview(view);
   if (openReplayHandNo != null) paintReplay();
+  shellEmbed.send(shellContext(view));
+  // Motion runs over the painted DOM; a new view ends whatever was still moving.
+  if (view !== motionFrame?.view) {
+    const frame = { view, revealed: Object.keys(revealedCards().map) };
+    if (!keepingMotion) motion.play(diffViews(motionFrame, frame, motionInput), { table: $('table') });
+    motionFrame = frame;
+  }
+  const seatedLive = !ui.sessionEnded && !spectator && Boolean(view?.seats?.some((seat) => seat.playerId === viewerId(view) && !seat.out));
+  onboarding.offer({
+    myTurn: seatedLive && Boolean(view?.legal) && view.legal.toAct === viewerId(view),
+    deadline: Boolean(ui.turnDeadline),
+    seated: seatedLive,
+  });
 }
 
 function upsertHandReplays(rows, replace) {
@@ -985,7 +1510,46 @@ function mergeAnnotationOntoCards(ann) {
   ui.training[at] = applyTrainingAnnotation(ui.training[at], ann);
 }
 
+function paintTurnDeadline() {
+  const deadline = ui.turnDeadline;
+  const now=Date.now()+serverOffsetMs;
+  const text = formatTurnDeadline(deadline, now);
+  const seconds = deadline ? Math.ceil((Date.parse(deadline.at) - now) / 1000) : null;
+  const urgent = seconds !== null && seconds > 0 && seconds <= 10;
+  const label = $('turn-deadline');
+  if (label) {label.hidden = !text;label.textContent = text ?? '';label.classList.toggle('is-urgent', urgent);}
+  for (const node of document.querySelectorAll('.plate-deadline')) {
+    node.textContent = text ?? '';node.hidden = !text;node.classList.toggle('is-urgent', urgent);
+  }
+  const key = deadline ? `${deadline.decisionId}:${deadline.at}` : null;
+  if (renderedDeadlineKey !== key) {
+    renderedDeadlineKey=key;announcedDeadline=null;
+    const announcement=$('turn-announcement');if(announcement)announcement.textContent='';
+  }
+  if (urgent && viewerId(ui.view) === ui.view?.toAct && announcedDeadline !== key) {
+    announcedDeadline = key;
+    const announcement=$('turn-announcement');
+    if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
+  }
+}
+setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlateThinking==='function')paintPlateThinking();}, 1000);
+
 function renderSnapshot(snap) {
+  // Initial load, reconnect, and terminal records jump; they never animate or award.
+  // A read of the revision already shown (the action controller reconciles
+  // right after the user's own decision leaves the view) is not a jump: the
+  // motion it would end — often the award of the hand that action ended — goes on.
+  const sameRevision = ui.view != null && Number.isInteger(snap.revision) && snap.revision === revision;
+  if (!sameRevision) { motionInput = { source: 'snapshot', contiguous: false }; awardBaseline = null; }
+  ui.resultHold=snap.resultHold ?? null;
+  ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
+  const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
+  if (isSpectating(snap.view)) {
+    actionController?.disconnect(); actionController = null;
+    pendingAction = true; lastDecisionId = null;
+    $('intent-note').value = '';
+    if (becameSpectator && ui.view?.viewer != null) $('seat-announcement').textContent = '탈락하여 관전으로 전환되었습니다.';
+  }
   ui.hint=hintState.accept(snap.hint,snap.view,hintRequests.get(snap)??{generation:-1});
   ui.view = snap.view ?? null;
   ui.log = Array.isArray(snap.log) ? snap.log.slice() : [];
@@ -997,15 +1561,19 @@ function renderSnapshot(snap) {
   for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
   upsertHandReplays(snap.handReplays, true);
-  authenticatedStudyUrl = studyLink(snap.studyUrl);
+  authenticatedStudyUrl = participantMode ? null : studyLink(snap.studyUrl);
   const study = $('study-open');
   study.hidden = !authenticatedStudyUrl;
   if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
   else study.removeAttribute('href');
-  paint();
+  paint({ keepMotion: sameRevision });
 }
 
-function render(m) {
+function render(m, contiguous = true) {
+  motionInput = { source: 'live', contiguous };
+  if(m.resultHold!==undefined)ui.resultHold=m.resultHold;
+  else if(m.view && (m.view.handInProgress || m.view.handNo!==ui.resultHold?.handNo))ui.resultHold=null;
+  ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, m.turnDeadline, ui.view, m.view ?? ui.view);
   ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
     const previous=new Map((ui.view?.seats??[]).map(s=>[s.playerId,s.out]));
@@ -1027,12 +1595,12 @@ function render(m) {
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (Array.isArray(m.training) && m.training.length) {
-    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
+    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !trainingExcluded(item) && !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
     ui.training = mergeTrainingItems(ui.training, m.training);
     for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   }
   if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {
-    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
+    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !trainingExcluded(ui.training.find((item) => item.evaluationId === ann.evaluationId)) && !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
     for (const ann of m.trainingAnnotations) {
       const at = ui.trainingAnnotations.findIndex((existing) => (
         existing.evaluationId === ann.evaluationId && existing.field === ann.field
@@ -1068,7 +1636,7 @@ $('btn-raise').addEventListener('click', () => {
   if($('raise-amount').value!==amountEditor.state.text)amountEditor.edit($('raise-amount').value,legal);
   const amount=amountEditor.submit(legal,{locked:pendingAction});
   const state=amountEditor.state;raiseTo=state.value;$('raise-amount').value=state.text;markAmountValid(!state.invalid);
-  setBtnLabel($('btn-raise'),'총액 레이즈',raiseTo);
+  setBtnLabel($('btn-raise'),raiseLabel(raiseTo),raiseTo);
   if(amount!==null)void sendAction('raise',amount);
 });
 $('btn-allin-only').addEventListener('click', () => sendAction('raise', ui.view?.legal?.maxRaiseTo));
@@ -1085,7 +1653,9 @@ $('raise-panel').addEventListener('click', (ev) => {
   if (!preset || !legal || pendingAction || legal.minRaiseTo > legal.maxRaiseTo) return;
   const myBet = myBetOf(ui.view);
   if (preset === 'min') setRaiseTo(legal.minRaiseTo);
+  else if (preset === 'third') setRaiseTo(potRaiseTo(legal, myBet, 1 / 3));
   else if (preset === 'half') setRaiseTo(potRaiseTo(legal, myBet, 0.5));
+  else if (preset === 'threequarter') setRaiseTo(potRaiseTo(legal, myBet, 0.75));
   else if (preset === 'pot') setRaiseTo(potRaiseTo(legal, myBet, 1));
   else if (preset === 'allin') setRaiseTo(legal.maxRaiseTo);
   else if (preset === 'rfi' || preset === 'threebet') {
@@ -1137,6 +1707,8 @@ function paintUnread() {
 }
 
 function selectTab(which) {
+  // A tab hidden for this viewer (coach, learning for participants) cannot be selected.
+  if ($(`tab-${which}`)?.hidden) return;
   selectedTab = which;
   if (which in unread) unread[which] = 0;
   paintUnread();
@@ -1156,7 +1728,7 @@ $('tab-training')?.addEventListener('click', () => selectTab('training'));
 $('tab-participants').addEventListener('click',()=>selectTab('participants'));
 selectTab('log');
 document.querySelector('.tabs').addEventListener('keydown',ev=>{
-  const tabs=['log','coach','training','participants'];let index=tabs.indexOf(selectedTab);
+  const tabs=['log','coach','training','participants'].filter(name=>$(`tab-${name}`)&&!$(`tab-${name}`).hidden);let index=tabs.indexOf(selectedTab);
   if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
   else if(ev.key==='ArrowLeft')index=(index+tabs.length-1)%tabs.length;
   else if(ev.key==='Home')index=0;else if(ev.key==='End')index=tabs.length-1;else return;
@@ -1164,18 +1736,57 @@ document.querySelector('.tabs').addEventListener('keydown',ev=>{
 });
 $('display-unit').value=displayUnit;
 $('display-unit').addEventListener('change',ev=>{
-  displayUnit=ev.target.value==='chips'?'chips':'bb';writePreference(displayUnit);
-  paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
+  displayUnit=ev.target.value==='chips'?'chips':'bb';saveDisplaySetting('unit',displayUnit);
+  paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintHandResult();paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
 });
 $('seat-close').addEventListener('click',()=>dialogs.close());
 $('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list').scrollHeight;$('log-list')._unread=0;$('log-new').hidden=true;});
 
+// ←/→/Home/End step through the replay; Space plays or pauses unless a
+// control that Space already activates has focus.
+document.addEventListener('keydown', (ev) => {
+  const overlay = $('replay-overlay');
+  if (!replayModel || !overlay || overlay.hidden || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+  if (!(overlay.contains(ev.target) || ev.target === document.body) || ev.target.closest?.('select,input,textarea')) return;
+  // Holding a key must not flip playback (or step) once per repeat — including
+  // with focus on the page itself, the usual way Space toggles playback.
+  if (ev.repeat && [' ', 'Enter'].includes(ev.key)) { ev.preventDefault(); return; }
+  const lastIndex = replayModel.steps.length - 1;
+  if (ev.key === 'ArrowLeft') setReplayStep(replayUi.step - 1);
+  else if (ev.key === 'ArrowRight') setReplayStep(replayUi.step + 1);
+  else if (ev.key === 'Home') setReplayStep(0);
+  else if (ev.key === 'End') setReplayStep(lastIndex);
+  else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) toggleReplayPlayback();
+  else return;
+  ev.preventDefault();
+});
+// ⓘ beside the notices that the help drawer explains.
+$('learning-scope')?.after(helpButton('learning', '학습 수치의 의미'));
+$('replay-disclaimer')?.after(helpButton('privacy', '복기 공개 범위'));
+// Esc ends the first-turn guide when no dialog is open.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || ev.defaultPrevented || !onboarding.active || onboarding.suspended || dialogs.active || document.querySelector('dialog[open]')) return;
+  onboarding.skip();
+});
+// Display settings changed here or in another document of this origin.
+const followUnit = (value) => {
+  displayUnit = value === 'chips' ? 'chips' : 'bb';
+  if ($('display-unit')) $('display-unit').value = displayUnit;
+  paint();
+};
+window.addEventListener('holdem:display-unit', (ev) => followUnit(ev.detail));
+window.addEventListener('holdem:onboarding-reset', () => onboarding.reset());
+window.addEventListener('storage', (ev) => {
+  if (ev.key === 'holdem.display-unit.v1') followUnit(readPreference());
+  if (ev.key === DISPLAY_KEYS.onboarding && ev.newValue === null) onboarding.reset();
+});
 $('replay-close')?.addEventListener('click', () => {
   closeReplay();
 });
 $('replay-overlay')?.addEventListener('click', (ev) => {
   if (ev.target === $('replay-overlay')) closeReplay();
 });
+$('final-log').addEventListener('click',()=>{ $('review-overlay').dataset.dismissed='true';dialogs.close();selectTab('log');});
 $('review-close').addEventListener('click', () => {
   const overlay = $('review-overlay');
   overlay.dataset.dismissed = 'true';
@@ -1188,39 +1799,65 @@ $('review-reopen').addEventListener('click', () => {
   paintReview(ui.view);
   $('review-close').focus();
 });
+// The memo stays folded until asked for, then stays open for later decisions.
+$('intent-note-toggle').addEventListener('click', () => {
+  $('intent-note').closest('.intent-note-wrap').classList.add('is-open');
+  $('intent-note-toggle').setAttribute('aria-expanded', 'true');
+  $('intent-note').focus();
+});
+
+$('action-options-toggle').addEventListener('click', () => {
+  const expanded=$('action-bar').classList.toggle('options-expanded');
+  $('action-options-toggle').setAttribute('aria-expanded',String(expanded));
+  if(expanded)$('raise-amount').focus({preventScroll:true});
+});
 $('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
 $('action-retry').addEventListener('click', () => void actionController?.retry());
 
-const token = appGameId ? sessionStorage.getItem('holdem-app-token') : new URLSearchParams(location.search).get('token');
+const token = appGameId ? authToken() : new URLSearchParams(location.search).get('token');
 let revision = 0;
 const buffer = [];
 let booted = false;
-let opening = false;
+let openingAttempt = 0;
 async function getSnapshot({ signal } = {}) {
   const generation=hintState.capture();
+  const requestedAt=Date.now();
   const response = await (appGameId ? appFetch('snapshot',{signal}) : fetch(`/api/snapshot?${new URLSearchParams({ token })}`, { signal }));
-  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  if (!response.ok) {
+    const body=await response.json().catch(()=>({}));
+    throw Object.assign(new Error('AUTHORITY_UNAVAILABLE'),{code:body.code??(response.status>=500?'RELAY_UNAVAILABLE':'NETWORK_ERROR')});
+  }
+  serverOffsetMs = serverClockOffset(response.headers.get('Date'),Date.now(),requestedAt);
   const snapshot=await response.json();let canRestore=false;
   try{if(appGameId&&new URLSearchParams(location.search).get('terminal')==='1')return snapshot;const status=await getStatus({signal});canRestore=status.decisionId===snapshot.view?.legal?.decisionId&&['rejected','unreceived'].includes(status.phase);}catch{}
   hintRequests.set(snapshot,{generation,canRestore});return snapshot;
 }
 async function getStatus({ signal } = {}) {
   const response = await (appGameId ? appFetch('action-status',{signal}) : fetch(`/api/action-status?${new URLSearchParams({ token })}`, { signal }));
-  if (!response.ok) throw new Error('AUTHORITY_UNAVAILABLE');
+  if (!response.ok) {
+    const body=await response.json().catch(()=>({}));
+    throw Object.assign(new Error('AUTHORITY_UNAVAILABLE'),{code:body.code??(response.status>=500?'RELAY_UNAVAILABLE':'NETWORK_ERROR')});
+  }
   return response.json();
 }
+async function legacyGameEpoch(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 async function initializeController() {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-  const gameEpoch = appGameId ? appEpoch : Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const { uuid } = await import('./uuid.js');
+  const gameEpoch = appGameId ? appEpoch : await legacyGameEpoch(token);
   actionController = createActionController({
-    gameEpoch, getSnapshot, getStatus, storage: sessionStorage,
+    gameEpoch, getSnapshot, getStatus, storage: sessionStorage, uuid,
     postAction: async (body, { signal }) => {
+      const participant = new URLSearchParams(location.search).get('participant') === '1';
       const live = $('intent-note')?.value;
-      const note = typeof body.note === 'string' ? body.note
-        : typeof live === 'string' ? live
-          : undefined;
+      const note = participant ? undefined
+        : typeof body.note === 'string' ? body.note
+          : typeof live === 'string' ? live
+            : undefined;
       const payload = appGameId ? {...body} : { token, ...body };
-      if (typeof note === 'string') payload.note = note;
+      if (!participant && typeof note === 'string') payload.note = note;
       else delete payload.note;
       const actionOptions={method:'POST',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)};
       const response=await (appGameId ? appFetch('action',actionOptions) : fetch('/api/action',actionOptions));
@@ -1232,22 +1869,31 @@ async function initializeController() {
       renderSnapshot(snapshot); revision = snapshot.revision;
     },
     onState: (state) => {
+      if(ui.sessionEnded){paintEndedControls();return;}
       pendingAction = state.disabled;
-      $('action-status').textContent = state.message;
+      $('action-status').textContent = state.phase === 'idle' && state.decisionId ? turnPrompt(ui.view) ?? state.message : state.message;
+      const notice=$('action-notice');if(notice){notice.textContent=formatActionNotice(state.notice);notice.hidden=!notice.textContent;}
       $('action-retry').hidden = !state.canRetry;
       $('action-retry').disabled = !state.canRetry;
-      $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(state.phase);
+      $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed', 'paused'].includes(state.phase);
       paintActionBar(ui.view);
     },
   });
 }
 function applyMessage(m) {
+  if (m.snapshot && m.revision >= revision) {
+    renderSnapshot(m.snapshot); revision = m.revision;
+    actionController?.observe(m.snapshot.view, {revision:m.revision});
+    if (m.snapshot.view) {booted = true; setConn(true);}
+    return;
+  }
   if (m.revision <= revision) return;
-  revision = m.revision; render(m);
+  const contiguous = m.revision === revision + 1;
+  revision = m.revision; render(m, contiguous);
 }
 if (!token) showBootError('접속 토큰이 없습니다. 게임에서 제공한 접속 링크를 다시 열어 주세요.');
 else if (appGameId && new URLSearchParams(location.search).get('terminal') === '1') {
-  try { const snapshot=await getSnapshot();renderSnapshot(snapshot);setConn(true);$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
+  try { const snapshot=await getSnapshot();ui.sessionEnded=true;renderSnapshot(snapshot);paintEndedControls();setConn(false,'게임 종료');$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
 }
 else {
   const es = appGameId ? eventStream('events?after=0') : new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
@@ -1257,6 +1903,7 @@ else {
   es.onmessage = (event) => {
     try {
       const msg = { revision: Number(event.lastEventId), ...JSON.parse(event.data),hintGeneration:hintState.capture() };
+      if (msg.snapshot) {applyMessage(msg); return;}
       if (!booted) { buffer.push(msg); return; }
       applyMessage(msg);
     } catch (error) {
@@ -1264,23 +1911,52 @@ else {
       setConn(false); actionController?.disconnect();
     }
   };
-  es.onopen = async () => {
-    if (opening) return;
-    opening = true;
+  es.onopen = async ({signal} = {}) => {
+    const attempt=++openingAttempt;
+    const current=()=>!signal?.aborted && attempt===openingAttempt && !ui.sessionEnded;
     try {
-      const snapshot = await getSnapshot();
-      if (!actionController) await initializeController();
-      await actionController.connect(snapshot);
+      const snapshot = await getSnapshot({signal});
+      if(!current())return;
+      if (isSpectating(snapshot.view)) {if(snapshot.revision >= revision){renderSnapshot(snapshot);revision = snapshot.revision;}}
+      else {
+        if (!actionController) await initializeController();
+        if(!current())return;
+        await actionController.connect(snapshot);
+      }
+      if(!current())return;
       booted = true; setConn(true);
       for (const msg of buffer.splice(0)) applyMessage(msg);
-    } catch {
+    } catch (error) {
+      if(!current())return;
       booted = false; setConn(false); actionController?.disconnect();
       $('action-status').textContent = '현재 상태를 불러오지 못했습니다. 연결 또는 접속 링크를 확인하세요.';
-    } finally { opening = false; }
+      if(appGameId)throw error;
+    }
   };
   es.onerror = () => { booted = false; setConn(false); actionController?.disconnect(); };
+  if(appGameId) {
+    es.onretry=attempt=>{shellRetries=attempt;setConn(false,`재접속 중… (${attempt}번째)`);};
+    es.onfatal=async(code,{signal})=>{
+      ++openingAttempt;booted=false;clearInterval(poll);actionController?.disconnect();
+      if(code==='SESSION_INACTIVE') {
+        ui.sessionEnded=true;paintEndedControls();setConn(false,'종료 결과를 확인하고 있습니다…');
+        try {
+          const snapshot=await recoverFinalSnapshot({getSnapshot,signal});
+          if(signal.aborted)return;
+          if(snapshot && snapshot.revision>=revision){renderSnapshot(snapshot);revision=snapshot.revision;}
+        } catch { /* Rendering failure must not undo authoritative termination. */ }
+        finally {
+          if(!signal.aborted){
+            ui.sessionEnded=true;
+            try {paint();} finally {paintEndedControls();setConn(false,'게임 종료');}
+          }
+        }
+      } else setConn(false,'게임 연결이 종료되었습니다');
+    };
+  }
+
   const poll = setInterval(() => {
-    if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed'].includes(actionController.state.phase)) void actionController.reconcile();
+    if (booted && actionController && ['unknown', 'unreceived', 'accepted', 'delivered', 'consumed', 'paused'].includes(actionController.state.phase)) void actionController.reconcile();
   }, 2500);
   window.addEventListener('pagehide', () => { clearInterval(poll); es.close(); });
 }

@@ -1,0 +1,161 @@
+# JEV 구현 검증 기록
+
+2026-09-22 · 구현·로컬 검증 완료. 브랜치 `feat/table-wide-jev`.
+
+## 구현 범위
+
+테이블 전체 JEV를 로비/legacy CLI에 추가했다. SDK 0.6.0과 `jev-1.13.0` 고정, 기존 policy 기본값 유지, 인간 좌석 유지. Node 내부 HTTP 플레이어이며 upper LLM 코치/리뷰와 분리한다. 공개 정보+행동자 패만 허용 목록으로 투영하고 이름/ID를 좌석 alias로 바꾼다. 후보는 엔진 legal을 따르며 금액은 코드로 계산한다.
+
+신규 engine runtime/descriptor, internal restart journal, v3 pending, HTTP 중단/종료 확인, 명시 재시도, 크래시 reconciliation, private diagnostics, 참가자 전송 고지 및 UI를 포함한다. SDK 에러 원문/키는 sink에 보내지 않는다. active JEV store는 구버전으로 열지 않는다.
+
+## 실제 provider 및 브라우저 플레이
+
+- 계약 spike: 정상 합성 요청 1회, 전송 후 취소 1회. 정상 model/확률/usage 검증, 약 793ms. 취소는 약 30ms 내 로컬 settlement 확인. 별도 다중 후보 진단 1회 성공. 합성 요청 합계 3회.
+- 첫 실제 브라우저 테스트: 7회 호출 후 `JEV_INVALID_RESPONSE`에서 복구 대기로 중단.
+- 진단 재현: 4회 호출 후 동일 중단. HTTP 200 응답의 확률 합이 0.99임을 확인했다. 요청 상태/패/이름/키는 보고서에 저장하지 않았다.
+- 저자 설계 보정: 모든 확률이 hundredth인 경우만 n×0.005+1e-6 합 오차 허용. 다른 정밀도는 기존 1e-6. 후보 key 집합·범위·confidence·model·usage·최대 선택 검증 유지. 정규화/자동 재시도/다른 플레이어 대체 없음.
+- 보정 후 실제 플레이: 인간 1명 + JEV 2명, cash-training 2핸드 완료. 실제 JEV 10회 모두 HTTP 200. 두 AI actor(`seat_1`, `seat_2`) 확인. 응답 202–585ms, input 10,101/output 849 tokens. upper LLM은 비활성화하고 사실 기반 피드백을 사용했다. 게임 루프/앱/브라우저는 실제 경로다.
+- 최종 수정본 실제 플레이도 인간 1명 + JEV 2명, 2핸드/10회 결정 모두 성공했다. 응답 212–611ms, input 9,524/output 706 tokens. 두 성공 실행 합계 4핸드/20회 결정이다.
+- 플롭·턴·리버 합성 상태도 각 1회 실제 호출해 고정 모델/후보/응답 계약을 통과했다(225–608ms). 합성 요청 합계는 6회로 계획의 10회 상한 이내다.
+- 실패 재현을 포함한 실제 플레이 호출은 총 31회(실행당 40회 상한), 계약 spike 포함 전체 원격 요청은 37회(취소 포함). 기존 `game/` 해시 불변, 전용 임시 store와 소유 서비스/브라우저 종료 확인.
+- 로컬 증거: `output/playwright/jev-live-verified/result.json`, `jev-lobby.png`, `jev-completed.png`, `output/playwright/jev-live-final/result.json`, `output/playwright/jev-street-smoke/result.json`. 최초 실패와 진단도 별도 디렉터리에 보존했다. API 응답의 비밀정보 없는 결과와 원본 파일 해시는 [실제 API 증거](jev-player-live-evidence.json)에 포함했다. 보고서의 원격 성공은 포커 승률/solver/GTO 품질 증명이 아니다.
+
+## 자동 검증
+
+- pure projection/candidate/response, 실제 설치 SDK fake-fetch serialization/abort/no-retry/log privacy tests.
+- 앱 start/pause/end-without-key/restart descriptor, AI-zero preflight=0, 잘못된 descriptor의 mutation 전 거부, byte/count bounded diagnostics, 손상 config explicit End.
+- loop 전체 핸드, 두 AI alias, loop-state 유실, soft interrupt/명시 retry/fresh 거부, hard timeout, closure-unconfirmed와 late settlement, crash running/unsafe/retry-authorized/proposed/applied, pause exactly-once/stop zero-apply.
+- `npm run benchmark:policies`: PASS.
+- `npm run test:lobby:browser`: PASS.
+- `npm run test:multiplayer:browser`: PASS.
+- `node test/browser/jev-journey.mjs --out-dir output/playwright/ui-journey/jev`: PASS. fake HTTP의 soft wait → cancel → retry → key-free End, privacy 및 사용자 store/cleanup 확인. 외부 API 0회.
+- 최종 수정본 `npm run test:ui:browser -- --ci`와 JEV recovery browser 재실행: PASS.
+- Node 20 실제 SDK/runtime/projection/session 관련 13개 테스트: PASS.
+- 최초 `npm run test:ci`: 2,888 tests, 2,881 pass, 7 fail. 새 runtime 저장 필드로 기존 fixture 2개, 잘못 확장한 pause/stop abort 분기(부모 포함 3개), opt-in live script를 CI journey로 발견한 2개였다. fixture를 명시하고 abort를 JEV stop에 한정했으며 opt-in 스크립트를 `jev-live-play.mjs`로 분리했다. 영향 테스트 재실행 PASS. 최초 실패 로그는 `/tmp/jev-test-ci.log`에 보존했다.
+- 두 번째 전체 실행: 2,913개 중 2,911 PASS, 두 기대값 목록 실패(복구 종료 코드/Windows loop-b 분할). 실행 도중 수정된 fixture여서 해당 실행에는 반영되지 않았다. 두 테스트의 수정본 별도 검증 PASS, 원 로그 `/tmp/jev-test-ci-final.log` 보존.
+- R3 수정 후 JEV recovery browser 재실행: PASS (`output/playwright/ui-journey/jev-reviewed`).
+- 수정본 `npm run test:ci`: **2,919 PASS / 0 FAIL**, 약 1,214초 (`/tmp/jev-test-ci-clean.log`). 실행 중 R3의 마지막 stop 수정이 들어갔으므로 해당 공통 game-loop와 JEV session은 최종 코드로 **496 PASS / 0 FAIL** 별도 재실행했다. JEV 수정 테스트 27개와 browser도 최종 코드로 재실행 PASS.
+- 원격 Linux Node 20/22, Windows Node 20/22 8 shards, publisher, UI browser, study lifecycle benchmark 결과는 이 브랜치 PR의 GitHub checks가 정본이다. 모두 성공한 뒤 병합한다. 이 로컬 보고서만으로 미실행 OS 성공을 주장하지 않는다.
+
+## 독립 코드 리뷰 및 저자 판정
+
+`deep-model-router:model-router` 1.14.0, HIGH, author gpt-6-astra 제외, Opus 5 + Sol 독립 subprocess, tools disabled, 같은 artifact hash, Darwin receipt guard를 사용했다.
+
+R1: Opus는 600초 timeout, 종료 확인. Sol은 실제 지적을 반환했지만 저자 프롬프트가 `REQUEST_CHANGES`를 허용하여 router 판정 문법(PASS/PASS_WITH_CHANGES/FAIL)에 맞지 않아 INVALID_OUTPUT. 둘을 유효한 완료 판정으로 집계하지 않는다.
+
+Sol의 내용 중 다음은 저자가 재현 가능한 결함으로 수용했다.
+
+1. **수용:** 엔진 적용 성공 후 CLI 응답 유실에서 closeConfirmed=false로 바뀌면 기존 reconcile 조건이 이미 적용된 액션을 놓침. v3는 정확한 엔진 action 증거로 정리하고 HTTP closure와 engine receipt를 구분했다. applied proposal crash 테스트 추가.
+2. **수용:** 손상 recovery record에 retryable=true와 proposedAction이 함께 있으면 재추론 가능. pending semantic validator와 retry/dispatch 양쪽에서 막았다.
+3. **테스트 수용:** 각 후보 수에서 확률 반올림 허용/거부 상한 검사.
+4. **증거 보완:** R1 bundle에 누락했던 package-lock을 R2에 포함.
+5. 합계 반올림 보정 자체는 Sol도 수학적으로 허용 가능한 범위로 평가했다. 정책 선택의 최종 책임은 저자에게 있다.
+
+R2: 두 좌석 모두 유효한 receipt와 종료 확인. Sol FAIL(confidence 0.96), Opus PASS_WITH_CHANGES(0.72). 판정을 그대로 승인으로 취급하지 않고 아래처럼 결정했다.
+
+- Sol의 자동 stop 정리 금지 요구는 **기각**: 설계 §6.1은 이미 요청된 stop의 전체 cleanup 재실행을 요구한다. 명시 재시도가 필요한 것은 추론/액션이며 shutdown 완료와 다르다. 다만 stopPromise/cleanupError 기록 사이의 race는 **수용**하여 실패한 stopPromise settlement를 먼저 기다리도록 고쳤다. 락 유지→late settle→전체 cleanup→락 해제, 액션 0 테스트 PASS.
+- Opus의 ENGINE_APPLY_UNCONFIRMED 막다른 길 지적은 **수용**: HTTP 미확인은 계속 모든 플레이 제어를 막지만, 엔진 제안 불확실성은 명시 End만 허용한다. 기존 엔진 end transaction이 stateVersion을 진행하고 hand를 비우므로 뒤늦은 old expect-version step은 종료 뒤 적용할 수 없다. 재시도/새 게임 허용은 추가하지 않았다.
+- 취소와 runtime 선택 경합은 일반 경로에서 제시된 그대로 재현되지는 않았지만 **부분 수용**: 제안 이전 취소는 INTERRUPTED/retryable로 명시 분류했다. unsafe/제안 이후를 덮어쓰지 않는다.
+- optional diagnostics 손상이 모든 lifecycle write를 막는 문제는 **수용**: 진단만 격리 리셋하고 historyIncomplete와 quarantine log를 남긴다. 종료/락 해제 테스트 PASS.
+- 알 수 없는 archetype의 retryable 변환은 **기각**: 생성기는 동일한 6개 enum을 사용하며 손상 입력은 설계상 nonretryable/End다. 이름이나 다른 플레이 스타일로 대체하지 않는다.
+- 제안 뒤 VERSION_MISMATCH 자동 resync는 **보류/기각**: 보수적으로 엔진 불확실성으로 남기고 End-only 또는 소유자 종료 후 reconciliation을 사용한다. 이전 차례를 자동 재추론하지 않는다.
+- undocumented resume({opponentRuntime}) 인자 요구는 **기각**: 공개 resume 인자는 skipLock이고 실제 CLI/launcher의 explicit opts는 교차검사된다.
+- cannot-check/zero-call 후보 상태는 **수용**하여 입력 오류로 거부한다.
+- settled=null 경합은 두 대입 사이 await가 없어 도달 불가, 타이머는 settlement/finally에 정리된다. unref 제안은 단독 pending 작업을 사라지게 할 수 있어 **기각**.
+- client 재생성이 연결 풀을 없앤다는 주장은 global fetch pooling과 다르므로 **기각**. 진단 비용 최적화는 256 KiB 상한이 있고 관측 성능 결함이 없어 보류한다.
+- resume preflight 강제는 **기각**: 키/SDK 부재가 게임 복원과 End를 막지 않게 첫 결정에서 안전한 복구 오류를 남기는 설계다.
+
+R3: 위 판단과 수정된 코드/계약을 동일 artifact로 두 독립 좌석에 전달했다.
+
+- Sol FAIL(0.94)의 복합 stop 오류 소실 지적은 **수용**: JEV close 미확인 뒤 다른 cleanup 실패가 있어도 첫 코드만 남던 경로를 보정했다. 각 stop 시도의 모든 오류 코드를 보존하고, 동일 시도에서 JEV closure 오류 단독임을 확인한 경우만 late observer가 전체 cleanup을 재실행한다. compound failure 주입에서 자동 재시도 없음/락 유지/오류 보존 및 명시 stop 재시도 뒤 로그 이력 유지 테스트 PASS.
+- canCheck=true/callAmount>0의 상호 모순은 **수용**하여 후보 생성 전에 입력 오류로 거부한다. 실제 엔진은 이 조합을 생성하지 않지만 경계 검증을 강화했다. raise 범위는 short all-in(min>max)이 합법인 기존 계약을 유지한다.
+- 마지막 수정 관련 27개 테스트 PASS. 변경된 공통 stop 경로의 기존 game-loop 전체 + JEV session 테스트 496개 재실행 PASS(약 533초).
+- Opus PASS_WITH_CHANGES(0.62). 조건부/유지보수 제안은 아래처럼 실제 구현을 대조했다.
+  - legacy runtime: **기각**. `requestedOpponentRuntime`은 기본 llm이고 `opponentRuntimeOf()`는 loop 값 또는 그 기본값을 반환한다. resume은 별도로 legacy resolver를 거쳐 resolver/restore 전에 runtime을 기록한다. `undefined`를 반환한다는 전제가 성립하지 않는다. 기존 fixture 두 수정은 새 명시 config의 정확한 비교/의도적인 policy 설정을 반영한 것이다.
+  - CLI 대기 무한정 주장: **기각**. 발췌에 없던 runJsonChild는 execFile timeout(기본 60초)을 적용하며 현재 엔진은 SIGTERM을 무시하는 런타임이 아니다. 이미 소유한 atomic step은 정리 전에 settlement를 기다리는 기존 계약을 유지한다. 커널 수준 비정상 stall을 정상 shutdown 증거로 간주하지 않는다.
+  - 좌석/성향/position 불일치: **기각**. normalizeSetup은 AI≤8·totalSeats≤9, 엔진 ARCHETYPES는 정확히 같은 6개, positionsOf는 현재 allowlist에 포함되는 label만 생성한다. 미지원 손상 입력을 임의 보정하지 않는다.
+  - decisionId 포맷 공유: **유지보수 이월**. 현재 엔진 hand/decision 두 경로도 같은 포맷이며 실제 late-settlement 테스트가 동일성을 검사한다. 포맷 변경은 향후 저장 계약 변경으로 함께 다뤄야 한다.
+  - 상대 경로 init: **기각**. 실제 CLI parser와 session-catalog가 경로를 resolve하며 prepared stagingDir은 절대 경로다. initializer를 문서화되지 않은 상대 경로로 직접 호출하는 확장은 범위 밖이다.
+  - config 파일 오류 코드: **기각**. 앱/재시작은 validateJevConfig로 먼저 전용 오류를 내고, internal CLI의 잘못된 파일은 usage로 mutation 전에 거부한다.
+  - 임의 SDK 생성 예외의 retryable 변환: **기각**. 실제 고정 SDK import/키 부재는 전용 retryable 코드이며, 나머지 프로그래밍/입력 오류에 반복 호출을 권하지 않는다. 키/원문 오류는 노출하지 않는다.
+  - origin 거부 세분화: **이월**. 네트워크 오류로 분류되어도 redirect/origin 차단은 실제 테스트로 보장된다. SDK 임의 error.code를 신뢰해 통과시키는 제안은 수용하지 않는다.
+  - diagnostics historyIncomplete: **기각**. 정상 절단은 정확한 dropped로, 손상은 손실량이 알려지지 않아 historyIncomplete로 구분한다. 전체 256 KiB 예산 내 성능 캐시는 관측 문제 없어 이월.
+  - proposedAction 후 자동 복구/재시도: **기각**. 엔진 적용 불확실성의 보수적인 End-only 정책을 유지한다.
+  - 추가 오류 문면: **이월**. HTTP 미확인/엔진 미확인/입력 오류는 실제 pause-message에 한국어 안내가 있고 일반 실패도 AI 복구 메시지로 표시된다. HTTP API 코드는 진단에 보존한다.
+  - resume({opponentRuntime}) 항목: **기각**. 실제 resume의 인자는 skipLock이며 bootstrap과 혼동한 지적이다.
+
+R2/R3 모두 `verify-evidence --require-receipt-guard --expect-fingerprint --expect-models` exit 0. R3 유효 판정은 FAIL + PASS_WITH_CHANGES이며 이를 두 승인으로 바꾸지 않는다. 저자는 재현 가능한 Sol 지적 두 건을 마지막 수정과 테스트로 해소했고, 조건부 Opus 지적을 위 증거로 판정했다. 리뷰 3라운드 후 추가 리뷰를 무한 반복하지 않으며 마지막 수정은 저자의 회귀 테스트 및 최종 CI로 검증한다. 원본 응답/receipt/수정 파일 해시는 [코드 리뷰 증거](jev-player-code-review-evidence.json)에 보존한다.
+
+
+## PR CI에서 발견한 화면 회귀
+
+첫 원격 Test run `35683836404`의 UI browser job `106606349535`에서 `guest A table fills the viewport`가 실패했다. JEV recovery/로비/관전자 여정은 통과한 뒤 기존 멀티플레이어 여정에서 실패했다. 원인은 참가 전 안내문과 비어 있는 provider 문단이 게임 중에도 세로 공간을 차지한 것이었다. CI의 낮은 viewport에서 iframe 높이가 400px 미만이 되는 실제 회귀로 판정했고 단순 재실행으로 덮지 않았다.
+
+- 참가 전 두 안내문은 게임 중에만 숨기고, 실제 JEV provider 표시는 간결하게 유지한다. 비어 있는 provider 문단은 공간을 차지하지 않는다.
+- 멀티플레이어 browser journey의 두 참가자 viewport를 1280×600으로 고정해 이 조건을 지속적으로 검사한다.
+- 수정 후 multiplayer browser PASS, UI public contract 4 PASS. 기존 사용자 store 보존 및 소유 서비스 cleanup도 PASS.
+- 최초 로그 `/tmp/jev-ci-ui-first.log`, 다운로드 증거 `/tmp/jev-ci-ui-evidence`, GitHub artifact `10675883508`(run `35683836404`)을 보존했다. 이후 최종 commit에서 전체 원격 CI를 새로 실행한다.
+
+
+두 번째 원격 UI 실행(run `35684612635`, job `106608913079`)은 JEV/관전자 여정 통과 후 기존 로비의 `#recover` 클릭에서 실패했다. 브라우저는 클릭 지점이 header에 가려졌다고 보고했으나 후속 스크린샷에서는 복구 화면이 정상 표시됐다. 테스트가 manager의 error 상태만 기다리고 브라우저 polling render를 기다리지 않는 경합을 확인해, 실제 복구 버튼의 표시·클릭 지점 소유를 기다린 뒤 기존 브라우저 클릭을 수행하도록 보완했다. 제품 경로 변경이나 강제 DOM 클릭으로 우회하지 않았다. 수정 후 전체 lobby browser journey PASS. 최초 로그 `/tmp/jev-ci-ui-second.log`와 `/tmp/jev-ci-ui-second-evidence`를 보존했다.
+
+## v2 검증 (결정 규칙 v2, 2026-09-23)
+
+설계는 [결정 규칙 v2](jev-player-design.md#결정-규칙-v2-2026-09-22)다. 수치는 요약만 싣고 세션 ID·경로·카드 원자료는 싣지 않는다.
+
+### 오프라인 검증
+
+- 기록된 v1 분포 230건(세션 식별자·카드 없음, `test/fixtures/jev-distributions-2026-09-22.json`)의 100점 격자 재생: 클래스 빈도가 가지치기·정규화 뒤 질량과 ±0.01 이내, 질량 0.05 미만 클래스 선택 0회, 레이즈 사이즈가 독립 구현한 가중 중앙값과 전 건 일치. 분할 투표 회귀 사례(AA, 레이즈 0.22·0.22·0.41 → 중앙값 사이즈)와 합 0.99·누적 경계·정확한 절반 중앙값·확률 0 후보 경계.
+- 메뉴 v2 기대값(오픈·레이즈 직면·4벳·림프·헤즈업·토너먼트 레벨·숏스택·유효 잔여·낮은 SPR·clamp)과 투영 v2(3좌석 팟 오즈, 사이드팟, 부분 올인 콜, 실제 엔진 상태, 최대 유효 입력 < 24 KiB).
+- 루프 결선: API 라벨과 다른 선택이 제안과 엔진 적용 양쪽에 쓰임, 진단 entry와 제안이 한 번의 loop-state write(쓰기 실패 시 둘 다 없음), 적용 액션의 재계산 일치, 세대별 추첨값, 제안 뒤 크래시·적용 뒤 응답 유실 복구.
+- roll-forward: v1 store 재개 시 마커·notice·log 각 1회, 두 번째 재개 불변, 마커 write 실패 뒤 재기록, 엔진 descriptor·아카이브·pending 불변, v2·policy store 무기록, 같은 설정 재시작은 v2, 모르는 descriptor 거부.
+- 공개 채널 canary: 호스트·착석 참가자·관전자 스냅샷과 SSE, 요약 API, export(두 형식), replay, loop.log에서 확률·추첨값·선택 기록 부재(양성 대조 포함).
+
+### 실제 API 게이트 (2026-09-23)
+
+실행: 임시 store, 브라우저 저니(`test/browser/jev-live-play.mjs`), 사람 1명 + JEV AI 6명, pace instant, 상위 LLM 비활성. 판정식은 `test/helpers/jev-gate.mjs`(단위 테스트 `test/jev-gate.test.js`). 승인 예산 1,200 요청 중 **993** 사용(무효 실행 포함).
+
+| 실행 | 설정 | 핸드 | 결정(①) | ① | ② 40bb 초과 절망 all-in | ③ | ④ 프리미엄 폴드 |
+|---|---|---|---|---|---|---|---|
+| A | cash 30핸드, 사람 check-call | 30 | 362 | PASS (실패 0·재계산 362/362) | **FAIL 7/208** | 해당 없음 (0칩 사건 첫 5핸드 4·전체 22) | PASS 0/7 |
+| B | 같음 (재실행, 예산 상한 핸드 경계 정지) | 29 + 미완결 1 | 362 | PASS (재계산 362/362, 미완결 1 제외) | **FAIL 7/208** | 해당 없음 (첫 5핸드 3·전체 14) | PASS 0/4 |
+| C | tournament, 사람 check-fold | 52 (자연 종료) | 171 | PASS (재계산 171/171) | **FAIL 2/70** | **FAIL** (5핸드 내 AI 탈락 2) | PASS 0/5 |
+
+- 무효 실행 1회(B 첫 시도, 97요청): 실제 API가 0.01 단위 확률에서 최댓값(0.28)보다 0.01 낮은 후보(0.27)를 `choice`로 돌려줘 `JEV_INVALID_RESPONSE`로 멈췄다. 반올림 봉투 안의 응답이므로 choice 허용 오차를 0.01로 보정(설계 문서 "choice 반올림 봉투")한 뒤 B를 재실행했다.
+- ⑤ A+B+C 합산 VPIP/PFR(기회 = 딜 받은 핸드): Nit 23.3/21.7 (기회 60, PASS), TAG 41.4/35.1 (111, **밴드 18–35 밖**), LAG 56.3/50.0 (80, PASS), Maniac 74.3/67.6 (74, PASS), CallingStation 63.5/21.6 (74, **PFR ≤ 15 밖**), Trickster 50.0/38.3 (60, **밴드 20–45 밖**).
+- ⑥ 보고: 최대 질량이 아닌 클래스가 추첨된 비율 25–28%, all-in 후보 노출 26–33%, 모델 지연 p50 277–307ms·p90 354–415ms, 입력 약 1,540–1,650토큰/결정, 진단 entry 약 650바이트(362건 ≈ 236 KB, 절단 0).
+- ② 위반 16건 중 9건은 5% 이상 소수 클래스(질량 0.09–0.46)가 추첨된 경우이고 7건은 모델이 all-in·콜오프 클래스에 최대 질량을 준 경우다. 대부분 큰 레이즈에 직면한 프리플랍(메뉴가 fold/call/all-in만 남는 자리)과 낮은 SPR 포스트플랍이었다.
+
+**대조군(v1 기록 3게임, 같은 판정식)**: ① "v1 — 미적용"(한 게임은 미완결 기록 5건), ② 7/81 FAIL(52bb Ac5c 플랍 셔브, 7하이 올인 콜 등), ③ 세 게임 모두 FAIL(5핸드 내 탈락 2·5·3), ④ 1/5 FAIL(TT 폴드), 합산 Nit VPIP 5.1%·TAG 44.1%·LAG 93.3%.
+
+**판정: 설계 D7의 필수 기준 ②(세 실행)와 ③(C)을 충족하지 못했다.** v1 대비 절망 all-in 비율은 8.6% → 3.3%, 프리미엄 폴드는 1/5 → 0/16으로 줄었고 성향 간 VPIP 차이가 생겼지만, "0건" 기준에는 미달이다. 이 수치는 휴리스틱 기준표 비교이며 포커 실력·수익·GTO의 증명이 아니다.
+
+## v3 검증 (결정 규칙 v3, 2026-09-29, #234)
+
+설계는 [결정 규칙 v3](jev-player-design.md#결정-규칙-v3-2026-09-29-234)다. 수치는 요약만 싣고 세션 ID·경로·카드·확률 원자료는 싣지 않는다.
+
+### 오프라인 검증
+
+- 선택 규칙 `class-sample-v2`: v2 게이트의 ② 위반 16건 재현 중 12건에서 commit 후보를 추첨 전에 제외(모든 추첨값), 모델이 0.6 이상을 준 4건은 유지. 프리미엄·얕은 스택 예외, 0.6 정확값 유지와 그 직전 값(0.5999999996 등) 제외, API의 0.01 단위 값은 정수 합, `rule` 누락은 입력 오류.
+- 메뉴 v3: full raise 수에 따른 프리플랍 사다리(엔진으로 만든 연속 short all-in 포함), 정확한 1/10 배수, 95% 병합, 5벳은 all-in만.
+- 게이트 ①의 독립성: entry의 버전 튜플 전체, 아카이브만으로 다시 만든 v3 메뉴(레이즈 가능 여부도 엔진 규칙대로 재생), 비밀 시드에서 재유도한 추첨값, 아카이브에서 재유도한 가드 입력으로 `selection` 전체를 대조. 엔진이 둔 핸드의 모든 결정에서 재구성 메뉴가 루프 메뉴와 같고, 레이즈 가능 여부 재생을 끄면 실패하는 것을 확인.
+- 판정 범위: 현재 descriptor로 시작한 store만 판정하고, 증거가 불완전한 실행(절단 미복원·결과 파일 없음·요청 상한)은 INCONCLUSIVE로 두되 완료 핸드가 증명하는 위반과 저니의 제품 검증 실패는 FAIL.
+- roll-forward: v1·v2·v1→v2 store가 v3로 한 번 roll-forward, 대기 중 결정(적용됨·복구 필요)은 바이트 그대로이고 추가 추론 없음.
+
+### 실제 API 게이트 (2026-09-29)
+
+실행: 임시 store, 브라우저 저니(`test/browser/jev-live-play.mjs`), 사람 1명 + JEV AI 6명, pace instant, 상위 LLM 비활성. 판정식은 `test/helpers/jev-gate.mjs`. 승인 예산 1,200 요청 중 **938** 사용(하네스 점검용 2핸드 실행 6요청 포함). 네 실행 모두 저니 PASS, 응답은 전부 HTTP 200, 진단 절단 0(미러 복원 불필요).
+
+| 실행 | 설정 | 핸드 | 결정(①) | ① | ② 40bb 초과 절망 all-in | ③ | ④ 프리미엄 폴드 |
+|---|---|---|---|---|---|---|---|
+| A | cash 20핸드, 사람 check-call | 20 | 244 | PASS (실패 0·재계산 244/244) | PASS 0/126 | 해당 없음 (0칩 사건 첫 5핸드 0·전체 3) | PASS 0/1 |
+| B | 같음 | 20 | 241 | PASS (241/241) | PASS 0/125 | 해당 없음 (0·2) | PASS 0/6 |
+| C | 같음 | 20 | 240 | PASS (240/240) | PASS 0/133 | 해당 없음 (2·6) | PASS 0/5 |
+| D | tournament, 사람 check-fold | 60 (자연 종료) | 207 | PASS (207/207) | PASS 0/69 | PASS (5핸드 내 AI 탈락 1) | PASS 0/9 |
+
+- ② 합산 0/453(0%, v2 정의로도 0). 합격선은 합산 1% 이하이고 "0건"도 이번 표본에서 달성했다. 0/453은 참 위반율이 약 0.7%까지일 수 있는 표본이다(95% 상한, 3/n 규칙).
+- ⑤ 합산 VPIP/PFR(기회 = 딜 받은 핸드), 모두 밴드 안: Nit 22.5/18.8(80, 밴드 8–25), TAG 27.5/24.2(120, 18–35), LAG 59.4/56.3(64, 30–60), Maniac 66.3/62.7(83, 40–75), CallingStation 57.3/14.7(75, 35–70·PFR ≤ 15), Trickster 36.4/31.8(88, 20–45). LAG VPIP와 CallingStation PFR은 경계에 가깝다.
+- 가드: 932결정 중 199건에서 commit 후보를 제외했다(그중 173건은 질량이 0보다 컸다). 같은 추첨값으로 가드 없이 다시 선택하면 28건이 commit 후보로 갔다.
+- ⑥ 보고: 최대 질량이 아닌 클래스가 추첨된 비율 17–28%, all-in 후보 노출 22–43%, 모델 지연 p50 235–242ms·p90 288–363ms, 입력 약 1,560–1,690토큰/결정, 진단 entry 약 660바이트(244건 ≈ 162 KB).
+
+**판정: PASS.** 설계 D7의 필수 기준 ①–④와 ⑤를 모두 충족했다. v2 대비 절망 all-in은 16/486 → 0/453, 토너먼트 조기 탈락은 2 → 1, 성향 밴드 이탈은 3개 → 0개다. 이 수치는 휴리스틱 기준표 비교이며 포커 실력·수익·GTO의 증명이 아니다.

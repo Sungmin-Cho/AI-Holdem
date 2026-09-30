@@ -241,23 +241,30 @@ test('proof-profile-report aggregates five fixture lines as a table and as --jso
     { t: 3, pid: 10, kind: 'identity', paths: 1, ms: 1000, status: null, timedOut: true, phase: 'checkpoint' },
     { t: 4, pid: 11, kind: 'acl', paths: 3, ms: 20, status: 1, timedOut: false, phase: null },
     { t: 5, pid: 11, kind: 'create', paths: 1, ms: 30, status: 0, timedOut: false, phase: 'create' },
+    { t: 6, pid: 12, kind: 'identity', paths: 0, ms: 400, status: 0, timedOut: false, phase: 'stop', self: true },
+    { t: 7, pid: 12, kind: 'identity', paths: 0, ms: 300, status: 0, timedOut: false, phase: 'stop', self: false },
   ];
   fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
   const helper = path.join(HERE, 'helpers', 'proof-profile-report.mjs');
   const text = spawnSync(process.execPath, [helper, file], { encoding: 'utf8', env: cliEnv() });
   assert.equal(text.status, 0, text.stderr);
-  assert.match(text.stdout, /calls=5/);
+  assert.match(text.stdout, /calls=7/);
   assert.match(text.stdout, /timedOut=1/);
+  assert.match(text.stdout, /by target:\n {2}\(unrecorded\) {2}calls=5/);
+  assert.match(text.stdout, /by pid x phase \(top 20 by ms\):\n {2}10 checkpoint {2}calls=1 {2}ms=1000/);
   const json = spawnSync(process.execPath, [helper, file, '--json'], { encoding: 'utf8', env: cliEnv() });
   assert.equal(json.status, 0, json.stderr);
   const parsed = JSON.parse(json.stdout);
-  assert.equal(parsed.total.calls, 5);
-  assert.equal(parsed.total.ms, 1200);
+  assert.equal(parsed.total.calls, 7);
+  assert.equal(parsed.total.ms, 1900);
   assert.equal(parsed.total.timedOut, 1);
   assert.equal(parsed.total.nonzero, 2);
   assert.equal(parsed.byPid['10'].calls, 3);
   assert.equal(parsed.byPhase.ensure.calls, 2);
   assert.equal(parsed.byKind.acl.calls, 3);
+  assert.equal(parsed.byPidPhase['10 ensure'].ms, 150);
+  assert.equal(parsed.byPidPhase['11 (none)'].calls, 1);
+  assert.deepEqual([parsed.byTarget.self.ms, parsed.byTarget.other.ms, parsed.byTarget['(unrecorded)'].calls], [400, 300, 5]);
 });
 
 test('reporter CLIs stay inert when node --test loads the helper modules', async () => {
@@ -288,4 +295,47 @@ test('tap-file-timing maps a step-6 then alphabet-restart log back onto two file
   assert.match(result.stdout, /alpha\.test\.js/);
   assert.match(result.stdout, /zeta\.test\.js/);
   assert.match(result.stdout, /zeta\.test\.js[\s\S]*zeta one|zeta one/);
+});
+
+// #212: node's TAP reporter prints `#` as `\#` and doubles backslashes, and a template name such
+// as `${phase}-${gameOver}` matches almost any hyphenated name. Neither may move a test to the
+// alphabetically earlier file.
+test('tap-file-timing attributes escaped-hash and template-shadowed names to their own file', () => {
+  const dir = diagDir();
+  const tests = path.join(dir, 'test');
+  fs.mkdirSync(tests);
+  fs.writeFileSync(path.join(tests, 'app-exit.test.js'), [
+    "for (const phase of ['a']) for (const gameOver of [true]) {",
+    '  test(`${phase}-${gameOver}`, () => {});',
+    '}',
+    "test('app plain', () => {});",
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(tests, 'game-loop.test.js'), [
+    "test('#196 legacy run forwards a fresh-session grant', () => {});",
+    "test('plain name with-hyphen', () => {});",
+    "test('back\\\\slash # mid\\ttab', () => {});",
+    '',
+  ].join('\n'));
+  const log = path.join(dir, 'job.log');
+  const lines = [
+    'loop\t2026-09-07T10:00:00.0000000Z # Subtest: \\#196 legacy run forwards a fresh-session grant',
+    'loop\t2026-09-07T10:01:00.0000000Z ok 1 - \\#196 legacy run forwards a fresh-session grant',
+    'loop\t2026-09-07T10:01:00.0000000Z # Subtest: plain name with-hyphen',
+    'loop\t2026-09-07T10:02:00.0000000Z not ok 2 - plain name with-hyphen',
+    'loop\t2026-09-07T10:02:00.0000000Z # Subtest: back\\\\slash \\# mid\\\\ttab',
+    'loop\t2026-09-07T10:03:00.0000000Z not ok 3 - back\\\\slash \\# mid\\\\ttab',
+    'loop\t2026-09-07T10:03:00.0000000Z # Subtest: a-true',
+    'loop\t2026-09-07T10:04:00.0000000Z ok 4 - a-true',
+  ];
+  fs.writeFileSync(log, lines.join('\n') + '\n');
+  const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /files seen: 2\/2 {2}total: 4\.0 min {2}unmatched subtests: 0/);
+  assert.match(result.stdout, /3\.00 min {2}game-loop\.test\.js +tests= {2}3 skip= 0 fail=2/);
+  // Only the template-only name falls back to the template file, after the literal names.
+  assert.match(result.stdout, /1\.00 min {2}app-exit\.test\.js +tests= {2}1 skip= 0 fail=0/);
+  assert.match(result.stdout, /game-loop\.test\.js: plain name with-hyphen/);
+  assert.match(result.stdout, /game-loop\.test\.js: back\\slash # mid\\ttab/);
 });

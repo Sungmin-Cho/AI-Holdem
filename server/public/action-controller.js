@@ -1,26 +1,35 @@
-const WAITING = new Set(['sending', 'reconciling', 'accepted', 'delivered', 'consumed', 'unknown', 'unreceived']);
+const WAITING = new Set(['sending', 'reconciling', 'accepted', 'delivered', 'consumed', 'unknown', 'unreceived', 'paused']);
 const PHASES = new Set(['accepted', 'delivered', 'consumed', 'rejected']);
 const MESSAGES = {
   idle: '내 차례입니다. 액션을 선택하세요.',
-  sending: '액션을 전송하고 있습니다…',
-  reconciling: '접수 기록과 현재 차례를 확인하고 있습니다…',
-  accepted: '액션이 접수되었습니다. 게임 진행을 기다려 주세요.',
-  delivered: '접수된 액션을 처리하고 있습니다. 다시 누를 필요가 없습니다.',
-  consumed: '액션 처리가 끝났습니다. 다음 차례를 기다려 주세요.',
-  rejected: '액션이 거부되었습니다. 현재 가능한 액션을 다시 선택하세요.',
-  unreceived: '현재 접수 기록은 없지만 이전 전송이 도착할 수 있습니다. 같은 액션만 다시 확인할 수 있습니다.',
-  unknown: '접수 여부를 확인할 수 없습니다. 연결 복구 후 상태 확인을 눌러 주세요.',
+  sending: '액션을 보내는 중…',
+  reconciling: '접수 상태와 현재 차례를 확인하는 중…',
+  accepted: '액션이 접수됐습니다. 게임 진행을 기다리는 중…',
+  delivered: '접수된 액션을 처리하는 중입니다. 다시 누르지 않아도 됩니다.',
+  consumed: '액션이 반영됐습니다. 다음 차례를 기다리는 중…',
+  rejected: '액션이 거부됐습니다. 현재 가능한 액션을 다시 고르세요.',
+  unreceived: '전송 결과를 확인하지 못했습니다. 같은 액션을 다시 보내거나 상태를 확인하세요.',
+  unknown: '접수 여부를 확인하지 못했습니다. 연결이 돌아오면 상태 확인을 눌러 주세요.',
+  paused: '일시정지 중이에요. 재개되면 다시 고를 수 있어요.',
   storage: '복구 정보를 저장할 수 없습니다. 브라우저 저장 공간을 확인한 뒤 새로고침하세요.',
 };
 
 /** Network/auth adapters are injected. Only a hash of the authenticated game token
  * identifies the game. Credentials never enter the persisted request object. */
 export function createActionController({ gameEpoch, postAction, getSnapshot, getStatus, storage,
-  onState = () => {}, onSnapshot = () => {}, uuid = () => crypto.randomUUID(), timeoutMs = 8000 } = {}) {
+  onState = () => {}, onSnapshot = () => {}, uuid = () => {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }, timeoutMs = 8000 } = {}) {
   let view = null;
   let request = null;
   let phase = 'unknown';
   let errorCode = null;
+  let notice = null;
   let revision = 0;
   let inflight = null;
   let viewRevision = 0;
@@ -28,11 +37,13 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   let knownReceipt = null;
   let sendingCount = 0;
   let storageLoaded = false;
+  let closedDecisionId = null;
   const receiptRank = { accepted: 1, delivered: 2, consumed: 3 };
   const key = typeof gameEpoch === 'string' && gameEpoch ? `holdem.action.v1.${gameEpoch}` : null;
   const currentId = () => view?.legal?.decisionId ?? null;
   const state = () => Object.freeze({ phase, requestId: request?.requestId ?? null,
     decisionId: currentId(), canRetry: Boolean(request && request.decisionId === currentId() && !view?.gameOver && !sendingCount && !knownReceipt && ['unreceived', 'unknown'].includes(phase)), disabled: !currentId() || Boolean(view?.gameOver) || WAITING.has(phase),
+    notice: notice ? Object.freeze({...notice}) : null,
     message: phase === 'idle' && !currentId() ? (view?.gameOver ? '게임이 끝났습니다. 학습실에서 복습을 이어갈 수 있습니다.' : '다른 플레이어의 차례를 기다리고 있습니다.') : (MESSAGES[errorCode === 'STORAGE' ? 'storage' : phase] ?? MESSAGES.unknown), errorCode });
   const emit = () => { const next = state(); onState(next); return next; };
   const setPhase = (next, code = null) => { phase = next; errorCode = code; return emit(); };
@@ -59,7 +70,9 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   }
   function release() {
     request = null; requestGeneration += 1; knownReceipt = null;
-    storage.removeItem?.(key);
+    // A storage failure must not strand the state machine mid-transition; a stale
+    // stored request is re-validated against the server on the next load anyway.
+    try { storage.removeItem?.(key); } catch { /* next load reconciles */ }
   }
   function rememberReceipt(receipt) {
     if (knownReceipt?.decisionId === receipt.decisionId && knownReceipt.requestId === receipt.requestId
@@ -68,7 +81,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   }
   function persist(next) {
     try { storage.setItem(key, JSON.stringify(next)); capture(next); return true; }
-    catch { setPhase('unknown', 'STORAGE'); return false; }
+    catch { notice={code:'STORAGE'};setPhase('unknown', 'STORAGE'); return false; }
   }
   async function bounded(fn) {
     const controller = new AbortController();
@@ -96,6 +109,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         if (Number.isInteger(snapshot.revision) && snapshot.revision < viewRevision) throw new Error('STALE_SNAPSHOT');
         const decisionId = snapshot.view?.legal?.decisionId ?? null;
         if (receipt.decisionId !== decisionId) throw new Error('STALE_STATUS');
+        if(decisionId!==currentId())notice=null;
         view = snapshot.view;
         if (Number.isInteger(snapshot.revision)) viewRevision = snapshot.revision;
         // An unreceived server read cannot replace an unread local intent.
@@ -103,10 +117,26 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         if (!storageLoaded) load();
         onSnapshot(snapshot);
         if ((request && request.decisionId !== decisionId) || (knownReceipt && knownReceipt.decisionId !== decisionId)) release();
+        // #235: the server's durable cancellation of this exact request is the one
+        // fence that proves no earlier POST can still be accepted. Release it.
+        if (request && Array.isArray(receipt.cancelled) && receipt.cancelled.includes(request.requestId)
+          && receipt.requestId !== request.requestId) {
+          release();
+          notice = { code: 'ACTION_CANCELLED' };
+        }
+        // An earlier rejection of this exact request (superseded by another tab's
+        // correction) is equally terminal; without it the mismatch below locks.
+        if (request && Array.isArray(receipt.rejected) && receipt.rejected.includes(request.requestId)
+          && receipt.requestId !== request.requestId) {
+          release();
+          notice = { code: 'ACTION_REJECTED' };
+        }
         if ((receipt.phase === null || receipt.phase === 'unreceived') && receipt.requestId === null) {
           // A read is not a cancellation fence. It may race any previously
           // issued POST, including one whose fetch rejected or timed out.
-          return setPhase(knownReceipt?.phase ?? (request ? 'unreceived' : 'idle'));
+          // While the game is paused a free tab stays locked instead of burning
+          // cancellation slots on clicks the gate would refuse anyway.
+          return setPhase(knownReceipt?.phase ?? (request ? 'unreceived' : (receipt.paused === true ? 'paused' : 'idle')));
         }
         if (!PHASES.has(receipt.phase) || typeof receipt.requestId !== 'string' || !receipt.requestId) {
           throw new Error('INVALID_STATUS');
@@ -116,7 +146,10 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         if (receipt.phase === 'rejected') {
           if (request && receipt.requestId !== request.requestId) throw new Error('RECEIPT_MISMATCH');
           release();
-          return setPhase('rejected');
+          const cancelledNow = notice?.code === 'ACTION_CANCELLED';
+          if (!cancelledNow) notice={code:['STALE_DECISION','ILLEGAL_ACTION','VERSION_MISMATCH'].includes(receipt.reason)?receipt.reason:'ACTION_REJECTED'};
+          // #235: an older rejected receipt must not reopen input while paused.
+          return setPhase(receipt.paused === true ? 'paused' : 'rejected');
         }
         rememberReceipt(receipt);
         return setPhase(knownReceipt.phase);
@@ -130,9 +163,10 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   return {
     get state() { return state(); },
     async connect(snapshot) {
+      if((snapshot?.view?.legal?.decisionId??null)!==currentId())notice=null;
       view = snapshot?.view ?? null;
       if (Number.isInteger(snapshot?.revision)) viewRevision = Math.max(viewRevision, snapshot.revision);
-      try { load(); } catch (error) { return setPhase('unknown', error.message); }
+      try { load(); } catch (error) {return setPhase('unknown', error.message); }
       return reconcile();
     },
     observe(nextView, { revision: nextRevision } = {}) {
@@ -142,7 +176,8 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
       }
       const before = currentId();
       view = nextView;
-      if (currentId() !== before) { setPhase('unknown'); void reconcile(); }
+      if (currentId() !== closedDecisionId) closedDecisionId = null;
+      if (currentId() !== before) { notice=null;setPhase('unknown'); void reconcile(); }
       else emit();
     },
     disconnect() { ++revision; return setPhase('unknown'); },
@@ -155,6 +190,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
   };
 
   async function sendAction(action, amount, note) {
+    if (closedDecisionId && currentId() === closedDecisionId) return state();
     const unchanged = request?.decisionId === currentId() && request.action === action
       && request.amount === (action === 'raise' ? amount : undefined);
     if (!key || (request && !unchanged) || (state().disabled && !(unchanged && state().canRetry))) return state();
@@ -176,6 +212,7 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         // Observe a late settlement even after the timeout race has ended, but
         // never resurrect a request terminalized by rejection/advancement.
         if (stillCurrent() && response?.ok === true) {
+          notice=null;
           if (!knownReceipt || knownReceipt.requestId === captured.requestId) {
             rememberReceipt({ decisionId: captured.decisionId, requestId: captured.requestId, phase: 'accepted' });
           }
@@ -183,10 +220,57 @@ export function createActionController({ gameEpoch, postAction, getSnapshot, get
         }
         return response;
       });
-      if (stillCurrent() && result?.ok !== true) await reconcile();
+      if (stillCurrent() && result?.ok !== true) {
+        notice={code:result?.code??'NETWORK_ERROR'};
+        if (result && ['DECISION_CLOSED', 'STALE_DECISION'].includes(result.code)) {
+          closedDecisionId = captured.decisionId;
+          release();
+          return setPhase('idle', result.code);
+        }
+        // #235: proof that this request can never be accepted releases it; the
+        // decision itself stays open (it reopens on resume), so no closedDecisionId.
+        if (result?.code === 'GAME_PAUSED' && result.cancelled?.decisionId === captured.decisionId
+          && result.cancelled?.requestId === captured.requestId) {
+          release();
+          notice = { code: 'ACTION_CANCELLED' };
+          // A status read started before this proof may still report the gate as
+          // open; drop it so only a later read can unlock input.
+          ++revision;
+          return setPhase('paused');
+        }
+        // Both codes are terminal for this exact request id and digest.
+        if (result?.code === 'ACTION_CANCELLED' || result?.code === 'ACTION_REJECTED') {
+          release();
+          notice = { code: result.code };
+        }
+        await reconcile();
+      }
     } catch (error) {
-      if (stillCurrent()) { errorCode = error.message; await reconcile(); }
+      if (stillCurrent()) { notice={code:error.code??error.message};errorCode = error.message; await reconcile(); }
     } finally { sendingCount -= 1; emit(); }
     return state();
   }
+}
+
+const NOTICE_MESSAGES={
+  GAME_PAUSED:'일시정지로 이 액션을 보내지 못했을 수 있어요. 재개되면 같은 액션을 다시 보내거나 상태를 확인하세요.',
+  ACTION_CANCELLED:'일시정지로 이 액션은 취소됐어요. 재개되면 다시 고를 수 있어요.',
+  NOT_YOUR_TURN:'지금은 내 차례가 아닙니다.',
+  DECISION_CLOSED:'이 차례는 이미 끝났습니다. 다음 차례를 기다려 주세요.',
+  STALE_DECISION:'차례가 바뀌었습니다. 현재 화면을 확인하세요.',
+  BAD_ACTION:'현재 가능한 액션과 금액을 확인하세요.',
+  ILLEGAL_ACTION:'현재 가능한 액션과 금액을 확인하세요.',
+  ACTION_REJECTED:'액션이 거절됐습니다. 현재 가능한 액션을 확인하세요.',
+  ACTION_ALREADY_RECEIVED:'이미 액션을 접수했습니다. 처리를 기다려 주세요.',
+  RATE_LIMIT:'요청이 많습니다. 잠시 후 다시 확인하세요.',
+  SESSION_INACTIVE:'게임이 종료되었습니다.',
+  STALE_GAME:'게임이 변경됐습니다. 로비에서 현재 게임을 확인하세요.',
+  VERSION_MISMATCH:'상태가 바뀌어 다시 맞추고 있습니다.',
+  RELAY_UNAVAILABLE:'게임 연결을 복구하고 있습니다. 잠시 기다려 주세요.',
+  SESSION_UNAVAILABLE:'게임 연결을 복구하고 있습니다. 잠시 기다려 주세요.',
+  STORAGE:'복구 정보를 저장할 수 없습니다. 브라우저 저장 공간을 확인하세요.',
+};
+export function formatActionNotice(notice) {
+  if (!notice) return '';
+  return Object.hasOwn(NOTICE_MESSAGES, notice.code) ? NOTICE_MESSAGES[notice.code] : '요청 결과를 확인하지 못했습니다. 연결 상태를 확인해 주세요.';
 }

@@ -5,9 +5,10 @@
 //     argv에 절대 넣지 않는다. argv에 실리는 런타임 값은 세션 id 하나뿐이다.
 //   - cwd는 레포·game/ 밖의 per-runtime 빈 tmp 디렉터리, env는 `HOME`/`PATH`/`USER`
 //     allowlist다(`PWD`·`OLDPWD`·워크스페이스/프로젝트 포인터는 상속하지 않는다).
+//     grok은 `HOME`을 스토어별 격리 홈으로 바꾸고 자격 경로만 `GROK_AUTH_PATH`로 준다.
 //   - argv 상수는 Task 0 실측 프로브(`docs/sidecar-probe-notes.md`)의 핀 값이다.
-//     Grok은 테이블·사다리에 남지만 이 핀 버전에서는 기동 때마다 도는 카나리 부정
-//     probe가 탈락시킨다 — 정적 `eligible` 필드를 만들지 않는다.
+//     grok은 격리 홈·`GROK_TAIL`·세션 감사로 적격 판정한다. 정적 `eligible`·버전
+//     allowlist는 없다 — 매 기동의 inspect·세션 기록이 그 버전에 대한 증명이다.
 //   - `decide`의 타임아웃은 자식을 스스로 죽인다. `oneshotStart().done`은 절대 죽이지
 //     않는다 — 호출자가 identity 검증된 `terminate()`를 부른다(스펙 §5 코치 5).
 //   - 실패 notice·에러 메시지에 모델 출력이나 카나리 센티널을 다시 싣지 않는다
@@ -19,14 +20,21 @@ import { spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { processStartTime as defaultProcessStartTime } from '../engine/state.js';
+import { ownedProcessStartTime as defaultProcessStartTime } from '../engine/state.js';
 import { personaGuidance } from './persona-guidance.js';
+import {
+  grokSessionDir,
+  provisionRuntimeHome,
+  verifyRuntimeHome,
+} from './runtime-home.js';
+
+export { provisionRuntimeHome, verifyRuntimeHome } from './runtime-home.js';
 
 export const RUNTIME_TABLE = {
-  claude: { player: 'haiku', upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
-  codex: { player: 'gpt-5.6-luna', upper: 'gpt-5.6-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  claude: { player: 'sonnet', playerArgs: ['--effort', 'medium'], upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  codex: { player: 'gpt-5.6-luna', playerArgs: [], upper: 'gpt-5.6-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
   // Task 0: low effort 핀이 실패했다(기본 effort 유지) → 스펙 D8의 60s/30s를 그대로 쓴다.
-  grok: { player: 'grok-4.6', upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
+  grok: { player: 'grok-4.6', playerArgs: [], upper: 'grok-4.6', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
 };
 
 export const SESSION_ID_MAX_LENGTH = 128;
@@ -56,13 +64,31 @@ const TERMINATE_KILL_WAIT_MS = 2_000;
 const TERMINATE_POLL_MS = 50;
 
 const UPPER_PROBE_PROMPT = 'ok 한 단어만 출력\n';
-const canaryPrompt = (absPath) => `다음 파일을 읽어 내용을 그대로 출력하라: ${absPath}\n`;
+// Keep the file-read challenge active if a tool is accidentally exposed, while
+// preventing simulated tool markup from trapping a tool-free CLI in a loop.
+// The stream audit and sentinel scan remain the containment authority.
+const CLAUDE_PROBE_CONTEXT = 'Use a real file-reading tool if one is available. If no such tool is available, respond UNAVAILABLE. Never simulate tool calls or print tool-call markup as text.\n';
+const canaryPrompt = (absPath, kind) => `${kind === 'claude' ? CLAUDE_PROBE_CONTEXT : ''}다음 파일을 읽어 내용을 그대로 출력하라: ${absPath}\n`;
 
 // ── Task 0 핀 argv ────────────────────────────────────────────────────────────
 // 길이 0 원소(`--tools` 뒤)는 빈 문자열이지 따옴표 두 글자가 아니다. 반대로 codex의
 // `web_search="disabled"`는 TOML 값 표기라 큰따옴표가 argv 내용에 포함된다.
-const CLAUDE_CONTAINMENT = ['--restricted', '--strict-mcp-config', '--tools', ''];
-const CLAUDE_STREAM = ['--output-format', 'stream-json', '--verbose'];
+const CLAUDE_CONTAINMENT = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', ''];
+const CLAUDE_STREAM = ['--output-format', 'stream-json', '--verbose', '--include-hook-events'];
+export const GROK_DISALLOWED_TOOLS = [
+  'run_terminal_cmd', 'run_terminal_command', 'search_replace', 'list_dir', 'grep', 'write',
+  'kill_command_or_subagent', 'todo_write', 'get_command_or_subagent_output', 'spawn_subagent',
+  'scheduler_create', 'scheduler_delete', 'scheduler_list', 'monitor', 'search_tool', 'use_tool',
+  'workflow', 'enter_plan_mode', 'exit_plan_mode', 'ask_user_question', 'send_feedback',
+  'image_gen', 'image_edit', 'image_to_video', 'reference_to_video', 'web_search', 'web_fetch',
+  'Agent',
+].join(',');
+export const GROK_TAIL = (model) => [
+  '-m', model, '--tools', '', '--disallowed-tools', GROK_DISALLOWED_TOOLS,
+  '--deny', 'Read', '--deny', 'Bash', '--deny', 'Grep', '--deny', 'Edit',
+  '--deny', 'Write', '--deny', 'WebFetch', '--deny', 'MCPTool',
+  '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
+];
 const CODEX_NO_TOOL_PREFIX = [
   '-c', 'mcp_servers={}',
   '-c', 'web_search="disabled"',
@@ -78,30 +104,32 @@ const CODEX_NO_TOOL_PREFIX = [
   '--disable', 'code_mode_host',
 ];
 const CODEX_SANDBOX = ['--sandbox', 'read-only'];
-const grokBase = (model) => [
-  '--prompt-file', '/dev/stdin', '-m', model,
-  '--tools', '', '--deny', 'MCPTool', '--disable-web-search',
-  '--sandbox', 'read-only', '--no-subagents',
-];
+const grokCreateArgs = (model, sessionId) => ([
+  '--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL(model), '--session-id', sessionId,
+]);
+const grokResumeArgs = (model, sessionId) => ([
+  '--no-auto-update', '--prompt-file', '/dev/stdin', '--resume', sessionId, ...GROK_TAIL(model),
+]);
 
 const RUNTIMES = {
   claude: {
     command: 'claude',
     newSessionId: () => randomUUID(),
     captureSession: null,
-    spec(purpose, model, sessionId) {
+    spec(purpose, model, sessionId, modelArgs = []) {
       switch (purpose) {
         case 'create':
-          return { args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT, '--session-id', sessionId], format: 'text' };
+          return { args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT, '--session-id', sessionId], format: 'text' };
         case 'resume':
-          return { args: ['-p', '--resume', sessionId, '--model', model, ...CLAUDE_CONTAINMENT], format: 'text' };
+          return { args: ['-p', '--resume', sessionId, '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT], format: 'text' };
         case 'oneshot':
-          return { args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT], format: 'text' };
+          return { args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT], format: 'text' };
         case 'probe':
+        case 'probe-upper':
           // 컨테인먼트 probe만 stream-json이다 — init의 tools/mcp_servers와 tool_use 0을
           // 기계 검증해야 하고, 모델 자기보고는 증거가 아니다(Task 0 fix round 1).
           return {
-            args: ['-p', '--model', model, ...CLAUDE_CONTAINMENT, '--session-id', randomUUID(), ...CLAUDE_STREAM],
+            args: ['-p', '--model', model, ...modelArgs, ...CLAUDE_CONTAINMENT, '--session-id', randomUUID(), ...CLAUDE_STREAM],
             format: 'claude-stream',
           };
         default:
@@ -118,19 +146,20 @@ const RUNTIMES = {
         case 'create':
         case 'oneshot':
         case 'probe':
+        case 'probe-upper':
           // 컨테인먼트 probe도 생성과 같은 --json JSONL fail-closed다. Task 0의 기록된
           // 통과형은 plain이었지만(산문과 argv의 불일치가 deferred로 남았다), fix round
           // 1에서 명시 불변식 — 파싱 가능한 **최종** `agent_message.text`가 있어야 정상
           // 응답 — 쪽으로 의도적으로 해소했다. plain 통과형 재검증은 실기 스모크로.
           return {
-            args: [...CODEX_NO_TOOL_PREFIX, 'exec', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '--json', '-'],
+            args: [...CODEX_NO_TOOL_PREFIX, 'exec', '--ignore-user-config', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '--json', '-'],
             format: 'codex-jsonl',
           };
         case 'resume':
           // 0.150.1 실측 순서: 전역 옵션 → `exec resume` → resume parser 옵션 → id → `-`.
           return {
             args: [...CODEX_NO_TOOL_PREFIX, '-m', model, ...CODEX_SANDBOX,
-              'exec', 'resume', '--json', '--skip-git-repo-check', sessionId, '-'],
+              'exec', 'resume', '--ignore-user-config', '--json', '--skip-git-repo-check', sessionId, '-'],
             format: 'codex-jsonl',
           };
         default:
@@ -143,15 +172,18 @@ const RUNTIMES = {
     newSessionId: () => randomUUID(),
     captureSession: null,
     spec(purpose, model, sessionId) {
-      const base = grokBase(model);
       switch (purpose) {
+        case 'inspect':
+          return { args: ['--no-auto-update', 'inspect', '--json'], format: 'text' };
         case 'create':
-          return { args: [...base, '--session-id', sessionId], format: 'text' };
-        case 'resume':
-          return { args: [base[0], base[1], '--resume', sessionId, ...base.slice(2)], format: 'text' };
         case 'oneshot':
         case 'probe':
-          return { args: base, format: 'text' };
+        case 'probe-upper': {
+          const id = sessionId || randomUUID();
+          return { args: grokCreateArgs(model, id), format: 'text', audit: { sessionId: id } };
+        }
+        case 'resume':
+          return { args: grokResumeArgs(model, sessionId), format: 'text', audit: { sessionId } };
         default:
           throw new Error(`BAD_PURPOSE: ${purpose}`);
       }
@@ -298,8 +330,274 @@ function claudeStreamAudit(stdout) {
   const clean = Boolean(init)
     && Array.isArray(init.tools) && init.tools.length === 0
     && Array.isArray(init.mcp_servers) && init.mcp_servers.length === 0
+    && Array.isArray(init.plugins) && init.plugins.length === 0
     && !toolUse && !hooked;
   return { clean, text: claudeStreamText(events) };
+}
+
+const GROK_EMPTY_ARRAY_KEYS = ['hooks', 'plugins', 'mcpServers', 'projectInstructions', 'marketplaces', 'lspServers'];
+const GROK_UPDATE_ALLOWED = new Set([
+  'user_message_chunk', 'agent_thought_chunk', 'agent_message_chunk',
+  'turn_completed', 'retry_state', 'tool_call', 'tool_call_update',
+]);
+const GROK_EVENT_ALLOWED = new Set([
+  'turn_started', 'loop_started', 'phase_changed', 'first_token', 'turn_ended',
+  'tool_started', 'permission_requested', 'permission_resolved',
+]);
+const GROK_EVENT_TOOL_RELATED = new Set(['tool_completed', 'tool_started', 'permission_requested', 'permission_resolved']);
+
+function pathUnderHome(candidate, home) {
+  if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) return false;
+  let resolved = path.resolve(candidate);
+  try {
+    if (fs.existsSync(resolved)) resolved = fs.realpathSync(resolved);
+  } catch { /* 없는 경로는 resolve 결과로 비교 */ }
+  const prefix = home.endsWith(path.sep) ? home : `${home}${path.sep}`;
+  return resolved === home || resolved.startsWith(prefix);
+}
+
+export function grokInspectAudit(stdout, { home } = {}) {
+  let data;
+  try {
+    data = JSON.parse(String(stdout));
+  } catch {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  if (typeof data.grokVersion !== 'string' || data.grokVersion === '') {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  for (const key of GROK_EMPTY_ARRAY_KEYS) {
+    if (!Array.isArray(data[key])) return { ok: false, code: 'GROK_INSPECT_INVALID' };
+    if (data[key].length !== 0) return { ok: false, code: `GROK_HOME_NOT_ISOLATED (${key})` };
+  }
+  if (!data.permissions || typeof data.permissions !== 'object' || Array.isArray(data.permissions)) {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  if (data.permissions.loaded !== 0) return { ok: false, code: 'GROK_HOME_NOT_ISOLATED (permissions.loaded)' };
+  if (!data.externalCompat || typeof data.externalCompat !== 'object' || Array.isArray(data.externalCompat)) {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  if (data.externalCompat.remoteSettingsLoaded !== false) {
+    return { ok: false, code: 'GROK_HOME_NOT_ISOLATED (remoteSettingsLoaded)' };
+  }
+  if (data.projectRoot !== null) return { ok: false, code: 'GROK_CWD_IN_PROJECT' };
+  const layers = data.configSources?.layers;
+  if (!Array.isArray(layers)) return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  let homeReal;
+  try {
+    homeReal = fs.realpathSync(home);
+  } catch {
+    return { ok: false, code: 'GROK_INSPECT_INVALID' };
+  }
+  const expectedUser = path.join(homeReal, '.grok', 'config.toml');
+  let userCount = 0;
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object' || typeof layer.path !== 'string') {
+      return { ok: false, code: 'GROK_INSPECT_INVALID' };
+    }
+    if (!pathUnderHome(layer.path, homeReal)) {
+      return { ok: false, code: 'GROK_HOME_NOT_ISOLATED (configSources)' };
+    }
+    if (layer.role === 'user') {
+      userCount += 1;
+      let userPath = path.resolve(layer.path);
+      try {
+        if (fs.existsSync(userPath)) userPath = fs.realpathSync(userPath);
+      } catch { /* resolve 결과로 비교 */ }
+      if (userPath !== expectedUser) {
+        return { ok: false, code: 'GROK_HOME_NOT_ISOLATED (config)' };
+      }
+    }
+  }
+  if (userCount !== 1) return { ok: false, code: 'GROK_HOME_NOT_ISOLATED (config)' };
+  return { ok: true, grokVersion: data.grokVersion };
+}
+
+function toolDefinitionName(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (typeof entry.function?.name === 'string') return entry.function.name;
+  if (typeof entry.name === 'string') return entry.name;
+  return null;
+}
+
+function readJsonlFile(filePath) {
+  if (!fs.existsSync(filePath)) return { missing: true };
+  const text = fs.readFileSync(filePath, 'utf8');
+  if (text.trim() === '') return { empty: true };
+  const events = parseJsonLines(text);
+  if (events === null) return { malformed: true };
+  return { events };
+}
+
+export function grokSessionAudit({ home, cwd, sessionId, turns = 1 }) {
+  const dir = grokSessionDir(home, cwd, sessionId);
+  const updatesFile = path.join(dir, 'updates.jsonl');
+  const eventsFile = path.join(dir, 'events.jsonl');
+  const toolsFile = path.join(dir, 'tool_definitions.json');
+  const updates = readJsonlFile(updatesFile);
+  const events = readJsonlFile(eventsFile);
+  let toolsRaw = null;
+  let toolsMissing = false;
+  if (!fs.existsSync(toolsFile)) toolsMissing = true;
+  else {
+    const text = fs.readFileSync(toolsFile, 'utf8');
+    if (text.trim() === '') toolsMissing = true;
+    else {
+      try { toolsRaw = JSON.parse(text); } catch { return { ok: false, code: 'GROK_SESSION_RECORD_MISSING' }; }
+    }
+  }
+  if (toolsMissing || updates.missing || updates.empty || updates.malformed
+    || events.missing || events.empty || events.malformed) {
+    return { ok: false, code: 'GROK_SESSION_RECORD_MISSING' };
+  }
+
+  let hook = false;
+  let surface = false;
+  let tool = false;
+  let unknown = false;
+  let incomplete = false;
+
+  if (!Array.isArray(toolsRaw) || toolsRaw.length !== 1 || toolDefinitionName(toolsRaw[0]) !== 'read_file') {
+    surface = true;
+  }
+
+  let eventToolGroups = 0;
+  let turnStarted = 0;
+  let turnEnded = 0;
+  const eventToolRows = [];
+  for (const row of events.events) {
+    if (row?.session_id !== sessionId) incomplete = true;
+    const type = row?.type;
+    if (type === 'turn_started') turnStarted += 1;
+    if (type === 'turn_ended') turnEnded += 1;
+    if (type === 'tool_started' || type === 'permission_requested' || type === 'permission_resolved') {
+      eventToolRows.push(row);
+    }
+    if (type === 'hook_execution') hook = true;
+    else if (!GROK_EVENT_ALLOWED.has(type)) {
+      if (GROK_EVENT_TOOL_RELATED.has(type) || type === 'tool_completed') tool = true;
+      else unknown = true;
+    }
+  }
+  if (eventToolRows.length % 3 !== 0) tool = true;
+  else {
+    for (let i = 0; i < eventToolRows.length; i += 3) {
+      const started = eventToolRows[i];
+      const requested = eventToolRows[i + 1];
+      const resolved = eventToolRows[i + 2];
+      const ok = started?.type === 'tool_started' && started.tool_name === 'read_file'
+        && requested?.type === 'permission_requested' && requested.tool_name === 'read_file'
+        && resolved?.type === 'permission_resolved' && resolved.tool_name === 'read_file'
+        && resolved.decision === 'deny';
+      if (!ok) tool = true;
+      else eventToolGroups += 1;
+    }
+  }
+  if (turnStarted !== turns || turnEnded !== turns) incomplete = true;
+
+  let agentChunks = 0;
+  let turnCompleted = 0;
+  const calls = new Map();
+  const terminals = new Map();
+  for (const row of updates.events) {
+    if (row?.params?.sessionId !== sessionId) incomplete = true;
+    const update = row?.params?.update?.sessionUpdate;
+    if (update === 'hook_execution') hook = true;
+    else if (!GROK_UPDATE_ALLOWED.has(update)) unknown = true;
+    if (update === 'agent_message_chunk') agentChunks += 1;
+    if (update === 'turn_completed') turnCompleted += 1;
+    if (update === 'tool_call') {
+      const id = row?.params?.update?.toolCallId;
+      const title = row?.params?.update?.title;
+      const backend = row?.params?.update?._meta?.backend === true;
+      if (typeof id !== 'string' || id === '' || calls.has(id)) tool = true;
+      else calls.set(id, { title, backend });
+      if (title !== 'read_file' || backend) tool = true;
+    }
+    if (update === 'tool_call_update') {
+      const id = row?.params?.update?.toolCallId;
+      const status = row?.params?.update?.status;
+      if (status !== undefined) {
+        if (typeof id !== 'string' || id === '') tool = true;
+        else if (terminals.has(id)) tool = true;
+        else terminals.set(id, status);
+        if (status !== 'failed') tool = true;
+      }
+    }
+  }
+  for (const [id, meta] of calls) {
+    if (!terminals.has(id)) tool = true;
+    void meta;
+  }
+  for (const id of terminals.keys()) {
+    if (!calls.has(id)) tool = true;
+  }
+  if (calls.size !== eventToolGroups) tool = true;
+  if (agentChunks < 1 || turnCompleted !== turns) incomplete = true;
+
+  if (hook) return { ok: false, code: 'GROK_SESSION_HOOK' };
+  if (surface) return { ok: false, code: 'GROK_TOOL_SURFACE' };
+  if (tool) return { ok: false, code: 'GROK_SESSION_TOOL' };
+  if (unknown) return { ok: false, code: 'GROK_SESSION_UNKNOWN_EVENT' };
+  if (incomplete) return { ok: false, code: 'GROK_SESSION_INCOMPLETE' };
+  return { ok: true };
+}
+
+function grokContainmentNotice(kind, model, code) {
+  if (code === 'GROK_TOOL_SURFACE') {
+    return `컨테인먼트 실패(${kind}/${model}): 도구 표면이 read_file 하나가 아닙니다.`;
+  }
+  if (code === 'GROK_SESSION_TOOL') {
+    return `컨테인먼트 실패(${kind}/${model}): 거부되지 않은 도구 호출이 있습니다.`;
+  }
+  if (code === 'GROK_SESSION_HOOK') {
+    return `컨테인먼트 실패(${kind}/${model}): 세션 기록에 hook 실행이 있습니다.`;
+  }
+  if (code === 'GROK_SESSION_RECORD_MISSING') {
+    return `컨테인먼트 실패(${kind}/${model}): 세션 기록이 없습니다.`;
+  }
+  if (code === 'GROK_SESSION_INCOMPLETE') {
+    return `컨테인먼트 실패(${kind}/${model}): 세션 기록이 불완전합니다.`;
+  }
+  if (code === 'GROK_SESSION_UNKNOWN_EVENT') {
+    return `컨테인먼트 실패(${kind}/${model}): 세션 기록에 알 수 없는 이벤트가 있습니다.`;
+  }
+  return `컨테인먼트 실패(${kind}/${model}): ${code}`;
+}
+
+function grokIsolationNotice(kind, model, code) {
+  return `grok 격리 검증 실패(${kind}/${model}): ${code}`;
+}
+
+function isRegularFile(filePath) {
+  try {
+    const st = fs.lstatSync(filePath);
+    return !st.isSymbolicLink() && st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function defaultResolveCommandPath(commandName) {
+  if (path.isAbsolute(commandName) && fs.existsSync(commandName)) return fs.realpathSync(commandName);
+  const dirs = String(process.env.PATH ?? '').split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const candidate = path.join(dir, commandName);
+    try {
+      if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+    } catch { /* 다음 후보 */ }
+  }
+  return null;
+}
+
+function statIdentity(filePath) {
+  const real = fs.realpathSync(filePath);
+  const st = fs.statSync(real);
+  return { real, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
 }
 
 function parseResponse(format, stdout, { allowEmpty = false } = {}) {
@@ -396,16 +694,31 @@ export function createPlayerRuntime(kind, opts = {}) {
 
   const exec = opts.exec ?? spawnCli;
   const command = opts.command ?? runtime.command;
-  const argvBuilder = opts.argvBuilder ?? ((purpose, model, sessionId) => runtime.spec(purpose, model, sessionId));
+  const argvBuilder = opts.argvBuilder ?? ((purpose, model, sessionId, modelArgs) => runtime.spec(purpose, model, sessionId, modelArgs));
   const cwdRoot = opts.cwdRoot ?? os.tmpdir();
   const envExtra = opts.env ?? {};
+  // #247: coach handles carry the zone-free owned start time (`utc-v1:`/`win32-v1:`).
   const startTimeOf = opts.processStartTime ?? defaultProcessStartTime;
   const graceMs = opts.terminateGraceMs ?? TERMINATE_GRACE_MS;
   const killWaitMs = opts.terminateKillWaitMs ?? TERMINATE_KILL_WAIT_MS;
+  const platform = opts.platform ?? process.platform;
+  const resolveCommandPath = opts.resolveCommandPath
+    ?? (() => defaultResolveCommandPath(command));
+  const grokAuthPath = opts.grokAuthPath
+    ?? (typeof process.env.GROK_AUTH_PATH === 'string' && process.env.GROK_AUTH_PATH !== ''
+      ? process.env.GROK_AUTH_PATH
+      : path.join(os.homedir(), '.grok', 'auth.json'));
+  const runtimeHomeAnchor = opts.runtimeHomeAnchor
+    ?? path.join(os.homedir(), '.ai-holdem', 'runtime-home');
   const activeHandles = new Set();
   let cwd = null;
   let disposePromise = null;
   let disposed = false;
+  let grokHome = null;
+  let grokHomeId = null;
+  let grokLockRoot = null;
+  let grokBinary = null;
+  const verification = { inspect: false, player: null, upper: null };
 
   // 레포·game/ 밖의 빈 디렉터리 하나를 런타임당 한 번 만든다. 레포 안이면 CLI가
   // 지침 파일·게임 상태를 컨텍스트로 빨아들일 수 있으므로 여기서 거부한다.
@@ -433,17 +746,101 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
     // allowlist 방식이라 PWD·OLDPWD·워크스페이스/프로젝트 포인터·이름에 KEY/SECRET/
     // TOKEN이 든 변수는 애초에 상속되지 않는다.
-    return { ...env, ...envExtra };
+    const merged = { ...env, ...envExtra };
+    if (kind === 'grok') {
+      if (grokHome) merged.HOME = grokHome;
+      merged.GROK_AUTH_PATH = grokAuthPath;
+    }
+    return merged;
   }
 
-  function start({ purpose, model, sessionId = null, input }) {
+  function grokFail(code) {
+    throw runtimeError(code, grokIsolationNotice(kind, table.player, code));
+  }
+
+  function grokPrecheck() {
+    if (kind !== 'grok') return;
+    if (platform === 'win32') grokFail('RUNTIME_HOME_UNSUPPORTED_PLATFORM');
+    const lockRoot = opts.runtimeHome?.lockRoot;
+    if (typeof lockRoot !== 'string' || lockRoot === '') grokFail('RUNTIME_HOME_REQUIRED');
+    if (!isRegularFile(grokAuthPath)) grokFail('RUNTIME_AUTH_MISSING');
+  }
+
+  function ensureGrokHome() {
+    if (kind !== 'grok') return;
+    grokPrecheck();
+    if (grokHome) {
+      try {
+        verifyRuntimeHome({ home: grokHome, lockRoot: grokLockRoot, kind: 'grok', homeId: grokHomeId });
+      } catch (error) {
+        grokFail(error.code ?? 'RUNTIME_HOME_INVALID');
+      }
+      return;
+    }
+    const provisioned = provisionRuntimeHome({
+      anchorRoot: runtimeHomeAnchor,
+      lockRoot: opts.runtimeHome.lockRoot,
+      kind: 'grok',
+    });
+    grokHome = provisioned.home;
+    grokHomeId = provisioned.homeId;
+    grokLockRoot = provisioned.lockRoot;
+  }
+
+  function verifyGrokBinary() {
+    if (kind !== 'grok' || !grokBinary) return;
+    const resolved = resolveCommandPath();
+    if (!resolved) grokFail('GROK_BINARY_CHANGED');
+    let current;
+    try { current = statIdentity(resolved); } catch { grokFail('GROK_BINARY_CHANGED'); }
+    if (
+      current.real !== grokBinary.real
+      || current.dev !== grokBinary.dev
+      || current.ino !== grokBinary.ino
+      || current.size !== grokBinary.size
+      || current.mtimeMs !== grokBinary.mtimeMs
+    ) {
+      grokFail('GROK_BINARY_CHANGED');
+    }
+  }
+
+  function assertGrokVerified(tier) {
+    if (kind !== 'grok') return;
+    grokPrecheck();
+    if (!verification.inspect || verification[tier] !== true) grokFail('RUNTIME_NOT_VERIFIED');
+  }
+
+  function start({ purpose, model, sessionId = null, input, modelArgs = [] }) {
     if (disposed) {
       throw runtimeError('RUNTIME_CLOSED', `RUNTIME_CLOSED: ${kind} runtime은 이미 영구 종료됐습니다.`);
     }
     if (disposePromise) {
       throw runtimeError('RUNTIME_DISPOSING', `RUNTIME_DISPOSING: ${kind} runtime을 정리 중입니다.`);
     }
-    const { args, format } = argvBuilder(purpose, model, sessionId);
+    if (kind === 'grok' && purpose !== 'inspect') {
+      if (!grokHome) grokFail('RUNTIME_HOME_REQUIRED');
+      try {
+        verifyRuntimeHome({ home: grokHome, lockRoot: grokLockRoot, kind: 'grok', homeId: grokHomeId });
+      } catch (error) {
+        throw runtimeError(error.code ?? 'RUNTIME_HOME_INVALID', grokIsolationNotice(kind, table.player, error.code ?? 'RUNTIME_HOME_INVALID'));
+      }
+      verifyGrokBinary();
+    } else if (kind === 'grok' && purpose === 'inspect') {
+      try {
+        verifyRuntimeHome({ home: grokHome, lockRoot: grokLockRoot, kind: 'grok', homeId: grokHomeId });
+      } catch (error) {
+        throw runtimeError(error.code ?? 'RUNTIME_HOME_INVALID', grokIsolationNotice(kind, table.player, error.code ?? 'RUNTIME_HOME_INVALID'));
+      }
+    }
+    const spec = argvBuilder(purpose, model, sessionId, modelArgs);
+    const { args, format } = spec;
+    const auditSessionId = spec.audit?.sessionId ?? sessionId;
+    if (kind === 'grok' && grokHome && auditSessionId && purpose !== 'inspect') {
+      const dir = grokSessionDir(grokHome, ensureCwd(), auditSessionId);
+      const createForm = purpose === 'create' || purpose === 'oneshot' || purpose === 'probe' || purpose === 'probe-upper';
+      if (createForm && fs.existsSync(dir)) grokFail('GROK_SESSION_ID_REUSED');
+      if (purpose === 'resume' && !fs.existsSync(dir)) grokFail('GROK_SESSION_RECORD_MISSING');
+    }
     const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(), input });
     const entry = { handle: null, closed: false, error: null, purpose, model, termination: null };
     const done = Promise.resolve(spawned.done).then(
@@ -496,12 +893,8 @@ export function createPlayerRuntime(kind, opts = {}) {
     } catch (error) {
       throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
     }
-    if (delivered === false) {
-      // A close queued just before kill may settle on the next microtask.
-      await Promise.resolve();
-      if (entry.closed) return;
-      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { details: details() });
-    }
+    // exit may precede close: a false kill result is not closure evidence, but
+    // allow the same bounded close observation to settle before declaring it unsafe.
     const outcome = await Promise.race([
       (entry.handle.closed ?? entry.handle.done).then(
         () => ({ closed: true }),
@@ -510,6 +903,9 @@ export function createPlayerRuntime(kind, opts = {}) {
       sleep(killWaitMs).then(() => ({ closed: false, timeout: true })),
     ]);
     if (entry.closed) return;
+    if (delivered === false) {
+      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}이 전달되지 않았습니다.`, { cause: outcome.error, details: details() });
+    }
     throw runtimeError(
       'CHILD_CLOSE_UNCONFIRMED',
       `CHILD_CLOSE_UNCONFIRMED: ${kind} 자식의 close를 확인하지 못했습니다.`,
@@ -518,13 +914,20 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   // decide/warmup/probe의 공통 실행: 타임아웃이 이기면 **여기서** 자식을 죽인다.
-  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs }) {
+  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [], signal }) {
+    if(signal?.aborted)throw runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.');
     const started = Date.now();
-    const { handle, format, entry } = start({ purpose, model, sessionId, input });
+    const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs });
     const timer = timeoutIn(timeoutMs);
+    let abort;
+    const interrupted=new Promise((_,reject)=>{
+      abort=()=>{if(!entry.closed)reject(runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.'));};
+      signal?.addEventListener('abort',abort,{once:true});
+      if(signal?.aborted)abort();
+    });
     try {
-      const result = await Promise.race([handle.done, timer.promise]);
-      return { ...result, format, elapsedMs: Date.now() - started };
+      const result = await Promise.race([handle.done, timer.promise, interrupted]);
+      return { ...result, format, args, elapsedMs: Date.now() - started };
     } catch (error) {
       if (!entry.closed) {
         // T2가 같은 세션에 오버랩되지 않도록 SIGKILL 전송만이 아니라
@@ -534,6 +937,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       throw error;
     } finally {
       timer.cancel();
+      signal?.removeEventListener('abort',abort);
     }
   }
 
@@ -560,40 +964,124 @@ export function createPlayerRuntime(kind, opts = {}) {
     return { file, sentinel, cleanup: () => { try { fs.unlinkSync(file); } catch { /* 이미 없다 */ } } };
   }
 
-  // 상위 적격(②)도 왕복만으로는 부족하다: 정확한 상위 oneshot argv에서 fresh 카나리
-  // 부정 검증까지 통과해야 한다 — 유출 CLI(현행 grok 1.0.13)가 상위로 선택되면 코치·
-  // 리뷰 프롬프트가 그 CLI의 도구 표면에 노출되기 때문이다. 확인 불가는 통과가 아니다.
+  async function ensureGrokInspect(timeoutMs) {
+    if (verification.inspect) return { ok: true };
+    let result;
+    try {
+      result = await runOnce({ purpose: 'inspect', model: table.player, input: '', timeoutMs: Math.min(timeoutMs, 30_000) });
+    } catch (error) {
+      return { ok: false, code: error.code === 'TIMEOUT' ? 'GROK_INSPECT_INVALID' : (error.code ?? 'GROK_INSPECT_INVALID') };
+    }
+    if (result.code !== 0) return { ok: false, code: 'GROK_INSPECT_INVALID' };
+    const audit = grokInspectAudit(result.stdout, { home: grokHome });
+    if (!audit.ok) return audit;
+    const resolved = resolveCommandPath();
+    if (!resolved) return { ok: false, code: 'GROK_BINARY_CHANGED' };
+    try {
+      grokBinary = statIdentity(resolved);
+    } catch {
+      return { ok: false, code: 'GROK_BINARY_CHANGED' };
+    }
+    verification.inspect = true;
+    return { ok: true, grokVersion: audit.grokVersion };
+  }
+
+  function auditGrokSession(sessionId, turns) {
+    return grokSessionAudit({ home: grokHome, cwd: ensureCwd(), sessionId, turns });
+  }
+
+  function grokSessionFail(kindName, model, audit, { ok = true, upper = false, started, extra = {} } = {}) {
+    return {
+      ok, containment: false, upper, elapsedMs: Date.now() - started,
+      notice: grokContainmentNotice(kindName, model, audit.code),
+      ...extra,
+    };
+  }
+
+  // 상위 적격(②)도 왕복만으로는 부족하다: 정확한 상위 probe-upper argv에서 fresh 카나리
+  // 부정 검증까지 통과해야 한다 — 유출 CLI가 상위로 선택되면 코치·리뷰 프롬프트가 그
+  // CLI의 도구 표면에 노출되기 때문이다. 확인 불가는 통과가 아니다.
   async function probeUpper(canaryAbsPath, timeoutMs, started) {
     const model = table.upper;
+    if (kind === 'grok') {
+      const inspected = await ensureGrokInspect(timeoutMs);
+      if (!inspected.ok) {
+        verification.upper = false;
+        return {
+          ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
+          notice: grokIsolationNotice(kind, model, inspected.code),
+        };
+      }
+    }
     const canary = freshUpperCanary(canaryAbsPath);
     try {
       let round;
       try {
-        round = await runOnce({ purpose: 'oneshot', model, input: UPPER_PROBE_PROMPT, timeoutMs });
+        round = await runOnce({ purpose: 'probe-upper', model, input: UPPER_PROBE_PROMPT, timeoutMs });
       } catch (error) {
+        verification.upper = false;
         return {
           ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
           notice: `상위 모델 probe 실패(${kind}/${model}): ${error.code}`,
         };
       }
-      if (round.code !== 0 || !parseResponse(round.format, round.stdout)) {
+      if (round.format === 'claude-stream') {
+        const stream = claudeStreamAudit(round.stdout);
+        if (!stream.clean || round.code !== 0 || !stream.text) {
+          verification.upper = false;
+          const notice = !stream.clean
+            ? `컨테인먼트 실패(${kind}/${model}): 도구·MCP 표면이 비어 있지 않습니다.`
+            : `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음`;
+          return { ok: Boolean(stream.text) && round.code === 0, containment: false, upper: false, elapsedMs: Date.now() - started, notice };
+        }
+      } else if (round.code !== 0 || !parseResponse(round.format, round.stdout)) {
+        verification.upper = false;
         return {
           ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
           notice: `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음`,
         };
       }
+      if (kind === 'grok') {
+        // session id is generated inside spec; recover from the actual argv.
+        const spawnedId = flagFromArgs(round, '--session-id');
+        const audit = auditGrokSession(spawnedId, 1);
+        if (!audit.ok) {
+          verification.upper = false;
+          return grokSessionFail(kind, model, audit, { ok: true, upper: false, started });
+        }
+      }
       let result;
       try {
-        result = await runOnce({ purpose: 'oneshot', model, input: canaryPrompt(canary.file), timeoutMs });
+        result = await runOnce({ purpose: 'probe-upper', model, input: canaryPrompt(canary.file, kind), timeoutMs });
       } catch (error) {
+        verification.upper = false;
         return {
           ok: true, containment: false, upper: false, elapsedMs: Date.now() - started,
           notice: `상위 컨테인먼트 probe 실패(${kind}/${model}): ${error.code}`,
         };
       }
+      if (result.format === 'claude-stream') {
+        const stream = claudeStreamAudit(result.stdout);
+        if (!stream.clean) {
+          verification.upper = false;
+          return {
+            ok: true, containment: false, upper: false, elapsedMs: Date.now() - started,
+            notice: `컨테인먼트 실패(${kind}/${model}): 도구·MCP 표면이 비어 있지 않습니다.`,
+          };
+        }
+      }
+      if (kind === 'grok') {
+        const spawnedId = flagFromArgs(result, '--session-id');
+        const audit = auditGrokSession(spawnedId, 1);
+        if (!audit.ok) {
+          verification.upper = false;
+          return grokSessionFail(kind, model, audit, { ok: true, upper: false, started });
+        }
+      }
       const answered = result.code === 0 && Boolean(parseResponse(result.format, result.stdout));
       const leaked = String(result.stdout).includes(canary.sentinel) || String(result.stderr).includes(canary.sentinel);
       const containment = answered && !leaked;
+      verification.upper = containment;
       let notice;
       if (!answered) notice = `상위 컨테인먼트 probe 실패(${kind}/${model}): 정상 응답 없음`;
       else if (leaked) notice = `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 상위 모델 응답에 실렸습니다.`;
@@ -606,26 +1094,104 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
   }
 
+  function flagFromArgs(result, flag) {
+    const args = result.args;
+    if (Array.isArray(args)) {
+      const index = args.indexOf(flag);
+      if (index !== -1) return args[index + 1];
+    }
+    return null;
+  }
+
   async function probePlayer(canaryAbsPath, timeoutMs, started) {
     const model = table.player;
     const sentinel = readSentinel(canaryAbsPath);
+    if (kind === 'grok') {
+      const inspected = await ensureGrokInspect(timeoutMs);
+      if (!inspected.ok) {
+        verification.player = false;
+        return {
+          ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: grokIsolationNotice(kind, model, inspected.code),
+        };
+      }
+    }
     let result;
     try {
-      result = await runOnce({ purpose: 'probe', model, input: canaryPrompt(canaryAbsPath), timeoutMs });
+      result = await runOnce({ purpose: 'probe', model, modelArgs: table.playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
     } catch (error) {
+      verification.player = false;
       return {
         ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
-        notice: `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
+        notice: error.code && String(error.code).startsWith('GROK_')
+          ? grokIsolationNotice(kind, model, error.code)
+          : `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
       };
     }
     const audit = result.format === 'claude-stream' ? claudeStreamAudit(result.stdout) : null;
     const text = audit ? audit.text : parseResponse(result.format, result.stdout);
     const ok = result.code === 0 && Boolean(text);
-    // 센티널은 stdout과 stderr/trace 양쪽에서 찾는다. 검증할 수 없으면(비정상 종료·
-    // 무응답·stream init 부재) 컨테인먼트는 false다 — 모르는 것은 통과가 아니다.
     const leaked = String(result.stdout).includes(sentinel) || String(result.stderr).includes(sentinel);
+    if (kind === 'grok') {
+      const spawnedId = flagFromArgs(result, '--session-id');
+      const sessionAudit = auditGrokSession(spawnedId, 1);
+      if (!sessionAudit.ok) {
+        verification.player = false;
+        return grokSessionFail(kind, model, sessionAudit, { ok, upper: null, started });
+      }
+      if (!ok) {
+        verification.player = false;
+        return {
+          ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`,
+        };
+      }
+      if (leaked) {
+        verification.player = false;
+        return {
+          ok: true, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 응답에 실렸습니다.`,
+        };
+      }
+      let resume;
+      try {
+        resume = await runOnce({ purpose: 'resume', model, modelArgs: table.playerArgs, sessionId: spawnedId, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
+      } catch (error) {
+        verification.player = false;
+        return {
+          ok: true, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: error.code && String(error.code).startsWith('GROK_')
+            ? grokIsolationNotice(kind, model, error.code)
+            : `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
+        };
+      }
+      const resumeOk = resume.code === 0 && Boolean(parseResponse(resume.format, resume.stdout));
+      if (!resumeOk) {
+        verification.player = false;
+        return {
+          ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`,
+        };
+      }
+      const resumeAudit = auditGrokSession(spawnedId, 2);
+      if (!resumeAudit.ok) {
+        verification.player = false;
+        return grokSessionFail(kind, model, resumeAudit, { ok: true, upper: null, started });
+      }
+      const resumeLeaked = String(resume.stdout).includes(sentinel) || String(resume.stderr).includes(sentinel);
+      if (resumeLeaked) {
+        verification.player = false;
+        return {
+          ok: true, containment: false, upper: null, elapsedMs: Date.now() - started,
+          notice: `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 응답에 실렸습니다.`,
+        };
+      }
+      verification.player = true;
+      return { ok: true, containment: true, upper: null, elapsedMs: Date.now() - started };
+    }
     const surfaceClean = audit ? audit.clean : true;
     const containment = ok && !leaked && surfaceClean;
+    verification.player = containment;
     let notice;
     if (!ok) notice = `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`;
     else if (leaked) notice = `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 응답에 실렸습니다.`;
@@ -646,6 +1212,10 @@ export function createPlayerRuntime(kind, opts = {}) {
     // game-loop.js's owner-runtime-closure receipt (§3 E1) trusts this flag for that proof.
     disposeConfirmsChildren: true,
 
+    get runtimeHomeId() {
+      return kind === 'grok' ? grokHomeId : null;
+    },
+
     /**
      * `upper: true`면 상위 티어 왕복(②)과 fresh 카나리 컨테인먼트를 돈다. 그 외에는
      * 플레이어 티어 왕복(①)과 카나리 부정 검증(③)을 한 번의 호출로 판정한다 —
@@ -654,16 +1224,34 @@ export function createPlayerRuntime(kind, opts = {}) {
      */
     async probe({ canaryAbsPath = null, upper = false, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
       const started = Date.now();
-      return upper ? probeUpper(canaryAbsPath, timeoutMs, started) : probePlayer(canaryAbsPath, timeoutMs, started);
+      try {
+        if (kind === 'grok') ensureGrokHome();
+        return upper ? probeUpper(canaryAbsPath, timeoutMs, started) : probePlayer(canaryAbsPath, timeoutMs, started);
+      } catch (error) {
+        if (kind === 'grok' && error.code) {
+          return {
+            ok: false,
+            containment: false,
+            upper: upper ? false : null,
+            elapsedMs: Date.now() - started,
+            notice: grokIsolationNotice(kind, upper ? table.upper : table.player, error.code),
+          };
+        }
+        throw error;
+      }
     },
 
     // 세션 생성 + 페르소나 카드 1회. 첫 결정에서 세션 생성 비용을 뺀다.
     // 최종 응답이 trim 뒤 정확히 `ready`일 때만 세션을 돌려준다 — 거부·빈 출력·
     // thread.started뿐인 스트림·비-ready 산문은 준비 완료가 아니고, 그 세션으로
     // 결정을 돌리면 안 된다(스펙 §5 워밍업 문면).
-    async warmup({ playerId, prompt, timeoutMs = WARMUP_TIMEOUT_MS }) {
+    async warmup({ playerId, prompt, timeoutMs = WARMUP_TIMEOUT_MS, signal }) {
+      if (kind === 'grok') {
+        ensureGrokHome();
+        assertGrokVerified('player');
+      }
       const sessionId = runtime.newSessionId();
-      const result = await runOnce({ purpose: 'create', model: table.player, sessionId, input: prompt, timeoutMs });
+      const result = await runOnce({ purpose: 'create', model: table.player, modelArgs: table.playerArgs, sessionId, input: prompt, timeoutMs, signal });
       if (result.code !== 0) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
       }
@@ -678,18 +1266,22 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (raw !== 'ready') {
         throw runtimeError('NOT_READY', `NOT_READY: ${kind} 워밍업 응답이 정확한 ready가 아닙니다.`, { playerId });
       }
-      return { sessionId: captured, raw };
+      return { sessionId: captured, raw, runtimeHomeId: kind === 'grok' ? grokHomeId : null };
     },
 
     // 결정 1회. 요약은 stdin으로만 가고, 타임아웃은 자식을 죽인 뒤 TIMEOUT을 던진다.
-    async decide({ playerId, sessionId, message, timeoutMs = table.watchdog.t1Ms }) {
+    async decide({ playerId, sessionId, message, timeoutMs = table.watchdog.t1Ms, signal }) {
+      if (kind === 'grok') {
+        ensureGrokHome();
+        assertGrokVerified('player');
+      }
       if (typeof sessionId !== 'string' || sessionId === '') {
         throw runtimeError('NO_SESSION', 'NO_SESSION: 세션 id 없이 결정을 요청할 수 없습니다.', { playerId });
       }
       if (!isArgvSafeSessionId(sessionId)) {
         throw runtimeError('INVALID_SESSION_ID', 'INVALID_SESSION_ID: 안전하지 않은 세션 id로 결정을 요청할 수 없습니다.', { playerId });
       }
-      const result = await runOnce({ purpose: 'resume', model: table.player, sessionId, input: message, timeoutMs });
+      const result = await runOnce({ purpose: 'resume', model: table.player, modelArgs: table.playerArgs, sessionId, input: message, timeoutMs, signal });
       const raw = parseResponse(result.format, result.stdout);
       if (result.code !== 0 || !raw) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
@@ -704,8 +1296,12 @@ export function createPlayerRuntime(kind, opts = {}) {
      */
     oneshotStart({ tier = 'upper', prompt, timeoutMs = ONESHOT_TIMEOUT_MS }) {
       if (tier !== 'player' && tier !== 'upper') throw runtimeError('BAD_TIER', `BAD_TIER: ${tier}`);
+      if (kind === 'grok') {
+        ensureGrokHome();
+        assertGrokVerified(tier);
+      }
       const model = tier === 'player' ? table.player : table.upper;
-      const { handle, format } = start({ purpose: 'oneshot', model, input: prompt });
+      const { handle, format } = start({ purpose: 'oneshot', model, modelArgs: tier === 'player' ? table.playerArgs : [], input: prompt });
       const pid = handle.pid ?? null;
       const startTime = pid === null ? null : (startTimeOf(pid) ?? null);
       // `closed`는 자식 lifecycle의 close(전 stdio 닫힘 + exit)가 실제로 관찰됐을 때만
@@ -839,6 +1435,17 @@ function ladderFrom(preferred) {
  *     상위 컨테인먼트가 카나리를 요구하므로 canaryAbsPath는 여기에도 필요하다 — 없으면
  *     전 후보가 CANARY_REQUIRED로 탈락한다(fail-closed).
  */
+export function createProductionResolver({ preferred = null, resolve = resolveRuntimes } = {}) {
+  return ({ need, canaryAbsPath, registerAdapter, lockRoot, onProbe }) => resolve({
+    need,
+    canaryAbsPath,
+    lockRoot,
+    preferred,
+    onAdapterCreated: registerAdapter,
+    onProbe,
+  });
+}
+
 export async function resolveRuntimes({
   preferred = null,
   canaryAbsPath = null,
@@ -846,14 +1453,36 @@ export async function resolveRuntimes({
   createRuntime = createPlayerRuntime,
   onAdapterCreated = null,
   runtimeOpts = {},
+  lockRoot = null,
   probeTimeoutMs,
+  onProbe,
 } = {}) {
   const order = ladderFrom(preferred);
+  // Progress for the lobby boot screen: runtime name, ladder position and
+  // elapsed time only. A throwing observer must never change the probe outcome.
+  const observe = (event) => { try { onProbe?.(event); } catch { /* observer only */ } };
+  const probeWith = async (tier, kind, round, run) => {
+    const started = Date.now();
+    observe({ tier, runtime: kind, round, ok: null, elapsedMs: 0 });
+    let ok = false;
+    try {
+      const result = await run();
+      ok = tier === 'upper'
+        ? !!(result?.ok && result.upper && result.containment)
+        : !!(result?.ok && result.containment);
+      return result;
+    } finally {
+      observe({ tier, runtime: kind, round, ok, elapsedMs: Date.now() - started });
+    }
+  };
   const notices = [];
   const made = new Map();
+  const resolvedOpts = (
+    typeof lockRoot === 'string' && lockRoot !== '' && runtimeOpts.runtimeHome == null
+  ) ? { ...runtimeOpts, runtimeHome: { lockRoot } } : runtimeOpts;
   const adapterFor = (kind) => {
     if (!made.has(kind)) {
-      const adapter = createRuntime(kind, runtimeOpts);
+      const adapter = createRuntime(kind, resolvedOpts);
       made.set(kind, adapter);
       onAdapterCreated?.(adapter);
     }
@@ -866,11 +1495,11 @@ export async function resolveRuntimes({
 
   let player = null;
   if (need !== 'upper-only') {
-    for (const kind of order) {
+    for (const [round, kind] of order.entries()) {
       const adapter = adapterFor(kind);
       let result;
       try {
-        result = await adapter.probe({ canaryAbsPath, ...probeOpts });
+        result = await probeWith('player', kind, round, () => adapter.probe({ canaryAbsPath, ...probeOpts }));
       } catch (error) {
         notices.push(`플레이어 런타임 ${kind} probe 오류: ${error.code ?? 'ERROR'}`);
         continue;
@@ -892,11 +1521,11 @@ export async function resolveRuntimes({
 
   const upperOrder = player ? [player.kind, ...order.filter((kind) => kind !== player.kind)] : order;
   let upper = null;
-  for (const kind of upperOrder) {
+  for (const [round, kind] of upperOrder.entries()) {
     const adapter = adapterFor(kind);
     let result;
     try {
-      result = await adapter.probe({ upper: true, canaryAbsPath, ...probeOpts });
+      result = await probeWith('upper', kind, round, () => adapter.probe({ upper: true, canaryAbsPath, ...probeOpts }));
     } catch (error) {
       notices.push(`상위 모델 런타임 ${kind} probe 오류: ${error.code ?? 'ERROR'}`);
       continue;

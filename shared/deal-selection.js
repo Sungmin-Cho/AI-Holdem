@@ -23,6 +23,10 @@ export function dealSelectionDisposition(row) {
   catch { return 'unavailable'; }
 }
 export function checkDealBiasResume(config, requested) {
+  if (config?.humanCount > 1) {
+    const storedBias = config?.dealBias ?? 'off';
+    if (storedBias !== 'off' || (requested !== undefined && requested !== 'off')) throw dealSelectionError();
+  }
   const stored=config?.dealBias ?? 'off';
   if (!DEAL_BIAS_MODES.includes(stored) || (config?.dealSelectionContractVersion != null && config.dealSelectionContractVersion !== 1)
     || (config?.dealSelectionContractVersion === 1 && config.dealBias === undefined)

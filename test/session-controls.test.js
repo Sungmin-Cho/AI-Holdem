@@ -6,6 +6,28 @@ import path from "node:path";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { createGameLoop } from "../tools/game-loop.js";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+test('paused resume republishes a legacy observer anchor without advancing the hand',
+  {timeout:process.platform==='win32'?300000:30000},async t=>{
+    const root=createOwnedTempDir('holdem-spectator-paused');
+    const options={gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+      opts:{port:0,waitMs:60000,opponentRuntime:'policy',controlProtocolVersion:1}};
+    const loop=createGameLoop(options);t.after(()=>loop.requestStop());
+    await loop.bootstrap({ai:1,stack:5000,opponentRuntime:'policy'});
+    const running=loop.run();running.catch(()=>{});await sleep(300);await loop.pause();
+    await loop.requestStop();await running.catch(error=>{if(error.code!=='CHILD_FAILED'&&error.code!=='STOPPING')throw error;});
+    const engineFile=path.join(root,'state.json');const before=fs.readFileSync(engineFile,'utf8');
+    const snapshotFile=path.join(root,'ui-snapshot.json');
+    const old=JSON.parse(fs.readFileSync(snapshotFile,'utf8'));delete old.projectionAnchor;
+    fs.writeFileSync(snapshotFile,JSON.stringify(old));
+    const restored=createGameLoop({...options,opts:{...options.opts,startPaused:true}});
+    t.after(()=>restored.requestStop());await restored.resume();
+    const resumed=restored.run();resumed.catch(()=>{});
+    const deadline=Date.now()+(process.platform==='win32'?120000:10000);
+    while(Date.now()<deadline&&!JSON.parse(fs.readFileSync(snapshotFile,'utf8')).projectionAnchor)await sleep(20);
+    assert.ok(JSON.parse(fs.readFileSync(snapshotFile,'utf8')).projectionAnchor);
+    assert.equal(fs.readFileSync(engineFile,'utf8'),before);
+    await restored.requestStop();await resumed.catch(error=>{if(error.code!=='CHILD_FAILED'&&error.code!=='STOPPING')throw error;});
+  });
 test(
   "managed loop pauses durably, rejects actions, resumes and aborts without review",
   { timeout: process.platform === "win32" ? 300000 : 30000 },
@@ -55,6 +77,7 @@ test(
     const state = JSON.parse(fs.readFileSync(path.join(root, "state.json")));
     assert.equal(state.result, "abort");
     assert.equal(state.abortOperationId, "test-end");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root,"ui-snapshot.json"))).view.gameOver,true);
     assert.equal(
       JSON.parse(fs.readFileSync(path.join(root, "loop-state.json"))).phase,
       "aborted",
@@ -460,3 +483,110 @@ test(
     await running;
   },
 );
+
+test('published human deadline equals enforcement and only explicit resume renews it', {timeout:process.platform==='win32'?300000:30000}, async t=>{
+  const root=createOwnedTempDir('holdem-deadline');
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:15000,waitMs:60000}});
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,opponentRuntime:'policy'});
+  withMutation(root,state=>{state.button=(state.seats.findIndex(s=>s.playerId==='user')+state.seats.length-1)%state.seats.length;return {state};});
+  const running=loop.run();running.catch(()=>{});t.after(async()=>{await loop.requestStop();await running.catch(error=>{if(!['CHILD_FAILED','STOPPING'].includes(error.code))throw error;});});
+  const read=name=>JSON.parse(fs.readFileSync(path.join(root,name)));
+  const limit=Date.now()+10000;
+  while(Date.now()<limit) {try{if(read('ui-snapshot.json').turnDeadline && read('loop-state.json').humanTurn)break;}catch{}await sleep(10);}
+  const first=read('loop-state.json').humanTurn;
+  assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),first.deadlineAt);
+  const lock=read('lock.json');
+  for(let attempt=0;attempt<2;attempt++) {
+    const requestId=`illegal-deadline-${attempt}`;
+    const response=await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({token:lock.sessionToken,decisionId:first.decisionId,requestId,action:'raise',amount:1})});
+    assert.equal(response.ok,true);
+    let status;
+    const rejectedBy=Date.now()+3000;
+    do {
+      status=await (await fetch(`http://127.0.0.1:${lock.port}/api/action-status?token=${lock.sessionToken}`)).json();
+      if(status.requestId===requestId && status.phase==='rejected')break;
+      await sleep(10);
+    } while(Date.now()<rejectedBy);
+    assert.equal(status.phase,'rejected');
+    assert.deepEqual(read('loop-state.json').humanTurn,first);
+    assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),first.deadlineAt);
+  }
+  await loop.pause();
+  await sleep(Math.max(0,first.deadlineAt-Date.now()+50));
+  await loop.resumePlay();
+  const resumed=read('loop-state.json').humanTurn;
+  assert.equal(resumed.decisionId,first.decisionId);
+  assert.ok(resumed.deadlineAt>first.deadlineAt);
+  assert.equal(Date.parse(read('ui-snapshot.json').turnDeadline.at),resumed.deadlineAt);
+  await sleep(750);
+  assert.equal(read('ui-snapshot.json').view.legal.decisionId,first.decisionId);
+  assert.equal(read('ui-snapshot.json').log.some(event=>/^TIMEOUT_/.test(event.code??'')),false);
+  await loop.pause();
+});
+
+// #235: a request refused at the pause gate carries durable cancellation proof, so
+// after resume the player can choose a different action and the refused request
+// (a retry or a late duplicate of an earlier POST) can never be applied.
+test('a pause-refused request is cancelled for good and a different action is applied once after resume', {timeout:process.platform==='win32'?300000:30000}, async t=>{
+  const root=createOwnedTempDir('holdem-pause-cancel');
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),
+    opts:{port:0,controlProtocolVersion:1,opponentRuntime:'policy',actionTimeoutMs:60000,waitMs:60000}});
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,opponentRuntime:'policy'});
+  withMutation(root,state=>{state.button=(state.seats.findIndex(s=>s.playerId==='user')+state.seats.length-1)%state.seats.length;return {state};});
+  const running=loop.run();running.catch(()=>{});t.after(async()=>{await loop.requestStop();await running.catch(error=>{if(!['CHILD_FAILED','STOPPING'].includes(error.code))throw error;});});
+  const read=name=>JSON.parse(fs.readFileSync(path.join(root,name)));
+  const limit=Date.now()+10000;
+  while(Date.now()<limit) {try{if(read('ui-snapshot.json').turnDeadline && read('loop-state.json').humanTurn)break;}catch{}await sleep(10);}
+  const {decisionId}=read('loop-state.json').humanTurn;
+  const lock=read('lock.json');
+  const post=body=>fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({token:lock.sessionToken,decisionId,...body})}).then(async response=>({status:response.status,body:await response.json()}));
+  const status=()=>fetch(`http://127.0.0.1:${lock.port}/api/action-status?token=${lock.sessionToken}`).then(response=>response.json());
+  await loop.pause();
+  const refused=await post({requestId:'paused-call',action:'call'});
+  assert.equal(refused.status,409);
+  assert.deepEqual(refused.body,{ok:false,code:'GAME_PAUSED',cancelled:{decisionId,requestId:'paused-call'}});
+  assert.deepEqual((await status()).cancelled,['paused-call']);
+  assert.equal((await status()).paused,true);
+  await loop.resumePlay();
+  assert.equal(read('loop-state.json').humanTurn.decisionId,decisionId,'resume keeps the same decision');
+  assert.equal((await status()).paused,false);
+  assert.deepEqual((await post({requestId:'paused-call',action:'call'})).body,{ok:false,code:'ACTION_CANCELLED'});
+  assert.equal((await post({requestId:'after-resume-fold',action:'fold'})).status,200);
+  const applied=Date.now()+10000;
+  while(Date.now()<applied&&read('ui-action-receipt.json').phase!=='consumed')await sleep(10);
+  const receipt=read('ui-action-receipt.json');
+  assert.equal(receipt.requestId,'after-resume-fold');
+  assert.equal(receipt.action,'fold');
+  assert.equal(receipt.phase,'consumed','the new action was applied');
+  const engine=read('state.json');
+  const decisionHand=Number(decisionId.split('-')[1]);
+  const handActions=(engine.hand?.handNo===decisionHand?engine.hand.actions:engine.lastHand?.handNo===decisionHand?engine.lastHand.actions:null);
+  assert.ok(handActions,'the decided hand is still readable');
+  const userActions=handActions.filter(action=>action.playerId==='user');
+  assert.deepEqual(userActions.map(action=>action.action),['fold'],'exactly one user action, the new one, reached the engine');
+  assert.equal((await post({requestId:'paused-call',action:'call'})).body.code,'STALE_DECISION');
+});
+
+test('abort end-view publication failure is best effort and never enters relay recovery',
+ {timeout:process.platform==='win32'?300000:30000},async t=>{
+  const root=createOwnedTempDir('holdem-abort-view-failure');let abortPublishes=0;const events=[];
+  const loop=createGameLoop({gameDir:root,resolver:async()=>({player:null,upper:null,notices:[]}),opts:{
+   port:0,waitMs:60000,opponentRuntime:'policy',controlProtocolVersion:1,startPaused:true,
+   log:entry=>events.push(entry.event),onPublishInvoke(){
+    const state=JSON.parse(fs.readFileSync(path.join(root,'state.json')));
+    if(state.result==='abort'){abortPublishes++;throw Object.assign(Error('relay rejected publication'),{code:'PUBLISH_REJECTED'});}
+   },
+  }});t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,stack:5000,opponentRuntime:'policy'});
+  const running=loop.run();running.catch(()=>{});await loop.pause();
+  const before=events.filter(event=>event==='server-spawn').length;
+  await loop.endGame('abort-view-failure');await running;
+  assert.equal(abortPublishes,1);assert.equal(events.filter(event=>event==='server-spawn').length,before);
+  assert.equal(events.includes('server-recovered'),false);assert.equal(events.includes('server-recovery-verified'),false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'loop-state.json'))).phase,'aborted');
+ });

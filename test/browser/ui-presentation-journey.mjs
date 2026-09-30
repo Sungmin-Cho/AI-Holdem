@@ -1,3 +1,4 @@
+import { finishJourney, selfTestJourney } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,11 +9,93 @@ import {createGame,startHand,applyAction,legalFor} from '../../engine/hand.js';
 import {newDeck} from '../../engine/cards.js';
 import {userView} from '../../engine/views.js';
 import {fixedDeck} from '../helpers/fixtures.js';
-import {handRecordFixture,writeSecurityFixtures} from '../helpers/security-fixtures.js';
+import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','real-settlement','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','short-viewport','desktop-viewport-fit','very-short-desktop','desktop-log-follow','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
+// The geometry matrix (design A5): every width × table size × height the gate
+// runs. The journey records what it measured and fails if that differs.
+export const GEOMETRY_WIDTHS=[360,390,768,1024,1280,1440];
+// The table as it sits inside the lobby or join page: the handshake adds
+// body.embedded (no top bar) and the viewport is the iframe under a header.
+export const EMBEDDED_SIZES=[[1280,744],[390,590]];
+export const embeddedStates=()=>['turn','result'].flatMap(state=>EMBEDDED_SIZES.map(([w,h])=>`${state}-${w}x${h}`));
+const EMBEDDED_TABLE_SCRIPT=`(()=>{
+  const visible=n=>n&&!n.hidden&&n.getClientRects().length>0;
+  const rect=n=>n.getBoundingClientRect();
+  const hit=(a,b)=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1;
+  const plates=[...document.querySelectorAll('.plate')].filter(visible).map(rect);
+  const strip=document.querySelector('#hand-result');
+  const blockers=[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(visible);
+  const bar=document.querySelector('#action-bar');let dock=null;
+  if(visible(bar)){bar.scrollIntoView({block:'end'});const r=rect(bar);dock=r.top>=0&&r.bottom<=innerHeight+1;}
+  let result=null;
+  if(visible(strip)){const r=rect(strip),t=rect(document.querySelector('.table'));result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=t.bottom-1),hits:blockers.filter(n=>hit(r,rect(n))).map(n=>n.id||n.className)};}
+  return {scrollX:document.documentElement.scrollWidth-innerWidth,topbar:getComputedStyle(document.querySelector('.topbar')).display,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>hit(a,b))),dock,result};
+})()`;
+// Layout overlaps a gate must see: plates with each other, plates with the board
+// and pot, bet markers with the board, pot or another player's plate, small plate
+// text, and a visible result strip over any of them (it must be on screen or in
+// the flow under the table).
+const STATE_SCRIPT=`(()=>{
+  const vis=n=>n.getClientRects().length>0&&getComputedStyle(n).display!=='none'&&getComputedStyle(n).visibility!=='hidden';
+  const R=n=>n.getBoundingClientRect(),hit=(a,b)=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1;
+  const owner=n=>n.closest('[data-player-id]')?.dataset.playerId??null;
+  const plates=[...document.querySelectorAll('.seat .plate')].filter(vis);
+  const center=[...document.querySelectorAll('#board .card, #pots')].filter(vis);
+  const markers=[...document.querySelectorAll('.bet-marker')].filter(vis);
+  const plateOverlaps=[];plates.forEach((a,i)=>plates.slice(i+1).forEach(b=>{if(hit(R(a),R(b)))plateOverlaps.push([owner(a),owner(b)]);}));
+  const tableHits=[];plates.forEach(p=>center.forEach(c=>{if(hit(R(p),R(c)))tableHits.push([owner(p),c.id||c.className]);}));
+  const markerHits=[];markers.forEach(m=>{const who=m.dataset.playerId;[...center,...plates.filter(p=>owner(p)!==who)].forEach(t=>{if(hit(R(m),R(t)))markerHits.push([who,t.id||t.className||owner(t)]);});});
+  const small=[...document.querySelectorAll('.table *, #action-bar *, #result-dock *')].filter(n=>vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())).filter(n=>parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.id||n.tagName);
+  const strip=document.querySelector('#hand-result'),table=R(document.querySelector('.table'));let result=null;
+  if(vis(strip)){const r=R(strip);result={inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=table.bottom-1),hits:[...center,...plates].filter(n=>hit(r,R(n))).map(n=>n.id||n.className)};}
+  return {scroll:document.documentElement.scrollWidth,plateOverlaps,tableHits,markerHits,small,result};
+})()`;
+export const STATE_SIZES=[[390,667],[1280,800]];
+export const stateMatrix=()=>['turn','ai-thinking','fold-allin-out','showdown-result'].flatMap(state=>STATE_SIZES.map(([w,h])=>`${state}-${w}x${h}`));
+export const geometryCounts=({ci=false}={})=>ci?[2,6,9]:[2,6,8,9];
+export function geometryCombos({ci=false}={}) {
+  const combos=[];
+  for(const count of geometryCounts({ci})) {
+    for(const width of GEOMETRY_WIDTHS)for(const height of [667,900])combos.push(`${count}p-${width}x${height}`);
+    for(const width of [1024,1280])combos.push(`${count}p-${width}x800`);
+  }
+  return combos;
+}
+// Computed-colour contrast (design A2): text colour against the composited
+// background under it (translucent layers over the felt or page), with the
+// ancestors' opacity applied to both, judged at the WCAG size threshold.
+export const CONTRAST_SCRIPT=`((selectors)=>{
+  const hex=(v)=>{const m=/^#([0-9a-f]{6})$/i.exec(v.trim());return m?[0,2,4].map(i=>parseInt(m[1].slice(i,i+2),16)).concat(1):null;};
+  const parse=(c)=>{if(!c||c==='transparent')return [0,0,0,0];let m=c.match(/^rgba?\\(([^)]+)\\)/);if(m){const p=m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number);return [p[0],p[1],p[2],p[3]??1];}m=c.match(/^color\\(srgb ([^)]+)\\)/);if(m){const p=m[1].split(/[\\s\\/]+/).filter(Boolean).map(Number);return [p[0]*255,p[1]*255,p[2]*255,p[3]??1];}return hex(c);};
+  const over=(top,bottom)=>{const a=top[3]+bottom[3]*(1-top[3]);if(!a)return [0,0,0,0];return [0,1,2].map(i=>(top[i]*top[3]+bottom[i]*bottom[3]*(1-top[3]))/a).concat(a);};
+  const mix=(c,back,o)=>[0,1,2].map(i=>c[i]*o+back[i]*(1-o)).concat(1);
+  const lum=(c)=>{const f=v=>{v/=255;return v<=0.03928?v/12.92:((v+0.055)/1.055)**2.4;};return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);};
+  const root=getComputedStyle(document.documentElement);
+  const page=hex(root.getPropertyValue('--c-bg'))??[0,0,0,1],felt=hex(root.getPropertyValue('--c-felt-mid'))??page;
+  const out=[];let checked=0;
+  for(const selector of selectors)for(const el of document.querySelectorAll(selector)){
+    if(!el.getClientRects().length||!el.textContent.trim())continue;
+    // WCAG exempts disabled controls (they wear opacity on purpose).
+    if(el.disabled||el.closest('[disabled],[aria-disabled="true"]'))continue;
+    const cs=getComputedStyle(el);if(cs.visibility==='hidden')continue;
+    const layers=[];let opacity=1,backdrop=page,stopped=false;
+    for(let n=el;n;n=n.parentElement){const s=getComputedStyle(n);opacity*=Number(s.opacity);
+      if(stopped)continue;
+      if(n.classList.contains('table')||n.classList.contains('replayer-felt')){backdrop=felt;stopped=true;continue;}
+      const bg=parse(s.backgroundColor);layers.push(bg);if(bg[3]>=1)stopped=true;}
+    let base=backdrop;for(const layer of layers.reverse())base=over(layer,base);
+    let text=over(parse(cs.color),base);
+    if(opacity<1){text=mix(text,backdrop,opacity);base=mix(base,backdrop,opacity);}
+    checked+=1;
+    const [hi,lo]=[lum(text),lum(base)].sort((a,b)=>b-a),ratio=(hi+0.05)/(lo+0.05);
+    const size=parseFloat(cs.fontSize),bold=Number(cs.fontWeight)>=700,need=size>=24||(bold&&size>=18.66)?3:4.5;
+    if(ratio<need)out.push({selector,text:el.textContent.trim().slice(0,24),ratio:Math.round(ratio*100)/100,need,size});
+  }
+  return {checked,out};
+})`;
 export async function runUiJourney(outDir,{ci=false}={}) {
   fs.mkdirSync(outDir,{recursive:true});
   const workspace=createBrowserWorkspace(),session=`ui-${randomUUID()}`,token=randomUUID();
@@ -25,37 +108,74 @@ export async function runUiJourney(outDir,{ci=false}={}) {
   };
   const evaluate=async(expr)=>{const value=await browser(['eval',expr]);return value?.result??value;};
   const publish=async(events=[],extra={})=>{
-    const response=await fetch(`http://127.0.0.1:${relay.port}/api/publish`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,publishId:++publishId,view,events,...extra})});
+    const response=await fetch(`http://127.0.0.1:${relay.port}/api/publish`,{method:'POST',headers:{'content-type':'application/json',connection:'close'},body:JSON.stringify({token,publishId:++publishId,view,events,...extra})});
     const result=await response.json();
     assert.equal(response.status,200,`publish ${publishId}: ${result.code??response.status}`);return result;
   };
   const ready=async()=>{
     for(let i=0;i<25;i++){if(await evaluate("document.querySelector('#btn-raise')?.disabled===false"))return;await new Promise(r=>setTimeout(r,100));}
-    throw Error('action readiness unavailable');
+    const why=await evaluate("({raise:document.querySelector('#btn-raise')?.disabled,bar:document.querySelector('#action-bar')?.hidden,status:document.querySelector('#action-status')?.textContent,notice:document.querySelector('#action-notice')?.textContent,conn:document.querySelector('#conn-text')?.textContent,hand:document.querySelector('#hand-no')?.textContent,result:document.querySelector('#hand-result')?.hidden})");
+    throw Error(`action readiness unavailable: ${JSON.stringify(why)}`);
   };
   const click=async(selector)=>{await browser(['snapshot','-i']);await browser(['click',selector]);};
   try {
     const historical=handRecordFixture(1,{actions:[{playerId:'user',street:'preflop',action:'raise',amount:125}]});historical.blinds=[25,50];
-    writeSecurityFixtures(workspace.root,{hands:[historical,handRecordFixture(2)],config:{replayReveal:'all'},state:{sessionToken:token}});
+    // An engine-settled heads-up hand (same seats as the fixture) for the visual replayer.
+    let settledState=createGame({aiCount:1,startStack:5000,levelEvery:10});settledState.handNo=2;
+    settledState=startHand(settledState,{deck:fixedDeck()}).state;
+    while(!legalFor(settledState).handOver){const legal=legalFor(settledState);const raise=legal.canCheck&&legal.street==='turn'&&legal.canRaise;
+      settledState=applyAction(settledState,legal.toAct,raise?'raise':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
+    const settledHand=settledState.lastHand;
+    // A nine-handed engine hand for the crowded replayer layout.
+    let fullState=createGame({aiCount:8,startStack:5000,levelEvery:10});fullState.handNo=3;
+    fullState=startHand(fullState,{deck:fixedDeck()}).state;
+    // Raises and folds, so bet pills and tags sit on seats at the same time.
+    for(let turn=0;!legalFor(fullState).handOver;turn+=1){const legal=legalFor(fullState);
+      const raise=legal.canRaise&&turn%5===0,fold=!raise&&!legal.canCheck&&turn%3===1;
+      fullState=applyAction(fullState,legal.toAct,raise?'raise':fold?'fold':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
+    const fullHand=fullState.lastHand;
+    // A six-handed hand: two seats per side on a short desktop viewport.
+    let sixState=createGame({aiCount:5,startStack:5000,levelEvery:10});sixState.handNo=4;
+    sixState=startHand(sixState,{deck:fixedDeck()}).state;
+    while(!legalFor(sixState).handOver){const legal=legalFor(sixState);const raise=legal.canRaise&&legal.street==='flop'&&legal.canCheck;
+      sixState=applyAction(sixState,legal.toAct,raise?'raise':legal.canCheck?'check':'call',raise?legal.minRaiseTo:undefined).state;}
+    const sixHand=sixState.lastHand;
+    const fixturePlayers=[...defaultPlayers(),...['p2','p3','p4','p5','p6','p7','p8'].map(playerId=>({...defaultPlayers()[1],playerId}))];
+    writeSecurityFixtures(workspace.root,{players:fixturePlayers,hands:[historical,handRecordFixture(2),settledHand,fullHand,sixHand],config:{replayReveal:'all'},state:{sessionToken:token}});
     relay=await startServer({gameDir:workspace.root,port:0,token});
     const origin=`http://127.0.0.1:${relay.port}`;
-    for(const asset of ['design-tokens.css','table-design.css','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
+    for(const asset of ['design-tokens.css','ui-base.css','table.css','theme-boot.js','card-render.js','shell-embed.js','motion.js','chip-format.js','seat-format.js','amount-editor.js','dialog-controller.js','hand-result.js','replay-model.js','replayer.js','help-panel.js','display-settings.js','onboarding.js'])assert.equal((await fetch(`${origin}/${asset}`)).status,200);
     checks.push('assets');
-    for(const count of ci?[6,9]:[2,6,8,9]) {
+    // The same table sizes the expected matrix names (CI included).
+    for(const count of geometryCounts({ci})) {
       let state=createGame({aiCount:count-1});state.button=count===2?1:count-4;
       const dealt=startHand(state,{deck:fixedDeck()});state=dealt.state;view=userView(state);
       assert.ok(view.legal);
       await publish(dealt.events);
       await browser(['open',`${origin}/?token=${token}`]);await ready();
-      for(const width of ci?[390,1440]:[360,390,768,1024,1440]) {
-        await browser(['set','viewport',String(width),'900']);await browser(['snapshot','-i']);
+      if(!checks.includes('onboarding')) {
+        // First turn in this browser: the guide sits in the side panel, outlines the
+        // seat, leaves focus alone, ends on Esc and does not come back.
+        const guide=await evaluate("(()=>{const card=document.querySelector('aside.side .onboarding-card');return {card:!!card,inCard:!!card&&card.contains(document.activeElement),seat:!!document.querySelector('.seat.is-hero .plate.onboarding-focus'),step:card?.querySelector('.onboarding-count')?.textContent}})()");
+        assert.ok(guide.card&&!guide.inCard&&guide.seat&&guide.step==='처음 안내 1 / 3',JSON.stringify(guide));
+        await browser(['press','Escape']);
+        assert.equal(await evaluate("!!document.querySelector('.onboarding-card')||!!document.querySelector('.onboarding-focus')"),false);
+        await browser(['reload']);await ready();
+        assert.equal(await evaluate("!!document.querySelector('.onboarding-card')"),false,'seen once per browser');
+        checks.push('onboarding');
+      }
+      for(const combo of geometryCombos({ci}).filter(key=>key.startsWith(`${count}p-`))) {
+        const [width,height]=combo.slice(combo.indexOf('-')+1).split('x').map(Number);
+        await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
         const metrics=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,size:parseFloat(getComputedStyle(n.querySelector('.amount-primary')).fontSize)}});const overlaps=[];for(let i=0;i<plates.length;i++)for(let j=i+1;j<plates.length;j++){const a=plates[i],b=plates[j];if(a.x<b.x+b.w-1&&a.x+a.w>b.x+1&&a.y<b.y+b.h-1&&a.y+a.h>b.y+1)overlaps.push([i,j]);}return {width:innerWidth,scroll:document.documentElement.scrollWidth,plates,overlaps};})()`);
         const markers=await evaluate(`(()=>{const visible=n=>!!n&&n.getClientRects().length>0&&getComputedStyle(n).display!=='none';return ${JSON.stringify(state.hand.posts)}.map(post=>{const seat=document.querySelector('.seat[data-player-id="'+post.playerId+'"]'),badge=seat.querySelector('.dealer-btn'),bet=document.querySelector('.bet-marker[data-player-id="'+post.playerId+'"]');return {role:badge?.textContent,betVisible:visible(bet)||visible(seat.querySelector('.seat-bet'))}})})()`);
         assert.equal(markers[0].role,count===2?'D/SB':'SB');
         assert.equal(markers[1].role,'BB');
         assert.ok(markers.every(m=>m.betVisible),JSON.stringify({count,width,markers}));
-        measurements.push({count,...metrics});
-        await browser(['screenshot',path.join(outDir,`table-${count}-${width}.png`)]);
+        measurements.push({combo,count,height,...metrics});
+        await browser(['screenshot',path.join(outDir,`table-${combo}.png`)]);
+        const crossings=await evaluate(STATE_SCRIPT);
+        assert.ok(crossings.tableHits.length===0&&crossings.markerHits.length===0&&crossings.small.length===0,`seat/board/pot/marker overlap or text under 12px ${combo}: ${JSON.stringify(crossings)}`);
         assert.ok(metrics.scroll<=width,`horizontal overflow ${count}/${width}: ${metrics.scroll}`);
         assert.equal(metrics.plates.length,count);assert.deepEqual(metrics.overlaps,[],`seat overlap ${count}/${width}`);
         assert.ok(metrics.plates.every(p=>p.size>=12),`stack font ${count}/${width}`);
@@ -64,6 +184,40 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     checks.push('responsive');
     checks.push('blind-and-bet-markers');
+    assert.deepEqual(measurements.map(row=>row.combo),geometryCombos({ci}),'the geometry matrix ran exactly the expected combinations');
+    checks.push('geometry-matrix');
+    // Contrast on the live turn: plates on the felt, secondary amounts, the action bar.
+    const contrastPass=async(label,selectors,minimum)=>{
+      const failures=[];
+      for(const theme of ['b','a','c']){
+        await evaluate(theme==='b'?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme','${theme}')`);
+        const {checked,out}=await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(selectors)})`);
+        assert.ok(checked>=minimum,`${label}/${theme}: only ${checked} elements measured`);
+        measurements.push({contrast:label,theme,checked});
+        for(const row of out)failures.push({label,theme,...row});
+      }
+      await evaluate("document.documentElement.removeAttribute('data-theme')");
+      return failures;
+    };
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    // Embedded turn: no page overflow, no plate overlap, the dock within reach.
+    const embedded=[];
+    const measureEmbedded=async(stateName,expectResult)=>{
+      await evaluate("document.body.classList.add('embedded')");
+      for(const [width,height] of EMBEDDED_SIZES){
+        await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+        const fit=await evaluate(EMBEDDED_TABLE_SCRIPT);
+        assert.ok(fit.scrollX<=1&&fit.topbar==='none'&&!fit.overlap&&fit.dock!==false,JSON.stringify({stateName,width,height,fit}));
+        if(expectResult)assert.deepEqual(fit.result&&{inside:fit.result.inside,hits:fit.result.hits},{inside:true,hits:[]},JSON.stringify({stateName,width,height,fit}));
+        await browser(['screenshot',path.join(outDir,`embedded-${stateName}-${width}x${height}.png`)]);
+        embedded.push(`${stateName}-${width}x${height}`);
+      }
+      await evaluate("document.body.classList.remove('embedded')");
+    };
+    await measureEmbedded('turn',false);
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const turnContrast=await contrastPass('turn',['.plate-name','.plate-stack .amount-primary','.plate .amount-secondary','.plate-tag','.bet-amount','.pot-label','.pot-amount','#action-bar button','.action-summary','.table-context','.tabs button'],20);
+    assert.deepEqual(turnContrast,[],JSON.stringify(turnContrast));
     await browser(['set','viewport','1094','500']);await browser(['snapshot','-i']);
     const veryShort=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.plate')].map(n=>n.getBoundingClientRect());return {overflow:getComputedStyle(document.body).overflowY,width:document.documentElement.scrollWidth,overlap:plates.some((a,i)=>plates.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1))}})()`);
     assert.notEqual(veryShort.overflow,'hidden');
@@ -80,7 +234,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       assert.ok(fit.bottom<=height&&fit.top>=0,JSON.stringify(fit));
       assert.equal(fit.plates,true,JSON.stringify(fit));
       assert.equal(fit.overlap,false,JSON.stringify(fit));
-      const spacing=await evaluate(`(()=>{const shapes=[...document.querySelectorAll('.seat .plate,.seat .card,.seat .dealer-btn')].filter(n=>n.getClientRects().length).map(n=>({player:n.closest('.seat').dataset.playerId,...n.getBoundingClientRect().toJSON()}));let minGap=Infinity;for(let i=0;i<shapes.length;i++)for(let j=i+1;j<shapes.length;j++){const a=shapes[i],b=shapes[j];if(a.player!==b.player)minGap=Math.min(minGap,Math.hypot(Math.max(a.left-b.right,b.left-a.right,0),Math.max(a.top-b.bottom,b.top-a.bottom,0)));}const hero=document.querySelector('.seat.is-hero'),cards=[...hero.querySelectorAll('.card--hero')].map(n=>n.getBoundingClientRect());return {minGap,cardToPlate:hero.querySelector('.plate').getBoundingClientRect().top-Math.max(...cards.map(r=>r.bottom))}})()`);
+      const spacing=await evaluate(`(()=>{const shapes=[...document.querySelectorAll('.seat .plate,.seat .card,.seat .dealer-btn')].filter(n=>n.getClientRects().length).map(n=>({player:n.closest('.seat').dataset.playerId,kind:n.className,...n.getBoundingClientRect().toJSON()}));let minGap=Infinity,closest=null;for(let i=0;i<shapes.length;i++)for(let j=i+1;j<shapes.length;j++){const a=shapes[i],b=shapes[j];if(a.player!==b.player){const gap=Math.hypot(Math.max(a.left-b.right,b.left-a.right,0),Math.max(a.top-b.bottom,b.top-a.bottom,0));if(gap<minGap){minGap=gap;closest=[a,b];}}}const hero=document.querySelector('.seat.is-hero'),cards=[...hero.querySelectorAll('.card--hero')].map(n=>n.getBoundingClientRect());return {minGap,closest,cardToPlate:hero.querySelector('.plate').getBoundingClientRect().top-Math.max(...cards.map(r=>r.bottom))}})()`);
       assert.ok(spacing.minGap>=8,JSON.stringify({width,height,spacing}));
       assert.ok(spacing.cardToPlate>=8,JSON.stringify({width,height,spacing}));
       await browser(['screenshot',path.join(outDir,`desktop-fit-${width}-${height}.png`)]);
@@ -129,15 +283,28 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     for(const [width,height] of [[1094,559],[1440,900]]) {
       await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
       const bets=await evaluate(`(()=>{const visible=n=>n.getClientRects().length&&getComputedStyle(n).display!=='none',targets=[...document.querySelectorAll('.plate,.seat .card,#board .card,#pots')].filter(visible),overlaps=[],gaps=[];for(const m of [...document.querySelectorAll('.bet-marker')].filter(visible)){const a=m.getBoundingClientRect(),plate=m.closest('.plate'),p=plate.getBoundingClientRect();gaps.push(Math.hypot(Math.max(a.left-p.right,p.left-a.right,0),Math.max(a.top-p.bottom,p.top-a.bottom,0)));for(const n of targets){if(n===plate)continue;const b=n.getBoundingClientRect();if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)overlaps.push({player:m.dataset.playerId,target:n.className,targetPlayer:n.closest('.seat')?.dataset.playerId,marker:a.toJSON(),targetRect:b.toJSON()});}}return {gaps,overlaps}})()`);
-      assert.equal(bets.gaps.length,ownView.seats.length-1);
+      assert.equal(bets.gaps.length,ownView.seats.length,'every betting seat, the viewer included, shows one marker');
       assert.ok(bets.gaps.every(gap=>gap>=4&&gap<=9),JSON.stringify(bets));
       assert.deepEqual(bets.overlaps,[],JSON.stringify({width,height,bets}));
       await browser(['screenshot',path.join(outDir,`bet-spacing-${width}-${height}.png`)]);
     }
     view=ownView;await publish();checks.push('bet-owner-spacing');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    for (const position of ['top', 'bottom']) {
+      await evaluate(position === 'top' ? 'scrollTo(0,0)' : "document.querySelector('#action-bar').scrollIntoView({block:'end'})");
+      const sticky=await evaluate(`(()=>{const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect();return {position:getComputedStyle(a).position,hidden:a.hidden,barHeight:r.height,bottom:r.bottom,top:r.top,height:innerHeight,plates:[...document.querySelectorAll('.seat .plate')].every(n=>{const p=n.getBoundingClientRect();return p.bottom<=r.top||p.top>=r.bottom;}),controls:[...a.querySelectorAll('button')].filter(n=>n.getClientRects().length).every(n=>n.getBoundingClientRect().height>=44)}})()`);
+      assert.equal(sticky.hidden,false,JSON.stringify({position,sticky}));
+      assert.ok(sticky.barHeight>0,JSON.stringify({position,sticky}));
+      assert.equal(sticky.position,'sticky');assert.ok(sticky.bottom<=sticky.height+1,JSON.stringify({position,sticky}));
+      assert.ok(sticky.top>=0,JSON.stringify({position,sticky}));assert.equal(sticky.plates,true,JSON.stringify({position,sticky}));
+      assert.equal(sticky.controls,true,JSON.stringify({position,sticky}));
+      await browser(['screenshot',path.join(outDir,`mobile-sticky-${position}.png`)]);
+    }
+    checks.push('mobile-action-bar-sticky');
+
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
+    await click('#action-options-toggle');
     await browser(['fill','#intent-note','fixture intention']);
     await browser(['fill','#raise-amount',String(view.legal.minRaiseTo)]);
     await browser(['fill','#raise-amount','9999999']);await browser(['press','ArrowUp']);
@@ -168,6 +335,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     view={...view,seats:view.seats.map((s,i)=>i===1?{...s,out:true,stack:0}:s)};await publish();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);
     assert.equal(await evaluate("document.querySelectorAll('[data-player-id=p1] .card--back').length"),0);checks.push('elimination');
+    await evaluate("document.querySelector('[data-player-id=p1] .plate').scrollIntoView({block:'center'})");
     await click('[data-player-id=p1] .plate');
     assert.equal(await evaluate("document.querySelector('#seat-overlay').hidden"),false);
     assert.equal(await evaluate("document.querySelector('main').inert"),true);
@@ -188,7 +356,28 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#log-list').scrollTop"),0);
     await browser(['reload']);await ready();
     assert.equal(await evaluate("document.querySelector('.seat[data-player-id=p1]').classList.contains('is-out')"),true);checks.push('reload');
+    // Motion is decoration over the final DOM: the reduce setting creates nothing, a live bet
+    // pops its marker, a street change flies chips to the pot, and nothing lingers after 300ms.
+    const mover=view.seats.find(s=>s.playerId!=='user'&&!s.out).playerId;
+    const bumped={...view,seats:view.seats.map(s=>s.playerId===mover?{...s,bet:s.bet+view.blinds[1]}:s)};
+    await evaluate("window.__motion=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){window.__motion.push(this.className);return window.__animate.apply(this,args);}");
+    await evaluate("document.documentElement.dataset.motion='reduce'");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn',`[...document.querySelectorAll('.bet-marker')].some(n=>n.dataset.playerId===${JSON.stringify(mover)}&&n.textContent.includes(${JSON.stringify(String((bumped.seats.find(s=>s.playerId===mover).bet)/view.blinds[1]))}))`]);
+    assert.deepEqual(await evaluate('window.__motion'),[],'reduced motion creates no animation');
+    await publish([],{view});
+    await evaluate("delete document.documentElement.dataset.motion;window.__motion=[]");
+    await publish([],{view:bumped});
+    await browser(['wait','--fn','window.__motion.includes("bet-marker")']);
+    await publish([],{view:{...bumped,street:'flop',seats:bumped.seats.map(s=>({...s,bet:0}))}});
+    await browser(['wait','--fn','window.__motion.includes("motion-chip")']);
+    await browser(['wait','400']);
+    assert.deepEqual(await evaluate("({animations:document.getAnimations().filter(a=>a.effect?.target?.closest?.('#table')).length,chips:document.querySelectorAll('.motion-chip').length})"),{animations:0,chips:0});
+    await evaluate("Element.prototype.animate=window.__animate");
+    await publish([],{view});await ready();
+    checks.push('motion-decoration');
     await evaluate("window.actionBodies=[];window.originalFetch=window.fetch;window.fetch=(url,options)=>{if(url==='/api/action'&&options?.body)window.actionBodies.push(JSON.parse(options.body));return window.originalFetch(url,options);}");
+    await click('#action-options-toggle');
     await browser(['fill','#raise-amount','9999999']);await browser(['press','Tab']);await click('#btn-raise');
     assert.equal(await evaluate('window.actionBodies.length'),0);
     await click('#btn-raise');
@@ -202,9 +391,174 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate('document.activeElement===window.focusedReplay'),true);checks.push('replay-arrival-focus');
     await browser(['press','Enter']);
     assert.match(await evaluate("document.querySelector('#replay-body .replay-amount').textContent"),/2.5 BB/);
+    // A display fixture (posts: []) cannot be rebuilt: an explained text list, no drawing.
+    assert.equal(await evaluate("!!document.querySelector('#replay-body .replay-fallback')&&!document.querySelector('#replay-body .replayer')&&!!document.querySelector('#replay-body .replay-list .replay-row')"),true);checks.push('replay-fallback');
     await browser(['press','Escape']);
     const historyAmounts=await evaluate("[...document.querySelectorAll('#log-list .log-amount')].slice(-2).map(n=>n.textContent)");
     assert.match(historyAmounts[0],/2.5 BB/);assert.match(historyAmounts[1],/1.25 BB/);checks.push('historical-bb');
+    // Hand 2 started, so hand 1 folds to its divider; the toggle reopens it.
+    const folded=await evaluate("(()=>{const heads=[...document.querySelectorAll('#log-list .log-divider.is-past')];return {heads:heads.length,expanded:heads.map(n=>n.querySelector('.log-hand-toggle')?.getAttribute('aria-expanded')),summary:heads.at(-1)?.querySelector('.log-hand-summary')?.textContent,hidden:document.querySelectorAll('#log-list > .is-collapsed').length,latest:[...document.querySelectorAll('#log-list .log-divider')].at(-1).classList.contains('is-past')}})()");
+    assert.ok(folded.heads>0&&folded.expanded.every(value=>value==='false')&&folded.hidden>0&&folded.latest===false,JSON.stringify(folded));
+    assert.equal(folded.summary,'결과 기록 없음');
+    await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).click()");
+    assert.equal(await evaluate("[...document.querySelectorAll('#log-list .log-hand-toggle')].at(-1).getAttribute('aria-expanded')"),'true');
+    assert.ok(await evaluate("document.querySelectorAll('#log-list > .is-collapsed').length")<folded.hidden);
+    checks.push('log-hand-fold');
+    // The engine-settled hand draws the visual replayer (design §10.1).
+    const beforeViewport=await evaluate('[innerWidth,innerHeight]');
+    await publish([{type:'hand_start',handNo:3,blinds:settledHand.blinds}],{handReplay:{handNos:[3]}});
+    await browser(['set','viewport','1280','800']);
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    const visual=await evaluate("(()=>({steps:document.querySelectorAll('.replayer-jump').length,seats:document.querySelectorAll('.replayer-seat').length,hero:document.querySelector('.replayer-seat')?.dataset.playerId,progress:document.querySelector('.replayer-progress').textContent,amount:!!document.querySelector('.replayer-timeline .replay-amount'),fallback:!!document.querySelector('.replay-fallback'),backs:document.querySelectorAll('.replayer-seat .card--back').length}))()");
+    assert.ok(visual.steps>=6&&visual.seats===2&&visual.hero==='user'&&visual.progress===`1 / ${visual.steps}`&&visual.amount&&!visual.fallback&&visual.backs===0,JSON.stringify(visual));
+    await browser(['screenshot',path.join(outDir,'replayer-1280.png')]);
+    checks.push('replay-visual');
+    await evaluate("document.querySelector('.replayer-next').focus()");
+    await browser(['press','ArrowRight']);await browser(['press','ArrowRight']);
+    assert.equal(await evaluate("document.querySelector('.replayer-progress').textContent"),`3 / ${visual.steps}`);
+    await browser(['press','End']);
+    const ended=await evaluate("({progress:document.querySelector('.replayer-progress').textContent,title:document.querySelector('.replayer-now-title').textContent,winners:document.querySelectorAll('.replayer-seat.is-winner').length,next:document.querySelector('.replayer-next').disabled,inDialog:document.querySelector('#replay-overlay').contains(document.activeElement)})");
+    assert.ok(ended.progress===`${visual.steps} / ${visual.steps}`&&ended.title==='결과'&&ended.winners>0&&ended.next&&ended.inDialog,JSON.stringify(ended));
+    await browser(['press','Home']);
+    assert.equal(await evaluate("document.querySelector('.replayer-progress').textContent"),`1 / ${visual.steps}`);
+    await evaluate("document.querySelector('.replayer-play').click()");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'일시정지');
+    assert.equal(await evaluate("document.querySelector('.replayer-now-title').getAttribute('aria-live')"),'off','autoplay does not queue announcements');
+    await browser(['wait','--fn',"document.querySelector('.replayer-progress').textContent.startsWith('2 /')"]);
+    await evaluate("document.querySelector('.replayer-play').click()");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
+    // Space plays and pauses when no control has focus.
+    await evaluate("document.activeElement.blur()");await browser(['press','Space']);
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'일시정지');
+    await browser(['press','Space']);
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
+    // A held key repeats: repeats never flip playback again.
+    await evaluate("document.body.dispatchEvent(new KeyboardEvent('keydown',{key:' ',repeat:true,bubbles:true,cancelable:true}))");
+    assert.equal(await evaluate("document.querySelector('.replayer-play').textContent"),'재생');
+    checks.push('replay-keyboard');
+    // The timeline keeps its own scroll position when the replay is rebuilt (unit change).
+    await evaluate("document.querySelector('.replayer-timeline').scrollTop=60");
+    const timelineBefore=await evaluate("document.querySelector('.replayer-timeline').scrollTop");
+    assert.ok(timelineBefore>0,'the timeline scrolls on its own');
+    await browser(['select','#display-unit','chips']);
+    assert.equal(await evaluate("document.querySelector('.replayer-timeline').scrollTop"),timelineBefore);
+    await browser(['select','#display-unit','bb']);
+    checks.push('replay-timeline-scroll');
+    await evaluate("document.querySelector('.replayer-list-toggle').focus()");await browser(['press','Enter']);
+    const listed=await evaluate("({rows:document.querySelectorAll('.replay-list .replay-row').length,expanded:document.querySelector('.replayer-list-toggle').getAttribute('aria-expanded'),focus:document.activeElement?.classList.contains('replayer-list-toggle')})");
+    assert.ok(listed.rows>0&&listed.expanded==='true'&&listed.focus,JSON.stringify(listed));
+    checks.push('replay-list-toggle');
+    // The help drawer opened from the replay's ⓘ keeps Tab and Esc to itself;
+    // the replay's own focus trap stands aside until it closes.
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    // Without the fix the replay's trap took Tab and sent focus back under the drawer.
+    // (Past the drawer's last control a native modal may hand focus to the browser.)
+    for(const key of ['Tab','Shift+Tab']) {
+      await browser(['press',key]);
+      const where=await evaluate("({inHelp:!!document.activeElement?.closest('#help-panel'),inReplay:!!document.activeElement?.closest('#replay-overlay')})");
+      assert.deepEqual(where,{inHelp:true,inReplay:false},`${key} stays in the help drawer`);
+    }
+    await evaluate("document.querySelector('#help-panel').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+    assert.equal(await evaluate("document.querySelector('#replay-overlay').hidden"),false,'Esc meant for the drawer leaves the replay open');
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.equal(await evaluate("!document.querySelector('dialog[open]') && !document.querySelector('#replay-overlay').hidden && !!document.activeElement?.closest('#replay-overlay')"),true,'focus comes back to the replay');
+    // The drawer now exists: reopening the replay must not leave it inert.
+    await evaluate("document.querySelector('#replay-close').click()");
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    await browser(['press','Tab']);
+    const drawerReopened=await evaluate("({inert:document.querySelector('#help-panel').inert,inHelp:!!document.activeElement?.closest('#help-panel')})");
+    assert.deepEqual(drawerReopened,{inert:false,inHelp:true},'the reopened drawer is usable');
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    checks.push('help-over-replay');
+    await browser(['set','viewport','390','844']);
+    const sheet=await evaluate("(()=>{const r=document.querySelector('.replay-card').getBoundingClientRect();const low=[...document.querySelectorAll('.replayer-controls .btn,.replayer-speed select,.replayer-jump')].map(n=>Math.round(n.getBoundingClientRect().height)).filter(h=>h<44);return {w:Math.round(r.width),h:Math.round(r.height),fits:document.documentElement.scrollWidth<=innerWidth,low}})()");
+    assert.ok(sheet.w===390&&sheet.h===844&&sheet.fits&&sheet.low.length===0,JSON.stringify(sheet));
+    await browser(['screenshot',path.join(outDir,'replayer-390.png')]);
+    checks.push('replay-mobile-sheet');
+    // Phone: the ⓘ, the drawer's contents links and the settings rows are 44px targets.
+    const infoSize=await evaluate("(()=>{const r=document.querySelector('#replay-disclaimer + .help-info').getBoundingClientRect();return Math.min(r.width,r.height)})()");
+    await evaluate("document.querySelector('#replay-disclaimer + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    const navSizes=await evaluate("[...document.querySelectorAll('#help-panel .help-nav-link')].map(n=>Math.round(n.getBoundingClientRect().height))");
+    await evaluate("document.querySelector('.help-display-open').click()");
+    await browser(['wait','#display-settings[open]']);
+    const optionSizes=await evaluate("[...document.querySelectorAll('#display-settings .display-option')].map(n=>Math.round(n.getBoundingClientRect().height))");
+    await evaluate("document.querySelector('#display-settings .display-close').click()");
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.ok(infoSize>=44&&navSizes.length>0&&navSizes.every(h=>h>=44)&&optionSizes.length>0&&optionSizes.every(h=>h>=44),JSON.stringify({infoSize,navSizes,optionSizes}));
+    checks.push('help-touch-targets');
+    // Closing while playing stops the timer; reopening starts from the first step.
+    await evaluate("document.querySelector('.replayer-play').click()");
+    await browser(['press','Escape']);
+    await browser(['wait','1800']);
+    await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+    await browser(['wait','#replay-body .replayer']);
+    const reopened=await evaluate("({progress:document.querySelector('.replayer-progress').textContent,play:document.querySelector('.replayer-play').textContent})");
+    await browser(['wait','1600']);
+    assert.ok(reopened.progress.startsWith('1 /')&&reopened.play==='재생'&&(await evaluate("document.querySelector('.replayer-progress').textContent")).startsWith('1 /'),JSON.stringify(reopened));
+    await browser(['press','Escape']);
+    checks.push('replay-close-stops');
+    // Nine seats with long names, and six seats on a short desktop: at every
+    // step (tags and bet pills included) no two seats overlap or leave the stage.
+    // (Later checks publish their own views; the closed decision of the earlier
+    // view is never re-opened, which the receipt store would refuse.)
+    const longNames=(seats)=>seats.map(seat=>({...seat,name:'매우 긴 플레이어 이름 접근성 확인'}));
+    // Seats and their tag/bet pills: nothing of one seat may cover another seat's, nor leave the stage.
+    const layoutAtEveryStep="(()=>{const measure=()=>{const boxes=[...document.querySelectorAll('.replayer-seat')].map(seat=>[seat,...seat.querySelectorAll('.replayer-seat-tag,.replayer-seat-bet')].map(n=>n.getBoundingClientRect()).filter(r=>r.width>0));let hits=0;for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++)for(const a of boxes[i])for(const b of boxes[j])if(a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)hits++;const stage=document.querySelector('.replayer-stage').getBoundingClientRect();return hits+100*boxes.flat().filter(x=>x.left<stage.left-1||x.right>stage.right+1).length;};const steps=document.querySelectorAll('.replayer-jump').length;let worst=0,at=-1;for(let i=0;i<steps;i++){if(i)document.querySelector('.replayer-next').click();const v=measure();if(v>worst){worst=v;at=i;}}return {seats:document.querySelectorAll('.replayer-seat').length,worst,at,steps,board:Math.round(document.querySelector('.replayer-board .card').getBoundingClientRect().width),fits:document.documentElement.scrollWidth<=innerWidth};})()";
+    view={...userView(fullState),seats:longNames(userView(fullState).seats)};
+    await publish([{type:'hand_start',handNo:4,blinds:fullHand.blinds},{type:'hand_start',handNo:5,blinds:sixHand.blinds}],{handReplay:{handNos:[4,5]}});
+    for(const [w,h] of [[390,844],[700,1000],[1280,800],[1366,640]]) {
+      await browser(['set','viewport',String(w),String(h)]);
+      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-2).click()");
+      await browser(['wait','#replay-body .replayer.is-crowded']);
+      const crowd=await evaluate(layoutAtEveryStep);
+      assert.ok(crowd.seats===9&&crowd.worst===0&&crowd.board===(w<600?24:32)&&crowd.fits,`${w}x${h} ${JSON.stringify(crowd)}`);
+      if(w===1280){
+        assert.ok(await evaluate("document.querySelectorAll('.replayer-seat.is-folded').length>0"),'the last step has folded seats');
+        const replayContrast=await contrastPass('replay',['.replayer-seat-name','.replayer-seat-stack','.replayer-seat-pos','.replayer-seat-tag','.replayer-seat-bet','.replayer-pot','.replayer-now-title','.replayer-seat .card-rank'],20);
+        assert.deepEqual(replayContrast,[],JSON.stringify(replayContrast));
+      }
+      await browser(['screenshot',path.join(outDir,`replayer-9-${w}x${h}.png`)]);
+      await browser(['press','Escape']);
+    }
+    view={...userView(sixState),seats:longNames(userView(sixState).seats)};await publish();
+    for(const [w,h] of [[390,844],[1366,640]]) {
+      await browser(['set','viewport',String(w),String(h)]);
+      await evaluate("[...document.querySelectorAll('#log-list .replay-open')].at(-1).click()");
+      await browser(['wait','#replay-body .replayer']);
+      const six=await evaluate(layoutAtEveryStep);
+      assert.ok(six.seats===6&&six.worst===0&&six.fits,`${w}x${h} ${JSON.stringify(six)}`);
+      await browser(['screenshot',path.join(outDir,`replayer-6-${w}x${h}.png`)]);
+      await browser(['press','Escape']);
+    }
+    checks.push('replay-crowded-layout');
+    // Help drawer from the learning notice's ⓘ, and the display settings from it.
+    await evaluate("document.querySelector('#learning-scope + .help-info').click()");
+    await browser(['wait','#help-panel[open]']);
+    assert.equal(await evaluate("document.activeElement?.id"),'help-learning-title');
+    // The rules' ranking cards keep their own size inside the table document too.
+    const rankingCards=await evaluate("[...document.querySelectorAll('#help-panel .help-ranking-cards .card')].map(n=>{const r=n.getBoundingClientRect();return [Math.round(r.width),Math.round(r.height)]})");
+    assert.ok(rankingCards.length===50&&rankingCards.every(([w,h])=>w>=20&&h>=28),JSON.stringify(rankingCards.slice(0,5)));
+    const rankSizes=await evaluate("[...document.querySelectorAll('#help-panel .help-ranking-cards .card-rank')].map(n=>parseFloat(getComputedStyle(n).fontSize))");
+    assert.ok(rankSizes.length===50&&rankSizes.every(size=>size>=12),JSON.stringify(rankSizes.slice(0,5)));
+    await evaluate("document.querySelector('.help-display-open').click()");
+    await browser(['wait','#display-settings[open]']);
+    await evaluate("document.querySelector('#display-settings input[name=display-theme][value=c]').click()");
+    assert.equal(await evaluate("document.documentElement.dataset.theme"),'c');
+    await evaluate("document.querySelector('#display-settings input[name=display-theme][value=b]').click()");
+    assert.equal(await evaluate("!document.documentElement.hasAttribute('data-theme')"),true);
+    // Closed with their buttons: Esc on a native dialog under viewport emulation
+    // can hang headless Chrome (a harness issue; the dialog's own Esc still works).
+    await evaluate("document.querySelector('#display-settings .display-close').click()");
+    await evaluate("document.querySelector('#help-panel .help-close').click()");
+    assert.equal(await evaluate("!document.querySelector('dialog[open]')"),true);
+    checks.push('help-display');
+    await browser(['set','viewport',String(beforeViewport[0]),String(beforeViewport[1])]);
     view={...view,seats:view.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};await publish();
     for(const unit of ['chips','bb']) {
       await browser(['select','#display-unit',unit]);
@@ -223,12 +577,32 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.match(await evaluate("document.querySelector('.seat.is-hero .plate-tag').textContent"),/올인/);
     while(!legalFor(settlement).handOver){const legal=legalFor(settlement);const step=applyAction(settlement,legal.toAct,legal.canCheck?'check':'call');settlement=step.state;view=userView(settlement);await publish(step.events);}
     const eliminated=view.seats.filter(s=>s.out).length;assert.equal(eliminated,2);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.equal(await evaluate("document.querySelector('#final-last-hand').hidden"),false);
+    checks.push('final-overlay-immediate');
+    // The final result on a phone and a laptop: no sideways scroll, the card inside the viewport width.
+    const finalRuns=[];
+    for(const [width,height] of STATE_SIZES){
+      await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+      const fit=await evaluate("(()=>{const card=document.querySelector('#review-overlay .review-card').getBoundingClientRect();return {open:!document.querySelector('#review-overlay').hidden,scroll:document.documentElement.scrollWidth,left:card.left,right:card.right,innerWidth}})()");
+      await browser(['screenshot',path.join(outDir,`final-${width}x${height}.png`)]);
+      assert.ok(fit.open&&fit.scroll<=width&&fit.left>=0&&fit.right<=width+1,JSON.stringify({width,height,fit}));
+      finalRuns.push(`final-${width}x${height}`);
+    }
+    assert.deepEqual(finalRuns,STATE_SIZES.map(([w,h])=>`final-${w}x${h}`));
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    checks.push('final-geometry');
+    await click('#review-close');
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out').length"),eliminated);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out .card--back,.seat.is-out .dealer-btn,.seat.is-out.is-to-act').length"),0);
     assert.match(await evaluate("document.querySelector('#seat-announcement').textContent"),/탈락/);
     await browser(['reload']);await browser(['wait','.seat.is-out']);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰 생성 중/);
+    checks.push('final-overlay-finalizing-reload');
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out').length"),eliminated);
     assert.equal(await evaluate("document.querySelector('#seat-announcement').textContent"),'');checks.push('real-settlement');
+    await click('#review-close');
     assert.equal(await evaluate("document.querySelector('#session-net').closest('.meta-seg').hidden"),true);
     const settledView=view;view={...view,pots:[]};await publish();assert.match(await evaluate("document.querySelector('#pots').textContent"),/팟 정보 없음/);
     view={...settledView,legal:{potTotal:1}};await publish();assert.match(await evaluate("document.querySelector('#pots').textContent"),/팟 정보 확인 중/);
@@ -240,10 +614,27 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#pots details').open && document.activeElement.matches('#pots summary')"),true);
     view={...view,handNo:view.handNo+1};await publish();
     assert.equal(await evaluate("document.querySelector('#pots details').open"),false);
+    // Close the real relay connection, publish the review before reconnect, and
+    // require the persisted snapshot to restore the missed review frame.
+    const reconnectPort=relay.port;
+    await relay.close();
+    relay=await startServer({gameDir:workspace.root,port:reconnectPort,token});
     await publish([],{review:'UI review fixture'});
+    await browser(['wait','--fn',"document.querySelector('#review-reopen').textContent.includes(' ·')"]);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),true,'late review must not reopen dismissed final result');
+    await click('#review-reopen');
     assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/UI review fixture/);
+    checks.push('final-overlay-review-after-disconnect');
     await publish([],{review:null});
-    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden && !document.querySelector('main').inert"),true);
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰 생성 중/);
+    await browser(['open',`${origin}/?token=${token}&terminal=1`]);await ready();
+    assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰가 없습니다/);
+    checks.push('final-overlay-terminal');
+    await browser(['open',`${origin}/?token=${token}`]);await ready();
+    await click('#review-close');
     // This synthetic scenario shares a relay; never reuse a retired decision ID.
     let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:102});cash.handNo=100;
     const cashDeal=startHand(cash,{deck:fixedDeck()});cash=cashDeal.state;view=userView(cash);await publish(cashDeal.events);
@@ -251,6 +642,148 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#cash-reset-note').hidden"),false);
     assert.match(await evaluate("document.querySelector('#participants-summary').textContent"),/^참가자 3명$/);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out,.seat .dealer-btn,.seat .is-allin,.seat .card--back').length"),0);checks.push('cash-reset');
+    assert.equal(await evaluate("document.querySelector('#hand-result').hidden"),false);
+    assert.match(await evaluate("document.querySelector('#hand-result').textContent"),/상대 전원 폴드/);
+    // On desktop the strip sits above the board and leaves the cards and settled pot visible.
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const strip=await evaluate("(()=>{const r=document.querySelector('#hand-result').getBoundingClientRect();return {hidden:document.querySelector('#hand-result').hidden,text:document.querySelector('#hand-result').textContent,hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+    assert.equal(strip.hidden,false);assert.deepEqual(strip.hits,[],JSON.stringify(strip));
+    const winnerLines=await evaluate("[...document.querySelectorAll('#hand-result .hand-result-winner')].map(n=>n.textContent)");
+    assert.ok(winnerLines.length>0&&winnerLines.every(line=>/팟 .+ 획득/.test(line)&&!/\+\d/.test(line)),`a winner line is the pot collected, never a signed profit: ${JSON.stringify(winnerLines)}`);
+    await browser(['screenshot',path.join(outDir,'hand-result-1280.png')]);
+    // Every size: the strip never covers the board, the settled pot or a plate, and
+    // is on screen (fitted desktop action area) or in the flow under the table.
+    for(const [width,height] of [[390,667],[768,900],[1024,800],[1440,900]]) {
+      await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+      const placed=await evaluate("(()=>{const node=document.querySelector('#hand-result'),r=node.getBoundingClientRect(),t=document.querySelector('.table').getBoundingClientRect();return {hidden:node.hidden,inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=t.bottom-1),hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
+      await browser(['screenshot',path.join(outDir,`hand-result-${width}x${height}.png`)]);
+      assert.deepEqual({hidden:placed.hidden,inside:placed.inside,hits:placed.hits},{hidden:false,inside:true,hits:[]},JSON.stringify({width,height,placed}));
+    }
+    await measureEmbedded('result',true);
+    assert.deepEqual(embedded,embeddedStates(),'the embedded state matrix ran exactly the expected states');
+    checks.push('embedded-state-matrix');
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    checks.push('hand-result-banner');
+    assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
+    checks.push('last-action-badge');
+    // A short desktop (the lobby or join page iframe at 1280×600): the status line
+    // takes its own row, so a name and stack never wrap letter by letter beside it.
+    await browser(['set','viewport','1280','544']);await browser(['snapshot','-i']);
+    const statusRows=await evaluate("[...document.querySelectorAll('.plate')].filter(p=>p.querySelector('.plate-action')).map(p=>{const info=p.querySelector('.plate-info').getBoundingClientRect(),status=p.querySelector('.plate-status').getBoundingClientRect(),stack=p.querySelector('.plate-stack .amount-primary');return {below:status.top>=info.bottom-1,infoWidth:Math.round(info.width),stackLines:Math.round(stack.getBoundingClientRect().height/parseFloat(getComputedStyle(stack).fontSize))}})");
+    assert.ok(statusRows.length>0&&statusRows.every(row=>row.below&&row.infoWidth>=40&&row.stackLines<=2),JSON.stringify(statusRows));
+    await browser(['screenshot',path.join(outDir,'plate-status-1280x544.png')]);
+    checks.push('plate-status-row');
+    // Contrast after the hand: folded plates (opacity), last actions, the result strip.
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.pot-label','.pot-amount','.log-name','.log-act'],8);
+    assert.deepEqual(resultContrast,[],JSON.stringify(resultContrast));
+    checks.push('computed-contrast');
+    await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
+    await evaluate("window.__resultNode=document.querySelector('#hand-result').firstChild");
+    await publish([],{view:undefined});
+    assert.equal(await evaluate("window.__resultNode===document.querySelector('#hand-result').firstChild"),true);
+    checks.push('hand-result-survives-side-frames');
+    // A held hand without a runout plays pot → winner once; the same paint's
+    // motion.play() (which ends running motion) must not cancel it, and neither
+    // may the action controller's reconcile read of that same revision — heads-up
+    // with the user first to act, so the user's own fold ends the hand and the
+    // decision leaving the view triggers that read at once.
+    await evaluate("window.__motion=[];window.__cancelled=[];window.__animate=Element.prototype.animate;Element.prototype.animate=function(...args){const a=window.__animate.apply(this,args),target=this,cancel=a.cancel.bind(a);window.__motion.push(String(target.getAttribute('class')));a.cancel=()=>{window.__cancelled.push(String(target.getAttribute('class')));cancel();};return a;}");
+    let award=createGame({mode:'cash-training',aiCount:1,startStack:5000,levelEvery:null,handLimit:152});award.handNo=150;award.button=1;
+    const awardDeal=startHand(award,{deck:fixedDeck()});award=awardDeal.state;view=userView(award);await publish(awardDeal.events);
+    assert.equal(legalFor(award).toAct,'user');
+    await browser(['wait','--fn',"document.querySelector('#btn-fold')?.disabled===false"]);
+    const awardStep=applyAction(award,'user','fold');award=awardStep.state;view=userView(award);assert.equal(legalFor(award).handOver,true);
+    const awardEvents=awardStep.events;
+    const awardAt=Date.now();
+    await publish(awardEvents,{resultHold:{handNo:view.handNo,startAt:new Date(awardAt).toISOString(),until:new Date(awardAt+4000).toISOString(),runoutStepMs:0,runoutStreets:0}});
+    await browser(['wait','--fn',"window.__motion.some(name=>/\\bplate\\b/.test(name))"]);
+    await browser(['wait','500']);
+    assert.equal(await evaluate("window.__cancelled.some(name=>/\\bplate\\b/.test(name))"),false,'the award pulse is cancelled neither by its own paint nor by the reconcile read of the same revision');
+    await evaluate("Element.prototype.animate=window.__animate");
+    checks.push('award-motion');
+    let runout=createGame({mode:'cash-training',aiCount:2,startStack:100,levelEvery:null,handLimit:202});runout.handNo=200;
+    const runoutDeal=startHand(runout,{deck:fixedDeck()});runout=runoutDeal.state;view=userView(runout);await publish(runoutDeal.events);
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>{const r=document.querySelector('#hand-result');window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!r.hidden});},50)");
+    let finalEvents;
+    while(!legalFor(runout).handOver){
+      const legal=legalFor(runout);const action=legal.canRaise?'raise':legal.canCheck?'check':'call';
+      const step=applyAction(runout,legal.toAct,action,action==='raise'?legal.maxRaiseTo:undefined);runout=step.state;view=userView(runout);
+      if(legalFor(runout).handOver)finalEvents=step.events;else await publish(step.events);
+    }
+    const count=finalEvents.filter(row=>row.type==='street').length;assert.equal(count,3,'preflop all-in must exercise all three streets');
+    const start=Date.now()+1000;
+    const hold={handNo:view.handNo,startAt:new Date(start).toISOString(),until:new Date(start+25000).toISOString(),runoutStepMs:5000,runoutStreets:count};
+    await publish(finalEvents,{resultHold:hold});
+    await evaluate("window.__stages=[]");
+    await new Promise(resolve=>setTimeout(resolve,6500));
+    const beforeReload=await evaluate("clearInterval(window.__stageTimer);({stages:window.__stages,cards:document.querySelectorAll('#board .card[role=img]').length})");
+    assert.equal(beforeReload.cards,3,'flop stage before reconnect');
+    await browser(['reload']);await browser(['wait','#board .card[role=img]']);
+    const afterReload=await evaluate("({cards:document.querySelectorAll('#board .card[role=img]').length,hidden:document.querySelector('#hand-result').hidden})");
+    assert.ok(afterReload.cards>=3 && afterReload.cards<5 && afterReload.hidden,'reconnect preserves current runout position');
+    checks.push('hand-result-reconnect');
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!document.querySelector('#hand-result').hidden}),50)");
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,start+count*5000+750-Date.now())));
+    const stages=[...beforeReload.stages,...await evaluate("clearInterval(window.__stageTimer);window.__stages")];
+    assert.ok(stages.some(row=>row.cards===3&&!row.visible),JSON.stringify(stages));
+    assert.ok(stages.some(row=>row.cards===4&&!row.visible),JSON.stringify(stages));
+    assert.ok(stages.some(row=>row.cards===5&&row.visible),JSON.stringify(stages));
+    assert.match(await evaluate("document.querySelector('.hand-result-countdown').textContent"),/다음 핸드 [0-9]+초/);
+    checks.push('runout-staged');
+    // A5 state matrix: a crowded (nine-seat) table through the states of a hand,
+    // on a phone and a laptop.
+    const stateRuns=[];
+    const measureState=async(name)=>{
+      for(const [width,height] of STATE_SIZES){
+        await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+        const m=await evaluate(STATE_SCRIPT);
+        await browser(['screenshot',path.join(outDir,`state-${name}-${width}x${height}.png`)]);
+        assert.ok(m.scroll<=width&&m.plateOverlaps.length===0&&m.tableHits.length===0&&m.markerHits.length===0&&m.small.length===0
+          &&(!m.result||(m.result.inside&&m.result.hits.length===0)),JSON.stringify({name,width,height,m}));
+        stateRuns.push(`${name}-${width}x${height}`);
+      }
+    };
+    // Tournament mode (so an out seat shows), blinds held at level 1 despite the hand number.
+    let crowded=createGame({aiCount:8,levelEvery:1000});crowded.handNo=400;crowded.button=5;
+    const crowdedDeal=startHand(crowded,{deck:fixedDeck()});crowded=crowdedDeal.state;view=userView(crowded);
+    assert.equal(legalFor(crowded).toAct,'user','the matrix starts on the viewer\'s turn');
+    // The runout's 25-second result hold above must end before a new hand can act.
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(hold.until)-Date.now()+500)));
+    await publish(crowdedDeal.events);await browser(['reload']);await ready();
+    // The first-turn guide on a desktop: an Esc that closes the seat detail is not a
+    // skip, and a timed turn moves keyboard focus from the guide to a visible action.
+    await browser(['set','viewport','1280','800']);
+    await evaluate("localStorage.removeItem('holdem.onboarding.v1');true");await browser(['reload']);await ready();
+    await browser(['wait','aside.side .onboarding-card']);
+    await click('[data-player-id=p1] .plate');
+    assert.equal(await evaluate("document.querySelector('#seat-overlay').hidden"),false);
+    await browser(['press','Escape']);
+    assert.deepEqual(await evaluate("({detail:document.querySelector('#seat-overlay').hidden,guide:!!document.querySelector('.onboarding-card'),stored:localStorage.getItem('holdem.onboarding.v1')})"),{detail:true,guide:true,stored:null},'closing the detail leaves the guide');
+    await evaluate("document.querySelector('.onboarding-next').focus();true");
+    await publish([],{turnDeadline:{decisionId:view.legal.decisionId,at:new Date(Date.now()+120000).toISOString()}});
+    await browser(['wait','--fn',"!document.querySelector('.onboarding-card')"]);
+    const timedFocus=await evaluate("(()=>{const a=document.activeElement;return {inBar:!!a?.closest('#action-bar'),visible:!!a&&a.getClientRects().length>0,enabled:!!a&&!a.disabled}})()");
+    assert.deepEqual(timedFocus,{inBar:true,visible:true,enabled:true},'focus moved to a visible action');
+    checks.push('onboarding-timed-turn');
+    await measureState('turn');
+    let step=applyAction(crowded,'user','call');crowded=step.state;view=userView(crowded);await publish(step.events);
+    const aiActor=legalFor(crowded).toAct;
+    assert.ok(aiActor&&aiActor!=='user'&&view.seats.find(seat=>seat.playerId===aiActor)?.kind==='ai','an AI seat acts next');
+    await browser(['wait','--fn',`(()=>{const tag=document.querySelector('.seat[data-player-id="${aiActor}"] .plate-thinking');return !!tag&&tag.getClientRects().length>0&&document.querySelector('#action-bar').hidden})()`]);
+    await measureState('ai-thinking');
+    const thinkingView=view;
+    view={...thinkingView,seats:thinkingView.seats.map((seat,index)=>index===2?{...seat,folded:true}:index===3?{...seat,allIn:true,bet:seat.bet+seat.stack,stack:0}:index===4?{...seat,out:true,stack:0}:seat)};
+    await publish();
+    await browser(['wait','--fn',"!!document.querySelector('.seat.is-out')&&!!document.querySelector('.plate-tag.is-allin')&&!!document.querySelector('.seat.is-folded')"]);
+    await measureState('fold-allin-out');
+    view=thinkingView;await publish();
+    while(!legalFor(crowded).handOver){const legal=legalFor(crowded);step=applyAction(crowded,legal.toAct,legal.canCheck?'check':'call');crowded=step.state;view=userView(crowded);await publish(step.events);}
+    await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false&&document.querySelectorAll('.seat:not(.is-hero) .seat-cards .card[role=img]').length>=4"]);
+    await measureState('showdown-result');
+    assert.deepEqual(stateRuns,stateMatrix(),'the state matrix ran exactly the expected states');
+    checks.push('state-matrix');
+
   } catch(error) {failure=error;try{await browser(['screenshot',path.join(outDir,'failure.png')]);}catch{}}
   finally {
     const cleanupErrors=[];
@@ -260,12 +793,14 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     if(cleanupErrors.length) failure=new AggregateError([...(failure?[failure]:[]),...cleanupErrors],'UI journey or cleanup failed');
     else checks.push('owned-cleanup');
     const pending=requiredJourneyChecks.filter(n=>!checks.includes(n));
+    try { finishJourney({ required: requiredJourneyChecks, recorded: checks, failure }); }
+    catch (error) { failure = error; }
     fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify({pass:!failure&&!pending.length,checks,pending,measurements,error:failure?.message,errors:failure instanceof AggregateError?failure.errors.map(e=>e.message):[],browser:'agent-browser@0.36.0',scope:'Real relay/public engine views; synthetic out, bet amounts and events; lifecycle covered separately by lobby journey'},null,2));
-    if(pending.length&&!failure)failure=Error(`Missing required checks: ${pending.join(', ')}`);
+
   }
-  if(failure)throw failure;
+  finishJourney({ required: requiredJourneyChecks, recorded: checks, failure });
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   if(!browserCliEnabled())console.log('BROWSER_CLI_DISABLED_UNDER_NODE_TEST_CONTEXT');
-  else {const index=process.argv.indexOf('--out-dir');await runUiJourney(path.resolve(index<0?'output/playwright/ui-journey':process.argv[index+1]),{ci:process.argv.includes('--ci')});console.log('UI presentation journey PASS');}
+  else if (!selfTestJourney(requiredJourneyChecks)) {const index=process.argv.indexOf('--out-dir');await runUiJourney(path.resolve(index<0?'output/playwright/ui-journey':process.argv[index+1]),{ci:process.argv.includes('--ci')});console.log('UI presentation journey PASS');}
 }

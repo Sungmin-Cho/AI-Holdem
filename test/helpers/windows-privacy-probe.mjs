@@ -40,8 +40,8 @@ async function main({ coldStart = false } = {}) {
         .replace("'@;", `'@;\n${mark('compile-end')}`)
         .replace('$me=[System.Security.Principal.WindowsIdentity]', `${mark('acl-build-start')}$me=[System.Security.Principal.WindowsIdentity]`)
         .replace('try { [Runtime.InteropServices.Marshal]::Copy', `${mark('native-create-start')}try { [Runtime.InteropServices.Marshal]::Copy`)
-        .replace('$a=Get-Acl', `${mark('acl-read-start')}$a=Get-Acl`)
-        .replace('$rules=@();', `${mark('acl-read-end')}$rules=@();`);
+        .replace('$attr=[System.IO.File]::GetAttributes($p);', `${mark('acl-read-start')}$attr=[System.IO.File]::GetAttributes($p);`)
+        .replace('$rules=[System.Collections.Generic.List[string]]::new();', `${mark('acl-read-end')}$rules=[System.Collections.Generic.List[string]]::new();`);
       args[1] = [...args[1].slice(0, -1), measured + '\n' + mark('script-end')];
       args[2] = { ...args[2], timeout: privacyProbeTimeout(args[2]?.timeout, { coldStart, deadline }) };
     }

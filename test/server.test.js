@@ -50,6 +50,8 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     const js = await req(srv.port, '/training-format.js', { token: 'tok-mod' });
     assert.equal(js.status, 200);
     assert.match(js.text, /formatTrainingCard/);
+    const resultJs=await req(srv.port,'/hand-result.js',{token:'tok-mod'});
+    assert.equal(resultJs.status,200);assert.match(resultJs.text,/export function buildHandResult/);
     const replayJs = await req(srv.port, '/replay-format.js', { token: 'tok-mod' });
     assert.equal(replayJs.status, 200);
     assert.match(replayJs.text, /formatReplay/);
@@ -1121,3 +1123,49 @@ test('P3 F4: alreadyApplied missing handReplay is a marker, not stored', async (
     await closeOf(srv);
   }
 });
+
+test('result hold persists through side frames, snapshot restore and expires on a new hand', async () => {
+  const gameDir = tmpDir(), token = 'hold-contract';
+  let srv = await start(gameDir, token);
+  const hold = {handNo:1,startAt:'2026-01-01T00:00:00.000Z',until:'2026-01-01T00:00:03.500Z',runoutStepMs:800,runoutStreets:0};
+  const view = {handNo:1,handInProgress:false};
+  try {
+    assert.equal((await publish(srv.port,token,{publishId:1,view,resultHold:hold})).status,200);
+    const snapshot = () => req(srv.port,'/api/snapshot',{token});
+    assert.deepEqual((await snapshot()).json.resultHold,hold);
+    assert.equal((await publish(srv.port,token,{publishId:2,messages:[]})).status,200);
+    assert.deepEqual((await snapshot()).json.resultHold,hold);
+    assert.equal((await publish(srv.port,token,{publishId:3,view,viewOnly:true})).status,200);
+    assert.deepEqual((await snapshot()).json.resultHold,hold);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(gameDir,'ui-snapshot.json'))).resultHold,hold);
+    await closeOf(srv); srv = await start(gameDir, token);
+    assert.deepEqual((await snapshot()).json.resultHold,hold);
+    assert.equal((await publish(srv.port,token,{publishId:4,view:{handNo:2,handInProgress:true}})).status,200);
+    assert.equal((await snapshot()).json.resultHold,null);
+    assert.equal((await publish(srv.port,token,{publishId:5,resultHold:hold})).json.code,'BAD_RESULT_HOLD');
+  } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
+});
+
+ test('relay bounds persisted log by whole hands and preserves the remaining hand after restart', async () => {
+  const gameDir=tmpDir(), token='tok-bounded-log';
+  let srv=await start(gameDir,token);
+  try {
+    let publishId=0;
+    for(let hand=1;hand<=3;hand++){
+      for(let part=0;part<10;part++){
+        const response=await publish(srv.port,token,{publishId:++publishId,view:{handNo:hand},
+          ...(part===0?{events:[{...ev(hand,'hand_start'),handNo:hand}]}:{}),
+          messages:[{type:'narration',text:String(hand).repeat(55000)}]});
+        assert.equal(response.status,200);
+      }
+    }
+    const before=(await snapshot(srv.port,token)).json;
+    assert.equal(before.log.length,11);
+    assert.equal(before.log[0].handNo,3);
+    assert.equal(before.log[1].text.length,55000);
+    await closeOf(srv);srv=await start(gameDir,token);
+    const after=(await snapshot(srv.port,token)).json;
+    assert.deepEqual(after.log,before.log);
+    assert.equal(after.revision,before.revision);
+  } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
+ });

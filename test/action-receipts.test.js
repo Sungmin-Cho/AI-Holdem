@@ -216,7 +216,7 @@ test('rejected tombstone survives restart, rejects exact retry, and admits only 
   assert.equal((await f.publish(2, { actionAck })).status, 200);
   await f.restart();
   assert.equal((await f.wait()).body.timeout, true);
-  assert.deepEqual((await f.status()).body, { ok: true, decisionId: D1, requestId: 'request-1', phase: 'rejected' });
+  assert.deepEqual((await f.status()).body, { ok: true, decisionId: D1, requestId: 'request-1', phase: 'rejected', reason:'ILLEGAL_ACTION' });
   assert.equal((await f.action()).body.code, 'ACTION_REJECTED');
   assert.equal((await f.action(request('request-1', { action: 'fold' }))).status, 409);
   assert.equal((await f.action(request('request-2', { action: 'fold' }))).status, 200);
