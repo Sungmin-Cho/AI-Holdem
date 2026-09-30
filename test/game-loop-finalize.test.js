@@ -22,6 +22,7 @@ import {
   platformBudgetScale,
   buildBadChildOutputDetails,
   unresolvedEvidenceGuidance,
+  persistedRecoveryClass,
   consultCoachCloseEvidence,
   readSidecarFileWithoutNoFollow,
   parseLsofCwdRecords,
@@ -673,6 +674,272 @@ test('#247 an owned start time that moved is never signalled; it is a replacemen
   }
   assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
   assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'the process holding the pid was left alone');
+});
+
+// #255: a linux-v1 handle, read through injected readers so every CI platform runs it. The
+// lstart part is what the #247 rule compared.
+const LINUX_LSTART = 'Mon Sep 28 12:00:00 2026';
+const LINUX_COACH = `linux-v1:${LINUX_LSTART};boot=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0;pidns=4026531836;timens=none;start=1234567`;
+function linuxCoachReaders(pid, coachNow) {
+  return {
+    coachProcessStartTime: (p) => (p === pid ? coachNow() : null),
+    ownedProcessStartTime: (p) => (p === pid ? `utc-v1:${LINUX_LSTART}` : ownedProcessStartTime(p)),
+  };
+}
+
+for (const closed of [false, true]) {
+  test(`#255 a linux-v1 coach with the recorded lstart but another tick is never signalled nor released${closed ? ', even with close evidence' : ''}`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan({ ignoreTerm: false });
+    t.after(() => terminateIfAlive(orphan));
+    await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => LINUX_COACH });
+    const signalled = [];
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper: makeCoachAdapter(),
+      stateOverrides: {
+        port: external.lock.port,
+        ...(closed ? { coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-09-30T00:00:00.000Z' }] } : {}),
+      },
+      loopOpts: {
+        finalizeBudgetMs: 3_000 * WIN32_SCALE,
+        finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+        ...linuxCoachReaders(orphan.pid, () => LINUX_COACH.replace('start=1234567', 'start=1234568')),
+        signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+      },
+    });
+    await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_AMBIGUOUS/.test(error.message));
+    assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), []);
+    assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'the process holding the pid was left alone');
+    assert.notEqual(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+      .find((row) => row.generation === 1)?.cleanupState, 'released');
+    // Protected like a live coach: no release command the writer would refuse, only the pid.
+    const { recovery } = readJson(path.join(gameDir, 'loop-state.json')).halt;
+    assert.equal(recovery.attempts.find((row) => row.generation === 1)?.reason, 'IDENTITY_AMBIGUOUS');
+    assert.deepEqual(recovery.commands, []);
+    assert.equal(persistedRecoveryClass('IDENTITY_AMBIGUOUS'), 'live');
+  });
+}
+
+// The recovery the guidance names: a person ends the ambiguous pid, and the next resume
+// releases the row on its own (it reads dead) and finishes.
+test('#255 an ambiguous coach row is released by the next resume once its pid is ended', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => LINUX_COACH });
+  const readers = linuxCoachReaders(orphan.pid, () => LINUX_COACH.replace('start=1234567', 'start=1234568'));
+  const first = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: { finalizeBudgetMs: 3_000 * WIN32_SCALE, finalizeCutoffLeadMs: 2_000 * WIN32_SCALE, ...readers },
+  });
+  await assert.rejects(first.loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_AMBIGUOUS/.test(error.message));
+  await first.loop.requestStop();
+  orphan.kill('SIGKILL');
+  await waitUntilDead(orphan.pid);
+  const second = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: readers,
+  });
+  await second.loop.resume();
+  const row = readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts.find((entry) => entry.generation === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.deepEqual(row.release.declared, { evidence: 'IDENTITY_DEAD' });
+  assert.equal(row.release.verification.status, 'verified', 'the writer saw the pid dead itself');
+  assert.equal((await second.loop.run()).phase, 'done');
+});
+
+test('#255 a linux-v1 coach read back identically is signalled and released', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => LINUX_COACH });
+  const signals = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      ...linuxCoachReaders(orphan.pid, () => LINUX_COACH),
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) signals.push(signal);
+        process.kill(pid, signal);
+      },
+    },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  assert.deepEqual(signals, ['SIGTERM']);
+  await waitUntilDead(orphan.pid);
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+    .find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
+// #255 S3: the observation that authorises a pid signal is taken in the same synchronous run
+// as the signal. Each case makes the last observation before an `await` resume read alive and
+// queue a microtask that changes the identity before the caller continues.
+// - SIGKILL: with no grace the post-SIGTERM wait observes twice synchronously and returns.
+// - SIGTERM: the first observation is unknown; the identity wait's first poll reads alive.
+// The pid signal is a recording stub, so Windows (where SIGTERM terminates) runs it too.
+for (const boundary of ['SIGKILL', 'SIGTERM']) {
+  test(`#255 a ${boundary} follows its own observation, not one taken before an await`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan();
+    t.after(() => terminateIfAlive(orphan));
+    const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+    let reads = 0;
+    let armed = false;
+    let flipQueued = false;
+    let flipped = false;
+    const signals = [];
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper: makeCoachAdapter(),
+      stateOverrides: { port: external.lock.port },
+      loopOpts: {
+        finalizeBudgetMs: 3_000 * WIN32_SCALE,
+        finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+        orphanTerminateGraceMs: 0,
+        ownedProcessStartTime: (pid) => {
+          if (pid !== orphan.pid) return ownedProcessStartTime(pid);
+          reads += 1;
+          if (boundary === 'SIGTERM' && reads === 1) return null;
+          if ((boundary === 'SIGTERM' || armed) && !flipQueued) {
+            flipQueued = true;
+            queueMicrotask(() => { flipped = true; });
+          }
+          return flipped ? laterOwnedStartTime(seeded.startTime) : seeded.startTime;
+        },
+        signalProcess: (pid, signal) => {
+          if (pid !== orphan.pid) { process.kill(pid, signal); return; }
+          signals.push(signal);
+          if (signal === 'SIGTERM') armed = true;
+        },
+      },
+    });
+    await loop.resume().catch(() => {});
+    assert.equal(flipped, true, 'the identity changed while the caller was suspended');
+    assert.deepEqual(signals, boundary === 'SIGKILL' ? ['SIGTERM'] : [], `${boundary} needs a fresh observation of the same process`);
+    assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+  });
+}
+
+// #255 S2 through its seam (`recordedTerminator`): a `win32-v1` record, observed through an
+// injected owned reader so every platform runs the loop's handling of each outcome.
+const WIN32_COACH = 'win32-v1:2026-09-28T03:00:00.1234567Z';
+for (const [outcome, expected] of [['replaced', 'released'], ['failed', 'SIGNAL_FAILED']]) {
+  test(`#255 the handle terminator's ${outcome} outcome ${expected === 'released' ? 'releases without a pid signal' : 'stops without a pid signal'}`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan();
+    t.after(() => terminateIfAlive(orphan));
+    await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => WIN32_COACH });
+    const terminations = [];
+    const signalled = [];
+    const upper = makeCoachAdapter();
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper,
+      stateOverrides: { port: external.lock.port },
+      loopOpts: {
+        finalizeBudgetMs: 3_000 * WIN32_SCALE,
+        finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+        ownedProcessStartTime: (pid) => (pid === orphan.pid ? WIN32_COACH : ownedProcessStartTime(pid)),
+        recordedTerminator: (pid, startTime, { timeoutMs }) => {
+          terminations.push({ pid, startTime, timeoutMs });
+          // The pid now names another process. On Windows the writer's own reading shows its
+          // different creation time while it keeps running; elsewhere the fabricated win32-v1
+          // record has no comparable reading, so the stand-in ends and the writer reads it dead.
+          if (outcome === 'replaced' && process.platform !== 'win32') process.kill(pid, 'SIGKILL');
+          return outcome;
+        },
+        signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+      },
+    });
+    if (expected === 'released') {
+      await loop.resume();
+      await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+      assert.equal((await loop.run()).phase, 'done');
+      assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+        .find((row) => row.generation === 1)?.cleanupState, 'released');
+    } else {
+      await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /SIGNAL_FAILED/.test(error.message));
+      assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+    }
+    assert.equal(terminations.length, 1);
+    assert.equal(terminations[0].startTime, WIN32_COACH);
+    assert.ok(terminations[0].timeoutMs >= 1_000);
+    assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), [], 'no pid signal beside the handle');
+  });
+}
+
+test('#255 with under a second left the handle terminator is not started', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => WIN32_COACH });
+  let observed = false;
+  let skewNs = 0n;
+  const terminations = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      // After the coach is observed alive, the clock sits just short of every deadline.
+      monotonicNs: () => process.hrtime.bigint() + skewNs,
+      ownedProcessStartTime: (pid) => {
+        if (pid === orphan.pid && !observed) { observed = true; skewNs = 60n * 60n * 1_000_000_000n; }
+        return pid === orphan.pid ? WIN32_COACH : ownedProcessStartTime(pid);
+      },
+      recordedTerminator: (...args) => { terminations.push(args); return 'terminated'; },
+      signalProcess: (pid, signal) => { if (pid !== orphan.pid) process.kill(pid, signal); },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.deepEqual(terminations, []);
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+});
+
+test('#255 Windows: an owned coach is terminated through its process handle', {
+  skip: process.platform !== 'win32' && 'Windows process handles', timeout: 60_000 * WIN32_SCALE,
+}, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  await waitUntilDead(orphan.pid);
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+    .find((row) => row.generation === 1)?.cleanupState, 'released');
 });
 
 test('Task 7A full review: stale coach authority epoch의 live pid에는 signal 없이 durable recovery로 중단한다', { timeout: 20_000 }, async (t) => {

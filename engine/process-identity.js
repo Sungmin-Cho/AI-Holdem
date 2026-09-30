@@ -92,6 +92,91 @@ export function win32ProcessStartTime(pid, { spawn = spawnSync } = {}) {
   }
 }
 
+// #255: the creation FILETIME (100 ns since 1601-01-01 UTC) a `win32-v1:` value was printed
+// from — `win32ProcessStartTime` writes `.StartTime.ToUniversalTime().ToString('o')`, which
+// keeps all seven fraction digits. Only the exact owned wire is accepted; anything else is
+// null, so no terminate helper is ever started for it.
+const WIN32_OWNED = /^win32-v1:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{7})Z$/;
+const FILETIME_UNIX_EPOCH_S = 11_644_473_600n;
+export function win32OwnedFileTime(value) {
+  const match = typeof value === 'string' ? WIN32_OWNED.exec(value) : null;
+  if (!match || !validWin32StartTime(value.slice('win32-v1:'.length))) return null;
+  const ms = Date.parse(`${match[1]}Z`);
+  if (!Number.isSafeInteger(ms) || ms % 1000 !== 0) return null;
+  const fileTime = (BigInt(ms / 1000) + FILETIME_UNIX_EPOCH_S) * 10_000_000n + BigInt(match[2]);
+  return fileTime > 0n ? fileTime : null;
+}
+
+const TERMINATE_OUTCOMES = new Set(['terminated', 'replaced', 'absent', 'failed']);
+export function parseWin32TerminateOutput(result) {
+  if (!result || result.status !== 0 || stripBom(result.stderr).trim() !== '') return 'failed';
+  const token = stripBom(result.stdout).replace(/\r?\n$/, '');
+  return TERMINATE_OUTCOMES.has(token) ? token : 'failed';
+}
+
+// #255 S2: check the recorded identity and terminate through ONE process handle. The handle
+// keeps the process object — and so its pid — from being reused between the creation-time
+// comparison and TerminateProcess, which a separate observation followed by
+// `process.kill(pid)` cannot promise. Node's own kill is TerminateProcess (exit code 1) on
+// Windows too, so only the identity check moves; the effect on the target is the same.
+// Outcomes: 'terminated'; 'replaced' (the pid now names a process created at another time);
+// 'absent' (no such pid, or it already exited); 'failed' (anything unproven — the caller
+// sends nothing else and reports it).
+export function terminateWin32ProcessStartedAt(pid, ownedStartTime, { spawn = spawnSync, timeoutMs = IDENTITY_TIMEOUT_MS } = {}) {
+  const id = asPid(pid);
+  const expected = win32OwnedFileTime(ownedStartTime);
+  if (id === null || id === process.pid || expected === null) return 'failed';
+  const script = `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class RecordedProcessTerminate {
+ [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle,out long creation,out long exit,out long kernel,out long user);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint ms);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateProcess(IntPtr handle,uint code);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+ public static string Run(uint pid,long expected) {
+  // PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+  IntPtr handle=OpenProcess(0x0001|0x1000|0x00100000,false,pid);
+  if(handle==IntPtr.Zero) return Marshal.GetLastWin32Error()==87?"absent":"failed";
+  try {
+   long creation,exit,kernel,user;
+   if(!GetProcessTimes(handle,out creation,out exit,out kernel,out user)) return "failed";
+   if(creation!=expected) return "replaced";
+   if(WaitForSingleObject(handle,0)==0) return "absent";
+   if(TerminateProcess(handle,1)) return "terminated";
+   return WaitForSingleObject(handle,0)==0?"absent":"failed";
+  } finally { CloseHandle(handle); }
+ }
+}
+'@
+[Console]::Out.Write([RecordedProcessTerminate]::Run(${id}, ${expected}))`;
+  try {
+    const started = performance.now();
+    const result = spawn(powershellExe(), [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-Command', script,
+    ], {
+      encoding: 'utf8',
+      timeout: Math.max(1, Math.min(platformTimeout(IDENTITY_TIMEOUT_MS), timeoutMs)),
+      env: windowsPowerShellEnvironment(),
+      maxBuffer: IDENTITY_MAX_BUFFER,
+      windowsHide: true,
+    });
+    recordProofEvent({
+      kind: 'terminate',
+      paths: 1,
+      ms: Math.round(performance.now() - started),
+      status: result.status ?? null,
+      timedOut: result.error?.code === 'ETIMEDOUT',
+      self: false,
+    });
+    return parseWin32TerminateOutput(result);
+  } catch {
+    return 'failed';
+  }
+}
+
 export function createProcessStartTime({
   platform = process.platform,
   exec = execFileSync,

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { validWin32StartTime } from '../engine/process-identity.js';
-import { validOwnedIdentity } from '../engine/state.js';
+import { validOwnedIdentity, ownedProcessStartTime } from '../engine/state.js';
 
 export const SIDECAR_MAX_BYTES = 64 * 1024;
 // #192 I2: undefined (not 0) on a platform that has no O_NOFOLLOW (e.g. Windows) so callers
@@ -191,13 +191,51 @@ const LSTART_SHAPE = /^\S+\s+\S+\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}$|^\S+\s+\S+
 const OWNED = /^(?:utc|win32)-v1:/;
 const owned = (value) => typeof value === 'string' && OWNED.test(value);
 export function isOwnedStartTime(value) { return owned(value); }
+
+// #255 S1: the Linux coach identity. The `utc-v1` lstart comes first and is kept verbatim;
+// the scope the tick was read in (boot, the reader's own pid and time namespaces) and the
+// start tick (/proc/<pid>/stat field 22) are appended. They only ever add conditions to
+// "same": equal text is the same process, and the lstart alone decides the protected-alive
+// `ambiguous` (observeRecordedIdentity). A Linux mismatch still proves nothing (#247).
+// The value ends in `start=<digits>`, so the pre-#255 comparator's LSTART_SHAPE (which needs
+// the text to end in whitespace + a four-digit year) rejects it: an older build reads it as
+// unknown.
+const LINUX_COACH = /^linux-v1:([^;]+);boot=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12});pidns=(\d{1,20});timens=(\d{1,20}|none);start=(0|[1-9]\d{0,19})$/;
+const linuxKind = (value) => typeof value === 'string' && value.startsWith('linux-v1:');
+function linuxCoachParts(value) {
+  const match = typeof value === 'string' ? LINUX_COACH.exec(value) : null;
+  if (!match || !validOwnedIdentity(`utc-v1:${match[1]}`)) return null;
+  return { lstart: match[1], boot: match[2], pidns: match[3], timens: match[4], start: match[5] };
+}
+// Every start-time form a coach handle may carry. `validOwnedIdentity` itself (shared with
+// lifetime locks) stays `utc-v1`/`win32-v1` only.
+export function validCoachIdentity(value) {
+  return validOwnedIdentity(value) || linuxCoachParts(value) !== null;
+}
+const OWNED_LSTART_OF = (value) => `utc-v1:${linuxCoachParts(value).lstart}`;
+
+// A coach reading as the kind `recorded` was written in. A handle recorded as plain `utc-v1`
+// (the reader fell back at spawn) keeps being judged by that owned value when the extras can
+// be read again later: a `linux-v1` reading contributes only its embedded owned sample.
+// Anything else is returned as is.
+export function coachReadingFor(recorded, current) {
+  if (typeof recorded === 'string' && recorded.startsWith('utc-v1:')) {
+    const parts = linuxCoachParts(current);
+    if (parts) return `utc-v1:${parts.lstart}`;
+  }
+  return current;
+}
+
 export function compareStartTimes(recorded, current, { platform = process.platform } = {}) {
+  if (linuxKind(recorded) || linuxKind(current)) {
+    return linuxCoachParts(recorded) !== null && recorded === current ? 'same' : 'unknown';
+  }
   if (owned(recorded) || owned(current)) {
     if (!validOwnedIdentity(recorded) || !validOwnedIdentity(current)) return 'unknown';
     const kind = recorded.slice(0, recorded.indexOf(':'));
     if (kind !== current.slice(0, current.indexOf(':'))) return 'unknown';
     if (recorded === current) return 'same';
-    return kind === 'win32-v1' || platform === 'darwin' ? 'different' : 'unknown';
+    return kind === 'win32-v1' || (kind === 'utc-v1' && platform === 'darwin') ? 'different' : 'unknown';
   }
   if (platform === 'win32') {
     const a = win32Ticks(recorded);
@@ -221,8 +259,22 @@ export function compareStartTimes(recorded, current, { platform = process.platfo
 // 'unknown'. kill(0) runs first so a dead pid costs no `ps`/PowerShell spawn. An owned
 // record is read back only with `ownedStartTimeOf` (#247); without it the answer is unknown,
 // never a legacy reading compared against an owned one.
-export function observeRecordedIdentity({ pid, startTime }, { processAlive, startTimeOf, ownedStartTimeOf, platform = process.platform }) {
+// #255: a `linux-v1` record is read once with `coachStartTimeOf`, whose value embeds the one
+// owned `ps` sample it took (or is that sample, when the Linux extras were unavailable). It is
+// 'alive' only when the whole text is identical. Otherwise, when that same sample carries the
+// recorded lstart, it is 'ambiguous': the state the #247 rule called alive, so it stays
+// protected (the writer refuses to release it) but carries no signal authority (the loop never
+// signals or releases it). Anything else is unknown — never 'replaced' on Linux.
+export function observeRecordedIdentity({ pid, startTime }, {
+  processAlive, startTimeOf, ownedStartTimeOf, coachStartTimeOf, platform = process.platform,
+}) {
   if (!processAlive(pid)) return 'dead';
+  if (linuxKind(startTime)) {
+    if (!linuxCoachParts(startTime) || typeof coachStartTimeOf !== 'function') return 'unknown';
+    const current = coachStartTimeOf(pid);
+    if (current === startTime) return 'alive';
+    return coachReadingFor(OWNED_LSTART_OF(startTime), current) === OWNED_LSTART_OF(startTime) ? 'ambiguous' : 'unknown';
+  }
   const read = owned(startTime) ? ownedStartTimeOf : startTimeOf;
   if (typeof read !== 'function') return 'unknown';
   const current = read(pid);
@@ -230,6 +282,81 @@ export function observeRecordedIdentity({ pid, startTime }, { processAlive, star
   const compared = compareStartTimes(startTime, current, { platform });
   return compared === 'same' ? 'alive' : compared === 'different' ? 'replaced' : 'unknown';
 }
+
+// #255 S1: pure parsers for the Linux coach identity. Each returns null for anything it does
+// not recognise exactly; the reader turns any null into "no extra evidence".
+// /proc/<pid>/stat: comm (field 2) may contain spaces and parentheses, so fields are counted
+// from the LAST ')' — the next token is field 3 and field 22 (starttime) is 19 tokens later.
+export function parseProcStatStartTicks(text) {
+  if (typeof text !== 'string') return null;
+  const close = text.lastIndexOf(')');
+  if (close < 0) return null;
+  const fields = text.slice(close + 1).trim().split(' ');
+  const ticks = fields[19];
+  return typeof ticks === 'string' && /^(?:0|[1-9]\d{0,19})$/.test(ticks) ? ticks : null;
+}
+
+// `readlink /proc/self/ns/<kind>` is `<kind>:[<inode>]`.
+export function parseNsLink(text, kind) {
+  const match = typeof text === 'string' ? /^([a-z_]+):\[(\d{1,20})\]$/.exec(text) : null;
+  return match && match[1] === kind ? match[2] : null;
+}
+
+// /proc/self/status `NSpid:` lists this task's pid in every pid namespace from the one that
+// mounted this procfs inward (proc(5)). Exactly one value, equal to our own pid, means this
+// procfs resolves pids in our own namespace — the one `kill()` uses. Anything else (an
+// ancestor's procfs, a kernel without NSpid) is null.
+export function parseNsPid(statusText, selfPid) {
+  const match = typeof statusText === 'string' ? /^NSpid:\t?(.*)$/m.exec(statusText) : null;
+  if (!match) return null;
+  const values = match[1].trim().split(/\s+/);
+  return values.length === 1 && values[0] === String(selfPid) ? values[0] : null;
+}
+
+const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function parseBootId(text) {
+  const value = typeof text === 'string' ? text.trim() : '';
+  return BOOT_ID.test(value) ? value : null;
+}
+
+// #255 S1 reader for coach handles. Never null where `ownedProcessStartTime` is not: on
+// Linux the extra evidence is best effort, and any missing piece returns the plain owned
+// `utc-v1` value (the row is then judged by the #247 rule). A null at spawn would leave the
+// child unbindable (identity-unavailable), so only the `ps` failure that already meant that
+// may produce it. Order: tick, owned `ps`, tick again — a pid that changed between the two
+// tick reads (or whose ticks cannot be read) gets no tick.
+export function createCoachProcessStartTime({
+  platform = process.platform, fsImpl = fs, ownedStartTimeOf = ownedProcessStartTime, selfPid = process.pid,
+} = {}) {
+  const readText = (file) => {
+    try { return fsImpl.readFileSync(file, 'utf8'); } catch { return null; }
+  };
+  const startTicks = (pid) => (Number.isSafeInteger(pid) && pid > 0 ? parseProcStatStartTicks(readText(`/proc/${pid}/stat`)) : null);
+  const scope = () => {
+    if (parseNsPid(readText('/proc/self/status'), selfPid) === null) return null;
+    let pidns = null;
+    try { pidns = parseNsLink(fsImpl.readlinkSync('/proc/self/ns/pid'), 'pid'); } catch { return null; }
+    let timens = null;
+    try {
+      timens = parseNsLink(fsImpl.readlinkSync('/proc/self/ns/time'), 'time');
+    } catch (error) {
+      timens = error?.code === 'ENOENT' ? 'none' : null;
+    }
+    const boot = parseBootId(readText('/proc/sys/kernel/random/boot_id'));
+    return pidns && timens && boot ? { boot, pidns, timens } : null;
+  };
+  return (pid) => {
+    if (platform !== 'linux') return ownedStartTimeOf(pid);
+    const t1 = startTicks(pid);
+    const value = ownedStartTimeOf(pid);
+    if (typeof value !== 'string' || !value.startsWith('utc-v1:')) return value ?? null;
+    const t2 = startTicks(pid);
+    const where = t1 !== null && t1 === t2 ? scope() : null;
+    if (!where) return value;
+    return `linux-v1:${value.slice('utc-v1:'.length)};boot=${where.boot};pidns=${where.pidns};timens=${where.timens};start=${t1}`;
+  };
+}
+export const coachProcessStartTime = createCoachProcessStartTime();
 
 export function processAlive(pid) {
   if (!Number.isInteger(pid) || pid < 1) return false;
