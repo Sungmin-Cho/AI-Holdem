@@ -12,7 +12,7 @@ import { execFile, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { resolveSessionReference } from './reference-source.js';
 import { openContained, writeContained } from './training-store.js';
-import { abortModeFor, validateAbortingCheckpoint, validRecoveryOperation } from './recovery-exit.js';
+import { ABANDON_REASONS, abortModeFor, neverDealt, validateAbortingCheckpoint, validRecoveryOperation } from './recovery-exit.js';
 import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
@@ -7778,6 +7778,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const mode=abortModeFor(engineState,state);
       if (!validRecoveryOperation(operationId)) throw codedError('BAD_OPERATION_ID','복구 종료 operationId가 올바르지 않습니다.');
       if (!mode) throw codedError('BAD_LOOP_PHASE','복구 종료 대상 상태가 아닙니다.');
+      const reason=ABANDON_REASONS.includes(opts.abortUnrecoverable?.reason)
+        ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
+      // The app judged START_FAILED before this launch; a game played since then is not one.
+      if (reason==='START_FAILED' && !neverDealt(engineState,state)) throw codedError('BAD_LOOP_PHASE','시작 실패 종료 대상이 아닙니다.');
       const snapshotPath=path.join(root,'loop-state.unverified.json');
       const unverifiedSnapshot=fs.existsSync(snapshotPath);
       const bytes=unverifiedSnapshot ? openContained(root,['loop-state.unverified.json'],{maxBytes:Number.MAX_SAFE_INTEGER}) : fs.readFileSync(loopStatePath);
@@ -7791,8 +7795,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (!matches) throw codedError('ABANDON_SIDECAR_CONFLICT','기존 감사 파일이 달라 덮어쓰지 않습니다.');
       }
       checkpoint={operationId,mode};
-      const reason=['BAD_PLAYER_RECOVERY','ROOM_UNBOUND'].includes(opts.abortUnrecoverable?.reason)
-        ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
       const audit={...checkpoint,sidecar,sha256,unverifiedSnapshot,abandonedAt:isoNow(now),reason};
       state=writeLoopState({pendingDecision:undefined,aborting:checkpoint,abandonedPendingDecision:audit});
       preserveLoopState=false;

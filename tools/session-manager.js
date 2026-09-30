@@ -20,7 +20,7 @@ import {
   controlError,
 } from "../shared/session-control-contract.js";
 import { launchSession } from "./session-launcher.js";
-import { abortModeFor, validateAbortingCheckpoint } from './recovery-exit.js';
+import { abortModeFor, neverDealt, validateAbortingCheckpoint } from './recovery-exit.js';
 import { createRoomManager } from "./room-manager.js";
 import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
@@ -35,6 +35,7 @@ const stable = (value) =>
       )
     : value;
 const canonical = (value) => JSON.stringify(stable(value));
+const START_KINDS = ["start", "restart", "replace-current"];
 export function createSessionManager({
   storeDir,
   instanceId = randomUUID(),
@@ -142,7 +143,7 @@ export function createSessionManager({
     });
   };
   const shouldLockRoom = (kind) => {
-    if (!["start", "restart", "replace-current"].includes(kind)) return false;
+    if (!START_KINDS.includes(kind)) return false;
     const existing = room.load();
     return Boolean(existing && (existing.status === "open" || existing.status === "locked"));
   };
@@ -160,16 +161,44 @@ export function createSessionManager({
       /* bind is best-effort after a committed session */
     }
   };
-  const currentIsTerminal = () => {
-    if (!current) return false;
+  const sessionIsTerminal = (sessionDir) => {
     try {
-      const engine = read(path.join(current.sessionDir, "state.json"));
-      const loopFile = path.join(current.sessionDir, "loop-state.json");
+      const engine = read(path.join(sessionDir, "state.json"));
+      const loopFile = path.join(sessionDir, "loop-state.json");
       const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
       return engine.result === "abort" || loop?.phase === "done";
     } catch {
       return false;
     }
+  };
+  const currentIsTerminal = () => Boolean(current) && sessionIsTerminal(current.sessionDir);
+  // #260: a start-type command that fails after its reservation was committed
+  // leaves that game current with the room's participants seated in it. Binding
+  // it (as a successful start does) keeps the game resumable; only a failure
+  // before the commit, or on a game that has already ended, restores the room
+  // the command locked.
+  const committedReservation = (row) => {
+    if (!START_KINDS.includes(row.kind) || !row.reservation) return null;
+    try {
+      const actual = resolveCurrentSession(root);
+      return actual?.gameId === row.reservation.gameId &&
+        actual.selectionVersion === row.reservation.selectionVersion
+        ? actual
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const settleRoomAfterFailure = (row, { bindWhen }) => {
+    const committed = committedReservation(row);
+    if (!committed || sessionIsTerminal(committed.sessionDir)) {
+      if (row.roomLocked) safeUnlock(row.requestId);
+      return;
+    }
+    if (!bindWhen) return;
+    // `current` still names the previous game until a launch succeeds.
+    current = committed;
+    safeBind(committed.gameId);
   };
   const emit = (next, code = null) => {
     if (next !== state) stateSince = new Date().toISOString();
@@ -177,7 +206,7 @@ export function createSessionManager({
     error = code;
     revision++;
     if (["ended", "completed"].includes(next) && current?.gameId) {
-      const keepLock = pending && ["start", "restart", "replace-current"].includes(pending.kind);
+      const keepLock = pending && START_KINDS.includes(pending.kind);
       try {
         room.release(current.gameId, { pendingRequestId: keepLock ? pending.requestId : null });
       } catch {
@@ -197,9 +226,12 @@ export function createSessionManager({
         const checkpoint=validateAbortingCheckpoint(current.sessionDir,engine,loop);
         return checkpoint ? {mode:checkpoint.mode} : null;
       }
-      if (!ABORTABLE_ERROR_CODES.includes(error)) return null;
       const mode=abortModeFor(engine,loop);
-      return mode ? {mode} : null;
+      if (ABORTABLE_ERROR_CODES.includes(error))
+        return mode ? {mode,reason:error==='ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY'} : null;
+      // #260: a committed game that never dealt a hand loses nothing by ending, so
+      // it can end whatever made its start fail (the cause may not be removable).
+      return mode==='abort' && neverDealt(engine,loop) ? {mode,reason:'START_FAILED'} : null;
     } catch { return null; }
   }
   function snapshot() {
@@ -235,7 +267,8 @@ export function createSessionManager({
       && (["finalizing", "review_generated", "review_published"].includes(loopState?.phase)
         || session.loop.gameOverPending === true))
       publicState = "finalizing";
-    const recoveryExit=abortTarget();
+    const exit=abortTarget();
+    const recoveryExit=exit ? {mode:exit.mode} : null;
     const progress = lobbyProgress(publicState, loopState);
     return {
       instanceId,
@@ -554,13 +587,13 @@ export function createSessionManager({
           await start(row);
         }
       }
-      if (row.roomLocked && ["start", "restart", "replace-current"].includes(row.kind) && current?.gameId) {
+      if (row.roomLocked && START_KINDS.includes(row.kind) && current?.gameId) {
         safeBind(current.gameId);
       }
       row.status = "succeeded";
       row.result = snapshot();
     } catch (err) {
-      if (row.roomLocked) safeUnlock(row.requestId);
+      settleRoomAfterFailure(row, { bindWhen: row.roomLocked });
       row.status = "failed";
       row.error = err.code ?? "COMMAND_FAILED";
       reconcileFailure(row.error);
@@ -636,7 +669,7 @@ export function createSessionManager({
       if (!recoveryExit) throw controlError('INVALID_TRANSITION');
       row.recovery={kind:'abort-unrecoverable',mode:recoveryExit.mode,gameId:current.gameId,
         selectionVersion:current.selectionVersion,gameEpoch:snapshot().gameEpoch,
-        reason: error === 'ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY'};
+        reason: recoveryExit.reason ?? (error === 'ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY')};
     }
     try {
       save(row);
@@ -728,7 +761,7 @@ export function createSessionManager({
           if (row.kind === "retry-decision") row.error = "RETRY_NOT_APPLIED";
           row.result = snapshot();
         } catch (err) {
-          if (row.roomLocked) safeUnlock(row.requestId);
+          settleRoomAfterFailure(row, { bindWhen: row.roomLocked || setupHasParticipants(row.setup) });
           row.status = "failed";
           row.error = err.code ?? "RECOVERY_REQUIRED";
           reconcileFailure(row.error);

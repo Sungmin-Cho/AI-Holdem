@@ -101,6 +101,36 @@ test('#197 preserves original invalid bytes before resume cleanup, then aborts w
   assert.deepEqual(fs.readFileSync(path.join(f.root,state.abandonedPendingDecision.sidecar)),preserved);
   assert.equal(read(path.join(f.root,'state.json')).abortOperationId,'exit-1');
 });
+// #260: the app offers START_FAILED only for a committed game that never dealt a
+// hand; the loop checks that premise again before it abandons anything.
+test('#260 START_FAILED ends a never-dealt bootstrap game and is refused once a game has left bootstrap',{timeout:TIMEOUT},async t=>{
+  for(const [phase,expected] of [['bootstrap','GAME_ENDED'],['playing','BAD_LOOP_PHASE']])await t.test(phase,async st=>{
+    const root=createOwnedTempDir('start-failed-exit');
+    await initializePreparedSession(root,{ai:1,mode:'cash-training',hands:20,opponentRuntime:'policy'});
+    const engine=read(path.join(root,'state.json'));
+    assert.equal(engine.handNo,0);assert.equal(engine.hand,null);
+    const file=path.join(root,'loop-state.json');
+    fs.writeFileSync(file,JSON.stringify({phase,handNo:0,sessionToken:engine.sessionToken,gameEpoch:sha(engine.sessionToken)}));
+    const before=fs.readFileSync(file);
+    let calls=0;
+    const loop=createGameLoop({gameDir:root,resolver:async()=>{calls++;throw new Error('UNEXPECTED_RESOLVER');},
+      opts:{port:0,abortUnrecoverable:{operationId:'start-failed-1',reason:'START_FAILED'}}});
+    st.after(()=>loop.requestStop().catch(()=>{}));
+    if(expected==='GAME_ENDED') {
+      assert.equal((await loop.resume()).code,'GAME_ENDED');
+      const state=read(file);
+      assert.equal(state.phase,'aborted');assert.equal(state.abandonedPendingDecision.reason,'START_FAILED');
+      assert.deepEqual(fs.readFileSync(path.join(root,state.abandonedPendingDecision.sidecar)),before);
+      assert.equal(read(path.join(root,'state.json')).result,'abort');
+    } else {
+      await assert.rejects(loop.resume(),{code:'BAD_LOOP_PHASE'});
+      assert.deepEqual(fs.readFileSync(file),before);
+      assert.equal(read(path.join(root,'state.json')).result,engine.result);
+      assert.equal(fs.readdirSync(root).some(name=>name.startsWith('loop-state.abandoned.')),false);
+    }
+    assert.equal(calls,0);
+  });
+});
 test('#197 identity rejection and snapshot publication failure never rewrite loop bytes',{timeout:TIMEOUT},async t=>{
   for(const mode of ['identity','snapshot-failure','large'])await t.test(mode,async st=>{
     const f=await fixture(st,{large:mode==='large'});
