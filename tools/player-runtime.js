@@ -20,7 +20,8 @@ import { spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { ownedProcessStartTime as defaultProcessStartTime } from '../engine/state.js';
+// #255: coach handles carry `linux-v1` on Linux (tools/coach-evidence.js); elsewhere the owned value.
+import { coachProcessStartTime as defaultProcessStartTime, coachReadingFor } from './coach-evidence.js';
 import { personaGuidance } from './persona-guidance.js';
 import {
   grokSessionDir,
@@ -887,6 +888,12 @@ export function createPlayerRuntime(kind, opts = {}) {
       purpose: entry.purpose, model: entry.model, signal,
       waitBudgetMs: killWaitMs, waitedMs: Date.now() - started,
       closeConfirmed: entry.closed });
+    // #255 S4 (accepted): on POSIX `ChildProcess.kill` signals the numeric pid. libuv reaps
+    // several children in one SIGCHLD pass and then runs their exit callbacks one by one, so
+    // a kill of a child that is already reaped but not yet reported can reach a reused pid.
+    // JS cannot observe that state; whether a libuv release marks reaped handles depends on
+    // the bundled version (test/coach-signal-authority.test.js logs `process.versions.uv`).
+    // Windows kills through the process handle instead.
     let delivered;
     try {
       delivered = entry.handle.pid === null && entry.handle.closed ? true : entry.handle.kill(signal);
@@ -1343,7 +1350,9 @@ export function createPlayerRuntime(kind, opts = {}) {
         if (!isAlive(pid)) return 'exited-unclosed';
         const current = startTimeOf(pid);
         if (current === null) return 'unknown';
-        return current === startTime ? 'alive' : 'mismatch';
+        // #255: a handle recorded as plain `utc-v1` (Linux extras unavailable at spawn) is
+        // compared in that form even if the extras can be read now.
+        return coachReadingFor(startTime, current) === startTime ? 'alive' : 'mismatch';
       }
 
       async function waitClosed(ms) {

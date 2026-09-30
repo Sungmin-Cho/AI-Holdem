@@ -410,6 +410,42 @@ test('#247 writer: owned handles are alive, replaced or unverifiable by the owne
   await assert.rejects(unreadable.cleanup({ evidence: 'IDENTITY_REPLACED' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' });
 });
 
+// #255: a linux-v1 handle. `ambiguous` (the recorded lstart without the full identity) is
+// refused exactly like `alive` — whatever is declared — so the writer's refusals stay the
+// #247 set even when the extra Linux evidence cannot be read.
+const LINUX = 'linux-v1:Mon Sep 28 12:00:00 2026;boot=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0;pidns=4026531836;timens=none;start=1234567';
+test('#255 writer: a linux-v1 handle is refused while the owned lstart still matches', async () => {
+  const deps = (coach, owned) => ({
+    processAlive: () => true,
+    processStartTime: () => { throw new Error('a linux-v1 handle must not read the legacy start time'); },
+    coachProcessStartTime: () => coach,
+    ownedProcessStartTime: () => owned,
+    platform: 'linux',
+  });
+  // The owned reader returns null throughout: the coach reading carries the one owned sample
+  // that decides protection, so a second read failing cannot drop it (d2).
+  const protectedCases = [
+    ['alive', LINUX, null],
+    ['another tick', LINUX.replace('start=1234567', 'start=1234568'), null],
+    ['another boot', LINUX.replace('0f1e2d3c', '1f1e2d3c'), null],
+    ['coach reader fell back', OWNED.utc, null],
+  ];
+  for (const [label, coach, owned] of protectedCases) {
+    for (const fields of [{ operatorConfirmed: true }, { evidence: 'IDENTITY_DEAD' }, { evidence: 'OWNER_RUNTIME_CLOSED' }]) {
+      const f = await fixture({ handle: `${LIVE_PID}:${LINUX}`, closures: [{ ownerSessionId: OWNER }], deps: deps(coach, owned) });
+      const before = bytes(f.dir);
+      await assert.rejects(f.cleanup(fields), { code: 'RELEASE_TARGET_ALIVE' }, `${label} ${JSON.stringify(fields)}`);
+      assert.deepEqual(bytes(f.dir), before, `${label}: a refusal writes nothing`);
+    }
+  }
+  // Another lstart is no replacement on Linux: identity declarations stay unverifiable, while
+  // durable close evidence and the operator path behave as for any unknown identity.
+  const other = () => fixture({ handle: `${LIVE_PID}:${LINUX}`, closures: [{ ownerSessionId: OWNER }], deps: deps('utc-v1:Mon Sep 28 12:00:07 2026', OWNED.utc) });
+  await assert.rejects((await other()).cleanup({ evidence: 'IDENTITY_REPLACED' }), { code: 'RELEASE_EVIDENCE_UNVERIFIABLE' });
+  assert.equal((await (await other()).cleanup({ evidence: 'OWNER_RUNTIME_CLOSED' })).verification.status, 'verified');
+  assert.equal((await (await other()).cleanup({ operatorConfirmed: true })).verification.status, 'unverified');
+});
+
 test('#216 trace rows stay FIFO: while an earlier row waits, a new one waits behind it', async () => {
   let failing = true;
   const appended = [];

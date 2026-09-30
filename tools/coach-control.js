@@ -10,7 +10,7 @@ import { processStartTime as defaultProcessStartTime } from '../engine/process-i
 import {
   createCoachEvidenceReader, sidecarTupleMismatch, rowIdentities, observeRecordedIdentity,
   closeEvidenceReasons, notSpawnedHolds, legacyEligible, scanCoachRuntimeProcesses, DEFAULT_LSOF,
-  processAlive as defaultProcessAlive,
+  processAlive as defaultProcessAlive, coachProcessStartTime as defaultCoachProcessStartTime,
 } from './coach-evidence.js';
 import { readPersistedSolver } from './solver-runtime.js';
 import {
@@ -715,6 +715,7 @@ export function createCoachControl(deps = {}) {
   const processAlive = deps.processAlive ?? defaultProcessAlive;
   const startTimeOf = deps.processStartTime ?? defaultProcessStartTime;
   const ownedStartTimeOf = deps.ownedProcessStartTime ?? defaultOwnedProcessStartTime;
+  const coachStartTimeOf = deps.coachProcessStartTime ?? defaultCoachProcessStartTime;
   const scanRuntimeProcesses = deps.scanRuntimeProcesses
     ?? (() => scanCoachRuntimeProcesses({ lsofPath: DEFAULT_LSOF }));
   const wallClock = deps.wallClock ?? (() => new Date());
@@ -1253,7 +1254,9 @@ export function createCoachControl(deps = {}) {
     const attributable = reader.coachEvidenceAttributable(row.exactResultPath);
     const tupleMismatch = sidecarTupleMismatch(sidecar, row, auth.gameEpoch);
     const ids = rowIdentities(row, tupleMismatch ? null : sidecar);
-    const probe = (identity) => (identity ? observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf, platform }) : null);
+    const probe = (identity) => (identity ? observeRecordedIdentity(identity, {
+      processAlive, startTimeOf, ownedStartTimeOf, coachStartTimeOf, platform,
+    }) : null);
     const authorityState = probe(ids.authority);
     const sidecarState = ids.sidecar && (!ids.authority || ids.conflict) ? probe(ids.sidecar) : authorityState;
     const scan = scanLegacy && !ids.selected && legacyEligible(row, sidecar, attributable)
@@ -1293,6 +1296,12 @@ export function createCoachControl(deps = {}) {
     }
     if (observed.identityStates.includes('alive')) {
       codedFail('RELEASE_TARGET_ALIVE', '기록된 코치 프로세스가 아직 살아 있습니다. 종료된 뒤 다시 실행하세요.');
+    }
+    // #255: the lstart the #247 rule called alive without the full identity — protected the
+    // same way. The loop never signals it, so a person checks this pid and ends it if it is
+    // the coach; it then reads dead.
+    if (observed.identityStates.includes('ambiguous')) {
+      codedFail('RELEASE_TARGET_ALIVE', '기록된 코치와 시작 시각이 같은 프로세스가 살아 있어 해제할 수 없습니다(IDENTITY_AMBIGUOUS). 그 pid를 확인해 코치면 종료한 뒤 다시 실행하세요.');
     }
     if (operatorConfirmed) {
       const verified = !observed.tupleMismatch && !observed.conflict && observed.hasIdentity

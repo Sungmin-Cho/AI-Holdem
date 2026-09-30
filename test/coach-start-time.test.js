@@ -8,10 +8,15 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ownedProcessStartTime, validOwnedIdentity } from '../engine/state.js';
+import { validCoachIdentity } from '../tools/coach-evidence.js';
 import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KIND = { linux: /^utc-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform];
+// #255: on Linux a coach handle adds the reader's scope and the start tick, or falls back to
+// the owned value when they cannot be read (test/coach-signal-authority.test.js requires
+// the full form from a live child on the ubuntu runners).
+const COACH_KIND = { linux: /^(?:linux|utc)-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform];
 const skip = KIND ? false : `no owned start time on ${process.platform}`;
 
 test('#247 another time zone reads the same owned start time', { skip }, async () => {
@@ -47,7 +52,7 @@ test('#247 a one-shot coach handle carries the owned start time by default', { s
   });
   t.after(() => upper.dispose());
   const handle = upper.oneshotStart({ tier: 'upper', prompt: 'coach' });
-  assert.match(handle.startTime, KIND);
-  assert.equal(validOwnedIdentity(handle.startTime), true);
+  assert.match(handle.startTime, COACH_KIND);
+  assert.equal(validCoachIdentity(handle.startTime), true);
   assert.equal((await handle.done).raw, 'ok');
 });

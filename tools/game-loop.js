@@ -33,6 +33,7 @@ import {
   verifyOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
+import { terminateWin32ProcessStartedAt } from '../engine/process-identity.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
 import { createRelayRootOwner, writeRelayJsonAtomic } from '../server/action-receipts.js';
 import {
@@ -55,7 +56,8 @@ import {
   SIDECAR_NOFOLLOW, DEFAULT_LSOF, RELEASE_REASONS, readSidecarFileWithoutNoFollow,
   consultCoachCloseEvidence, scanCoachRuntimeProcesses, parseLsofCwdRecords, legacyCoachRuntimeCandidates,
   createCoachEvidenceReader, parsePersistedCoachHandle, validSidecarIdentity, sidecarTupleMismatch, rowIdentities,
-  notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive,
+  notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive, coachProcessStartTime,
+  recordedTerminatorTimeoutMs,
 } from './coach-evidence.js';
 // Re-exported for existing importers (tests and tools) of these names.
 export {
@@ -312,8 +314,9 @@ export function relayHealthCompatible(health, { responseOk, managed, study, snap
 
 export function persistedRecoveryClass(reason) {
   // #214: the cleanup writer observing the recorded coach alive is as live as the loop
-  // observing it — no recovery command, only "wait for pid N".
-  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED', 'RELEASE_TARGET_ALIVE'].includes(reason)
+  // observing it — no recovery command, only "wait for pid N". #255: so is IDENTITY_AMBIGUOUS
+  // (the writer refuses to release it exactly like a live coach).
+  return ['LEGACY_RUNTIME_PROCESS_PRESENT', 'STILL_ALIVE', 'DEADLINE_EXCEEDED', 'RELEASE_TARGET_ALIVE', 'IDENTITY_AMBIGUOUS'].includes(reason)
     ? 'live' : 'unverified';
 }
 
@@ -335,7 +338,12 @@ export function unresolvedEvidenceGuidance(unresolved) {
       ...(row.evidence?.identity?.pid != null ? [row.evidence.identity.pid] : []),
       ...(row.evidence?.legacyScanPids ?? []),
     ]))];
-    return `코치 프로세스${pids.length ? `(pid: ${pids.join(', ')})` : ''}의 종료를 확인한 뒤 resume하세요. 쓰기 권한이 있는 행(cleanupAuthorized)은 다음 resume이 자동으로 released 처리하고, 권한 없는 행은 종료 확인 뒤 --row-owner … --operator-confirmed 1로 닫습니다.`;
+    // #255: an ambiguous pid has the recorded start second but may be another process; the
+    // loop never signals it, so a person decides what it is.
+    const ambiguous = live.some((row) => row?.reason === 'IDENTITY_AMBIGUOUS')
+      ? ' IDENTITY_AMBIGUOUS: 그 pid는 기록된 코치와 시작 시각(초)이 같지만 같은 프로세스임을 증명하지 못해 자동으로 신호하지 않습니다. 이 게임의 코치 CLI면 직접 종료하고, 아니면 그 프로세스가 끝나기를 기다리세요.'
+      : '';
+    return `코치 프로세스${pids.length ? `(pid: ${pids.join(', ')})` : ''}의 종료를 확인한 뒤 resume하세요. 쓰기 권한이 있는 행(cleanupAuthorized)은 다음 resume이 자동으로 released 처리하고, 권한 없는 행은 종료 확인 뒤 --row-owner … --operator-confirmed 1로 닫습니다.${ambiguous}`;
   }
   const withEvidence = unresolved.filter((row) => row?.evidence);
   if (withEvidence.some((row) => row.evidence.sidecar === 'intent')) {
@@ -716,6 +724,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
   const ownedStartTimeOf = opts.ownedProcessStartTime ?? ownedProcessStartTime;
+  // #255: coach handles only (`linux-v1` on Linux); lifetime locks keep `ownedStartTimeOf`.
+  const coachStartTimeOf = opts.coachProcessStartTime ?? coachProcessStartTime;
   const listenerOwnedByFn = opts.listenerOwnedBy ?? createListenerOwnedBy({
     lsofPath,
     timeoutMs: osVerifyMs,
@@ -725,6 +735,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     },
   });
   const signalProcess = opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
+  // #255 S2: on Windows a persisted coach recorded as `win32-v1` is checked and terminated
+  // through one process handle, so its pid cannot be reused between the creation-time check
+  // and TerminateProcess. An injected `signalProcess` (test seam) keeps the pid path;
+  // `recordedTerminator` is its own seam ((pid, startTime, {timeoutMs}) → 'terminated' |
+  // 'replaced' | 'absent' | 'failed'). null means every record takes the pid path.
+  const recordedTerminator = opts.recordedTerminator !== undefined
+    ? opts.recordedTerminator
+    : (!opts.signalProcess && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
   // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
@@ -4146,7 +4164,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #214 D4a: the same observation the cleanup writer makes. A start time that may differ
   // only by a time-zone offset is 'unknown', never proof of replacement.
   const persistedCoachIdentityState = (identity) => {
-    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf });
+    const observed = observeRecordedIdentity(identity, { processAlive, startTimeOf, ownedStartTimeOf, coachStartTimeOf });
     return observed === 'replaced' ? 'mismatch' : observed;
   };
 
@@ -4213,6 +4231,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // A different startTime proves that the recorded process identity is gone. Never
     // signal the replacement pid; close the stale record as released instead.
     if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+    // #255: the lstart the #247 rule would call alive, without the full identity. Protected
+    // like a live coach — the writer refuses to release it, so c/f evidence cannot either —
+    // and never signalled. An operator checks the pid and ends it; it then reads dead.
+    if (state === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
     if (state !== 'alive') {
       const hook = consultCoachCloseEvidence(attempt, closures, sidecar);
       if (hook) return { outcome: 'released', reason: hook.reason };
@@ -4220,26 +4242,49 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
 
     // Once alive is confirmed, any failure to prove termination is final here — it never
-    // falls through to c/f/d below.
-    try {
-      signalProcess(identity.pid, 'SIGTERM');
-    } catch (error) {
-      if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
-    }
+    // falls through to c/f/d below. #255 S3: the observation that authorises a pid signal is
+    // taken in the same synchronous run as the signal — an `await` between them (the wait
+    // helpers) lets other work run first. Returns null to go on waiting, else the outcome.
+    const signalStillAlive = (signal) => {
+      if (recordedTerminator && identity.startTime.startsWith('win32-v1:')) {
+        const timeoutMs = recordedTerminatorTimeoutMs(deadlineNs - monotonicNs());
+        if (timeoutMs === null) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
+        const outcome = recordedTerminator(identity.pid, identity.startTime, { timeoutMs });
+        if (outcome === 'replaced') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+        return outcome === 'terminated' || outcome === 'absent' ? null : { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
+      }
+      const now = persistedCoachIdentityState(identity);
+      if (now === 'dead') return null;
+      if (now === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+      if (now === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
+      if (now !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
+      try {
+        signalProcess(identity.pid, signal);
+      } catch (error) {
+        if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
+      }
+      return null;
+    };
+    const afterWait = (observed) => {
+      if (observed === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
+      if (observed === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+      if (observed === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
+      return null;
+    };
+
+    let stop = signalStillAlive('SIGTERM');
+    if (stop) return stop;
     state = await waitForPersistedCoachDeath(identity, orphanTerminateGraceMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
-    if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+    stop = afterWait(state);
+    if (stop) return stop;
     if (state !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
     if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
 
-    try {
-      signalProcess(identity.pid, 'SIGKILL');
-    } catch (error) {
-      if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
-    }
+    stop = signalStillAlive('SIGKILL');
+    if (stop) return stop;
     state = await waitForPersistedCoachDeath(identity, orphanTerminateKillWaitMs, deadlineNs);
-    if (state === 'dead') return { outcome: 'released', reason: 'IDENTITY_DEAD' };
-    if (state === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+    stop = afterWait(state);
+    if (stop) return stop;
     return {
       outcome: 'unconfirmed',
       reason: state === 'alive' ? 'STILL_ALIVE' : 'IDENTITY_UNKNOWN',
@@ -4585,7 +4630,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           else {
             const refused = ['RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED']
               .includes(error.code);
-            childFailure = { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+            // #255: an unconfirmed live judgment (the coach may still run, or its pid is
+            // ambiguous) survives a failed termination_unconfirmed write — its recovery is
+            // "check pid N", never a release command the writer would refuse.
+            const liveJudgment = result.confirmed !== true && persistedRecoveryClass(result.reason) === 'live';
+            childFailure = liveJudgment
+              ? { reason: result.reason, cleanupAuthorized: true, cleanupFailure: refused ? error.code : 'CLEANUP_CHILD_FAILED' }
+              : { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
           }
         }
       }
@@ -4603,6 +4654,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           handNo: attempt.handNo,
           generation: attempt.generation,
           reason: effectiveResult.reason,
+          ...(childFailure?.cleanupFailure ? { cleanupFailure: childFailure.cleanupFailure } : {}),
         });
       }
       return { attempt, result: effectiveResult };
