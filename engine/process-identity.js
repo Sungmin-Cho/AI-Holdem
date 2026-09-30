@@ -6,6 +6,12 @@ import path from 'node:path';
 // `ps` 한 번의 상한. 만료하면 identity를 "확인 불가"로 보고 fail-closed라서,
 // 프로세스가 많거나 느린 기기에서는 짧은 상한이 곧 기동·재개 실패다.
 const IDENTITY_TIMEOUT_MS = process.platform === 'win32' ? 15_000 : 10_000;
+// #257: the relay server's owned reader (engine/state.js `serverProcessStartTime`) waits for
+// `ps` exactly as long as the legacy one, so moving the server to the owned form never turns a
+// slow read into a new null.
+export function identityTimeoutMs() {
+  return platformTimeout(IDENTITY_TIMEOUT_MS);
+}
 const IDENTITY_MAX_BUFFER = 256;
 export const WIN32_START_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/;
 
