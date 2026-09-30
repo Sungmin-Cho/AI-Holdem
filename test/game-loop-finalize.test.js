@@ -789,6 +789,43 @@ test('#255 an ambiguous row keeps its judgment when its cleanup write fails', { 
     'the failed write is still reported');
 });
 
+// r2: the same holds for a coach still alive after SIGKILL — STILL_ALIVE keeps its "wait for
+// pid N" recovery when its termination_unconfirmed write fails.
+test('#255 a still-alive coach keeps its judgment when its cleanup write fails', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+  fs.writeFileSync(path.join(gameDir, '.inject-cleanup-failure'), '');
+  const logs = [];
+  const signals = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      orphanTerminateGraceMs: 50,
+      orphanTerminateKillWaitMs: 50,
+      coachCliPath: COACH_FAILURE_SHIM,
+      log: (record) => logs.push(record),
+      signalProcess: (pid, signal) => {
+        if (pid === orphan.pid) { signals.push(signal); return; }
+        process.kill(pid, signal);
+      },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  const { recovery } = readJson(path.join(gameDir, 'loop-state.json')).halt;
+  assert.equal(recovery.attempts.find((row) => row.generation === 1)?.reason, 'STILL_ALIVE');
+  assert.deepEqual(recovery.commands, []);
+  assert.ok(logs.some((record) => record.reason === 'STILL_ALIVE' && record.cleanupFailure === 'CLEANUP_CHILD_FAILED'));
+});
+
 // d-r1: without an injected signalProcess, Windows goes through the handle helper. The loop
 // is told the coach is alive, but the process holding the pid was created at another time:
 // the helper leaves it running and the row is released as replaced.
