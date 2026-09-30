@@ -289,7 +289,7 @@ export function stopServer(pid, deps = {}) {
   // otherwise the handle terminator is the default only on Windows without a `kill` seam.
   const terminate = deps.terminate !== undefined
     ? deps.terminate
-    : (!deps.kill && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
+    : (!deps.kill && (deps.platform ?? process.platform) === 'win32' ? terminateWin32ProcessStartedAt : null);
 
   if (typeof expectedStartTime !== 'string' || expectedStartTime.length === 0) return;
   if (!alive(pid)) return;

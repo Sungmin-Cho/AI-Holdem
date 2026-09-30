@@ -875,18 +875,20 @@ export function ownedProcessStartTime(pid) {
 // Lock and coach readings keep their shorter bound — their callers run inside deadlines.
 let serverStartTime = null;
 export function serverProcessStartTime(pid) {
-  serverStartTime ??= cacheSelfOnWin32((id) => readOwnedProcessStartTime(id, identityTimeoutMs()));
+  serverStartTime ??= cacheSelfOnWin32((id) => readOwnedProcessStartTime(id, identityTimeoutMs));
   return serverStartTime(pid);
 }
-function readOwnedProcessStartTime(pid, timeout = 3000) {
+function readOwnedProcessStartTime(pid, timeoutMs = () => 3000) {
   if (process.platform === 'win32') {
     const stamp = win32ProcessStartTime(pid);
     return stamp === null ? null : `win32-v1:${stamp}`;
   }
   if (!['darwin', 'linux'].includes(process.platform)) return null;
   try {
+    // The bound is computed inside the try: an exhausted caller deadline is an unreadable
+    // start time (null), as for the legacy reader, not an exception.
     const value = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
-      encoding: 'utf8', timeout, env: { ...process.env, TZ: 'UTC', LANG: 'C', LC_ALL: 'C' },
+      encoding: 'utf8', timeout: timeoutMs(), env: { ...process.env, TZ: 'UTC', LANG: 'C', LC_ALL: 'C' },
     }).trim();
     return validOwnedTimestamp(value) ? `utc-v1:${value}` : null;
   } catch { return null; }

@@ -9,12 +9,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ownedProcessStartTime, processStartTime } from '../engine/state.js';
-import { terminateWin32ProcessStartedAt } from '../engine/process-identity.js';
 import { initGameDir, stopServer } from '../engine/game-archive.js';
 import { createGameLoop, recordedTerminatorOptions } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
 import {
-  ROOT, tmpGame, readJson, initGame, makeAdapter, resolverFor, startExternalServer, terminateIfAlive, waitUntilDead,
+  ROOT, REAL_LSOF, tmpGame, readJson, initGame, makeAdapter, resolverFor, startExternalServer, terminateIfAlive, waitUntilDead,
 } from './helpers/game-loop-fixtures.mjs';
 
 const OWNED = 'utc-v1:Wed Sep 30 12:45:56 2026';
@@ -149,7 +148,7 @@ test('#257 a loop records its relay server in the owned form', { timeout: 30_000
   await waitUntilDead(serverPid);
 });
 
-async function adoptExternalServer(t, { recordedTerminator, signalProcess }) {
+async function adoptExternalServer(t, { processTerminator, signalProcess }) {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
@@ -164,7 +163,7 @@ async function adoptExternalServer(t, { recordedTerminator, signalProcess }) {
     opts: {
       port: 0,
       processStartTime: (pid) => (pid === external.child.pid ? WIN : processStartTime(pid)),
-      recordedTerminator: recordedTerminator && ((pid, startTime, options) => recordedTerminator(pid, startTime, options, external.child)),
+      processTerminator: processTerminator && ((pid, startTime, options) => processTerminator(pid, startTime, options, external.child)),
       signalProcess,
     },
   });
@@ -176,7 +175,7 @@ test('#257 an adopted server is stopped through the recorded terminator, never b
   const calls = [];
   const signals = [];
   const { loop, external } = await adoptExternalServer(t, {
-    recordedTerminator: (pid, startTime, options, child) => { calls.push([pid, startTime, options]); child.kill('SIGKILL'); return 'terminated'; },
+    processTerminator: (pid, startTime, options, child) => { calls.push([pid, startTime, options]); child.kill('SIGKILL'); return 'terminated'; },
     signalProcess: (pid, signal) => signals.push([pid, signal]),
   });
   await loop.requestStop();
@@ -190,7 +189,7 @@ for (const first of ['terminated', 'absent']) {
   test(`#257 an adopted server still alive after a first ${first} is checked and terminated again`, { timeout: 30_000 }, async (t) => {
     const calls = [];
     const { loop, external, gameDir } = await adoptExternalServer(t, {
-      recordedTerminator: (pid, startTime, options, child) => {
+      processTerminator: (pid, startTime, options, child) => {
         calls.push(pid);
         if (calls.length === 1) return first;
         child.kill('SIGKILL');
@@ -209,7 +208,7 @@ test('#257 a second attempt that finds the pid replaced leaves the server, its l
   let calls = 0;
   let recover = false;
   const { loop, external, gameDir } = await adoptExternalServer(t, {
-    recordedTerminator: (pid, startTime, options, child) => {
+    processTerminator: (pid, startTime, options, child) => {
       calls += 1;
       if (recover) { child.kill('SIGKILL'); return 'terminated'; }
       return calls === 1 ? 'terminated' : 'replaced';
@@ -230,7 +229,7 @@ test('#257 an injected signalProcess alone keeps the adopted server on the pid p
   const signals = [];
   let external;
   const adopted = await adoptExternalServer(t, {
-    recordedTerminator: undefined,
+    processTerminator: undefined,
     signalProcess: (pid, signal) => { signals.push([pid, signal]); process.kill(pid, signal); },
   });
   external = adopted.external;
@@ -244,7 +243,7 @@ for (const [outcome, code] of [['replaced', 'SERVER_IDENTITY_MISMATCH'], ['faile
     let answer = outcome;
     const signals = [];
     const { loop, external, gameDir } = await adoptExternalServer(t, {
-      recordedTerminator: (pid, startTime, options, child) => {
+      processTerminator: (pid, startTime, options, child) => {
         if (answer === 'terminated') child.kill('SIGKILL');
         return answer;
       },
@@ -273,7 +272,7 @@ test('#257 --force stops a Windows-recorded loop owner through the recorded term
       port: 0,
       processStartTime: (pid) => (pid === holder.pid ? WIN : processStartTime(pid)),
       ownedProcessStartTime: (pid) => (pid === holder.pid ? WIN : ownedProcessStartTime(pid)),
-      recordedTerminator: (pid, startTime, options) => { calls.push([pid, startTime]); holder.kill('SIGKILL'); return 'terminated'; },
+      processTerminator: (pid, startTime, options) => { calls.push([pid, startTime]); holder.kill('SIGKILL'); return 'terminated'; },
       signalProcess: (pid, signal) => signals.push([pid, signal]),
     },
   });
@@ -283,18 +282,35 @@ test('#257 --force stops a Windows-recorded loop owner through the recorded term
   assert.deepEqual(signals.filter(([pid]) => pid === holder.pid), []);
 });
 
+// Records every signal `process.kill` is asked to send to `pid` (probes with 0 excepted) while
+// letting it through, so a test can prove the default Windows path never signals by pid.
+function watchPidSignals(t, pid) {
+  const signals = [];
+  const original = process.kill;
+  process.kill = function kill(target, signal) {
+    if (target === pid && signal !== 0) signals.push(signal ?? 'SIGTERM');
+    return original.call(process, target, signal);
+  };
+  t.after(() => { process.kill = original; });
+  return signals;
+}
+
 test('#257 Windows: engine stopServer ends the recorded process through its handle and spares another creation time', {
   skip: process.platform !== 'win32', timeout: 60_000,
 }, async (t) => {
-  const replaced = spawnIdle(t);
-  const recorded = ownedProcessStartTime(replaced.pid);
-  stopServer(replaced.pid, { expectedStartTime: laterWin32(recorded) });
-  assert.doesNotThrow(() => process.kill(replaced.pid, 0), 'a replaced creation time is never terminated');
-  stopServer(replaced.pid, { expectedStartTime: recorded });
-  await waitUntilDead(replaced.pid, 10_000);
+  const target = spawnIdle(t);
+  const recorded = ownedProcessStartTime(target.pid);
+  const signals = watchPidSignals(t, target.pid);
+  // No seam: the default Windows selection. Another creation time is refused by the handle's
+  // own FILETIME check (there is no pre-read on this path).
+  stopServer(target.pid, { expectedStartTime: laterWin32(recorded) });
+  assert.doesNotThrow(() => process.kill(target.pid, 0), 'a replaced creation time is never terminated');
+  stopServer(target.pid, { expectedStartTime: recorded });
+  await waitUntilDead(target.pid, 10_000);
+  assert.deepEqual(signals, [], 'never by pid');
 });
 
-test('#257 Windows: an adopted server is stopped through the real handle terminator', { skip: process.platform !== 'win32', timeout: 120_000 }, async (t) => {
+test('#257 Windows: an adopted server is stopped through the default handle terminator, never by pid', { skip: process.platform !== 'win32', timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
   fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
@@ -303,15 +319,12 @@ test('#257 Windows: an adopted server is stopped through the real handle termina
   }));
   const external = await startExternalServer(gameDir, init.sessionToken);
   t.after(() => terminateIfAlive(external.child));
-  const outcomes = [];
-  const loop = createGameLoop({
-    gameDir, resolver: resolverFor(makeAdapter()),
-    opts: { port: 0, recordedTerminator: (...args) => { const outcome = terminateWin32ProcessStartedAt(...args); outcomes.push(outcome); return outcome; } },
-  });
+  const signals = watchPidSignals(t, external.child.pid);
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0 } });
   await loop.resume();
   await loop.requestStop();
   await waitUntilDead(external.child.pid, 10_000);
-  assert.deepEqual(outcomes, ['terminated']);
+  assert.deepEqual(signals, [], 'never by pid');
 });
 
 test('#257 engine stopServer waits between the two handle attempts and after the last one', () => {
@@ -364,6 +377,24 @@ test('#257 engine seam precedence: an explicit terminate wins, null turns it off
   assert.deepEqual(run(() => ({ terminate: null })), ['kill:SIGTERM'], 'null turns the handle path off');
 });
 
+test('#257 engine: on Windows without a kill seam an explicit null terminate still takes the pid path', (t) => {
+  const signals = [];
+  let alive = true;
+  const original = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid !== 42) return original.call(process, pid, signal);
+    signals.push(signal);
+    alive = false;
+    return true;
+  };
+  t.after(() => { process.kill = original; });
+  stopServer(42, {
+    expectedStartTime: WIN, platform: 'win32', terminate: null,
+    ownedProcessStartTime: () => WIN, isAlive: () => alive, sleepSync() {},
+  });
+  assert.deepEqual(signals, ['SIGTERM'], 'the default handle terminator stayed off');
+});
+
 test('#257 --force never signals a loop owner alive by its tick whose lstart moved (#256 I4)', { timeout: 60_000 }, async (t) => {
   const gameDir = tmpGame();
   const holder = spawnIdle(t);
@@ -381,7 +412,7 @@ test('#257 --force never signals a loop owner alive by its tick whose lstart mov
       processStartTime: (pid) => (pid === holder.pid ? `linux-v1:Wed Sep 30 12:46:03 2026;${scope}` : processStartTime(pid)),
       ownedProcessStartTime: (pid) => (pid === holder.pid ? 'utc-v1:Wed Sep 30 12:46:03 2026' : ownedProcessStartTime(pid)),
       signalProcess: (pid, signal) => signals.push([pid, signal]),
-      recordedTerminator: (...args) => { terminations.push(args); return 'terminated'; },
+      processTerminator: (...args) => { terminations.push(args); return 'terminated'; },
     },
   });
   t.after(() => loop.requestStop().catch(() => {}));
@@ -401,3 +432,105 @@ test('#257 a bound stop starts the handle terminator only with a whole second le
   assert.deepEqual(recordedTerminatorOptions(7_500_000_000n, now), { timeoutMs: 2500 });
   assert.equal(recordedTerminatorOptions(4_000_000_000n, now), null, 'already past');
 });
+
+test('#257 init --force passes the handle seam to the server stop', () => {
+  const dir = tmpGame();
+  const first = initGameDir(dir, { aiCount: 2 });
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: 42, port: 8877, sessionToken: first.sessionToken, startedAt: new Date().toISOString(), serverStartTime: WIN,
+  }));
+  const calls = [];
+  let alive = true;
+  initGameDir(dir, { aiCount: 2, force: true }, {
+    callerPpid: 0,
+    isAlive: (pid) => (pid === 42 ? alive : false),
+    terminate: (pid, startTime) => { calls.push([pid, startTime]); alive = false; return 'terminated'; },
+    kill: () => assert.fail('never by pid when a handle seam is given'),
+    sleepSync() {},
+  });
+  assert.deepEqual(calls, [[42, WIN]]);
+});
+
+test('#257 with both readers injected the legacy one reads the server', { timeout: 30_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const loop = createGameLoop({
+    gameDir, resolver: resolverFor(makeAdapter()),
+    opts: { port: 0, processStartTime: (pid) => processStartTime(pid), ownedProcessStartTime: (pid) => ownedProcessStartTime(pid) },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  await loop.bootstrap({ ai: 1, stack: 100 });
+  const lock = readJson(path.join(gameDir, 'lock.json'));
+  assert.equal(lock.serverStartTime, processStartTime(lock.serverPid), 'an injected processStartTime stays the server reader');
+  await loop.requestStop();
+});
+
+test('#257 the server reader answers null, not an exception, inside an exhausted caller deadline', async () => {
+  const { serverProcessStartTime } = await import('../engine/state.js');
+  const { withPlatformDeadline } = await import('../shared/platform-files.js');
+  // The legacy reader's contract: an exhausted budget is an unreadable start time.
+  assert.equal(withPlatformDeadline(1, () => processStartTime(process.pid), { now: () => 2 }), null);
+  if (process.platform === 'win32') return; // the win32 owned read is the legacy one plus a prefix
+  assert.equal(withPlatformDeadline(1, () => serverProcessStartTime(process.pid === 1 ? 2 : process.pid + 1), { now: () => 2 }), null);
+});
+
+for (const [outcome, code] of [['replaced', 'LOOP_IDENTITY_MISMATCH'], ['failed', 'LOOP_SIGNAL_FAILED']]) {
+  test(`#257 --force leaves a Windows-recorded loop owner the terminator reports ${outcome} (${code})`, { timeout: 60_000 }, async (t) => {
+    const gameDir = tmpGame();
+    const holder = spawnIdle(t);
+    const record = `${holder.pid}\n${WIN.replace(':', '\n')}`;
+    fs.mkdirSync(path.join(gameDir, 'loop.lock.d'));
+    fs.writeFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), record);
+    const loop = createGameLoop({
+      gameDir, resolver: resolverFor(makeAdapter()),
+      opts: {
+        port: 0,
+        processStartTime: (pid) => (pid === holder.pid ? WIN : processStartTime(pid)),
+        ownedProcessStartTime: (pid) => (pid === holder.pid ? WIN : ownedProcessStartTime(pid)),
+        processTerminator: () => outcome,
+        signalProcess: () => assert.fail('never by pid'),
+      },
+    });
+    t.after(() => loop.requestStop().catch(() => {}));
+    await assert.rejects(loop.bootstrap({ ai: 1, force: true }), { code });
+    assert.doesNotThrow(() => process.kill(holder.pid, 0));
+    assert.equal(fs.readFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), 'utf8'), record);
+  });
+}
+
+for (const outcome of ['terminated', 'replaced']) {
+  test(`#257 --force stops a Windows-recorded server through the handle (${outcome})`, {
+    skip: !REAL_LSOF && process.platform !== 'win32' ? 'lsof is required for authoritative listener binding' : false, timeout: 60_000,
+  }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await initGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const before = fs.readFileSync(path.join(gameDir, 'state.json'));
+    const calls = [];
+    const loop = createGameLoop({
+      gameDir, resolver: resolverFor(makeAdapter()),
+      opts: {
+        port: 0,
+        processStartTime: (pid) => (pid === external.child.pid ? WIN : processStartTime(pid)),
+        processTerminator: (pid, startTime) => {
+          calls.push([pid, startTime]);
+          if (outcome === 'terminated') external.child.kill('SIGKILL');
+          return outcome;
+        },
+        signalProcess: (pid, signal) => { if (pid === external.child.pid) assert.fail('never by pid'); process.kill(pid, signal); },
+      },
+    });
+    t.after(() => loop.requestStop().catch(() => {}));
+    if (outcome === 'terminated') {
+      await loop.bootstrap({ ai: 1, force: true });
+      await waitUntilDead(external.child.pid);
+      assert.deepEqual(calls, [[external.child.pid, WIN]]);
+    } else {
+      await assert.rejects(loop.bootstrap({ ai: 1, force: true }), { code: 'SERVER_IDENTITY_MISMATCH' });
+      assert.deepEqual(calls, [[external.child.pid, WIN]]);
+      assert.doesNotThrow(() => process.kill(external.child.pid, 0));
+      assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, external.child.pid);
+      assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), before, 'the game was not archived');
+    }
+  });
+}

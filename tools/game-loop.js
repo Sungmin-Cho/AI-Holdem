@@ -760,6 +760,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const recordedTerminator = opts.recordedTerminator !== undefined
     ? opts.recordedTerminator
     : (!opts.signalProcess && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
+  // #257: the same one-handle termination for the relay server and a forced loop owner, as its
+  // own seam — the coach seam above stays the coaches' (its test doubles answer for coach
+  // pids). The same default: Windows without an injected `signalProcess`.
+  const processTerminator = opts.processTerminator !== undefined
+    ? opts.processTerminator
+    : (!opts.signalProcess && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
   // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
@@ -1575,16 +1581,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #257 D3: on Windows a recorded `win32-v1` identity is checked and terminated through one
   // process handle (#255 S2), so the pid cannot be reused between the creation-time check and
   // TerminateProcess — which an observation followed by `process.kill(pid)` cannot promise.
-  // Used only where `recordedTerminator` exists (Windows without an injected `signalProcess`);
+  // Used only where `processTerminator` exists (Windows without an injected `signalProcess`);
   // SIGTERM and SIGKILL are both TerminateProcess there. Returns like `sendSignal`: true when
   // terminated, false when the process was already gone. A finalization-bound stop starts the
   // terminator only with at least a whole second left.
-  const recordedTerminates = (identity) => Boolean(recordedTerminator)
+  const recordedTerminates = (identity) => Boolean(processTerminator)
     && typeof identity?.startTime === 'string' && identity.startTime.startsWith('win32-v1:');
   const terminateRecorded = (pid, startTime, codes, { boundToFinalizationDeadline = false } = {}) => {
     const options = recordedTerminatorOptions(boundToFinalizationDeadline ? finalizationDeadlineNs : null, monotonicNs);
     if (options === null) throw codedError(codes.unconfirmed, `pid ${pid} 종료를 확인할 시간이 남지 않았습니다.`);
-    const outcome = recordedTerminator(pid, startTime, options);
+    const outcome = processTerminator(pid, startTime, options);
     if (outcome === 'terminated') return true;
     if (outcome === 'absent') return false;
     if (outcome === 'replaced') throw codedError(codes.mismatch, `pid ${pid}가 다른 프로세스로 재사용되어 종료하지 않습니다.`);
