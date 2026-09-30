@@ -624,13 +624,22 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
 }
 
 // #256 D6: attach `parentIdentity` to a study service that is already running, and only
-// then. Nothing is started, created or waited for when no live owner holds the lock: the
-// caller only needs to know, before it commits anything, whether a running service (perhaps
-// one started by an older build) refuses this parent. Returns null when there is none.
+// then. Nothing is started or created, and `inFlight` is neither joined nor set: the caller
+// only needs to know, before it commits anything, whether a running service (perhaps one
+// started by an older build) refuses this parent. Returns null when no owner holds the lock or
+// it is dead — a later ensure starts or replaces one. An owner that is neither proven alive
+// nor dead is waited on as long as a normal ensure would wait on it, and failing that fails
+// here, before the commit, instead of after it.
 async function attachExistingWithinBudget(storeDir, options) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  const { ctx, owner } = readContextOwnership(storeDir);
-  if (!ctx.trainingStat || owner?.status !== 'alive') return null;
+  let { ctx, owner } = readContextOwnership(storeDir);
+  if (!ctx.trainingStat) return null;
+  while (owner && owner.status !== 'alive' && owner.status !== 'dead') {
+    if (platformNow() >= deadline) fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${owner.status} pid=${owner.pid ?? 'none'}`);
+    await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
+    owner = aclTransaction(ctx, () => { assertContext(ctx); return readLock(ctx); });
+  }
+  if (owner?.status !== 'alive') return null;
   validateParent(ctx, options.parentIdentity);
   const value = await waitForLiveService(ctx, owner, deadline);
   await attachParent(ctx, value, options.parentIdentity, deadline);

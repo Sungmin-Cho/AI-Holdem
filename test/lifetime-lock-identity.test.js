@@ -292,6 +292,9 @@ function fakeProc({
 } = {}) {
   const reads = [];
   let pidnsRead = 0;
+  let bootRead = 0;
+  let timensRead = 0;
+  const nth = (value, i) => (Array.isArray(value) ? value[Math.min(i, value.length - 1)] : value);
   const enoent = () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
   const stat = (pid, start) => `${pid} (node) S 1 ${pid} ${pid} 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 ${start} 1000 5 1`;
   return {
@@ -303,14 +306,14 @@ function fakeProc({
         const match = /^\/proc\/(\d+)\/stat$/.exec(file);
         if (match) return ticks[match[1]] === undefined ? enoent() : stat(match[1], ticks[match[1]]);
         if (file === '/proc/self/status') return status;
-        if (file === '/proc/sys/kernel/random/boot_id') return boot;
+        if (file === '/proc/sys/kernel/random/boot_id') return nth(boot, bootRead++);
         if (file === '/proc/self/timens_offsets' && timensOffsets !== undefined) return timensOffsets;
         return enoent();
       },
       readlinkSync(file) {
         reads.push(file);
         if (file === '/proc/self/ns/pid') return pidns[Math.min(pidnsRead++, pidns.length - 1)];
-        if (file === '/proc/self/ns/time') return timens ?? enoent();
+        if (file === '/proc/self/ns/time') return nth(timens, timensRead++) ?? enoent();
         if (file === '/proc/self/ns/time_for_children' && timeForChildren !== undefined) return timeForChildren;
         return enoent();
       },
@@ -331,8 +334,10 @@ test('#256 the lifetime reader brackets the ticks with two agreeing scope reads 
   const own = fakeProc();
   assert.equal(lifetime(own)(77), reading({ start: '555' }));
   assert.ok(!own.reads.includes('/proc/77/stat'));
-  // The procfs changed between the two scope reads: no evidence, the owned value only.
+  // Any scope part changed between the two scope reads: no evidence, the owned value only.
   assert.equal(lifetime(fakeProc({ pidns: ['pid:[4026531836]', 'pid:[4026532000]'] }))(4242), OWN);
+  assert.equal(lifetime(fakeProc({ boot: [`${BOOT}\n`, `${OTHER_BOOT}\n`] }))(4242), OWN);
+  assert.equal(lifetime(fakeProc({ timens: ['time:[4026531834]', 'time:[4026532001]'] }))(4242), OWN);
   // No scope before the ticks: no evidence either (and no tick read at all).
   const ancestor = fakeProc({ status: 'NSpid:\t9123\t77\n' });
   assert.equal(lifetime(ancestor)(4242), OWN);
@@ -535,7 +540,7 @@ test('#256 Linux: the study service keeps a live owner whose lstart moved and re
   // wait) — judged by its lstart alone it would be a live stranger and fail the start.
   writeRecord(training, 'study.lock.d', `${service.child.pid}\nutc-v1\n${lstart}\n${evidenceOf(real, String(BigInt(real.start) + 1n))}`);
   assert.deepEqual(await inspectStudyService(store), { status: 'stopped' });
-  const replaced = await ensureStudyService(store, { testOptions: { publishDelayMs: 3000 } });
+  const replaced = await ensureStudyService(store, { testOptions: { publishDelayMs: 5000 } });
   t.after(() => stopStudyService(store, { expectedInstanceId: replaced.instanceId }).catch(() => {}));
   assert.notEqual(replaced.instanceId, identity.instanceId);
   assert.notEqual(replaced.pid, service.child.pid);
@@ -583,7 +588,7 @@ test('#256 D6: nothing is attached before the commit when the loop lock has no e
     onReserve: () => { reachedReservation = true; throw Object.assign(new Error('stop here'), { code: 'TEST_STOP' }); },
   }), { code: 'TEST_STOP' });
   assert.equal(reachedReservation, true);
-  assert.equal(fs.existsSync(path.join(store, '.training', 'study.lock.d')), false, 'no study service was started');
+  assert.equal(fs.existsSync(path.join(store, '.training')), false, 'nothing of the study service was created');
 });
 
 test('#256 Linux: a refusal after the commit carries the same code, and the committed session stays for a resume', { skip: !LINUX, timeout: 120_000 }, async (t) => {
@@ -635,4 +640,27 @@ test('#256 Linux: with the default readers, ESRCH is death only in this process\
   writeRecord(dir, 'loop.lock.d', `${child.pid}\nutc-v1\n${real.lstart}\n${record('1')}`);
   assert.equal(readOwnedLock(dir, 'loop.lock.d').status, 'unknown', 'an owner recorded in another pid namespace is not seen dead');
   assert.throws(() => acquireOwnedLock(dir, 'loop.lock.d'), { code: 'LOCKED' });
+});
+
+test('#256 D6 Linux: a study owner neither alive nor dead is waited on, then stops the start before the commit', { skip: !LINUX, timeout: 90_000 }, async (t) => {
+  const { prepareGameSession } = await import('../tools/game-loop.js');
+  const { resolveCurrentSession } = await import('../engine/session-catalog.js');
+  const service = await startFakeService(t);
+  const real = realLinuxReading(service.child.pid);
+  assert.ok(real, 'this Linux runner must read the lifetime evidence');
+  const store = tmpDir('holdem-lifetime-d6-unknown-');
+  seedFakeStudy(store, service, real);
+  // A three-line record whose lstart moved: on Linux that proves neither life nor death.
+  const record = `${service.child.pid}\nutc-v1\n${shiftLstart(real.lstart, 7)}`;
+  writeRecord(path.join(store, '.training'), 'study.lock.d', record);
+  let reserved = false;
+  await assert.rejects(
+    prepareGameSession({ storeDir: store, ai: 1, port: 0 }, { resolver: async () => ({ player: null, upper: null, notices: [] }), onReserve: () => { reserved = true; } }),
+    { code: 'STUDY_DESCRIPTOR_CORRUPT' },
+  );
+  assert.equal(reserved, false);
+  assert.equal(resolveCurrentSession(store), null, 'no session was committed');
+  assert.equal(fs.existsSync(path.join(store, 'loop.lock.d')), false);
+  assert.equal(fs.readFileSync(path.join(store, '.training', 'study.lock.d', 'pid'), 'utf8'), record);
+  assert.equal(service.read().attaches ?? 0, 0, 'nothing was attached to an unproven owner');
 });
