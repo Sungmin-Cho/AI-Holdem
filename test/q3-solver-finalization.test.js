@@ -61,6 +61,10 @@ function spawningRecord(spawnToken, overrides = {}) {
   };
 }
 
+// #257: these resumes read the relay server's start time, now in the owned form, which accepts
+// only what `ps -o lstart=` prints (C locale); an opaque token reads as unavailable.
+const Q3_FINALIZATION_PROCESS_START = 'Wed Sep 30 12:45:56 2026';
+
 async function withFakePs(rows, work, { fallbackStart = null, onCalls = null } = {}) {
   const binDir = tmpQ3('holdem-q3-fake-ps-');
   const ps = path.join(binDir, 'ps');
@@ -302,7 +306,7 @@ test('Q3 M13: independent final cleanup detects a solver after its wrapper handl
   await withFakePs([], async () => {
     await loop.resume({ skipLock: true });
     await assert.rejects(loop.run(), { code: 'FINALIZATION_ABORTED' });
-  }, { fallbackStart: 'Q3_FINALIZATION_PROCESS_START' });
+  }, { fallbackStart: Q3_FINALIZATION_PROCESS_START });
 
   const cutoff = calls.find((args) => args[0] === 'finalize-cutoff');
   assert.ok(cutoff, 'finalize-cutoff was not invoked');
@@ -346,7 +350,7 @@ test('Q3 M14: finalizing resume writes cutoff marker before sealing unavailable 
   await withFakePs([], async () => {
     await loop.resume({ skipLock: true });
     await loop.run();
-  }, { fallbackStart: 'Q3_FINALIZATION_PROCESS_START' });
+  }, { fallbackStart: Q3_FINALIZATION_PROCESS_START });
 
   assert.equal(fs.lstatSync(cutoffPath).isFile(), true);
   assert.equal(fs.lstatSync(exactPath).isFile(), true);
