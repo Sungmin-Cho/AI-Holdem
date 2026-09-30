@@ -653,14 +653,39 @@ test('#256 D6 Linux: a study owner neither alive nor dead is waited on, then sto
   // A three-line record whose lstart moved: on Linux that proves neither life nor death.
   const record = `${service.child.pid}\nutc-v1\n${shiftLstart(real.lstart, 7)}`;
   writeRecord(path.join(store, '.training'), 'study.lock.d', record);
+  const { CLIENT_WAIT_MS } = await import('../tools/study-service.js');
   let reserved = false;
+  const started = Date.now();
   await assert.rejects(
     prepareGameSession({ storeDir: store, ai: 1, port: 0 }, { resolver: async () => ({ player: null, upper: null, notices: [] }), onReserve: () => { reserved = true; } }),
     { code: 'STUDY_DESCRIPTOR_CORRUPT' },
   );
+  assert.ok(Date.now() - started >= CLIENT_WAIT_MS - 1000, 'the unproven owner was waited on for the client budget');
   assert.equal(reserved, false);
   assert.equal(resolveCurrentSession(store), null, 'no session was committed');
   assert.equal(fs.existsSync(path.join(store, 'loop.lock.d')), false);
   assert.equal(fs.readFileSync(path.join(store, '.training', 'study.lock.d', 'pid'), 'utf8'), record);
   assert.equal(service.read().attaches ?? 0, 0, 'nothing was attached to an unproven owner');
+});
+
+test('#256 D6 Linux: a study owner that proves alive while waited on is attached and the start goes on', { skip: !LINUX, timeout: 90_000 }, async (t) => {
+  const { prepareGameSession } = await import('../tools/game-loop.js');
+  const service = await startFakeService(t);
+  const real = realLinuxReading(service.child.pid);
+  assert.ok(real, 'this Linux runner must read the lifetime evidence');
+  const store = tmpDir('holdem-lifetime-d6-late-alive-');
+  seedFakeStudy(store, service, real);
+  const training = path.join(store, '.training');
+  const proven = fs.readFileSync(path.join(training, 'study.lock.d', 'pid'), 'utf8');
+  writeRecord(training, 'study.lock.d', `${service.child.pid}\nutc-v1\n${shiftLstart(real.lstart, 7)}`);
+  // The owner's record becomes provable while the preflight waits (re-read, not decided once).
+  const timer = setTimeout(() => writeRecord(training, 'study.lock.d', proven), 1500);
+  t.after(() => clearTimeout(timer));
+  let reachedReservation = false;
+  await assert.rejects(prepareGameSession({ storeDir: store, ai: 1, port: 0 }, {
+    resolver: async () => ({ player: null, upper: null, notices: [] }),
+    onReserve: () => { reachedReservation = true; throw Object.assign(new Error('stop here'), { code: 'TEST_STOP' }); },
+  }), { code: 'TEST_STOP' });
+  assert.equal(reachedReservation, true);
+  assert.equal(service.read().attaches, 1, 'the owner proven alive was attached before the commit');
 });
