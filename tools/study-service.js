@@ -336,12 +336,12 @@ function pidRunning(pid) {
   try { process.kill(pid, 0); return true; }
   catch (error) { return error?.code === 'EPERM'; }
 }
-function identityStatus(pid, startTime) {
+// #256: `evidence` is the Linux evidence line of a lock record. Descriptors carry none;
+// `descriptorIdentityStatus` lends them the one of the lock record they name.
+function identityStatus(pid, startTime, evidence = null) {
   platformTimeout(WAIT_MS);
   const startTimeOf = identityMemo ? memoizedStartTimeOf(identityMemo, ownedProcessStartTime) : undefined;
-  const status = startTimeOf
-    ? ownedIdentityStatus(pid, startTime, startTimeOf)
-    : ownedIdentityStatus(pid, startTime);
+  const status = ownedIdentityStatus(pid, startTime, startTimeOf, evidence);
   platformTimeout(WAIT_MS);
   return status;
 }
@@ -379,8 +379,17 @@ function readLock(ctx, parent = false) {
   if (!pidFile) return { status: 'unknown', stat: checked, exact };
   const parsed = parseOwnedLockIdentity(pidFile.text);
   if (!parsed) return { status: 'unknown', stat: checked, exact };
-  const { pid, startTime } = parsed;
-  return { pid, startTime, stat: checked, exact, pidStat: pidFile.stat, status: identityStatus(pid, startTime) };
+  const { pid, startTime, evidence = null } = parsed;
+  return { pid, startTime, evidence, stat: checked, exact, pidStat: pidFile.stat, status: identityStatus(pid, startTime, evidence) };
+}
+// #256: a descriptor copies its owner's pid and startTime but not the lock record's evidence
+// line. Judge it with the evidence of the lock record it names, when that record was observed;
+// otherwise it is judged as a record without evidence.
+function lockEvidenceFor(value, lock) {
+  return lock && lock.pid === value.pid && lock.startTime === value.startTime ? lock.evidence ?? null : null;
+}
+function descriptorIdentityStatus(value, lock) {
+  return identityStatus(value.pid, value.startTime, lockEvidenceFor(value, lock));
 }
 function descriptorFields(value) {
   const keys = ['schemaVersion','pid','startTime','instanceId','storeIdentity','port','drillToken','controlToken'];
@@ -477,7 +486,7 @@ async function verified(ctx, descriptor, owner, deadline) {
     || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();
   return value;
 }
-async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, staleDescriptor } = {}) {
+async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, staleDescriptor, staleEvidence = null } = {}) {
   if (owner?.status !== 'alive') fail();
   // Only the already observed live owner may repair this descriptor. None of
   // these reads grants permission to start a process or reclaim its metadata.
@@ -493,7 +502,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
       const descriptor = readDescriptor(ctx);
       const awaitingFirstCheckpoint = staleDescriptor && descriptor.state === 'valid'
         && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
-        && identityStatus(staleDescriptor.pid, staleDescriptor.startTime) === 'dead';
+        && identityStatus(staleDescriptor.pid, staleDescriptor.startTime, staleEvidence) === 'dead';
       return { currentOwner, descriptor, awaitingFirstCheckpoint };
     });
     if (descriptor.state === 'valid' && !awaitingFirstCheckpoint) {
@@ -549,20 +558,25 @@ function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
   const testOptions = options.testOptions ?? {};
   if (!testOptions || typeof testOptions !== 'object' || Array.isArray(testOptions)
-    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs'].includes(key))) throw new TypeError('invalid study test options');
+    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs'].includes(key))) throw new TypeError('invalid study test options');
   const idleTimeoutMs = testOptions.idleTimeoutMs ?? 10 * 60 * 1000;
   const checkpointMs = testOptions.checkpointMs ?? 1000;
+  // #256 test seam: hold the first descriptor publish, so a client provably meets the new
+  // owner's lock while the previous owner's descriptor is still on disk.
+  const publishDelayMs = testOptions.publishDelayMs ?? 0;
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 600000
-    || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000) throw new TypeError('invalid study lifetime');
-  return { idleTimeoutMs, checkpointMs };
+    || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000
+    || !Number.isSafeInteger(publishDelayMs) || publishDelayMs < 0 || publishDelayMs > 5000) throw new TypeError('invalid study lifetime');
+  return publishDelayMs === 0 ? { idleTimeoutMs, checkpointMs } : { idleTimeoutMs, checkpointMs, publishDelayMs };
 }
 
 async function ensureOwned(ctx, options, deadline, coldDeadline) {
   const config = optionsForChild(options);
   let owner = readLock(ctx);
   let descriptor = readDescriptor(ctx);
+  const staleEvidence = descriptor.state === 'valid' ? lockEvidenceFor(descriptor.value, owner) : null;
   const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
-    && identityStatus(descriptor.value.pid, descriptor.value.startTime) === 'dead' ? descriptor.value : undefined;
+    && identityStatus(descriptor.value.pid, descriptor.value.startTime, staleEvidence) === 'dead' ? descriptor.value : undefined;
   if (owner?.status === 'alive') {
     extendPlatformDeadline(deadline);
     return waitForLiveService(ctx, owner, deadline);
@@ -571,7 +585,7 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     if (descriptor.state === 'corrupt') fail();
     if (descriptor.state === 'valid') {
       if (descriptor.value.storeIdentity !== ctx.storeIdentity
-        || identityStatus(descriptor.value.pid, descriptor.value.startTime) !== 'dead') fail();
+        || descriptorIdentityStatus(descriptor.value, owner) !== 'dead') fail();
       if (owner && (owner.pid !== descriptor.value.pid || owner.startTime !== descriptor.value.startTime)) fail();
     }
     assertContext(ctx);
@@ -602,14 +616,29 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     if (owner?.status === 'alive') {
       deadline = Math.min(deadline, platformNow() + platformTimeout(WAIT_MS));
       extendPlatformDeadline(deadline);
-      return waitForLiveService(ctx, owner, deadline, { staleDescriptor });
+      return waitForLiveService(ctx, owner, deadline, { staleDescriptor, staleEvidence });
     }
     await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
   }
   fail();
 }
 
+// #256 D6: attach `parentIdentity` to a study service that is already running, and only
+// then. Nothing is started, created or waited for when no live owner holds the lock: the
+// caller only needs to know, before it commits anything, whether a running service (perhaps
+// one started by an older build) refuses this parent. Returns null when there is none.
+async function attachExistingWithinBudget(storeDir, options) {
+  const deadline = platformNow() + platformTimeout(WAIT_MS);
+  const { ctx, owner } = readContextOwnership(storeDir);
+  if (!ctx.trainingStat || owner?.status !== 'alive') return null;
+  validateParent(ctx, options.parentIdentity);
+  const value = await waitForLiveService(ctx, owner, deadline);
+  await attachParent(ctx, value, options.parentIdentity, deadline);
+  return publicHandle(value);
+}
+
 async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
+  if (options.existingOnly === true) return attachExistingWithinBudget(storeDir, options);
   // Every WAIT_MS deadline is capped by the budget in force, so a caller's
   // monotonic budget is consumed, never extended past by a fresh window.
   let deadline = platformNow() + platformTimeout(WAIT_MS);
@@ -727,7 +756,9 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
       continue;
     }
     const { current, lock } = observed;
-    if (current.state === 'missing' && !lock && identityStatus(value.pid, value.startTime) === 'dead') {
+    // The lock is gone by now; judge the service's pid with the evidence of the lock record
+    // observed when the stop began (#256).
+    if (current.state === 'missing' && !lock && descriptorIdentityStatus(value, owner) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
     // A replacement belongs to the next caller; it is never ours to stop.
@@ -912,6 +943,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     });
     health.port = server.port;
     value = { schemaVersion: 1, ...health, drillToken, controlToken };
+    if (config.publishDelayMs) { await sleep(config.publishDelayMs); if (stopping) return; }
     publish(ctx, own, value);
     let lastCheckpointMs = 0;
     const scheduleCheckpoint = () => {

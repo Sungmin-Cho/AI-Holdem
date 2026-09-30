@@ -5,7 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 import { loadState, saveState, withMutation, withNamedLock, writeHandArchive, readHand, isReclaimable, acquireOwnedLock, readOwnedLock, releaseOwnedLock, processStartTime, ownedProcessStartTime, parseOwnedLockIdentity, writeJsonAtomic } from '../engine/state.js';
-import { spawnSleeper, skipOnWin32 } from './helpers/platform.js';
+import { reusedPidRecord, spawnSleeper, skipOnWin32 } from './helpers/platform.js';
 
 function tmpDir() { return createOwnedTempDir('holdem-state'); }
 
@@ -179,13 +179,15 @@ test('owned lock: 살아 있는 소유자는 6초가 지나도 회수되지 않�
   releaseOwnedLock(h);
 });
 
-test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회수된다', () => {
+test('owned lock: pid 재사용(startTime 불일치)은 dead로 판정되고 회수된다', (t) => {
   const dir = tmpDir();
   const lockDir = path.join(dir, 'loop.lock.d');
   fs.mkdirSync(lockDir);
-  // 살아 있는 pid(자기 자신)를 기록하되 startTime을 조작한다
-  const historical = process.platform === 'win32' ? 'win32-v1\n2001-01-01T00:00:00.0000000Z' : 'utc-v1\nMon Jan  1 00:00:00 2001';
-  fs.writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n${historical}`);
+  // 살아 있는 pid(자기 자신)를 기록하되 startTime을 조작한다. #256: Linux에서는 틀린
+  // utc-v1만으로는 재사용이 증명되지 않으므로 실제 증거에 다른 시작 tick을 쓴다.
+  const reused = reusedPidRecord(process.pid);
+  if (reused === null) { t.skip('this Linux runner cannot read the lifetime evidence'); return; }
+  fs.writeFileSync(path.join(lockDir, 'pid'), reused);
   const seen = readOwnedLock(dir, 'loop.lock.d');
   assert.equal(seen.alive, false); // 시그널 금지 판정의 근거
   assert.equal(seen.status, 'dead');
@@ -350,15 +352,24 @@ test('readOwnedLock: 1줄 레거시 기록은 존재하는 unknown owned 락으�
   });
 });
 
-test('owned lock: pid 파일 하나만, 정확히 버전이 명시된 3줄', () => {
+test('owned lock: pid 파일 하나만, 정확히 버전이 명시된 3줄(Linux 증거가 있으면 4줄)', () => {
   const dir = tmpDir();
   const h = acquireOwnedLock(dir, 'loop.lock.d');
   const lockDir = path.join(dir, 'loop.lock.d');
   assert.deepEqual(fs.readdirSync(lockDir), ['pid']);
   const content = fs.readFileSync(path.join(lockDir, 'pid'), 'utf8');
   const separator = h.startTime.indexOf(':');
-  assert.equal(content, `${process.pid}\n${h.startTime.slice(0, separator)}\n${h.startTime.slice(separator + 1)}`);
-  assert.deepEqual(parseOwnedLockIdentity(content), { pid: h.pid, startTime: h.startTime });
+  const threeLines = `${process.pid}\n${h.startTime.slice(0, separator)}\n${h.startTime.slice(separator + 1)}`;
+  const lines = content.split('\n');
+  if (lines.length === 4) {
+    // #256: a Linux writer that read its evidence appends it as a fourth line.
+    assert.equal(process.platform, 'linux');
+    assert.equal(content, `${threeLines}\n${lines[3]}`);
+    assert.deepEqual(parseOwnedLockIdentity(content), { pid: h.pid, startTime: h.startTime, evidence: lines[3] });
+  } else {
+    assert.equal(content, threeLines);
+    assert.deepEqual(parseOwnedLockIdentity(content), { pid: h.pid, startTime: h.startTime });
+  }
   assert.equal(parseOwnedLockIdentity(content + '\n'), null);
   releaseOwnedLock(h);
 });

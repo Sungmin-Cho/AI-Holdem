@@ -28,6 +28,7 @@ import {
   acquireOwnedLock,
   processStartTime,
   ownedProcessStartTime,
+  parseOwnedLockIdentity,
   readOwnedLock,
   releaseOwnedLock,
   verifyOwnedLock,
@@ -1522,7 +1523,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     });
     studyPromise = pending;
     try {
-      const service = await pending;
+      let service;
+      try { service = await pending; } catch (error) { throw studyRefusal(error, lockHandle, storeDir); }
       assertNotStopping();
       return service;
     } finally {
@@ -8464,6 +8466,43 @@ export async function initializePreparedSession(gameDir, args) {
   });
 }
 
+// #256: a study service started before #256 cannot read the Linux evidence line of a store
+// loop lock, so it refuses that loop as its parent (`PARENT_IDENTITY_MISMATCH`). Only a
+// four-line loop lock can be refused that way; the refusal is then named for what it most
+// likely is, with the way out (`npm run study:stop` stops an older service from a newer client).
+function hasLockEvidence(lockHandle) {
+  try {
+    return Boolean(parseOwnedLockIdentity(fs.readFileSync(path.join(lockHandle.dir, 'pid'), 'utf8'))?.evidence);
+  } catch {
+    return false;
+  }
+}
+function studyRefusal(error, lockHandle, storeDir) {
+  if (error?.code !== 'PARENT_IDENTITY_MISMATCH' || !lockHandle || !hasLockEvidence(lockHandle)) return error;
+  return codedError(
+    'STUDY_SERVICE_INCOMPATIBLE',
+    `실행 중인 학습 서비스가 이 게임 루프의 락을 확인하지 못했습니다. 업그레이드 전에 시작한 서비스라면 \`npm run study:stop -- ${storeDir}\`로 멈춘 뒤 다시 시작하세요.`,
+    { cause: error },
+  );
+}
+
+// #256 D6: the loop attaches its study parent once it runs — after a new session was
+// committed. For a four-line loop lock, try the same attach first, before the commit, against
+// a service that is already running (nothing is started here): its refusal then leaves the
+// store as it was. A service an older client starts between this check and the loop's own
+// attach is not covered; that refusal comes after the commit, with the same code, and the
+// committed session is resumed once the service is stopped.
+async function attachStudyBeforeCommit(storeDir, lockHandle) {
+  if (!hasLockEvidence(lockHandle)) return;
+  try {
+    await ensureStudyService(storeDir, {
+      parentIdentity: { pid: lockHandle.pid, startTime: lockHandle.startTime }, existingOnly: true,
+    });
+  } catch (error) {
+    throw studyRefusal(error, lockHandle, storeDir);
+  }
+}
+
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   if (!args.resume && args.opponentRuntime === 'jev' && args.ai !== 0) await (loopOptions.jevPreflight ?? preflightJev)();
   loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
@@ -8531,6 +8570,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
           if (previousServer && isAlive(previousServer.serverPid)) {
             throw codedError('ACTIVE_GAME', '이전 session server가 아직 실행 중입니다.');
           }
+          await attachStudyBeforeCommit(args.storeDir, storeLockHandle);
           const reservation = onReserve ? await onReserve(previous) : null;
           const prepared = prepareSession(args.storeDir, reservation);
           const initialized = prepared.recovering ? readPreparation(prepared) : await initializePreparedSession(prepared.stagingDir, args);

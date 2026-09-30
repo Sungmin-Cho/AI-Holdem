@@ -4,6 +4,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { processStartTime as realProcessStartTime } from '../../engine/process-identity.js';
 import { CLIENT_WAIT_MS, COLD_START_MS } from '../../tools/study-service.js';
+import { lifetimeProcessStartTime, parseLinuxReading } from '../../engine/state.js';
+
+// #256: a lifetime-lock record for the live `pid` that proves its recorded owner is gone —
+// a pid reused by another process. Windows and macOS: a start time in this host's own owned
+// format that the process never had. Linux: the process's real evidence with another start
+// tick (a mismatched `utc-v1` alone proves nothing there). null when this Linux runner
+// cannot read the evidence, so no record can prove it.
+export function reusedPidRecord(pid) {
+  if (process.platform === 'win32') return `${pid}\nwin32-v1\n2001-01-01T00:00:00.0000000Z`;
+  if (process.platform !== 'linux') return `${pid}\nutc-v1\nMon Jan  1 00:00:00 2001`;
+  const reading = parseLinuxReading(lifetimeProcessStartTime(pid));
+  if (!reading) return null;
+  return `${pid}\nutc-v1\n${reading.lstart}\nlinux-v1:boot=${reading.boot};pidns=${reading.pidns};timens=${reading.timens};start=${BigInt(reading.start) + 1n}`;
+}
 
 export function studyBudget({ coldStarts = 0, warmCalls = 0, extraMs = 0 } = {}) {
   return Math.ceil((coldStarts * COLD_START_MS + warmCalls * CLIENT_WAIT_MS + extraMs) * 1.1);
