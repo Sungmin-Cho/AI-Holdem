@@ -464,13 +464,16 @@ test('#257 with both readers injected the legacy one reads the server', { timeou
   await loop.requestStop();
 });
 
-test('#257 the server reader answers null, not an exception, inside an exhausted caller deadline', async () => {
+test('#257 the server reader answers null, not an exception, inside an exhausted caller deadline', async (t) => {
   const { serverProcessStartTime } = await import('../engine/state.js');
   const { withPlatformDeadline } = await import('../shared/platform-files.js');
+  // Another live process: this process's own reading is cached on Windows once read.
+  const other = spawnIdle(t);
+  const exhausted = (read) => withPlatformDeadline(1, () => read(other.pid), { now: () => 2 });
   // The legacy reader's contract: an exhausted budget is an unreadable start time.
-  assert.equal(withPlatformDeadline(1, () => processStartTime(process.pid), { now: () => 2 }), null);
-  if (process.platform === 'win32') return; // the win32 owned read is the legacy one plus a prefix
-  assert.equal(withPlatformDeadline(1, () => serverProcessStartTime(process.pid === 1 ? 2 : process.pid + 1), { now: () => 2 }), null);
+  assert.equal(exhausted(processStartTime), null);
+  assert.equal(exhausted(serverProcessStartTime), null);
+  assert.notEqual(serverProcessStartTime(other.pid), null, 'outside the budget the same process reads fine');
 });
 
 for (const [outcome, code] of [['replaced', 'LOOP_IDENTITY_MISMATCH'], ['failed', 'LOOP_SIGNAL_FAILED']]) {
