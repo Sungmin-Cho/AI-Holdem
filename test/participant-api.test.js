@@ -9,6 +9,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { startAppServer } from '../tools/app-server.js';
 import { createSessionManager } from '../tools/session-manager.js';
 import { createRoomManager } from '../tools/room-manager.js';
+import { resolveCurrentSession } from '../engine/session-catalog.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 
 const TOKEN = 'a'.repeat(64);
@@ -68,10 +70,29 @@ function cas(manager, kind = 'start') {
   };
 }
 
-async function boot(t, { publicPort = 0, tlsCert, tlsKey } = {}) {
+// Every manager a test opens on a store (see restartApp) is closed, and only when
+// all of them confirmed their close is the store's study service (which outlives
+// app shutdown by design) stopped. Cleanup failures are reported together.
+const storeManagers = new Map();
+async function boot(t, { publicPort = 0, tlsCert, tlsKey, resolver: resolve = resolver, onChange } = {}) {
   const storeDir = createOwnedTempDir('holdem-public');
-  const manager = createSessionManager({ storeDir, resolver });
-  t.after(() => manager.close());
+  const manager = createSessionManager({ storeDir, resolver: resolve, ...(onChange ? { onChange } : {}) });
+  storeManagers.set(storeDir, [manager]);
+  t.after(async () => {
+    const errors = [];
+    for (const opened of storeManagers.get(storeDir)) {
+      try { await opened.close(); } catch (error) { errors.push(error); }
+    }
+    storeManagers.delete(storeDir);
+    if (!errors.length) {
+      try {
+        const study = await inspectStudyService(storeDir);
+        if (study.status === 'running') await stopStudyService(storeDir, { expectedInstanceId: study.instanceId });
+      } catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length) throw new AggregateError(errors, 'store cleanup failed');
+  });
   await manager.initialize();
   const app = await startAppServer({
     manager, token: TOKEN, storeDir, port: 0, publicPort, tlsCert, tlsKey,
@@ -516,8 +537,7 @@ test('closed multi room resume becomes ROOM_UNBOUND and abort-unrecoverable end 
   const room = JSON.parse(fs.readFileSync(roomFile, 'utf8'));
   room.status = 'closed';
   fs.writeFileSync(roomFile, JSON.stringify(room));
-  const restored = createSessionManager({ storeDir, resolver });
-  t.after(() => restored.close());
+  const restored = restartApp(t, storeDir, resolver);
   await restored.initialize();
   assert.equal(restored.snapshot().error, 'SESSION_RECOVERABLE');
   const resume = cas(restored, 'resume');
@@ -533,6 +553,470 @@ test('closed multi room resume becomes ROOM_UNBOUND and abort-unrecoverable end 
   assert.ok(sidecar, fs.readdirSync(gameDir).join(','));
   const audit = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'), 'utf8'));
   assert.equal(audit.abandonedPendingDecision?.reason, 'ROOM_UNBOUND');
+});
+
+// #260: an LLM game blocks on the runtime probe after the new session is
+// committed (policy games probe in the background), so one failing probe is a
+// failure after the commit. Later probes return a working fake player.
+function probeFailingOnce() {
+  const player = { kind: 'fake',
+    async warmup({ playerId }) { return { sessionId: `session-${playerId}`, raw: 'ready' }; },
+    async decide() { return { raw: 'invalid' }; }, async dispose() {} };
+  const control = { failNext: false, alwaysFail: false, gate: null, entered: null };
+  control.resolver = async ({ need } = {}) => {
+    if (need === 'player+upper' && control.gate) {
+      control.entered?.();
+      await control.gate;
+    }
+    if (need === 'player+upper' && (control.failNext || control.alwaysFail)) {
+      control.failNext = false;
+      throw Object.assign(new Error('probe failure'), { code: 'NO_PLAYER_RUNTIME' });
+    }
+    return { player: need === 'player+upper' ? player : null, upper: null, notices: [] };
+  };
+  return control;
+}
+const LLM_ROOM = { mode: 'cash-training', totalSeats: 3, opponentRuntime: 'llm', hints: 'off', dealBias: 'off' };
+const POLICY_ROOM = { ...LLM_ROOM, opponentRuntime: 'policy' };
+async function openRoomWithGuest(app, manager) {
+  manager.room.open({ hostName: '호스트', totalSeats: 3, actionTimeoutSec: 60 });
+  const joined = await jsonOf(await fetch(`http://127.0.0.1:${app.publicPort}/api/join`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: manager.room.load().joinCode, name: '민준' }),
+  }));
+  assert.equal(joined.status, 200, JSON.stringify(joined.body));
+  return joined.body;
+}
+function assertRoomBoundTo(manager, gameId, guest) {
+  const room = manager.room.load();
+  assert.equal(room.status, 'locked');
+  assert.equal(room.lock.boundGameId, gameId);
+  const seat = room.participants.find((row) => row.participantId === guest.participantId);
+  assert.equal(seat.boundGameId, gameId);
+  assert.equal(seat.playerId, 'h1');
+}
+async function resumeSucceeds(manager, gameId) {
+  const resume = cas(manager, 'resume');
+  manager.command(resume);
+  const done = await settle(manager, resume.requestId);
+  assert.equal(done.status, 'succeeded', `${done.error} ${manager.snapshot().error}`);
+  assert.ok(['playing', 'paused'].includes(manager.snapshot().state), manager.snapshot().state);
+  assert.equal(manager.snapshot().gameId, gameId);
+}
+async function pauseWhenPlaying(manager) {
+  const deadline = Date.now() + TIMEOUT;
+  while (!['playing', 'paused'].includes(manager.snapshot().state)) {
+    if (Date.now() > deadline) throw new Error(`state ${manager.snapshot().state}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  if (manager.snapshot().state === 'paused') return;
+  const pause = cas(manager, 'pause');
+  manager.command(pause);
+  assert.equal((await settle(manager, pause.requestId)).status, 'succeeded');
+}
+// Rewrites a finished start row as the unfinished row a crash would leave, with
+// the room locked for it as `lockForStart` left it.
+function crashBeforeFinishing(storeDir, row, previous = { status: 'open', boundGameId: null, requestId: null }) {
+  const unfinished = { ...row, status: 'accepted' };
+  for (const key of ['error', 'completedAt', 'result']) delete unfinished[key];
+  fs.writeFileSync(path.join(storeDir, '.app', 'commands', `${row.requestId}.json`), JSON.stringify(unfinished));
+  const roomFile = path.join(storeDir, '.app', 'room.json');
+  const room = JSON.parse(fs.readFileSync(roomFile, 'utf8'));
+  room.status = 'locked';
+  room.lock = { requestId: row.requestId, boundGameId: previous.boundGameId, previous };
+  fs.writeFileSync(roomFile, JSON.stringify(room));
+}
+
+test('#260 a start that fails after its commit keeps the room bound, and the game resumes', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  let observed = null;
+  let roomAtFirstError;
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver, onChange: (snap) => {
+    if (snap.state === 'error' && roomAtFirstError === undefined) roomAtFirstError = structuredClone(observed?.room.load() ?? null);
+  } });
+  observed = manager;
+  const guest = await openRoomWithGuest(app, manager);
+  probe.failNext = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  const failed = await settle(manager, start.requestId);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  assert.equal(committed.gameId, failed.reservation.gameId);
+  assert.equal(manager.snapshot().state, 'error');
+  assert.equal(manager.snapshot().gameId, committed.gameId);
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  // The room is settled before the failure is published, not after.
+  assert.equal(roomAtFirstError?.status, 'locked');
+  assert.equal(roomAtFirstError?.lock.boundGameId, committed.gameId);
+  const seen = await jsonOf(await fetch(`http://127.0.0.1:${app.publicPort}/api/p/state`, {
+    headers: { authorization: `Bearer ${guest.participantToken}` } }));
+  assert.equal(seen.body.me.playerId, 'h1');
+  assert.equal(seen.body.game.gameId, committed.gameId);
+  await resumeSucceeds(manager, committed.gameId);
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  const view = await fetch(`http://127.0.0.1:${app.publicPort}/api/p/game/${committed.gameId}/snapshot`, {
+    headers: { authorization: `Bearer ${guest.participantToken}`, 'x-game-epoch': manager.snapshot().gameEpoch } });
+  assert.equal(view.status, 200, await view.text());
+  await endGame(manager);
+  assert.equal(manager.room.load().status, 'open');
+  assert.equal(manager.room.load().lock.boundGameId, null);
+});
+
+test('#260 the binding survives an app restart after a failure after the commit', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  probe.failNext = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).status, 'failed');
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.snapshot().error, 'SESSION_RECOVERABLE');
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  await resumeSucceeds(restored, committed.gameId);
+});
+
+for (const kind of ['replace-current', 'restart']) {
+  test(`#260 ${kind} that fails after its commit binds the room to the new game, not the previous one`, { timeout: TIMEOUT }, async (t) => {
+    const probe = probeFailingOnce();
+    const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+    const guest = await openRoomWithGuest(app, manager);
+    // restart keeps the stored setup, so only an LLM previous game fails on the probe again.
+    const first = { ...cas(manager), setup: kind === 'restart' ? LLM_ROOM : POLICY_ROOM };
+    manager.command(first);
+    assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
+    const previous = manager.snapshot().gameId;
+    await pauseWhenPlaying(manager);
+    assertRoomBoundTo(manager, previous, guest);
+    probe.failNext = true;
+    const next = { ...cas(manager, kind), ...(kind === 'replace-current' ? { setup: LLM_ROOM } : {}) };
+    manager.command(next);
+    const failed = await settle(manager, next.requestId);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.error, 'NO_PLAYER_RUNTIME');
+    const committed = resolveCurrentSession(storeDir);
+    assert.equal(committed.gameId, failed.reservation.gameId);
+    assert.notEqual(committed.gameId, previous);
+    assertRoomBoundTo(manager, committed.gameId, guest);
+    await resumeSucceeds(manager, committed.gameId);
+  });
+}
+
+async function endGame(manager) {
+  await pauseWhenPlaying(manager);
+  const end = cas(manager, 'end');
+  manager.command(end);
+  assert.equal((await settle(manager, end.requestId)).status, 'succeeded');
+}
+function restartApp(t, storeDir, resolve) {
+  const restored = createSessionManager({ storeDir, resolver: resolve });
+  storeManagers.get(storeDir).push(restored);
+  return restored;
+}
+
+test('#260 app-restart recovery that fails after the commit keeps the room bound', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  // (a) The committed reservation is recovered again (`reservedCurrent`) and its resume fails.
+  probe.failNext = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  const failed = await settle(manager, start.requestId);
+  assert.equal(failed.status, 'failed');
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  crashBeforeFinishing(storeDir, failed);
+  probe.failNext = true;
+  let restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).status, 'failed');
+  assert.equal(restored.receipt(start.requestId).error, 'NO_PLAYER_RUNTIME');
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  await resumeSucceeds(restored, committed.gameId);
+  // (b) A reserved but uncommitted start row starts again on recovery and fails after its commit.
+  await endGame(restored);
+  assert.equal(restored.room.load().status, 'open');
+  await restored.close();
+  const reserved = { ...failed, requestId: randomUUID(), expectedGameId: committed.gameId,
+    expectedSelectionVersion: committed.selectionVersion,
+    reservation: { gameId: randomUUID(), selectionVersion: committed.selectionVersion + 1 } };
+  crashBeforeFinishing(storeDir, reserved);
+  probe.failNext = true;
+  restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(reserved.requestId).status, 'failed');
+  assert.equal(restored.receipt(reserved.requestId).error, 'NO_PLAYER_RUNTIME');
+  assert.equal(resolveCurrentSession(storeDir).gameId, reserved.reservation.gameId);
+  assertRoomBoundTo(restored, reserved.reservation.gameId, guest);
+  await resumeSucceeds(restored, reserved.reservation.gameId);
+});
+
+test('#260 a committed reservation whose loop-state cannot be read is not bound on a failed recovery', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  await openRoomWithGuest(app, manager);
+  probe.failNext = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  const failed = await settle(manager, start.requestId);
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  crashBeforeFinishing(storeDir, failed);
+  fs.writeFileSync(path.join(committed.sessionDir, 'loop-state.json'), '{');
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).status, 'failed');
+  // Whether that game ended is unknown, so the room is restored as before the fix.
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
+});
+
+test('#260 a start refused before its reservation still reopens the room', { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const { storeDir, manager, app } = await boot(t);
+  await openRoomWithGuest(app, manager);
+  const owner = acquireOwnedLock(storeDir, 'loop.lock.d');
+  t.after(() => releaseOwnedLock(owner));
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const refused = await settle(manager, start.requestId);
+  assert.equal(refused.status, 'failed');
+  assert.equal(refused.error, 'ACTIVE_GAME');
+  assert.equal(refused.reservation, undefined);
+  assert.equal(resolveCurrentSession(storeDir), null);
+  assert.equal(manager.room.load().status, 'open');
+  assert.equal(manager.room.load().lock.boundGameId, null);
+});
+
+test('#260 a recovered start whose reservation was never committed reopens the room', { timeout: TIMEOUT }, async (t) => {
+  const { storeDir, manager, app } = await boot(t);
+  await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  const previous = resolveCurrentSession(storeDir);
+  await endGame(manager);
+  assert.equal(manager.room.load().status, 'open');
+  await manager.close();
+  // The CAS still names the ended game, but the reservation no longer follows its
+  // selection, so prepareSession refuses it after onReserve and before any commit.
+  const stale = { ...started, requestId: randomUUID(), expectedGameId: previous.gameId,
+    expectedSelectionVersion: previous.selectionVersion,
+    reservation: { gameId: randomUUID(), selectionVersion: previous.selectionVersion } };
+  crashBeforeFinishing(storeDir, stale);
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(stale.requestId).status, 'failed');
+  assert.equal(restored.receipt(stale.requestId).error, 'CURRENT_CHANGED');
+  assert.equal(resolveCurrentSession(storeDir).gameId, previous.gameId);
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
+  assert.equal(restored.room.load().lock.requestId, null);
+});
+
+test('#260 a recovered start whose reservation lost to another commit leaves that game unbound', { timeout: TIMEOUT }, async (t) => {
+  const { prepareSession, commitSession } = await import('../engine/session-catalog.js');
+  const { initializePreparedSession } = await import('../tools/game-loop.js');
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  await manager.close();
+  // While the app was down after reserving its game, a standalone launcher committed another.
+  const prepared = prepareSession(storeDir);
+  await initializePreparedSession(prepared.stagingDir, { ai: 2, opponentRuntime: 'policy' });
+  const other = commitSession(storeDir, prepared);
+  const row = { ...start, payload: 'crashed', roomLocked: true, acceptedAt: new Date().toISOString(),
+    setup: { ...POLICY_ROOM, hostName: '호스트', participants: [{ playerId: 'h1', name: '민준', participantId: guest.participantId }], actionTimeoutSec: 60 },
+    reservation: { gameId: randomUUID(), selectionVersion: 1 } };
+  crashBeforeFinishing(storeDir, row);
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(row.requestId).error, 'CURRENT_CHANGED');
+  assert.equal(resolveCurrentSession(storeDir).gameId, other.gameId);
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
+});
+
+test('#260 a start that can never succeed can still end, which reopens the room', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  probe.alwaysFail = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  assert.deepEqual(manager.snapshot().recoveryExit, { mode: 'abort' });
+  assert.deepEqual(manager.snapshot().allowedCommands, ['resume', 'end', 'restart']);
+  const resume = cas(manager, 'resume');
+  manager.command(resume);
+  assert.equal((await settle(manager, resume.requestId)).error, 'NO_PLAYER_RUNTIME');
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  // After an app restart the error is SESSION_RECOVERABLE and the exit stays open.
+  await manager.close();
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.snapshot().error, 'SESSION_RECOVERABLE');
+  assert.deepEqual(restored.snapshot().allowedCommands, ['resume', 'end', 'restart']);
+  const end = cas(restored, 'end');
+  restored.command(end);
+  const ended = await settle(restored, end.requestId);
+  assert.equal(ended.status, 'succeeded', JSON.stringify({ error: ended.error, snap: restored.snapshot().error }));
+  assert.equal(ended.recovery.reason, 'NEVER_DEALT');
+  assert.equal(restored.snapshot().state, 'ended');
+  const audit = JSON.parse(fs.readFileSync(path.join(committed.sessionDir, 'loop-state.json'), 'utf8'));
+  assert.equal(audit.abandonedPendingDecision?.reason, 'NEVER_DEALT');
+  assert.equal(restored.room.load().status, 'open');
+  probe.alwaysFail = false;
+  const next = { ...cas(restored), setup: POLICY_ROOM };
+  restored.command(next);
+  assert.equal((await settle(restored, next.requestId)).status, 'succeeded');
+  assertRoomBoundTo(restored, restored.snapshot().gameId, guest);
+});
+
+test('#260 a committed game without loop-state that can never start can still end after a resume attempt', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  probe.alwaysFail = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  // As if the app stopped between the commit and bootstrap's first loop-state write.
+  fs.rmSync(path.join(committed.sessionDir, 'loop-state.json'));
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  assert.deepEqual(restored.snapshot().allowedCommands, ['resume']);
+  const resume = cas(restored, 'resume');
+  restored.command(resume);
+  assert.equal((await settle(restored, resume.requestId)).error, 'NO_PLAYER_RUNTIME');
+  // The resume rebuilt loop-state as `playing` before its probe failed; no hand was dealt.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(committed.sessionDir, 'loop-state.json'), 'utf8')).phase, 'playing');
+  assert.deepEqual(restored.snapshot().allowedCommands, ['resume', 'end', 'restart']);
+  const end = cas(restored, 'end');
+  restored.command(end);
+  const ended = await settle(restored, end.requestId);
+  assert.equal(ended.status, 'succeeded', JSON.stringify({ error: ended.error }));
+  assert.equal(ended.recovery.reason, 'NEVER_DEALT');
+  assert.equal(restored.room.load().status, 'open');
+});
+
+for (const loopState of ['intact', 'unreadable', 'oversized']) test(`#260 a failed recovery of a reserved game that already ended does not bind the room (${loopState} loop-state)`, { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const { storeDir, manager, app } = await boot(t);
+  await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  await endGame(manager);
+  await manager.close();
+  // The start row never finished although its game did (e.g. a crash, then a CLI end).
+  crashBeforeFinishing(storeDir, started);
+  // An aborted engine is terminal whatever its loop-state holds, including one the
+  // app reader refuses (over 2 MiB).
+  const loopFile = path.join(resolveCurrentSession(storeDir).sessionDir, 'loop-state.json');
+  if (loopState === 'unreadable') fs.writeFileSync(loopFile, '{');
+  if (loopState === 'oversized') fs.appendFileSync(loopFile, ' '.repeat(2 * 1024 * 1024 + 1));
+  const owner = acquireOwnedLock(storeDir, 'loop.lock.d');
+  t.after(() => releaseOwnedLock(owner));
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).error, 'ACTIVE_GAME');
+  assert.equal(resolveCurrentSession(storeDir).gameId, started.reservation.gameId);
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
+});
+
+test('#260 an app restart opens a room bound to an aborted game even when its loop-state cannot be read', { timeout: TIMEOUT }, async (t) => {
+  const { storeDir, manager, app } = await boot(t);
+  await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).status, 'succeeded');
+  const ended = resolveCurrentSession(storeDir);
+  await endGame(manager);
+  await manager.close();
+  // The room still names the aborted game (as after a restart whose new game was never
+  // committed), no command is unfinished, and the loop-state is damaged.
+  const roomFile = path.join(storeDir, '.app', 'room.json');
+  const room = JSON.parse(fs.readFileSync(roomFile, 'utf8'));
+  room.status = 'locked';
+  room.lock = { requestId: start.requestId, boundGameId: ended.gameId, previous: null };
+  fs.writeFileSync(roomFile, JSON.stringify(room));
+  fs.writeFileSync(path.join(ended.sessionDir, 'loop-state.json'), '{');
+  const restored = restartApp(t, storeDir, resolver);
+  // The room is recovered first; initialize then fails on the damaged loop-state
+  // (existing behaviour, not what this test pins).
+  await restored.initialize().catch(() => {});
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
+});
+
+test('#260 a recovered replace-current binds the room to the game it commits', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  const previous = resolveCurrentSession(storeDir);
+  await pauseWhenPlaying(manager);
+  await manager.close();
+  // A replace-current row the app accepted and then lost before reserving its game.
+  const replace = { requestId: randomUUID(), expectedInstanceId: 'crashed', expectedAppRevision: 1,
+    expectedGameId: previous.gameId, expectedSelectionVersion: previous.selectionVersion, kind: 'replace-current',
+    setup: { ...started.setup, opponentRuntime: 'llm' }, payload: 'crashed', roomLocked: true,
+    acceptedAt: new Date().toISOString() };
+  crashBeforeFinishing(storeDir, replace, { status: 'locked', boundGameId: previous.gameId, requestId: start.requestId });
+  probe.failNext = true;
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  const failed = restored.receipt(replace.requestId);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  assert.equal(committed.gameId, failed.reservation.gameId);
+  assert.notEqual(committed.gameId, previous.gameId);
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  await resumeSucceeds(restored, committed.gameId);
+});
+
+test('#260 closing the app during a start keeps the committed game bound', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  let release;
+  const entering = new Promise((resolve) => { probe.entered = resolve; });
+  probe.gate = new Promise((resolve) => { release = resolve; });
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  await entering;
+  const closing = manager.close();
+  setTimeout(release, 30);
+  await closing;
+  probe.gate = null;
+  const failed = manager.receipt(start.requestId);
+  assert.equal(failed.status, 'failed');
+  const committed = resolveCurrentSession(storeDir);
+  assert.equal(committed.gameId, failed.reservation.gameId);
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  await resumeSucceeds(restored, committed.gameId);
 });
 
 test('late spectator API is read-only and promotion only affects the next game', {timeout:TIMEOUT}, async t => {

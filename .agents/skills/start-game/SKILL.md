@@ -133,6 +133,8 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 `BAD_PLAYER_RECOVERY`로 불러오기가 실패하면 손상된 결정을 직접 수정·삭제·재실행하지 않는다. 앱의 private JSON reader는 loop 파일 **2 MiB**를 넘으면 거부하며, 이는 snapshot/core 경계가 아니라 app-reader 경계다. 그러면 제어 버튼은 fail-closed로 unavailable일 수 있다. stopped·unowned game에만 legacy 복구를 쓴다. 명시 legacy flag는 prior `BAD_PLAYER_RECOVERY` 관찰이 없어도 eligible playing state를 버릴 수 있고, audit reason은 이 operator recovery 경로의 분류일 뿐 모든 호출자가 오류를 관찰했다는 증명이 아니다. 웹 결과 패널의 **게임 종료** 또는 **같은 설정으로 새 게임**을 사용자가 확인하면 원문은 `loop-state.unverified.json`과 `loop-state.abandoned.<operationId>.json`에 보존되고 `player-recovery-abandoned`로 추적된다. 엔진이 아직 진행 중이면 abort하며 칩·완료 핸드 기록은 유지하고 진행 핸드는 감사 파일로 보존한다. 이미 결과가 확정된 경우 **기록을 버리고 결과 정리**는 결과를 바꾸지 않고 기존 finalization만 재개한다. 플레이어 호출은 없지만 upper/relay/리뷰 단계는 허용되고 halt할 수 있다. live session을 중단하지 말고 먼저 owner identity와 stop을 확인한다.
 
+새 게임 commit 뒤 시작이 실패하면 그 게임이 current로 남고 온라인 세션은 그 게임에 묶인 채 유지된다(원인 제거 후 불러오기). 한 핸드도 시작하지 않은 게임은 오류 코드와 무관하게 **게임 종료**·**같은 설정으로 새 게임**을 허용하며 audit reason은 `NEVER_DEALT`다.
+
 legacy 정지 게임은 `node tools/game-loop.js --game-dir /absolute/game --resume --abort-unrecoverable recovery-1`로 명시 종료한다(operationId 필수, `--retry-decision`과 배타). `GAME_ENDED` 뒤에는 run을 다시 호출하지 않는다. audit retry 이벤트는 operationId/SHA별로 반복될 수 있어 exactly-once를 주장하지 않는다. pendingDecision·accepted 명령·terminal 엔진과 미수렴한 aborting/abandonedPendingDecision이 남으면 downgrade하지 않는다. 호환 버전에서 roll-forward하고 원문 sidecar는 삭제하지 않는다. 상세 행렬은 `docs/implementation/unrecoverable-recovery-exit.md`다.
 
 ## 4. 종료 보고

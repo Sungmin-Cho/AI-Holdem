@@ -15,6 +15,12 @@ The command journal records the original game ID, selection version and epoch. R
 
 `BAD_ABORT_CHECKPOINT` remains fail-closed even when the engine already reports abort. Keep the game stopped and preserve its engine, loop state, sidecar and logs. If an original backup of the matching sidecar/checkpoint exists, restore only that original evidence and retry with this compatible version; operation ID and digest must match the engine. Do not invent a sidecar, alter a digest/operation ID, or delete the checkpoint to force completion. If matching originals are unavailable, retain the files for diagnosis; neither the app nor `--abort-unrecoverable` bypasses this check. Invalid pending records in hint-enabled games are snapshotted before any capability child can run.
 
+## Start failures before the first hand (#260)
+
+A start-type command can fail after its new session is committed (for example the runtime probe or the study service refuses during bootstrap). The committed game stays current; if the command locked an online room, the room stays bound to that game so it can be resumed once the cause is removed. A failure before the commit, or on a reserved game that has already ended, restores the room as before.
+
+When the cause cannot be removed, a committed game that never dealt a hand (engine `handNo` 0 with neither a current nor a last hand, loop `phase` `bootstrap` or `playing`, no `pendingDecision`) offers End/Restart from any error, not only the codes listed above. A game parked before its first hand qualifies too; ending it loses no decision. It uses the same abandonment path with audit reason `NEVER_DEALT`, and the loop re-checks that the game still never dealt before it writes anything. A checkpoint with this reason needs this version or later to converge.
+
 ## Rollback boundary
 
 Do not downgrade while any `pendingDecision` exists, any command row is `accepted`, or an `aborting`/`abandonedPendingDecision` record has not converged with the terminal engine. Preserve original events and sidecars; use a compatible version to roll forward. A successful unit test or a retained sidecar is not proof that a live game is safe to downgrade.

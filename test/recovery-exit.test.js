@@ -101,6 +101,61 @@ test('#197 preserves original invalid bytes before resume cleanup, then aborts w
   assert.deepEqual(fs.readFileSync(path.join(f.root,state.abandonedPendingDecision.sidecar)),preserved);
   assert.equal(read(path.join(f.root,'state.json')).abortOperationId,'exit-1');
 });
+// #260: the app offers NEVER_DEALT only for a committed game that never dealt a
+// hand; the loop checks that premise again before it abandons anything.
+async function neverDealtFixture(t,{phase,dealt=false,pending=false}) {
+  const root=createOwnedTempDir('start-failed-exit');
+  await initializePreparedSession(root,{ai:1,mode:'cash-training',hands:20,opponentRuntime:'policy'});
+  if(dealt) await engine(root,['step','--new-hand']);
+  const seeded=read(path.join(root,'state.json'));
+  assert.equal(seeded.handNo,dealt?1:0);
+  const file=path.join(root,'loop-state.json');
+  fs.writeFileSync(file,JSON.stringify({phase,handNo:seeded.handNo,sessionToken:seeded.sessionToken,gameEpoch:sha(seeded.sessionToken),
+    ...(pending?{pendingDecision:{schemaVersion:1,gameEpoch:sha(seeded.sessionToken),generation:1,status:'running'}}:{})}));
+  let calls=0;
+  const loops=[];
+  const loop=(opts={})=>{const l=createGameLoop({gameDir:root,resolver:async()=>{calls++;throw new Error('UNEXPECTED_RESOLVER');},opts:{port:0,...opts}});loops.push(l);return l;};
+  t.after(async()=>{for(const l of loops)await l.requestStop().catch(()=>{});});
+  return {root,file,seeded,before:fs.readFileSync(file),loop,calls:()=>calls};
+}
+const NEVER_DEALT=operationId=>({abortUnrecoverable:{operationId,reason:'NEVER_DEALT'}});
+test('#260 NEVER_DEALT ends a committed game that never dealt a hand, from bootstrap or a rebuilt playing state',{timeout:TIMEOUT},async t=>{
+  for(const phase of ['bootstrap','playing'])await t.test(phase,async st=>{
+    const f=await neverDealtFixture(st,{phase});
+    assert.equal((await f.loop(NEVER_DEALT('start-failed-1')).resume()).code,'GAME_ENDED');
+    const state=read(f.file);
+    assert.equal(state.phase,'aborted');assert.equal(state.abandonedPendingDecision.reason,'NEVER_DEALT');
+    assert.deepEqual(fs.readFileSync(path.join(f.root,state.abandonedPendingDecision.sidecar)),f.before);
+    assert.equal(read(path.join(f.root,'state.json')).result,'abort');
+    assert.equal(f.calls(),0);
+  });
+});
+test('#260 NEVER_DEALT is refused once a hand was dealt or a decision is pending, before any write',{timeout:TIMEOUT},async t=>{
+  for(const [name,options] of [['dealt',{phase:'playing',dealt:true}],['pending',{phase:'playing',pending:true}]])await t.test(name,async st=>{
+    const f=await neverDealtFixture(st,options);
+    const engineBefore=fs.readFileSync(path.join(f.root,'state.json'));
+    await assert.rejects(f.loop(NEVER_DEALT('start-failed-2')).resume(),{code:'BAD_LOOP_PHASE'});
+    assert.deepEqual(fs.readFileSync(f.file),f.before);
+    assert.deepEqual(fs.readFileSync(path.join(f.root,'state.json')),engineBefore);
+    assert.equal(fs.readdirSync(f.root).some(file=>file.startsWith('loop-state.abandoned.')),false);
+    assert.equal(f.calls(),0);
+  });
+});
+test('#260 a NEVER_DEALT checkpoint left by a failed engine end is validated and finished on the next resume',{timeout:TIMEOUT},async t=>{
+  const f=await neverDealtFixture(t,{phase:'bootstrap'});
+  await assert.rejects(f.loop({...NEVER_DEALT('start-failed-3'),onEngineInvoke:args=>{
+    if(args[0]==='end')throw Object.assign(new Error('injected'),{code:'END_REJECTED'});
+  }}).resume(),{code:'END_REJECTED'});
+  const checkpoint=read(f.file);
+  assert.deepEqual(checkpoint.aborting,{operationId:'start-failed-3',mode:'abort'});
+  assert.equal(checkpoint.abandonedPendingDecision.reason,'NEVER_DEALT');
+  assert.equal((await f.loop().resume()).code,'GAME_ENDED');
+  const state=read(f.file);
+  assert.equal(state.phase,'aborted');assert.equal(state.aborting,undefined);
+  assert.equal(state.abandonedPendingDecision.reason,'NEVER_DEALT');
+  assert.equal(read(path.join(f.root,'state.json')).abortOperationId,'start-failed-3');
+  assert.equal(f.calls(),0);
+});
 test('#197 identity rejection and snapshot publication failure never rewrite loop bytes',{timeout:TIMEOUT},async t=>{
   for(const mode of ['identity','snapshot-failure','large'])await t.test(mode,async st=>{
     const f=await fixture(st,{large:mode==='large'});

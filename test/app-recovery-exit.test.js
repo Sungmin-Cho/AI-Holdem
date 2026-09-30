@@ -13,7 +13,7 @@ import {prepareSession,commitSession} from '../engine/session-catalog.js';
 import {initializePreparedSession} from '../tools/game-loop.js';
 import {resolveSessionReference} from '../tools/reference-source.js';
 import {sealPreparation} from '../tools/session-preparation.js';
-import {setupToArgs} from '../shared/game-setup.js';
+import {normalizeSetup,setupToArgs} from '../shared/game-setup.js';
 import {inspectStudyService,stopStudyService} from '../tools/study-service.js';
 
 const TIMEOUT=process.platform==='win32'?300000:30000;
@@ -387,4 +387,73 @@ test('#197 an unverified same-PID loop owner keeps startingLoop recovery exits f
     // declined release; remove the deliberately forged owner before global cleanup.
     fs.rmSync(path.join(root,'loop.lock.d'),{recursive:true,force:true});
   }
+});
+// #260: a committed game that never dealt a hand can end from any error, so a
+// start whose cause cannot be removed (here: no player runtime) is not a dead end.
+test('#260 a local game whose start keeps failing after the commit can end without a hand',{timeout:TIMEOUT},async t=>{
+  const root=createOwnedTempDir('app-start-failed-exit');
+  const resolver=async({need}={})=>{
+    if(need==='player+upper')throw Object.assign(new Error('probe failure'),{code:'NO_PLAYER_RUNTIME'});
+    return {player:null,upper:null,notices:[]};
+  };
+  const manager=createSessionManager({storeDir:root,resolver});
+  t.after(async()=>{
+    try { await manager.close(); }
+    finally {
+      const study=await inspectStudyService(root);
+      if(study.status==='running') await stopStudyService(root,{expectedInstanceId:study.instanceId});
+    }
+  });
+  await manager.initialize();
+  const start={...body(manager,'start'),setup:{aiCount:1,opponentRuntime:'llm'}};
+  manager.command(start);
+  const failed=await settle(manager,start.requestId);
+  assertReceipt(manager,failed,'failed');
+  assert.equal(failed.error,'NO_PLAYER_RUNTIME');
+  assert.deepEqual(manager.snapshot().recoveryExit,{mode:'abort'});
+  assert.deepEqual(manager.snapshot().allowedCommands,['resume','end','restart']);
+  const end=body(manager,'end');manager.command(end);
+  const ended=await settle(manager,end.requestId);
+  assertReceipt(manager,ended,'succeeded');
+  assert.equal(ended.recovery.reason,'NEVER_DEALT');
+  assert.equal(manager.snapshot().state,'ended');
+  const loop=read(path.join(manager.current.sessionDir,'loop-state.json'));
+  assert.equal(loop.phase,'aborted');
+  assert.equal(loop.abandonedPendingDecision.reason,'NEVER_DEALT');
+});
+// #260: a healthy game parked before its first hand (app-restart recovery parks a
+// fresh game) is never dealt either, so after another restart it can end the same way.
+test('#260 a game parked before its first hand can end after an app restart',{timeout:TIMEOUT},async t=>{
+  const root=createOwnedTempDir('app-parked-never-dealt');
+  const resolver=async()=>({player:null,upper:null,notices:[]});
+  let manager=createSessionManager({storeDir:root,resolver});
+  t.after(async()=>{
+    try { await manager.close(); }
+    finally {
+      const study=await inspectStudyService(root);
+      if(study.status==='running') await stopStudyService(root,{expectedInstanceId:study.instanceId});
+    }
+  });
+  await manager.initialize();
+  const request={...body(manager,'start'),setup:normalizeSetup({aiCount:1})};
+  await manager.close();
+  write(path.join(root,'.app','commands',`${request.requestId}.json`),
+    {...request,payload:JSON.stringify(request),status:'accepted',reservation:{gameId:randomUUID(),selectionVersion:1}});
+  manager=createSessionManager({storeDir:root,resolver});
+  await manager.initialize();
+  assert.equal(manager.snapshot().state,'paused');
+  const dir=manager.current.sessionDir;
+  assert.equal(read(path.join(dir,'state.json')).handNo,0);
+  assert.equal(read(path.join(dir,'loop-state.json')).phase,'playing');
+  await manager.close();
+  manager=createSessionManager({storeDir:root,resolver});
+  await manager.initialize();
+  assert.equal(manager.snapshot().error,'SESSION_RECOVERABLE');
+  assert.deepEqual(manager.snapshot().recoveryExit,{mode:'abort'});
+  assert.deepEqual(manager.snapshot().allowedCommands,['resume','end','restart']);
+  const end=body(manager,'end');manager.command(end);
+  const ended=await settle(manager,end.requestId);
+  assertReceipt(manager,ended,'succeeded');
+  assert.equal(ended.recovery.reason,'NEVER_DEALT');
+  assert.equal(manager.snapshot().state,'ended');
 });
