@@ -5,8 +5,9 @@ import path from 'node:path';
 import { createGame } from './hand.js';
 import { generatePersonas } from './personas.js';
 import {
-  processStartTime, readOwnedLock, runExclusive, saveState, writeJsonAtomic,
+  processStartTime, readOwnedLock, runExclusive, saveState, serverProcessStartTime, writeJsonAtomic,
 } from './state.js';
+import { terminateWin32ProcessStartedAt } from './process-identity.js';
 
 // Game-directory archive (init vacate), not the per-hand writeHandArchive.
 
@@ -268,17 +269,42 @@ export function isAlive(pid) {
   }
 }
 
+// #257: `lock.json` `serverStartTime` is written by the game loop. An owned value
+// (`utc-v1:`/`win32-v1:`, since #257) is read back with the owned reader — the same text from
+// any time zone or locale; a value written before #257 keeps the legacy reader. On Windows an
+// owned record is checked and terminated through one process handle (#255 S2) unless a `kill`
+// seam is injected; any outcome but `terminated` sends nothing, like a mismatch.
 export function stopServer(pid, deps = {}) {
   const alive = deps.isAlive ?? isAlive;
   const kill = deps.kill ?? ((p, signal) => process.kill(p, signal));
   const beforeSignal = deps.beforeSignal ?? (() => {});
   const sleep = deps.sleepSync ?? sleepSync;
   const clock = deps.now ?? now;
-  const startTimeOf = deps.processStartTime ?? processStartTime;
   const expectedStartTime = deps.expectedStartTime;
+  const owned = typeof expectedStartTime === 'string' && /^(?:utc|win32)-v1:/.test(expectedStartTime);
+  const startTimeOf = owned
+    ? deps.ownedProcessStartTime ?? serverProcessStartTime
+    : deps.processStartTime ?? processStartTime;
+  // The #255 seam rule: an explicit `terminate` (a function, or null to turn it off) wins;
+  // otherwise the handle terminator is the default only on Windows without a `kill` seam.
+  const terminate = deps.terminate !== undefined
+    ? deps.terminate
+    : (!deps.kill && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
 
   if (typeof expectedStartTime !== 'string' || expectedStartTime.length === 0) return;
   if (!alive(pid)) return;
+  if (terminate && expectedStartTime.startsWith('win32-v1:')) {
+    beforeSignal(pid, 'SIGTERM');
+    if (terminate(pid, expectedStartTime) !== 'terminated') return;
+    waitWhileAlive(pid, alive, clock, sleep, 5000, 50);
+    if (!alive(pid)) return;
+    // TerminateProcess on another process is asynchronous. The second attempt is the same
+    // one-handle check on a fresh handle, so a replacement is still never terminated.
+    beforeSignal(pid, 'SIGKILL');
+    if (terminate(pid, expectedStartTime) !== 'terminated') return;
+    waitWhileAlive(pid, alive, clock, sleep, 200, 20);
+    return;
+  }
   const current = startTimeOf(pid);
   if (current !== expectedStartTime) return;
   beforeSignal(pid, 'SIGTERM');
@@ -337,6 +363,8 @@ export function initGameDir(gameDir, flags, deps = {}) {
       sleepSync: deps.sleepSync,
       now: clock,
       processStartTime: startTimeOf,
+      ownedProcessStartTime: deps.ownedProcessStartTime,
+      terminate: deps.terminate,
       expectedStartTime: lock.serverStartTime,
     });
     if (alive(lock.serverPid)) {

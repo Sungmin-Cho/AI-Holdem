@@ -29,6 +29,7 @@ import {
   processStartTime,
   ownedProcessStartTime,
   parseOwnedLockIdentity,
+  serverProcessStartTime,
   readOwnedLock,
   releaseOwnedLock,
   verifyOwnedLock,
@@ -285,6 +286,16 @@ export function buildBadChildOutputDetails({ script, exitCode, signal, stdout, s
 // commands require (only a lock.json carrying this game's sessionToken). `authenticated`
 // means this loop instance itself verified the binding of exactly this lock (pid, port,
 // token) and the pid still has the verified start time — a fact at `observedAt`, not later.
+// #257: the options for a recorded (handle) termination. Without a finalization deadline the
+// terminator's own default timeout applies ({}); with one, it starts only with at least a
+// whole second left and never gets more than what is left (#255 `recordedTerminatorTimeoutMs`),
+// and null means "do not start it".
+export function recordedTerminatorOptions(deadlineNs, monotonicNs) {
+  if (deadlineNs === null || deadlineNs === undefined) return {};
+  const timeoutMs = recordedTerminatorTimeoutMs(deadlineNs - monotonicNs());
+  return timeoutMs === null ? null : { timeoutMs };
+}
+
 export function deriveServerLockObservation({ readLock, expectedToken, bindingVerified, processAlive, startTimeOf, now = () => new Date() }) {
   const observedAt = now().toISOString();
   let lock;
@@ -725,6 +736,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
   const ownedStartTimeOf = opts.ownedProcessStartTime ?? ownedProcessStartTime;
+  // #257 D1: the relay server's identity is read in the owned form (UTC, fixed locale), so a
+  // DST fold or a TZ change never makes two readings of one process differ or two processes
+  // agree, and the value written to lock.json means the same to another process. An injected
+  // `processStartTime` (test seam) stays the server reader.
+  const serverStartTimeOf = opts.processStartTime ?? opts.ownedProcessStartTime ?? serverProcessStartTime;
   // #255: coach handles only (`linux-v1` on Linux); lifetime locks keep `ownedStartTimeOf`.
   const coachStartTimeOf = opts.coachProcessStartTime ?? coachProcessStartTime;
   const listenerOwnedByFn = opts.listenerOwnedBy ?? createListenerOwnedBy({
@@ -1549,12 +1565,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const identityStillAlive = (pid, startTime, { owned = false } = {}) => {
     if (!processAlive(pid)) return false;
-    const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
+    const current = owned ? ownedStartTimeOf(pid) : serverStartTimeOf(pid);
     if (current === null) {
       throw codedError('IDENTITY_UNAVAILABLE', `pid ${pid} startTime을 재검증할 수 없습니다.`);
     }
     return current === startTime;
   };
+
+  // #257 D3: on Windows a recorded `win32-v1` identity is checked and terminated through one
+  // process handle (#255 S2), so the pid cannot be reused between the creation-time check and
+  // TerminateProcess — which an observation followed by `process.kill(pid)` cannot promise.
+  // Used only where `recordedTerminator` exists (Windows without an injected `signalProcess`);
+  // SIGTERM and SIGKILL are both TerminateProcess there. Returns like `sendSignal`: true when
+  // terminated, false when the process was already gone. A finalization-bound stop starts the
+  // terminator only with at least a whole second left.
+  const recordedTerminates = (identity) => Boolean(recordedTerminator)
+    && typeof identity?.startTime === 'string' && identity.startTime.startsWith('win32-v1:');
+  const terminateRecorded = (pid, startTime, codes, { boundToFinalizationDeadline = false } = {}) => {
+    const options = recordedTerminatorOptions(boundToFinalizationDeadline ? finalizationDeadlineNs : null, monotonicNs);
+    if (options === null) throw codedError(codes.unconfirmed, `pid ${pid} 종료를 확인할 시간이 남지 않았습니다.`);
+    const outcome = recordedTerminator(pid, startTime, options);
+    if (outcome === 'terminated') return true;
+    if (outcome === 'absent') return false;
+    if (outcome === 'replaced') throw codedError(codes.mismatch, `pid ${pid}가 다른 프로세스로 재사용되어 종료하지 않습니다.`);
+    throw codedError(codes.signalFailed, `pid ${pid} 종료를 확인하지 못했습니다.`);
+  };
+  const LOOP_TERMINATE_CODES = { mismatch: 'LOOP_IDENTITY_MISMATCH', signalFailed: 'LOOP_SIGNAL_FAILED', unconfirmed: 'LOOP_ALIVE' };
+  const SERVER_TERMINATE_CODES = { mismatch: 'SERVER_IDENTITY_MISMATCH', signalFailed: 'SERVER_SIGNAL_FAILED', unconfirmed: 'SERVER_STOP_UNCONFIRMED' };
 
   const sendSignal = (pid, signal, code) => {
     try {
@@ -1575,7 +1612,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!processAlive(pid)) return true;
-      const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
+      const current = owned ? ownedStartTimeOf(pid) : serverStartTimeOf(pid);
       if (current === null) {
         // 종료 직후 kill(0)은 아직 성공하지만 ps identity가 먼저 사라지는
         // 짧은 전이 창이 있다. unknown을 사망으로 승격하지 않고 deadline까지 재확인한다.
@@ -1590,7 +1627,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await sleep(pollMs);
     }
     if (!processAlive(pid)) return true;
-    const current = owned ? ownedStartTimeOf(pid) : startTimeOf(pid);
+    const current = owned ? ownedStartTimeOf(pid) : serverStartTimeOf(pid);
     if (current === null) {
       throw codedError(unavailableCode, `${label} pid identity를 재검증할 수 없습니다.`);
     }
@@ -1616,6 +1653,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const expected = { pid: owner.pid, startTime: owner.startTime };
     const signalLoopOwner = (signal) => {
       assertSameLoopOwner(expected);
+      if (recordedTerminates(expected)) return terminateRecorded(expected.pid, expected.startTime, LOOP_TERMINATE_CODES);
       // lock 동일성 검사 직후 startTime을 한 번 더 맞춘 뒤 동기적으로 시그널한다.
       if (!identityStillAlive(expected.pid, expected.startTime, { owned: true })) {
         throw codedError('LOOP_IDENTITY_MISMATCH', '정지 대상 loop pid identity가 바뀌었습니다.');
@@ -1665,6 +1703,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ) {
       throw codedError('SERVER_IDENTITY_CHANGED', '시그널 직전 server lock이 바뀌었습니다.');
     }
+    if (recordedTerminates(expected)) return terminateRecorded(expected.serverPid, expected.startTime, SERVER_TERMINATE_CODES);
     // listener/token 검증은 await를 포함하므로, 그 뒤 신호 직전에
     // pid+startTime을 다시 맞춰 async 간격에서의 pid 재사용을 차단한다.
     if (!identityStillAlive(expected.serverPid, expected.startTime)) {
@@ -1684,7 +1723,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     if (processAlive(current.serverPid)) {
       if (expected.startTime !== undefined) {
-        const currentStart = startTimeOf(current.serverPid);
+        const currentStart = serverStartTimeOf(current.serverPid);
         if (currentStart === null) {
           throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 후 server pid identity를 확인할 수 없습니다.');
         }
@@ -1709,7 +1748,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         removeStoppedForceServerLock(lock, pin);
         return;
       }
-      const startTime = startTimeOf(lock.serverPid);
+      const startTime = serverStartTimeOf(lock.serverPid);
       if (startTime === null) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', 'force server startTime을 확인할 수 없습니다.');
       }
@@ -1764,7 +1803,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
         if (processAlive(existing.serverPid)) {
-          const startTime = startTimeOf(existing.serverPid);
+          const startTime = serverStartTimeOf(existing.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
           }
@@ -1775,19 +1814,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             confirmed.serverPid !== existing.serverPid
             || confirmed.port !== existing.port
             || confirmed.sessionToken !== sessionToken
-            || startTimeOf(existing.serverPid) !== startTime
+            || serverStartTimeOf(existing.serverPid) !== startTime
           ) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 adoption 중 바뀌었습니다.');
           }
           const snapshot = await assertServerBinding(confirmed, { stopAware });
           if (stopAware) assertNotStopping();
-          if (startTimeOf(existing.serverPid) !== startTime) {
+          if (serverStartTimeOf(existing.serverPid) !== startTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '재사용 서버 identity가 binding 재검증 뒤 바뀌었습니다.');
           }
           const compatible = study || managed ? await matchesStoreRelay(confirmed, snapshot, study, { stopAware }) : true;
           if (study || managed) {
             assertPinnedServerLock(pin);
-            if (startTimeOf(existing.serverPid) !== startTime) {
+            if (serverStartTimeOf(existing.serverPid) !== startTime) {
               throw codedError('SERVER_IDENTITY_CHANGED', 'store relay identity가 capability 검증 중 바뀌었습니다.');
             }
           }
@@ -1835,7 +1874,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       serverIdentity = null; serverBindingVerified = null;
       let spawnError = null;
       child.once('error', (error) => { spawnError = error; });
-      const spawnedStartTime = serverPid === null ? null : startTimeOf(serverPid);
+      const spawnedStartTime = serverPid === null ? null : serverStartTimeOf(serverPid);
       if (spawnedStartTime === null) {
         // spawn handle은 이미 우리 소유다. identity를 세울 수 없는 자식은 첫 await 전에
         // 즉시 KILL+exit 확인한다. 확인 실패면 handle을 유지해 bootstrap catch의
@@ -1863,7 +1902,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ) {
           if (stopAware) assertNotStopping();
           serverPid = lock.serverPid;
-          const startTime = startTimeOf(lock.serverPid);
+          const startTime = serverStartTimeOf(lock.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '새 server child startTime을 확인할 수 없습니다.');
           }
@@ -1889,7 +1928,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           }
           if (stopAware) assertNotStopping();
           const confirmed = assertPinnedServerLock(pin);
-          if (child.exitCode !== null || child.signalCode !== null || startTimeOf(child.pid) !== spawnedStartTime) {
+          if (child.exitCode !== null || child.signalCode !== null || serverStartTimeOf(child.pid) !== spawnedStartTime) {
             throw codedError('SERVER_IDENTITY_CHANGED', '새 server child identity가 binding 뒤 바뀌었습니다.');
           }
           closeServerLockPin(pin);
@@ -2214,7 +2253,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!identity || identity.pid !== child.pid) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child의 시작 identity가 없습니다.');
       }
-      const current = startTimeOf(child.pid);
+      const current = serverStartTimeOf(child.pid);
       if (current === null) {
         throw codedError('SERVER_IDENTITY_UNAVAILABLE', '직접 server child startTime을 시그널 직전 확인할 수 없습니다.');
       }
@@ -2257,7 +2296,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const identity = serverIdentity;
     if (!identity) throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 identity가 없습니다.');
     if (!processAlive(identity.pid)) return 'dead';
-    const current = startTimeOf(identity.pid);
+    const current = serverStartTimeOf(identity.pid);
     if (current === null) {
       throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime 재검증에 실패했습니다.');
     }
@@ -2276,7 +2315,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return !processAlive(serverIdentity.pid);
   };
 
-  const signalAdoptedServer = (signal) => {
+  const signalAdoptedServer = (signal, { boundToFinalizationDeadline = false } = {}) => {
+    if (recordedTerminates(serverIdentity)) {
+      if (!processAlive(serverIdentity.pid)) return false;
+      return terminateRecorded(serverIdentity.pid, serverIdentity.startTime, SERVER_TERMINATE_CODES, { boundToFinalizationDeadline });
+    }
     if (adoptedIdentityStatus() === 'dead') return false;
     try {
       signalProcess(serverIdentity.pid, signal);
@@ -2293,13 +2336,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return;
     }
     if (adoptedIdentityStatus() === 'dead') return;
-    signalAdoptedServer('SIGTERM');
+    signalAdoptedServer('SIGTERM', { boundToFinalizationDeadline });
     if (!await waitForAdoptedDeath(
       boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000,
     )) {
       // pid+startTime을 KILL 직전에 다시 확인한다. unknown/mismatch면 신호 없이 실패한다.
       if (boundToFinalizationDeadline) assertFinalizationDeadline();
-      signalAdoptedServer('SIGKILL');
+      signalAdoptedServer('SIGKILL', { boundToFinalizationDeadline });
       if (!await waitForAdoptedDeath(
         boundToFinalizationDeadline ? assertAndBoundFinalizationMs(1_000) : 1_000,
       )) {
@@ -3604,10 +3647,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if(!pin)return;
       const lock=assertPinnedServerLock(pin);
       if(lock.sessionToken!==engine.sessionToken || lock.serverPid!==serverPid ||
-        serverIdentity.pid!==serverPid || startTimeOf(serverPid)!==serverIdentity.startTime || !processAlive(serverPid))return;
+        serverIdentity.pid!==serverPid || serverStartTimeOf(serverPid)!==serverIdentity.startTime || !processAlive(serverPid))return;
       await assertServerBinding(lock);
       assertPinnedServerLock(pin);
-      if(startTimeOf(serverPid)!==serverIdentity.startTime)return;
+      if(serverStartTimeOf(serverPid)!==serverIdentity.startTime)return;
       await ensureGameOverViewPublished({ recover: false });
     } catch(error) {
       appendNotice(`중도 종료 뷰 게시를 생략했습니다: ${error.code??'ERROR'}`);
@@ -5897,7 +5940,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       observed: {
         serverLock: deriveServerLockObservation({
           readLock: readServerLock, expectedToken: readLoopState()?.sessionToken ?? null,
-          bindingVerified: serverBindingVerified, processAlive, startTimeOf,
+          bindingVerified: serverBindingVerified, processAlive, startTimeOf: serverStartTimeOf,
         }),
       },
       commands,
@@ -6853,7 +6896,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let lock;
     try {
       lock=assertPinnedServerLock(pin);
-      if(!serverIdentity || startTimeOf(lock.serverPid)!==serverIdentity.startTime)throw codedError('SERVER_IDENTITY_UNAVAILABLE','relay identity changed');
+      if(!serverIdentity || serverStartTimeOf(lock.serverPid)!==serverIdentity.startTime)throw codedError('SERVER_IDENTITY_UNAVAILABLE','relay identity changed');
       await assertServerBinding(lock);
       lock=assertPinnedServerLock(pin);
     } catch(error){if(drain)throw error;return {...current,waitError:error.code??'WAIT_FAILED'};} finally {closeServerLockPin(pin);}
@@ -7678,11 +7721,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (pin && processAlive(pin.lock.serverPid)) {
         const lock = assertPinnedServerLock(pin);
         if (lock.sessionToken !== engineState.sessionToken) throw codedError('SERVER_LOCK_MISMATCH', '종료 게임 relay identity 불일치');
-        const startTime = startTimeOf(lock.serverPid);
+        const startTime = serverStartTimeOf(lock.serverPid);
         if (!startTime) throw codedError('SERVER_IDENTITY_UNAVAILABLE', '종료 게임 relay identity 미확인');
         await assertServerBinding(lock);
         assertPinnedServerLock(pin);
-        if (startTimeOf(lock.serverPid) !== startTime) throw codedError('SERVER_IDENTITY_MISMATCH', '종료 게임 relay identity 변경');
+        if (serverStartTimeOf(lock.serverPid) !== startTime) throw codedError('SERVER_IDENTITY_MISMATCH', '종료 게임 relay identity 변경');
         serverPid = lock.serverPid; serverIdentity = {pid:serverPid,startTime};serverBindingVerified = {pid:serverPid,startTime,port:lock.port,sessionToken:lock.sessionToken};serverAdopted = true;
       }
     } finally {closeServerLockPin(pin);}
