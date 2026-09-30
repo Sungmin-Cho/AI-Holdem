@@ -891,7 +891,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     // #255 S4 (accepted): on POSIX `ChildProcess.kill` signals the numeric pid. libuv reaps
     // several children in one SIGCHLD pass and then runs their exit callbacks one by one, so
     // a kill of a child that is already reaped but not yet reported can reach a reused pid.
-    // JS cannot observe that state, and Windows kills through the process handle instead.
+    // JS cannot observe that state; whether a libuv release marks reaped handles depends on
+    // the bundled version (test/coach-signal-authority.test.js logs `process.versions.uv`).
+    // Windows kills through the process handle instead.
     let delivered;
     try {
       delivered = entry.handle.pid === null && entry.handle.closed ? true : entry.handle.kill(signal);

@@ -57,6 +57,7 @@ import {
   consultCoachCloseEvidence, scanCoachRuntimeProcesses, parseLsofCwdRecords, legacyCoachRuntimeCandidates,
   createCoachEvidenceReader, parsePersistedCoachHandle, validSidecarIdentity, sidecarTupleMismatch, rowIdentities,
   notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive, coachProcessStartTime,
+  recordedTerminatorTimeoutMs,
 } from './coach-evidence.js';
 // Re-exported for existing importers (tests and tools) of these names.
 export {
@@ -4246,9 +4247,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // helpers) lets other work run first. Returns null to go on waiting, else the outcome.
     const signalStillAlive = (signal) => {
       if (recordedTerminator && identity.startTime.startsWith('win32-v1:')) {
-        const remainingMs = remainingMsUntil(deadlineNs);
-        if (remainingMs < 1_000) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
-        const outcome = recordedTerminator(identity.pid, identity.startTime, { timeoutMs: remainingMs });
+        const timeoutMs = recordedTerminatorTimeoutMs(deadlineNs - monotonicNs());
+        if (timeoutMs === null) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
+        const outcome = recordedTerminator(identity.pid, identity.startTime, { timeoutMs });
         if (outcome === 'replaced') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
         return outcome === 'terminated' || outcome === 'absent' ? null : { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
       }
@@ -4629,7 +4630,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           else {
             const refused = ['RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED']
               .includes(error.code);
-            childFailure = { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+            // #255: an unconfirmed live judgment (the coach may still run, or its pid is
+            // ambiguous) survives a failed termination_unconfirmed write — its recovery is
+            // "check pid N", never a release command the writer would refuse.
+            const liveJudgment = result.confirmed !== true && persistedRecoveryClass(result.reason) === 'live';
+            childFailure = liveJudgment
+              ? { reason: result.reason, cleanupAuthorized: true, cleanupFailure: refused ? error.code : 'CLEANUP_CHILD_FAILED' }
+              : { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
           }
         }
       }
@@ -4647,6 +4654,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           handNo: attempt.handNo,
           generation: attempt.generation,
           reason: effectiveResult.reason,
+          ...(childFailure?.cleanupFailure ? { cleanupFailure: childFailure.cleanupFailure } : {}),
         });
       }
       return { attempt, result: effectiveResult };

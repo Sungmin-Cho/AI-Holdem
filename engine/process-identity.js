@@ -109,7 +109,8 @@ export function win32OwnedFileTime(value) {
 
 const TERMINATE_OUTCOMES = new Set(['terminated', 'replaced', 'absent', 'failed']);
 export function parseWin32TerminateOutput(result) {
-  if (!result || result.status !== 0 || stripBom(result.stderr).trim() !== '') return 'failed';
+  // A timeout (or any spawn error) is failed even if a token was printed before it.
+  if (!result || result.error || result.status !== 0 || stripBom(result.stderr).trim() !== '') return 'failed';
   const token = stripBom(result.stdout).replace(/\r?\n$/, '');
   return TERMINATE_OUTCOMES.has(token) ? token : 'failed';
 }

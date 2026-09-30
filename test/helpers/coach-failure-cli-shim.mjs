@@ -12,11 +12,15 @@ import path from 'node:path';
 
 const MARKER = '.inject-coach-failure';
 const FAILING_COMMANDS = new Set(['bind-handle', 'fence']);
+// #255: while `<game-dir>/.inject-cleanup-failure` exists, `cleanup-result` fails too.
+const CLEANUP_MARKER = '.inject-cleanup-failure';
 
 function injectedFailure(argv) {
-  if (!FAILING_COMMANDS.has(argv[0])) return false;
   const index = argv.indexOf('--game-dir');
-  return index !== -1 && fs.existsSync(path.join(argv[index + 1], MARKER));
+  if (index === -1) return false;
+  if (argv[0] === 'cleanup-result') return fs.existsSync(path.join(argv[index + 1], CLEANUP_MARKER));
+  if (!FAILING_COMMANDS.has(argv[0])) return false;
+  return fs.existsSync(path.join(argv[index + 1], MARKER));
 }
 
 const argv = process.argv.slice(2);

@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { ownedProcessStartTime, validOwnedIdentity } from '../engine/state.js';
 import {
@@ -11,7 +12,7 @@ import {
 } from '../engine/process-identity.js';
 import {
   coachReadingFor, compareStartTimes, createCoachProcessStartTime, observeRecordedIdentity, parseBootId, parseNsLink,
-  parseNsPid, parseProcStatStartTicks, validCoachIdentity,
+  parseNsPid, parseProcStatStartTicks, recordedTerminatorTimeoutMs, validCoachIdentity,
 } from '../tools/coach-evidence.js';
 
 const LSTART = 'Wed Sep 30 12:45:56 2026';
@@ -122,6 +123,10 @@ const reader = (proc, owned = () => OWNED, platform = 'linux') => createCoachPro
 });
 
 test('#255 the Linux coach reader appends scope and ticks, and otherwise falls back to the owned value', () => {
+  // Order: tick, the owned ps sample, tick again — then the reader's own scope.
+  const ordered = fakeProc();
+  assert.equal(reader(ordered, () => { ordered.reads.push('owned'); return OWNED; })(PID), LINUX);
+  assert.deepEqual(ordered.reads.slice(0, 3), [`/proc/${PID}/stat`, 'owned', `/proc/${PID}/stat`]);
   assert.equal(reader(fakeProc())(PID), LINUX);
   assert.equal(reader(fakeProc({ timens: null }))(PID), LINUX.replace('timens=4026531834', 'timens=none'),
     'no time namespaces in this kernel');
@@ -134,6 +139,7 @@ test('#255 the Linux coach reader appends scope and ticks, and otherwise falls b
     ['boot id hidden', fakeProc({ boot: new Error('EACCES') })],
     ['stat unreadable', fakeProc({ ticks: [new Error('EACCES')] })],
     ['the pid changed between the two tick reads', fakeProc({ ticks: ['1234567', '1234999'] })],
+    ['only the second tick read failed', fakeProc({ ticks: ['1234567', new Error('ENOENT')] })],
   ]) {
     assert.equal(reader(proc)(PID), OWNED, label);
   }
@@ -147,16 +153,19 @@ test('#255 the Linux coach reader appends scope and ticks, and otherwise falls b
 });
 
 test('#255 observing a linux-v1 record: one owned sample decides alive or ambiguous', () => {
-  const calls = { legacy: 0, owned: 0 };
-  const observe = (coach, { alive = true, platform = 'linux' } = {}) => observeRecordedIdentity({ pid: PID, startTime: LINUX }, {
-    processAlive: () => alive,
-    startTimeOf: () => { calls.legacy += 1; return LSTART; },
-    // The coach reading already embeds (or is) its one owned sample; a second owned read
-    // could disagree with it, so it is never taken.
-    ownedStartTimeOf: () => { calls.owned += 1; return null; },
-    ...(coach === undefined ? {} : { coachStartTimeOf: () => coach }),
-    platform,
-  });
+  const calls = { legacy: 0, owned: 0, coach: 0, observations: 0 };
+  const observe = (coach, { alive = true, platform = 'linux' } = {}) => {
+    calls.observations += alive && coach !== undefined ? 1 : 0;
+    return observeRecordedIdentity({ pid: PID, startTime: LINUX }, {
+      processAlive: () => alive,
+      startTimeOf: () => { calls.legacy += 1; return LSTART; },
+      // The coach reading already embeds (or is) its one owned sample; a second owned read
+      // could disagree with it, so it is never taken.
+      ownedStartTimeOf: () => { calls.owned += 1; return null; },
+      ...(coach === undefined ? {} : { coachStartTimeOf: () => { calls.coach += 1; return coach; } }),
+      platform,
+    });
+  };
   assert.equal(observe(LINUX), 'alive');
   // The #247 rule would call these alive: protected, but no signal authority.
   assert.equal(observe(LINUX.replace('start=1234567', 'start=1234568')), 'ambiguous', 'a later process in the same second');
@@ -170,7 +179,8 @@ test('#255 observing a linux-v1 record: one owned sample decides alive or ambigu
   assert.equal(observe(undefined), 'unknown', 'no coach reader');
   assert.equal(observe('win32-v1:2026-09-28T03:00:00.1234567Z'), 'unknown');
   assert.equal(observe(LINUX, { alive: false }), 'dead');
-  assert.deepEqual(calls, { legacy: 0, owned: 0 }, 'a linux-v1 record reads nothing but the coach reader');
+  assert.equal(calls.coach, calls.observations, 'one coach reading per observation');
+  assert.deepEqual([calls.legacy, calls.owned], [0, 0], 'a linux-v1 record reads nothing but the coach reader');
   assert.equal(observeRecordedIdentity({ pid: PID, startTime: 'linux-v1:garbage' }, {
     processAlive: () => true, coachStartTimeOf: () => 'linux-v1:garbage', ownedStartTimeOf: () => OWNED,
   }), 'unknown', 'a malformed record is never alive');
@@ -222,10 +232,20 @@ test('#255 the terminate helper reports only its own tokens', () => {
     assert.equal(parseWin32TerminateOutput({ status: 0, stdout: `﻿${token}\r\n`, stderr: '' }), token);
   }
   for (const result of [
+    { status: 0, stdout: 'replaced', stderr: '', error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) },
     { status: 1, stdout: 'terminated', stderr: '' }, { status: 0, stdout: 'terminated', stderr: 'warning' },
     { status: 0, stdout: 'terminated\nextra', stderr: '' }, { status: null, stdout: '', stderr: '' }, null,
   ]) {
     assert.equal(parseWin32TerminateOutput(result), 'failed', JSON.stringify(result));
+  }
+});
+
+test('#255 the handle terminator needs a whole second and never gets more than is left', () => {
+  for (const [remainingNs, expected] of [
+    [-5n, null], [0n, null], [500_000_000n, null], [999_000_000n, null], [999_500_000n, null], [999_999_999n, null],
+    [1_000_000_000n, 1_000], [1_000_700_000n, 1_000], [42_000_000_000n, 42_000], [1_500, null], [Number.NaN, null],
+  ]) {
+    assert.equal(recordedTerminatorTimeoutMs(remainingNs), expected, String(remainingNs));
   }
 });
 
@@ -271,17 +291,24 @@ function laterWin32(value) {
 test('#255 the real coach reader identifies a live child the same way twice', {
   skip: !['linux', 'darwin', 'win32'].includes(process.platform) && 'no owned start time', timeout: 60_000,
 }, async (t) => {
+  t.diagnostic(`node ${process.version}, libuv ${process.versions.uv}`);
   const { child } = await startIdle();
   t.after(() => { try { child.kill(); } catch { /* gone */ } });
   const { coachProcessStartTime } = await import('../tools/coach-evidence.js');
   const first = coachProcessStartTime(child.pid);
-  assert.match(first, { linux: /^linux-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform]);
+  // Linux gives the full form wherever this procfs is our own pid namespace (the ubuntu
+  // runners); elsewhere the reader falls back to the owned value.
+  let fullLinux = false;
+  if (process.platform === 'linux') {
+    try { fullLinux = parseNsPid(fs.readFileSync('/proc/self/status', 'utf8'), process.pid) !== null; } catch { fullLinux = false; }
+  }
+  assert.match(first, { linux: fullLinux ? /^linux-v1:/ : /^utc-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform]);
   assert.equal(validCoachIdentity(first), true);
   assert.equal(coachProcessStartTime(child.pid), first);
   assert.equal(observeRecordedIdentity({ pid: child.pid, startTime: first }, {
     processAlive: alive, coachStartTimeOf: coachProcessStartTime, ownedStartTimeOf: ownedProcessStartTime,
   }), 'alive');
-  if (process.platform === 'linux') {
+  if (fullLinux) {
     const later = first.replace(/start=(\d+)$/, (_, n) => `start=${BigInt(n) + 1n}`);
     assert.equal(observeRecordedIdentity({ pid: child.pid, startTime: later }, {
       processAlive: alive, coachStartTimeOf: coachProcessStartTime, ownedStartTimeOf: ownedProcessStartTime,

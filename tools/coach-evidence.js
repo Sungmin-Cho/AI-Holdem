@@ -358,6 +358,16 @@ export function createCoachProcessStartTime({
 }
 export const coachProcessStartTime = createCoachProcessStartTime();
 
+// #255 S2: the handle terminator (a PowerShell child) is started only with at least a whole
+// second left, and never given more than what is left. The remainder is compared in
+// nanoseconds (a millisecond reading rounded up would let 999.5 ms pass). null means "do not
+// start it".
+const RECORDED_TERMINATOR_MIN_NS = 1_000_000_000n;
+export function recordedTerminatorTimeoutMs(remainingNs) {
+  return typeof remainingNs === 'bigint' && remainingNs >= RECORDED_TERMINATOR_MIN_NS
+    ? Number(remainingNs / 1_000_000n) : null;
+}
+
 export function processAlive(pid) {
   if (!Number.isInteger(pid) || pid < 1) return false;
   try {

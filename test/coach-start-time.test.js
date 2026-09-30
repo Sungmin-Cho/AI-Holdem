@@ -13,8 +13,10 @@ import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KIND = { linux: /^utc-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform];
-// #255: on Linux a coach handle adds the reader's scope and the start tick.
-const COACH_KIND = { linux: /^linux-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform];
+// #255: on Linux a coach handle adds the reader's scope and the start tick, or falls back to
+// the owned value when they cannot be read (test/coach-signal-authority.test.js requires
+// the full form from a live child on the ubuntu runners).
+const COACH_KIND = { linux: /^(?:linux|utc)-v1:/, darwin: /^utc-v1:/, win32: /^win32-v1:/ }[process.platform];
 const skip = KIND ? false : `no owned start time on ${process.platform}`;
 
 test('#247 another time zone reads the same owned start time', { skip }, async () => {

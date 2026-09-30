@@ -725,6 +725,99 @@ for (const closed of [false, true]) {
 
 // The recovery the guidance names: a person ends the ambiguous pid, and the next resume
 // releases the row on its own (it reads dead) and finishes.
+// r1: the identity can turn ambiguous after SIGTERM too; the loop stops there, no SIGKILL.
+test('#255 a coach that turns ambiguous after SIGTERM gets no SIGKILL and no release command', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => LINUX_COACH });
+  let termSent = false;
+  const signals = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      orphanTerminateGraceMs: 200,
+      ...linuxCoachReaders(orphan.pid, () => (termSent ? LINUX_COACH.replace('start=1234567', 'start=1234568') : LINUX_COACH)),
+      signalProcess: (pid, signal) => {
+        if (pid !== orphan.pid) { process.kill(pid, signal); return; }
+        signals.push(signal);
+        if (signal === 'SIGTERM') termSent = true;
+      },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_AMBIGUOUS/.test(error.message));
+  assert.deepEqual(signals, ['SIGTERM']);
+  const { recovery } = readJson(path.join(gameDir, 'loop-state.json')).halt;
+  assert.equal(recovery.attempts.find((row) => row.generation === 1)?.reason, 'IDENTITY_AMBIGUOUS');
+  assert.deepEqual(recovery.commands, []);
+});
+
+// d-r1: a failed termination_unconfirmed write must not turn the ambiguous (live) judgment
+// into a generic cleanup failure that would carry a release command.
+test('#255 an ambiguous row keeps its judgment when its cleanup write fails', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => LINUX_COACH });
+  fs.writeFileSync(path.join(gameDir, '.inject-cleanup-failure'), '');
+  const logs = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: makeCoachAdapter(),
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      coachCliPath: COACH_FAILURE_SHIM,
+      log: (record) => logs.push(record),
+      ...linuxCoachReaders(orphan.pid, () => LINUX_COACH.replace('start=1234567', 'start=1234568')),
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_AMBIGUOUS/.test(error.message));
+  const { recovery } = readJson(path.join(gameDir, 'loop-state.json')).halt;
+  assert.equal(recovery.attempts.find((row) => row.generation === 1)?.reason, 'IDENTITY_AMBIGUOUS');
+  assert.deepEqual(recovery.commands, []);
+  assert.ok(logs.some((record) => record.reason === 'IDENTITY_AMBIGUOUS' && record.cleanupFailure === 'CLEANUP_CHILD_FAILED'),
+    'the failed write is still reported');
+});
+
+// d-r1: without an injected signalProcess, Windows goes through the handle helper. The loop
+// is told the coach is alive, but the process holding the pid was created at another time:
+// the helper leaves it running and the row is released as replaced.
+test('#255 Windows: the default terminator checks the creation time before terminating', {
+  skip: process.platform !== 'win32' && 'Windows process handles', timeout: 60_000 * WIN32_SCALE,
+}, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan();
+  t.after(() => terminateIfAlive(orphan));
+  const recorded = laterOwnedStartTime(ownedProcessStartTime(orphan.pid));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: () => recorded });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: { ownedProcessStartTime: (pid) => (pid === orphan.pid ? recorded : ownedProcessStartTime(pid)) },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0), 'a process created at another time is never terminated');
+  const row = readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts.find((entry) => entry.generation === 1);
+  assert.equal(row?.cleanupState, 'released');
+  assert.deepEqual(row.release.declared, { evidence: 'IDENTITY_REPLACED' });
+});
+
 test('#255 an ambiguous coach row is released by the next resume once its pid is ended', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -915,6 +1008,7 @@ test('#255 with under a second left the handle terminator is not started', { tim
     },
   });
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED');
+  assert.equal(observed, true, 'the coach was observed alive first');
   assert.deepEqual(terminations, []);
   assert.doesNotThrow(() => process.kill(orphan.pid, 0));
 });
