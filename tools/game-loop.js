@@ -7780,8 +7780,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (!mode) throw codedError('BAD_LOOP_PHASE','복구 종료 대상 상태가 아닙니다.');
       const reason=ABANDON_REASONS.includes(opts.abortUnrecoverable?.reason)
         ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
-      // The app judged START_FAILED before this launch; a game played since then is not one.
-      if (reason==='START_FAILED' && !neverDealt(engineState,state)) throw codedError('BAD_LOOP_PHASE','시작 실패 종료 대상이 아닙니다.');
+      // The app judged NEVER_DEALT before this launch; a game played since then is not one.
+      if (reason==='NEVER_DEALT' && !neverDealt(engineState,state)) throw codedError('BAD_LOOP_PHASE','무핸드 종료 대상이 아닙니다.');
       const snapshotPath=path.join(root,'loop-state.unverified.json');
       const unverifiedSnapshot=fs.existsSync(snapshotPath);
       const bytes=unverifiedSnapshot ? openContained(root,['loop-state.unverified.json'],{maxBytes:Number.MAX_SAFE_INTEGER}) : fs.readFileSync(loopStatePath);

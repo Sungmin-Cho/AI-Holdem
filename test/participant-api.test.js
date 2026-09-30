@@ -10,6 +10,7 @@ import { startAppServer } from '../tools/app-server.js';
 import { createSessionManager } from '../tools/session-manager.js';
 import { createRoomManager } from '../tools/room-manager.js';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
+import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 
 const TOKEN = 'a'.repeat(64);
@@ -69,10 +70,22 @@ function cas(manager, kind = 'start') {
   };
 }
 
+// Every manager a test opens on a store (see restartApp) closes before the
+// store's study service, which outlives app shutdown by design, is stopped.
+const storeManagers = new Map();
 async function boot(t, { publicPort = 0, tlsCert, tlsKey, resolver: resolve = resolver, onChange } = {}) {
   const storeDir = createOwnedTempDir('holdem-public');
   const manager = createSessionManager({ storeDir, resolver: resolve, ...(onChange ? { onChange } : {}) });
-  t.after(() => manager.close());
+  storeManagers.set(storeDir, [manager]);
+  t.after(async () => {
+    try {
+      for (const opened of storeManagers.get(storeDir)) await opened.close();
+    } finally {
+      storeManagers.delete(storeDir);
+      const study = await inspectStudyService(storeDir);
+      if (study.status === 'running') await stopStudyService(storeDir, { expectedInstanceId: study.instanceId });
+    }
+  });
   await manager.initialize();
   const app = await startAppServer({
     manager, token: TOKEN, storeDir, port: 0, publicPort, tlsCert, tlsKey,
@@ -517,8 +530,7 @@ test('closed multi room resume becomes ROOM_UNBOUND and abort-unrecoverable end 
   const room = JSON.parse(fs.readFileSync(roomFile, 'utf8'));
   room.status = 'closed';
   fs.writeFileSync(roomFile, JSON.stringify(room));
-  const restored = createSessionManager({ storeDir, resolver });
-  t.after(() => restored.close());
+  const restored = restartApp(t, storeDir, resolver);
   await restored.initialize();
   assert.equal(restored.snapshot().error, 'SESSION_RECOVERABLE');
   const resume = cas(restored, 'resume');
@@ -696,7 +708,7 @@ async function endGame(manager) {
 }
 function restartApp(t, storeDir, resolve) {
   const restored = createSessionManager({ storeDir, resolver: resolve });
-  t.after(() => restored.close());
+  storeManagers.get(storeDir).push(restored);
   return restored;
 }
 
@@ -736,6 +748,26 @@ test('#260 app-restart recovery that fails after the commit keeps the room bound
   assert.equal(resolveCurrentSession(storeDir).gameId, reserved.reservation.gameId);
   assertRoomBoundTo(restored, reserved.reservation.gameId, guest);
   await resumeSucceeds(restored, reserved.reservation.gameId);
+});
+
+test('#260 a committed reservation whose loop-state cannot be read is not bound on a failed recovery', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  await openRoomWithGuest(app, manager);
+  probe.failNext = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  const failed = await settle(manager, start.requestId);
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  crashBeforeFinishing(storeDir, failed);
+  fs.writeFileSync(path.join(committed.sessionDir, 'loop-state.json'), '{');
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).status, 'failed');
+  // Whether that game ended is unknown, so the room is restored as before the fix.
+  assert.equal(restored.room.load().status, 'open');
+  assert.equal(restored.room.load().lock.boundGameId, null);
 });
 
 test('#260 a start refused before its reservation still reopens the room', { timeout: TIMEOUT }, async (t) => {
@@ -831,10 +863,10 @@ test('#260 a start that can never succeed can still end, which reopens the room'
   restored.command(end);
   const ended = await settle(restored, end.requestId);
   assert.equal(ended.status, 'succeeded', JSON.stringify({ error: ended.error, snap: restored.snapshot().error }));
-  assert.equal(ended.recovery.reason, 'START_FAILED');
+  assert.equal(ended.recovery.reason, 'NEVER_DEALT');
   assert.equal(restored.snapshot().state, 'ended');
   const audit = JSON.parse(fs.readFileSync(path.join(committed.sessionDir, 'loop-state.json'), 'utf8'));
-  assert.equal(audit.abandonedPendingDecision?.reason, 'START_FAILED');
+  assert.equal(audit.abandonedPendingDecision?.reason, 'NEVER_DEALT');
   assert.equal(restored.room.load().status, 'open');
   probe.alwaysFail = false;
   const next = { ...cas(restored), setup: POLICY_ROOM };
@@ -843,7 +875,37 @@ test('#260 a start that can never succeed can still end, which reopens the room'
   assertRoomBoundTo(restored, restored.snapshot().gameId, guest);
 });
 
-test('#260 a failed recovery of a reserved game that already ended does not bind the room', { timeout: TIMEOUT }, async (t) => {
+test('#260 a committed game without loop-state that can never start can still end after a resume attempt', { timeout: TIMEOUT }, async (t) => {
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  probe.alwaysFail = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  await manager.close();
+  // As if the app stopped between the commit and bootstrap's first loop-state write.
+  fs.rmSync(path.join(committed.sessionDir, 'loop-state.json'));
+  const restored = restartApp(t, storeDir, probe.resolver);
+  await restored.initialize();
+  assertRoomBoundTo(restored, committed.gameId, guest);
+  assert.deepEqual(restored.snapshot().allowedCommands, ['resume']);
+  const resume = cas(restored, 'resume');
+  restored.command(resume);
+  assert.equal((await settle(restored, resume.requestId)).error, 'NO_PLAYER_RUNTIME');
+  // The resume rebuilt loop-state as `playing` before its probe failed; no hand was dealt.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(committed.sessionDir, 'loop-state.json'), 'utf8')).phase, 'playing');
+  assert.deepEqual(restored.snapshot().allowedCommands, ['resume', 'end', 'restart']);
+  const end = cas(restored, 'end');
+  restored.command(end);
+  const ended = await settle(restored, end.requestId);
+  assert.equal(ended.status, 'succeeded', JSON.stringify({ error: ended.error }));
+  assert.equal(ended.recovery.reason, 'NEVER_DEALT');
+  assert.equal(restored.room.load().status, 'open');
+});
+
+for (const loopState of ['intact', 'unreadable']) test(`#260 a failed recovery of a reserved game that already ended does not bind the room (${loopState} loop-state)`, { timeout: TIMEOUT }, async (t) => {
   const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
   const { storeDir, manager, app } = await boot(t);
   await openRoomWithGuest(app, manager);
@@ -855,6 +917,8 @@ test('#260 a failed recovery of a reserved game that already ended does not bind
   await manager.close();
   // The start row never finished although its game did (e.g. a crash, then a CLI end).
   crashBeforeFinishing(storeDir, started);
+  // An aborted engine is terminal whatever its loop-state holds.
+  if (loopState === 'unreadable') fs.writeFileSync(path.join(resolveCurrentSession(storeDir).sessionDir, 'loop-state.json'), '{');
   const owner = acquireOwnedLock(storeDir, 'loop.lock.d');
   t.after(() => releaseOwnedLock(owner));
   const restored = restartApp(t, storeDir, resolver);

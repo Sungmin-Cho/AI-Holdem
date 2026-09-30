@@ -415,9 +415,9 @@ test('#260 a local game whose start keeps failing after the commit can end witho
   const end=body(manager,'end');manager.command(end);
   const ended=await settle(manager,end.requestId);
   assertReceipt(manager,ended,'succeeded');
-  assert.equal(ended.recovery.reason,'START_FAILED');
+  assert.equal(ended.recovery.reason,'NEVER_DEALT');
   assert.equal(manager.snapshot().state,'ended');
   const loop=read(path.join(manager.current.sessionDir,'loop-state.json'));
   assert.equal(loop.phase,'aborted');
-  assert.equal(loop.abandonedPendingDecision.reason,'START_FAILED');
+  assert.equal(loop.abandonedPendingDecision.reason,'NEVER_DEALT');
 });

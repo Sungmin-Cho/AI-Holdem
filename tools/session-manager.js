@@ -161,17 +161,18 @@ export function createSessionManager({
       /* bind is best-effort after a committed session */
     }
   };
+  // true / false, or null when the session cannot be read. An aborted engine is
+  // terminal even if its loop-state is damaged.
   const sessionIsTerminal = (sessionDir) => {
     try {
-      const engine = read(path.join(sessionDir, "state.json"));
+      if (read(path.join(sessionDir, "state.json")).result === "abort") return true;
       const loopFile = path.join(sessionDir, "loop-state.json");
-      const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
-      return engine.result === "abort" || loop?.phase === "done";
+      return fs.existsSync(loopFile) ? read(loopFile).phase === "done" : false;
     } catch {
-      return false;
+      return null;
     }
   };
-  const currentIsTerminal = () => Boolean(current) && sessionIsTerminal(current.sessionDir);
+  const currentIsTerminal = () => Boolean(current) && sessionIsTerminal(current.sessionDir) === true;
   // #260: a start-type command that fails after its reservation was committed
   // leaves that game current with the room's participants seated in it. Binding
   // it (as a successful start does) keeps the game resumable; only a failure
@@ -191,7 +192,7 @@ export function createSessionManager({
   };
   const settleRoomAfterFailure = (row, { bindWhen }) => {
     const committed = committedReservation(row);
-    if (!committed || sessionIsTerminal(committed.sessionDir)) {
+    if (!committed || sessionIsTerminal(committed.sessionDir) !== false) {
       if (row.roomLocked) safeUnlock(row.requestId);
       return;
     }
@@ -231,7 +232,7 @@ export function createSessionManager({
         return mode ? {mode,reason:error==='ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY'} : null;
       // #260: a committed game that never dealt a hand loses nothing by ending, so
       // it can end whatever made its start fail (the cause may not be removable).
-      return mode==='abort' && neverDealt(engine,loop) ? {mode,reason:'START_FAILED'} : null;
+      return mode==='abort' && neverDealt(engine,loop) ? {mode,reason:'NEVER_DEALT'} : null;
     } catch { return null; }
   }
   function snapshot() {

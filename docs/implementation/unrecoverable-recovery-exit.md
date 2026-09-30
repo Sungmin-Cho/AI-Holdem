@@ -19,7 +19,7 @@ The command journal records the original game ID, selection version and epoch. R
 
 A start-type command can fail after its new session is committed (for example the runtime probe or the study service refuses during bootstrap). The committed game stays current; if the command locked an online room, the room stays bound to that game so it can be resumed once the cause is removed. A failure before the commit, or on a reserved game that has already ended, restores the room as before.
 
-When the cause cannot be removed, a committed game that never dealt a hand (engine `handNo` 0 with no hand, loop `phase: "bootstrap"`, no `pendingDecision`) offers End/Restart from any error, not only the codes listed above. It uses the same abandonment path with audit reason `START_FAILED`, and the loop re-checks that the game still never dealt before it writes anything. A checkpoint with this reason needs this version or later to converge.
+When the cause cannot be removed, a committed game that never dealt a hand (engine `handNo` 0 with neither a current nor a last hand, loop `phase` `bootstrap` or `playing`, no `pendingDecision`) offers End/Restart from any error, not only the codes listed above. A game parked before its first hand qualifies too; ending it loses no decision. It uses the same abandonment path with audit reason `NEVER_DEALT`, and the loop re-checks that the game still never dealt before it writes anything. A checkpoint with this reason needs this version or later to converge.
 
 ## Rollback boundary
 
