@@ -462,6 +462,8 @@ const errorMessages = {
     "다른 실행에서 게임이 진행 중입니다. 그 게임을 먼저 정리해 주세요.",
   CURRENT_CHANGED:
     "다른 실행에서 현재 게임이 변경됐습니다. 로비를 새로고침해 주세요.",
+  STUDY_SERVICE_INCOMPATIBLE:
+    "업그레이드 전에 시작한 학습 서비스가 실행 중이라 게임을 시작하지 않았습니다. 서버에서 npm run study:stop -- <저장소 경로>로 멈춘 뒤 다시 시작하세요.",
   RECOVERY_REQUIRED:
     "저장된 진행 정보를 자동으로 복구하지 못했습니다. 기록은 보존되어 있습니다.",
   SESSION_RECOVERABLE: "저장된 게임이 있습니다. 불러온 뒤 계속할 수 있습니다.",

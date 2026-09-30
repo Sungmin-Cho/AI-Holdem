@@ -11,7 +11,7 @@ import {
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
-import { createStartTimeProbe, skipOnWin32 } from './helpers/platform.js';
+import { createStartTimeProbe, reusedPidRecord, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
   exitCodeFor,
@@ -6621,13 +6621,15 @@ test('--force treats a reused-pid startTime mismatch as dead and never signals t
   const gameDir = tmpGame();
   const signalLog = path.join(gameDir, 'pid-reuse-signals.log');
   const holder = await startOwnedLoopHolder(gameDir, { signalLog });
-  fs.writeFileSync(
-    path.join(gameDir, 'loop.lock.d', 'pid'),
-    // Wrong in this host's own identity format; a foreign format is 'unknown'.
-    process.platform === 'win32'
-      ? `${holder.pid}\nwin32-v1\n2001-01-01T00:00:00.0000000Z`
-      : `${holder.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
-  );
+  // Wrong in this host's own identity format; a foreign format is 'unknown'. #256: on Linux
+  // the holder's real evidence with another start tick.
+  const reused = reusedPidRecord(holder.pid);
+  if (reused === null) {
+    await terminateIfAlive(holder);
+    t.skip('this Linux runner cannot read the lifetime evidence');
+    return;
+  }
+  fs.writeFileSync(path.join(gameDir, 'loop.lock.d', 'pid'), reused);
   const signals = [];
   const loop = createGameLoop({
     gameDir,

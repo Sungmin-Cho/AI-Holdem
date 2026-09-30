@@ -12,6 +12,7 @@ import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
   closeOpenPartial, vacateLive, initGameDir, stopServer, assertNotSessionCatalogTarget,
 } from '../engine/game-archive.js';
+import { reusedPidRecord } from './helpers/platform.js';
 
 const STATE_MODULE_URL = pathToFileURL(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../engine/state.js'),
@@ -628,20 +629,19 @@ test('initGameDir: runExclusive 대기 중 생긴 loop를 pre-archive 재검사�
   }
 });
 
-test('loop startTime 불일치는 dead로 판정해 활성으로 치지 않는다', () => {
+test('loop startTime 불일치는 dead로 판정해 활성으로 치지 않는다', (t) => {
   const dir = tmpGame();
+  // #256: on Linux a mismatched utc-v1 alone proves nothing; the helper writes the real
+  // evidence with another start tick there.
+  const reused = reusedPidRecord(process.pid);
+  if (reused === null) { t.skip('this Linux runner cannot read the lifetime evidence'); return; }
   fs.mkdirSync(path.join(dir, 'loop.lock.d'));
   // 살아 있는 pid(이 테스트 프로세스 자신)지만 기록된 startTime이 실제와
   // 다르면 pid 재사용 방어에 의해 이전 owner는 dead다. 플랫폼별 pid 상한을
   // 추측하는 임의의 큰 pid에는 기대지 않는다.
   // The stamp must be wrong in this host's own identity format. A stamp in a
   // foreign format is 'unknown', which is never reclaimed, by design.
-  fs.writeFileSync(
-    path.join(dir, 'loop.lock.d', 'pid'),
-    process.platform === 'win32'
-      ? `${process.pid}\nwin32-v1\n2001-01-01T00:00:00.0000000Z`
-      : `${process.pid}\nutc-v1\nMon Jan  1 00:00:00 2001`,
-  );
+  fs.writeFileSync(path.join(dir, 'loop.lock.d', 'pid'), reused);
   const result = initGameDir(dir, { aiCount: 2 });
   assert.ok(result.sessionToken);
 });

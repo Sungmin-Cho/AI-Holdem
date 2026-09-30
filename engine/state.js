@@ -112,9 +112,10 @@ function readPidFile(dir) {
       const parsed = Number(lines[0].trim());
       return { ...base, pid: Number.isInteger(parsed) && parsed > 0 ? parsed : null, startTime: null };
     }
-    // Three lines deliberately fail closed in pre-versioned owned-lock readers.
+    // Three lines deliberately fail closed in pre-versioned owned-lock readers, and four
+    // (the #256 Linux evidence line) in pre-#256 readers.
     const owned = parseOwnedLockIdentity(lines.join('\n'));
-    if (owned) return { ...base, ...owned };
+    if (owned) return { ...base, evidence: null, ...owned };
     if (lines.length === 2 && lines[0].trim() !== '' && lines[1].trim() !== ''
       && !/^(?:utc|win32)-/.test(lines[1].trim())) {
       const parsed = Number(lines[0].trim());
@@ -167,15 +168,33 @@ function mutexIdentity(dir) {
 // 같이 취급하면(예: null !== recordedStartTime) 살아 있는 소유자가 회수되는
 // fail-open이 생긴다. isIdentityStale·readOwnedLock 양쪽 모두 'unknown'을
 // 'dead'가 아닌 별도 상태로 다뤄야 한다.
-export function ownedIdentityStatus(pid, recordedStartTime, startTimeOf = ownedProcessStartTime) {
+//
+// #256: a record carrying the Linux evidence line (`evidence`) is judged by
+// `lifetimeIdentityStatus` from one lifetime reading. A record without it (written before
+// #256, or by a Linux writer that could not read the evidence) is dead on a mismatch only
+// where the start time cannot move: Windows, and a macOS reader.
+export function ownedIdentityStatus(pid, recordedStartTime, startTimeOf = ownedProcessStartTime, evidence = null) {
+  if (evidence !== null && evidence !== undefined) {
+    const recorded = recordedLinuxParts(recordedStartTime, evidence);
+    if (!recorded) return 'unknown';
+    // kill(0) resolves the pid in the reader's own pid namespace: ESRCH proves the owner gone
+    // only when that is the namespace the owner recorded.
+    if (!isProcessAlive(pid)) return readerPidNamespace(startTimeOf) === recorded.pidns ? 'dead' : 'unknown';
+    return lifetimeIdentityStatus(recordedStartTime, evidence, resolveLifetimeReading(pid, startTimeOf), { self: pid === process.pid });
+  }
   // Parsed two-line legacy records retain the accepted positively-dead PID
   // reclamation boundary; live legacy can never authorize identity or signals.
   if (!isProcessAlive(pid)) return 'dead';
   // Unqualified legacy stamps cannot prove identity across caller timezones.
   if (!validOwnedIdentity(recordedStartTime)) return 'unknown';
   const current = resolveOwnedStartTime(pid, startTimeOf);
-  if (!validOwnedIdentity(current) || current.split(':', 1)[0] !== recordedStartTime.split(':', 1)[0]) return 'unknown';
-  return current === recordedStartTime ? 'alive' : 'dead';
+  const kind = recordedStartTime.split(':', 1)[0];
+  if (!validOwnedIdentity(current) || current.split(':', 1)[0] !== kind) return 'unknown';
+  if (current === recordedStartTime) return 'alive';
+  // A different reading is another process only where the start time was fixed when the
+  // process was created: the Windows creation FILETIME, or the start time macOS stores at
+  // fork. A Linux lstart follows the wall clock, so there a mismatch proves nothing (#256).
+  return kind === 'win32-v1' || (kind === 'utc-v1' && process.platform === 'darwin') ? 'dead' : 'unknown';
 }
 
 function isIdentityStale(id) {
@@ -184,7 +203,7 @@ function isIdentityStale(id) {
     // pid를 원래 소유자로 오판할 수 있으므로 pid+startTime 일치까지 재검증한다.
     // 기존 1줄 기록(startTime 없음)의 판정은 이전과 동일하게 pid 생존만 본다.
     const startTime = id.pidFile ? id.pidFile.startTime : null;
-    if (startTime !== null) return ownedIdentityStatus(id.pid, startTime) === 'dead';
+    if (startTime !== null) return ownedIdentityStatus(id.pid, startTime, undefined, id.pidFile.evidence ?? null) === 'dead';
     return !isProcessAlive(id.pid);
   }
   return Date.now() - id.mtimeMs >= MUTEX_STALE_MS;
@@ -371,7 +390,8 @@ function detachStalePidFile(dir, expected, hooks) {
     }
     if (matches) {
       const now = readPidFile(dir);
-      if (!now || now.pid !== expectedPidFile.pid || now.startTime !== expectedPidFile.startTime) {
+      if (!now || now.pid !== expectedPidFile.pid || now.startTime !== expectedPidFile.startTime
+        || (now.evidence ?? null) !== (expectedPidFile.evidence ?? null)) {
         matches = false;
       }
     }
@@ -419,7 +439,7 @@ function ownedIdentityIsDead(id, startTimeOf = processStartTime) {
     pidFile
     && pidFile.pid !== null
     && pidFile.startTime !== null
-    && ownedIdentityStatus(pidFile.pid, pidFile.startTime, startTimeOf) === 'dead'
+    && ownedIdentityStatus(pidFile.pid, pidFile.startTime, startTimeOf, pidFile.evidence ?? null) === 'dead'
   );
 }
 
@@ -434,6 +454,7 @@ function sameOwnedIdentity(expected, current) {
     && a.ino === b.ino
     && a.pid === b.pid
     && a.startTime === b.startTime
+    && (a.evidence ?? null) === (b.evidence ?? null)
   );
 }
 
@@ -649,13 +670,198 @@ export function validOwnedIdentity(value) {
 }
 
 /** Parse only the exact canonical lifetime wire after a caller's bounded safe read.
- * Legacy and unknown formats return null; they cannot authorize a current owner. */
+ * Legacy and unknown formats return null; they cannot authorize a current owner.
+ * #256: a `utc-v1` record may carry a fourth line, the Linux evidence; it is returned as
+ * `evidence` only when present, so a three-line result keeps its exact shape. */
 export function parseOwnedLockIdentity(text) {
   if (typeof text !== 'string') return null;
   const lines = text.split('\n');
-  if (lines.length !== 3 || !/^[1-9]\d*$/.test(lines[0]) || !validOwnedIdentity(`${lines[1]}:${lines[2]}`)) return null;
+  if ((lines.length !== 3 && lines.length !== 4) || !/^[1-9]\d*$/.test(lines[0])
+    || !validOwnedIdentity(`${lines[1]}:${lines[2]}`)) return null;
   const pid = Number(lines[0]);
-  return Number.isSafeInteger(pid) ? { pid, startTime: `${lines[1]}:${lines[2]}` } : null;
+  if (!Number.isSafeInteger(pid)) return null;
+  const startTime = `${lines[1]}:${lines[2]}`;
+  if (lines.length === 3) return { pid, startTime };
+  return recordedLinuxParts(startTime, lines[3]) ? { pid, startTime, evidence: lines[3] } : null;
+}
+
+// #255 S1 (moved here from tools/coach-evidence.js for #256, which re-exports it): pure
+// parsers for the Linux identity evidence. Each returns null for anything it does not
+// recognise exactly; the reader turns any null into "no extra evidence".
+// /proc/<pid>/stat: comm (field 2) may contain spaces and parentheses, so fields are counted
+// from the LAST ')' — the next token is field 3 and field 22 (starttime) is 19 tokens later.
+export function parseProcStatStartTicks(text) {
+  if (typeof text !== 'string') return null;
+  const close = text.lastIndexOf(')');
+  if (close < 0) return null;
+  const fields = text.slice(close + 1).trim().split(' ');
+  const ticks = fields[19];
+  return typeof ticks === 'string' && /^(?:0|[1-9]\d{0,19})$/.test(ticks) ? ticks : null;
+}
+
+// `readlink /proc/self/ns/<kind>` is `<kind>:[<inode>]`.
+export function parseNsLink(text, kind) {
+  const match = typeof text === 'string' ? /^([a-z_]+):\[(\d{1,20})\]$/.exec(text) : null;
+  return match && match[1] === kind ? match[2] : null;
+}
+
+// /proc/self/status `NSpid:` lists this task's pid in every pid namespace from the one that
+// mounted this procfs inward (proc(5)). Exactly one value, equal to our own pid, means this
+// procfs resolves pids in our own namespace — the one `kill()` uses. Anything else (an
+// ancestor's procfs, a kernel without NSpid) is null.
+export function parseNsPid(statusText, selfPid) {
+  const match = typeof statusText === 'string' ? /^NSpid:\t?(.*)$/m.exec(statusText) : null;
+  if (!match) return null;
+  const values = match[1].trim().split(/\s+/);
+  return values.length === 1 && values[0] === String(selfPid) ? values[0] : null;
+}
+
+const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function parseBootId(text) {
+  const value = typeof text === 'string' ? text.trim() : '';
+  return BOOT_ID.test(value) ? value : null;
+}
+
+// The Linux reading: the `utc-v1` lstart kept verbatim, then the scope the tick was read in
+// (boot, the reader's own pid and time namespaces) and the start tick (/proc/<pid>/stat
+// field 22). Coach handles store it whole (#255); lifetime locks store the lstart as their
+// `utc-v1` identity and the rest as the evidence line (#256).
+const LINUX_READING = /^linux-v1:([^;]+);boot=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12});pidns=(\d{1,20});timens=(\d{1,20}|none);start=(0|[1-9]\d{0,19})$/;
+export function parseLinuxReading(value) {
+  const match = typeof value === 'string' ? LINUX_READING.exec(value) : null;
+  if (!match || !validOwnedIdentity(`utc-v1:${match[1]}`)) return null;
+  return { lstart: match[1], boot: match[2], pidns: match[3], timens: match[4], start: match[5] };
+}
+
+// #255 S1 reader. Never null where `ownedProcessStartTime` is not: on Linux the extra
+// evidence is best effort, and any missing piece returns the plain owned `utc-v1` value. A
+// null at spawn would leave a coach child unbindable and a lock unacquirable
+// (IDENTITY_UNAVAILABLE), so only the `ps` failure that already meant that may produce it.
+// Order: tick, owned `ps`, tick again — a pid that changed between the two tick reads (or
+// whose ticks cannot be read) gets no tick — then the reader's own scope. `bracketScope`
+// (#256, lifetime locks) also reads the scope first and needs both scope reads to agree, so
+// the ticks were read through one procfs that resolves this process's own pid namespace.
+// #256: this process's own tick is read from /proc/self/stat. Field 22 depends only on the
+// task and the reading task's time namespace, while a numeric /proc/<pid> path depends on
+// which pid namespace the mounted procfs resolves.
+export function createLinuxProcessStartTime({
+  platform = process.platform, fsImpl = fs, ownedStartTimeOf = ownedProcessStartTime, selfPid = process.pid,
+  bracketScope = false,
+} = {}) {
+  const readText = (file) => {
+    try { return fsImpl.readFileSync(file, 'utf8'); } catch { return null; }
+  };
+  const absent = (read) => {
+    try { read(); return false; } catch (error) { return error?.code === 'ENOENT'; }
+  };
+  const startTicks = (pid) => {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    return parseProcStatStartTicks(readText(pid === selfPid ? '/proc/self/stat' : `/proc/${pid}/stat`));
+  };
+  const scope = () => {
+    if (parseNsPid(readText('/proc/self/status'), selfPid) === null) return null;
+    let pidns = null;
+    try { pidns = parseNsLink(fsImpl.readlinkSync('/proc/self/ns/pid'), 'pid'); } catch { return null; }
+    let timens = null;
+    try {
+      timens = parseNsLink(fsImpl.readlinkSync('/proc/self/ns/time'), 'time');
+    } catch (error) {
+      // `none` only when this kernel has no time namespaces at all (#256): every time
+      // namespace file is missing. One link hidden while the others exist is no evidence.
+      timens = error?.code === 'ENOENT'
+        && absent(() => fsImpl.readlinkSync('/proc/self/ns/time_for_children'))
+        && absent(() => fsImpl.readFileSync('/proc/self/timens_offsets', 'utf8'))
+        ? 'none' : null;
+    }
+    const boot = parseBootId(readText('/proc/sys/kernel/random/boot_id'));
+    return pidns && timens && boot ? { boot, pidns, timens } : null;
+  };
+  const sameScope = (a, b) => Boolean(a && b && a.boot === b.boot && a.pidns === b.pidns && a.timens === b.timens);
+  return (pid) => {
+    if (platform !== 'linux') return ownedStartTimeOf(pid);
+    const before = bracketScope ? scope() : null;
+    if (bracketScope && !before) return ownedStartTimeOf(pid) ?? null;
+    const t1 = startTicks(pid);
+    const value = ownedStartTimeOf(pid);
+    if (typeof value !== 'string' || !value.startsWith('utc-v1:')) return value ?? null;
+    const t2 = startTicks(pid);
+    const where = t1 !== null && t1 === t2 ? scope() : null;
+    if (!where || (bracketScope && !sameScope(before, where))) return value;
+    return `linux-v1:${value.slice('utc-v1:'.length)};boot=${where.boot};pidns=${where.pidns};timens=${where.timens};start=${t1}`;
+  };
+}
+
+// #256: the lifetime-lock reader. On Linux it is the #255 reading with the scope read before
+// and after the ticks; elsewhere it is `ownedProcessStartTime` itself.
+export const lifetimeProcessStartTime = createLinuxProcessStartTime({ bracketScope: true });
+
+// #256 wire: the fourth line of a Linux lifetime-lock pid file is the Linux reading without
+// its lstart (which is the third line). It is valid only under a `utc-v1` identity.
+const LIFETIME_EVIDENCE = /^linux-v1:boot=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12};pidns=\d{1,20};timens=(?:\d{1,20}|none);start=(?:0|[1-9]\d{0,19})$/;
+function lifetimeEvidenceOf(parts) {
+  return `linux-v1:boot=${parts.boot};pidns=${parts.pidns};timens=${parts.timens};start=${parts.start}`;
+}
+function recordedLinuxParts(startTime, evidence) {
+  if (typeof startTime !== 'string' || !startTime.startsWith('utc-v1:')) return null;
+  if (typeof evidence !== 'string' || !LIFETIME_EVIDENCE.test(evidence)) return null;
+  return parseLinuxReading(`linux-v1:${startTime.slice('utc-v1:'.length)};${evidence.slice('linux-v1:'.length)}`);
+}
+
+/**
+ * #256: judge a lifetime record carrying the Linux evidence against ONE current reading (the
+ * caller has already seen the pid answer kill(0)). Only a different start tick read in the
+ * same pid and time namespaces is death: while the recorded owner lives, its pid namespace
+ * and its time namespace stay allocated (so equal inode numbers name them), the pid names it
+ * in that namespace, and field 22 is its fixed start_boottime shifted by that namespace's
+ * fixed offset — the recorded tick exactly. boot_id is deliberately not a premise of death
+ * (after a reboot the owner is dead anyway; requiring it would stop reclaiming reused pids),
+ * only of the tick-based `alive` — except for the reader's own pid (`self`): only the reader
+ * can be the owner there, and it cannot read another boot than the one it recorded. A pid
+ * read in another pid namespace names another process: unknown. Everything else falls back
+ * to the lstart rule without its mismatch = dead: equal text is `alive` (the pre-#256
+ * evidence level), anything else unknown — a Linux lstart follows the wall clock.
+ */
+export function lifetimeIdentityStatus(recordedStartTime, evidence, current, { self = false } = {}) {
+  const recorded = recordedLinuxParts(recordedStartTime, evidence);
+  if (!recorded) return 'unknown';
+  const reading = parseLinuxReading(current);
+  if (reading && reading.pidns === recorded.pidns && reading.timens === recorded.timens) {
+    if (reading.start !== recorded.start) return 'dead';
+    if (reading.boot === recorded.boot) return 'alive';
+    if (self) return 'dead';
+  } else if (reading && reading.pidns !== recorded.pidns) {
+    return 'unknown';
+  }
+  const owned = reading ? `utc-v1:${reading.lstart}` : current;
+  return owned === recordedStartTime ? 'alive' : 'unknown';
+}
+
+// #256: the pid namespace kill() resolves pids in — this process's own, which it can never
+// leave (a process's active pid namespace is fixed for life). The default readers read the
+// `/proc/self/ns/pid` link once (no `ps`: the reclaim path judges up to three times) and keep
+// only a readable answer; an injected reader answers with its own reading of this process.
+let selfPidNamespace = null;
+function readerPidNamespace(probe) {
+  if (probe !== processStartTime && probe !== ownedProcessStartTime && probe !== lifetimeProcessStartTime) {
+    return parseLinuxReading(resolveLifetimeReading(process.pid, probe))?.pidns ?? null;
+  }
+  if (process.platform !== 'linux') return null;
+  if (selfPidNamespace === null) {
+    try { selfPidNamespace = parseNsLink(fs.readlinkSync('/proc/self/ns/pid'), 'pid'); } catch { /* unknown this time */ }
+  }
+  return selfPidNamespace;
+}
+
+// The lifetime counterpart of `resolveOwnedStartTime`: the default readers read the lifetime
+// reading, an injected probe may answer with an owned or a Linux reading, and a raw probe is
+// qualified only after a real matching platform read.
+function resolveLifetimeReading(pid, probe) {
+  if (probe === processStartTime || probe === ownedProcessStartTime || probe === lifetimeProcessStartTime) {
+    return lifetimeProcessStartTime(pid);
+  }
+  const value = probe(pid);
+  if (value == null || validOwnedIdentity(value) || parseLinuxReading(value)) return value;
+  return value === processStartTime(pid) ? lifetimeProcessStartTime(pid) : null;
 }
 
 /** Versioned identity for lifetime locks only; legacy processStartTime is unchanged. */
@@ -706,7 +912,7 @@ export function readOwnedLock(gameDir, name, { processStartTime: startTimeOf = p
       status: 'unknown',
     };
   }
-  const status = ownedIdentityStatus(pidFile.pid, pidFile.startTime, startTimeOf);
+  const status = ownedIdentityStatus(pidFile.pid, pidFile.startTime, startTimeOf, pidFile.evidence ?? null);
   return {
     pid: pidFile.pid,
     startTime: pidFile.startTime,
@@ -715,16 +921,19 @@ export function readOwnedLock(gameDir, name, { processStartTime: startTimeOf = p
   };
 }
 
-function installOwnedLock(dir, startTime, hooks, state) {
+function installOwnedLock(dir, identity, hooks, state) {
+  const { startTime, evidence } = identity;
   const separator = startTime.indexOf(':');
-  const content = `${process.pid}\n${startTime.slice(0, separator)}\n${startTime.slice(separator + 1)}`;
+  const content = `${process.pid}\n${startTime.slice(0, separator)}\n${startTime.slice(separator + 1)}`
+    + (evidence ? `\n${evidence}` : '');
   const mine = installMutex(dir, content, hooks, state);
   return mine ? { dir, pid: process.pid, startTime, dev: mine.dev, ino: mine.ino } : null;
 }
 
 /**
  * 기존 mkdir+pid 원시를 수명 보유(lifetime-owned) 락으로 확장한다: 기록은
- * pid 파일 한 개에 `pid\nutc-v1\nUTC timestamp` 3줄뿐(비재귀 rmdir 계약을 지키기 위해
+ * pid 파일 한 개에 `pid\nutc-v1\nUTC timestamp` 3줄뿐(Linux에서 증거를 읽었으면 #256
+ * 증거 줄을 더한 4줄; 비재귀 rmdir 계약을 지키기 위해
  * 그 외 파일은 절대 만들지 않는다), staleness는 mtime이 아니라 `readOwnedLock`의
  * `alive` 판정 하나로만 결정된다 — 살아 있는 소유자는 시간이 얼마나 지나도
  * 회수되지 않는다. 죽은 것으로 판정되면 기존 reclaim 경로(inode 검증
@@ -737,8 +946,15 @@ function installOwnedLock(dir, startTime, hooks, state) {
  */
 export function acquireOwnedLock(gameDir, name, { processStartTime: startTimeOf = processStartTime, hooks } = {}) {
   const dir = path.join(gameDir, name);
-  const startTime = resolveOwnedStartTime(process.pid, startTimeOf);
-  if (!validOwnedIdentity(startTime)) {
+  // #256: a Linux reading is split into the `utc-v1` identity every caller compares as text
+  // and the evidence line only `ownedIdentityStatus` reads. An owned reading is written as
+  // the three-line record it always was.
+  const reading = resolveLifetimeReading(process.pid, startTimeOf);
+  const linux = parseLinuxReading(reading);
+  const identity = linux
+    ? { startTime: `utc-v1:${linux.lstart}`, evidence: lifetimeEvidenceOf(linux) }
+    : { startTime: reading, evidence: null };
+  if (!validOwnedIdentity(identity.startTime)) {
     const error = new Error('IDENTITY_UNAVAILABLE');
     error.code = 'IDENTITY_UNAVAILABLE';
     throw error;
@@ -748,19 +964,19 @@ export function acquireOwnedLock(gameDir, name, { processStartTime: startTimeOf 
   try {
     // fail-closed 정책: 이미 존재하는 dir는 rename으로 덮지 않고 먼저 판정한다(빈 dir·unknown 기록은 LOCKED).
     if (!inodeKey(dir)) {
-      const handle = installOwnedLock(dir, startTime, hooks, state);
+      const handle = installOwnedLock(dir, identity, hooks, state);
       if (handle) return handle;
     }
     // pid 파일 없이 회수 aside만 남은 디렉터리는 죽은 회수자의 잔해다(보유 중이 아니다).
     const seen = mutexIdentity(dir);
     if (seen && !seen.pidFile && reclaimAsideLeftovers(dir) === true) {
-      const handle = installOwnedLock(dir, startTime, hooks, state);
+      const handle = installOwnedLock(dir, identity, hooks, state);
       if (handle) return handle;
     }
     const owner = readOwnedLock(gameDir, name, { processStartTime: startTimeOf });
     if (!owner || owner.status !== 'dead') throwLocked();
     if (!reclaimOwnedMutex(dir, startTimeOf, hooks)) throwLocked();
-    const handle = installOwnedLock(dir, startTime, hooks, state);
+    const handle = installOwnedLock(dir, identity, hooks, state);
     if (!handle) throwLocked();
     return handle;
   } finally {
