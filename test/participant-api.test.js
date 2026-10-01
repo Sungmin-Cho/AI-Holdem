@@ -1111,6 +1111,116 @@ test('#263 a recovered restart that fails before its commit reopens the room', {
   assertRoomReleased(restored, guest);
 });
 
+test('#263 a recovered restart whose committed game already ended reopens a room left on the previous game', { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const first = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(first);
+  assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
+  const previous = manager.snapshot().gameId;
+  await pauseWhenPlaying(manager);
+  const restart = cas(manager, 'restart');
+  manager.command(restart);
+  const restarted = await settle(manager, restart.requestId);
+  assert.equal(restarted.status, 'succeeded');
+  await endGame(manager);
+  await manager.close();
+  // The restart row never finished although its game did; the room is locked for
+  // it on top of the previous game, and another owner holds the loop lock.
+  crashBeforeFinishing(storeDir, restarted, { status: 'locked', boundGameId: previous, requestId: first.requestId });
+  const owner = acquireOwnedLock(storeDir, 'loop.lock.d');
+  t.after(() => releaseOwnedLock(owner));
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(restart.requestId).error, 'ACTIVE_GAME');
+  // The failure restores the room onto the previous game while the state is `error`:
+  // the current game ended, so neither game is live.
+  assert.equal(restored.snapshot().state, 'error');
+  assert.equal(restored.snapshot().gameId, restarted.reservation.gameId);
+  assertRoomReleased(restored, guest);
+});
+
+test('#263 a start that fails before its commit reopens a room left on an ended game', { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const first = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(first);
+  assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
+  const ended = manager.snapshot().gameId;
+  await endGame(manager);
+  // A room still locked on the ended game, as the paths above left it before #263.
+  manager.room.lockForStart({ requestId: 'stale' });
+  manager.room.bind(ended, []);
+  const transaction = acquireOwnedLock(path.join(storeDir, '.session-store'), 'transaction.lock.d');
+  let held = true;
+  t.after(() => { if (held) releaseOwnedLock(transaction); });
+  const next = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(next);
+  const failed = await settle(manager, next.requestId);
+  releaseOwnedLock(transaction);
+  held = false;
+  assert.equal(failed.error, 'LOCKED');
+  assert.equal(manager.snapshot().state, 'ended');
+  assertRoomReleased(manager, guest);
+});
+
+test('#263 a recovery-exit restart that fails before its commit reopens the room', { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const probe = probeFailingOnce();
+  const { storeDir, manager, app } = await boot(t, { resolver: probe.resolver });
+  const guest = await openRoomWithGuest(app, manager);
+  probe.alwaysFail = true;
+  const start = { ...cas(manager), setup: LLM_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).error, 'NO_PLAYER_RUNTIME');
+  const committed = resolveCurrentSession(storeDir);
+  assertRoomBoundTo(manager, committed.gameId, guest);
+  assert.ok(manager.snapshot().allowedCommands.includes('restart'));
+  // The restart ends the never-dealt game, then its new commit is refused.
+  const transaction = acquireOwnedLock(path.join(storeDir, '.session-store'), 'transaction.lock.d');
+  let held = true;
+  t.after(() => { if (held) releaseOwnedLock(transaction); });
+  const restart = cas(manager, 'restart');
+  manager.command(restart);
+  const failed = await settle(manager, restart.requestId);
+  releaseOwnedLock(transaction);
+  held = false;
+  assert.equal(failed.recovery.reason, 'NEVER_DEALT');
+  assert.equal(failed.error, 'LOCKED');
+  assert.equal(resolveCurrentSession(storeDir).gameId, committed.gameId);
+  assert.equal(manager.snapshot().state, 'ended');
+  assertRoomReleased(manager, guest);
+});
+
+test('#263 a live game keeps its room: a parked recovery and successful restarts', { timeout: TIMEOUT }, async (t) => {
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  await pauseWhenPlaying(manager);
+  await manager.close();
+  crashBeforeFinishing(storeDir, started);
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).status, 'succeeded');
+  assert.equal(restored.snapshot().state, 'paused');
+  assertRoomBoundTo(restored, started.reservation.gameId, guest);
+  assert.throws(() => restored.room.close(), { code: 'ROOM_LOCKED' });
+  for (const kind of ['restart', 'replace-current']) {
+    const previous = restored.snapshot().gameId;
+    const next = { ...cas(restored, kind), ...(kind === 'replace-current' ? { setup: POLICY_ROOM } : {}) };
+    restored.command(next);
+    assert.equal((await settle(restored, next.requestId)).status, 'succeeded');
+    assert.notEqual(restored.snapshot().gameId, previous);
+    assertRoomBoundTo(restored, restored.snapshot().gameId, guest);
+    await pauseWhenPlaying(restored);
+  }
+});
+
 test('#263 a restart that fails before ending the previous game keeps its room bound', { timeout: TIMEOUT }, async (t) => {
   const { manager, app } = await boot(t);
   const guest = await openRoomWithGuest(app, manager);

@@ -205,9 +205,11 @@ export function createSessionManager({
   // pending, for that start to rebind it. A command that settles without a live
   // game (its start failed before committing, or it recovered a game that had
   // already ended) never rebinds, so the deferred release happens here. Whatever
-  // game the room is bound to, none is live once the current one has ended.
+  // game the room is bound to, none is live once the current one has ended —
+  // the same rule as the app-restart `room.recover` (gameTerminal → open).
   const releaseDeferredRoom = (row) => {
-    if (!START_KINDS.includes(row.kind) || !["ended", "completed"].includes(state)) return;
+    if (!START_KINDS.includes(row.kind)) return;
+    if (!["ended", "completed"].includes(state) && !currentIsTerminal()) return;
     try {
       const bound = room.load()?.lock?.boundGameId;
       if (bound) room.release(bound);
@@ -614,9 +616,10 @@ export function createSessionManager({
       reconcileFailure(row.error);
     } finally {
       row.completedAt = new Date().toISOString();
+      // Before the receipt is saved: a failed save stops the app (see command()).
+      releaseDeferredRoom(row);
       save(row);
       pending = null;
-      releaseDeferredRoom(row);
       revision++;
       onChange(snapshot());
     }
@@ -783,9 +786,9 @@ export function createSessionManager({
           reconcileFailure(row.error);
         } finally {
           row.completedAt = new Date().toISOString();
+          releaseDeferredRoom(row);
           save(row);
           pending = null;
-          releaseDeferredRoom(row);
           revision++;
         }
         return snapshot();
