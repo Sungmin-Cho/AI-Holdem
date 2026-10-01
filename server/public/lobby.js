@@ -145,7 +145,7 @@ function render() {
       ? "중도 종료했습니다. 진행 중이던 핸드는 성적에 포함하지 않습니다."
       : s === "completed"
         ? "게임을 완료했습니다."
-        : (errorMessages[snapshot.error] ?? "현재 게임 상태를 확인해 주세요.");
+        : (errorText(snapshot.error) ?? "현재 게임 상태를 확인해 주세요.");
   $("recover").hidden = !snapshot.allowedCommands.includes("resume");
   $("review").hidden = !["completed", "ended"].includes(s);
   $("result-restart").hidden = !snapshot.allowedCommands.includes("restart");
@@ -273,6 +273,15 @@ function pauseElapsedText(pausing) {
 }
 // Rewrite a live region only when its words change.
 function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
+// #264: a study-service refusal comes before a game is committed (the lobby is
+// back where it was) or once a game exists: a start after its commit, or a
+// resume. Then the state is `error` and the game is kept for 불러오기.
+function errorText(code, snap = snapshot) {
+  if (code === "STUDY_SERVICE_INCOMPATIBLE" && snap?.state === "error")
+    return errorMessages.STUDY_SERVICE_INCOMPATIBLE_KEPT +
+      (snap.allowedCommands?.includes("end") ? " 이어 갈 수 없으면 게임을 종료할 수 있습니다." : "");
+  return errorMessages[code];
+}
 let refreshFailures=0;
 // Counts refreshes as they start, so a settled pause is released only by a
 // snapshot requested after it settled, and an answer older than the one
@@ -464,6 +473,9 @@ const errorMessages = {
     "다른 실행에서 현재 게임이 변경됐습니다. 로비를 새로고침해 주세요.",
   STUDY_SERVICE_INCOMPATIBLE:
     "업그레이드 전에 시작한 학습 서비스가 실행 중이라 게임을 시작하지 않았습니다. 서버에서 npm run study:stop -- <저장소 경로>로 멈춘 뒤 다시 시작하세요.",
+  // Lobby-only key (not a server code): the same refusal once the game exists.
+  STUDY_SERVICE_INCOMPATIBLE_KEPT:
+    "업그레이드 전에 시작한 학습 서비스가 이 게임을 거부했습니다. 게임은 저장되어 있습니다. 서버에서 npm run study:stop -- <저장소 경로>로 멈춘 뒤 불러오기로 이어 가세요.",
   RECOVERY_REQUIRED:
     "저장된 진행 정보를 자동으로 복구하지 못했습니다. 기록은 보존되어 있습니다.",
   SESSION_RECOVERABLE: "저장된 게임이 있습니다. 불러온 뒤 계속할 수 있습니다.",
@@ -480,7 +492,7 @@ const errorMessages = {
 function showError(e) {
   $("error").dataset.kind = e?.code === "INVALID_SETUP" ? "setup" : "";
   $("error").textContent =
-    errorMessages[e.code] ?? errorMessages[e.message] ??
+    errorText(e.code) ?? errorText(e.message) ??
     "요청을 완료하지 못했습니다. 연결과 현재 게임 상태를 확인해 주세요.";
 }
 const commands = createLobbyCommandClient({
@@ -536,7 +548,10 @@ async function command(kind, setup, extra = {}) {
     // recovered, and so does one that succeeded but whose refresh failed.
     if (kind === "pause" && !sent && !storedPause(pauseLock)) pauseLock = null;
     showError(e);
+    // Advice can depend on the state the failure left (#264), so pick it again
+    // from the refreshed snapshot; a failed refresh leaves the same words.
     await refresh().catch(() => {});
+    showError(e);
   } finally {
     preparing = null;
     busy = false;

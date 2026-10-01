@@ -559,7 +559,9 @@ test('#256 D6 Linux: a running study service that refuses the new loop lock stop
   let reserved = false;
   await assert.rejects(
     prepareGameSession({ storeDir: store, ai: 1, port: 0 }, { resolver: async () => ({ player: null, upper: null, notices: [] }), onReserve: () => { reserved = true; } }),
-    (error) => error.code === 'STUDY_SERVICE_INCOMPATIBLE' && error.cause?.code === 'PARENT_IDENTITY_MISMATCH',
+    // Nothing was created, so the advice is to start again (#264).
+    (error) => error.code === 'STUDY_SERVICE_INCOMPATIBLE' && error.cause?.code === 'PARENT_IDENTITY_MISMATCH'
+      && /다시 시작하세요/.test(error.message),
   );
   assert.equal(service.read().attaches, 1, 'the refusal came from the running service');
   assert.equal(reserved, false);
@@ -605,7 +607,9 @@ test('#256 Linux: a refusal after the commit carries the same code, and the comm
   service.spec({ ...spec, refuseFrom: 2 });
   await assert.rejects(
     launchSession({ storeDir: store, ai: 1, port: 0, opponentRuntime: 'policy' }, { resolver: async () => ({ player: null, upper: null, notices: [] }) }),
-    (error) => error.code === 'STUDY_SERVICE_INCOMPATIBLE' && error.cause?.code === 'PARENT_IDENTITY_MISMATCH',
+    // The committed game is kept, so the advice is to resume it (#264).
+    (error) => error.code === 'STUDY_SERVICE_INCOMPATIBLE' && error.cause?.code === 'PARENT_IDENTITY_MISMATCH'
+      && /이 게임을 재개하세요/.test(error.message),
   );
   assert.equal(service.read().attaches, 2);
   assert.ok(resolveCurrentSession(store), 'the committed session is kept');

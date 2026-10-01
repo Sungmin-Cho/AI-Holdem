@@ -151,3 +151,48 @@ test('R3: recovery keeps a settled pause locked until a later snapshot and resto
  await context.recoverCommand();
  assert.equal(context.pauseLock,null,'a stored pause for another game does not lock this one');
 });
+
+// #264: the lobby's actual messages, result panel and notice.
+function lobbyWithMessages(extra={}){
+ const dom=elements(),source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const context={...dom,URLSearchParams,snapshot:null,selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,pauseLock:null,rejoinFor:null,labels:{},preparing:null,refreshSeq:0,...extra};
+ vm.createContext(context);
+ vm.runInContext(source.slice(source.indexOf('function render()'),source.indexOf('let refreshFailures='))
+  +source.slice(source.indexOf('const errorMessages = {'),source.indexOf('const commands ='))
+  +source.slice(source.indexOf('async function command('),source.indexOf('function confirm(')),context);
+ return {dom,context};
+}
+const KEPT=/게임은 저장되어 있습니다.*불러오기로 이어 가세요/;
+const NOT_STARTED=/게임을 시작하지 않았습니다.*다시 시작하세요/;
+test('#264 a study refusal that kept its game advises 불러오기, and 종료 only when it is allowed', () => {
+ const {dom,context}=lobbyWithMessages();
+ const panel=(allowedCommands)=>{context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error:'STUDY_SERVICE_INCOMPATIBLE',allowedCommands};context.render();return dom.$('result-message').textContent;};
+ const endable=panel(['resume','end','restart']);
+ assert.match(endable,KEPT);assert.match(endable,/게임을 종료할 수 있습니다/);assert.doesNotMatch(endable,/시작하지 않았습니다|다시 시작/);
+ const resumeOnly=panel(['resume']);
+ assert.match(resumeOnly,KEPT);assert.doesNotMatch(resumeOnly,/종료/);
+ context.showError(new Error('STUDY_SERVICE_INCOMPATIBLE'));
+ assert.equal(dom.$('error').textContent,resumeOnly,'the notice says what the result panel says');
+ // Refused before any commit, the lobby is back where it was.
+ for(const state of ['lobby','ended','completed']){
+  context.snapshot={state,gameId:state==='lobby'?null:'one',allowedCommands:['start','restart']};
+  context.showError(new Error('STUDY_SERVICE_INCOMPATIBLE'));assert.match(dom.$('error').textContent,NOT_STARTED,state);
+ }
+ // Other codes read the same in every state.
+ context.snapshot={state:'error',allowedCommands:['resume']};context.showError(new Error('NO_PLAYER_RUNTIME'));
+ const runtime=dom.$('error').textContent;assert.match(runtime,/LLM 플레이어/);
+ context.snapshot={state:'lobby',allowedCommands:['start']};context.showError(new Error('NO_PLAYER_RUNTIME'));
+ assert.equal(dom.$('error').textContent,runtime);
+});
+test('#264 a failed start picks its notice again from the state the failure left', async () => {
+ for(const refreshed of [true,false]){
+  const {dom,context}=lobbyWithMessages({uuid:()=>'request',storedPause:()=>false,openPauseMenu(){},
+   commands:{send:async()=>{throw new Error('STUDY_SERVICE_INCOMPATIBLE');}}});
+  dom.$('start').focus=()=>{};
+  context.snapshot={state:'lobby',gameId:null,allowedCommands:['start']};
+  // The game was committed before the refusal: the next snapshot is its `error`.
+  context.refresh=async()=>{if(!refreshed)throw new Error('offline');context.snapshot={state:'error',gameId:'new',gameEpoch:'epoch',error:'STUDY_SERVICE_INCOMPATIBLE',allowedCommands:['resume','end','restart']};};
+  await context.command('start',{mode:'cash-training'});
+  assert.match(dom.$('error').textContent,refreshed ? KEPT : NOT_STARTED,`refreshed=${refreshed}`);
+ }
+});
