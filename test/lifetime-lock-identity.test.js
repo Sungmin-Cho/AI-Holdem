@@ -614,6 +614,13 @@ test('#256 Linux: a refusal after the commit carries the same code, and the comm
   assert.equal(service.read().attaches, 2);
   assert.ok(resolveCurrentSession(store), 'the committed session is kept');
   assert.equal(fs.existsSync(path.join(store, 'loop.lock.d')), false);
+  // Resuming the kept game meets the same refusal and the same advice.
+  await assert.rejects(
+    launchSession({ storeDir: store, resume: true, port: 0 }, { resolver: async () => ({ player: null, upper: null, notices: [] }) }),
+    (error) => error.code === 'STUDY_SERVICE_INCOMPATIBLE' && /이 게임을 재개하세요/.test(error.message),
+  );
+  assert.equal(service.read().attaches, 3);
+  assert.equal(fs.existsSync(path.join(store, 'loop.lock.d')), false);
 });
 
 test('#256 a refusal is renamed only for a four-line loop lock; a three-line one keeps its code', {

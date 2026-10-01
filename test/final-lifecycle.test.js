@@ -178,6 +178,9 @@ test('#264 a study refusal that kept its game advises 불러오기, and 종료 o
   context.snapshot={state,gameId:state==='lobby'?null:'one',allowedCommands:['start','restart']};
   context.showError(new Error('STUDY_SERVICE_INCOMPATIBLE'));assert.match(dom.$('error').textContent,NOT_STARTED,state);
  }
+ // An `error` state without a current game created none.
+ context.snapshot={state:'error',gameId:null,allowedCommands:['resume']};
+ context.showError(new Error('STUDY_SERVICE_INCOMPATIBLE'));assert.match(dom.$('error').textContent,NOT_STARTED);
  // Other codes read the same in every state.
  context.snapshot={state:'error',allowedCommands:['resume']};context.showError(new Error('NO_PLAYER_RUNTIME'));
  const runtime=dom.$('error').textContent;assert.match(runtime,/LLM 플레이어/);

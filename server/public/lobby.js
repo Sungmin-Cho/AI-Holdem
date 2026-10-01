@@ -275,9 +275,10 @@ function pauseElapsedText(pausing) {
 function setLiveText(node, text) { if (node.textContent !== text) node.textContent = text; }
 // #264: a study-service refusal comes before a game is committed (the lobby is
 // back where it was) or once a game exists: a start after its commit, or a
-// resume. Then the state is `error` and the game is kept for 불러오기.
+// resume. On this code's paths the latter leaves that game current in `error`,
+// kept for 불러오기; the former never leaves `error` with a current game.
 function errorText(code, snap = snapshot) {
-  if (code === "STUDY_SERVICE_INCOMPATIBLE" && snap?.state === "error")
+  if (code === "STUDY_SERVICE_INCOMPATIBLE" && snap?.state === "error" && snap.gameId)
     return errorMessages.STUDY_SERVICE_INCOMPATIBLE_KEPT +
       (snap.allowedCommands?.includes("end") ? " 이어 갈 수 없으면 게임을 종료할 수 있습니다." : "");
   return errorMessages[code];
