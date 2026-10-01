@@ -1019,6 +1019,119 @@ test('#260 closing the app during a start keeps the committed game bound', { tim
   await resumeSucceeds(restored, committed.gameId);
 });
 
+function assertRoomReleased(manager, guest) {
+  const room = manager.room.load();
+  assert.equal(room.status, 'open');
+  assert.equal(room.lock.boundGameId, null);
+  assert.equal(room.participants.find((row) => row.participantId === guest.participantId)?.status, 'active');
+}
+async function startBindsGuest(manager, guest) {
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  assert.equal((await settle(manager, start.requestId)).status, 'succeeded');
+  assertRoomBoundTo(manager, manager.snapshot().gameId, guest);
+}
+
+for (const ending of ['ended', 'completed']) test(`#263 recovering a reserved game that already ${ending} reopens the room`, { timeout: TIMEOUT }, async (t) => {
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  if (ending === 'ended') await endGame(manager);
+  else await pauseWhenPlaying(manager);
+  await manager.close();
+  if (ending === 'completed') {
+    // As if the game had played to its end (a CLI resume) before the app came back.
+    const loopFile = path.join(resolveCurrentSession(storeDir).sessionDir, 'loop-state.json');
+    fs.writeFileSync(loopFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(loopFile, 'utf8')), phase: 'done' }));
+  }
+  // The start row never finished although its game did.
+  crashBeforeFinishing(storeDir, started);
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(start.requestId).status, 'succeeded');
+  assert.equal(restored.snapshot().state, ending);
+  assert.equal(restored.snapshot().gameId, started.reservation.gameId);
+  assertRoomReleased(restored, guest);
+  if (ending === 'ended') await startBindsGuest(restored, guest);
+  else assert.equal(restored.room.close().status, 'closed');
+});
+
+for (const kind of ['restart', 'replace-current']) test(`#263 ${kind} that fails before its commit after ending the previous game reopens the room`, { timeout: TIMEOUT }, async (t) => {
+  const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const first = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(first);
+  assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
+  const previous = manager.snapshot().gameId;
+  await pauseWhenPlaying(manager);
+  assertRoomBoundTo(manager, previous, guest);
+  // The previous game ends first; the catalog transaction lock then refuses the new commit.
+  const transaction = acquireOwnedLock(path.join(storeDir, '.session-store'), 'transaction.lock.d');
+  let held = true;
+  t.after(() => { if (held) releaseOwnedLock(transaction); });
+  const next = { ...cas(manager, kind), ...(kind === 'replace-current' ? { setup: POLICY_ROOM } : {}) };
+  manager.command(next);
+  const failed = await settle(manager, next.requestId);
+  releaseOwnedLock(transaction);
+  held = false;
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.error, 'LOCKED');
+  assert.equal(resolveCurrentSession(storeDir).gameId, previous);
+  assert.equal(manager.snapshot().state, 'ended');
+  assertRoomReleased(manager, guest);
+  await startBindsGuest(manager, guest);
+});
+
+test('#263 a recovered restart that fails before its commit reopens the room', { timeout: TIMEOUT }, async (t) => {
+  const { storeDir, manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const start = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(start);
+  const started = await settle(manager, start.requestId);
+  assert.equal(started.status, 'succeeded');
+  await pauseWhenPlaying(manager);
+  const previous = resolveCurrentSession(storeDir);
+  await manager.close();
+  // Recovery ends the paused game, then the stale reservation is refused before any commit.
+  const restart = { requestId: randomUUID(), expectedInstanceId: 'crashed', expectedAppRevision: 1,
+    expectedGameId: previous.gameId, expectedSelectionVersion: previous.selectionVersion, kind: 'restart',
+    setup: started.setup, payload: 'crashed', roomLocked: true, acceptedAt: new Date().toISOString(),
+    reservation: { gameId: randomUUID(), selectionVersion: previous.selectionVersion } };
+  crashBeforeFinishing(storeDir, restart, { status: 'locked', boundGameId: previous.gameId, requestId: start.requestId });
+  const restored = restartApp(t, storeDir, resolver);
+  await restored.initialize();
+  assert.equal(restored.receipt(restart.requestId).status, 'failed');
+  assert.equal(restored.receipt(restart.requestId).error, 'CURRENT_CHANGED');
+  assert.equal(resolveCurrentSession(storeDir).gameId, previous.gameId);
+  assert.equal(restored.snapshot().state, 'ended');
+  assertRoomReleased(restored, guest);
+});
+
+test('#263 a restart that fails before ending the previous game keeps its room bound', { timeout: TIMEOUT }, async (t) => {
+  const { manager, app } = await boot(t);
+  const guest = await openRoomWithGuest(app, manager);
+  const first = { ...cas(manager), setup: POLICY_ROOM };
+  manager.command(first);
+  assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
+  const previous = manager.snapshot().gameId;
+  await pauseWhenPlaying(manager);
+  const loop = manager.session.loop;
+  const endGameOf = loop.endGame;
+  loop.endGame = async () => { throw Object.assign(new Error('end refused'), { code: 'END_REFUSED' }); };
+  const restart = cas(manager, 'restart');
+  manager.command(restart);
+  const failed = await settle(manager, restart.requestId);
+  loop.endGame = endGameOf;
+  assert.equal(failed.error, 'END_REFUSED');
+  assert.equal(manager.snapshot().state, 'paused');
+  assertRoomBoundTo(manager, previous, guest);
+  await resumeSucceeds(manager, previous);
+});
+
 test('late spectator API is read-only and promotion only affects the next game', {timeout:TIMEOUT}, async t => {
   const {manager,app}=await boot(t);
   manager.room.open({hostName:'Host',totalSeats:3,actionTimeoutSec:60});

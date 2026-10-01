@@ -201,6 +201,20 @@ export function createSessionManager({
     current = committed;
     safeBind(committed.gameId);
   };
+  // #263: emit() keeps an ended game's room locked while a start-type command is
+  // pending, for that start to rebind it. A command that settles without a live
+  // game (its start failed before committing, or it recovered a game that had
+  // already ended) never rebinds, so the deferred release happens here. Whatever
+  // game the room is bound to, none is live once the current one has ended.
+  const releaseDeferredRoom = (row) => {
+    if (!START_KINDS.includes(row.kind) || !["ended", "completed"].includes(state)) return;
+    try {
+      const bound = room.load()?.lock?.boundGameId;
+      if (bound) room.release(bound);
+    } catch {
+      /* room may be absent */
+    }
+  };
   const emit = (next, code = null) => {
     if (next !== state) stateSince = new Date().toISOString();
     state = next;
@@ -602,6 +616,7 @@ export function createSessionManager({
       row.completedAt = new Date().toISOString();
       save(row);
       pending = null;
+      releaseDeferredRoom(row);
       revision++;
       onChange(snapshot());
     }
@@ -770,6 +785,7 @@ export function createSessionManager({
           row.completedAt = new Date().toISOString();
           save(row);
           pending = null;
+          releaseDeferredRoom(row);
           revision++;
         }
         return snapshot();
