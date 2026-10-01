@@ -1111,10 +1111,10 @@ test('#263 a recovered restart that fails before its commit reopens the room', {
   assertRoomReleased(restored, guest);
 });
 
-test('#263 a recovered restart whose committed game already ended reopens a room left on the previous game', { timeout: TIMEOUT }, async (t) => {
+test('#263 while another loop owner holds the store, a failed recovery leaves the room as the failure restored it', { timeout: TIMEOUT }, async (t) => {
   const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
   const { storeDir, manager, app } = await boot(t);
-  const guest = await openRoomWithGuest(app, manager);
+  await openRoomWithGuest(app, manager);
   const first = { ...cas(manager), setup: POLICY_ROOM };
   manager.command(first);
   assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
@@ -1134,25 +1134,32 @@ test('#263 a recovered restart whose committed game already ended reopens a room
   const restored = restartApp(t, storeDir, resolver);
   await restored.initialize();
   assert.equal(restored.receipt(restart.requestId).error, 'ACTIVE_GAME');
-  // The failure restores the room onto the previous game while the state is `error`:
-  // the current game ended, so neither game is live.
+  // The owner may be committing a game of its own, so the room is not opened while
+  // it runs: the failure restored the lock on the previous game (an app restart
+  // without the unfinished row opens it, `room.recover` gameTerminal).
   assert.equal(restored.snapshot().state, 'error');
   assert.equal(restored.snapshot().gameId, restarted.reservation.gameId);
-  assertRoomReleased(restored, guest);
+  const room = restored.room.load();
+  assert.equal(room.status, 'locked');
+  assert.equal(room.lock.boundGameId, previous);
 });
 
 test('#263 a start that fails before its commit reopens a room left on an ended game', { timeout: TIMEOUT }, async (t) => {
   const { acquireOwnedLock, releaseOwnedLock } = await import('../engine/state.js');
   const { storeDir, manager, app } = await boot(t);
   const guest = await openRoomWithGuest(app, manager);
-  const first = { ...cas(manager), setup: POLICY_ROOM };
-  manager.command(first);
-  assert.equal((await settle(manager, first.requestId)).status, 'succeeded');
-  const ended = manager.snapshot().gameId;
-  await endGame(manager);
-  // A room still locked on the ended game, as the paths above left it before #263.
+  const games = [];
+  for (let i = 0; i < 2; i++) {
+    const start = { ...cas(manager), setup: POLICY_ROOM };
+    manager.command(start);
+    assert.equal((await settle(manager, start.requestId)).status, 'succeeded');
+    games.push(manager.snapshot().gameId);
+    await endGame(manager);
+  }
+  // A room still locked on an ended game, as the paths above left it before #263 —
+  // here an older one than the current game: the room's own binding is released.
   manager.room.lockForStart({ requestId: 'stale' });
-  manager.room.bind(ended, []);
+  manager.room.bind(games[0], []);
   const transaction = acquireOwnedLock(path.join(storeDir, '.session-store'), 'transaction.lock.d');
   let held = true;
   t.after(() => { if (held) releaseOwnedLock(transaction); });
