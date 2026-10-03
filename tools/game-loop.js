@@ -1546,7 +1546,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     studyPromise = pending;
     try {
       let service;
-      try { service = await pending; } catch (error) { throw studyRefusal(error, lockHandle, storeDir); }
+      try { service = await pending; } catch (error) { throw studyRefusal(error, lockHandle, storeDir, { committed: true }); }
       assertNotStopping();
       return service;
     } finally {
@@ -8528,11 +8528,13 @@ function hasLockEvidence(lockHandle) {
     return false;
   }
 }
-function studyRefusal(error, lockHandle, storeDir) {
+// `committed`: the loop's own attach, so this game stays current and is resumed
+// once the service is stopped (#264); otherwise nothing was created yet.
+function studyRefusal(error, lockHandle, storeDir, { committed = false } = {}) {
   if (error?.code !== 'PARENT_IDENTITY_MISMATCH' || !lockHandle || !hasLockEvidence(lockHandle)) return error;
   return codedError(
     'STUDY_SERVICE_INCOMPATIBLE',
-    `실행 중인 학습 서비스가 이 게임 루프의 락을 확인하지 못했습니다. 업그레이드 전에 시작한 서비스라면 \`npm run study:stop -- ${storeDir}\`로 멈춘 뒤 다시 시작하세요.`,
+    `실행 중인 학습 서비스가 이 게임 루프의 락을 확인하지 못했습니다. 업그레이드 전에 시작한 서비스라면 \`npm run study:stop -- ${storeDir}\`로 멈춘 뒤 ${committed ? '이 게임을 재개하세요' : '다시 시작하세요'}.`,
     { cause: error },
   );
 }
