@@ -10,7 +10,7 @@ import {
   publicProofId,
   publishBodyByteLength,
 } from '../publish-contract.js';
-import { createCoachControl, UNAVAILABLE_TEXT, DEFAULT_ATTEMPT_MS } from '../tools/coach-control.js';
+import { createCoachControl, UNAVAILABLE_TEXT, DEFAULT_ATTEMPT_MS, failureEnvelope, CoachError } from '../tools/coach-control.js';
 
 class FakeClock {
   constructor(start = 0n) {
@@ -1249,4 +1249,20 @@ test('#205 CLI and loop release reason sets agree with the contract', async () =
   const expected = new Set(['IDENTITY_DEAD', 'IDENTITY_REPLACED', 'NOT_SPAWNED', 'OWNER_RUNTIME_CLOSED', 'CLOSED_CONFIRMED', 'ACCEPT_EVIDENCE', 'LEGACY_NO_RUNTIME_PROCESS']);
   assert.deepEqual(new Set(RELEASE_EVIDENCE_REASONS), expected);
   assert.deepEqual(new Set(LOOP_RELEASE_REASONS), expected);
+});
+
+// #265 C: an unexpected exception is still INTERNAL, now with a closed-set cause/syscall.
+test('#265 failure envelope: INTERNAL carries a closed-set cause and syscall, coach errors stay as they were', async () => {
+  const eperm = Object.assign(new Error('EPERM: operation not permitted, rename \'C:\\x.tmp\''), { code: 'EPERM', syscall: 'rename', path: 'C:\\x.tmp' });
+  const internal = failureEnvelope(eperm);
+  assert.equal(internal.code, 'INTERNAL');
+  assert.equal(internal.cause, 'EPERM');
+  assert.equal(internal.syscall, 'rename');
+  assert.equal(Object.hasOwn(internal, 'path'), false);
+  assert.equal(failureEnvelope(new SyntaxError('Unexpected token')).cause, 'JSON_PARSE');
+  const odd = failureEnvelope(Object.assign(new Error('x'), { code: 'ESOMETHING', syscall: 'ioctl' }));
+  assert.equal(odd.cause, 'OTHER');
+  assert.equal(Object.hasOwn(odd, 'syscall'), false);
+  const coded = failureEnvelope(new CoachError('STALE_GENERATION', 'stale'));
+  assert.deepEqual(coded, { ok: false, code: 'STALE_GENERATION', message: 'stale' }, 'a CoachError keeps its own envelope');
 });

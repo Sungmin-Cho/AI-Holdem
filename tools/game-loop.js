@@ -252,6 +252,21 @@ const KNOWN_CHILD_ERROR_CODES = new Set([
   'HINT_SNAPSHOT_INVALID',
 ]);
 
+// #265 C: what a failed child said about itself, re-validated here (child output is not
+// trusted): the coach-control subcommand this loop ran and the closed-set cause/syscall of an
+// INTERNAL failure. Never raw text.
+const CHILD_FAILURE_CAUSES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOENT', 'ENOTDIR', 'ENOTEMPTY', 'EEXIST',
+  'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'EXDEV', 'EINVAL', 'LOCKED', 'JSON_PARSE', 'OTHER']);
+const CHILD_FAILURE_SYSCALLS = new Set(['open', 'read', 'write', 'rename', 'unlink', 'rmdir', 'mkdir', 'stat',
+  'lstat', 'fstat', 'fsync', 'close', 'copyfile']);
+export function childFailureDiagnostic(error) {
+  const out = {};
+  if (typeof error?.childCommand === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(error.childCommand)) out.childCommand = error.childCommand;
+  if (CHILD_FAILURE_CAUSES.has(error?.envelope?.cause)) out.childCause = error.envelope.cause;
+  if (CHILD_FAILURE_SYSCALLS.has(error?.envelope?.syscall)) out.childSyscall = error.envelope.syscall;
+  return out;
+}
+
 function classifyChildOutputCode(rawCode) {
   return typeof rawCode === 'string' && KNOWN_CHILD_ERROR_CODES.has(rawCode) ? rawCode : 'UNLISTED';
 }
@@ -1366,7 +1381,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           reject(codedError(
             envelope?.code ?? error?.code ?? 'CHILD_FAILED',
             envelope?.message ?? String(stderr).trim() ?? '자식 프로세스가 실패했습니다.',
-            { cause: error, envelope },
+            { cause: error, envelope, ...(script === coachCliPath ? { childCommand: args[0] } : {}) },
           ));
           return;
         }
@@ -4656,7 +4671,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         } catch (error) {
           if (error.code === deadlineError().code) throw error;
           if (error.code !== 'STALE_GENERATION') {
-            childFailure = { reason: 'FENCE_CHILD_FAILED', cleanupAuthorized: false };
+            // #265 C, as for a failed cleanup write below (#255): an unconfirmed live judgment
+            // survives a failed fence — its recovery is "check pid N". Cleanup stays withheld.
+            const liveJudgment = result.confirmed !== true && persistedRecoveryClass(result.reason) === 'live';
+            childFailure = liveJudgment
+              ? { reason: result.reason, cleanupAuthorized: false, cleanupFailure: 'FENCE_CHILD_FAILED', diagnostic: childFailureDiagnostic(error) }
+              : { reason: 'FENCE_CHILD_FAILED', cleanupAuthorized: false, diagnostic: childFailureDiagnostic(error) };
           }
         }
       }
@@ -4693,8 +4713,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             // "check pid N", never a release command the writer would refuse.
             const liveJudgment = result.confirmed !== true && persistedRecoveryClass(result.reason) === 'live';
             childFailure = liveJudgment
-              ? { reason: result.reason, cleanupAuthorized: true, cleanupFailure: refused ? error.code : 'CLEANUP_CHILD_FAILED' }
-              : { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true };
+              ? { reason: result.reason, cleanupAuthorized: true, cleanupFailure: refused ? error.code : 'CLEANUP_CHILD_FAILED', diagnostic: childFailureDiagnostic(error) }
+              : { reason: refused ? error.code : 'CLEANUP_CHILD_FAILED', cleanupAuthorized: true, diagnostic: childFailureDiagnostic(error) };
           }
         }
       }
@@ -4713,6 +4733,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           generation: attempt.generation,
           reason: effectiveResult.reason,
           ...(childFailure?.cleanupFailure ? { cleanupFailure: childFailure.cleanupFailure } : {}),
+          ...(childFailure?.diagnostic ?? {}),
         });
       }
       return { attempt, result: effectiveResult };
@@ -5485,7 +5506,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       .then(() => (typeof work === 'function' ? work() : work))
       .catch((error) => {
         appendNotice(`핸드 ${handNo} 코치 파이프라인 오류: ${error.code ?? 'ERROR'}`);
-        log('coach-error', { handNo, code: error.code ?? 'ERROR' });
+        log('coach-error', { handNo, code: error.code ?? 'ERROR', ...childFailureDiagnostic(error) });
       })
       .finally(() => coachTasks.delete(task));
     coachTasks.add(task);
