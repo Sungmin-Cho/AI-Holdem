@@ -6480,6 +6480,8 @@ test('#265 a failed fence keeps the LIVE pid guidance and logs the child failure
   assert.match(halt.message, /--operator-confirmed 1/);
   assert.match(halt.message, /reasons:.*STILL_ALIVE.*LEGACY_SCAN_UNAVAILABLE/);
   assert.doesNotMatch(halt.message, /FENCE_CHILD_FAILED/);
+  // The failed fence still withholds that hand's cleanup.
+  assert.equal(f.calls.some((args) => args[0] === 'cleanup-result' && args[args.indexOf('--hand') + 1] === '1'), false);
   const records = fs.readFileSync(path.join(f.gameDir, 'loop.log'), 'utf8').trim().split('\n').map(JSON.parse);
   const unconfirmed = records.find((row) => row.event === 'resume-persisted-unconfirmed' && row.handNo === 1);
   assert.deepEqual({ reason: unconfirmed.reason, cleanupFailure: unconfirmed.cleanupFailure, childCommand: unconfirmed.childCommand,
