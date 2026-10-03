@@ -2379,6 +2379,52 @@ for (const [label, recorded, current] of [
   assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
 });
 
+test('#265 a non-canonical recorded start time is no proof: the live pid keeps the lock (fails closed)', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  // The same instant written with three fraction digits: not the owned wire, so not compared.
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'win32-v1:2026-01-01T00:00:00.123Z', current: 'win32-v1:2026-01-01T00:00:00.1230000Z',
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_MISMATCH');
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, unrelated.pid);
+  assert.deepEqual(signals, []);
+});
+
+test('#265 an aborted game whose relay lock pid was reused finishes without adopting it', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'win32-v1:2026-01-01T00:00:00.0000000Z', current: 'win32-v1:2026-10-01T00:00:00.0000000Z',
+  });
+  await execFileAsync(process.execPath, [CLI, 'end', '--result', 'abort', '--game-dir', gameDir]);
+  const ended = await loop.resume();
+  assert.equal(ended.code, 'GAME_ENDED');
+  assert.deepEqual(signals.filter((row) => row.pid === unrelated.pid), []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
+// The real readers: a recorded stamp in this host's own canonical format that is not the
+// idle child's. Windows and macOS prove the pid reused; Linux cannot (ACTIVE_GAME as before).
+const HOST_STALE_STAMP = process.platform === 'win32'
+  ? 'win32-v1:2001-01-01T00:00:00.0000000Z' : 'utc-v1:Mon Jan  1 00:00:00 2001';
+const HOST_PROVES_REUSE = ['win32', 'darwin'].includes(process.platform);
+test('#265 a new store game is not refused by the previous session\'s relay lock whose pid was reused', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const { commitSession } = await import('../engine/session-catalog.js');
+  const { initializePreparedSession } = await import('../tools/game-loop.js');
+  const store = createOwnedTempDir('holdem-265-reused-relay');
+  const prepared = prepareSession(store);
+  await initializePreparedSession(prepared.stagingDir, { ai: 1, opponentRuntime: 'policy' });
+  const previous = commitSession(store, prepared);
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  t.after(() => terminateIfAlive(unrelated));
+  fs.writeFileSync(path.join(previous.sessionDir, 'lock.json'), JSON.stringify({
+    serverPid: unrelated.pid, port: 1, sessionToken: 't'.repeat(64), startedAt: '2001-01-01T00:00:00.000Z', serverStartTime: HOST_STALE_STAMP,
+  }));
+  const attempt = prepareGameSession({ storeDir: store, ai: 1, port: 0, opponentRuntime: 'policy' }, {
+    resolver: resolverFor(makeAdapter()),
+    onReserve: () => { throw Object.assign(new Error('stop here'), { code: 'TEST_STOP' }); },
+  });
+  await assert.rejects(attempt, { code: HOST_PROVES_REUSE ? 'TEST_STOP' : 'ACTIVE_GAME' });
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
 test('#265 an unproven start-time mismatch (Linux lstart) still fails closed on a live pid', {
   skip: process.platform === 'darwin' ? 'a macOS lstart is fixed at creation' : false, timeout: 20_000 * WIN32_SCALE,
 }, async (t) => {
