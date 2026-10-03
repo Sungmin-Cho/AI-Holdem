@@ -2996,7 +2996,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           assertPinnedServerLock(pin);
           await stopServer({ boundToFinalizationDeadline: true });
           d9Checkpoint('after-stop-server');
-        } else if (serverChild?.pid === expected.serverPid) {
+        } else if (serverChild?.pid === expected.serverPid
+          // #265 B: an adopted relay that died (its pid possibly reused) is this lock's relay
+          // only when this loop's identity of it matches what the lock recorded.
+          || (serverAdopted && serverIdentity?.pid === expected.serverPid
+            && serverIdentity.startTime === expected.serverStartTime)) {
           serverChild = null;
           serverIdentity = null; serverBindingVerified = null;
           serverPid = null;
@@ -7859,7 +7863,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (phase === 'done') {
       await ensureStudyForOwner();
       const liveLock = readServerLock();
-      if (liveLock && processAlive(liveLock.serverPid)) {
+      if (liveLock && recordedRelayAlive(liveLock)) {
         const port = await ensureServer(engineState.sessionToken, { port: liveLock.port });
         return writeLoopState({ port });
       }

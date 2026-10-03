@@ -9,6 +9,7 @@ import {
   processStartTime,
   ownedProcessStartTime,
   serverProcessStartTime,
+  validOwnedIdentity,
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
@@ -2414,6 +2415,8 @@ test('#265 a new store game is not refused by the previous session\'s relay lock
   const previous = commitSession(store, prepared);
   const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
   t.after(() => terminateIfAlive(unrelated));
+  // Precondition, not a retry of the product call: the real reader can identify the child.
+  await waitFor(() => validOwnedIdentity(serverProcessStartTime(unrelated.pid)), 'the idle child start time is unreadable', 10_000);
   fs.writeFileSync(path.join(previous.sessionDir, 'lock.json'), JSON.stringify({
     serverPid: unrelated.pid, port: 1, sessionToken: 't'.repeat(64), startedAt: '2001-01-01T00:00:00.000Z', serverStartTime: HOST_STALE_STAMP,
   }));
@@ -6116,6 +6119,50 @@ test('D9 quarantine restore never clobbers a second lock created immediately bef
   assert.equal(quarantinedStat.ino, firstStat.ino);
   assert.equal(fs.readFileSync(outcome.race.quarantinePath, 'utf8'), firstRaw);
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+});
+
+// #265 B: publish recovery over an adopted relay whose pid now reads another start time. The
+// recovery retires the stale lock; a stop at that point must find no stale ownership to stop.
+test('#265 publish recovery forgets an adopted relay proven gone, so a stop before the respawn succeeds', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'SIGSTOP keeps the relay alive but unresponsive; win32 has no equivalent')) return;
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const relayPid = external.child.pid;
+  // A relay a previous loop started records its start time; this one is made to match.
+  let relayStamp = 'win32-v1:2026-01-01T00:00:00.0000000Z';
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({ ...external.lock, serverStartTime: relayStamp }));
+  const signals = [];
+  let loopRef = null;
+  let stopping = null;
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0, waitMs: 40, localHttpProbeMs: 300,
+    processStartTime: (pid) => (pid === relayPid ? relayStamp : serverProcessStartTime(pid)),
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); process.kill(pid, signal); },
+    d9Checkpoint(name) { if (name === 'before-retire' && stopping === null) stopping = loopRef.requestStop(); },
+  } });
+  loopRef = loop;
+  t.after(async () => {
+    try { process.kill(relayPid, 'SIGCONT'); } catch { /* gone */ }
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(external.child);
+  });
+  await loop.resume();
+  assert.equal(loop.serverPid, relayPid, 'the relay was adopted');
+  const running = startRun(loop);
+  await waitForUserSnapshot(gameDir, 10_000);
+  // The relay stops answering and its pid now reads another creation time: reused.
+  process.kill(relayPid, 'SIGSTOP');
+  relayStamp = 'win32-v1:2026-10-01T00:00:00.0000000Z';
+  await waitFor(() => stopping !== null, 'publish recovery never reached before-retire', 30_000);
+  await stopping;
+  await assert.rejects(running, { code: 'STOPPING' });
+  assert.deepEqual(signals.filter((row) => row.pid === relayPid), [], 'the reused pid was never signalled');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
 test('D9 stop checkpoints fence retirement, spawn, and recorded-body retry interleavings', { timeout: 30_000 }, async (t) => {

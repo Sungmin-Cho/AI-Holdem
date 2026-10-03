@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireOwnedLock, processStartTime, releaseOwnedLock, runExclusive, withMutation,
+  acquireOwnedLock, processStartTime, releaseOwnedLock, runExclusive, serverProcessStartTime, validOwnedIdentity, withMutation,
 } from '../engine/state.js';
 import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
@@ -716,6 +716,11 @@ test('#265 engine init is not refused by a relay lock whose pid now belongs to a
   const dir = tmpGame();
   const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
   t.after(() => { try { unrelated.kill('SIGKILL'); } catch { /* gone */ } });
+  // Precondition, not a retry of the product call: the real reader can identify the child.
+  for (const deadline = Date.now() + 10_000; !validOwnedIdentity(serverProcessStartTime(unrelated.pid));) {
+    if (Date.now() > deadline) assert.fail('the idle child start time is unreadable');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   const stale = process.platform === 'win32' ? 'win32-v1:2001-01-01T00:00:00.0000000Z' : 'utc-v1:Mon Jan  1 00:00:00 2001';
   fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
     serverPid: unrelated.pid, port: 1, sessionToken: 't', startedAt: '2001-01-01T00:00:00.000Z', serverStartTime: stale,
