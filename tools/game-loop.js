@@ -1784,6 +1784,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  // #265: lock.json outlives a stopped relay (nothing removes it), keeping the start time
+  // this loop recorded for it (`serverStartTime`). A live pid with a different start time is
+  // another process that reused the dead relay's pid — Windows recycles pids quickly — so the
+  // lock is stale: retire it without signalling that process. Only a value fixed at creation
+  // proves this (Windows creation time; macOS `p_starttime`). A Linux `lstart` moves with the
+  // clock, so a mismatch there stays unproven and the adoption below fails closed as before.
+  const recordedServerReplaced = (lock) => {
+    const recorded = lock?.serverStartTime;
+    if (typeof recorded !== 'string') return false;
+    const scheme = recorded.startsWith('win32-v1:') ? 'win32-v1:'
+      : recorded.startsWith('utc-v1:') && process.platform === 'darwin' ? 'utc-v1:' : null;
+    if (!scheme) return false;
+    const current = serverStartTimeOf(lock.serverPid);
+    return typeof current === 'string' && current.startsWith(scheme) && current !== recorded;
+  };
   const ensureServer = async (sessionToken, {
     port: desiredPort = requestedPort,
     pin: providedPin = null,
@@ -1808,7 +1823,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (existing.sessionToken !== sessionToken || (existing.controlProtocolVersion ?? null) !== (managed ? 1 : null)) {
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
-        if (processAlive(existing.serverPid)) {
+        if (processAlive(existing.serverPid) && !recordedServerReplaced(existing)) {
           const startTime = serverStartTimeOf(existing.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
@@ -1852,7 +1867,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
 
         const confirmed = assertPinnedServerLock(pin);
-        if (processAlive(confirmed.serverPid)) {
+        if (processAlive(confirmed.serverPid) && !recordedServerReplaced(confirmed)) {
           throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server pid가 확인 중 다시 살아났습니다.');
         }
         if (recovery) d9Checkpoint('before-retire-existing');

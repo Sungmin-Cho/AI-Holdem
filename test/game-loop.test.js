@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import {
   processStartTime,
   ownedProcessStartTime,
+  serverProcessStartTime,
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
@@ -2331,6 +2332,63 @@ test('forged lock cannot bind an unrelated live pid to another healthy authentic
   assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+// #265 B: a relay this loop started records its start time in lock.json, and the lock
+// outlives the relay. When the dead relay's pid is reused (Windows recycles pids quickly),
+// a start time fixed at creation proves the lock stale. Without the proof (a Linux `lstart`,
+// or no recorded value — the forged-lock test above) adoption still fails closed.
+async function resumeOverReusedRelayPid(t, { recorded, current }) {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  // No listener: the process now holding the dead relay's pid serves nothing.
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: unrelated.pid, port: 1, sessionToken: init.sessionToken,
+    startedAt: '2026-01-01T00:00:00.000Z', serverStartTime: recorded,
+  }));
+  const signals = [];
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0,
+    processStartTime: (pid) => (pid === unrelated.pid ? current : serverProcessStartTime(pid)),
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); process.kill(pid, signal); },
+  } });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(unrelated);
+  });
+  return { gameDir, loop, unrelated, signals };
+}
+
+for (const [label, recorded, current] of [
+  ['Windows creation time', 'win32-v1:2026-01-01T00:00:00.0000000Z', 'win32-v1:2026-10-01T00:00:00.0000000Z'],
+  ...(process.platform === 'darwin' ? [['macOS lstart', 'utc-v1:Thu Jan  1 00:00:00 2026', 'utc-v1:Thu Oct  1 00:00:00 2026']] : []),
+]) test(`#265 a relay lock whose pid now belongs to another process (${label}) is retired without signalling it`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, { recorded, current });
+  await loop.resume();
+  const lock = readJson(path.join(gameDir, 'lock.json'));
+  assert.notEqual(lock.serverPid, unrelated.pid);
+  assert.notEqual(lock.serverStartTime, recorded);
+  const health = await fetch(`http://127.0.0.1:${lock.port}/api/health`);
+  assert.equal(health.ok, true);
+  assert.deepEqual(signals.filter((row) => row.pid === unrelated.pid), []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
+test('#265 an unproven start-time mismatch (Linux lstart) still fails closed on a live pid', {
+  skip: process.platform === 'darwin' ? 'a macOS lstart is fixed at creation' : false, timeout: 20_000 * WIN32_SCALE,
+}, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'utc-v1:Thu Jan  1 00:00:00 2026', current: 'utc-v1:Thu Oct  1 00:00:00 2026',
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_MISMATCH');
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, unrelated.pid);
+  assert.deepEqual(signals, []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
 });
 
 test('listener ownership without token-authenticated snapshot is never adopted', { timeout: 10_000 }, async (t) => {
