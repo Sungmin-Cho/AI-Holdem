@@ -6161,6 +6161,7 @@ test('#265 publish recovery forgets an adopted relay proven gone, so a stop befo
   await waitFor(() => stopping !== null, 'publish recovery never reached before-retire', 30_000);
   await stopping;
   await assert.rejects(running, { code: 'STOPPING' });
+  assert.ok(readLoopLog(gameDir).some((entry) => entry.event === 'user-wait-error'), 'the recovery came through the user waitError path');
   assert.deepEqual(signals.filter((row) => row.pid === relayPid), [], 'the reused pid was never signalled');
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
