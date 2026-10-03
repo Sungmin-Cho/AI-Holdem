@@ -1834,19 +1834,31 @@ export async function runCoachControlCli(argv = process.argv.slice(2), deps = {}
   fs.writeSync(1, `${JSON.stringify(result)}\n`);
 }
 
+// #265 C: INTERNAL folds every unexpected exception into one code, and the loop logs no raw
+// child text. A closed-set `cause` (errno-like code) and `syscall` say which failure it was
+// without paths, tokens or messages.
+const INTERNAL_CAUSES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOENT', 'ENOTDIR', 'ENOTEMPTY', 'EEXIST',
+  'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'EXDEV', 'EINVAL', 'LOCKED']);
+const INTERNAL_SYSCALLS = new Set(['open', 'read', 'write', 'rename', 'unlink', 'rmdir', 'mkdir', 'stat',
+  'lstat', 'fstat', 'fsync', 'close', 'copyfile']);
+export function failureEnvelope(error) {
+  if (error instanceof CoachError) return { ok: false, code: error.code, message: error.message };
+  const cause = INTERNAL_CAUSES.has(error?.code) ? error.code : error instanceof SyntaxError ? 'JSON_PARSE' : 'OTHER';
+  return { ok: false, code: 'INTERNAL', message: error?.message, cause,
+    ...(INTERNAL_SYSCALLS.has(error?.syscall) ? { syscall: error.syscall } : {}) };
+}
+
 const isDirect = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 export function runCoachControlCliMain(argv = process.argv.slice(2), deps = {}) {
   return runCoachControlCli(argv, deps).catch((error) => {
-    const code = error instanceof CoachError ? error.code : 'INTERNAL';
-    fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error.message })}\n`);
+    fs.writeSync(1, `${JSON.stringify(failureEnvelope(error))}\n`);
     process.exitCode = 1;
   });
 }
 
 if (isDirect) {
   runCoachControlCli().catch((error) => {
-    const code = error instanceof CoachError ? error.code : 'INTERNAL';
-    fs.writeSync(1, `${JSON.stringify({ ok: false, code, message: error.message })}\n`);
+    fs.writeSync(1, `${JSON.stringify(failureEnvelope(error))}\n`);
     process.exit(1);
   });
 }
