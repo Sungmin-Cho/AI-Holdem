@@ -21,6 +21,7 @@ import {
   defaultReclaimBudgets,
   platformBudgetScale,
   buildBadChildOutputDetails,
+  childFailureDiagnostic,
   unresolvedEvidenceGuidance,
   persistedRecoveryClass,
   consultCoachCloseEvidence,
@@ -6449,6 +6450,54 @@ test('#205 mixed LIVE and UNVERIFIED rows retain pid and confirmation guidance',
   assert.match(halt.message, new RegExp(`pid: ${f.orphan.pid}`));
   assert.match(halt.message, /--operator-confirmed 1/);
   assert.match(halt.message, /reasons:.*STILL_ALIVE.*LEGACY_SCAN_UNAVAILABLE/);
+});
+
+// #265 C: a fence write that fails (an INTERNAL from coach-control, e.g. a Windows file
+// race) must not erase the live judgment already made — the operator still gets "pid N".
+test('#265 a failed fence keeps the LIVE pid guidance and logs the child failure cause', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const shimDir = createOwnedTempDir('holdem-fence-internal-shim');
+  const shim = path.join(shimDir, 'fence-internal.mjs');
+  const view = writerObservationShim({});
+  fs.writeFileSync(shim, [
+    "import { spawnSync } from 'node:child_process';",
+    `const writer = ${JSON.stringify(view)};`,
+    'const args = process.argv.slice(2);',
+    "if (args[0] === 'fence' && args[args.indexOf('--hand') + 1] === '1') {",
+    "  process.stdout.write(JSON.stringify({ ok: false, code: 'INTERNAL', message: 'EPERM: operation not permitted, rename', cause: 'EPERM', syscall: 'rename' }) + '\\n');",
+    '  process.exitCode = 1;',
+    '} else {',
+    "  const result = spawnSync(process.execPath, [writer, ...args], { encoding: 'utf8' });",
+    "  process.stdout.write(result.stdout ?? ''); process.exitCode = result.status ?? 1;",
+    '}',
+    '',
+  ].join('\n'));
+  const f = await recovery205Fixture(t, { mixed: true, coachCliPath: shim });
+  await assert.rejects(f.loop.resume(), { code: 'COACH_HANDLE_UNRESOLVED' });
+  const { halt } = readJson(path.join(f.gameDir, 'loop-state.json'));
+  assert.equal(halt.recovery.attempts.find((row) => row.handNo === 1).reason, 'STILL_ALIVE');
+  assert.equal(halt.recovery.commands.length, 1, 'only the unverified hand gets an operator command');
+  assert.match(halt.message, new RegExp(`pid: ${f.orphan.pid}`));
+  assert.match(halt.message, /--operator-confirmed 1/);
+  assert.match(halt.message, /reasons:.*STILL_ALIVE.*LEGACY_SCAN_UNAVAILABLE/);
+  assert.doesNotMatch(halt.message, /FENCE_CHILD_FAILED/);
+  // The failed fence still withholds that hand's cleanup.
+  assert.equal(f.calls.some((args) => args[0] === 'cleanup-result' && args[args.indexOf('--hand') + 1] === '1'), false);
+  const records = fs.readFileSync(path.join(f.gameDir, 'loop.log'), 'utf8').trim().split('\n').map(JSON.parse);
+  const unconfirmed = records.find((row) => row.event === 'resume-persisted-unconfirmed' && row.handNo === 1);
+  assert.deepEqual({ reason: unconfirmed.reason, cleanupFailure: unconfirmed.cleanupFailure, childCommand: unconfirmed.childCommand,
+    childCause: unconfirmed.childCause, childSyscall: unconfirmed.childSyscall },
+  { reason: 'STILL_ALIVE', cleanupFailure: 'FENCE_CHILD_FAILED', childCommand: 'fence', childCause: 'EPERM', childSyscall: 'rename' });
+  assert.equal(JSON.stringify(records).includes('operation not permitted'), false, 'no raw child text in the log');
+});
+
+test('#265 child failure diagnostics keep only closed-set values', () => {
+  const envelope = (fields) => Object.assign(new Error('raw text C:\\secret'), { childCommand: 'fence', envelope: { ok: false, code: 'INTERNAL', ...fields } });
+  assert.deepEqual(childFailureDiagnostic(envelope({ cause: 'EBUSY', syscall: 'unlink' })),
+    { childCommand: 'fence', childCause: 'EBUSY', childSyscall: 'unlink' });
+  assert.deepEqual(childFailureDiagnostic(envelope({ cause: 'C:\\secret', syscall: 'rename C:\\x' })), { childCommand: 'fence' });
+  assert.deepEqual(childFailureDiagnostic(Object.assign(new Error('x'), { childCommand: '../evil path' })), {});
+  assert.deepEqual(childFailureDiagnostic(new Error('not a child')), {});
+  assert.deepEqual(childFailureDiagnostic(null), {});
 });
 
 test('#205 replaced identity releases with evidence without signaling the replacement', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
