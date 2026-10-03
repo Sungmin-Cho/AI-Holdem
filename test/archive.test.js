@@ -6,11 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireOwnedLock, processStartTime, releaseOwnedLock, runExclusive, withMutation,
+  acquireOwnedLock, processStartTime, releaseOwnedLock, runExclusive, serverProcessStartTime, validOwnedIdentity, withMutation,
 } from '../engine/state.js';
 import {
   isReservedName, shouldArchive, archiveTag, formatArchiveId,
-  closeOpenPartial, vacateLive, initGameDir, stopServer, assertNotSessionCatalogTarget,
+  closeOpenPartial, vacateLive, initGameDir, stopServer, assertNotSessionCatalogTarget, relayMayBeAlive,
 } from '../engine/game-archive.js';
 import { reusedPidRecord } from './helpers/platform.js';
 
@@ -691,4 +691,41 @@ test('managed final session is never an archive target while staging remains ini
   const alias = path.join(store, 'session-alias');
   fs.symlinkSync(finalDir, alias);
   assert.throws(() => vacateLive(alias), (error) => error.code === 'BAD_DIRECTORY_MODE');
+});
+
+// #265 B: the relay lock's recorded start time against the live pid's current one.
+test('#265 relayMayBeAlive: only a canonical reading fixed at creation proves the pid reused', () => {
+  const lock = (serverStartTime) => ({ serverPid: 4242, port: 1, sessionToken: 't', serverStartTime });
+  const judge = (recorded, current, alive = true) => relayMayBeAlive(lock(recorded), { alive: () => alive, startTimeOf: () => current });
+  const W1 = 'win32-v1:2026-01-01T00:00:00.0000000Z', W2 = 'win32-v1:2026-10-01T00:00:00.0000000Z';
+  assert.equal(judge(W1, W2), false, 'Windows creation time differs: another process');
+  assert.equal(judge(W1, W1), true);
+  assert.equal(judge(W1, W2, false), false, 'a dead pid is not alive either way');
+  assert.equal(judge('win32-v1:2026-01-01T00:00:00.123Z', 'win32-v1:2026-01-01T00:00:00.1230000Z'), true, 'non-canonical record');
+  assert.equal(judge(W1, 'win32-v1:garbage'), true, 'non-canonical reading');
+  assert.equal(judge(W1, null), true, 'unreadable');
+  assert.equal(judge(W1, 'utc-v1:Thu Oct  1 00:00:00 2026'), true, 'scheme changed');
+  assert.equal(judge(undefined, W2), true, 'no record (a relay-written or older lock)');
+  assert.equal(judge('opaque-server-start', W2), true, 'legacy record');
+  const U1 = 'utc-v1:Thu Jan  1 00:00:00 2026', U2 = 'utc-v1:Thu Oct  1 00:00:00 2026';
+  assert.equal(judge(U1, U2), process.platform !== 'darwin', 'lstart proves reuse only on macOS');
+  assert.equal(relayMayBeAlive(null), false);
+});
+
+test('#265 engine init is not refused by a relay lock whose pid now belongs to another process', async (t) => {
+  const dir = tmpGame();
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  t.after(() => { try { unrelated.kill('SIGKILL'); } catch { /* gone */ } });
+  // Precondition, not a retry of the product call: the real reader can identify the child.
+  for (const deadline = Date.now() + 10_000; !validOwnedIdentity(serverProcessStartTime(unrelated.pid));) {
+    if (Date.now() > deadline) assert.fail('the idle child start time is unreadable');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const stale = process.platform === 'win32' ? 'win32-v1:2001-01-01T00:00:00.0000000Z' : 'utc-v1:Mon Jan  1 00:00:00 2001';
+  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+    serverPid: unrelated.pid, port: 1, sessionToken: 't', startedAt: '2001-01-01T00:00:00.000Z', serverStartTime: stale,
+  }));
+  if (['win32', 'darwin'].includes(process.platform)) assert.ok(initGameDir(dir, { aiCount: 2 }).sessionToken);
+  else assert.throws(() => initGameDir(dir, { aiCount: 2 }), { code: 'ACTIVE_GAME' });
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
 });

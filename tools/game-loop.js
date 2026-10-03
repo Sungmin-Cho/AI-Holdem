@@ -109,7 +109,7 @@ import {
 } from './profile-cli.js';
 import { createProfileStore } from './training-stores.js';
 import { ensureStudyService } from './study-service.js';
-import { assertNotSessionCatalogTarget, isAlive } from '../engine/game-archive.js';
+import { assertNotSessionCatalogTarget, relayMayBeAlive } from '../engine/game-archive.js';
 import {
   commitSession,
   ensureSessionStore,
@@ -1733,6 +1733,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return sendSignal(expected.serverPid, signal, 'SERVER_SIGNAL_FAILED');
   };
 
+  // #265 B: a lock's pid is its recorded relay unless a start time fixed at creation proves
+  // the pid reused (`relayMayBeAlive`); then the lock is stale and no signal goes to that pid.
+  const recordedRelayAlive = (lock) => relayMayBeAlive(lock, { alive: processAlive, startTimeOf: serverStartTimeOf });
   const removeStoppedForceServerLock = (expected, pin) => {
     const current = assertPinnedServerLock(pin);
     if (
@@ -1742,7 +1745,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ) {
       throw codedError('SERVER_IDENTITY_CHANGED', '종료 확인 후 server lock이 바뀌었습니다.');
     }
-    if (processAlive(current.serverPid)) {
+    if (recordedRelayAlive(current)) {
       if (expected.startTime !== undefined) {
         const currentStart = serverStartTimeOf(current.serverPid);
         if (currentStart === null) {
@@ -1764,7 +1767,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!pin) return;
     try {
       const lock = pin.lock;
-      if (!processAlive(lock.serverPid)) {
+      if (!recordedRelayAlive(lock)) {
         // 시그널 대상이 없는 stale lock도 처음 고정한 descriptor 자체만 retire한다.
         removeStoppedForceServerLock(lock, pin);
         return;
@@ -1823,7 +1826,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (existing.sessionToken !== sessionToken || (existing.controlProtocolVersion ?? null) !== (managed ? 1 : null)) {
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
-        if (processAlive(existing.serverPid)) {
+        if (recordedRelayAlive(existing)) {
           const startTime = serverStartTimeOf(existing.serverPid);
           if (startTime === null) {
             throw codedError('SERVER_IDENTITY_UNAVAILABLE', '재사용 서버 startTime을 확인할 수 없습니다.');
@@ -1867,7 +1870,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
 
         const confirmed = assertPinnedServerLock(pin);
-        if (processAlive(confirmed.serverPid)) {
+        if (recordedRelayAlive(confirmed)) {
           throw codedError('SERVER_IDENTITY_CHANGED', '죽은 server pid가 확인 중 다시 살아났습니다.');
         }
         if (recovery) d9Checkpoint('before-retire-existing');
@@ -3001,14 +3004,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           return port;
         }
 
-        if (processAlive(expected.serverPid)) {
+        if (recordedRelayAlive(expected)) {
           if (expected.serverPid !== serverPid) {
             throw codedError('SERVER_IDENTITY_CHANGED', '게시 복구 중 검증하지 못한 server lock 소유자가 살아 있습니다.');
           }
           assertPinnedServerLock(pin);
           await stopServer({ boundToFinalizationDeadline: true });
           d9Checkpoint('after-stop-server');
-        } else if (serverChild?.pid === expected.serverPid) {
+        } else if (serverChild?.pid === expected.serverPid
+          // #265 B: an adopted relay that died (its pid possibly reused) is this lock's relay
+          // only when this loop's identity of it matches what the lock recorded.
+          || (serverAdopted && serverIdentity?.pid === expected.serverPid
+            && serverIdentity.startTime === expected.serverStartTime)) {
           serverChild = null;
           serverIdentity = null; serverBindingVerified = null;
           serverPid = null;
@@ -3017,7 +3024,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
 
         const confirmed = assertPinnedServerLock(pin);
-        if (processAlive(confirmed.serverPid)) {
+        if (recordedRelayAlive(confirmed)) {
           throw codedError('SERVER_STOP_UNCONFIRMED', '기존 서버가 살아 있어 lock을 지울 수 없습니다.');
         }
         d9Checkpoint('before-retire');
@@ -7745,7 +7752,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const adoptAbortedRelay = async (engineState) => {
     const pin = openServerLockPin();
     try {
-      if (pin && processAlive(pin.lock.serverPid)) {
+      if (pin && recordedRelayAlive(pin.lock)) {
         const lock = assertPinnedServerLock(pin);
         if (lock.sessionToken !== engineState.sessionToken) throw codedError('SERVER_LOCK_MISMATCH', '종료 게임 relay identity 불일치');
         const startTime = serverStartTimeOf(lock.serverPid);
@@ -7877,7 +7884,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (phase === 'done') {
       await ensureStudyForOwner();
       const liveLock = readServerLock();
-      if (liveLock && processAlive(liveLock.serverPid)) {
+      if (liveLock && recordedRelayAlive(liveLock)) {
         const port = await ensureServer(engineState.sessionToken, { port: liveLock.port });
         return writeLoopState({ port });
       }
@@ -8641,7 +8648,7 @@ export async function prepareGameSession(args, { resolver, loopOptions = {}, onR
         } else {
           const previous = resolveCurrentSession(args.storeDir);
           const previousServer = previous ? readStrictServerLock(previous.sessionDir) : null;
-          if (previousServer && isAlive(previousServer.serverPid)) {
+          if (relayMayBeAlive(previousServer)) {
             throw codedError('ACTIVE_GAME', '이전 session server가 아직 실행 중입니다.');
           }
           await attachStudyBeforeCommit(args.storeDir, storeLockHandle);

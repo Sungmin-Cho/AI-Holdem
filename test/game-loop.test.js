@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import {
   processStartTime,
   ownedProcessStartTime,
+  serverProcessStartTime,
+  validOwnedIdentity,
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
@@ -2331,6 +2333,111 @@ test('forged lock cannot bind an unrelated live pid to another healthy authentic
   assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
+});
+
+// #265 B: a relay this loop started records its start time in lock.json, and the lock
+// outlives the relay. When the dead relay's pid is reused (Windows recycles pids quickly),
+// a start time fixed at creation proves the lock stale. Without the proof (a Linux `lstart`,
+// or no recorded value — the forged-lock test above) adoption still fails closed.
+async function resumeOverReusedRelayPid(t, { recorded, current }) {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  // No listener: the process now holding the dead relay's pid serves nothing.
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({
+    serverPid: unrelated.pid, port: 1, sessionToken: init.sessionToken,
+    startedAt: '2026-01-01T00:00:00.000Z', serverStartTime: recorded,
+  }));
+  const signals = [];
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0,
+    processStartTime: (pid) => (pid === unrelated.pid ? current : serverProcessStartTime(pid)),
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); process.kill(pid, signal); },
+  } });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(unrelated);
+  });
+  return { gameDir, loop, unrelated, signals };
+}
+
+for (const [label, recorded, current] of [
+  ['Windows creation time', 'win32-v1:2026-01-01T00:00:00.0000000Z', 'win32-v1:2026-10-01T00:00:00.0000000Z'],
+  ...(process.platform === 'darwin' ? [['macOS lstart', 'utc-v1:Thu Jan  1 00:00:00 2026', 'utc-v1:Thu Oct  1 00:00:00 2026']] : []),
+]) test(`#265 a relay lock whose pid now belongs to another process (${label}) is retired without signalling it`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, { recorded, current });
+  await loop.resume();
+  const lock = readJson(path.join(gameDir, 'lock.json'));
+  assert.notEqual(lock.serverPid, unrelated.pid);
+  assert.notEqual(lock.serverStartTime, recorded);
+  const health = await fetch(`http://127.0.0.1:${lock.port}/api/health`);
+  assert.equal(health.ok, true);
+  assert.deepEqual(signals.filter((row) => row.pid === unrelated.pid), []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
+test('#265 a non-canonical recorded start time is no proof: the live pid keeps the lock (fails closed)', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  // The same instant written with three fraction digits: not the owned wire, so not compared.
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'win32-v1:2026-01-01T00:00:00.123Z', current: 'win32-v1:2026-01-01T00:00:00.1230000Z',
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_MISMATCH');
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, unrelated.pid);
+  assert.deepEqual(signals, []);
+});
+
+test('#265 an aborted game whose relay lock pid was reused finishes without adopting it', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'win32-v1:2026-01-01T00:00:00.0000000Z', current: 'win32-v1:2026-10-01T00:00:00.0000000Z',
+  });
+  await execFileAsync(process.execPath, [CLI, 'end', '--result', 'abort', '--game-dir', gameDir]);
+  const ended = await loop.resume();
+  assert.equal(ended.code, 'GAME_ENDED');
+  assert.deepEqual(signals.filter((row) => row.pid === unrelated.pid), []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
+// The real readers: a recorded stamp in this host's own canonical format that is not the
+// idle child's. Windows and macOS prove the pid reused; Linux cannot (ACTIVE_GAME as before).
+const HOST_STALE_STAMP = process.platform === 'win32'
+  ? 'win32-v1:2001-01-01T00:00:00.0000000Z' : 'utc-v1:Mon Jan  1 00:00:00 2001';
+const HOST_PROVES_REUSE = ['win32', 'darwin'].includes(process.platform);
+test('#265 a new store game is not refused by the previous session\'s relay lock whose pid was reused', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const { commitSession } = await import('../engine/session-catalog.js');
+  const { initializePreparedSession } = await import('../tools/game-loop.js');
+  const store = createOwnedTempDir('holdem-265-reused-relay');
+  const prepared = prepareSession(store);
+  await initializePreparedSession(prepared.stagingDir, { ai: 1, opponentRuntime: 'policy' });
+  const previous = commitSession(store, prepared);
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  t.after(() => terminateIfAlive(unrelated));
+  // Precondition, not a retry of the product call: the real reader can identify the child.
+  await waitFor(() => validOwnedIdentity(serverProcessStartTime(unrelated.pid)), 'the idle child start time is unreadable', 10_000);
+  fs.writeFileSync(path.join(previous.sessionDir, 'lock.json'), JSON.stringify({
+    serverPid: unrelated.pid, port: 1, sessionToken: 't'.repeat(64), startedAt: '2001-01-01T00:00:00.000Z', serverStartTime: HOST_STALE_STAMP,
+  }));
+  const attempt = prepareGameSession({ storeDir: store, ai: 1, port: 0, opponentRuntime: 'policy' }, {
+    resolver: resolverFor(makeAdapter()),
+    onReserve: () => { throw Object.assign(new Error('stop here'), { code: 'TEST_STOP' }); },
+  });
+  await assert.rejects(attempt, { code: HOST_PROVES_REUSE ? 'TEST_STOP' : 'ACTIVE_GAME' });
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+});
+
+test('#265 an unproven start-time mismatch (Linux lstart) still fails closed on a live pid', {
+  skip: process.platform === 'darwin' ? 'a macOS lstart is fixed at creation' : false, timeout: 20_000 * WIN32_SCALE,
+}, async (t) => {
+  const { gameDir, loop, unrelated, signals } = await resumeOverReusedRelayPid(t, {
+    recorded: 'utc-v1:Thu Jan  1 00:00:00 2026', current: 'utc-v1:Thu Oct  1 00:00:00 2026',
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_LISTENER_MISMATCH');
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, unrelated.pid);
+  assert.deepEqual(signals, []);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
 });
 
 test('listener ownership without token-authenticated snapshot is never adopted', { timeout: 10_000 }, async (t) => {
@@ -6012,6 +6119,51 @@ test('D9 quarantine restore never clobbers a second lock created immediately bef
   assert.equal(quarantinedStat.ino, firstStat.ino);
   assert.equal(fs.readFileSync(outcome.race.quarantinePath, 'utf8'), firstRaw);
   assert.equal(fs.existsSync(path.join(gameDir, '.publish-attempt.json')), true);
+});
+
+// #265 B: publish recovery over an adopted relay whose pid now reads another start time. The
+// recovery retires the stale lock; a stop at that point must find no stale ownership to stop.
+test('#265 publish recovery forgets an adopted relay proven gone, so a stop before the respawn succeeds', { timeout: 40_000 }, async (t) => {
+  if (skipOnWin32(t, 'SIGSTOP keeps the relay alive but unresponsive; win32 has no equivalent')) return;
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  fs.writeFileSync(path.join(gameDir, 'loop-state.json'), JSON.stringify({
+    phase: 'bootstrap', sessionToken: init.sessionToken, gameEpoch: gameEpochOf(init.sessionToken),
+    ownerSessionId: 'old-owner', startedAt: '2026-08-30T00:00:00.000Z', notices: [], metrics: [],
+  }));
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  const relayPid = external.child.pid;
+  // A relay a previous loop started records its start time; this one is made to match.
+  let relayStamp = 'win32-v1:2026-01-01T00:00:00.0000000Z';
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({ ...external.lock, serverStartTime: relayStamp }));
+  const signals = [];
+  let loopRef = null;
+  let stopping = null;
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: {
+    port: 0, waitMs: 40, localHttpProbeMs: 300,
+    processStartTime: (pid) => (pid === relayPid ? relayStamp : serverProcessStartTime(pid)),
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); process.kill(pid, signal); },
+    d9Checkpoint(name) { if (name === 'before-retire' && stopping === null) stopping = loopRef.requestStop(); },
+  } });
+  loopRef = loop;
+  t.after(async () => {
+    try { process.kill(relayPid, 'SIGCONT'); } catch { /* gone */ }
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(external.child);
+  });
+  await loop.resume();
+  assert.equal(loop.serverPid, relayPid, 'the relay was adopted');
+  const running = startRun(loop);
+  await waitForUserSnapshot(gameDir, 10_000);
+  // The relay stops answering and its pid now reads another creation time: reused.
+  process.kill(relayPid, 'SIGSTOP');
+  relayStamp = 'win32-v1:2026-10-01T00:00:00.0000000Z';
+  await waitFor(() => stopping !== null, 'publish recovery never reached before-retire', 30_000);
+  await stopping;
+  await assert.rejects(running, { code: 'STOPPING' });
+  assert.ok(readLoopLog(gameDir).some((entry) => entry.event === 'user-wait-error'), 'the recovery came through the user waitError path');
+  assert.deepEqual(signals.filter((row) => row.pid === relayPid), [], 'the reused pid was never signalled');
+  assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
 test('D9 stop checkpoints fence retirement, spawn, and recorded-body retry interleavings', { timeout: 30_000 }, async (t) => {

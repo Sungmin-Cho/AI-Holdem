@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createGame } from './hand.js';
 import { generatePersonas } from './personas.js';
 import {
-  processStartTime, readOwnedLock, runExclusive, saveState, serverProcessStartTime, writeJsonAtomic,
+  processStartTime, readOwnedLock, runExclusive, saveState, serverProcessStartTime, validOwnedIdentity, writeJsonAtomic,
 } from './state.js';
 import { terminateWin32ProcessStartedAt } from './process-identity.js';
 
@@ -269,6 +269,21 @@ export function isAlive(pid) {
   }
 }
 
+// #265 B: a relay's lock.json outlives the relay and keeps the start time its loop recorded
+// (`serverStartTime`). A live pid is that relay's unless the owned identity rule
+// (`ownedIdentityStatus` in state.js) proves otherwise: both readings canonical, of one
+// scheme, different, and fixed at creation (Windows creation time, macOS `p_starttime`).
+// Legacy, unreadable and Linux `lstart` readings leave the relay possibly alive.
+export function relayMayBeAlive(lock, { alive = isAlive, startTimeOf = serverProcessStartTime } = {}) {
+  if (!lock || !alive(lock.serverPid)) return false;
+  const recorded = lock.serverStartTime;
+  if (!validOwnedIdentity(recorded)) return true;
+  const current = startTimeOf(lock.serverPid);
+  const kind = recorded.split(':', 1)[0];
+  if (!validOwnedIdentity(current) || current.split(':', 1)[0] !== kind || current === recorded) return true;
+  return !(kind === 'win32-v1' || (kind === 'utc-v1' && process.platform === 'darwin'));
+}
+
 // #257: `lock.json` `serverStartTime` is written by the game loop. An owned value
 // (`utc-v1:`/`win32-v1:`, since #257) is read back with the owned reader — the same text from
 // any time zone or locale; a value written before #257 keeps the legacy reader. On Windows an
@@ -350,7 +365,8 @@ export function initGameDir(gameDir, flags, deps = {}) {
   assertLoopAllowsInit(gameDir, callerPpid, force, startTimeOf);
 
   const lock = readLock(gameDir, { fs: disk });
-  const live = Boolean(lock && alive(lock.serverPid));
+  const relayAlive = () => relayMayBeAlive(lock, { alive, startTimeOf: deps.ownedProcessStartTime ?? serverProcessStartTime });
+  const live = relayAlive();
   if (live && !force) throwCoded('ACTIVE_GAME', '이미 진행 중인 게임이 있습니다.');
   if (force && live) {
     // No server signal is authorized by a stale loop preflight. Re-read immediately
@@ -367,7 +383,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
       terminate: deps.terminate,
       expectedStartTime: lock.serverStartTime,
     });
-    if (alive(lock.serverPid)) {
+    if (relayAlive()) {
       throwCoded('SERVER_ALIVE', '게임 서버가 아직 종료되지 않았습니다.');
     }
   }

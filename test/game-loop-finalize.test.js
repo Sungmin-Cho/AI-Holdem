@@ -306,6 +306,39 @@ test('done resume adopts a live server so normal cleanup stops it without spawni
   await waitUntilDead(external.child.pid);
 });
 
+// #265 B: a finished game resumes without a relay when its relay died; a lock whose pid now
+// belongs to another process (a start time fixed at creation differs) is that case too.
+test('#265 done resume neither adopts nor spawns a relay over a lock whose pid was reused', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  fs.writeFileSync(enginePath, JSON.stringify({ ...readJson(enginePath), gameOver: true, result: 'lose' }));
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'done' });
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  const lock = { serverPid: unrelated.pid, port: 1, sessionToken: init.sessionToken, startedAt: '2026-01-01T00:00:00.000Z',
+    serverStartTime: 'win32-v1:2026-01-01T00:00:00.0000000Z' };
+  fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify(lock));
+  const signals = [];
+  let resolverCalls = 0;
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async () => { resolverCalls += 1; return { player: null, upper: null, notices: [] }; },
+    opts: { port: 0,
+      processStartTime: (pid) => (pid === unrelated.pid ? 'win32-v1:2026-10-01T00:00:00.0000000Z' : processStartTime(pid)),
+      signalProcess: (pid, signal) => { signals.push(pid); process.kill(pid, signal); } },
+  });
+  t.after(async () => {
+    await loop.requestStop().catch(() => {});
+    await terminateIfAlive(unrelated);
+  });
+  const resumed = await loop.resume();
+  assert.equal(resumed.phase, 'done');
+  assert.equal(resolverCalls, 0);
+  assert.equal(loop.serverPid, null, 'no relay was adopted or spawned');
+  assert.deepEqual(readJson(path.join(gameDir, 'lock.json')), lock);
+  assert.deepEqual(signals, []);
+});
+
 test('upper-null finalization keeps notices, clears REVIEW_FAILED, and finishes with a factual review', { timeout: 20_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
