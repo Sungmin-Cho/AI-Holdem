@@ -1142,6 +1142,9 @@ test('#263 while another loop owner holds the store, a failed recovery leaves th
   const room = restored.room.load();
   assert.equal(room.status, 'locked');
   assert.equal(room.lock.boundGameId, previous);
+  // Restored by the failure's unlock, not left over from the crash.
+  assert.equal(room.lock.requestId, first.requestId);
+  assert.equal(room.lock.previous, null);
 });
 
 test('#263 a start that fails before its commit reopens a room left on an ended game', { timeout: TIMEOUT }, async (t) => {

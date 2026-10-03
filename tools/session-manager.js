@@ -204,8 +204,9 @@ export function createSessionManager({
   // #263: emit() keeps an ended game's room locked while a start-type command is
   // pending, for that start to rebind it. A command that settles without a live
   // game (its start failed before committing, or it recovered a game that had
-  // already ended) never rebinds, so the deferred release happens here. Whatever
-  // game the room is bound to, none is live once the current one has ended.
+  // already ended) never rebinds, so the deferred release happens here — only
+  // when the command leaves the app `ended`/`completed`, and then for whatever
+  // game the room is bound to (the app runs no game in those states).
   const releaseDeferredRoom = (row) => {
     if (!START_KINDS.includes(row.kind) || !["ended", "completed"].includes(state)) return;
     try {
