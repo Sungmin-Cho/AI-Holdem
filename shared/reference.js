@@ -235,3 +235,63 @@ export function referenceClaimAllowed(value) {
   }
   return allowed.every(Boolean);
 }
+
+// ---- coaching text (learning calibration D9) ------------------------------
+// Coaching may use EV as a qualitative concept ("이 콜은 기대값이 낮다") but never
+// attach a number to it, and may not claim GTO/solver/optimal authority. The
+// coaching predicate accepts everything referenceClaimAllowed accepts (so stored
+// proofs stay valid) and additionally a sentence whose only authority words are
+// qualitative EV vocabulary, provided the sentence has no digits.
+const QUALITATIVE_CLAIM_RE = /\bEV\b|기대\s*(?:값|수익)|expected\s+value|포커\s*실수/giu;
+const LINE_PREFIX_RE = /^(\s*(?:#{1,6}\s+|>\s*|[-*•]\s+|\d{1,3}[.)]\s+)?)(.*)$/u;
+// A sentence ends at . ! ? or 。 followed by whitespace; "0.5" and "1.5bb" never split.
+const SENTENCE_SPLIT_RE = /(?<=[.!?。])\s+/u;
+
+// New coaching output also drops Korean solver-authority claims, which the
+// legacy predicate never matched; validation of stored text stays unchanged.
+const NEW_OUTPUT_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)|GTO\s*(?:기준|상|적으로)\s*(?:정답|최적)/u;
+
+function coachingSentenceAllowed(sentence) {
+  if (referenceClaimAllowed(sentence)) return true;
+  if (/\d/.test(sentence)) return false;
+  return referenceClaimAllowed(sentence.replace(QUALITATIVE_CLAIM_RE, ' '));
+}
+
+// A bare "EV" heading or fragment could pair with a number on the next line.
+function evOnlyFragment(sentence) {
+  QUALITATIVE_CLAIM_RE.lastIndex = 0;
+  if (!QUALITATIVE_CLAIM_RE.test(sentence)) return false;
+  return sentence.replace(QUALITATIVE_CLAIM_RE, '').replace(/[^\p{L}\p{N}]/gu, '').length < 6;
+}
+
+function coachingLines(text) {
+  return text.split(/\r\n|\r|\n|\u2028|\u2029/).map((line) => {
+    const [, prefix, body] = LINE_PREFIX_RE.exec(line);
+    return { prefix, sentences: body.trim() ? body.split(SENTENCE_SPLIT_RE) : [] };
+  });
+}
+
+export function coachingClaimAllowed(text) {
+  if (typeof text !== 'string' || text.length === 0) return true;
+  if (referenceClaimAllowed(text)) return true;
+  return coachingLines(text).every(line => line.sentences.every(coachingSentenceAllowed));
+}
+
+// Removes only the sentences that coachingClaimAllowed would reject; headings and
+// list items are checked like any other text. A line left without a sentence is
+// dropped. Returns the kept text and the removed/total sentence counts.
+export function sanitizeCoachingText(text) {
+  if (typeof text !== 'string') return { text, removed: 0, total: 0 };
+  let removed = 0;
+  let total = 0;
+  const kept = [];
+  for (const line of coachingLines(text)) {
+    if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); continue; }
+    total += line.sentences.length;
+    const ok = line.sentences.filter(sentence => coachingSentenceAllowed(sentence) && !NEW_OUTPUT_AUTHORITY_RE.test(sentence)
+      && !evOnlyFragment(sentence));
+    removed += line.sentences.length - ok.length;
+    if (ok.length) kept.push(`${line.prefix}${ok.join(' ')}`);
+  }
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed, total };
+}

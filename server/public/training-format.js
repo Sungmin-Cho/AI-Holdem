@@ -1,7 +1,7 @@
 import { independentAssessmentEligibility } from '../../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../../shared/reference-coverage.js';
 import {parsePreflopKey} from '../../shared/preflop-key.js';
-import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
+import { formatReferenceReason, coachingClaimAllowed, referenceQuality } from '../../shared/reference.js';
 
 /**
  * An evaluationId's machine digest is set-once (R3/R5). A later publish carrying
@@ -159,7 +159,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     note: '',
     explanation: item.explanationStatus === 'unavailable'
       ? 'unavailable'
-      : (sourceEligible && referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
+      : (sourceEligible && coachingClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     sourceQuality: quality.quality,
     sourceLabel: SOURCE_LABEL[quality.quality] ?? SOURCE_LABEL.unverified,
@@ -190,7 +190,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);
   } else if (!sourceEligible) {
     card.note = formatReferenceReason(quality.reason);
-  } else if (!referenceClaimAllowed(item.explanation)) {
+  } else if (!coachingClaimAllowed(item.explanation)) {
     card.note = [card.note,'근거 범위를 벗어난 표현을 제외했습니다.'].filter(Boolean).join(' · ');
   }
   if (item.assistance?.hintShown) card.note = [card.note,'힌트 도움을 받은 결정 · 점수 제외'].filter(Boolean).join(' · ');

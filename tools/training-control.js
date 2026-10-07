@@ -32,7 +32,7 @@ import {
   writeJsonSecure,
   writeTextSecure,
 } from './training-store.js';
-import { referenceClaimAllowed } from '../shared/reference.js';
+import { coachingClaimAllowed } from '../shared/reference.js';
 
 export const TRAINING_LOCK = 'training.lock.d';
 const ANNOTATION_MAX_BYTES = 64_000;
@@ -44,6 +44,8 @@ const ALLOWED_SEAL_REASONS = new Set([
   'exact-file-missing',
   'post-cutoff',
   'explain-failed',
+  // Unsupported decisions get no LLM explanation; the card shows the reason instead.
+  'not-explainable',
 ]);
 
 
@@ -875,7 +877,7 @@ function migrateV1ToV2Unlocked(sessionDir, auth, { storeDir, io = {} } = {}) {
       const annotations = {};
       const projectedLegacy = legacyExplanationAnnotation(explanation);
       const legacyAnnotation = projectedLegacy?.status === 'ready'
-        && !referenceClaimAllowed(projectedLegacy.value)
+        && !coachingClaimAllowed(projectedLegacy.value)
         ? { status: 'unavailable', value: null, sealReason: 'LEGACY_AUTHORITY_FORBIDDEN' }
         : projectedLegacy;
       if (legacyAnnotation) {
@@ -1606,7 +1608,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
         value = null;
         effectiveSealReason = 'cutoff';
       }
-      if (field === 'explanation' && status === 'ready' && !referenceClaimAllowed(value)) {
+      if (field === 'explanation' && status === 'ready' && !coachingClaimAllowed(value)) {
         return { ok: false, code: 'REFERENCE_AUTHORITY_FORBIDDEN' };
       }
       if (status === 'unavailable' && !ALLOWED_SEAL_REASONS.has(effectiveSealReason)) {

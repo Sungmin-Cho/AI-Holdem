@@ -7,7 +7,7 @@ import {
   NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
-import { referenceClaimAllowed } from './shared/reference.js';
+import { coachingClaimAllowed } from './shared/reference.js';
 import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
 
 export { HOST_ID, humanIdsOf, isHumanSeat };
@@ -89,7 +89,7 @@ export function validateCoachDecisions(decisions, handNo) {
       if (typeof value !== 'string' || value.trim() === '') return `empty-${field}`;
       if ([...value].length > COACH_DECISION_LIMITS.chars) return 'too-long';
       if (COACH_CONTROL_CHARS.test(value)) return 'control';
-      if (!referenceClaimAllowed(value)) return 'reference';
+      if (!coachingClaimAllowed(value)) return 'reference';
     }
     if (typeof handNo === 'number' && !row.decisionId.startsWith(`d-${handNo}-`)) return 'hand-mismatch';
     if (seen.has(row.decisionId)) return 'duplicate';

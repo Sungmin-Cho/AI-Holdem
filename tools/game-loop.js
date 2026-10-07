@@ -81,7 +81,7 @@ import {
 import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
-import { referenceClaimAllowed } from '../shared/reference.js';
+import { coachingClaimAllowed, sanitizeCoachingText } from '../shared/reference.js';
 import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
@@ -1449,7 +1449,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         || !(error.cause instanceof SyntaxError)) throw error;
     }
     const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
-    if (feedback.some((text) => !referenceClaimAllowed(text))) {
+    if (feedback.some((text) => !coachingClaimAllowed(text))) {
       throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
     }
     // After the cutoff every publication must carry the single finalization deadline:
@@ -4166,6 +4166,28 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : prompt;
   };
 
+  // D9: drop out-of-bounds sentences from a fresh model note before it is
+  // validated, sealed and proved; a decision row left empty is dropped.
+  const sanitizeCoachOutput = (raw) => {
+    const note = typeof raw === 'string' ? extractJsonLine(raw) : raw;
+    if (!note || typeof note !== 'object' || Array.isArray(note)) return raw;
+    const clean = { ...note };
+    if (typeof clean.text === 'string') clean.text = sanitizeCoachingText(clean.text).text;
+    if (Array.isArray(clean.decisions)) {
+      clean.decisions = clean.decisions.map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        const out = { ...row };
+        for (const field of ['why', 'outcome', 'alternative']) {
+          if (typeof out[field] === 'string') out[field] = sanitizeCoachingText(out[field]).text;
+        }
+        return out;
+      }).filter((row) => !row || typeof row !== 'object'
+        || ['why', 'outcome', 'alternative'].every((field) => typeof row[field] !== 'string' || row[field].trim() !== ''));
+      if (!clean.decisions.length) delete clean.decisions;
+    }
+    return clean;
+  };
+
   const validateCoachNote = (raw, handNo, { forbiddenDetailed, replay } = {}) => {
     const note = typeof raw === 'string' ? extractJsonLine(raw) : raw;
     if (!note || typeof note !== 'object' || Array.isArray(note)) {
@@ -4194,7 +4216,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
       }
     }
-    if (!referenceClaimAllowed(note.text)) {
+    if (!coachingClaimAllowed(note.text)) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 근거 범위를 벗어납니다.');
     }
     const strings = coachNoteStrings(note);
@@ -5334,7 +5356,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         record.bound = true;
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
-        const note = validateCoachNote(completed?.raw, handNo, {
+        const note = validateCoachNote(sanitizeCoachOutput(completed?.raw), handNo, {
           forbiddenDetailed: denyDetailed,
           replay: parseCapturedHand(inputs.replay.raw),
         });
@@ -6084,14 +6106,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return handoff;
   };
 
-  const validateReviewOutput = (raw, { requireHeadings = false } = {}) => {
+  // D9: an out-of-bounds sentence is removed instead of discarding the review;
+  // only an output that loses most of its substance is rejected and retried.
+  const REVIEW_MAX_REMOVED_SHARE = 0.4;
+  const validateReviewOutput = (raw, { requireHeadings = false, onSanitized } = {}) => {
     if (typeof raw !== 'string' || raw.trim() === '') {
       throw codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
     }
-    const text = raw.trim();
-    if (!referenceClaimAllowed(text)) {
+    const sanitized = sanitizeCoachingText(raw.trim());
+    const text = sanitized.text;
+    if (!text || sanitized.removed > sanitized.total * REVIEW_MAX_REMOVED_SHARE || !coachingClaimAllowed(text)) {
       throw codedError('REVIEW_CLAIM_REJECTED', '리뷰 출력이 근거 범위를 벗어납니다.');
     }
+    if (sanitized.removed) onSanitized?.(sanitized.removed, sanitized.total);
     if (requireHeadings && REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(text))) {
       throw codedError('REVIEW_HEADINGS_MISSING', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
     }
@@ -6118,7 +6145,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // remain private diagnostics and can never become a subsequent model input.
     const corrections = new Map([
       ['EMPTY_REVIEW_OUTPUT', '빈 출력이 거절되었습니다. 요청한 한국어 평가 본문을 작성하세요.'],
-      ['REVIEW_CLAIM_REJECTED', '근거 범위를 벗어난 주장이 감지되었습니다. 최적·정답·GTO·확정 누수·EV 주장을 피하고 관측 사실과 정성적 과정 평가만 작성하세요. 한계는 "공개 정보에 근거한 정성적 과정 평가입니다."처럼 표현하세요.'],
+      ['REVIEW_CLAIM_REJECTED', '근거 범위를 벗어난 문장이 많았습니다. 최적·정답·GTO·솔버 판정, 확정 누수, 숫자를 붙인 EV 주장을 쓰지 마세요. 기대값은 숫자 없이 개념으로만 쓰고, 수치는 입력에 주어진 사실 카드 값만 인용하세요.'],
       ['REVIEW_HEADINGS_MISSING', '필수 제목이 누락되었습니다. 원래 요청에 명시된 한국어 제목 네 개를 모두 포함하세요.'],
     ]);
     let correctionCode = null;
@@ -6139,7 +6166,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }
         const completed = await handle.done;
         raw = completed?.raw;
-        return validateReviewOutput(raw, { requireHeadings });
+        return validateReviewOutput(raw, { requireHeadings,
+          onSanitized: (removed, total) => log('review-sanitized', { stage, attempt, removed, total }) });
       } catch (error) {
         if (error?.code === 'CLI_FAILED' && error?.exitCode === 0 && error?.outputKind === 'empty') {
           raw = '';

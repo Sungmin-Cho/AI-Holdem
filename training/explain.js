@@ -1,6 +1,6 @@
 import { independentAssessmentEligibility } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
-import { referenceClaimAllowed, referenceQuality } from '../shared/reference.js';
+import { coachingClaimAllowed, referenceQuality } from '../shared/reference.js';
 
 const ACTION_ALIASES = Object.freeze({
   raise: ['리레이즈', '3-bet', '3벳', '레이즈', 'raise', '오픈'],
@@ -114,7 +114,7 @@ export function validateExplanation(evaluation, explanation) {
   if (explanation.length > MAX_EXPLANATION) {
     return { ok: false, code: 'EXPLANATION_TOO_LONG' };
   }
-  if (!referenceClaimAllowed(explanation)) {
+  if (!coachingClaimAllowed(explanation)) {
     return { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' };
   }
   if (evaluation?.status === 'supported'
