@@ -1,6 +1,6 @@
 import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
 import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability } from './study-format.js';
-import { renderSpotChart } from './spot-chart.js';
+import { createChartPanel, renderSpotChart } from './spot-chart.js';
 import { mountPotOddsDrill } from './pot-odds-drill.js';
 import { helpButton, openHelp } from '../public/help-panel.js';
 import { openDisplaySettings } from '../public/display-settings.js';
@@ -293,19 +293,24 @@ async function mountStudy() {
       box.append(open);
     }
   }
-  async function showChart(spotKey, handClass, version) {
-    const box = $('chart-box');
-    box.hidden = false;
-    box.replaceChildren(node('p', '차트를 불러오고 있습니다…'));
-    try {
-      const response = await api(`/api/spot?spotKey=${encodeURIComponent(spotKey)}${version ? `&version=${encodeURIComponent(version)}` : ''}`);
+  const chartPanel = createChartPanel({
+    box: $('chart-box'),
+    load: ({ spotKey, version }) => api(`/api/spot?spotKey=${encodeURIComponent(spotKey)}${version ? `&version=${encodeURIComponent(version)}` : ''}`),
+    show: ({ loading, response, request }) => {
+      const box = $('chart-box');
+      if (loading) { box.replaceChildren(node('p', '차트를 불러오고 있습니다…')); return; }
+      if (!response) { box.replaceChildren(node('p', '차트를 불러오지 못했습니다.')); return; }
       if (!response.ok) { box.replaceChildren(node('p', response.code === 'GRID_LOCKED' ? '평가·재평가·일반화 연습 중에는 차트를 볼 수 없습니다.' : formatStudyError(response))); return; }
       const legend = node('p', '막대: 레이즈 · 콜 · 폴드 비중. 차트를 본 상황의 손패는 7일 동안 새 문제 평가와 일반화 연습에서 미응답으로 세지 않습니다.', 'chart-legend');
-      box.replaceChildren(renderSpotChart(document, response, { highlight: handClass }), legend);
-    } catch { box.replaceChildren(node('p', '차트를 불러오지 못했습니다.')); }
+      box.replaceChildren(renderSpotChart(document, response, { highlight: request.handClass }), legend);
+    },
+  });
+  function showChart(spotKey, handClass, version) {
+    return chartPanel.open({ spotKey, handClass, version });
   }
   function render(state) {
     const current = state.session;
+    chartPanel.sync(current?.sessionId ?? null, ['assessment', 'retest', 'transfer'].includes(current?.mode) && current?.index < current?.count);
     if (!state.target && (entry.spotKey || entry.handClass)) {
       entry.spotKey = null; entry.handClass = null;
       const corrected = new URL(location.href);
@@ -407,17 +412,17 @@ async function mountStudy() {
       }
       box.append(node('h3', series.label, 'trend-title'), list);
     }
-    if (trends.game.length) {
+    for (const group of trends.game) {
       const list = node('ul', '', 'trend-list');
-      list.setAttribute('aria-label', '게임별 허용률');
-      for (const row of trends.game) {
+      list.setAttribute('aria-label', `${group.label} 허용률`);
+      for (const row of group.rows) {
         const item = node('li', '', 'trend-row');
         const track = node('span', '', 'freq-track'); track.setAttribute('aria-hidden', 'true');
         const fill = node('span', '', 'freq-fill'); fill.style.width = `${row.width}%`; track.append(fill);
         item.append(node('span', row.label, 'trend-date'), track, node('span', `${row.rate} · ${row.graded}`, 'trend-value'));
         list.append(item);
       }
-      box.append(node('h3', '게임 기록', 'trend-title'), list);
+      box.append(node('h3', group.label, 'trend-title'), list);
     }
     if (!box.children.length) box.append(node('p', '완료한 연습 실행과 채점된 게임이 쌓이면 추세가 보입니다.'));
   }

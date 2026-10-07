@@ -250,6 +250,17 @@ async function srsPendingFixture() {
   return { storeDir, session: captured, bank };
 }
 
+test('a pending review captured by the v1 producer recovers as the same v1 transition', async () => {
+  const { storeDir, session, bank } = await srsPendingFixture();
+  const captured = session.pending.srsPatch;
+  assert.equal(Object.hasOwn(captured.patch, 'srsVersion'), false, 'the fixture is a v1 capture');
+  writeDrillSession(storeDir, session);
+  await nextQuestion(storeDir);
+  const item = (await bank.list()).find((row) => row.mistakeId === captured.mistakeId);
+  assert.deepEqual(item.reviewState, { ...captured.before, ...captured.patch });
+  assert.equal(Object.hasOwn(item.reviewState, 'srsVersion'), false, 'recovery does not convert it to SR v2');
+});
+
 test('S5 an SRS target dated before its run cannot be committed', async () => {
   const { storeDir, session } = await srsPendingFixture();
   const patch = session.pending.srsPatch;

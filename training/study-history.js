@@ -5,7 +5,7 @@ import { CANONICAL_REFERENCE_SOURCE, validateMixObservation, matchReferenceActio
 import { validateStudyRun } from '../shared/study-contract.js';
 import { assertProfileEvent } from './profile-aggregator.js';
 import { assertEvaluationId, coded } from './contracts.js';
-import { selectGoal } from './goal.js';
+import { goalSelection } from './goal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -172,14 +172,27 @@ function summarizeRun(entries, now) {
   };
 }
 
-// Trends (design D12): completed practice runs per series (source and mode —
-// runs drawn from different distributions are never compared on one line), and
-// per game session the independently graded decisions and their allowed share.
-function trendsOf(runs, events, now) {
-  const practice = runs.filter((run) => run.complete && run.sourceIdentity)
-    .map((run) => ({ id: run.id, mode: run.mode, series: `${sourceKey(run.sourceIdentity)}|${run.mode}`, startedAt: run.startedAt,
-      total: run.total, allowedActionRate: run.result.allowedActionRate, foldBaselineRate: run.result.foldBaselineRate }))
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+// Trends (design D12). Only runs drawn the same way share a line: the
+// assessments of one source (one sampler), and each assessment with its own
+// retests (the same questions). Free, leak, daily, review and transfer runs
+// depend on what was chosen and form no series. Per game session: the
+// independently graded decisions and their allowed share, with the source.
+export function trendsOf(runs, events, now) {
+  const done = runs.filter((run) => run.complete && run.sourceIdentity);
+  const byId = new Map(done.map((run) => [run.id, run]));
+  const row = (run, series) => ({ id: run.id, mode: run.mode, series, startedAt: run.startedAt,
+    total: run.total, allowedActionRate: run.result.allowedActionRate, foldBaselineRate: run.result.foldBaselineRate });
+  const practice = [];
+  for (const run of done) {
+    if (run.mode === 'assessment') practice.push(row(run, `${sourceKey(run.sourceIdentity)}|assessment`));
+    if (run.mode !== 'retest') continue;
+    const baseline = byId.get(run.assessmentId);
+    if (!baseline || baseline.mode !== 'assessment' || sourceKey(baseline.sourceIdentity) !== sourceKey(run.sourceIdentity)) continue;
+    const series = `${sourceKey(run.sourceIdentity)}|retest|${baseline.id}`;
+    if (!practice.some((entry) => entry.series === series)) practice.push(row(baseline, series));
+    practice.push(row(run, series));
+  }
+  practice.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   const sessions = new Map();
   for (const event of events) {
     if (projectionOrigin(event.origin) !== 'game' || !event.mixObservation || !validIso(event.appliedAt)
@@ -292,18 +305,17 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
         .localeCompare(String(right.completedAt ?? right.startedAt)));
     assessment.latestCompletedRetest = [...assessment.retests].reverse().find((run) => run.complete) ?? null;
   }
+  const selection = goalSelection(validEvents, { now });
   return {
     schemaVersion: 1,
     unknownPreTrackingExposure,
     seenPairs: [...seen.values()],
     assessments,
     retests,
-    // The shared goal (training/goal.js); the oldest-deviation pick remains the
-    // fallback when no skill has enough independent evidence.
     trends: trendsOf(runs, validEvents, now),
-    // Events stamped after `now` are excluded here as everywhere else in the history.
-    goal: selectGoal(validEvents.filter((event) => !(validIso(event.appliedAt)
-      && Date.parse(event.appliedAt) > Date.parse(now)))) ?? gameGoal ?? practiceGoal ?? {
+    // The shared goal (training/goal.js) at `now`. The oldest-deviation pick is a
+    // fallback only without independent evidence; a resolved record keeps the default.
+    goal: selection.goal ?? (selection.state === 'none' ? gameGoal ?? practiceGoal : null) ?? {
       origin: 'default',
       sourceIdentity: null,
       // The default practice spot follows the source new sessions use.

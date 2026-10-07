@@ -254,6 +254,33 @@ export function drawsOf(holeCards, boardCards) {
   return { flushDraw: flushSuit >= 0, straightDraw, outs: outCards.length, outCards };
 }
 
+// ---- river nuts --------------------------------------------------------------
+
+/** River: no unseen two cards beat this hand and only a few tie with it (at
+ * most 5% of them, e.g. the same straight). A hand that ties with most of them
+ * (the board plays) is a split, not the nuts. */
+export const NUT_TIE_SHARE = 0.05;
+export function isSoleRiverNuts(holeCards, boardCards) {
+  const hole = toCardInts(holeCards);
+  const board = toCardInts(boardCards);
+  if (hole.length !== 2 || board.length !== 5) return false;
+  const mine = scoreCards([...hole, ...board]);
+  const used = new Set([...hole, ...board]);
+  let ties = 0;
+  let total = 0;
+  for (let a = 0; a < 52; a += 1) {
+    if (used.has(a)) continue;
+    for (let b = a + 1; b < 52; b += 1) {
+      if (used.has(b)) continue;
+      const score = scoreCards([a, b, ...board]);
+      if (score > mine) return false;
+      if (score === mine) ties += 1;
+      total += 1;
+    }
+  }
+  return total > 0 && ties / total <= NUT_TIE_SHARE;
+}
+
 // ---- Monte Carlo equity ---------------------------------------------------
 
 function drawCard(next, used) {

@@ -59,3 +59,37 @@ test('study history picks its goal only from events stamped by now', async () =>
   const before = new Date(Date.parse(at) - 1000).toISOString();
   assert.equal(studyHistory(misses, before).goal.origin, 'default', 'a future-stamped miss cannot choose the goal');
 });
+
+test('a resolved record keeps no goal in every consumer, and future records count nowhere', async () => {
+  const { studyHistory } = await import('../training/study-history.js');
+  const { evaluationIdOf } = await import('../training/contracts.js');
+  const { goalSelection, practiceFocusGoal } = await import('../training/goal.js');
+  const { writePracticeFocus } = await import('../tools/profile-cli.js');
+  const { createOwnedTempDir } = await import('./helpers/owned-fixtures.mjs');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const valid = (rows) => rows.map((row, i) => ({ ...row,
+    evaluationId: evaluationIdOf({ gameEpoch: 'cd'.repeat(32), decisionId: `d-${i + 1}-preflop-0`,
+      providerId: LEGACY_REFERENCE_SOURCE.id, providerVersion: LEGACY_REFERENCE_SOURCE.version }),
+    payloadSha256: String(i % 10).repeat(64) }));
+  // One miss, then five allowed decisions: resolved.
+  const resolved = valid([event({ skill: 'preflop.rfi.HJ', grade: 'off-policy' }),
+    ...Array.from({ length: 5 }, () => event({ skill: 'preflop.rfi.HJ', grade: 'preferred' }))]);
+  const now = resolved.at(-1).appliedAt;
+  assert.deepEqual(goalSelection(resolved, { now }), { state: 'clear', goal: null });
+  assert.equal(studyHistory(resolved, now).goal.origin, 'default', 'the old miss is not revived');
+  const storeDir = createOwnedTempDir('goal-focus');
+  fs.mkdirSync(path.join(storeDir, '.training'), { recursive: true });
+  const leaky = { game: { candidates: [{ id: 'preflop.rfi.HJ', recommendedDrill: 'preflop.rfi.HJ', severity: 1, confidence: 1 }] } };
+  const file = writePracticeFocus(storeDir, leaky, { events: resolved, now });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { schemaVersion: 2, origin: 'default', goal: null, focus: null });
+  // A miss stamped after now is left out by the selector, the focus and the study room alike.
+  const future = valid([event({ skill: 'preflop.rfi.CO', grade: 'off-policy' })]);
+  const before = new Date(Date.parse(future[0].appliedAt) - 1000).toISOString();
+  assert.deepEqual(goalSelection(future, { now: before }), { state: 'none', goal: null });
+  assert.equal(practiceFocusGoal(future, { now: before }), null);
+  assert.equal(practiceFocusGoal(future, { now: future[0].appliedAt }).id, 'preflop.rfi.CO');
+  // A study run that starts after now is future too.
+  const run = { ...future[0], appliedAt: before, studyRun: { startedAt: future[0].appliedAt } };
+  assert.equal(goalSelection([run], { now: before }).state, 'none');
+});

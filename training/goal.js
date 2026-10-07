@@ -23,9 +23,16 @@ export function skillStanding(rows) {
   return { n, off, allowed, resolved, offPolicyRate: n ? off / n : 0, score: n ? (off / n) * (n / (n + 5)) : 0 };
 }
 
-export function selectGoal(events) {
+const stampedAfter = (value, now) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.parse(now);
+
+/** The shared choice and its state: 'goal' (a skill to practise), 'clear'
+ * (independent evidence exists and no skill has an open miss: nothing to fall
+ * back to) or 'none' (no independent evidence yet). With `now`, events or study
+ * runs stamped after it are left out, as in every other summary. */
+export function goalSelection(events, { now = null } = {}) {
   const groups = new Map();
   const ordered = [...(events ?? [])].filter(Boolean)
+    .filter((event) => now === null || !(stampedAfter(event.appliedAt, now) || stampedAfter(event.studyRun?.startedAt, now)))
     .sort((a, b) => String(a.appliedAt ?? '').localeCompare(String(b.appliedAt ?? '')));
   for (const event of ordered) {
     const observation = event.mixObservation;
@@ -54,9 +61,9 @@ export function selectGoal(events) {
       || (standing.score === current.standing.score && String(missed.appliedAt) > String(current.missed.appliedAt))) best[origin] = candidate;
   }
   const chosen = best.game ?? best.practice;
-  if (!chosen) return null;
+  if (!chosen) return { state: groups.size ? 'clear' : 'none', goal: null };
   const observation = chosen.missed.mixObservation;
-  return {
+  return { state: 'goal', goal: {
     origin: chosen.origin,
     sourceIdentity: { ...observation.sourceIdentity },
     spotKey: observation.spotKey,
@@ -66,12 +73,20 @@ export function selectGoal(events) {
     sample: chosen.standing.n,
     score: chosen.standing.score,
     reason: 'reference-deviation',
-  };
+  } };
 }
 
-/** The practice-focus goal (coach and lobby): the same choice in that file's shape. */
-export function practiceFocusGoal(events) {
-  const goal = selectGoal(events);
+export function selectGoal(events, options) {
+  return goalSelection(events, options).goal;
+}
+
+/** A goal in the practice-focus file's shape (coach and lobby). */
+export function focusOfGoal(goal) {
   if (!goal) return null;
   return { id: goal.skillKey, recommendedDrill: goal.skillKey, severity: goal.score, confidence: goal.sample / (goal.sample + 5), reason: goal.reason };
+}
+
+/** The practice-focus goal: the same choice in that file's shape. */
+export function practiceFocusGoal(events, options) {
+  return focusOfGoal(selectGoal(events, options));
 }

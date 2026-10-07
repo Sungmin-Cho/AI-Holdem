@@ -15,7 +15,7 @@ import { eventFromEvaluation, eventForPrior } from '../training/profile-store.js
 import { learningEventKey } from '../training/study-history.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { lookup } from '../training/providers/preflop-json.js';
-import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, V3_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
+import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { nativePreflopSnapshot } from '../training/native-preflop-snapshot.js';
 import { evaluatePreflopReference } from '../training/preflop-reference.js';
@@ -622,14 +622,16 @@ function storedAnswer(session, questionId, attemptNo) {
 // shows every answer of that spot, so it is refused while an assessment, a
 // retest or a transfer run is open, and each view is recorded; assessment and
 // transfer then treat that spot's hands as seen for seven days.
+// One row per source and spot (its latest view); rows past the window expire.
 const EXPOSURE_SEGMENTS = ['grid-exposures.json'];
-const EXPOSURE_LIMIT = 500;
+const EXPOSURE_MAX_BYTES = 1024 * 1024;
 const EXPOSURE_WINDOW_MS = 7 * 86_400_000;
 const LOCKED_RUN_MODES = new Set(['assessment', 'retest', 'transfer']);
 function loadExposures(storeDir) {
   try {
-    const rows = JSON.parse(openContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, { maxBytes: 256 * 1024 }).toString('utf8'));
-    return Array.isArray(rows) ? rows.filter((row) => row && typeof row.spotKey === 'string' && typeof row.at === 'string' && row.sourceIdentity) : [];
+    const rows = JSON.parse(openContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, { maxBytes: EXPOSURE_MAX_BYTES }).toString('utf8'));
+    return Array.isArray(rows) ? rows.filter((row) => row && typeof row.spotKey === 'string' && typeof row.at === 'string'
+      && Number.isFinite(Date.parse(row.at)) && row.sourceIdentity) : [];
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -674,7 +676,14 @@ export async function readSpotChart(storeDir, { spotKey, source: requested } = {
     }
     if (!any) throw coded('UNSUPPORTED_SPOT', 'spot is not in the reference dataset');
     const at = new Date().toISOString();
-    const rows = [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }].slice(-EXPOSURE_LIMIT);
+    const latest = new Map();
+    for (const row of [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }]) {
+      if (Date.parse(at) - Date.parse(row.at) > EXPOSURE_WINDOW_MS) continue;
+      const key = JSON.stringify([row.sourceIdentity.id, row.sourceIdentity.version, row.sourceIdentity.contentSha256 ?? null, row.spotKey]);
+      const prior = latest.get(key);
+      if (!prior || Date.parse(row.at) >= Date.parse(prior.at)) latest.set(key, row);
+    }
+    const rows = [...latest.values()].sort((left, right) => left.at.localeCompare(right.at));
     writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
     return { ok: true, source, spotKey, cells };
   });
@@ -698,8 +707,11 @@ export async function startDrill(storeDir, {
       const activeId = rebuildFromEvents(events).activeSegmentId;
       defaultSource = KNOWN_REFERENCE_SOURCES.find(s=>`${s.id}@${s.version}`===activeId) ?? defaultSource;
     }
-    const loadedDataset = loadReferenceDataset(requestedSource ?? (spotKey?.endsWith('-v3') ? V3_REFERENCE_SOURCE
-      : spotKey && !spotKey.endsWith('-v2') ? LEGACY_REFERENCE_SOURCE : defaultSource));
+    // A named spot carries its own source (v1 keys have no suffix); only a run
+    // without one follows the active record or the default.
+    const spotSource = !spotKey ? null : spotKey.endsWith('-v3') ? V3_REFERENCE_SOURCE
+      : spotKey.endsWith('-v2') ? V2_REFERENCE_SOURCE : LEGACY_REFERENCE_SOURCE;
+    const loadedDataset = loadReferenceDataset(requestedSource ?? spotSource ?? defaultSource);
     let sourceIdentity = sourceIdentityOfDataset(loadedDataset);
     if (requestedSource !== undefined && !sameSource(requestedSource, sourceIdentity)) {
       throw coded('SOURCE_CHANGED', 'requested reference source is not available');

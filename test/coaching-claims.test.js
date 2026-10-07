@@ -43,13 +43,12 @@ test('sanitizing removes only the offending sentences and keeps structure', () =
     '+2.5bb',
   ].join('\n');
   const { text, removed, total } = sanitizeCoachingText(doc);
-  // Once the solver and "## EV" lines go, the EV sentence sits right above
-  // "+2.5bb" and would read as an EV figure, so a second pass removes it too.
+  // "+2.5bb" is the figure of the "## EV" label, so both go; the qualitative EV
+  // sentence then has no number below it and stays.
   assert.equal(text, [
     '## 결정적 핸드 2~3개 리플레이', '',
     '1. 43번: 22로 민레이즈했습니다. 이후 콜은 가격 때문입니다.',
-    '- 1.5bb 오픈은 작았습니다.',
-    '+2.5bb',
+    '- 1.5bb 오픈은 작았습니다. 기대값이 낮은 콜이었습니다.',
   ].join('\n'));
   assert.equal(removed, 5);
   assert.equal(total, 10);
@@ -77,6 +76,19 @@ test('the sanitizer keeps a stated limit and removes the same phrase used as a c
   }
   // A negation later in the sentence does not turn a claim into a limit.
   assert.equal(sanitizeCoachingText('솔버가 검증한 결과, 콜은 틀린 선택이 아닙니다. 끝.').text, '끝.');
+  // A negated phrase does not excuse another claim in the same sentence.
+  for (const mixed of ['솔버로 검증하지 않은 참고 자료를 사용했지만 이 액션은 솔버가 계산한 전략입니다.',
+    '솔버가 검증한 전략은 아닙니다만 솔버가 계산한 결과 콜이 맞습니다.']) {
+    assert.equal(sanitizeCoachingText(`${mixed} 끝.`).text, '끝.', mixed);
+  }
+});
+
+test('new output loses an expected-value word whose number sits on the next line', () => {
+  for (const text of ['기대 수익:\n+2BB', '기대 값:\n+2BB', 'EV:\n- 1.5BB']) {
+    assert.equal(sanitizeCoachingText(`${text}\n상대 범위를 보세요.`).text.includes('BB'), false, text);
+  }
+  // A qualitative line followed by a numbered list item that is not a figure of it stays.
+  assert.equal(sanitizeCoachingText('기대값이 낮은 라인은 아닙니다.\n상대 범위를 보세요.').removed, 0);
 });
 
 test('new output loses a quantitative expected value written with a space or full-width digits', () => {

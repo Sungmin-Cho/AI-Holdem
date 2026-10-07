@@ -21,6 +21,9 @@ test('G5 nut raise is judged only on a sample that can carry an 80% rate', () =>
 });
 
 test('G6 reduced: degenerate strategies do not beat the lobby tables', { timeout: 600_000 }, () => {
+  // 1,000 hands bound the mean; the gate's 95% upper bound needs the full run
+  // (20,000 hands per strategy, design §9) except where the margin is decisive.
   const exploits = measureExploits({ hands: 1000, seed: 'g6-reduced' });
   for (const [name, row] of Object.entries(exploits)) assert.ok(row.bbPer100 <= 30, `${name} ${row.bbPer100.toFixed(1)}bb/100`);
+  for (const name of ['always-min-raise', 'always-call']) assert.ok(exploits[name].high <= 30, `${name} upper ${exploits[name].high.toFixed(1)}`);
 });

@@ -240,21 +240,43 @@ export function formatSummary(summary = {}) {
 }
 /** Trends (design D12): one series per source and mode — runs from different
  * question distributions are never joined — and one row per game session. */
+// A series names its source as a JSON [id, version, sha] key; a game row as id@version.
+function sourceLabel(text) {
+  let id = null;
+  let version = null;
+  try { [id, version] = JSON.parse(text); } catch { [id, version] = String(text ?? '').split('@'); }
+  if (typeof id !== 'string' || typeof version !== 'string') return '';
+  return id === 'local-preflop-baseline' ? `기준표 ${version}` : `${id}@${version}`;
+}
+
+// One line per comparable series (see training/study-history.js trendsOf): the
+// assessments of a source, or one assessment with its retests. Game sessions
+// are grouped by the reference source they were graded against.
 export function formatTrends(trends = {}) {
   const series = new Map();
   for (const run of Array.isArray(trends.practice) ? trends.practice : []) {
     if (typeof run?.series !== 'string' || number(run.allowedActionRate) === null) continue;
-    const [sourceText, mode] = run.series.split('|');
-    const label = `${STUDY_MODES[mode] ?? '연습'} · ${sourceText.replace('local-preflop-baseline@', '기준표 ')}`;
-    const rows = series.get(label) ?? [];
-    rows.push({ date: new Date(run.startedAt).toLocaleDateString('ko-KR'), rate: percent(run.allowedActionRate),
+    const [sourceText, kind] = run.series.split('|');
+    if (!['assessment', 'retest'].includes(kind)) continue;
+    const date = new Date(run.startedAt).toLocaleDateString('ko-KR');
+    if (!series.has(run.series)) {
+      series.set(run.series, { label: kind === 'retest'
+        ? `${STUDY_MODES.retest} · ${date} 평가와 같은 문항 · ${sourceLabel(sourceText)}`
+        : `${STUDY_MODES.assessment} · ${sourceLabel(sourceText)}`, rows: [] });
+    }
+    series.get(run.series).rows.push({ date: run.mode === 'assessment' && kind === 'retest' ? `${date} (기준)` : date, rate: percent(run.allowedActionRate),
       baseline: number(run.foldBaselineRate) !== null ? percent(run.foldBaselineRate) : null, width: Math.round(run.allowedActionRate * 1000) / 10 });
-    series.set(label, rows);
   }
-  const game = (Array.isArray(trends.game) ? trends.game : []).filter((row) => number(row?.allowedActionRate) !== null)
-    .map((row) => ({ label: `게임 ${count(row.session)} · ${new Date(row.startedAt).toLocaleDateString('ko-KR')}`, graded: `${count(row.graded)}결정 채점`,
-      rate: percent(row.allowedActionRate), width: Math.round(row.allowedActionRate * 1000) / 10 }));
-  return { series: [...series].map(([label, rows]) => ({ label, rows: rows.slice(-12) })), game: game.slice(-12) };
+  const games = new Map();
+  for (const row of Array.isArray(trends.game) ? trends.game : []) {
+    if (number(row?.allowedActionRate) === null) continue;
+    const label = `게임 기록 · ${sourceLabel(row.source) || '출처 미상'}`;
+    if (!games.has(label)) games.set(label, []);
+    games.get(label).push({ label: `게임 ${count(row.session)} · ${new Date(row.startedAt).toLocaleDateString('ko-KR')}`, graded: `${count(row.graded)}결정 채점`,
+      rate: percent(row.allowedActionRate), width: Math.round(row.allowedActionRate * 1000) / 10 });
+  }
+  return { series: [...series.values()].map((entry) => ({ label: entry.label, rows: entry.rows.slice(-12) })),
+    game: [...games].map(([label, rows]) => ({ label, rows: rows.slice(-12) })) };
 }
 export function drillRequest(pathname, authToken, { method = 'GET', body, signal } = {}) {
   const headers = { 'x-drill-token': authToken };

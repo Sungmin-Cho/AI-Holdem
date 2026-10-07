@@ -290,9 +290,21 @@ const NEW_OUTPUT_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|�
 // 휴리스틱입니다", "GTO 정답은 아닙니다") is kept: the negation attaches to the
 // authority phrase itself, not anywhere later in the sentence.
 const NEGATED_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)\s*(?:(?:하지|되지)\s*않[은았는]|(?:한|된)\s*(?:\S{1,8}\s*)?(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요))|GTO\s*(?:기준|상|적으로)?\s*(?:정답|최적)\s*(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요)/u;
-const assertsAuthority = (sentence) => NEW_OUTPUT_AUTHORITY_RE.test(sentence) && !NEGATED_AUTHORITY_RE.test(sentence);
+// Each authority phrase is judged on its own: a negated one does not excuse
+// another claim in the same sentence.
+const AUTHORITY_ALL_RE = new RegExp(NEW_OUTPUT_AUTHORITY_RE.source, 'gu');
+const NEGATED_AT_RE = new RegExp(NEGATED_AUTHORITY_RE.source, 'uy');
+function assertsAuthority(sentence) {
+  for (const match of sentence.matchAll(AUTHORITY_ALL_RE)) {
+    NEGATED_AT_RE.lastIndex = match.index;
+    if (!NEGATED_AT_RE.test(sentence)) return true;
+  }
+  return false;
+}
 // New output only: an expected-value word with a number in the same sentence,
 // spaced or not ("기대 수익은 +2BB", "EV 1.5") — no such figure is computed here.
+// An expected-value word, spaced or not; with a number on the next line it is a figure too.
+const EV_WORD_RE = /기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z])|expected\s+value/iu;
 const QUANTITATIVE_EV_RE = /(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))[^.!?。]*\d|\d[^.!?。]*(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))/iu;
 
 // Same normalisation the legacy predicate applies before matching.
@@ -328,7 +340,8 @@ function keptSentences(lines, index, extra = () => true) {
   const line = lines[index];
   const nextNumeric = startsWithNumber(lines.slice(index + 1).find((row) => row.raw.trim())?.raw);
   return line.sentences.filter((sentence, i) => {
-    if (!coachingSentenceAllowed(sentence) || !extra(sentence)) return false;
+    const last = nextNumeric && i === line.sentences.length - 1;
+    if (!coachingSentenceAllowed(sentence) || !extra(sentence, last)) return false;
     if (referenceClaimAllowed(sentence)) return true;
     if (evOnlyFragment(sentence)) return false;
     return !(nextNumeric && i === line.sentences.length - 1);
@@ -360,17 +373,29 @@ export function sanitizeCoachingText(text) {
   return { text: pass.text, removed, total };
 }
 
+// A line that is only a figure ("+2BB", "- 1.5 BB", "３%"): the value of a label above it.
+const FIGURE_LINE_RE = /^\s*(?:[#>*•-]\s*)*[+−-]?\s*\d[\d.,]*\s*(?:bb|칩|%)?\s*[.!]?\s*$/iu;
+
 function sanitizePass(text) {
   let removed = 0;
   let total = 0;
   const kept = [];
   const lines = coachingLines(text);
+  // An expected-value label whose figure sits alone on the next line goes with it.
+  const figureOfLabel = new Set();
+  lines.forEach((line, index) => {
+    const label = line.sentences.at(-1);
+    const next = lines.findIndex((row, j) => j > index && row.raw.trim());
+    if (label && next > 0 && EV_WORD_RE.test(normalizeClaimText(label)) && FIGURE_LINE_RE.test(normalizeClaimText(lines[next].raw))) figureOfLabel.add(next);
+  });
   lines.forEach((line, index) => {
     if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); return; }
     total += line.sentences.length;
-    const ok = keptSentences(lines, index, (sentence) => {
+    if (figureOfLabel.has(index)) { removed += line.sentences.length; return; }
+    const ok = keptSentences(lines, index, (sentence, beforeNumber) => {
       const normalized = normalizeClaimText(sentence);
-      return !assertsAuthority(normalized) && !QUANTITATIVE_EV_RE.test(normalized);
+      return !assertsAuthority(normalized) && !QUANTITATIVE_EV_RE.test(normalized)
+        && !(beforeNumber && EV_WORD_RE.test(normalized));
     });
     removed += line.sentences.length - ok.length;
     if (ok.length) kept.push(`${line.prefix}${ok.join(' ')}`);

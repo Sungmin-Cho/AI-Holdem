@@ -1,7 +1,7 @@
 // Coverage for reference v3 (local-preflop-baseline@3.0.0): the closed public
 // input projected from an engine decision, and the one derivation both the
 // resolver (to produce) and the validator (to check) use. Pure and browser-safe.
-import { PREFLOP_ORDERS_V3, PUSHFOLD_STACKS_BB, preflopKeysV3 } from './preflop-key.js';
+import { PREFLOP_ORDERS_V3, PUSHFOLD_STACKS_BB, parsePreflopKeyV3, preflopKeysV3 } from './preflop-key.js';
 import { matchReferenceActionV3, sameReferenceSource } from './reference.js';
 
 export { matchReferenceActionV3 };
@@ -24,6 +24,18 @@ export const V3_BANDS = Object.freeze({
   facingOpenExact: [2.0, 3.0], facingOpenProjected: [3.0, 4.0], threeBetExact: [6, 12], threeBetProjected: [12, 16],
   openChoice: [2.0, 3.2], threeBetChoice: [6, 12], fourBetChoice: [16, 30], deepAllIn: 40,
 });
+
+/** Whether a key's synthetic table is an exact (gradeable) context: push and
+ * shove models only cover a few players behind the hero (design D6.3). */
+export function practiceKeyExactV3(spotKey) {
+  const spot = parsePreflopKeyV3(spotKey);
+  if (!spot) return false;
+  const order = PREFLOP_ORDERS_V3[spot.seated];
+  const behind = order.length - order.indexOf(spot.position) - 1;
+  if (spot.context === 'push') return behind <= V3_BANDS.pushBehindMax;
+  if (spot.context === 'vs-shove') return behind <= V3_BANDS.shoveBehindMax;
+  return true;
+}
 
 function coded(code, message) {
   const error = new Error(message);
@@ -225,6 +237,9 @@ export function buildCoverageV3(input) {
 // from its own input (a publisher cannot claim a context, key or eligibility).
 // Callers that bind a coverage to a completed engine decision do so separately.
 export function projectReferenceCoverageV3(c) {
+  // An unsupported result with no coverage input (postflop, no preflop context)
+  // carries null, as in v2.
+  if (c === null) return null;
   if (!exactKeys(c, COVERAGE_V3_KEYS) || c.schemaVersion !== COVERAGE_V3_SCHEMA || c.policyVersion !== COVERAGE_V3_POLICY) invalid('envelope');
   if (!exactKeys(c.derived, DERIVED_KEYS)) invalid('derived keys');
   const expected = buildCoverageV3(c.input);
@@ -253,6 +268,11 @@ export function referenceAssessmentEligibilityV3(e, source) {
     if (!e || !Object.hasOwn(e, 'coverage')) return fail();
     const c = projectReferenceCoverageV3(e.coverage);
     if (e.mixObservation && !sameReferenceSource(e.mixObservation.sourceIdentity, source)) return fail();
+    if (c === null) {
+      // Verified as unsupported only: no grade, no frequency, no observation.
+      if (e.status === 'supported' || e.grade != null || e.chosen?.frequency != null || e.mixObservation) return fail();
+      return { verified: true, referenceAvailable: false, metricEligible: false, reason: null };
+    }
     const available = e.status === 'supported' && !e.forced;
     if (e.status === 'supported' && !c.derived.spotKey) return fail();
     const spotKey = e.spotKey ?? e.mixObservation?.spotKey;
@@ -265,7 +285,9 @@ export function referenceAssessmentEligibilityV3(e, source) {
       if (choice.action !== c.input.chosen.action) return fail();
       if (choice.action === 'raise' ? !(Math.abs(choice.sizeBb * bb - c.input.chosen.toChips) < 1e-6) : choice.sizeBb !== undefined) return fail();
       if (choice.allIn !== undefined && (choice.allIn !== true || choice.action !== 'raise')) return fail();
-    } else if (Boolean(choice) !== Boolean(c.input.chosen)) return fail();
+    } else if (choice) return fail();
+    // A profile event keeps the choice only for scored results; without it the
+    // coverage's own chosen action stands (an eligible result needs it below).
     if (!eligible && (e.grade != null || (e.chosen && e.chosen.frequency != null))) return fail();
     if (eligible) {
       if (!Array.isArray(actions) || !actions.length || actions.length > 3 || !choice) return fail();

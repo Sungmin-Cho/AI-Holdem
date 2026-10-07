@@ -135,6 +135,21 @@ function identitySpans(text, evaluation) {
   return spans;
 }
 const insideSpans = (spans, start, length) => spans.some(([from, to]) => start >= from && start + length <= to);
+// The stack depth named as a depth ("100BB 깊이", "100BB에서"), not as a size.
+const DEPTH_CONTEXT = /^\s*(?:bb|BB)\s*(?:스택|깊이|딥|유효|짜리|에서|의|게임|테이블|상황|구간|캐시|토너)/;
+// An identifier's digits are exempt only where they are used as the identifier:
+// a percentage is always a frequency claim, and a BB amount is a size claim
+// unless it is the spot's own stack depth used as a depth.
+function identityAt(text, spans, index, token, evaluation) {
+  if (!insideSpans(spans, index, token.length)) return false;
+  const rest = afterToken(text, index, token);
+  if (/^\s*%/.test(rest)) return false;
+  if (/^\s*(?:bb|BB)/.test(rest)) {
+    const stack = /^\dmax-(\d+)bb-/.exec(typeof evaluation?.spotKey === 'string' ? evaluation.spotKey : '')?.[1];
+    return stack != null && token === stack && DEPTH_CONTEXT.test(rest);
+  }
+  return true;
+}
 
 export function validateExplanation(evaluation, explanation) {
   if (typeof explanation !== 'string' || !explanation.trim()) {
@@ -160,7 +175,7 @@ export function validateExplanation(evaluation, explanation) {
     let match;
     while ((match = numberRe.exec(explanation))) {
       const token = match[0];
-      if (insideSpans(identities, match.index, token.length)) continue;
+      if (identityAt(explanation, identities, match.index, token, evaluation)) continue;
       if (EV_WORDS.test(clauseAt(explanation, match.index))
         || handNo == null || token !== String(handNo)) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
@@ -188,7 +203,7 @@ export function validateExplanation(evaluation, explanation) {
   while ((match = numberRe.exec(explanation))) {
     const token = match[0];
     if (numberCoveredByAlias(spans, match.index, token.length)) continue;
-    if (insideSpans(identities, match.index, token.length)) continue;
+    if (identityAt(explanation, identities, match.index, token, evaluation)) continue;
     const num = Number(token);
     const range = clauseRangeAt(explanation, match.index);
     const clause = range.clause;

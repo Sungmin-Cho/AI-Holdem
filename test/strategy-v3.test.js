@@ -4,7 +4,7 @@ import { newDeck } from '../engine/cards.js';
 import { snapshotDecision } from '../engine/decision.js';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { validatePolicyOutput } from '../training/policies/contracts.js';
-import { distributionV3, scaleWidth } from '../training/policies/strategy-v3.js';
+import { __test as strategyInternals, distributionV3, scaleWidth } from '../training/policies/strategy-v3.js';
 import { PERSONA_ARCHETYPES_V3, personaConfigV3 } from '../training/policies/personas-v3.js';
 import { HAND_CLASSES, comboCount } from '../shared/poker-eval.js';
 
@@ -124,4 +124,93 @@ test('river raises are value only: the nuts nearly always, never a bluff raise',
   const missedSnapshot = { ...snapshot, holeCards: ['3c', '5d'], decisionId: `${snapshot.decisionId}-missed` };
   const missed = distributionV3(missedSnapshot, legal, personaConfigV3('Maniac'));
   assert.equal(missed.some((r) => r.action === 'raise' && r.frequency > 0), false, JSON.stringify(missed));
+});
+
+test('a short call is priced against the pot it can win, not the bet it cannot match', () => {
+  // UTG shoves 100BB; the button has 10BB. Calling 10BB wins at most 10BB from
+  // UTG plus the blinds: about 46% is needed, not 9%.
+  const config = personaConfigV3('TAG');
+  for (const [cards, expected] of [[['7s', '2d'], 'fold'], [['As', 'Ah'], 'call']]) {
+    let state = table({ stacks: [500, 5000, 5000, 5000, 5000, 5000], cards: { user: cards } });
+    state = applyAction(state, 'p3', 'raise', 5000).state;
+    state = applyAction(state, 'p4', 'fold').state;
+    state = applyAction(state, 'p5', 'fold').state;
+    const { legal, snapshot } = snap(state);
+    assert.equal(legal.toAct, 'user');
+    assert.equal(legal.callAmount, 500);
+    const items = distributionV3(snapshot, legal, config);
+    const top = [...items].sort((a, b) => b.frequency - a.frequency)[0];
+    assert.equal(top.action, expected, `${cards.join('')} ${JSON.stringify(items)}`);
+    if (expected === 'fold') assert.equal(items.find((r) => r.action === 'call')?.frequency ?? 0, 0);
+  }
+});
+
+test('a 3-bet far above the reference sizes is priced off the chart', () => {
+  // BTN opens 2.5BB, the big blind 3-bets to 80BB (not all-in) at 100BB.
+  const config = personaConfigV3('TAG');
+  const at = (threeBetTo) => {
+    let state = table({ cards: { user: ['As', '5s'] } });
+    for (const pid of ['p3', 'p4', 'p5']) state = applyAction(state, pid, 'fold').state;
+    state = applyAction(state, 'user', 'raise', 125).state;
+    state = applyAction(state, 'p1', 'fold').state;
+    state = applyAction(state, 'p2', 'raise', threeBetTo).state;
+    const { legal, snapshot } = snap(state);
+    assert.equal(legal.toAct, 'user');
+    return distributionV3(snapshot, legal, config);
+  };
+  const huge = at(4000);
+  assert.ok(huge.every((row) => !String(row.reasonCode).includes('4bet')), JSON.stringify(huge));
+  assert.ok((huge.find((row) => row.action === 'raise')?.frequency ?? 0) < 0.5, JSON.stringify(huge));
+  // A reference-sized 3-bet still uses the chart.
+  assert.ok(at(450).some((row) => String(row.reasonCode).includes('4bet')));
+});
+
+test('river bluffs fill V·b/(1+b) of the betting value mass, weakest showdown values first', () => {
+  const { riverBluffPlan, tableOf, BASE_BLUFF } = strategyInternals;
+  for (const board of [['Ks', '9d', '4c', '2h', '7s'], ['Qh', 'Jh', '8c', '5d', '3s']]) {
+    // Button opens, the big blind calls and checks every street; the button acts on the river.
+    let state = table({ cards: { user: ['Ac', 'Tc'] }, board });
+    for (const pid of ['p3', 'p4', 'p5']) state = applyAction(state, pid, 'fold').state;
+    state = applyAction(state, 'user', 'raise', 125).state;
+    state = applyAction(state, 'p1', 'fold').state;
+    state = applyAction(state, 'p2', 'call').state;
+    for (let street = 0; street < 2; street += 1) {
+      state = applyAction(state, 'p2', 'check').state;
+      state = applyAction(state, 'user', 'check').state;
+    }
+    state = applyAction(state, 'p2', 'check').state;
+    const { snapshot } = snap(state);
+    assert.equal(snapshot.street, 'river');
+    for (const persona of ['TAG', 'Maniac']) {
+      const { traits } = personaConfigV3(persona);
+      const plan = riverBluffPlan(snapshot, tableOf(snapshot), traits, 0.66, 0.62);
+      const b = 0.66 / 1.66;
+      assert.ok(Math.abs(plan.target - plan.value * b * (traits.bluff / BASE_BLUFF)) < 1e-9);
+      const nonValue = plan.heroRows.filter((row) => row.e < 0.62);
+      const bluffMass = nonValue.reduce((sum, row) => sum + row.w * plan.share(row.s), 0);
+      const available = nonValue.reduce((sum, row) => sum + row.w, 0);
+      assert.ok(Math.abs(bluffMass - Math.min(plan.target, available)) < 1e-6 * Math.max(1, plan.value), `${persona} ${bluffMass} vs ${plan.target}`);
+      const bluffing = nonValue.filter((row) => plan.share(row.s) > 0);
+      const checking = nonValue.filter((row) => plan.share(row.s) === 0);
+      if (bluffing.length && checking.length) assert.ok(Math.max(...bluffing.map((r) => r.e)) <= Math.min(...checking.map((r) => r.e)));
+    }
+  }
+});
+
+test('a split with the board is not raised as the nuts', () => {
+  const config = personaConfigV3('TAG');
+  let state = table({ cards: { user: ['7c', '2d'] }, board: ['As', 'Ks', 'Qs', 'Js', 'Ts'] });
+  for (const pid of ['p3', 'p4', 'p5']) state = applyAction(state, pid, 'fold').state;
+  state = applyAction(state, 'user', 'call').state;
+  state = applyAction(state, 'p1', 'fold').state;
+  state = applyAction(state, 'p2', 'check').state;
+  for (let street = 0; street < 2; street += 1) {
+    state = applyAction(state, 'p2', 'check').state;
+    state = applyAction(state, 'user', 'check').state;
+  }
+  state = applyAction(state, 'p2', 'raise', 100).state;
+  const { legal, snapshot } = snap(state);
+  assert.equal(snapshot.street, 'river');
+  const items = distributionV3(snapshot, legal, config);
+  assert.equal(items.some((row) => row.reasonCode === 'v3-river-nut-raise'), false, JSON.stringify(items));
 });

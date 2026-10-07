@@ -146,3 +146,11 @@ test('drawsOf keeps a flush redraw on a made straight and tells a double gutshot
   assert.equal(drawsOf(['Ac', '2d'], ['3h', '4s', 'Kc']).straightDraw, 'gutshot');
   assert.equal(drawsOf(['Ah', 'Kh'], ['Qh', 'Jh', '2h']).outs, 0, 'a made flush draws nothing');
 });
+
+test('the river nuts exclude a split with the board but keep a rare tie', async () => {
+  const { isSoleRiverNuts } = await import('../shared/poker-eval.js');
+  assert.equal(isSoleRiverNuts(['2c', '4s'], ['As', 'Ks', 'Qs', 'Js', 'Ts']), false, 'the board plays: everyone splits');
+  assert.equal(isSoleRiverNuts(['Ah', '3h'], ['Kh', '9h', '4h', '2c', '7d']), true, 'the nut flush');
+  assert.equal(isSoleRiverNuts(['Jc', 'Th'], ['9c', '8d', '7h', '2s', 'Kd']), true, 'the nut straight ties only another J-T');
+  assert.equal(isSoleRiverNuts(['Qc', 'Jh'], ['9c', '8d', '7h', '2s', 'Kd']), false, 'J-T beats it');
+});

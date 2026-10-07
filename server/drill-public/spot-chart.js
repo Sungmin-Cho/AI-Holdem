@@ -41,3 +41,32 @@ export function renderSpotChart(doc, chart, { highlight = null } = {}) {
   table.append(body);
   return table;
 }
+
+/** The chart box's lifecycle. A chart belongs to the run it was opened in: a
+ * measuring run or another run closes it, and a response that arrives after the
+ * box was closed or reopened is dropped. `show` paints a state into the box. */
+export function createChartPanel({ box, load, show }) {
+  let generation = 0;
+  let run;
+  const close = () => {
+    generation += 1;
+    box.hidden = true;
+    box.replaceChildren();
+  };
+  return {
+    close,
+    sync(runId, measuring) {
+      if (measuring || runId !== run) { run = runId; close(); }
+    },
+    async open(request) {
+      const mine = ++generation;
+      box.hidden = false;
+      show({ loading: true, request });
+      let response = null;
+      try { response = await load(request); } catch { response = null; }
+      if (mine !== generation) return false;
+      show({ response, request });
+      return true;
+    },
+  };
+}

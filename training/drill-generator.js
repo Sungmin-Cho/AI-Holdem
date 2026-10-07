@@ -86,6 +86,13 @@ function exactSource(left, right) {
     && (left?.contentSha256 ?? null) === (right?.contentSha256 ?? null);
 }
 
+/** A graduated SR v2 item missed again: new evidence after graduation and after
+ * the last review. */
+export function reenteredAfterGraduation(item) {
+  const at = (value) => (typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : -Infinity);
+  return Boolean(item?.graduatedAt) && at(item.lastSeenAt) > Math.max(at(item.graduatedAt), at(item.lastReviewedAt));
+}
+
 function validateSelection(spotKey, handClass, source, admits) {
   if (spotKey !== undefined && (!isPreflopSpotKey(spotKey) || !(source ? spotsForSource(source).includes(spotKey) : SUPPORTED_SPOT_SET.has(spotKey)))) {
     throw coded('UNSUPPORTED_SPOT', 'selected spot is unavailable in the reference dataset');
@@ -253,13 +260,16 @@ export function generateQueue({
   validateSelection(spotKey, handClass, selectedSource, admits);
 
   if (mode === 'daily' || mode === 'mistake-review') {
-    // Daily skips graduated items (SR v2); review shows the most overdue first,
-    // then the most lapsed.
+    // Daily skips graduated items (SR v2) unless the same mistake was made again
+    // after graduation and after its last review: that item is due again now.
+    // (The stored schedule is not rewritten, so a pending review stays valid.)
+    // Review shows the most overdue first, then the most lapsed.
     const ordered = mode === 'mistake-review'
       ? [...mistakes].sort((a, b) => String(a.nextReviewAt ?? '').localeCompare(String(b.nextReviewAt ?? '')) || (b.lapses ?? 0) - (a.lapses ?? 0))
       : mistakes;
     const candidates = ordered
-      .filter((item) => mode !== 'daily' || ((!item.nextReviewAt || item.nextReviewAt <= now) && !item.graduatedAt))
+      .filter((item) => mode !== 'daily' || (item.graduatedAt ? reenteredAfterGraduation(item)
+        : (!item.nextReviewAt || item.nextReviewAt <= now)))
       .map((item) => itemInput(item, selectedSource))
       .filter(Boolean);
     const seen = new Set();

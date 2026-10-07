@@ -8,7 +8,7 @@ import { createMistakeBank, createProfileStore } from './training-stores.js';
 import { createTrainingControl } from './training-control.js';
 import { defaultEvaluate, defaultSolve, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
-import { practiceFocusGoal, selectGoal } from '../training/goal.js';
+import { focusOfGoal, goalSelection } from '../training/goal.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
 export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
@@ -362,14 +362,15 @@ export async function completeSessionStoreMigration(storeDir, sessionDir, {
   return { completed: true };
 }
 
-// With the journal events the focus is the shared goal (training/goal.js);
-// without them, the profile's first leak candidate as before.
-export function writePracticeFocus(storeDir, profile, { events } = {}) {
-  const unified = Array.isArray(events) ? selectGoal(events) : null;
-  if (unified) {
+// With the journal events the focus is the shared goal (training/goal.js) at
+// `now`, and a record whose skills are all resolved has no focus; only without
+// independent evidence (or events) the profile's first leak candidate stands.
+export function writePracticeFocus(storeDir, profile, { events, now = new Date().toISOString() } = {}) {
+  const selection = Array.isArray(events) ? goalSelection(events, { now }) : { state: 'none', goal: null };
+  if (selection.state !== 'none') {
     const file = path.join(storeDir, '.training', 'practice-focus.json');
-    const goal = practiceFocusGoal(events);
-    writeJsonSecure(file, { schemaVersion: 2, origin: unified.origin, goal, focus: goal.recommendedDrill });
+    const goal = focusOfGoal(selection.goal);
+    writeJsonSecure(file, { schemaVersion: 2, origin: selection.goal?.origin ?? 'default', goal, focus: goal?.recommendedDrill ?? null });
     return file;
   }
   const gameCandidates = profile.game?.candidates ?? [];

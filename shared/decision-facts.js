@@ -32,6 +32,15 @@ function potStructure(snapshot, heroTotal) {
   return { winnable, multiPot, otherSidePots };
 }
 
+/** The pot hero contests by calling: every contribution capped at hero's total
+ * after the call (the unmatched part of a larger bet is returned). Null without
+ * a hero seat. With side pots it is the sum of every pot hero can win. */
+export function winnablePotAfterCall(snapshot) {
+  const hero = seatOf(snapshot, snapshot.actorId);
+  if (!hero) return null;
+  return potStructure(snapshot, hero.contribution + (snapshot.toCall ?? 0)).winnable;
+}
+
 export function chipFacts(snapshot) {
   const bb = snapshot.blinds?.[1];
   const hero = seatOf(snapshot, snapshot.actorId);

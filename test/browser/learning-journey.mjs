@@ -316,7 +316,9 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
         && apiUrls.length > 0 && apiUrls.every((value) => !new URL(value).searchParams.has('token'));
     })()`);
     check('study-fragment-header-auth', authEvidence);
-    assert.equal(await evaluate('document.querySelector("#mode").options.length'), 6);
+    // Six modes plus transfer practice (learning calibration S8).
+    assert.equal(await evaluate('document.querySelector("#mode").options.length'), 7);
+    assert.equal(await evaluate('Boolean(document.querySelector("#mode option[value=transfer]"))'), true);
     await browser(['select', '#mode', 'assessment']);
     await browser(['click', '#start']);
     await browser(['wait', '#actions button:not([disabled])']);

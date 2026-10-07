@@ -93,3 +93,19 @@ test('an explanation may name its own hand class, spot and stack depth; other nu
   assert.equal(validateExplanation(evaluation, '93s는 버리는 손패입니다.').code, 'NUMBER_CONTRADICTION', 'another hand class is not exempt');
   assert.equal(validateExplanation(evaluation, '이 손패는 37% 확률로 이깁니다.').code, 'NUMBER_CONTRADICTION');
 });
+
+test('an identifier never excuses a frequency or a size claim', async () => {
+  const { validateExplanation } = await import('../training/explain.js');
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  // BTN 22: the reference is a 2.5BB raise at 100%.
+  const evaluation = { status: 'supported', handNo: 4, handClass: '22', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop',
+    source: { ...LEGACY_REFERENCE_SOURCE }, recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }],
+    chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }, grade: 'preferred' };
+  assert.equal(validateExplanation(evaluation, '폴드 22%가 기준 빈도입니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '레이즈 100BB가 기준 사이즈입니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '100BB로 레이즈하세요.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '22BB 레이즈가 기준입니다.').code, 'NUMBER_CONTRADICTION');
+  // The same identifiers used as identifiers stay allowed.
+  assert.equal(validateExplanation(evaluation, '100BB 깊이에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '6인 100BB에서 22는 레이즈 100%입니다.').ok, true);
+});

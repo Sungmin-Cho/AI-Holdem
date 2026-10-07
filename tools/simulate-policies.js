@@ -10,7 +10,7 @@ import { newDeck } from '../engine/cards.js';
 import { snapshotDecision } from '../engine/decision.js';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { preflopRates } from '../engine/views.js';
-import { scoreCards, seedFrom, toCardInts, xorshift32 } from '../shared/poker-eval.js';
+import { isSoleRiverNuts, seedFrom, xorshift32 } from '../shared/poker-eval.js';
 import { handClassOf } from '../training/cards.js';
 import { distributionV3 } from '../training/policies/strategy-v3.js';
 import { PERSONA_ARCHETYPES_V3, personaConfigV3 } from '../training/policies/personas-v3.js';
@@ -117,16 +117,9 @@ export function measureTendencies({ hands = 3000, seed = 'g5', block = 250 } = {
         const firstOwn = !(snapshot.priorActions ?? []).some((a) => a.street === 'flop' && a.playerId === pid);
         if (firstOwn) { cbet.opportunities += 1; if (picked.action === 'raise') cbet.bets += 1; }
       }
-      if (snapshot.street === 'river' && !legal.canCheck && legal.canRaise) {
-        const hole = toCardInts(snapshot.holeCards); const board = toCardInts(snapshot.board);
-        const mine = scoreCards([...hole, ...board]);
-        const used = new Set([...hole, ...board]);
-        let best = true;
-        for (let a = 0; a < 52 && best; a += 1) for (let b = a + 1; b < 52; b += 1) {
-          if (used.has(a) || used.has(b)) continue;
-          if (scoreCards([a, b, ...board]) > mine) { best = false; break; }
-        }
-        if (best) { nuts.opportunities += 1; if (picked.action === 'raise') nuts.raises += 1; }
+      // The policy's own nut definition: a split with the board is not the nuts.
+      if (snapshot.street === 'river' && !legal.canCheck && legal.canRaise && isSoleRiverNuts(snapshot.holeCards, snapshot.board)) {
+        nuts.opportunities += 1; if (picked.action === 'raise') nuts.raises += 1;
       }
     } });
     for (const id of ids) {

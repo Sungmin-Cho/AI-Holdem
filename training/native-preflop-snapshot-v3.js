@@ -1,5 +1,5 @@
 import { PREFLOP_ORDERS_V3, parsePreflopKeyV3, trainingPositionV3 } from '../shared/preflop-key.js';
-import { V3_BANDS } from '../shared/reference-coverage-v3.js';
+import { V3_BANDS, practiceKeyExactV3 } from '../shared/reference-coverage-v3.js';
 import { allHandClasses } from './cards.js';
 
 /** Explicit synthetic practice context for a v3 spot key (drills), never a
@@ -13,17 +13,9 @@ const OPEN_TO = 125;
 const THREE_BET_TO = 450;
 const ENGINE_LABELS = ['BTN/SB', 'BB', 'BTN', 'SB', 'CO', 'UTG', ...Array.from({ length: 6 }, (_, k) => `UTG+${k + 1}`)];
 
-/** Whether a key's synthetic table is an exact (gradeable) context: push and
- * shove models only cover a few players behind the hero (design D6.3). */
-export function practiceKeyExactV3(spotKey) {
-  const spot = parsePreflopKeyV3(spotKey);
-  if (!spot) return false;
-  const order = PREFLOP_ORDERS_V3[spot.seated];
-  const behind = order.length - order.indexOf(spot.position) - 1;
-  if (spot.context === 'push') return behind <= V3_BANDS.pushBehindMax;
-  if (spot.context === 'vs-shove') return behind <= V3_BANDS.shoveBehindMax;
-  return true;
-}
+// Whether a key's synthetic table is gradeable lives with the v3 bands (shared,
+// so the table's practice links use the same rule).
+export { practiceKeyExactV3 };
 
 function engineLabel(position, seated) {
   return ENGINE_LABELS.find((label) => trainingPositionV3(label, seated) === position) ?? null;

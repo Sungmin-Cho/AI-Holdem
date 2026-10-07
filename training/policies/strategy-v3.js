@@ -7,8 +7,9 @@
 // returned entries is done by the caller (deriveUnit).
 import {
   HAND_CLASSES, HAND_CLASS_INDEX, combosOfClass, comboCount, describeMadeHand, drawsOf, equityVs,
-  scoreCards, seedFrom, toCardInts,
+  isSoleRiverNuts, scoreCards, seedFrom, toCardInts,
 } from '../../shared/poker-eval.js';
+import { winnablePotAfterCall } from '../../shared/decision-facts.js';
 import { PREFLOP_ORDERS_V3, trainingPositionV3 } from '../../shared/preflop-key.js';
 import { nearestBucket, V3_BANDS } from '../../shared/reference-coverage-v3.js';
 import { handClassOf } from '../cards.js';
@@ -213,7 +214,9 @@ function preflopDistribution(snapshot, legal, persona, t) {
     const villain = t.live.find((s) => s.playerId === raises[1].playerId);
     const villainPos = t.position.get(raises[1].playerId);
     const effBb = Math.min(heroTotal, t.total(villain)) / t.bb;
-    if (villainPos && effBb > V3_BANDS.midStack[1]) {
+    // The chart answers 3-bets of the reference's sizes; a larger one (80BB into
+    // 2.5BB) is priced off the chart.
+    if (villainPos && effBb > V3_BANDS.midStack[1] && raises[1].amount / t.bb <= V3_BANDS.threeBetProjected[1]) {
       const chart = vs3betChart(t.seated, heroPos, villainPos);
       return chartResponse(chart, idx, p, legal, snapshot, t, { to: raises[1].amount * 2.3, tag: '4bet' });
     }
@@ -242,6 +245,14 @@ function chartResponse(chart, idx, p, legal, snapshot, t, { to, tag }) {
   ];
 }
 
+// The price of a call against the pot it can win: a bet above hero's stack is
+// returned, not won (the fact card's arithmetic).
+function requiredEquity(snapshot, call) {
+  if (!(call > 0)) return 0;
+  const winnable = winnablePotAfterCall(snapshot);
+  return call / (winnable > call ? winnable : Math.max(0, snapshot.potBefore ?? 0) + call);
+}
+
 // Lines the charts do not model (limps, callers, 4-bets, deep all-ins): equity
 // against stand-in ranges compared with the price.
 function offChartPreflop(snapshot, legal, persona, t, cls) {
@@ -264,8 +275,7 @@ function offChartPreflop(snapshot, legal, persona, t, cls) {
       seed: seedFrom(`${snapshot.decisionId}:${ranges.length}:preflop`) });
   } catch { equity = 0.3; }
   const call = Math.max(0, legal.callAmount ?? 0);
-  const pot = Math.max(0, snapshot.potBefore ?? 0);
-  const need = call > 0 ? call / (pot + call) : 0;
+  const need = requiredEquity(snapshot, call);
   const share = 1 / (1 + t.opponents.length);
   const strong = equity >= Math.max(0.55, share + 0.18) || (raises.length >= 2 && PREMIUMS.has(cls));
   const jam = raises.length >= 3 || (raises.length >= 2 && PREMIUMS.has(cls));
@@ -304,19 +314,65 @@ function narrowedRanges(snapshot, t) {
   });
 }
 
-// River: no unseen two cards beat this hand (ties allowed).
-function isRiverNuts(holeCards, board) {
-  const hole = toCardInts(holeCards);
-  const cards = toCardInts(board);
-  const mine = scoreCards([...hole, ...cards]);
-  const used = new Set([...hole, ...cards]);
-  const free = [];
-  for (let c = 0; c < 52; c += 1) if (!used.has(c)) free.push(c);
-  for (let i = 0; i < free.length; i += 1) {
-    for (let j = i + 1; j < free.length; j += 1) if (scoreCards([free[i], free[j], ...cards]) > mine) return false;
-  }
-  return true;
+// A player's preflop range estimated from the other side's view, narrowed by
+// its own postflop line like an opponent's (0.75 per bet or raise, 0.9 per call).
+function rangeOfPlayer(snapshot, playerId, viewerId, order) {
+  let estimated = {};
+  try { estimated = estimateOpponentRanges({ ...snapshot, actorId: viewerId }); } catch { estimated = {}; }
+  const actions = (snapshot.priorActions ?? []).filter((a) => a.playerId === playerId && (a.street ?? 'preflop') !== 'preflop');
+  const w = 0.75 ** actions.filter((a) => a.action === 'raise').length * 0.9 ** actions.filter((a) => a.action === 'call').length;
+  const base = asArray(estimated[playerId] ?? null);
+  return w < 1 ? scaleWidth(base, w, order) : base;
 }
+
+// The baseline persona's bluff trait: personas bluff in proportion to it.
+const BASE_BLUFF = 0.14;
+const valueBetFrequency = (traits) => clamp(0.55 + 0.4 * traits.aggression);
+
+// River bluff mass (design D11). Each combo of hero's own range is scored against
+// the opponent's continuing range on the complete board (card removal between the
+// two ranges is ignored). With value mass V (equity ≥ valueLine), bluffs fill
+// V·b/(1+b), scaled by the persona's bluff trait, from the weakest showdown
+// values up. Returns the plan; `share(score)` is the bluff share of a hand.
+function riverBluffPlan(snapshot, t, traits, fraction, valueLine) {
+  const board = toCardInts(snapshot.board);
+  const blocked = new Set(board);
+  const order = boardOrder(board, board);
+  const villain = t.opponents[0];
+  const rows = (range) => {
+    const out = [];
+    for (let i = 0; i < N; i += 1) {
+      if (!(range[i] > 0)) continue;
+      for (const [a, b] of combosOfClass(HAND_CLASSES[i])) {
+        if (!blocked.has(a) && !blocked.has(b)) out.push({ w: range[i], s: scoreCards([a, b, ...board]) });
+      }
+    }
+    return out;
+  };
+  const villainRows = rows(rangeOfPlayer(snapshot, villain.playerId, snapshot.actorId, order)).sort((x, y) => x.s - y.s);
+  const below = new Float64Array(villainRows.length + 1);
+  villainRows.forEach((row, i) => { below[i + 1] = below[i] + row.w; });
+  const total = below[villainRows.length];
+  const firstAtLeast = (score) => { let lo = 0; let hi = villainRows.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (villainRows[mid].s < score) lo = mid + 1; else hi = mid; } return lo; };
+  const firstAbove = (score) => { let lo = 0; let hi = villainRows.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (villainRows[mid].s <= score) lo = mid + 1; else hi = mid; } return lo; };
+  const equityOf = (score) => (total > 0 ? (below[firstAtLeast(score)] + (below[firstAbove(score)] - below[firstAtLeast(score)]) / 2) / total : 0.5);
+  const heroRows = rows(rangeOfPlayer(snapshot, snapshot.actorId, villain.playerId, order)).map((row) => ({ ...row, e: equityOf(row.s) }));
+  // Value combos bet at the value-bet frequency; V is what actually bets.
+  const value = heroRows.reduce((sum, row) => sum + (row.e >= valueLine ? row.w : 0), 0) * valueBetFrequency(traits);
+  const target = value * (fraction / (1 + fraction)) * (traits.bluff / BASE_BLUFF);
+  const share = (score) => {
+    const e = equityOf(score);
+    if (e >= valueLine) return 0;
+    const weaker = heroRows.reduce((sum, row) => sum + (row.e < e ? row.w : 0), 0);
+    const same = heroRows.reduce((sum, row) => sum + (row.e === e ? row.w : 0), 0);
+    if (same === 0) return weaker < target ? 1 : 0;
+    return clamp((target - weaker) / same);
+  };
+  return { value, target, heroRows, equityOf, share };
+}
+
+// River nuts: nothing beats the hand and it is not a split with the board.
+const isRiverNuts = isSoleRiverNuts;
 
 function wetBoard(board) {
   const cards = toCardInts(board);
@@ -354,7 +410,7 @@ function postflopDistribution(snapshot, legal, persona, t) {
     let reason;
     if (equity >= valueLine) {
       fraction = equity >= 0.8 || wet ? 0.75 : 0.5;
-      pBet = clamp(0.55 + 0.4 * traits.aggression);
+      pBet = valueBetFrequency(traits);
       reason = 'v3-value-bet';
     } else if (strongDraw && !river) {
       fraction = 0.6;
@@ -364,14 +420,14 @@ function postflopDistribution(snapshot, legal, persona, t) {
       fraction = 0.33;
       pBet = clamp((0.15 + 0.45 * traits.aggression + 0.2 * traits.bluff) * (multi ? 0.45 : 1));
       reason = 'v3-cbet';
-    } else if (river && equity < 0.2 && !multi) {
-      // Bluff mass b/(1+b) of the value frequency, scaled by the persona's
-      // bluff trait; the weakest showdown values are the bluffs.
-      fraction = 0.66;
-      pBet = clamp(2 * traits.bluff * (fraction / (1 + fraction)));
-      reason = 'v3-river-bluff';
     } else {
-      return entries([{ action: 'check', frequency: 1, reasonCode: 'v3-check' }], legal, t.bb);
+      // River heads-up: bluff mass V·b/(1+b) of the value combos, weakest showdown values first.
+      fraction = 0.66;
+      pBet = river && !multi
+        ? riverBluffPlan(snapshot, t, traits, fraction, valueLine).share(scoreCards([...toCardInts(snapshot.holeCards), ...toCardInts(snapshot.board)]))
+        : 0;
+      if (!(pBet > 0)) return entries([{ action: 'check', frequency: 1, reasonCode: 'v3-check' }], legal, t.bb);
+      reason = 'v3-river-bluff';
     }
     const raiseTo = sizedRaise(snapshot, legal, actorBet + fraction * pot, t);
     return entries([
@@ -381,7 +437,7 @@ function postflopDistribution(snapshot, legal, persona, t) {
   }
 
   const call = Math.max(0, legal.callAmount ?? 0);
-  const need = call / (pot + call);
+  const need = requiredEquity(snapshot, call);
   const raiseTo = sizedRaise(snapshot, legal, Math.max(snapshot.currentBet ?? 0, 1) * 3, t);
   let pRaise = 0;
   let reason = 'v3-raise';
@@ -418,4 +474,4 @@ export function distributionV3(snapshot, legal, config) {
   return postflopDistribution(snapshot, legal, persona, t);
 }
 
-export const __test = { preflopOrder, boardOrder, isRiverNuts, narrowedRanges, tableOf };
+export const __test = { preflopOrder, boardOrder, isRiverNuts, narrowedRanges, tableOf, riverBluffPlan, BASE_BLUFF, valueBetFrequency };
