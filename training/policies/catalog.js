@@ -1,4 +1,5 @@
-import { configDigestOf, isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 } from './contracts.js';
+import { configDigestOf, isStrategyV2, isStrategyV3, PREDECESSOR_VERSIONS_V2, VERSION_V2, VERSION_V3 } from './contracts.js';
+import { PERSONAS_V3 } from './personas-v3.js';
 import { TENDENCY_MIN_HANDS, assertTendency } from '../tendency/contracts.js';
 import {
   EXPLOITER_LABELS,
@@ -7,7 +8,7 @@ import {
 } from '../tendency/exploit.js';
 import { traitsFromTendency } from '../tendency/traits.js';
 
-export { isStrategyV2, PREDECESSOR_VERSIONS_V2, VERSION_V2 };
+export { isStrategyV2, isStrategyV3, PREDECESSOR_VERSIONS_V2, VERSION_V2, VERSION_V3 };
 
 const TRAIT_KEYS = ['tightness', 'aggression', 'calling', 'bluff'];
 const STRATEGY_VERSION_RE = /^\d+\.\d+\.\d+$/;
@@ -166,6 +167,18 @@ function policyV2(policyId, persona, traits) {
   return completePolicy(config);
 }
 
+function policyV3(policyId, persona) {
+  const { traits, preflop } = PERSONAS_V3[persona === 'baseline' ? 'baseline' : persona];
+  return completePolicy({
+    policyId,
+    policyVersion: VERSION_V3,
+    base: 'strategy-v3',
+    persona,
+    traits: { ...traits },
+    preflop: { ...preflop },
+  });
+}
+
 export const POLICIES = Object.freeze({
   'baseline-v1': policy('baseline-v1', { base: null }),
   'tag-v1': policy('tag-v1', {
@@ -213,6 +226,22 @@ export const POLICIES = Object.freeze({
   'trickster-v2': policyV2('trickster-v2', 'Trickster', {
     tightness: 0.48, aggression: 0.80, calling: 0.48, bluff: 0.32,
   }),
+  'baseline-v3': policyV3('baseline-v3', 'baseline'),
+  'tag-v3': policyV3('tag-v3', 'TAG'),
+  'lag-v3': policyV3('lag-v3', 'LAG'),
+  'nit-v3': policyV3('nit-v3', 'Nit'),
+  'calling-station-v3': policyV3('calling-station-v3', 'CallingStation'),
+  'maniac-v3': policyV3('maniac-v3', 'Maniac'),
+  'trickster-v3': policyV3('trickster-v3', 'Trickster'),
+});
+
+export const ARCHETYPE_POLICY_ID_V3 = Object.freeze({
+  TAG: 'tag-v3',
+  LAG: 'lag-v3',
+  Nit: 'nit-v3',
+  CallingStation: 'calling-station-v3',
+  Maniac: 'maniac-v3',
+  Trickster: 'trickster-v3',
 });
 
 export const ARCHETYPE_POLICY_ID = Object.freeze({
@@ -316,10 +345,11 @@ export function resolveExactPolicy(stored) {
   return config;
 }
 
+// New games seat policy v3; stored assignments keep their own identity.
 export function assignmentFor(archetype) {
-  const policyId = typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_POLICY_ID, archetype)
-    ? ARCHETYPE_POLICY_ID[archetype]
-    : 'baseline-v2';
+  const policyId = typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_POLICY_ID_V3, archetype)
+    ? ARCHETYPE_POLICY_ID_V3[archetype]
+    : 'baseline-v3';
   const config = POLICIES[policyId];
   return {
     policyId: config.policyId,
@@ -360,6 +390,11 @@ export function sanitizePlayersForReview(players, { gameOver = false, derived } 
         out.policyModelKind = 'qualitative-config-v2';
         out.policyTraitsEvidence = 'configured-not-observed-action-frequencies';
         out.policyTraits = { ...config.traits };
+      } else if (isStrategyV3(config)) {
+        out.policyModelKind = 'reference-v3-persona-v3';
+        out.policyTraitsEvidence = 'configured-not-observed-action-frequencies';
+        out.policyTraits = { ...config.traits };
+        out.policyPreflop = { ...config.preflop };
       } else if (Array.isArray(config.deviations) && config.deviations.length) {
         out.deviation = config.deviations.map((row) => ({
           street: row.selector?.street ?? null,

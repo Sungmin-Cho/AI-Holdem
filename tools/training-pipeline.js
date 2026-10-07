@@ -13,7 +13,7 @@ import {
   readAnnotationExactFile,
 } from './training-control.js';
 import { explanationEligible, validateExplanation } from '../training/explain.js';
-import { referenceQuality } from '../shared/reference.js';
+import { isCoverageReferenceSource, referenceQuality, sanitizeCoachingText } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
 import { readDerivedPolicyConfigs } from './policy-player.js';
@@ -181,9 +181,13 @@ export function buildExplanationPrompt(evaluation) {
     evaluation?.status !== 'supported'
       ? 'unsupported를 정답처럼 설명하지 마라. 핸드 번호 외 숫자를 쓰지 마라.'
       : '',
-    evaluation?.source?.version === '2.0.0' && !independentAssessmentEligibility(evaluation).metricEligible
+    isCoverageReferenceSource(evaluation?.source) && !independentAssessmentEligibility(evaluation).metricEligible
       ? '투영 참고 또는 비교 불가다. 등급을 주장하지 말고 핸드 번호 외 모든 숫자를 생략하라. 직접 비교라고 쓰지 마라.' : '',
+    '해설에는 아래 handClass·spotKey·street가 가리키는 손패와 상황을 구체적으로 언급하라.',
     JSON.stringify({
+      handClass: evaluation?.handClass,
+      spotKey: evaluation?.spotKey,
+      street: evaluation?.street,
       assistance: evaluation?.assistance,
       dealSelection: evaluation?.dealSelection,
       dealSelectionContractVersion: evaluation?.dealSelectionContractVersion,
@@ -459,6 +463,12 @@ async function runHandPipelineUnlocked({
       evaluationId: item.evaluationId,
     };
     if (typeof explain !== 'function') continue;
+    // An unsupported decision has nothing to explain beyond its reason code:
+    // seal it at once instead of spending an LLM call or leaving it pending.
+    if (evaluation.status !== 'supported') {
+      await sealExplanation(item, 'unavailable', { sealReason: 'not-explainable' });
+      continue;
+    }
     // A source no explanation could be accepted for (synthetic or unverified
     // reference) gets no LLM call; it stays unsealed until the cutoff seal.
     if (!explanationEligible(evaluation)) continue;
@@ -484,6 +494,10 @@ async function runHandPipelineUnlocked({
     }
     if (held) { explainDeferred = true; continue; }
     if (typeof text !== 'string' || !text.trim()) continue;
+    // New model output only: drop out-of-bounds sentences before validation and
+    // sealing; a stored explanation is never rewritten.
+    text = sanitizeCoachingText(text).text;
+    if (!text) continue;
     const check = validateExplanation(evaluation, text);
     if (!check.ok) continue;
     await sealExplanation(item, text);

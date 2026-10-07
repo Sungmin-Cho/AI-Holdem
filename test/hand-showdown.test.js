@@ -90,21 +90,25 @@ test('칩 보존: 핸드 전후 총합 불변', () => {
   for (const seat of st.seats) assert.ok(seat.stack >= 0);
 });
 
-test('칩 보존: 숏스택 올인 블라인드에 폴드하면 언콜 반환', () => {
+test('칩 보존: 큰 블라인드가 작은 블라인드보다 적게 올인하면 행동 없이 쇼다운하고 초과분을 돌려준다', () => {
   const g = createGame({ aiCount: 1 });
   g.button = 0;
   g.seats[0].stack = 8;
   g.seats[1].stack = 5000;
   const before = 5008;
   const started = startHand(g, { deck: fixedDeck() });
+  // The small blind already covers the 8-chip big blind: nothing is left to decide.
+  assert.equal(started.state.hand, null);
+  assert.equal(legalFor(started.state).handOver, true);
   assert.equal(chipTotal(started.state), before);
-  assert.equal(started.state.seats[started.state.button].playerId, 'p1');
-  const r = applyAction(started.state, 'p1', 'fold');
-  assert.equal(chipTotal(r.state), before);
-  const user = r.state.seats.find((s) => s.playerId === 'user');
-  const p1 = r.state.seats.find((s) => s.playerId === 'p1');
-  assert.equal(user.stack, 16);
-  assert.equal(p1.stack, 4992);
+  const record = started.state.lastHand;
+  assert.deepEqual(record.uncalledReturns, { p1: 17 });
+  assert.equal(record.actions.length, 0);
+  assert.equal(record.showdown.reveals.length, 2);
+  const user = started.state.seats.find((s) => s.playerId === 'user');
+  const p1 = started.state.seats.find((s) => s.playerId === 'p1');
+  assert.equal(user.stack + p1.stack, before);
+  assert.ok([0, 8, 16].includes(user.stack));
 });
 
 test('칩 보존: 사이드팟 올인과 레이즈-폴드', () => {

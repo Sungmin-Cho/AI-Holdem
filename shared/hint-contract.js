@@ -1,4 +1,5 @@
 import { projectReferenceCoverage } from './reference-coverage.js';
+import { projectReferenceCoverageV3, V3_TREE } from './reference-coverage-v3.js';
 import { KNOWN_REFERENCE_SOURCES, sameReferenceSource } from './reference.js';
 
 export const HINT_MAX_BYTES = 16 * 1024;
@@ -8,7 +9,10 @@ const COMMON = ['schemaVersion','gameEpoch','decisionId','handNo','stateVersion'
 const UNSUPPORTED_CODES = new Set(['HINT_SOURCE_UNSUPPORTED','HINT_STREET_UNSUPPORTED','UNSUPPORTED_SPOT',
   'MODE_UNSUPPORTED','SEAT_COUNT_UNSUPPORTED','POSITION_INVALID','STACK_OUT_OF_RANGE',
   'UNSUPPORTED_STACK_CONFIGURATION','LIMP_OR_CALLER','FOUR_BET_PLUS','FACING_SIZE_OUT_OF_RANGE',
-  'DATASET_SPOT_MISSING','REFERENCE_ACTION_ILLEGAL']);
+  'DATASET_SPOT_MISSING','REFERENCE_ACTION_ILLEGAL',
+  // v3 contexts the reference does not compare.
+  'MID_STACK_UNSUPPORTED','FORCED_STACK','FACING_ALLIN_UNMODELED','OPENER_RANGE_UNREACHABLE','NO_DECISION']);
+const V3_TREE_RAISE_BB = Object.freeze({ 'rfi-unopened': V3_TREE.openBb, 'vs-single-raise': V3_TREE.threeBetBb, 'vs-3bet': V3_TREE.fourBetBb });
 const UNAVAILABLE_CODES = new Set(['HINT_RELAY_UNAVAILABLE','HINT_SOURCE_UNAVAILABLE','HINT_QUERY_UNAVAILABLE',
   'HINT_SNAPSHOT_INVALID','HINT_STALE_DECISION','HINT_EXPOSURE_CONFLICT','HINT_PROOF_MISMATCH','HINT_PREPARE_TIMEOUT']);
 const fail = () => { throw Object.assign(new Error('Invalid pre-action hint'), { code: 'HINT_PROOF_MISMATCH' }); };
@@ -25,8 +29,9 @@ export function projectHint(value) {
   if (value.source !== null && (!value.source || Object.keys(value.source).sort().join(',') !== 'contentSha256,id,version'
     || !KNOWN_REFERENCE_SOURCES.some(source => sameReferenceSource(source,value.source)))) fail();
   if (supported) {
-    if (value.source?.version !== '2.0.0' || !HEX.test(value.exposureId)) fail();
-    const coverage = projectReferenceCoverage(value.coverage);
+    const v3 = value.source?.version === '3.0.0';
+    if ((!v3 && value.source?.version !== '2.0.0') || !HEX.test(value.exposureId)) fail();
+    const coverage = v3 ? projectReferenceCoverageV3(value.coverage) : projectReferenceCoverage(value.coverage);
     if (!coverage || coverage.referenceMatch === 'unsupported' || coverage.choiceMatch !== 'not-observed'
       || coverage.metricEligible || !Array.isArray(value.actions) || !value.actions.length || value.actions.length > 4) fail();
     const seen = new Set(); let sum = 0;
@@ -36,7 +41,9 @@ export function projectHint(value) {
         || !ACTIONS.includes(row.action) || seen.has(row.action) || !Number.isFinite(row.frequency)
         || row.frequency <= 0 || row.frequency > 1 || Math.abs(row.frequency * 10000 - Math.round(row.frequency * 10000)) > 1e-8) fail();
       const legal = coverage.input.legal;
-      if (row.action === 'raise' && (!legal.canRaise || row.raiseToChips !== coverage.reference.sizing?.raiseToChips)) fail();
+      const raiseTo = v3 ? (coverage.derived.context === 'push' ? legal.maxRaiseToChips
+        : Math.round((V3_TREE_RAISE_BB[coverage.derived.context] ?? NaN) * coverage.input.bbChips)) : coverage.reference.sizing?.raiseToChips;
+      if (row.action === 'raise' && (!legal.canRaise || row.raiseToChips !== raiseTo)) fail();
       if (row.action === 'check' ? !legal.canCheck : row.action === 'call' ? legal.canCheck : row.action === 'fold' ? legal.canCheck : false) fail();
       seen.add(row.action); sum += row.frequency;
     }

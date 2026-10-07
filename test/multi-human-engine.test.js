@@ -165,10 +165,15 @@ test('쇼다운 open: 인간 패배 머크, AI 강제 공개', () => {
     ['As', 'Ah'],
     ['8s', '3d'],
   ]);
+  // A showdown without an all-in: the AI bets the river and shows first, the
+  // losing humans muck (button user, SB h1, BB p1 after the move).
+  const checkAround = [['h1', 'check'], ['p1', 'check'], ['user', 'check']];
   const ended = playOut(st, {
     deck,
-    script: [['user', 'call'], ['h1', 'call'], ['p1', 'raise', 5000]],
+    script: [['user', 'call'], ['h1', 'call'], ['p1', 'raise', 1000], ['user', 'call'], ['h1', 'call'],
+      ...checkAround, ...checkAround, ['h1', 'check'], ['p1', 'raise', 1000], ['user', 'call'], ['h1', 'call']],
   });
+  assert.deepEqual(ended.lastHand.showdown.reveals.map((row) => row.playerId), ['p1']);
   const showdown = ended.lastHand.showdown;
   const revealed = new Set(showdown.reveals.map((row) => row.playerId));
   const mucked = new Set(showdown.mucks);
@@ -176,6 +181,14 @@ test('쇼다운 open: 인간 패배 머크, AI 강제 공개', () => {
   assert.equal(mucked.has('user'), true);
   assert.equal(mucked.has('h1'), true);
   assert.equal(revealed.size + mucked.size, 3);
+  // Rules v2: when everyone is all-in, every hand is tabled (TDA); humans tabled
+  // only by that rule stay out of the AI's observations (engine/views.js).
+  const allIn = playOut(setButtonLast(game({ aiCount: 1, showdownPolicy: 'open' })), {
+    deck: dealDeck([['7h', '2c'], ['As', 'Ah'], ['8s', '3d']]),
+    script: [['user', 'call'], ['h1', 'call'], ['p1', 'raise', 5000]],
+  });
+  assert.equal(allIn.lastHand.showdown.reveals.length, 3);
+  assert.ok(['user', 'h1'].every((pid) => allIn.lastHand.allInRevealed.includes(pid)));
 });
 
 test('토너먼트 종료: 호스트 탈락 후 진행, 인간 전원/최후 1인, 솔로 parity', () => {

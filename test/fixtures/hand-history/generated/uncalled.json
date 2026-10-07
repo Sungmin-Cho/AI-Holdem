@@ -84,7 +84,7 @@
   ],
   "decisions": [
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-preflop-0",
       "gameMode": "tournament",
       "handNo": 1,
@@ -141,6 +141,14 @@
         }
       ],
       "priorActions": [],
+      "legal": {
+        "decisionId": "d-1-preflop-0",
+        "canCheck": false,
+        "canRaise": true,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000
+      },
       "chosenAction": {
         "action": "raise",
         "amount": 200
@@ -187,5 +195,17 @@
   ],
   "uncalledReturns": {
     "user": 150
-  }
+  },
+  "positions": {
+    "user": "BTN",
+    "p1": "SB",
+    "p2": "BB"
+  },
+  "rulesVersion": 2,
+  "allInRevealed": [],
+  "tableSeats": [
+    "user",
+    "p1",
+    "p2"
+  ]
 }

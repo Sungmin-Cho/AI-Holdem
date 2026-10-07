@@ -1,9 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {hintFixture} from './helpers/hint-fixture.mjs';
-import {evaluatePreflopReference} from '../training/preflop-reference.js';
+import {evaluateReference} from '../training/reference-evaluator.js';
 import {loadReferenceDataset} from '../tools/preflop-dataset.js';
-import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
+import {CANONICAL_REFERENCE_SOURCE} from '../shared/reference.js';
 import {createTrainingControl,materializeLearningEvaluation} from '../tools/training-control.js';
 import {eventFromEvaluation,eventForPrior} from '../training/profile-store.js';
 import {applyEvent,emptyProfile,assertProfileEvent} from '../training/profile-aggregator.js';
@@ -16,7 +16,7 @@ test('canonical biased evaluations stay factual but excluded, and cannot strip o
  const record=f.state().lastHand,s=record.decisions.find(row=>row.actorId==='user');
  assert.equal(f.state().config.dealBias,'strong');
  assert.equal(record.dealSelection.mode,'strong');
- const ev=evaluatePreflopReference(s,loadReferenceDataset(V2_REFERENCE_SOURCE),{gameEpoch:f.epoch});
+ const ev=evaluateReference(s,loadReferenceDataset(CANONICAL_REFERENCE_SOURCE),{gameEpoch:f.epoch});
  const tc=createTrainingControl();
  for(const mutant of [{...ev,dealSelection:undefined},{...ev,dealSelection:undefined,dealSelectionContractVersion:undefined},
    {...ev,dealSelection:{...ev.dealSelection,mode:'off'}}]) {
@@ -55,7 +55,7 @@ test('new default off contract remains independently learnable end to end',async
  const f=await hintFixture(t,{hints:'off',dealBias:'off'});await f.prepare();
  f.cli('apply','user','fold');while(f.state().hand){const next=f.cli('step').next;f.cli('apply',next.toAct,'fold');}
  const s=f.state().lastHand.decisions.find(row=>row.actorId==='user');
- const ev=evaluatePreflopReference(s,loadReferenceDataset(V2_REFERENCE_SOURCE),{gameEpoch:f.epoch});
+ const ev=evaluateReference(s,loadReferenceDataset(CANONICAL_REFERENCE_SOURCE),{gameEpoch:f.epoch});
  const tc=createTrainingControl();await tc.acceptEvaluations(f.dir,{gameEpoch:f.epoch,owner:'off-test',handNo:1,evaluations:[ev]});
  const m=materializeLearningEvaluation(f.dir,tc.loadAuthority(f.dir).items[ev.evaluationId]);
  const store=createProfileStore(f.dir);await store.apply(m);

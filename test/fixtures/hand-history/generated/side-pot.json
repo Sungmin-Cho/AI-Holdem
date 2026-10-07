@@ -90,7 +90,7 @@
   ],
   "decisions": [
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-preflop-0",
       "gameMode": "tournament",
       "handNo": 1,
@@ -147,6 +147,14 @@
         }
       ],
       "priorActions": [],
+      "legal": {
+        "decisionId": "d-1-preflop-0",
+        "canCheck": false,
+        "canRaise": true,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 100
+      },
       "chosenAction": {
         "action": "raise",
         "amount": 100
@@ -201,11 +209,17 @@
           "Ad"
         ],
         "handName": "원페어"
+      },
+      {
+        "playerId": "user",
+        "cards": [
+          "Ah",
+          "Kh"
+        ],
+        "handName": "하이 카드"
       }
     ],
-    "mucks": [
-      "user"
-    ]
+    "mucks": []
   },
   "startStacks": {
     "p1": 300,
@@ -229,5 +243,19 @@
       "allIn": false
     }
   ],
-  "uncalledReturns": {}
+  "uncalledReturns": {},
+  "positions": {
+    "user": "BTN",
+    "p1": "SB",
+    "p2": "BB"
+  },
+  "rulesVersion": 2,
+  "allInRevealed": [
+    "user"
+  ],
+  "tableSeats": [
+    "user",
+    "p1",
+    "p2"
+  ]
 }

@@ -479,7 +479,7 @@ function javascriptFiles(root) {
 }
 
 test('Q3 M14 inventory: every literal unavailable seal caller pins an allowed sealReason', () => {
-  const allowed = new Set(['cutoff', 'exact-file-missing', 'post-cutoff', 'explain-failed']);
+  const allowed = new Set(['cutoff', 'exact-file-missing', 'post-cutoff', 'explain-failed', 'not-explainable']);
   const inventory = [];
   for (const scope of ['tools', 'test']) {
     for (const file of javascriptFiles(path.join(ROOT, scope))) {

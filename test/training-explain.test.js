@@ -80,3 +80,38 @@ test('S2 supported explanation fails closed when source is absent', () => {
   const { source, ...unverified } = supported;
   assert.equal(validateExplanation(unverified, '레이즈가 주력입니다.').ok, false);
 });
+
+test('an explanation may name its own hand class, spot and stack depth; other numbers are still checked', async () => {
+  const { validateExplanation } = await import('../training/explain.js');
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  const evaluation = { status: 'supported', handNo: 12, handClass: '92s', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop',
+    source: { ...LEGACY_REFERENCE_SOURCE }, recommended: [{ action: 'fold', frequency: 1, evBb: null }], chosen: { action: 'fold', frequency: 1, evBb: null }, grade: 'preferred' };
+  assert.equal(validateExplanation(evaluation, '92s는 이 위치에서 상대의 범위를 고려해야 합니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '6max 100BB에서 92s는 폴드가 주력입니다.').ok, true);
+  assert.equal(validateExplanation({ ...evaluation, handClass: '22' }, '22는 작은 페어입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '92s는 3번 레이즈할 손패가 아닙니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '93s는 버리는 손패입니다.').code, 'NUMBER_CONTRADICTION', 'another hand class is not exempt');
+  assert.equal(validateExplanation(evaluation, '이 손패는 37% 확률로 이깁니다.').code, 'NUMBER_CONTRADICTION');
+});
+
+test('an identifier never excuses a frequency or a size claim', async () => {
+  const { validateExplanation } = await import('../training/explain.js');
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  // BTN 22: the reference is a 2.5BB raise at 100%.
+  const evaluation = { status: 'supported', handNo: 4, handClass: '22', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop',
+    source: { ...LEGACY_REFERENCE_SOURCE }, recommended: [{ action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }],
+    chosen: { action: 'raise', sizeBb: 2.5, frequency: 1, evBb: null }, grade: 'preferred' };
+  assert.equal(validateExplanation(evaluation, '폴드 22%가 기준 빈도입니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '레이즈 100BB가 기준 사이즈입니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '100BB로 레이즈하세요.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '22BB 레이즈가 기준입니다.').code, 'NUMBER_CONTRADICTION');
+  for (const claim of ['레이즈 100BB의 크기가 기준 사이즈입니다.', '100BB의 오픈 사이즈가 권장됩니다.',
+    '100BB의 레이즈가 기준 사이즈입니다.', '100BB짜리 레이즈를 권장합니다.']) {
+    assert.equal(validateExplanation(evaluation, claim).code, 'NUMBER_CONTRADICTION', claim);
+  }
+  assert.equal(validateExplanation(evaluation, '100BB의 스택에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '100BB짜리 게임에서 22는 레이즈 100%입니다.').ok, true);
+  // The same identifiers used as identifiers stay allowed.
+  assert.equal(validateExplanation(evaluation, '100BB 깊이에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '6인 100BB에서 22는 레이즈 100%입니다.').ok, true);
+});

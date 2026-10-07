@@ -8059,18 +8059,24 @@ test('S2 evaluator and synthesizer authority claims cannot cross retries or publ
     evaluatorRounds: [{ raw: 'This is the optimal choice.' }, { raw: '참고용 과정 평가입니다.' }],
     synthesizerRounds: [{ raw: `${VALID_REVIEW}\nThis move is solver certified.` }, { raw: VALID_REVIEW }],
   });
-  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  const logs = [];
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 }, loopOpts: { log: (entry) => logs.push(entry) } });
   await loop.resume();
   assert.equal((await loop.run()).phase, 'done');
+  // D9: an evaluator output that is nothing but an authority claim loses all of
+  // its substance and is retried; the synthesizer's single bad sentence is
+  // removed instead, so its first attempt is kept.
   assert.equal(upper.evaluatorStarts.length, 2);
-  assert.equal(upper.synthesizerStarts.length, 2);
+  assert.equal(upper.synthesizerStarts.length, 1);
   assert.equal(upper.synthesizerStarts.some((row) => row.prompt.includes('the optimal choice')), false);
-  for (const starts of [upper.evaluatorStarts, upper.synthesizerStarts]) {
-    assert.ok(starts[1].prompt.startsWith(starts[0].prompt));
-    assert.match(starts[1].prompt, /교정 안내 \(REVIEW_CLAIM_REJECTED\)/);
-    assert.doesNotMatch(starts[1].prompt, /the optimal choice|This move is solver certified/);
-  }
-  assert.doesNotMatch(readJson(path.join(gameDir, 'ui-snapshot.json')).review, /the optimal choice|solver certified/);
+  assert.ok(upper.evaluatorStarts[1].prompt.startsWith(upper.evaluatorStarts[0].prompt));
+  assert.match(upper.evaluatorStarts[1].prompt, /교정 안내 \(REVIEW_CLAIM_REJECTED\)/);
+  assert.doesNotMatch(upper.evaluatorStarts[1].prompt, /the optimal choice|This move is solver certified/);
+  assert.ok(logs.some((entry) => entry?.event === 'review-sanitized' || entry?.[0] === 'review-sanitized'
+    || JSON.stringify(entry).includes('review-sanitized')));
+  const review = readJson(path.join(gameDir, 'ui-snapshot.json')).review;
+  assert.doesNotMatch(review, /the optimal choice|solver certified/);
+  assert.match(review, /## 내 성향 통계/);
 });
 
 test('S2 mixed coaching sends eligible decisions only and appends a separate unavailable notice', { timeout: 20_000 }, async (t) => {

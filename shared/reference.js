@@ -7,9 +7,16 @@ export const V2_REFERENCE_SOURCE = Object.freeze({
   id: 'local-preflop-baseline', version: '2.0.0',
   contentSha256: '1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7',
 });
-export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE]);
+// Reference v3 (schema 3): learning-calibration charts and push/fold. Registered
+// for reading and evaluation; new sessions switch to it with CANONICAL below.
+export const V3_REFERENCE_SOURCE = Object.freeze({
+  id: 'local-preflop-baseline', version: '3.0.0',
+  contentSha256: '0c04d64b5ea4db3ec9f73a394d85ef80bd0ba00a4309930610be35d6d6f0e2a7',
+});
+export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE]);
 // New sessions use v2; legacy sessions and policy retain their explicit v1 pin.
-export const CANONICAL_REFERENCE_SOURCE = V2_REFERENCE_SOURCE;
+// New sessions use reference v3; recorded sessions keep the source they bound.
+export const CANONICAL_REFERENCE_SOURCE = V3_REFERENCE_SOURCE;
 export function sameReferenceSource(a, b) {
   return Boolean(a && b && ['id','version','contentSha256'].every(k=>a[k]===b[k]));
 }
@@ -73,6 +80,28 @@ export function matchReferenceAction(actions, chosen) {
   // Never choose the first of overlapping reference sizes, including an exact
   // match that also lies in another row's tolerance interval.
   return matches.length === 1 ? matches[0] : null;
+}
+
+/** Reference schema of a source: 1, 2 or 3 for the bundled baselines, else null. */
+export function referenceSchemaOf(source) {
+  if (source?.id !== 'local-preflop-baseline') return null;
+  return { '1.0.0': 1, '2.0.0': 2, '3.0.0': 3 }[source.version] ?? null;
+}
+/** Sources whose evaluations carry a closed coverage projection (v2 and v3). */
+export function isCoverageReferenceSource(source) {
+  const schema = referenceSchemaOf(source);
+  return schema === 2 || schema === 3;
+}
+/** v3 compares action classes: the one reference row of the chosen action. The
+ * chosen size was already judged by the coverage's choice band. */
+export function matchReferenceActionV3(actions, chosen) {
+  if (!Array.isArray(actions) || !plainObject(chosen) || !ACTIONS.has(chosen.action)) return null;
+  const rows = actions.filter((row) => plainObject(row) && row.action === chosen.action);
+  return rows.length === 1 ? rows[0] : null;
+}
+/** The comparison contract of the source: v3 by action class, v1/v2 unchanged. */
+export function matchReferenceActionFor(source, actions, chosen) {
+  return referenceSchemaOf(source) === 3 ? matchReferenceActionV3(actions, chosen) : matchReferenceAction(actions, chosen);
 }
 
 function normalizeReferenceAction(action) {
@@ -181,6 +210,14 @@ const REASONS = Object.freeze({
   SOURCE_IDENTITY_UNVERIFIED: '출처 식별값이 확인되지 않아 기준표 비교에서 제외했습니다.',
   SYNTHETIC_SOURCE: '테스트용 합성 출처는 학습 집계에서 제외됩니다.',
   UNSUPPORTED_SPOT: '현재 기준표에서 지원되지 않는 상황입니다.',
+  NO_DECISION: '비교할 결정 기록이 없습니다.',
+  MID_STACK_UNSUPPORTED: '15.5~25BB 중간 스택은 기준표 비교 범위 밖입니다.',
+  FORCED_STACK: '1BB 이하 스택은 선택지가 사실상 정해져 있어 비교하지 않습니다.',
+  FACING_ALLIN_UNMODELED: '이 올인에 대한 대응은 기준표 모델 밖입니다.',
+  OPENER_RANGE_UNREACHABLE: '이 손패는 기준표의 오픈 범위 밖이라 3벳 대응을 비교하지 않습니다.',
+  PUSHFOLD_PROJECTED: '스택 구성이 푸시/폴드 모델과 달라 투영 참고이며 점수에서 제외됩니다.',
+  CHOICE_OUT_OF_TREE: '선택한 행동(림프·소액 레이즈 등)은 기준표 트리 밖이라 비교하지 않습니다.',
+  DEEP_ALLIN_UNMODELED: '깊은 스택 올인 4벳은 기준표 모델 밖이라 비교하지 않습니다.',
   NOT_LEARNABLE: '현재 정량 학습 범위 밖의 상황입니다.',
 });
 
@@ -234,4 +271,135 @@ export function referenceClaimAllowed(value) {
     allowed[index] = claimAllowed(claims[index], index);
   }
   return allowed.every(Boolean);
+}
+
+// ---- coaching text (learning calibration D9) ------------------------------
+// Coaching may use EV as a qualitative concept ("이 콜은 기대값이 낮다") but never
+// attach a number to it, and may not claim GTO/solver/optimal authority. The
+// coaching predicate accepts everything referenceClaimAllowed accepts (so stored
+// proofs stay valid) and additionally a sentence whose only authority words are
+// qualitative EV vocabulary, provided the sentence has no digit, is not a bare
+// EV fragment, and is not followed by a line that starts with a number.
+const QUALITATIVE_CLAIM_RE = /\bEV\b|기대\s*(?:값|수익)|expected\s+value|포커\s*실수/giu;
+const LINE_PREFIX_RE = /^(\s*(?:#{1,6}\s+|>\s*|[-*•]\s+|\d{1,3}[.)]\s+)?)(.*)$/u;
+// A sentence ends at . ! ? or 。 followed by whitespace; "0.5" and "1.5bb" never split.
+const SENTENCE_SPLIT_RE = /(?<=[.!?。])\s+/u;
+// New coaching output also drops Korean solver-authority claims, which the
+// legacy predicate never matched; validation of stored text stays unchanged.
+const NEW_OUTPUT_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)|GTO\s*(?:기준|상|적으로)\s*(?:정답|최적)/u;
+// A limit stated as such ("솔버가 검증한 전략은 아닙니다", "솔버로 검증하지 않은
+// 휴리스틱입니다", "GTO 정답은 아닙니다") is kept: the negation attaches to the
+// authority phrase itself, not anywhere later in the sentence.
+const NEGATED_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)\s*(?:(?:하지|되지)\s*않[은았는]|(?:한|된)\s*(?:\S{1,8}\s*)?(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요))|GTO\s*(?:기준|상|적으로)?\s*(?:정답|최적)\s*(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요)/u;
+// Each authority phrase is judged on its own: a negated one does not excuse
+// another claim in the same sentence.
+const AUTHORITY_ALL_RE = new RegExp(NEW_OUTPUT_AUTHORITY_RE.source, 'gu');
+const NEGATED_AT_RE = new RegExp(NEGATED_AUTHORITY_RE.source, 'uy');
+function assertsAuthority(sentence) {
+  for (const match of sentence.matchAll(AUTHORITY_ALL_RE)) {
+    NEGATED_AT_RE.lastIndex = match.index;
+    if (!NEGATED_AT_RE.test(sentence)) return true;
+  }
+  return false;
+}
+// New output only: an expected-value word with a number in the same sentence,
+// spaced or not ("기대 수익은 +2BB", "EV 1.5") — no such figure is computed here.
+// An expected-value word, spaced or not; with a number on the next line it is a figure too.
+const EV_WORD_RE = /기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z])|expected\s+value/iu;
+const QUANTITATIVE_EV_RE = /(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))[^.!?。]*\d|\d[^.!?。]*(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))/iu;
+
+// Same normalisation the legacy predicate applies before matching.
+const normalizeClaimText = (text) => text.normalize('NFKC').replace(/[​-‍⁠﻿]/g, '');
+const startsWithNumber = (line) => /^\s*(?:[#>*•-]\s*)*[+−-]?\d/u.test(normalizeClaimText(line ?? ''));
+
+function coachingSentenceAllowed(sentence) {
+  if (referenceClaimAllowed(sentence)) return true;
+  const normalized = normalizeClaimText(sentence);
+  if (/\d/u.test(normalized)) return false;
+  return referenceClaimAllowed(normalized.replace(QUALITATIVE_CLAIM_RE, ' '));
+}
+
+// A bare "EV" heading or fragment could pair with a number on the next line.
+function evOnlyFragment(sentence) {
+  const normalized = normalizeClaimText(sentence);
+  QUALITATIVE_CLAIM_RE.lastIndex = 0;
+  if (!QUALITATIVE_CLAIM_RE.test(normalized)) return false;
+  return normalized.replace(QUALITATIVE_CLAIM_RE, '').replace(/[^\p{L}\p{N}]/gu, '').length < 6;
+}
+
+function coachingLines(text) {
+  return text.split(/\r\n|\r|\n|\u2028|\u2029/).map((line) => {
+    const [, prefix, body] = LINE_PREFIX_RE.exec(line);
+    return { raw: line, prefix, sentences: body.trim() ? body.split(SENTENCE_SPLIT_RE) : [] };
+  });
+}
+
+// The sentences of one line that coaching may keep. A sentence allowed only
+// through the qualitative-EV mask must not be a bare fragment, and must not be
+// the line's last sentence when the next non-empty line starts with a number.
+function keptSentences(lines, index, extra = () => true) {
+  const line = lines[index];
+  const nextNumeric = startsWithNumber(lines.slice(index + 1).find((row) => row.raw.trim())?.raw);
+  return line.sentences.filter((sentence, i) => {
+    const last = nextNumeric && i === line.sentences.length - 1;
+    if (!coachingSentenceAllowed(sentence) || !extra(sentence, last)) return false;
+    if (referenceClaimAllowed(sentence)) return true;
+    if (evOnlyFragment(sentence)) return false;
+    return !(nextNumeric && i === line.sentences.length - 1);
+  });
+}
+
+export function coachingClaimAllowed(text) {
+  if (typeof text !== 'string' || text.length === 0) return true;
+  if (referenceClaimAllowed(text)) return true;
+  const lines = coachingLines(text);
+  return lines.every((line, index) => keptSentences(lines, index).length === line.sentences.length);
+}
+
+// Removes only the sentences that coachingClaimAllowed would reject (plus new
+// Korean solver-authority claims); headings and list items are checked like any
+// other text. A line left without a sentence is dropped. Returns the kept text
+// and the removed/total sentence counts.
+export function sanitizeCoachingText(text) {
+  if (typeof text !== 'string') return { text, removed: 0, total: 0 };
+  // Removing a line can make an EV sentence and a numeric line adjacent, so the
+  // pass repeats until nothing more is removed.
+  let pass = sanitizePass(text);
+  const total = pass.total;
+  let removed = pass.removed;
+  for (let round = 0; round < 8 && pass.removed; round += 1) {
+    pass = sanitizePass(pass.text);
+    removed += pass.removed;
+  }
+  return { text: pass.text, removed, total };
+}
+
+// A line that is only a figure ("+2BB", "- 1.5 BB", "３%"): the value of a label above it.
+const FIGURE_LINE_RE = /^\s*(?:[#>*•-]\s*)*[+−-]?\s*\d[\d.,]*\s*(?:bb|칩|%)?\s*[.!]?\s*$/iu;
+
+function sanitizePass(text) {
+  let removed = 0;
+  let total = 0;
+  const kept = [];
+  const lines = coachingLines(text);
+  // An expected-value label whose figure sits alone on the next line goes with it.
+  const figureOfLabel = new Set();
+  lines.forEach((line, index) => {
+    const label = line.sentences.at(-1);
+    const next = lines.findIndex((row, j) => j > index && row.raw.trim());
+    if (label && next > 0 && EV_WORD_RE.test(normalizeClaimText(label)) && FIGURE_LINE_RE.test(normalizeClaimText(lines[next].raw))) figureOfLabel.add(next);
+  });
+  lines.forEach((line, index) => {
+    if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); return; }
+    total += line.sentences.length;
+    if (figureOfLabel.has(index)) { removed += line.sentences.length; return; }
+    const ok = keptSentences(lines, index, (sentence, beforeNumber) => {
+      const normalized = normalizeClaimText(sentence);
+      return !assertsAuthority(normalized) && !QUANTITATIVE_EV_RE.test(normalized)
+        && !(beforeNumber && EV_WORD_RE.test(normalized));
+    });
+    removed += line.sentences.length - ok.length;
+    if (ok.length) kept.push(`${line.prefix}${ok.join(' ')}`);
+  });
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed, total };
 }

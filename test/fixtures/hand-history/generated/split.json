@@ -294,7 +294,7 @@
   ],
   "decisions": [
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-preflop-0",
       "gameMode": "tournament",
       "handNo": 1,
@@ -351,13 +351,21 @@
         }
       ],
       "priorActions": [],
+      "legal": {
+        "decisionId": "d-1-preflop-0",
+        "canCheck": false,
+        "canRaise": true,
+        "callAmount": 50,
+        "minRaiseTo": 100,
+        "maxRaiseTo": 5000
+      },
       "chosenAction": {
         "action": "call",
         "amount": 50
       }
     },
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-flop-5",
       "gameMode": "tournament",
       "handNo": 1,
@@ -517,13 +525,21 @@
           "currentBet": 0
         }
       ],
+      "legal": {
+        "decisionId": "d-1-flop-5",
+        "canCheck": true,
+        "canRaise": true,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4950
+      },
       "chosenAction": {
         "action": "check",
         "amount": 0
       }
     },
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-turn-8",
       "gameMode": "tournament",
       "handNo": 1,
@@ -752,13 +768,21 @@
           "currentBet": 0
         }
       ],
+      "legal": {
+        "decisionId": "d-1-turn-8",
+        "canCheck": true,
+        "canRaise": true,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4950
+      },
       "chosenAction": {
         "action": "check",
         "amount": 0
       }
     },
     {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "decisionId": "d-1-river-11",
       "gameMode": "tournament",
       "handNo": 1,
@@ -1059,6 +1083,14 @@
           "currentBet": 0
         }
       ],
+      "legal": {
+        "decisionId": "d-1-river-11",
+        "canCheck": true,
+        "canRaise": true,
+        "callAmount": 0,
+        "minRaiseTo": 50,
+        "maxRaiseTo": 4950
+      },
       "chosenAction": {
         "action": "check",
         "amount": 0
@@ -1131,5 +1163,17 @@
       "allIn": false
     }
   ],
-  "uncalledReturns": {}
+  "uncalledReturns": {},
+  "positions": {
+    "user": "BTN",
+    "p1": "SB",
+    "p2": "BB"
+  },
+  "rulesVersion": 2,
+  "allInRevealed": [],
+  "tableSeats": [
+    "user",
+    "p1",
+    "p2"
+  ]
 }

@@ -336,7 +336,8 @@ test('schema 2 legacy replay preserves processed ids as unverified evidence and 
 
   const profile = await store.show();
   assert.equal(profile.schemaVersion, 6);
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  // Only unverified evidence remains, so the default (reference v3) segment is active.
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@3.0.0');
   assert.equal(profile.skills['preflop.unknown'], undefined);
   assert.equal(profile.game.coverage.unverifiedDecisions, 1);
   assert.equal(profile.skills['preflop.other.UNK'], undefined);

@@ -1,6 +1,6 @@
 import { independentAssessmentEligibility } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
-import { referenceClaimAllowed, referenceQuality } from '../shared/reference.js';
+import { coachingClaimAllowed, isCoverageReferenceSource, referenceQuality } from '../shared/reference.js';
 
 const ACTION_ALIASES = Object.freeze({
   raise: ['리레이즈', '3-bet', '3벳', '레이즈', 'raise', '오픈'],
@@ -103,7 +103,53 @@ function afterToken(text, index, token) {
  * at all (its source checks). The pipeline skips the LLM call otherwise. */
 export function explanationEligible(evaluation) {
   if (evaluation?.status === 'supported' && referenceQuality(evaluation.source).quality !== 'heuristic-reference') return false;
-  if (evaluation?.source?.version === '2.0.0' && !independentAssessmentEligibility(evaluation).verified) return false;
+  if (isCoverageReferenceSource(evaluation?.source) && !independentAssessmentEligibility(evaluation).verified) return false;
+  return true;
+}
+
+// Numbers that are part of the evaluation's own identifiers: the hand class
+// ("92s", "22"), the spot key, the table size ("6max", "6인"), the spot's stack
+// depth ("100BB") and position labels with digits ("UTG+1"). Only these exact
+// tokens are exempt from the numeric checks; any other number is still judged.
+function identitySpans(text, evaluation) {
+  const tokens = new Set();
+  const handClass = typeof evaluation?.handClass === 'string' ? evaluation.handClass : null;
+  if (handClass && /^[2-9TJQKA]{2}[so]?$/.test(handClass)) tokens.add(handClass);
+  const spotKey = typeof evaluation?.spotKey === 'string' ? evaluation.spotKey : '';
+  if (/^[a-z0-9+-]{1,100}$/.test(spotKey)) tokens.add(spotKey);
+  const seats = /^(\d)max-/.exec(spotKey)?.[1];
+  if (seats) { tokens.add(`${seats}max`); tokens.add(`${seats}인`); }
+  const stack = /^\dmax-(\d+)bb-/.exec(spotKey)?.[1];
+  if (stack) { tokens.add(`${stack}BB`); tokens.add(`${stack}bb`); tokens.add(`${stack} BB`); }
+  for (const label of ['UTG+1', 'UTG+2', 'UTG1', 'UTG2']) tokens.add(label);
+  const spans = [];
+  for (const token of tokens) {
+    let at = text.indexOf(token);
+    while (at >= 0) {
+      const before = text[at - 1] ?? '';
+      const after = text[at + token.length] ?? '';
+      if (!/[A-Za-z0-9]/.test(before) && !/[A-Za-z0-9]/.test(after)) spans.push([at, at + token.length]);
+      at = text.indexOf(token, at + 1);
+    }
+  }
+  return spans;
+}
+const insideSpans = (spans, start, length) => spans.some(([from, to]) => start >= from && start + length <= to);
+// The stack depth named as a depth ("100BB 깊이", "100BB의 스택", "100BB에서"),
+// not as a size: "의"·"짜리" count only before a depth or table noun, so
+// "100BB의 레이즈" or "100BB짜리 오픈" is still a size claim.
+const DEPTH_CONTEXT = /^\s*(?:bb|BB)\s*(?:(?:(?:의|짜리)\s*)?(?:스택|깊이|딥|유효|상황|구간|게임|테이블|캐시|토너)|에서)/;
+// An identifier's digits are exempt only where they are used as the identifier:
+// a percentage is always a frequency claim, and a BB amount is a size claim
+// unless it is the spot's own stack depth used as a depth.
+function identityAt(text, spans, index, token, evaluation) {
+  if (!insideSpans(spans, index, token.length)) return false;
+  const rest = afterToken(text, index, token);
+  if (/^\s*%/.test(rest)) return false;
+  if (/^\s*(?:bb|BB)/.test(rest)) {
+    const stack = /^\dmax-(\d+)bb-/.exec(typeof evaluation?.spotKey === 'string' ? evaluation.spotKey : '')?.[1];
+    return stack != null && token === stack && DEPTH_CONTEXT.test(rest);
+  }
   return true;
 }
 
@@ -114,7 +160,7 @@ export function validateExplanation(evaluation, explanation) {
   if (explanation.length > MAX_EXPLANATION) {
     return { ok: false, code: 'EXPLANATION_TOO_LONG' };
   }
-  if (!referenceClaimAllowed(explanation)) {
+  if (!coachingClaimAllowed(explanation)) {
     return { ok: false, code: 'REFERENCE_AUTHORITY_CLAIM' };
   }
   if (evaluation?.status === 'supported'
@@ -122,14 +168,16 @@ export function validateExplanation(evaluation, explanation) {
     return { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' };
   }
   const eligibility = independentAssessmentEligibility(evaluation);
-  if (evaluation?.source?.version === '2.0.0' && !eligibility.verified) return {ok:false,code:'REFERENCE_SOURCE_UNVERIFIED'};
-  if (evaluation?.status !== 'supported' || (evaluation?.source?.version === '2.0.0' && !eligibility.metricEligible)) {
+  if (isCoverageReferenceSource(evaluation?.source) && !eligibility.verified) return {ok:false,code:'REFERENCE_SOURCE_UNVERIFIED'};
+  if (evaluation?.status !== 'supported' || (isCoverageReferenceSource(evaluation?.source) && !eligibility.metricEligible)) {
     if (/직접\s*비교|주력\s*선택|허용\s*선택|저빈도|off.policy|preferred|mixed/i.test(explanation)) return {ok:false,code:'REFERENCE_AUTHORITY_CLAIM'};
     const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;
+    const identities = identitySpans(explanation, evaluation);
     let match;
     while ((match = numberRe.exec(explanation))) {
       const token = match[0];
+      if (identityAt(explanation, identities, match.index, token, evaluation)) continue;
       if (EV_WORDS.test(clauseAt(explanation, match.index))
         || handNo == null || token !== String(handNo)) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
@@ -151,11 +199,13 @@ export function validateExplanation(evaluation, explanation) {
   }
   const handNo = Number(evaluation.handNo);
   const spans = aliasSpans(explanation);
+  const identities = identitySpans(explanation, evaluation);
   const numberRe = /-?\d+(?:\.\d+)?/g;
   let match;
   while ((match = numberRe.exec(explanation))) {
     const token = match[0];
     if (numberCoveredByAlias(spans, match.index, token.length)) continue;
+    if (identityAt(explanation, identities, match.index, token, evaluation)) continue;
     const num = Number(token);
     const range = clauseRangeAt(explanation, match.index);
     const clause = range.clause;

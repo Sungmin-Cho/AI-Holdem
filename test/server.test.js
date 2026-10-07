@@ -59,6 +59,10 @@ test('UI는 ESM module로 로드되고 training formatter를 import한다', asyn
     assert.equal(shared.status, 200);
     assert.match(shared.headers['content-type'], /javascript/);
     assert.match(shared.text, /export function referenceQuality/);
+    // The table's decision aid and replay fact card run these pure modules in the browser.
+    for (const served of ['/shared/poker-eval.js', '/shared/decision-facts.js', '/shared/reference-coverage-v3.js']) {
+      assert.equal((await req(srv.port, served, { token: 'tok-mod' })).status, 200, served);
+    }
     for (const denied of ['/shared/study-contract.js', '/shared/%2e%2e%2fpublish-contract.js', '/shared/reference.js/extra']) {
       assert.notEqual((await req(srv.port, denied, { token: 'tok-mod' })).status, 200);
     }

@@ -3,6 +3,8 @@ import { loadReferenceDataset } from './preflop-dataset.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
 import { CANONICAL_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, referenceQuality } from '../shared/reference.js';
+import { hasSpotHand } from '../training/providers/preflop-json.js';
+import { reenteredAfterGraduation } from '../training/drill-generator.js';
 
 const sameSource = (a, b) => a?.id === b?.id && a?.version === b?.version && a?.contentSha256 === b?.contentSha256;
 const safeSource = (value) => value && typeof value.id === 'string' && value.id.length <= 128
@@ -17,7 +19,8 @@ function runSummary(run, now, baseline) {
     ...(run.assessmentId ? { assessmentId: run.assessmentId } : {}),
     complete: run.complete, reason: run.reason, completedAt: run.completedAt,
     sourceIdentity: safeSource(run.sourceIdentity),
-    result: { allowed: run.result.allowed, total: run.result.total, allowedActionRate: run.result.allowedActionRate },
+    result: { allowed: run.result.allowed, total: run.result.total, allowedActionRate: run.result.allowedActionRate,
+      foldBaselineRate: run.result.foldBaselineRate ?? null },
     retest: retestEligibility(baseline ?? run, now),
   };
 }
@@ -67,12 +70,13 @@ export async function readStudySummary(storeDir) {
   const now = new Date().toISOString();
   const activeId = rebuildFromEvents(events.filter(event=>!future(event,Date.parse(now)))).activeSegmentId;
   const selected = KNOWN_REFERENCE_SOURCES.find(s=>`${s.id}@${s.version}`===activeId) ?? CANONICAL_REFERENCE_SOURCE;
-  const { data, contentSha256 } = loadReferenceDataset(selected);
+  const dataset = loadReferenceDataset(selected);
+  const { data, contentSha256 } = dataset;
   const source = safeSource({ id: data.id, version: data.version, contentSha256 });
   for (const event of events) {
     const pair = event.mixObservation;
-    if (sameSource(pair?.sourceIdentity, source)
-      && (!Object.hasOwn(data.spots, pair.spotKey) || !Object.hasOwn(data.spots[pair.spotKey], pair.handClass))) {
+    // v3 spots name a shared chart; hasSpotHand reads either layout.
+    if (sameSource(pair?.sourceIdentity, source) && !hasSpotHand(dataset, pair.spotKey, pair.handClass)) {
       const error = new Error('PROFILE_EVENT_INVALID'); error.code = 'PROFILE_EVENT_INVALID'; throw error;
     }
   }
@@ -91,11 +95,15 @@ export async function readStudySummary(storeDir) {
     game: projection(profile.game, 'game', metricsEvents, source),
     practice: projection(profile.practice, 'practice', metricsEvents, source),
     bank: { totalCount: availableBank.length,
-      dueCount: availableBank.filter((item) => Date.parse(item.nextReviewAt) <= Date.parse(now)).length },
+      // The daily queue's own rule: a graduated item missed again is due again.
+      dueCount: availableBank.filter((item) => (item.graduatedAt ? reenteredAfterGraduation(item)
+        : Date.parse(item.nextReviewAt) <= Date.parse(now))).length,
+      graduatedCount: availableBank.filter((item) => item.graduatedAt && !reenteredAfterGraduation(item)).length },
     goal: { origin: goal.origin, sourceIdentity: safeSource(goal.sourceIdentity), spotKey: goal.spotKey,
       handClass: goal.handClass, reason: goal.reason },
     assessments: history.assessments.slice(-100).map((run) => runSummary(run, now)),
     retests: history.retests.slice(-100).map((run) => runSummary(run, now,
       history.assessments.find((baseline) => baseline.id === run.assessmentId))),
+    trends: { practice: history.trends.practice.slice(-60), game: history.trends.game.slice(-60) },
   };
 }

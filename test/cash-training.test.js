@@ -229,13 +229,17 @@ test('applyModeDefaults: cash-training --ai 생략은 5, 명시는 유지, 토�
   assert.equal(tourney.ai, undefined);
 });
 
-test('gtoEvalNotice: cash-training만, 6-max 100BB가 아니면 문면', () => {
+test('gtoEvalNotice: cash-training만, 기준표 v3가 직접 비교하지 않는 깊이면 문면', () => {
   assert.equal(gtoEvalNotice({}), null);
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 100 }), null);
   assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 100 }), null);
-  const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 });
-  assert.match(four, /휴리스틱.*기준표.*6·8·9인.*100BB/);
-  assert.match(four, /4인/);
+  // v3 covers every table size from 2 to 9 at 80–150BB.
+  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 100 }), null);
+  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 1, startStackBb: 150 }), null);
+  const four = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 200 });
+  assert.match(four, /휴리스틱.*기준표.*2~9인.*80~150BB/);
+  assert.match(four, /시작 스택 200BB/);
+  assert.match(four, /투영 참고/);
   const stack = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 50 });
   assert.match(stack, /시작 스택 50BB/);
   assert.doesNotMatch(stack, /GTO|startStackBb/);
@@ -253,12 +257,13 @@ test('parseGameLoopArgs는 --mode/--stack-bb/--hands를 읽는다', () => {
 });
 
 test('reference notice distinguishes projected stacks from unsupported configurations',()=>{
- for(const seats of [6,8,9]){
+ // Reference v3: every table from 2 to 9 seats; 80–150BB exact, 25–250BB projected.
+ for(const seats of [2,3,6,7,8,9]){
   assert.equal(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:100}),null);
-  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:112}),/투영 참고/);
-  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:40}),/지원 범위 밖/);
+  assert.equal(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:112}),null);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:40}),/투영 참고/);
+  assert.match(gtoEvalNotice({mode:'cash-training',aiCount:seats-1,startStackBb:20}),/지원 범위 밖/);
  }
- assert.match(gtoEvalNotice({mode:'cash-training',aiCount:6,startStackBb:100}),/지원 범위 밖/);
 });
 
 test('P3: fresh store injects showdownPolicy=open and replayReveal=all outside the cash-training branch', () => {

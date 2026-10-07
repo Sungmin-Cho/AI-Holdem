@@ -2,7 +2,7 @@ import { readFirstFixtureRecord } from './helpers/fixture-readiness.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyModeDefaults, parseGameLoopArgs, engineInitFlags, gtoEvalNotice, createGameLoop } from '../tools/game-loop.js';
-import { VERSION_V2 } from '../training/policies/catalog.js';
+import { VERSION_V3 } from '../training/policies/catalog.js';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 test('REQ-001: new store sessions default to policy learning', () => {
   const parsed = parseGameLoopArgs(['--store-dir', '/tmp/s8-new-store']);
@@ -126,13 +126,15 @@ test('S8 early: resume never adds learning defaults or overrides parsed values',
 test('S8 early: off-target configuration uses readable heuristic reference comparison wording', () => {
   const notice = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, startStackBb: 50 });
   assert.match(notice, /휴리스틱.*기준표/);
-  assert.match(notice, /6·8·9인.*100BB/);
-  assert.match(notice, /4인/);
+  assert.match(notice, /2~9인.*80~150BB/);
   assert.match(notice, /50BB/);
   assert.doesNotMatch(notice, /GTO|startStackBb/);
-  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 99 }), /투영 참고/);
-  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 101 }), /투영 참고/);
-  assert.notEqual(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 101.1 }), null);
+  // v3 compares 80–150BB directly; 25–250BB is a projection, the rest is outside.
+  assert.equal(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 99 }), null);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 60 }), /투영 참고/);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 200 }), /투영 참고/);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 20 }), /지원 범위 밖/);
+  assert.match(gtoEvalNotice({ mode: 'cash-training', aiCount: 5, startStackBb: 300 }), /지원 범위 밖/);
   assert.equal(gtoEvalNotice({ mode: 'tournament', aiCount: 3, startStackBb: 20 }), null);
 });
 
@@ -200,7 +202,7 @@ test('S8 early: the actual store CLI initializes the default policy table before
   assert.equal(state.handNo, 0, 'this test checks initialization, not a 20-hand learning outcome');
   assert.match(state.policySeed, /^[a-f0-9]{64}$/);
   assert.equal(players.filter((player) => player.playerId !== 'user').length, 5);
-  assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === VERSION_V2));
+  assert.ok(players.filter((player) => player.playerId !== 'user').every((player) => player.policy.policyVersion === VERSION_V3));
   assert.equal(fs.existsSync(path.join(gameDir, '.player-sessions.json')), false);
   cli.requestStop();
   const result = await within(cli.closed, scaled(15000));

@@ -1,8 +1,8 @@
 PokerStars Hand #AIH1-1: Hold'em No Limit (25/50 PLAY) - 2026/09/01 0:00:00 ET
-Table 'AI-Holdem' 3-max Seat #3 is the button
-Seat 1: p1 (5000 in chips)
-Seat 2: p2 (5000 in chips)
-Seat 3: user (5000 in chips)
+Table 'AI-Holdem' 3-max Seat #1 is the button
+Seat 1: user (5000 in chips)
+Seat 2: p1 (5000 in chips)
+Seat 3: p2 (5000 in chips)
 p1: posts small blind 25
 p2: posts big blind 50
 *** HOLE CARDS ***
@@ -14,7 +14,7 @@ p2: checks
 p1: checks
 p2: checks
 user: checks
-*** TURN *** [2c 7d 9h 3s]
+*** TURN *** [2c 7d 9h] [3s]
 p1: folds
 p2: folds
 user collected 150 from pot

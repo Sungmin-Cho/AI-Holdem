@@ -8,6 +8,8 @@ import { createMistakeBank, createProfileStore } from './training-stores.js';
 import { createTrainingControl } from './training-control.js';
 import { defaultEvaluate, defaultSolve, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
+import { focusOfGoal, futureAt, goalSelection } from '../training/goal.js';
+import { rebuildFromEvents } from '../training/profile-aggregator.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
 export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
@@ -238,8 +240,9 @@ export async function sweepStore(storeDir, { evaluate, solve, onNotice } = {}) {
   }
   let profile = null;
   try {
-    profile = await createProfileStore(storeDir).show();
-    if (profileHasFocus(profile)) writePracticeFocus(storeDir, profile);
+    const store = createProfileStore(storeDir);
+    profile = await store.show();
+    if (profileHasFocus(profile)) writePracticeFocus(storeDir, profile, { events: await store.readEventSnapshot() });
   } catch (error) {
     const notice = `profile sweep 실패: ${error.code ?? 'ERROR'}`;
     notices.push(notice);
@@ -360,7 +363,20 @@ export async function completeSessionStoreMigration(storeDir, sessionDir, {
   return { completed: true };
 }
 
-export function writePracticeFocus(storeDir, profile) {
+// With the journal events the focus is the shared goal (training/goal.js) at
+// `now`, and a record whose skills are all resolved has no focus; only without
+// independent evidence (or events) the profile's first leak candidate stands.
+export function writePracticeFocus(storeDir, profile, { events, now = new Date().toISOString() } = {}) {
+  const selection = Array.isArray(events) ? goalSelection(events, { now }) : { state: 'none', goal: null };
+  if (selection.state !== 'none') {
+    const file = path.join(storeDir, '.training', 'practice-focus.json');
+    const goal = focusOfGoal(selection.goal);
+    writeJsonSecure(file, { schemaVersion: 2, origin: selection.goal?.origin ?? 'default', goal, focus: goal?.recommendedDrill ?? null });
+    return file;
+  }
+  // The fallback reads the same as-of record: with events, a profile rebuilt
+  // without those stamped after `now`.
+  if (Array.isArray(events)) profile = rebuildFromEvents(events.filter((event) => !futureAt(event, now)));
   const gameCandidates = profile.game?.candidates ?? [];
   const practiceCandidates = profile.practice?.candidates ?? [];
   const origin = gameCandidates.length > 0 ? 'game'
@@ -529,7 +545,7 @@ async function main() {
     const evaluation = JSON.parse(fs.readFileSync(file, 'utf8'));
     const result = await store.apply(evaluation);
     const profile = result.profile ?? result;
-    writePracticeFocus(storeDir, profile);
+    writePracticeFocus(storeDir, profile, { events: await store.readEventSnapshot() });
     fs.writeSync(1, `${JSON.stringify({ ok: true, profile, applied: result.applied !== false })}\n`);
     return;
   }
@@ -547,7 +563,7 @@ async function main() {
   }
   if (cmd === 'rebuild') {
     const profile = await store.rebuild();
-    writePracticeFocus(storeDir, profile);
+    writePracticeFocus(storeDir, profile, { events: await store.readEventSnapshot() });
     fs.writeSync(1, `${JSON.stringify({ ok: true, profile })}\n`);
     return;
   }

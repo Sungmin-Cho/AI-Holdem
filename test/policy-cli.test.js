@@ -6,7 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decide, stampPlayerPolicies } from '../tools/policy-player.js';
-import { assignmentFor, sanitizePlayersForReview } from '../training/policies/catalog.js';
+import { ARCHETYPE_POLICY_ID, POLICIES, assignmentFor, sanitizePlayersForReview } from '../training/policies/catalog.js';
+
+// A stored v2 seat rolls forward within the v2 family, never to v3.
+function v2AssignmentFor(archetype) {
+  const { policyId, policyVersion, configDigest } = POLICIES[ARCHETYPE_POLICY_ID[archetype]];
+  return { policyId, policyVersion, configDigest };
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE = path.join(ROOT, 'engine/cli.js');
@@ -119,11 +125,12 @@ test('sanitized review projection stays private pre-game and resolves exact post
     policy: assignmentFor('TAG'),
   }];
   const pre = JSON.stringify(sanitizePlayersForReview(players, { gameOver: false }));
-  assert.equal(pre.includes('tag-v2'), false);
+  assert.equal(pre.includes('tag-v3'), false);
   assert.equal(pre.includes('policyTraits'), false);
+  assert.equal(pre.includes('policyPreflop'), false);
   const post = sanitizePlayersForReview(players, { gameOver: true });
-  assert.equal(post[0].policyId, 'tag-v2');
-  assert.equal(post[0].policyModelKind, 'qualitative-config-v2');
+  assert.equal(post[0].policyId, 'tag-v3');
+  assert.equal(post[0].policyModelKind, 'reference-v3-persona-v3');
   assert.throws(() => sanitizePlayersForReview([{ ...players[0], policy: {
     ...players[0].policy,
     configDigest: 'deadbeef',
@@ -222,10 +229,13 @@ test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves ext
   const marked = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
   for (const player of marked) {
     if (player.playerId === 'user' || !player.policy) continue;
-    const digest = DIGEST_V2_2_0_0[player.policy.policyId];
-    assert.ok(digest, player.policy.policyId);
+    // New games seat v3; model a seat stored by the 2.0.0 producer of the same persona.
+    const v2Id = player.policy.policyId.replace(/-v3$/, '-v2');
+    const digest = DIGEST_V2_2_0_0[v2Id];
+    assert.ok(digest, v2Id);
     player.policy = {
       ...player.policy,
+      policyId: v2Id,
       policyVersion: '2.0.0',
       configDigest: digest,
       extra: 'keep',
@@ -246,7 +256,7 @@ test('stampPlayerPolicies rolls exact 2.0.0 seats forward once and preserves ext
         policyVersion: player.policy.policyVersion,
         configDigest: player.policy.configDigest,
       },
-      assignmentFor(player.archetype),
+      v2AssignmentFor(player.archetype),
     );
   }
   assert.equal(notices.length, 1);
@@ -373,10 +383,12 @@ test('stampPlayerPolicies emits catalog and derived roll-forward notices togethe
     extra: 'keep',
   };
   const catalogSeat = marked.find((player) => player.playerId === 'p2');
-  const predecessor = DIGEST_V2_2_0_0[catalogSeat.policy.policyId];
-  assert.ok(predecessor, catalogSeat.policy.policyId);
+  const catalogV2Id = catalogSeat.policy.policyId.replace(/-v3$/, '-v2');
+  const predecessor = DIGEST_V2_2_0_0[catalogV2Id];
+  assert.ok(predecessor, catalogV2Id);
   catalogSeat.policy = {
     ...catalogSeat.policy,
+    policyId: catalogV2Id,
     policyVersion: '2.0.0',
     configDigest: predecessor,
     extra: 'keep',
@@ -399,7 +411,7 @@ test('stampPlayerPolicies emits catalog and derived roll-forward notices togethe
       policyVersion: catalog.policy.policyVersion,
       configDigest: catalog.policy.configDigest,
     },
-    assignmentFor(catalog.archetype),
+    v2AssignmentFor(catalog.archetype),
   );
   assert.equal(notices.length, 2);
   assert.equal(notices[0], `policy roll-forward 2.0.0→2.2.0: p2`);

@@ -51,7 +51,7 @@ npm run app -- "$($PWD.Path)\game"
 
 Open the URL printed in your terminal, choose your settings, and start from the lobby. Opening the lobby does not start a game or an LLM call.
 
-The default table is **cash training · 5 AI opponents · 100BB · 20 hands · local policy v2 · normal pace**. Local opponent decisions need no provider credentials. LLM coaching is optional; when unavailable, the game provides factual feedback from recorded events.
+The default table is **cash training · 5 AI opponents · 100BB · 20 hands · local policy v3 · normal pace**. Local opponent decisions need no provider credentials. LLM coaching is optional; when unavailable, the game provides factual feedback from recorded events.
 
 The app runs in the background. Stop it using the same store path:
 
@@ -107,7 +107,7 @@ npm run study -- /absolute/store
 npm run study:stop -- /absolute/store
 ```
 
-The preflop reference covers specific 6-, 8-, and 9-player 100BB situations. Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
+New sessions use preflop reference v3: opens, facing an open and facing a 3-bet at 80–150BB for 2–9 players, plus push/fold and calling a shove at 15BB or less (earlier sessions keep reference v1/v2). Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
 
 ## How it works
 

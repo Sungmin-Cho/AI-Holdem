@@ -64,6 +64,7 @@
         <div id="result-dock" class="result-dock"><aside id="hand-result" class="hand-result" role="status" aria-live="polite" hidden><p id="cash-reset-note" class="cash-reset-note" hidden>다음 핸드는 시작 스택으로 다시 시작합니다.</p></aside></div>
         <div id="action-bar" class="action-bar" hidden>
           <p id="action-summary" class="action-summary"></p>
+          <p id="decision-aid" class="decision-aid num" aria-live="polite" hidden></p>
           <button type="button" id="action-options-toggle" class="btn btn-ghost" aria-expanded="false" aria-controls="raise-panel intent-note">금액·메모</button>
           <div class="act-group">
             <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
@@ -77,6 +78,7 @@
                 <button type="button" class="preset" data-preset="min">최소</button>
                 <button type="button" class="preset" data-preset="third" hidden>⅓ 팟</button>
                 <button type="button" class="preset" data-preset="half">½ 팟</button>
+                <button type="button" class="preset" data-preset="twothird" hidden>⅔ 팟</button>
                 <button type="button" class="preset" data-preset="threequarter" hidden>¾ 팟</button>
                 <button type="button" class="preset" data-preset="pot">팟</button>
                 <button type="button" class="preset" data-preset="allin">올인</button>
@@ -102,6 +104,14 @@
               <input id="intent-note" class="intent-note" type="text" maxlength="160"
                      autocomplete="off" spellcheck="false" aria-label="이 결정의 의도 메모" placeholder="이 결정의 의도 (선택)">
             </label>
+            <div id="intent-tags" class="intent-tags" role="group" aria-label="의도 빠른 태그">
+              <button type="button" class="intent-tag" data-tag="밸류">밸류</button>
+              <button type="button" class="intent-tag" data-tag="블러프">블러프</button>
+              <button type="button" class="intent-tag" data-tag="세미블러프">세미블러프</button>
+              <button type="button" class="intent-tag" data-tag="팟 오즈">팟 오즈</button>
+              <button type="button" class="intent-tag" data-tag="보호">보호</button>
+              <button type="button" class="intent-tag" data-tag="쇼다운">쇼다운</button>
+            </div>
           </div>
         </div>
       </div>
@@ -109,6 +119,7 @@
 
     <aside class="side">
       <div class="study-entry"><button id="review-reopen" class="btn btn-ghost" type="button" hidden>결과 다시 보기</button></div>
+      <p id="coach-toast" class="coach-toast" role="status" hidden><span id="coach-toast-text"></span><button type="button" id="coach-toast-open" class="btn btn-ghost">코치 보기</button></p>
       <div class="tabs" role="tablist">
         <button type="button" id="tab-log" class="tab on" role="tab" aria-selected="true" aria-controls="panel-log">이벤트 로그</button>
         <button type="button" id="tab-coach" class="tab" role="tab" aria-selected="false" aria-controls="panel-coach">코치 <span id="unread-coach" class="unread" hidden></span></button>
@@ -120,6 +131,7 @@
         <div id="log-list" class="log-list"></div>
       </div>
       <div id="panel-coach" class="panel" role="tabpanel" aria-labelledby="tab-coach" hidden>
+        <section id="process-report" class="process-report" hidden></section>
         <div id="coach-list" class="coach-list"></div>
       </div>
       <div id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
@@ -156,6 +168,7 @@
       <div class="final-content">
         <section id="final-last-hand" hidden></section>
         <section id="final-summary"></section>
+        <section id="final-reveal" class="final-reveal" hidden></section>
         <section id="final-review-section"><h2>종합 리뷰</h2><div id="review-body" class="review-body"></div></section>
         <div class="final-links"><button id="final-log" class="btn btn-ghost" type="button">로그·복기 보기</button><a id="final-study" class="study-link" target="_blank" rel="noopener noreferrer" hidden>학습실 열기</a></div>
       </div>

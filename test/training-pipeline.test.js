@@ -227,6 +227,64 @@ test('an evaluation whose source no explanation could be accepted for gets no ex
   assert.equal(item.annotations?.explanation, undefined, 'left for the cutoff seal');
 });
 
+test('an unsupported decision is sealed not-explainable without an explain call', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  let explainCalls = 0;
+  const base = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  const evaluation = {
+    schemaVersion: 1,
+    evaluationId: base.evaluationId,
+    decisionId: base.decisionId,
+    status: 'unsupported',
+    code: 'UNSUPPORTED_SPOT',
+    reason: '4bet',
+    street: 'preflop',
+    chosen: { action: 'fold' },
+    forced: false,
+    source: { ...CANONICAL_REFERENCE_SOURCE },
+  };
+  const result = await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    explain: () => { explainCalls += 1; return handleOf(VALID_EXPLAIN); },
+    admit: () => true,
+    admitExplain: () => true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(explainCalls, 0);
+  const item = createTrainingControl().loadAuthority(dir).items[evaluation.evaluationId];
+  assert.equal(item.annotations.explanation.status, 'unavailable');
+  assert.equal(item.annotations.explanation.sealReason, 'not-explainable');
+});
+
+test('a new explanation keeps its substance: only the out-of-bounds sentence is dropped before sealing', async () => {
+  const dir = tmp();
+  const token = 'tok';
+  const gameEpoch = gameEpochOf(token);
+  writeLastHand(dir, { token });
+  const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  await pipeline.runHandPipeline({
+    sessionDir: dir,
+    handNo: 1,
+    gameEpoch,
+    owner: 'owner-1',
+    evaluate: () => handleOf({ ok: true, evaluations: [evaluation] }),
+    explain: () => handleOf(`${VALID_EXPLAIN} GTO 정답은 오픈입니다.`),
+    admit: () => true,
+    admitExplain: () => true,
+  });
+  const item = createTrainingControl().loadAuthority(dir).items[evaluation.evaluationId];
+  const sealed = readAnnotationExactFile(dir, item.detailRef, 'explanation');
+  assert.equal(sealed.status, 'ready');
+  assert.equal(sealed.value, VALID_EXPLAIN);
+});
+
 test('evaluator failure records pending[decisionId] without an item', async () => {
   const dir = tmp();
   const token = 'tok';

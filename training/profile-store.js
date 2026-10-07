@@ -5,7 +5,7 @@ import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { assertEvaluationId } from './contracts.js';
 import { classifyOpportunity } from './opportunities.js';
-import { validateMixObservation } from '../shared/reference.js';
+import { isCoverageReferenceSource, validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { learningEventKey, validateLearningEvents } from './study-history.js';
 
@@ -58,11 +58,11 @@ export function eventFromEvaluation(evaluation, appliedAt, classified = classify
       ? { origin: evaluation.origin }
       : { origin: 'game' }),
   };
-  if (evaluation.source?.version === '2.0.0' && evaluation.source?.id === 'local-preflop-baseline') {
+  if (isCoverageReferenceSource(evaluation.source)) {
     event.sourceIdentity = { id:evaluation.source.id, version:evaluation.source.version, contentSha256:evaluation.source.contentSha256 };
     if (Object.hasOwn(evaluation, 'coverage')) event.coverage = structuredClone(evaluation.coverage);
   }
-  if ((evaluation.source?.version !== '2.0.0' || referenceAssessmentEligibility(evaluation).metricEligible)
+  if ((!isCoverageReferenceSource(evaluation.source) || referenceAssessmentEligibility(evaluation).metricEligible)
     && evaluation.status === 'supported'
     && evaluation.source?.contentSha256
     && Array.isArray(evaluation.recommended)

@@ -44,6 +44,11 @@ function emptyStats() {
     showdowns: 0,
     showdownWins: 0,
     net: 0,
+    // Hands with a preflop decision (walks and blind-only all-ins excluded), and
+    // postflop-only aggression. Older stats objects lack these and keep `hands`.
+    vpipHands: 0,
+    postflopBetsRaises: 0,
+    postflopCalls: 0,
   };
 }
 
@@ -313,6 +318,11 @@ export function startHand(state, options = {}) {
     lastBettingAggressor: null,
     reopenEligible: true,
     acted: [],
+    // Rules v2: TDA cumulative short all-in reopening, the lone player left to act
+    // only matches what others can still win, and all-in showdowns are tabled.
+    rulesVersion: 2,
+    actedAt: {},
+    preflopActed: [],
     actions: [],
     decisions: [],
     ...(state.config.dealSelectionContractVersion === 1 ? {dealSelectionContractVersion:1,
@@ -324,6 +334,8 @@ export function startHand(state, options = {}) {
     pfrd: [],
     raiseCount: {},
     callCount: {},
+    postflopRaiseCount: {},
+    postflopCallCount: {},
   };
 
   const events = [];
@@ -375,12 +387,24 @@ function actionablePids(state) {
   return inPotPids(state.hand).filter((pid) => canPutChips(state, pid));
 }
 
+// The bet a player must match. With rules v2, a player who is the only one left
+// able to act never has to put in more than the largest bet another in-pot player
+// made (e.g. a big blind all-in for less than the small blind).
+function betToMatch(state, pid) {
+  const hand = state.hand;
+  if (!(hand.rulesVersion >= 2)) return hand.currentBet;
+  const actionable = actionablePids(state);
+  if (actionable.length !== 1 || actionable[0] !== pid) return hand.currentBet;
+  const others = inPotPids(hand).filter(id => id !== pid).map(id => hand.bets[id] ?? 0);
+  return others.length ? Math.min(hand.currentBet, Math.max(...others)) : hand.currentBet;
+}
+
 function needsAction(state, idx) {
   const seat = state.seats[idx];
   if (!seat) return false;
   const pid = seat.playerId;
   if (!canPutChips(state, pid)) return false;
-  const matched = (state.hand.bets[pid] ?? 0) >= state.hand.currentBet;
+  const matched = (state.hand.bets[pid] ?? 0) >= betToMatch(state, pid);
   if (actionablePids(state).length === 1) return !matched;
   if (state.hand.acted.includes(pid) && matched) return false;
   return true;
@@ -402,7 +426,7 @@ function bettingRoundClosed(state) {
   if (actionable.length === 0) return true;
   if (actionable.length === 1) {
     const pid = actionable[0];
-    return (state.hand.bets[pid] ?? 0) >= state.hand.currentBet;
+    return (state.hand.bets[pid] ?? 0) >= betToMatch(state, pid);
   }
   return actionable.every(
     (pid) => state.hand.acted.includes(pid) && (state.hand.bets[pid] ?? 0) >= state.hand.currentBet,
@@ -427,6 +451,7 @@ function advanceStreet(state) {
   state.hand.lastAggressor = null;
   state.hand.reopenEligible = true;
   state.hand.acted = [];
+  if (state.hand.actedAt) state.hand.actedAt = {};
   state.hand.toActIdx = nextNeedingAction(state, state.button);
 }
 
@@ -471,7 +496,7 @@ function potWinnersOf(pot, scores) {
   return pot.eligible.filter((pid) => compareScore(scores.get(pid), best) === 0);
 }
 
-function buildShowdown(state, hand, inPot, pots, scores, evals) {
+function buildShowdown(state, hand, inPot, pots, scores, evals, allInShowdown = false) {
   const winnerSet = new Set();
   for (const pot of pots) {
     for (const pid of potWinnersOf(pot, scores)) winnerSet.add(pid);
@@ -480,6 +505,7 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
   const shown = [];
   const reveals = [];
   const mucks = [];
+  const allInOnly = [];
   for (const pid of order) {
     const mustShow = winnerSet.has(pid) || pots.some((pot) => {
       if (!pot.eligible.includes(pid)) return false;
@@ -495,18 +521,19 @@ function buildShowdown(state, hand, inPot, pots, scores, evals) {
     const forcedReveal = state.config?.showdownPolicy === 'open' && !isHumanSeat(revealSeat ?? { playerId: pid });
     // reveals and shown stay in lockstep; otherwise a losing user hand leaks
     // when a prior forced AI reveal is not counted as shown.
-    if (forcedReveal || mustShow) {
+    if (forcedReveal || mustShow || allInShowdown) {
       reveals.push({
         playerId: pid,
         cards: [...hand.holes[pid]],
         handName: evals[pid].name,
       });
       shown.push(pid);
+      if (!forcedReveal && !mustShow) allInOnly.push(pid);
     } else {
       mucks.push(pid);
     }
   }
-  return { reveals, mucks };
+  return { reveals, mucks, allInOnly };
 }
 
 function returnUncalled(state) {
@@ -544,6 +571,11 @@ function updateStats(state, hand, inPot, contested, contestedWinners) {
     if (hand.pfrd.includes(pid)) stats.pfr += 1;
     stats.betsRaises += hand.raiseCount[pid] ?? 0;
     stats.calls += hand.callCount[pid] ?? 0;
+    if ('vpipHands' in stats && hand.preflopActed) {
+      if (hand.preflopActed.includes(pid)) stats.vpipHands += 1;
+      stats.postflopBetsRaises += hand.postflopRaiseCount?.[pid] ?? 0;
+      stats.postflopCalls += hand.postflopCallCount?.[pid] ?? 0;
+    }
     if (contested && inPot.includes(pid)) {
       stats.showdowns += 1;
       if (contestedWinners.has(pid)) stats.showdownWins += 1;
@@ -575,8 +607,13 @@ function finishHand(state, events) {
   }
 
   let showdown = null;
+  let allInRevealed = [];
   if (contested) {
-    showdown = buildShowdown(state, hand, inPot, pots, scores, evals);
+    // TDA: once a player is all-in and the betting is over, every hand is tabled.
+    const allInShowdown = hand.rulesVersion >= 2 && inPot.some(pid => hand.allIn.includes(pid));
+    const built = buildShowdown(state, hand, inPot, pots, scores, evals, allInShowdown);
+    allInRevealed = built.allInOnly;
+    showdown = { reveals: built.reveals, mucks: built.mucks };
     emit(events, 'public', 'showdown', {
       reveals: showdown.reveals,
       mucks: showdown.mucks,
@@ -637,6 +674,7 @@ function finishHand(state, events) {
     posts: structuredClone(hand.posts ?? []),
     uncalledReturns,
     positions: positionsOf(state),
+    ...(hand.rulesVersion >= 2 ? { rulesVersion: 2, allInRevealed, tableSeats: state.seats.map((seat) => seat.playerId) } : {}),
   };
 
   if (isCashTraining(state)) {
@@ -755,11 +793,15 @@ function legalSnapshot(state) {
   const seat = state.seats[toActIdx];
   const pid = seat.playerId;
   const myBet = hand.bets[pid] ?? 0;
-  const callRaw = Math.max(0, hand.currentBet - myBet);
+  const callRaw = Math.max(0, betToMatch(state, pid) - myBet);
   const callAmount = Math.min(callRaw, seat.stack);
   const minRaiseTo = hand.currentBet + hand.lastRaiseSize;
   const maxRaiseTo = myBet + seat.stack;
-  const reopenBlocked = hand.acted.includes(pid) && !hand.reopenEligible;
+  // TDA: a player who already acted may raise again only when the raises since
+  // their action add up to at least one full raise (several short all-ins can).
+  const reopenBlocked = hand.acted.includes(pid) && (hand.actedAt
+    ? hand.currentBet - (hand.actedAt[pid] ?? hand.currentBet) < hand.lastRaiseSize
+    : !hand.reopenEligible);
   const hasRespondent = actionablePids(state).some((id) => id !== pid);
   const canRaise = !reopenBlocked && hasRespondent && maxRaiseTo > hand.currentBet;
   return {
@@ -785,6 +827,7 @@ function putChips(seat, hand, pid, put) {
 
 function markActed(hand, pid) {
   if (!hand.acted.includes(pid)) hand.acted.push(pid);
+  if (hand.actedAt) hand.actedAt[pid] = hand.currentBet;
 }
 
 export function applyAction(state, playerId, action, amount, { forced = false, policyMeta = null, meta } = {}) {
@@ -847,6 +890,7 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     }));
   }
   hand.actions.push(record);
+  if (street === 'preflop' && hand.preflopActed && !hand.preflopActed.includes(playerId)) hand.preflopActed.push(playerId);
 
   if (action === 'fold') {
     hand.folded.push(playerId);
@@ -854,9 +898,10 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
   } else if (action === 'check') {
     markActed(hand, playerId);
   } else if (action === 'call') {
-    putChips(seat, hand, playerId, Math.min(hand.currentBet - myBet, seat.stack));
+    putChips(seat, hand, playerId, legal.callAmount);
     markActed(hand, playerId);
     hand.callCount[playerId] = (hand.callCount[playerId] ?? 0) + 1;
+    if (street !== 'preflop' && hand.postflopCallCount) hand.postflopCallCount[playerId] = (hand.postflopCallCount[playerId] ?? 0) + 1;
     if (street === 'preflop' && !hand.vpipped.includes(playerId)) hand.vpipped.push(playerId);
   } else {
     const put = amount - myBet;
@@ -864,16 +909,18 @@ export function applyAction(state, playerId, action, amount, { forced = false, p
     const fullRaise = amount >= hand.currentBet + hand.lastRaiseSize;
     putChips(seat, hand, playerId, put);
     hand.lastAggressor = playerId;
+    hand.currentBet = amount;
     if (fullRaise) {
       hand.lastRaiseSize = raiseBy;
       hand.reopenEligible = true;
       hand.acted = [playerId];
+      if (hand.actedAt) hand.actedAt = { [playerId]: amount };
     } else {
       hand.reopenEligible = false;
       markActed(hand, playerId);
     }
-    hand.currentBet = amount;
     hand.raiseCount[playerId] = (hand.raiseCount[playerId] ?? 0) + 1;
+    if (street !== 'preflop' && hand.postflopRaiseCount) hand.postflopRaiseCount[playerId] = (hand.postflopRaiseCount[playerId] ?? 0) + 1;
     if (street === 'preflop') {
       if (!hand.vpipped.includes(playerId)) hand.vpipped.push(playerId);
       if (!hand.pfrd.includes(playerId)) hand.pfrd.push(playerId);

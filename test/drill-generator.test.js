@@ -63,3 +63,18 @@ test('schema1 candidates use only explicit matching nested source evidence', () 
     assert.deepEqual(generateQueue({ mode: 'mistake-review', mistakes: [bad] }), []);
   }
 });
+
+test('a graduated item missed again re-enters daily until it is reviewed', () => {
+  const base = {
+    mistakeId: 'm-grad', spotKey: '6max-100bb-btn-rfi-unopened', handClass: 'AJo',
+    spotSignature: '6max-100bb-btn-rfi-unopened:AJo', sourceIdentity: SOURCE, skillKey: 'preflop.rfi.BTN',
+    srsVersion: 2, graduatedAt: '2026-08-01T00:00:00.000Z', lastReviewedAt: '2026-08-01T00:00:00.000Z',
+    nextReviewAt: '2026-12-01T00:00:00.000Z', lastSeenAt: '2026-07-01T00:00:00.000Z',
+  };
+  const now = '2026-09-01T00:00:00.000Z';
+  assert.deepEqual(generateQueue({ mode: 'daily', mistakes: [base], now }), [], 'graduated and not missed since');
+  const missedAgain = { ...base, lastSeenAt: '2026-08-20T00:00:00.000Z' };
+  assert.equal(generateQueue({ mode: 'daily', mistakes: [missedAgain], now }).length, 1, 'a new miss brings it back, due now');
+  const reviewedSince = { ...missedAgain, lastReviewedAt: '2026-08-25T00:00:00.000Z' };
+  assert.deepEqual(generateQueue({ mode: 'daily', mistakes: [reviewedSince], now }), [], 'answered correctly after the miss: graduated again');
+});

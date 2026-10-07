@@ -55,7 +55,7 @@ test('accept with a missing v2 descriptor does not create a legacy binding',asyn
 
 test('coverage measurement binds canonical decisions and rejects duplicate journals without writes',async t=>{
  const d=fs.mkdtempSync(path.join(os.tmpdir(),'coverage-measure-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));
- resolveSessionReference(d,{createNew:true});fs.mkdirSync(path.join(d,'hands'));
+ resolveSessionReference(d,{createNew:true,source:V2_REFERENCE_SOURCE});fs.mkdirSync(path.join(d,'hands'));
  const snapshot=snap();fs.writeFileSync(path.join(d,'hands','hand-0001.json'),JSON.stringify({decisions:[snapshot]}));
  const e=evaluatePreflopReference(snapshot,data,{gameEpoch:epoch});
  const {accepted:[item]}=await createTrainingControl().acceptEvaluations(d,{gameEpoch:epoch,owner:'test',handNo:1,evaluations:[e]});

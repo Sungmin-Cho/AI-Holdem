@@ -53,3 +53,37 @@ node tools/build-preflop-baseline.js --version 2
 node tools/build-preflop-baseline.js --check
 node tools/build-preflop-baseline.js --version 1 --check
 ```
+
+## Baseline v3
+
+`preflop-baseline-v3.json` is an original frequency-only reference, schema 3,
+provider `local-preflop-baseline@3.0.0`, recipe `original-v3.0`, Apache-2.0. New
+sessions bind it; recorded sessions keep their v1/v2 source. Its `.sha256` and
+`shared/reference.js` pin the exact bytes. 1,680 spot keys share 323 deduplicated
+charts (base36, three characters per hand class).
+
+- Seats 2–9. Contexts: RFI (opening, 2.5BB), facing one open (3-bet 8.5BB or
+  call), facing a 3-bet after one's own open (4-bet 20BB or call; only hands in
+  the opener's RFI chart are graded), push (all-in) and calling a shove at
+  {3,4,5,6,7,8,10,12,15}BB.
+- RFI charts are written by players left behind. Facing-open and facing-3-bet
+  charts come from equity against the opponent's range (card-removal-aware combo
+  weights, blocker-aware value order, soft boundaries by bisection, a 5% floor
+  for the other continuing action). The small blind 3-bets linearly; the big blind
+  defends against the small blind in position.
+- Push/fold is solved by one-sided fictitious play with card removal, then
+  purified (rounding, flips, 50/50 mixes on cycles, domination closure); every
+  pure action is within 0.04BB of its best response.
+- Exact grading needs 80–150BB (projected 25–250BB) for deep contexts and the
+  push/fold model's own conditions (bucket within 15%, at most four players behind
+  for a push, two for a shove call, no much shorter stack behind); see
+  `shared/reference-coverage-v3.js`. Limps, callers, 4-bets and deep all-in
+  4-bets are not compared. EV fields are null.
+
+These are engineering choices checked by sanity anchors (`test/preflop-baseline-v3.test.js`),
+not evidence of GTO correctness, profitability or learning effectiveness.
+
+```sh
+node tools/build-preflop-baseline-v3.js --check
+node tools/build-preflop-baseline-v3.js --dump 6max-100bb-btn-rfi-v3
+```

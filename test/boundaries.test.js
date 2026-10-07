@@ -153,7 +153,7 @@ test('server imports only contracts, named containment and pure viewer projectio
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/reference-coverage-v3.js': ['practiceKeyExactV3'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS', 'parsePreflopKeyV3', 'PREFLOP_ORDERS_V3'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'shared/poker-eval.js': ['describeMadeHand', 'drawsOf'], 'shared/decision-facts.js': ['equityFacts', 'factsLineKo'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
@@ -526,7 +526,7 @@ test('hint proof façade has a closed named dependency surface and no writes or 
     'training/pre-action-hint.js':['buildPreActionHint','recommendationHash'],
     'shared/decision-observation.js':['observationHash','canonicalJson'],
     'shared/hint-contract.js':['projectHint'],
-    'shared/reference.js':['sameReferenceSource'],
+    'shared/reference.js':['isCoverageReferenceSource','sameReferenceSource'],
     'publish-contract.js':['gameEpochOf'],
   };
   for(const edge of staticGraph().edges.filter(edge=>edge.from==='tools/hint-proof.js')) {

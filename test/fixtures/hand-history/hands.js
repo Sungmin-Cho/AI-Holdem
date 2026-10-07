@@ -24,6 +24,8 @@ function base(overrides) {
     endStacks: { ...SEATS_5000 },
     posts: POSTS.map((post) => ({ ...post })),
     uncalledReturns: {},
+    // Rules v2 records carry the real table order (3-handed setup: user, p1, p2).
+    tableSeats: ['user', 'p1', 'p2'],
     ...overrides,
   };
 }
@@ -298,9 +300,13 @@ export const HANDS = [
         reveals: [
           { playerId: 'p1', cards: ['Kc', 'Kd'], handName: '원페어' },
           { playerId: 'p2', cards: ['As', 'Ad'], handName: '원페어' },
+          { playerId: 'user', cards: ['Ah', 'Kh'], handName: '하이 카드' },
         ],
-        mucks: ['user'],
+        mucks: [],
       },
+      // TDA all-in showdown: the losing all-in hand is tabled too.
+      rulesVersion: 2,
+      allInRevealed: ['user'],
       holes: { user: ['Ah', 'Kh'], p1: ['Kc', 'Kd'], p2: ['As', 'Ad'] },
       endStacks: { p1: 0, p2: 900, user: 0 },
     }),

@@ -1,10 +1,11 @@
 import { independentAssessmentEligibility, projectAssistance } from '../shared/assistance.js';
 import {dealSelectionFields} from '../shared/deal-selection.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
-import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
+import { CANONICAL_REFERENCE_SOURCE, validateMixObservation, matchReferenceActionFor, referenceQuality, referenceSchemaOf } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { assertProfileEvent } from './profile-aggregator.js';
 import { assertEvaluationId, coded } from './contracts.js';
+import { goalSelection } from './goal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -126,7 +127,8 @@ function summarizeRun(entries, now) {
       spotKey: observation.spotKey,
       handClass: observation.handClass,
       grade: entry.event.grade ?? null,
-      allowed: (matchReferenceAction(observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0,
+      allowed: (matchReferenceActionFor(observation.sourceIdentity, observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0,
+      foldAllowed: observation.referenceActions.some((row) => row.action === 'fold' && row.frequency > 0),
       appliedAt: entry.event.appliedAt,
     });
   }
@@ -146,6 +148,7 @@ function summarizeRun(entries, now) {
   if (run.mode === 'retest' && !run.assessmentId) inconsistent = true;
   const complete = !inconsistent && !future && verified && !legacy && completeIndices && timestampsValid && sourceIdentity !== null;
   const allowed = questions.filter((question) => question.allowed).length;
+  const foldAllowed = questions.filter((question) => question.foldAllowed).length;
   return {
     id: run.id,
     mode: run.mode,
@@ -158,13 +161,55 @@ function summarizeRun(entries, now) {
       ? new Date(Math.max(...timestamps.map((value) => Date.parse(value)))).toISOString()
       : null,
     sourceIdentity: sourceIdentity ? clone(sourceIdentity) : null,
-    questions: questions.map(({ appliedAt, ...question }) => future ? { ...question, grade: null, allowed: null } : question),
+    questions: questions.map(({ appliedAt, foldAllowed: _fold, ...question }) => future ? { ...question, grade: null, allowed: null } : question),
     result: {
       allowed: complete ? allowed : null,
       total: questions.length,
       allowedActionRate: complete ? allowed / questions.length : null,
+      // What always folding would have scored on these questions (design D12).
+      foldBaselineRate: complete && questions.length ? foldAllowed / questions.length : null,
     },
   };
+}
+
+// Trends (design D12). Only runs drawn the same way share a line: the
+// assessments of one source (one sampler), and each assessment with its own
+// retests (the same questions). Free, leak, daily, review and transfer runs
+// depend on what was chosen and form no series. Per game session: the
+// independently graded decisions and their allowed share, with the source.
+export function trendsOf(runs, events, now) {
+  const done = runs.filter((run) => run.complete && run.sourceIdentity);
+  const byId = new Map(done.map((run) => [run.id, run]));
+  const row = (run, series) => ({ id: run.id, mode: run.mode, series, startedAt: run.startedAt,
+    total: run.total, allowedActionRate: run.result.allowedActionRate, foldBaselineRate: run.result.foldBaselineRate });
+  const practice = [];
+  for (const run of done) {
+    if (run.mode === 'assessment') practice.push(row(run, `${sourceKey(run.sourceIdentity)}|assessment`));
+    if (run.mode !== 'retest') continue;
+    const baseline = byId.get(run.assessmentId);
+    if (!baseline || baseline.mode !== 'assessment' || sourceKey(baseline.sourceIdentity) !== sourceKey(run.sourceIdentity)) continue;
+    const series = `${sourceKey(run.sourceIdentity)}|retest|${baseline.id}`;
+    if (!practice.some((entry) => entry.series === series)) practice.push(row(baseline, series));
+    practice.push(row(run, series));
+  }
+  practice.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const sessions = new Map();
+  for (const event of events) {
+    if (projectionOrigin(event.origin) !== 'game' || !event.mixObservation || !validIso(event.appliedAt)
+      || Date.parse(event.appliedAt) > Date.parse(now)) continue;
+    let eligible = false;
+    try { eligible = independentAssessmentEligibility(event).metricEligible; } catch { eligible = false; }
+    if (!eligible) continue;
+    const observation = event.mixObservation;
+    const key = String(event.evaluationId).split(':')[0];
+    const row = sessions.get(key) ?? { startedAt: event.appliedAt, source: `${observation.sourceIdentity.id}@${observation.sourceIdentity.version}`, graded: 0, allowed: 0 };
+    row.graded += 1;
+    if ((matchReferenceActionFor(observation.sourceIdentity, observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0) row.allowed += 1;
+    sessions.set(key, row);
+  }
+  const game = [...sessions.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .map((row, index) => ({ session: index + 1, startedAt: row.startedAt, source: row.source, graded: row.graded, allowedActionRate: row.allowed / row.graded }));
+  return { practice, game };
 }
 
 // Callers may provide a deterministic as-of time. Runtime callers supply their
@@ -181,7 +226,8 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
   const groups = new Map();
   let gameGoal = null;
   let practiceGoal = null;
-  for (const event of validateLearningEvents(events)) {
+  const validEvents = validateLearningEvents(events);
+  for (const event of validEvents) {
     const future = (validIso(event.appliedAt) && Date.parse(event.appliedAt) > Date.parse(now))
       || (event.studyRun && Date.parse(event.studyRun.startedAt) > Date.parse(now));
     const relevantOrigin = ['game', 'practice', 'drill', 'retest'].includes(event.origin)
@@ -259,16 +305,21 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
         .localeCompare(String(right.completedAt ?? right.startedAt)));
     assessment.latestCompletedRetest = [...assessment.retests].reverse().find((run) => run.complete) ?? null;
   }
+  const selection = goalSelection(validEvents, { now });
   return {
     schemaVersion: 1,
     unknownPreTrackingExposure,
     seenPairs: [...seen.values()],
     assessments,
     retests,
-    goal: gameGoal ?? practiceGoal ?? {
+    trends: trendsOf(runs, validEvents, now),
+    // The shared goal (training/goal.js) at `now`. The oldest-deviation pick is a
+    // fallback only without independent evidence; a resolved record keeps the default.
+    goal: selection.goal ?? (selection.state === 'none' ? gameGoal ?? practiceGoal : null) ?? {
       origin: 'default',
       sourceIdentity: null,
-      spotKey: '6max-100bb-btn-rfi-v2',
+      // The default practice spot follows the source new sessions use.
+      spotKey: referenceSchemaOf(CANONICAL_REFERENCE_SOURCE) === 3 ? '6max-100bb-btn-rfi-v3' : '6max-100bb-btn-rfi-v2',
       handClass: 'AJo',
       reason: 'default-supported-spot',
     },

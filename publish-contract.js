@@ -1,13 +1,13 @@
 export { trimHandLog } from './shared/runtime-bounds.js';
 import { projectAssistance } from './shared/assistance.js';
 import {dealSelectionFields} from './shared/deal-selection.js';
-import { projectReferenceCoverage } from './shared/reference-coverage.js';
+import { projectCoverageFor } from './shared/reference-coverage.js';
 import { createHash } from 'node:crypto';
 import {
   NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
-import { referenceClaimAllowed } from './shared/reference.js';
+import { coachingClaimAllowed, isCoverageReferenceSource } from './shared/reference.js';
 import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
 
 export { HOST_ID, humanIdsOf, isHumanSeat };
@@ -89,7 +89,7 @@ export function validateCoachDecisions(decisions, handNo) {
       if (typeof value !== 'string' || value.trim() === '') return `empty-${field}`;
       if ([...value].length > COACH_DECISION_LIMITS.chars) return 'too-long';
       if (COACH_CONTROL_CHARS.test(value)) return 'control';
-      if (!referenceClaimAllowed(value)) return 'reference';
+      if (!coachingClaimAllowed(value)) return 'reference';
     }
     if (typeof handNo === 'number' && !row.decisionId.startsWith(`d-${handNo}-`)) return 'hand-mismatch';
     if (seen.has(row.decisionId)) return 'duplicate';
@@ -738,8 +738,8 @@ export function projectTrainingSummary(item) {
   out.recommendedTruncated = item.recommendedTruncated === true;
   if (Object.hasOwn(item, 'assistance')) out.assistance = projectAssistance(item.assistance);
   Object.assign(out,dealSelectionFields(item));
-  if (Object.hasOwn(item, 'coverage')) out.coverage = projectReferenceCoverage(item.coverage);
-  if (item.source?.id === 'local-preflop-baseline' && item.source?.version === '2.0.0'
+  if (Object.hasOwn(item, 'coverage')) out.coverage = projectCoverageFor(item.source, item.coverage);
+  if (isCoverageReferenceSource(item.source)
     && !Object.hasOwn(item, 'coverage')) throw coded('TRAINING_PROOF_MISMATCH', 'v2 coverage missing');
   out.payloadSha256 = trainingPayloadSha256(out);
   return out;

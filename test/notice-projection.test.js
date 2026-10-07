@@ -77,8 +77,9 @@ test('severity orders items (error, warn, info) and repeated coach fallbacks col
 });
 
 test('known product notices from their real builders are classified', () => {
-  const gto = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, humanCount: 1, startStackBb: 100 });
-  const gtoNear = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, humanCount: 1, startStackBb: 90 });
+  // Reference v3: 20BB is outside the bands, 200BB a projection.
+  const gto = gtoEvalNotice({ mode: 'cash-training', aiCount: 3, humanCount: 1, startStackBb: 20 });
+  const gtoNear = gtoEvalNotice({ mode: 'cash-training', aiCount: 5, humanCount: 1, startStackBb: 200 });
   const self = selfOpponentNotices({ assigned: { mirror: true, exploiter: true }, sources: [{ hands: 40 }], targets: [1, 2] });
   const out = projectNotices([JEV_ROLL_FORWARD_NOTICE, gto, gtoNear, ...self,
     'policy roll-forward 2.0.0→2.1.0: h2,h3',

@@ -123,16 +123,20 @@ function completedHandObservation(state) {
     const amount = entry.action === 'raise' || entry.action === 'call' ? ` ${entry.amount}` : '';
     return `${STREET_KO[entry.street] ?? entry.street} ${nameOf(entry.playerId)} ${ACTION_KO[entry.action] ?? entry.action}${amount}`;
   });
-  const reveals = (record.showdown?.reveals ?? []).slice(0, state.seats.length).map((entry) => (
+  // A human hand tabled only by the all-in rule is not handed to opponent models.
+  const allInOnly = new Set(record.allInRevealed ?? []);
+  const reveals = (record.showdown?.reveals ?? []).filter((entry) => !(allInOnly.has(entry.playerId)
+    && isHumanSeat(state.seats.find((seat) => seat.playerId === entry.playerId) ?? { playerId: entry.playerId })))
+    .slice(0, state.seats.length).map((entry) => (
     `${nameOf(entry.playerId)} ${Array.isArray(entry.cards) ? entry.cards.join(' ') : ''}`.trim()
   ));
   const publicStats = state.seats.slice(0, state.seats.length).map((seat) => {
     const raw = state.stats?.[seat.playerId] ?? {};
     const sample = raw.hands ?? 0;
-    const vpip = sample > 0 ? (raw.vpip ?? 0) / sample : 0;
-    const pfr = sample > 0 ? (raw.pfr ?? 0) / sample : 0;
-    const calls = raw.calls ?? 0;
-    const af = calls > 0 ? (raw.betsRaises ?? 0) / calls : (raw.betsRaises ?? 0);
+    const rate = preflopRates(raw);
+    const vpip = rate.vpip;
+    const pfr = rate.pfr;
+    const af = aggressionFactor(raw);
     return `${displayName(state, seat.playerId)}(표본 ${sample}, VPIP ${vpip.toFixed(2)}, PFR ${pfr.toFixed(2)}, AF ${af.toFixed(2)})`;
   });
   return [
@@ -276,20 +280,35 @@ function ratio(numerator, denominator) {
   return denominator > 0 ? numerator / denominator : 0;
 }
 
+// VPIP/PFR over hands with a preflop decision (walks and blind-only all-ins
+// excluded) when the stats track them; older stats objects fall back to hands.
+export function preflopRates(raw) {
+  const sample = 'vpipHands' in raw ? raw.vpipHands : raw.hands ?? 0;
+  return { vpip: ratio(raw.vpip ?? 0, sample), pfr: ratio(raw.pfr ?? 0, sample), sample };
+}
+
+// Postflop bets and raises per postflop call when tracked; otherwise all streets.
+export function aggressionFactor(raw) {
+  const postflop = 'postflopCalls' in raw;
+  const calls = postflop ? raw.postflopCalls : raw.calls ?? 0;
+  const raises = postflop ? raw.postflopBetsRaises : raw.betsRaises ?? 0;
+  return calls > 0 ? raises / calls : raises;
+}
+
 export function statsReport(state) {
   const perPlayer = {};
   for (const seat of state.seats) {
     const raw = state.stats?.[seat.playerId] ?? {};
     const sample = raw.hands ?? 0;
-    const calls = raw.calls ?? 0;
-    const betsRaises = raw.betsRaises ?? 0;
+    const rates = preflopRates(raw);
     perPlayer[seat.playerId] = {
-      vpip: ratio(raw.vpip ?? 0, sample),
-      pfr: ratio(raw.pfr ?? 0, sample),
-      af: calls > 0 ? betsRaises / calls : betsRaises,
+      vpip: rates.vpip,
+      pfr: rates.pfr,
+      af: aggressionFactor(raw),
       showdownWin: ratio(raw.showdownWins ?? 0, raw.showdowns ?? 0),
       net: raw.net ?? 0,
       sample,
+      ...('vpipHands' in raw ? { decisionSample: raw.vpipHands } : {}),
     };
   }
   return { perPlayer };

@@ -12,8 +12,10 @@ test('gtoEvalNotice uses humanCount + aiCount', () => {
     humanCount: 3, aiCount: 3, mode: 'cash-training', startStackBb: 100,
   }), null);
   assert.equal(gtoEvalNotice({ aiCount: 5, mode: 'cash-training', startStackBb: 100 }), null);
-  const unsupported = gtoEvalNotice({ humanCount: 2, aiCount: 1, mode: 'cash-training', startStackBb: 100 });
-  assert.match(unsupported, /3인/);
+  // Reference v3 covers 2–9 seats; two humans and eight AIs make ten.
+  assert.equal(gtoEvalNotice({ humanCount: 2, aiCount: 1, mode: 'cash-training', startStackBb: 100 }), null);
+  const unsupported = gtoEvalNotice({ humanCount: 2, aiCount: 8, mode: 'cash-training', startStackBb: 100 });
+  assert.match(unsupported, /10인/);
 });
 
 test('stampPlayerPolicies skips human participant rows', () => {

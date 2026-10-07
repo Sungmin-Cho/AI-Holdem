@@ -1,5 +1,5 @@
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest']);
+const MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest', 'transfer']);
 
 function coded(message) {
   const error = new Error(message);

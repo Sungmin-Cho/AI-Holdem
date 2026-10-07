@@ -156,7 +156,7 @@ test('REQ-002: summary is origin-explicit and practice cannot alter game evidenc
   for (const forbidden of ['processed', 'mixGroups', 'events', 'mastery', 'evLossBb', storeDir]) {
     assert.equal(JSON.stringify(summary).includes(forbidden), false, forbidden);
   }
-  assert.deepEqual(Object.keys(summary).sort(), ['schemaVersion','source','game','practice','bank','goal','assessments','retests'].sort());
+  assert.deepEqual(Object.keys(summary).sort(), ['schemaVersion','source','game','practice','bank','goal','assessments','retests','trends'].sort());
 });
 
 test('REQ-011: assessment summary omits question records and reports retest wait', async (t) => {

@@ -243,3 +243,32 @@
   .brand-sub { display: none; }
   .metrics-grid { grid-template-columns: 1fr; }
 }
+
+/* ---- Spot chart, trends and pot-odds practice (design D12) ---- */
+.chart-open { margin-top: var(--sp-2); }
+.chart-box { margin-top: var(--sp-3); overflow-x: auto; }
+.chart-box[hidden] { display: none; }
+.spot-chart { border-collapse: separate; border-spacing: 2px; font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
+.spot-chart caption { caption-side: top; text-align: left; padding-bottom: var(--sp-1); color: var(--c-text-2); }
+.spot-cell {
+  min-width: 34px;
+  height: 26px;
+  padding: 0 2px;
+  text-align: center;
+  color: var(--c-text);
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--c-action) 0 var(--raise, 0%), var(--c-info) var(--raise, 0%) var(--call, 0%), var(--c-surface-3) var(--call, 0%) 100%);
+}
+.spot-cell.is-unreached { background: var(--c-surface-1); color: var(--c-text-3); }
+.spot-cell.is-hand { outline: 2px solid var(--c-focus); outline-offset: 1px; }
+.chart-legend { margin-top: var(--sp-2); color: var(--c-text-2); font-size: var(--fs-12); }
+.assessment-baseline { color: var(--c-text-2); font-size: var(--fs-13); }
+.trends, .pot-odds { margin-top: var(--sp-4); }
+.trend-title { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-13); color: var(--c-text-2); }
+.trend-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); }
+.trend-row { display: grid; grid-template-columns: minmax(84px, auto) 1fr auto; align-items: center; gap: var(--sp-2); font-size: var(--fs-12); }
+.trend-value { font-variant-numeric: tabular-nums; color: var(--c-text); }
+.pot-odds-prompt { margin: var(--sp-2) 0; }
+.pot-odds-choices { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.pot-odds-result { min-height: 1.5em; margin: var(--sp-2) 0; color: var(--c-info-text); font-size: var(--fs-13); }
+.pot-odds-stats { color: var(--c-text-2); font-size: var(--fs-12); }

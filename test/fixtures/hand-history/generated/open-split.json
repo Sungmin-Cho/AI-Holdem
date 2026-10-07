@@ -1174,5 +1174,12 @@
     "user": "BTN",
     "p1": "SB",
     "p2": "BB"
-  }
+  },
+  "rulesVersion": 2,
+  "allInRevealed": [],
+  "tableSeats": [
+    "user",
+    "p1",
+    "p2"
+  ]
 }

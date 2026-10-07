@@ -15,7 +15,7 @@ export function createAmountEditor() {
   };
   return {
     get state(){return {...state};},
-    adopt(legal){if(state.decisionId!==legal.decisionId){state.decisionId=legal.decisionId;choose(legal.minRaiseTo,legal);}return {...state};},
+    adopt(legal,preferred){if(state.decisionId!==legal.decisionId){state.decisionId=legal.decisionId;choose(Number.isSafeInteger(preferred)?preferred:legal.minRaiseTo,legal);}return {...state};},
     choose,
     edit(text,legal){
       const n=parseChipInput(text);

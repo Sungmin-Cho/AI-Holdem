@@ -1,24 +1,41 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assignmentFor } from '../training/policies/catalog.js';
+import { ARCHETYPE_POLICY_ID, POLICIES as CATALOG, VERSION_V2, assignmentFor } from '../training/policies/catalog.js';
 
-test('REQ-005: new sessions use separately versioned Nit policy', () => {
-  assert.strictEqual(
-    assignmentFor('Nit').policyId,
-    'nit-v2',
-    'new sessions must select the v2 Nit policy',
-  );
+// New games now seat policy v3; v2 seats come from stored assignments, so these
+// tests build the exact v2 tuple a v2-era game recorded.
+function v2AssignmentFor(archetype) {
+  const policyId = typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_POLICY_ID, archetype)
+    ? ARCHETYPE_POLICY_ID[archetype]
+    : 'baseline-v2';
+  const { policyVersion, configDigest } = CATALOG[policyId];
+  return { policyId, policyVersion, configDigest };
+}
+
+test('REQ-005: the v2 Nit policy stays separately versioned and new sessions use v3', () => {
+  assert.strictEqual(ARCHETYPE_POLICY_ID.Nit, 'nit-v2');
+  assert.strictEqual(CATALOG['nit-v2'].policyVersion, VERSION_V2);
+  assert.strictEqual(assignmentFor('Nit').policyId, 'nit-v3', 'new sessions must select the v3 Nit policy');
 });
 
 import './helpers/owned-fixtures.mjs';
 
 test('all six personas and fallback receive separate v2 identities', async () => {
+  assert.deepEqual(
+    ['TAG', 'LAG', 'Nit', 'CallingStation', 'Maniac', 'Trickster', 'unknown'].map(
+      (persona) => v2AssignmentFor(persona).policyId,
+    ),
+    ['tag-v2', 'lag-v2', 'nit-v2', 'calling-station-v2', 'maniac-v2', 'trickster-v2', 'baseline-v2'],
+  );
+});
+
+test('all six personas and fallback receive separate v3 identities for new games', async () => {
   const { assignmentFor: assign } = await import('../training/policies/catalog.js');
   assert.deepEqual(
     ['TAG', 'LAG', 'Nit', 'CallingStation', 'Maniac', 'Trickster', 'unknown'].map(
       (persona) => assign(persona).policyId,
     ),
-    ['tag-v2', 'lag-v2', 'nit-v2', 'calling-station-v2', 'maniac-v2', 'trickster-v2', 'baseline-v2'],
+    ['tag-v3', 'lag-v3', 'nit-v3', 'calling-station-v3', 'maniac-v3', 'trickster-v3', 'baseline-v3'],
   );
 });
 
@@ -103,7 +120,7 @@ test('catalog lookup and archetype fallback ignore prototype-chain keys', async 
   const { assignmentFor: assign, policyById: lookup } = await import('../training/policies/catalog.js');
   for (const key of ['__proto__', 'constructor', 'toString']) {
     assert.strictEqual(lookup(key), null, `${key} must not resolve through Object.prototype`);
-    assert.strictEqual(assign(key).policyId, 'baseline-v2', `${key} must use the documented fallback`);
+    assert.strictEqual(assign(key).policyId, 'baseline-v3', `${key} must use the documented fallback`);
   }
 });
 
@@ -145,8 +162,8 @@ test('v2 catalog publishes only the strategy traits it actually applies', async 
 });
 
 test('post-game sanitization resolves exact identity and reveals qualitative v2 traits only', async () => {
-  const { assignmentFor: assign, sanitizePlayersForReview, VERSION_V2 } = await import('../training/policies/catalog.js');
-  const player = { playerId: 'p1', archetype: 'TAG', policy: assign('TAG') };
+  const { sanitizePlayersForReview, VERSION_V2 } = await import('../training/policies/catalog.js');
+  const player = { playerId: 'p1', archetype: 'TAG', policy: v2AssignmentFor('TAG') };
   const pre = sanitizePlayersForReview([player], { gameOver: false })[0];
   assert.strictEqual(Object.hasOwn(pre, 'policyId'), false);
   assert.strictEqual(Object.hasOwn(pre, 'policyTraits'), false);
@@ -434,8 +451,7 @@ test('Trickster differs materially from baseline-v2 on a fixed grid', async () =
 
 test('gameplay dispatches exact v2 tuples deterministically and ignores hidden state', async () => {
   const { decide, distributionFor } = await import('../tools/policy-player.js');
-  const { assignmentFor } = await import('../training/policies/catalog.js');
-  const policy = assignmentFor('TAG');
+  const policy = v2AssignmentFor('TAG');
   const input = {
     snapshot: snapshot({ street: 'flop', holeCards: ['Ah', 'Qh'], board: ['Jh', '7c', '2d'] }),
     legal: facingLegal,
@@ -459,11 +475,10 @@ test('gameplay dispatches exact v2 tuples deterministically and ignores hidden s
 
 test('gameplay rejects unknown wrong-version wrong-digest and arbitrary stored policies', async () => {
   const { decide } = await import('../tools/policy-player.js');
-  const { assignmentFor } = await import('../training/policies/catalog.js');
   const base = {
     snapshot: snapshot(), legal: facingLegal, policySeed: 'ab'.repeat(32), gameEpoch: 'cd'.repeat(32),
   };
-  const exact = assignmentFor('TAG');
+  const exact = v2AssignmentFor('TAG');
   for (const policy of [
     { ...exact, policyId: 'unknown-v2' },
     { ...exact, policyVersion: '9.0.0' },
@@ -479,13 +494,12 @@ test('gameplay rejects unknown wrong-version wrong-digest and arbitrary stored p
 
 test('fixed sampling seed preserves marginal price monotonicity', async () => {
   const { decide } = await import('../tools/policy-player.js');
-  const { assignmentFor } = await import('../training/policies/catalog.js');
   const marginal = snapshot({ holeCards: ['Ad', '9s'], board: ['Ah', 'Kh', '7c', '4d', '2c'] });
   for (const persona of ['Nit', 'TAG', 'LAG', 'CallingStation', 'Maniac', 'Trickster']) {
     for (let index = 0; index < 40; index += 1) {
       const common = {
         snapshot: marginal,
-        policy: assignmentFor(persona),
+        policy: v2AssignmentFor(persona),
         policySeed: `${persona}-${index}`,
         gameEpoch: 'ef'.repeat(32),
       };
@@ -516,9 +530,9 @@ test('v1 gameplay distribution remains unchanged while exact tuples resume', asy
 
 test('exploit and final-review model consumers accept exact v1 and v2 tuples', async () => {
   const { modelsFromPlayers, toOpponentModel } = await import('../training/exploit/policy-model.js');
-  const { POLICIES, assignmentFor } = await import('../training/policies/catalog.js');
+  const { POLICIES } = await import('../training/policies/catalog.js');
   assert.equal(toOpponentModel(POLICIES['tag-v1']).opponentModelId, 'tag-v1');
-  const v2 = toOpponentModel(assignmentFor('TAG'));
+  const v2 = toOpponentModel(v2AssignmentFor('TAG'));
   assert.equal(v2.opponentModelId, 'tag-v2');
   assert.equal(v2.modelKind, 'qualitative-config-v2');
   assert.equal(v2.modelKnowledge, 'configured-traits-not-observed-action-frequencies');
@@ -529,14 +543,13 @@ test('exploit and final-review model consumers accept exact v1 and v2 tuples', a
   assert.strictEqual(Object.hasOwn(v2, 'deviations'), false);
   assert.deepEqual(Object.keys(modelsFromPlayers([
     { playerId: 'user' },
-    { playerId: 'p1', policy: assignmentFor('Nit') },
+    { playerId: 'p1', policy: v2AssignmentFor('Nit') },
   ])), ['p1']);
 });
 
 test('exploit and final-review model consumers reject inexact stored tuples', async () => {
   const { modelsFromPlayers, toOpponentModel } = await import('../training/exploit/policy-model.js');
-  const { assignmentFor } = await import('../training/policies/catalog.js');
-  const exact = assignmentFor('TAG');
+  const exact = v2AssignmentFor('TAG');
   for (const policy of [
     { ...exact, policyVersion: '1.0.0' },
     { ...exact, configDigest: '00'.repeat(32) },
@@ -770,17 +783,17 @@ test('sanitizePlayersForReview and toOpponentModel roll a 2.0.0 stamp to 2.2.0 t
 test('v2 self-play raises stay in clamp and min-raise only after rounding down', async () => {
   const { applyAction, createGame, legalFor, startHand } = await import('../engine/hand.js');
   const { snapshotDecision } = await import('../engine/decision.js');
-  const { assignmentFor, policyById } = await import('../training/policies/catalog.js');
+  const { policyById } = await import('../training/policies/catalog.js');
   const { decide } = await import('../tools/policy-player.js');
   const { raiseToFor, roundToUnit } = await import('../training/policies/sizing.js');
   const started = Date.now();
   const policies = {
     user: policyById('baseline-v2'),
-    p1: assignmentFor('TAG'),
-    p2: assignmentFor('LAG'),
-    p3: assignmentFor('Nit'),
-    p4: assignmentFor('CallingStation'),
-    p5: assignmentFor('Maniac'),
+    p1: v2AssignmentFor('TAG'),
+    p2: v2AssignmentFor('LAG'),
+    p3: v2AssignmentFor('Nit'),
+    p4: v2AssignmentFor('CallingStation'),
+    p5: v2AssignmentFor('Maniac'),
   };
   const { mulberry32 } = await import('./helpers/fixtures.js');
   const rng = mulberry32(143);

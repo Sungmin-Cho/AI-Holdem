@@ -1,7 +1,8 @@
 import { independentAssessmentEligibility } from '../../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../../shared/reference-coverage.js';
-import {parsePreflopKey} from '../../shared/preflop-key.js';
-import { formatReferenceReason, referenceClaimAllowed, referenceQuality } from '../../shared/reference.js';
+import {parsePreflopKey,parsePreflopKeyV3} from '../../shared/preflop-key.js';
+import {practiceKeyExactV3} from '../../shared/reference-coverage-v3.js';
+import { formatReferenceReason, coachingClaimAllowed, referenceQuality } from '../../shared/reference.js';
 
 /**
  * An evaluationId's machine digest is set-once (R3/R5). A later publish carrying
@@ -52,7 +53,7 @@ const SOURCE_LABEL = Object.freeze({
 function practiceTargetOf(item, sourceEligible) {
   if (!sourceEligible || item.status !== 'supported' || item.forced
     || (item.street !== undefined && item.street !== 'preflop')
-    || !parsePreflopKey(item.spotKey)) return null;
+    || !(parsePreflopKey(item.spotKey) || practiceKeyExactV3(item.spotKey))) return null;
   const hand = /^([AKQJT2-9])([AKQJT2-9])([so]?)$/.exec(item.handClass ?? '');
   if (!hand) return null;
   const ranks = 'AKQJT98765432';
@@ -142,11 +143,14 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
   const rec = sourceEligible && Array.isArray(item.recommended) ? item.recommended[0] : null;
   const recFreq = rec?.frequency != null ? ` ${Math.round(rec.frequency * 100)}%` : '';
   const recSize = rec?.sizeBb != null ? ` ${rec.sizeBb}bb` : '';
-  const spot = parsePreflopKey(item.spotKey);
+  const spot = parsePreflopKey(item.spotKey) ?? parsePreflopKeyV3(item.spotKey);
+  const facing = { 'vs-single-raise': '오픈 대응', 'vs-3bet': '3벳 대응', 'vs-shove': '올인 대응' };
   const title = [
     `핸드 ${item.handNo ?? '?'}`,
-    spot?.version === 2 ? `${spot.seated}인 ${spot.position}` : item.spotKey ? String(item.spotKey).split('-')[2]?.toUpperCase() : null,
+    spot?.version >= 2 ? `${spot.seated}인 ${spot.position}` : item.spotKey ? String(item.spotKey).split('-')[2]?.toUpperCase() : null,
     spot?.version === 2 && spot.openerPosition ? `${spot.openerPosition} 오픈 대응` : null,
+    spot?.version === 3 && spot.openerPosition ? `${spot.openerPosition} ${facing[spot.context] ?? '대응'}` : null,
+    spot?.version === 3 && spot.context === 'push' ? `${spot.stackBb}BB 푸시/폴드` : null,
     item.handClass,
   ].filter(Boolean).join(' · ');
   const card = {
@@ -159,7 +163,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     note: '',
     explanation: item.explanationStatus === 'unavailable'
       ? 'unavailable'
-      : (sourceEligible && referenceClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
+      : (sourceEligible && coachingClaimAllowed(item.explanation) ? (item.explanation ?? '') : ''),
     source: item.source?.id ? `${item.source.id}@${item.source.version ?? ''}` : '',
     sourceQuality: quality.quality,
     sourceLabel: SOURCE_LABEL[quality.quality] ?? SOURCE_LABEL.unverified,
@@ -175,7 +179,18 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
       card.exploit = `Exploit 방향: bluff ${adj.bluff} / thin value ${adj.thinValue}`;
     }
   }
-  if (sourceEligible && item.coverage?.reference) {
+  if (sourceEligible && item.coverage?.schemaVersion === 2) {
+    // Reference v3: the derived context states the projection and the choice.
+    const c = item.coverage, d = c.derived, eff = d.effectiveChips / c.input.bbChips;
+    const projections = [];
+    if (c.reasonCodes.includes('STACK_PROJECTED')) projections.push(`스택 ${eff.toFixed(1)}bb → 100bb`);
+    if (c.reasonCodes.includes('PUSHFOLD_PROJECTED')) projections.push(`푸시/폴드 ${eff.toFixed(1)}bb → ${d.bucketBb}bb`);
+    if (c.reasonCodes.includes('FACING_SIZE_PROJECTED')) projections.push(`상대 레이즈 ${d.facingToBb.toFixed(1)}bb`);
+    if (projections.length) card.note = `투영 참고: ${projections.join(' · ')} · 점수 제외`;
+    const outside = c.reasonCodes.find((code) => ['CHOICE_SIZE_OUT_OF_RANGE', 'CHOICE_OUT_OF_TREE', 'DEEP_ALLIN_UNMODELED'].includes(code));
+    if (outside) card.note = [card.note, formatReferenceReason(outside)].filter(Boolean).join(' · ');
+    else if (c.metricEligible) card.note = '직접 기준표 비교';
+  } else if (sourceEligible && item.coverage?.reference) {
     const c=item.coverage,i=c.input,r=c.reference;
     const projections=[];
     if(c.reasonCodes.includes('STACK_PROJECTED'))projections.push(`스택 ${i.effectiveStackBb}bb → ${r.stackBb}bb`);
@@ -190,7 +205,7 @@ export function formatTrainingCard(item, { verifiedDetail = null } = {}) {
     card.note = formatReferenceReason(item.code ?? 'UNSUPPORTED_SPOT', item.reason);
   } else if (!sourceEligible) {
     card.note = formatReferenceReason(quality.reason);
-  } else if (!referenceClaimAllowed(item.explanation)) {
+  } else if (!coachingClaimAllowed(item.explanation)) {
     card.note = [card.note,'근거 범위를 벗어난 표현을 제외했습니다.'].filter(Boolean).join(' · ');
   }
   if (item.assistance?.hintShown) card.note = [card.note,'힌트 도움을 받은 결정 · 점수 제외'].filter(Boolean).join(' · ');

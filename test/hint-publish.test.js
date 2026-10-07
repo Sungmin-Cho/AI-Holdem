@@ -28,7 +28,7 @@ test('forged numeric frequency rejected; stale exact publication strips only hin
   const f=await hintFixture(t);const envelope=await f.prepare();
   const forged=structuredClone(envelope.hint);
   forged.actions=forged.actions.length===1
-    ? (forged.actions[0].action==='fold'?[{action:'raise',frequency:1,raiseToChips:forged.coverage.reference.sizing?.raiseToChips??forged.coverage.input.legal.minRaiseToChips}]:[{action:'fold',frequency:1}])
+    ? (forged.actions[0].action==='fold'?[{action:'raise',frequency:1,raiseToChips:forged.coverage.reference?.sizing?.raiseToChips??forged.coverage.input.legal.minRaiseToChips}]:[{action:'fold',frequency:1}])
     : forged.actions.map((row,index)=>({...row,frequency:row.frequency+(index===0?.0001:index===1?-.0001:0)}));
   assert.equal((await f.request('publish',{publishId:1,view:envelope.view,hint:forged})).status,400);
   f.cli('step','user','fold','--expect-version',String(envelope.stateVersion));

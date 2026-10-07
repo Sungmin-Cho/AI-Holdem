@@ -17,8 +17,16 @@ export function formatHint(hint) {
     }
     return line;
   });
-  if(hint.coverage.reasonCodes.includes('STACK_PROJECTED')) lines.push(`스택 투영: 실제 ${i.effectiveStackBb.toFixed(2)} BB → 기준 ${hint.coverage.reference.stackBb} BB`);
-  if(hint.coverage.reasonCodes.includes('FACING_SIZE_PROJECTED')) lines.push(`오픈 크기 투영: 실제 ${i.facingRaiseToBb.toFixed(2)} BB → 기준 ${hint.coverage.reference.openRaiseToBb} BB`);
+  if(hint.coverage.schemaVersion===2) {
+    // Reference v3: the derived context states the projection.
+    const d=hint.coverage.derived,eff=d.effectiveChips/i.bbChips;
+    if(hint.coverage.reasonCodes.includes('STACK_PROJECTED')) lines.push(`스택 투영: 유효 ${eff.toFixed(2)} BB → 기준 100 BB`);
+    if(hint.coverage.reasonCodes.includes('PUSHFOLD_PROJECTED')) lines.push(`푸시/폴드 모델 투영: 유효 ${eff.toFixed(2)} BB → 기준 ${d.bucketBb} BB`);
+    if(hint.coverage.reasonCodes.includes('FACING_SIZE_PROJECTED')) lines.push(`상대 레이즈 크기 투영: 실제 ${d.facingToBb.toFixed(2)} BB`);
+  } else {
+    if(hint.coverage.reasonCodes.includes('STACK_PROJECTED')) lines.push(`스택 투영: 실제 ${i.effectiveStackBb.toFixed(2)} BB → 기준 ${hint.coverage.reference.stackBb} BB`);
+    if(hint.coverage.reasonCodes.includes('FACING_SIZE_PROJECTED')) lines.push(`오픈 크기 투영: 실제 ${i.facingRaiseToBb.toFixed(2)} BB → 기준 ${hint.coverage.reference.openRaiseToBb} BB`);
+  }
   return {title:hint.coverage.referenceMatch==='projected'?'투영 기준표 참고 · 점수 제외':'기준표 사전 힌트 · 점수 제외',
     lines,source:`${hint.source.id}@${hint.source.version} · 빈도는 승률이나 GTO 정답이 아닙니다.`};
 }

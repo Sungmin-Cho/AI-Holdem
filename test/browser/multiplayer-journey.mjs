@@ -279,6 +279,8 @@ export async function runMultiplayerJourney(outDir) {
           const btn = [fold, call, checkBtn].find((node) => node && !node.disabled);
           if (!btn) return false;
           btn.click();
+          // With a check available the first fold press only arms it.
+          if (btn === fold && fold.classList.contains('is-armed')) fold.click();
           return true;
         })()`);
         return acted === true;
