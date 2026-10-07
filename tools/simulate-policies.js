@@ -162,8 +162,10 @@ export function measureExploits({ hands = 20000, seed = 'g6', block = 500, strat
 }
 
 // Design gates: G5 persona VPIP bands (Station PFR ≤ 12), TAG c-bet 45–70%,
-// nut raise ≥ 80% when observed; G6 95% upper bound ≤ +30bb/100.
+// nut raise ≥ 80% once observed often enough to judge; G6 95% upper bound ≤ +30bb/100.
 export const G5_BANDS = Object.freeze({ Nit: [9, 16], TAG: [18, 26], LAG: [26, 36], CallingStation: [35, 55], Maniac: [45, 70] });
+// River nuts facing a bet are rare (47 in 20,000 hands); fewer cannot judge an 80% rate.
+export const NUT_RAISE_MIN_OPPORTUNITIES = 30;
 export function gateFailures({ tendencies, exploits }) {
   const failures = [];
   if (tendencies) {
@@ -174,8 +176,10 @@ export function gateFailures({ tendencies, exploits }) {
     if (!(tendencies.personas.CallingStation?.pfr <= 12)) failures.push('G5 CallingStation PFR above 12');
     const cbet = tendencies.tagCbet.rate;
     if (cbet !== null && !(cbet >= 45 && cbet <= 70)) failures.push(`G5 TAG c-bet ${cbet.toFixed(1)} outside 45-70`);
-    const nut = tendencies.nutRaise.rate;
-    if (nut !== null && nut < 80) failures.push(`G5 nut raise ${nut.toFixed(1)} below 80`);
+    const { rate: nut, opportunities } = tendencies.nutRaise;
+    if (nut !== null && opportunities >= NUT_RAISE_MIN_OPPORTUNITIES && nut < 80) {
+      failures.push(`G5 nut raise ${nut.toFixed(1)} below 80`);
+    }
   }
   for (const [name, row] of Object.entries(exploits ?? {})) {
     if (row.high > 30) failures.push(`G6 ${name} upper ${row.high.toFixed(1)} above +30bb/100`);

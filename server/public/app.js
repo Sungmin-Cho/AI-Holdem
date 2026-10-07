@@ -293,7 +293,7 @@ async function loadInsights(view) {
   hudKey=null;
   const hudOk=!hudShown()||Array.isArray(hudBody?.players);
   if(Array.isArray(hudBody?.players)){hud=hudBody;paintParticipants(ui.view);}
-  if(Array.isArray(reportBody?.checks)){report=reportBody;paintReport();}
+  if(Array.isArray(reportBody?.checks)){report=reportBody;paintReport();paintReview(ui.view);}
   if(hudOk&&Array.isArray(reportBody?.checks))insightLoaded=key;
   else {insightRetryKey=key;insightRetryAt=Date.now()+5000;}
 }
@@ -1540,10 +1540,18 @@ function paintReview(view) {
   if(ui.review)void loadReveal();
   paintReveal(participantMode||spectator);
   const review=$('review-body');
-  const source=ui.review??state.review;
+  const source=ui.review??(state.review!=='pending'&&report?.hands?`report:${report.hands}:${report.checks.length}`:state.review);
   if(review._source!==source){
     const scroll=review.scrollTop;
     if(ui.review){review.innerHTML=renderMarkdown(reviewBody(ui.review));foldReviewSections(review);}
+    else if(state.review!=='pending'&&report?.hands){
+      // A game ended without a review (stopped early) still gets the host's
+      // deterministic process checks.
+      const list=el('ul','process-report-list');
+      for(const line of report.checks)list.append(el('li','',line.replace(/^-\s*/,'')));
+      if(!report.checks.length)list.append(el('li','','눈에 띄는 과정 점검 항목이 없습니다.'));
+      review.replaceChildren(el('p','',`종합 리뷰 없이 끝난 게임입니다. 완료 ${report.hands}핸드의 엔진 계산 점검입니다.`),list);
+    }
     else review.textContent=state.review==='pending'?'종합 리뷰 생성 중… 보통 1~4분':'종합 리뷰가 없습니다';
     review._source=source;review.scrollTop=scroll;
   }

@@ -205,6 +205,8 @@ export async function computeBaseline(root, corpus) {
 
 async function main(argv) {
   const arg = (name) => { const i = argv.indexOf(name); return i < 0 ? null : argv[i + 1]; };
+  // `node --test` runs every module under test/ without arguments: nothing to do.
+  if (!arg('--build-corpus') && !arg('--corpus')) return;
   const root = path.resolve(arg('--root') ?? '.');
   if (arg('--build-corpus')) {
     fs.writeFileSync(arg('--build-corpus'), `${JSON.stringify(await buildCorpus(root))}\n`);

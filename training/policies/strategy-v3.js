@@ -190,7 +190,6 @@ function preflopDistribution(snapshot, legal, persona, t) {
   }
 
   const open = raises[0];
-  const onlyFoldsBefore = (k) => t.preflop.slice(0, k).every((a) => a.action === 'fold' || raises.slice(0, 1).includes(a));
   // Facing one raise with only folds around it.
   if (raises.length === 1 && calls.length === 0 && open.playerId !== snapshot.actorId) {
     const opener = t.live.find((s) => s.playerId === open.playerId);
@@ -219,7 +218,6 @@ function preflopDistribution(snapshot, legal, persona, t) {
       return chartResponse(chart, idx, p, legal, snapshot, t, { to: raises[1].amount * 2.3, tag: '4bet' });
     }
   }
-  void onlyFoldsBefore;
   return offChartPreflop(snapshot, legal, persona, t, cls);
 }
 

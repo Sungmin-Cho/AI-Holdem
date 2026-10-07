@@ -46,3 +46,16 @@ test('a resolved skill, assisted or forced decisions and practice records do not
   assert.equal(selectGoal([practice]).origin, 'practice');
   assert.equal(selectGoal([]), null);
 });
+
+test('study history picks its goal only from events stamped by now', async () => {
+  const { studyHistory } = await import('../training/study-history.js');
+  const { evaluationIdOf } = await import('../training/contracts.js');
+  const misses = Array.from({ length: 3 }, (_, i) => ({ ...event({ skill: 'preflop.rfi.CO', grade: 'off-policy', hand: 'KTo' }),
+    evaluationId: evaluationIdOf({ gameEpoch: 'ab'.repeat(32), decisionId: `d-${i + 1}-preflop-0`,
+      providerId: LEGACY_REFERENCE_SOURCE.id, providerVersion: LEGACY_REFERENCE_SOURCE.version }),
+    payloadSha256: String(i).repeat(64) }));
+  const at = misses[0].appliedAt;
+  assert.equal(studyHistory(misses, misses.at(-1).appliedAt).goal.skillKey, 'preflop.rfi.CO');
+  const before = new Date(Date.parse(at) - 1000).toISOString();
+  assert.equal(studyHistory(misses, before).goal.origin, 'default', 'a future-stamped miss cannot choose the goal');
+});

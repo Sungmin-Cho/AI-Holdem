@@ -301,7 +301,9 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
     // The shared goal (training/goal.js); the oldest-deviation pick remains the
     // fallback when no skill has enough independent evidence.
     trends: trendsOf(runs, validEvents, now),
-    goal: selectGoal(validEvents) ?? gameGoal ?? practiceGoal ?? {
+    // Events stamped after `now` are excluded here as everywhere else in the history.
+    goal: selectGoal(validEvents.filter((event) => !(validIso(event.appliedAt)
+      && Date.parse(event.appliedAt) > Date.parse(now)))) ?? gameGoal ?? practiceGoal ?? {
       origin: 'default',
       sourceIdentity: null,
       // The default practice spot follows the source new sessions use.
