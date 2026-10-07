@@ -1,4 +1,4 @@
-import {referenceAssessmentEligibility,projectReferenceCoverage} from '../shared/reference-coverage.js';
+import {referenceAssessmentEligibility,projectCoverageFor} from '../shared/reference-coverage.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
@@ -6,7 +6,7 @@ import { FORBIDDEN_PATH_LITERALS, FORBIDDEN_PATH_RE, gameEpochOf } from '../publ
 import { materializeLearningEvaluation } from '../tools/training-control.js';
 import { openContained } from '../tools/training-store.js';
 import { EXPORT_MAX_BYTES } from './contracts.js';
-import { referenceQuality } from '../shared/reference.js';
+import { isCoverageReferenceSource, referenceQuality } from '../shared/reference.js';
 
 const FORBIDDEN = [
   'archetype', 'personality', 'bluffFreq', 'policySeed', 'sessionToken',
@@ -207,7 +207,7 @@ export function projectReferenceEvaluation(evaluation) {
     };
   }
   if (eligible) {
-    if (evaluation.source?.version === '2.0.0' && Object.hasOwn(evaluation,'coverage')) projected.coverage = projectReferenceCoverage(evaluation.coverage);
+    if (isCoverageReferenceSource(evaluation.source) && Object.hasOwn(evaluation,'coverage')) projected.coverage = projectCoverageFor(evaluation.source, evaluation.coverage);
     if (metricEligible && ['preferred', 'mixed', 'low-frequency', 'off-policy'].includes(evaluation.grade)) projected.grade = evaluation.grade;
     if (Array.isArray(evaluation.recommended)) {
       projected.recommended = evaluation.recommended.slice(0, 10).map((action) => exportAction(action, { reference: true })).filter(Boolean);

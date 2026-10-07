@@ -1,13 +1,14 @@
-import {parsePreflopKey} from '../shared/preflop-key.js';
+import {parsePreflopKey,parsePreflopKeyV3} from '../shared/preflop-key.js';
 import { assertEvaluationId } from './contracts.js';
 
 export const PREFLOP_SPOT_RE = /^6max-100bb-(utg|hj|co|btn|sb|bb)-(rfi-unopened|vs-single-raise)$/;
 
 export function isPreflopSpotKey(spotKey) {
-  return Boolean(parsePreflopKey(spotKey));
+  return Boolean(parsePreflopKey(spotKey) ?? parsePreflopKeyV3(spotKey));
 }
 
 export function skillKeyOf({ spotKey } = {}) {
+  if (parsePreflopKeyV3(spotKey)) return `preflop.v3.${spotKey}`;
   const parsed = parsePreflopKey(spotKey);
   if (!parsed) return 'unknown';
   const {position:pos,context} = parsed;

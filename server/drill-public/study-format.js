@@ -1,5 +1,5 @@
-import { referenceQuality, matchReferenceAction } from '../../shared/reference.js';
-import { PREFLOP_ORDERS, parsePreflopKey } from '../../shared/preflop-key.js';
+import { referenceQuality, matchReferenceActionFor } from '../../shared/reference.js';
+import { PREFLOP_ORDERS, PREFLOP_ORDERS_V3, parsePreflopKey, parsePreflopKeyV3 } from '../../shared/preflop-key.js';
 import { handClassParts } from '../public/card-render.js';
 
 export const STUDY_MODES = Object.freeze({ free: '자유 연습', leak: '연습 후보', daily: '오늘 복습', 'mistake-review': '기준표와 다른 선택 복습', assessment: '새 문제 평가', retest: '지연 재평가' });
@@ -90,6 +90,13 @@ export function formatQuestion(question) {
     if (sizeBb !== undefined && (!Number.isFinite(sizeBb) || sizeBb <= 0)) continue;
     actions.push({ action, ...(sizeBb !== undefined ? { sizeBb } : {}), label: `${ACTIONS[action]}${sizeBb !== undefined ? ` · 총액 ${sizeBb}BB` : ''}` });
   }
+  const v3 = parsePreflopKeyV3(prompt.spotKey);
+  if (v3) {
+    const villain = position(v3.openerPosition);
+    const line = { 'rfi-unopened': '앞 좌석 모두 폴드', 'vs-single-raise': `${villain} 오픈 대응`, 'vs-3bet': `내 오픈에 ${villain} 3벳`,
+      push: '푸시/폴드(올인 또는 폴드)', 'vs-shove': `${villain} 올인 대응` }[v3.context];
+    return { title: `${position(prompt.position)} · ${hand(prompt.handClass)}`, context: `${v3.seated}인 · ${line} · ${v3.stackBb}BB`, actions };
+  }
   return { title: `${position(prompt.position)} · ${hand(prompt.handClass)}`,
     context: `${prompt.seated ? `${prompt.seated}인 · ` : ''}${prompt.openerPosition ? `${position(prompt.openerPosition)} 오픈 대응 · ` : ''}${number(prompt.stackBb) ?? '—'}BB · ${history}`, actions };
 }
@@ -97,6 +104,18 @@ export function formatQuestion(question) {
  * the hero, the opener, and the seats known to have folded before the hero.
  * Only what the spot states — an unknown table size or opener draws nothing. */
 export function spotDiagram(prompt = {}) {
+  const v3 = parsePreflopKeyV3(prompt.spotKey);
+  if (v3) {
+    const order = PREFLOP_ORDERS_V3[v3.seated];
+    const heroAt = order.indexOf(v3.position);
+    const villainAt = v3.openerPosition ? order.indexOf(v3.openerPosition) : -1;
+    // Every v3 line folds around the hero and the one raiser (3-bet: after the hero).
+    const seats = order.map((pos, index) => ({ position: pos,
+      role: index === heroAt ? 'hero' : index === villainAt ? 'opener' : v3.context === 'vs-3bet' || index < heroAt ? 'folded' : 'waiting' }));
+    const what = { 'rfi-unopened': ' · 앞 좌석 모두 폴드', push: ' · 앞 좌석 모두 폴드', 'vs-single-raise': ` · ${v3.openerPosition} 오픈`,
+      'vs-3bet': ` · ${v3.openerPosition} 3벳`, 'vs-shove': ` · ${v3.openerPosition} 올인` }[v3.context];
+    return { seated: v3.seated, hero: v3.position, opener: v3.openerPosition, seats, label: `${v3.seated}인 테이블 · 내 위치 ${v3.position}${what}` };
+  }
   const parsed = parsePreflopKey(prompt.spotKey);
   const seated = Number.isSafeInteger(prompt.seated) ? prompt.seated : parsed?.seated;
   const order = PREFLOP_ORDERS[seated];
@@ -132,7 +151,7 @@ export function feedbackBars(result, source, chosen) {
   const rows = (result.recommended ?? []).filter((row) => ACTIONS[row.action] && number(row.frequency) !== null && row.frequency <= 1);
   const known = Boolean(chosen && result.questionId && chosen.questionId === result.questionId && ACTIONS[chosen.action]);
   // The same matcher the evaluator used, so the mark sits on the graded row.
-  const mine = known ? matchReferenceAction(rows, { action: chosen.action, ...(chosen.sizeBb !== undefined ? { sizeBb: chosen.sizeBb } : {}) }) : null;
+  const mine = known ? matchReferenceActionFor(source, rows, { action: chosen.action, ...(chosen.sizeBb !== undefined ? { sizeBb: chosen.sizeBb } : {}) }) : null;
   return {
     rows: rows.map((row) => ({
       label: `${ACTIONS[row.action]}${number(row.sizeBb) !== null ? ` ${row.sizeBb}BB` : ''}`,

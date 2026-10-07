@@ -5,18 +5,13 @@
 import { projectAssistance } from '../shared/assistance.js';
 import { dealSelectionFields } from '../shared/deal-selection.js';
 import { PREFLOP_ORDERS_V3, trainingPositionV3 } from '../shared/preflop-key.js';
-import { buildCoverageV3, V3_BANDS } from '../shared/reference-coverage-v3.js';
+import { buildCoverageV3, gradeOfFrequencyV3, V3_BANDS } from '../shared/reference-coverage-v3.js';
 import { referenceQuality } from '../shared/reference.js';
 import { handClassOf } from './cards.js';
 import { coded, evaluationIdOf } from './contracts.js';
 import { lookup } from './providers/preflop-json.js';
 
-// Grade by reference frequency of the chosen action class (thresholds as v2).
-export function gradeOfFrequencyV3(frequency, actions) {
-  if (!(frequency > 0)) return 'off-policy';
-  const max = Math.max(...actions.map((row) => row.frequency));
-  return frequency === max || frequency >= 0.5 ? 'preferred' : frequency >= 0.1 ? 'mixed' : 'low-frequency';
-}
+export { gradeOfFrequencyV3 };
 
 function priorAllIn(action) {
   if (action.action === 'raise') return Number.isInteger(action.maxRaiseTo) && action.amount === action.maxRaiseTo;

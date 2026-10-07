@@ -13,7 +13,7 @@ export function exposeHint(state, meta, { decisionId, expectVersion, playerId })
   const hex = /^[a-f0-9]{64}$/;
   if (meta.schemaVersion !== 1 || !hex.test(meta.gameEpoch) || !hex.test(meta.observationSha256)
     || !hex.test(meta.recommendationSha256) || !hex.test(meta.source.contentSha256)
-    || typeof meta.source.id !== 'string' || meta.source.id.length > 200 || meta.source.version !== '2.0.0'
+    || typeof meta.source.id !== 'string' || meta.source.id.length > 200 || !['2.0.0', '3.0.0'].includes(meta.source.version)
     || meta.gameEpoch !== gameEpochOf(state.sessionToken) || meta.decisionId !== decisionId) throw hintError('HINT_PROOF_MISMATCH');
   const legal = legalFor(state);
   if (playerId !== 'user' || legal.toAct !== 'user' || legal.decisionId !== decisionId || !state.hand) throw hintError('HINT_STALE_CONTEXT');

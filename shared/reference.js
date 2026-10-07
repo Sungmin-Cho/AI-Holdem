@@ -81,6 +81,28 @@ export function matchReferenceAction(actions, chosen) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+/** Reference schema of a source: 1, 2 or 3 for the bundled baselines, else null. */
+export function referenceSchemaOf(source) {
+  if (source?.id !== 'local-preflop-baseline') return null;
+  return { '1.0.0': 1, '2.0.0': 2, '3.0.0': 3 }[source.version] ?? null;
+}
+/** Sources whose evaluations carry a closed coverage projection (v2 and v3). */
+export function isCoverageReferenceSource(source) {
+  const schema = referenceSchemaOf(source);
+  return schema === 2 || schema === 3;
+}
+/** v3 compares action classes: the one reference row of the chosen action. The
+ * chosen size was already judged by the coverage's choice band. */
+export function matchReferenceActionV3(actions, chosen) {
+  if (!Array.isArray(actions) || !plainObject(chosen) || !ACTIONS.has(chosen.action)) return null;
+  const rows = actions.filter((row) => plainObject(row) && row.action === chosen.action);
+  return rows.length === 1 ? rows[0] : null;
+}
+/** The comparison contract of the source: v3 by action class, v1/v2 unchanged. */
+export function matchReferenceActionFor(source, actions, chosen) {
+  return referenceSchemaOf(source) === 3 ? matchReferenceActionV3(actions, chosen) : matchReferenceAction(actions, chosen);
+}
+
 function normalizeReferenceAction(action) {
   const key = actionKey(action);
   if (typeof action.frequency !== 'number'
@@ -187,6 +209,14 @@ const REASONS = Object.freeze({
   SOURCE_IDENTITY_UNVERIFIED: '출처 식별값이 확인되지 않아 기준표 비교에서 제외했습니다.',
   SYNTHETIC_SOURCE: '테스트용 합성 출처는 학습 집계에서 제외됩니다.',
   UNSUPPORTED_SPOT: '현재 기준표에서 지원되지 않는 상황입니다.',
+  NO_DECISION: '비교할 결정 기록이 없습니다.',
+  MID_STACK_UNSUPPORTED: '15.5~25BB 중간 스택은 기준표 비교 범위 밖입니다.',
+  FORCED_STACK: '1BB 이하 스택은 선택지가 사실상 정해져 있어 비교하지 않습니다.',
+  FACING_ALLIN_UNMODELED: '이 올인에 대한 대응은 기준표 모델 밖입니다.',
+  OPENER_RANGE_UNREACHABLE: '이 손패는 기준표의 오픈 범위 밖이라 3벳 대응을 비교하지 않습니다.',
+  PUSHFOLD_PROJECTED: '스택 구성이 푸시/폴드 모델과 달라 투영 참고이며 점수에서 제외됩니다.',
+  CHOICE_OUT_OF_TREE: '선택한 행동(림프·소액 레이즈 등)은 기준표 트리 밖이라 비교하지 않습니다.',
+  DEEP_ALLIN_UNMODELED: '깊은 스택 올인 4벳은 기준표 모델 밖이라 비교하지 않습니다.',
   NOT_LEARNABLE: '현재 정량 학습 범위 밖의 상황입니다.',
 });
 

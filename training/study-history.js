@@ -1,7 +1,7 @@
 import { independentAssessmentEligibility, projectAssistance } from '../shared/assistance.js';
 import {dealSelectionFields} from '../shared/deal-selection.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
-import { validateMixObservation, matchReferenceAction, referenceQuality } from '../shared/reference.js';
+import { CANONICAL_REFERENCE_SOURCE, validateMixObservation, matchReferenceActionFor, referenceQuality, referenceSchemaOf } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { assertProfileEvent } from './profile-aggregator.js';
 import { assertEvaluationId, coded } from './contracts.js';
@@ -126,7 +126,7 @@ function summarizeRun(entries, now) {
       spotKey: observation.spotKey,
       handClass: observation.handClass,
       grade: entry.event.grade ?? null,
-      allowed: (matchReferenceAction(observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0,
+      allowed: (matchReferenceActionFor(observation.sourceIdentity, observation.referenceActions, observation.chosenAction)?.frequency ?? 0) > 0,
       appliedAt: entry.event.appliedAt,
     });
   }
@@ -268,7 +268,8 @@ export function studyHistory(events = [], now = new Date().toISOString()) {
     goal: gameGoal ?? practiceGoal ?? {
       origin: 'default',
       sourceIdentity: null,
-      spotKey: '6max-100bb-btn-rfi-v2',
+      // The default practice spot follows the source new sessions use.
+      spotKey: referenceSchemaOf(CANONICAL_REFERENCE_SOURCE) === 3 ? '6max-100bb-btn-rfi-v3' : '6max-100bb-btn-rfi-v2',
       handClass: 'AJo',
       reason: 'default-supported-spot',
     },

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { withNamedLock } from '../engine/state.js';
 import { classifyOpportunity, isPreflopSpotKey } from './opportunities.js';
 import { assertEvaluationId } from './contracts.js';
-import { referenceQuality } from '../shared/reference.js';
+import { isCoverageReferenceSource, referenceQuality } from '../shared/reference.js';
 
 const REVIEW_FIELDS = new Set([
   'lastReviewedAt', 'nextReviewAt', 'intervalDays', 'ease',
@@ -299,7 +299,7 @@ function validateGraph(data, now) {
       if (!itemIds.has(id)) invalid('bank evidence digest has no matching identity');
       assertDigest(digest);
     }
-    if (source.id === 'local-preflop-baseline' && source.version === '2.0.0'
+    if (isCoverageReferenceSource(source)
       && !referenceAssessmentEligibility(item.evaluation).metricEligible) invalid('v2 bank evidence is not an exact comparison');
     const quality = referenceQuality(source).quality;
     const derived = { referenceQuality: quality, availability: quality === 'heuristic-reference' ? 'available' : 'unverified' };

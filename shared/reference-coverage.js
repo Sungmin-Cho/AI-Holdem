@@ -1,4 +1,11 @@
 import {referenceQuality, referenceSizeMatches, sameReferenceSource} from './reference.js';
+import {projectReferenceCoverageV3, referenceAssessmentEligibilityV3} from './reference-coverage-v3.js';
+
+/** A coverage checked against its source's schema: v2 (schema 1) or v3 (schema 2).
+ * A v3 coverage under a v2 source, or the reverse, is invalid. */
+export function projectCoverageFor(source,c) {
+ return source?.version==='3.0.0' ? projectReferenceCoverageV3(c) : projectReferenceCoverage(c);
+}
 const REASONS=['MODE_UNSUPPORTED','SEAT_COUNT_UNSUPPORTED','POSITION_INVALID','STACK_OUT_OF_RANGE',
  'UNSUPPORTED_STACK_CONFIGURATION','LIMP_OR_CALLER','FOUR_BET_PLUS','FACING_SIZE_OUT_OF_RANGE',
  'CHOICE_SIZE_OUT_OF_RANGE','DATASET_SPOT_MISSING','REFERENCE_ACTION_ILLEGAL',
@@ -81,6 +88,7 @@ export function referenceAssessmentEligibility(e) {
  const source=e?.source??e?.sourceIdentity??e?.mixObservation?.sourceIdentity;
  if(referenceQuality(source).quality!=='heuristic-reference')return {verified:false,referenceAvailable:false,metricEligible:false,reason:'SOURCE_IDENTITY_UNVERIFIED'};
  if(source.version==='1.0.0')return {verified:true,referenceAvailable:e.status==='supported'&&!e.forced,metricEligible:e.status==='supported'&&!e.forced,reason:null};
+ if(source.version==='3.0.0')return referenceAssessmentEligibilityV3(e,source);
  try {
   if(!Object.hasOwn(e,'coverage'))invalid();
   const c=projectReferenceCoverage(e.coverage);

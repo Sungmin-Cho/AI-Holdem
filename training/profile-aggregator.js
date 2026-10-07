@@ -1,9 +1,9 @@
 import { assistanceAllowsIndependent, projectAssistance } from '../shared/assistance.js';
 import {dealSelectionFields,dealSelectionDisposition} from '../shared/deal-selection.js';
-import { referenceAssessmentEligibility, projectReferenceCoverage } from '../shared/reference-coverage.js';
+import { referenceAssessmentEligibility, projectCoverageFor } from '../shared/reference-coverage.js';
 import { detectLeaks } from './leak-detector.js';
 import { confidenceOf, masteryOf } from './mastery.js';
-import { actionKey, matchReferenceAction, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
+import { actionKey, matchReferenceActionFor, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 
 export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@2.0.0';
@@ -96,7 +96,7 @@ export function assertProfileEvent(event) {
     throw coded('PROFILE_EVENT_INVALID', 'mix source identity does not match the event provider');
   }
   if (event.coverage !== undefined) {
-    try { projectReferenceCoverage(event.coverage); }
+    try { projectCoverageFor({ id: event.providerId, version: event.providerVersion }, event.coverage); }
     catch { throw coded('PROFILE_EVENT_INVALID','profile reference coverage is invalid'); }
   }
   if (event.sourceIdentity && (event.sourceIdentity.id !== event.providerId || event.sourceIdentity.version !== event.providerVersion)) throw coded('PROFILE_EVENT_INVALID', 'source identity conflict');
@@ -171,7 +171,7 @@ function applyToOverall(overall, event) {
 function allowedChoice(event) {
   if (!event.mixObservation) return isAllowedGrade(event.grade);
   if (referenceQuality(event.mixObservation.sourceIdentity).quality !== 'heuristic-reference') return false;
-  return (matchReferenceAction(event.mixObservation.referenceActions, event.mixObservation.chosenAction)?.frequency ?? 0) > 0;
+  return (matchReferenceActionFor(event.mixObservation.sourceIdentity, event.mixObservation.referenceActions, event.mixObservation.chosenAction)?.frequency ?? 0) > 0;
 }
 
 function applyToSkill(skills, event) {
@@ -209,7 +209,7 @@ function applyMixObservation(projection, raw) {
     expected: Object.fromEntries(observation.referenceActions.map((row) => [actionKey(row), row.frequency])),
     observed: {},
   };
-  const matched = matchReferenceAction(observation.referenceActions, observation.chosenAction);
+  const matched = matchReferenceActionFor(observation.sourceIdentity, observation.referenceActions, observation.chosenAction);
   const chosen = matched ? actionKey(matched) : `unmatched:${actionKey(observation.chosenAction)}`;
   group.n += 1;
   group.observed[chosen] = (group.observed[chosen] ?? 0) + 1;

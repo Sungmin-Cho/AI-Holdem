@@ -1,8 +1,8 @@
 import { verifyEvaluationAssistance } from './assistance-proof.js';
 import { readSessionReference } from './reference-source.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
-import { evaluatePreflopReference } from '../training/preflop-reference.js';
-import { sameReferenceSource } from '../shared/reference.js';
+import { evaluateReference } from '../training/reference-evaluator.js';
+import { isCoverageReferenceSource, sameReferenceSource } from '../shared/reference.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -1186,7 +1186,7 @@ export function materializeLearningEvaluation(sessionDir, item) {
     throw coded('LEARNING_DETAIL_IDENTITY_MISMATCH', 'learning detail identity does not match authority');
   }
   verifyEvaluationAssistance(sessionDir,detail,item.handNo,item.evaluationId.split(':')[0]);
-  if (detail.assistance !== undefined || detail.dealSelectionContractVersion != null || (detail.source?.id === 'local-preflop-baseline' && detail.source?.version === '2.0.0')) {
+  if (detail.assistance !== undefined || detail.dealSelectionContractVersion != null || isCoverageReferenceSource(detail.source)) {
     const projected = toPublicSummary(detail, {handNo:item.handNo, detailSha256:item.detailSha256, detailRef:item.detailRef});
     if (JSON.stringify(projected) !== JSON.stringify(canonicalSummary)) {
       throw coded('LEARNING_DETAIL_PROOF_MISMATCH', 'Versioned detail and summary differ');
@@ -1202,7 +1202,7 @@ export function materializeLearningEvaluation(sessionDir, item) {
 
 function verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, source) {
   if (evaluation.source?.id !== 'local-preflop-baseline') return;
-  if (evaluation.source?.version !== '2.0.0') {
+  if (!isCoverageReferenceSource(evaluation.source)) {
     // Legacy test/import artifacts without a lifecycle descriptor retain their contract.
     // A bound session cannot accept another baseline version or digest.
     try {
@@ -1222,7 +1222,7 @@ function verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, so
   }
   const snapshots = (record?.decisions ?? []).filter(s => s.actorId === 'user' && s.decisionId === evaluation.decisionId);
   if (snapshots.length !== 1) throw coded('REFERENCE_CONTEXT_UNAVAILABLE', 'Canonical completed decision missing');
-  const expected = evaluatePreflopReference(snapshots[0], loadReferenceDataset(source), {gameEpoch});
+  const expected = evaluateReference(snapshots[0], loadReferenceDataset(source), {gameEpoch});
   for (const key of ['evaluationId','decisionId','status','street','spotKey','handClass','recommended','chosen','bestEvBb','evLossBb','grade','forced','code','reason','source','coverage']) {
     if (JSON.stringify(evaluation[key]) !== JSON.stringify(expected[key])) throw coded('REFERENCE_EVALUATION_MISMATCH', `Reference evaluation mismatch: ${key}`);
   }
@@ -1299,7 +1299,7 @@ export function createTrainingControl({ storeDir, io } = {}) {
       auth.ownerSessionId = owner;
       auth.pending = auth.pending ?? {};
       auth.annotationQueue = auth.annotationQueue ?? {};
-      const source = (evaluations ?? []).some(e => e.source?.id === 'local-preflop-baseline' && e.source?.version === '2.0.0')
+      const source = (evaluations ?? []).some(e => isCoverageReferenceSource(e.source))
         ? readSessionReference(sessionDir) : null;
       const accepted = [];
       for (const evaluation of evaluations ?? []) {

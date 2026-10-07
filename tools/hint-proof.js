@@ -5,7 +5,7 @@ import { loadReferenceDataset } from './preflop-dataset.js';
 import { buildPreActionHint, recommendationHash } from '../training/pre-action-hint.js';
 import { observationHash, canonicalJson } from '../shared/decision-observation.js';
 import { projectHint } from '../shared/hint-contract.js';
-import { sameReferenceSource } from '../shared/reference.js';
+import { isCoverageReferenceSource, sameReferenceSource } from '../shared/reference.js';
 import { gameEpochOf } from '../publish-contract.js';
 
 async function readBounded(root, name, maxBytes) {
@@ -49,7 +49,7 @@ export async function verifyHintPublication({ sessionDir, token, context, initia
       if (state.sessionToken !== token || state.config?.hintContractVersion !== 1 || state.config.hints !== 'on') return {ready:false};
       const before = await readBounded(context.root,'reference-source.json',4096);
       context.source = readSessionReference(context.root,{expectedDescriptor:before.raw});
-      if (context.source.version !== '2.0.0') return {ready:false};
+      if (!isCoverageReferenceSource(context.source)) return {ready:false};
       context.dataset = loadReferenceDataset(context.source);
       context.descriptor = await readBounded(context.root,'reference-source.json',4096);
       if (before.raw !== context.descriptor.raw || before.dev !== context.descriptor.dev || before.ino !== context.descriptor.ino) throw new Error('source changed during initialization');

@@ -1,5 +1,6 @@
-import {parsePreflopKey,preflopKeys} from '../shared/preflop-key.js';
-import {V2_REFERENCE_SOURCE,sameReferenceSource} from '../shared/reference.js';
+import {parsePreflopKey,parsePreflopKeyV3,preflopKeys,preflopKeysV3} from '../shared/preflop-key.js';
+import {V2_REFERENCE_SOURCE,V3_REFERENCE_SOURCE,sameReferenceSource} from '../shared/reference.js';
+import {practiceKeyExactV3} from './native-preflop-snapshot-v3.js';
 import { createHash } from 'node:crypto';
 import { isPreflopSpotKey } from './opportunities.js';
 import { assertEvaluationId } from './contracts.js';
@@ -14,8 +15,20 @@ const SUPPORTED_SPOTS = [
   '6max-100bb-sb-vs-single-raise',
   '6max-100bb-btn-vs-single-raise',
 ];
-const SUPPORTED_SPOT_SET = new Set([...SUPPORTED_SPOTS,...preflopKeys()]);
-const spotsForSource = source => sameReferenceSource(source,V2_REFERENCE_SOURCE) ? preflopKeys() : SUPPORTED_SPOTS;
+// v3 drills use only the keys whose synthetic table is an exact comparison.
+const V3_PRACTICE_SPOTS = Object.freeze(preflopKeysV3().filter(practiceKeyExactV3));
+const SUPPORTED_SPOT_SET = new Set([...SUPPORTED_SPOTS,...preflopKeys(),...V3_PRACTICE_SPOTS]);
+const spotsForSource = source => sameReferenceSource(source,V3_REFERENCE_SOURCE) ? V3_PRACTICE_SPOTS
+  : sameReferenceSource(source,V2_REFERENCE_SOURCE) ? preflopKeys() : SUPPORTED_SPOTS;
+// The answer row set of a v3 context; sizes are the v3 tree's (push is all-in).
+function v3Prompt(parsed) {
+  const { context, stackBb } = parsed;
+  return {
+    actionHistory: context === 'vs-3bet' ? ['raise', 'raise'] : ['vs-single-raise', 'vs-shove'].includes(context) ? ['raise'] : [],
+    legalActions: context === 'rfi-unopened' ? ['fold', 'raise:2.5'] : context === 'vs-single-raise' ? ['fold', 'call', 'raise:8.5']
+      : context === 'vs-3bet' ? ['fold', 'call', 'raise:20'] : context === 'push' ? ['fold', `raise:${stackBb}`] : ['fold', 'call'],
+  };
+}
 const RANKS = 'AKQJT98765432'.split('');
 const HAND_CLASSES = [
   ...RANKS.map((rank) => `${rank}${rank}`),
@@ -72,17 +85,40 @@ function exactSource(left, right) {
     && (left?.contentSha256 ?? null) === (right?.contentSha256 ?? null);
 }
 
-function validateSelection(spotKey, handClass, source) {
+function validateSelection(spotKey, handClass, source, admits) {
   if (spotKey !== undefined && (!isPreflopSpotKey(spotKey) || !(source ? spotsForSource(source).includes(spotKey) : SUPPORTED_SPOT_SET.has(spotKey)))) {
     throw coded('UNSUPPORTED_SPOT', 'selected spot is unavailable in the reference dataset');
   }
   if (handClass !== undefined && !HAND_SET.has(handClass)) {
     throw coded('UNSUPPORTED_HAND', 'selected hand is unavailable in the reference dataset');
   }
+  // A hand the spot never reaches (a 3-bet against a hand the hero would not open).
+  if (spotKey !== undefined && handClass !== undefined && admits && !admits(spotKey, handClass)) {
+    throw coded('UNSUPPORTED_HAND', 'selected hand does not reach this spot');
+  }
 }
 
-function questionFrom({ mode, spotKey, handClass, skillKey, nonce, source, candidateMistakeId }) {
-  validateSelection(spotKey, handClass, source);
+function questionFrom({ mode, spotKey, handClass, skillKey, nonce, source, candidateMistakeId, admits }) {
+  validateSelection(spotKey, handClass, source, admits);
+  const v3 = parsePreflopKeyV3(spotKey);
+  if (v3) {
+    return {
+      questionId: `drill:${source.version}:${spotKey}:${handClass}:${nonce}`,
+      mode,
+      skillKey,
+      ...(candidateMistakeId ? { candidateMistakeId } : {}),
+      sourceIdentity: { ...source },
+      prompt: {
+        position: v3.position, handClass, stackBb: v3.stackBb, seated: v3.seated, openerPosition: v3.openerPosition,
+        referenceKind: 'native-practice', context: v3.context, spotKey, ...v3Prompt(v3),
+      },
+      answerPolicy: {
+        providerId: source.id,
+        providerVersion: source.version,
+        ...(source.contentSha256 ? { contentSha256: source.contentSha256 } : {}),
+      },
+    };
+  }
   const parsed = parsePreflopKey(spotKey);
   const pos = parsed.position;
   return {
@@ -126,6 +162,8 @@ function seatIn(key, seats) {
 }
 
 export function spotForSkillKey(skillKey) {
+  const v3 = String(skillKey ?? '').replace(/^preflop\.v3\./,'');
+  if (parsePreflopKeyV3(v3)) return v3;
   const v2 = String(skillKey ?? '').replace(/^preflop\.v2\./,'');
   if (parsePreflopKey(v2)?.version === 2) return v2;
   const key = String(skillKey ?? '').toLowerCase();
@@ -147,11 +185,11 @@ export function handClassForSkillKey(skillKey) {
   return HAND_ROTATION[sum % HAND_ROTATION.length];
 }
 
-function pool({ spots = SUPPORTED_SPOTS, hands = HAND_CLASSES, seed, seen = new Set() }) {
+function pool({ spots = SUPPORTED_SPOTS, hands = HAND_CLASSES, seed, seen = new Set(), admits }) {
   const pairs = [];
   for (const spot of spots) {
     for (const hand of hands) {
-      if (!seen.has(`${spot}:${hand}`)) pairs.push({ spot, handClass: hand });
+      if (!seen.has(`${spot}:${hand}`) && (!admits || admits(spot, hand))) pairs.push({ spot, handClass: hand });
     }
   }
   return shuffle(pairs, seed);
@@ -179,9 +217,9 @@ function itemInput(item, selectedSource) {
   return { item, spot, handClass, source: itemSource };
 }
 
-function questionsFromPairs(pairs, { mode, source, skillKey, limit }) {
+function questionsFromPairs(pairs, { mode, source, skillKey, limit, admits }) {
   return pairs.slice(0, limit).map(({ spot, handClass }, index) => questionFrom({
-    mode, source, spotKey: spot, handClass, skillKey, nonce: index + 1,
+    mode, source, spotKey: spot, handClass, skillKey, nonce: index + 1, admits,
   }));
 }
 
@@ -197,11 +235,12 @@ export function generateQueue({
   questionSet,
   limit = 10,
   source,
+  admits,
 } = {}) {
   if (!MODES.has(mode)) throw coded('INVALID_DRILL_MODE', `unsupported drill mode: ${mode}`);
   if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100) throw coded('INVALID_DRILL_LIMIT', 'invalid drill limit');
   const selectedSource = sourceIdentity(source);
-  validateSelection(spotKey, handClass, selectedSource);
+  validateSelection(spotKey, handClass, selectedSource, admits);
 
   if (mode === 'daily' || mode === 'mistake-review') {
     const candidates = mistakes
@@ -223,16 +262,16 @@ export function generateQueue({
   if (mode === 'retest') {
     if (!Array.isArray(questionSet)) throw coded('INCOMPLETE_ASSESSMENT', 'retest needs the original question set');
     const pairs = questionSet.map((question) => ({ spot: question.spotKey, handClass: question.handClass }));
-    for (const pair of pairs) validateSelection(pair.spot, pair.handClass, selectedSource);
-    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.retest', limit });
+    for (const pair of pairs) validateSelection(pair.spot, pair.handClass, selectedSource, admits);
+    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.retest', limit, admits });
   }
 
   if (mode === 'assessment') {
     const seen = new Set((history?.seenPairs ?? [])
       .filter((row) => exactSource(row.sourceIdentity, selectedSource))
       .map((row) => `${row.spotKey}:${row.handClass}`));
-    const pairs = pool({ spots:spotsForSource(selectedSource), seed, seen });
-    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.assessment', limit });
+    const pairs = pool({ spots:spotsForSource(selectedSource), seed, seen, admits });
+    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.assessment', limit, admits });
   }
 
   if (mode === 'leak') {
@@ -242,16 +281,17 @@ export function generateQueue({
       .filter((spot) => spotsForSource(selectedSource).includes(spot)))];
     if (!spots.length) return [];
     const primary = { spot: spots[0], handClass: handClassForSkillKey(leakKey) };
-    const pairs = [primary, ...pool({ spots, seed: `${seed}:${leakKey}` })
+    const usePrimary = !admits || admits(primary.spot, primary.handClass);
+    const pairs = [...(usePrimary ? [primary] : []), ...pool({ spots, seed: `${seed}:${leakKey}`, admits })
       .filter((pair) => pair.spot !== primary.spot || pair.handClass !== primary.handClass)];
     return questionsFromPairs(pairs, {
       mode, source: selectedSource,
-      skillKey: leakKey ?? 'preflop.leak', limit,
+      skillKey: leakKey ?? 'preflop.leak', limit, admits,
     });
   }
 
   const spots = spotKey ? [spotKey] : spotsForSource(selectedSource);
   const hands = handClass ? [handClass] : HAND_CLASSES;
-  const pairs = pool({ spots, hands, seed });
-  return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.free', limit });
+  const pairs = pool({ spots, hands, seed, admits });
+  return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.free', limit, admits });
 }

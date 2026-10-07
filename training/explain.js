@@ -1,6 +1,6 @@
 import { independentAssessmentEligibility } from '../shared/assistance.js';
 import {referenceAssessmentEligibility} from '../shared/reference-coverage.js';
-import { coachingClaimAllowed, referenceQuality } from '../shared/reference.js';
+import { coachingClaimAllowed, isCoverageReferenceSource, referenceQuality } from '../shared/reference.js';
 
 const ACTION_ALIASES = Object.freeze({
   raise: ['리레이즈', '3-bet', '3벳', '레이즈', 'raise', '오픈'],
@@ -103,7 +103,7 @@ function afterToken(text, index, token) {
  * at all (its source checks). The pipeline skips the LLM call otherwise. */
 export function explanationEligible(evaluation) {
   if (evaluation?.status === 'supported' && referenceQuality(evaluation.source).quality !== 'heuristic-reference') return false;
-  if (evaluation?.source?.version === '2.0.0' && !independentAssessmentEligibility(evaluation).verified) return false;
+  if (isCoverageReferenceSource(evaluation?.source) && !independentAssessmentEligibility(evaluation).verified) return false;
   return true;
 }
 
@@ -122,8 +122,8 @@ export function validateExplanation(evaluation, explanation) {
     return { ok: false, code: 'REFERENCE_SOURCE_UNVERIFIED' };
   }
   const eligibility = independentAssessmentEligibility(evaluation);
-  if (evaluation?.source?.version === '2.0.0' && !eligibility.verified) return {ok:false,code:'REFERENCE_SOURCE_UNVERIFIED'};
-  if (evaluation?.status !== 'supported' || (evaluation?.source?.version === '2.0.0' && !eligibility.metricEligible)) {
+  if (isCoverageReferenceSource(evaluation?.source) && !eligibility.verified) return {ok:false,code:'REFERENCE_SOURCE_UNVERIFIED'};
+  if (evaluation?.status !== 'supported' || (isCoverageReferenceSource(evaluation?.source) && !eligibility.metricEligible)) {
     if (/직접\s*비교|주력\s*선택|허용\s*선택|저빈도|off.policy|preferred|mixed/i.test(explanation)) return {ok:false,code:'REFERENCE_AUTHORITY_CLAIM'};
     const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;

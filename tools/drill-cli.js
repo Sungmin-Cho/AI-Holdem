@@ -15,10 +15,12 @@ import { eventFromEvaluation, eventForPrior } from '../training/profile-store.js
 import { learningEventKey } from '../training/study-history.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { lookup } from '../training/providers/preflop-json.js';
-import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES } from '../shared/reference.js';
+import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, V3_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { nativePreflopSnapshot } from '../training/native-preflop-snapshot.js';
 import { evaluatePreflopReference } from '../training/preflop-reference.js';
+import { evaluatePreflopReferenceV3 } from '../training/preflop-reference-v3.js';
+import { nativePreflopSnapshotV3 } from '../training/native-preflop-snapshot-v3.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
@@ -146,7 +148,7 @@ function assertSession(session, now = new Date().toISOString()) {
   for (const [index, question] of session.queue.entries()) {
     if (!object(question) || !object(question.prompt) || !object(question.answerPolicy)) throw coded('PENDING_UNRESOLVED', 'stored question is invalid');
     const { spotKey, handClass } = question.prompt;
-    const [canonical] = generateQueue({ mode: 'free', source, spotKey, handClass, limit: 1 });
+    const [canonical] = generateQueue({ mode: 'free', source, spotKey, handClass, limit: 1, admits: admitsFor(source) });
     if (question.questionId !== `drill:${source.version}:${spotKey}:${handClass}:${index + 1}`
       || question.mode !== session.mode || !isDeepStrictEqual(question.prompt, canonical.prompt)
       || (['free', 'leak', 'assessment', 'retest'].includes(session.mode) && pairs.has(`${spotKey}:${handClass}`))) throw coded('PENDING_UNRESOLVED', 'stored question identity or context is inconsistent');
@@ -254,12 +256,28 @@ function sameSource(left, right) {
     && left?.contentSha256 === right?.contentSha256;
 }
 
+// v3 grades against the rows its evaluator materializes on the practice table,
+// so the drill, the game and the eligibility check see the same row set.
 function lookupStrategy(question) {
-  const { data, contentSha256 } = loadReferenceDataset(question.sourceIdentity ?? LEGACY_REFERENCE_SOURCE);
-  return lookup({ data, contentSha256 }, {
+  const dataset = loadReferenceDataset(question.sourceIdentity ?? LEGACY_REFERENCE_SOURCE);
+  if (dataset.data.schemaVersion === 3) {
+    const evaluation = evaluatePreflopReferenceV3(nativePreflopSnapshotV3(question.prompt.spotKey, question.prompt.handClass, null),
+      dataset, { gameEpoch: '00'.repeat(32) });
+    if (evaluation.status !== 'supported') return { status: 'unsupported', code: evaluation.code, reason: evaluation.code, source: evaluation.source };
+    return { status: 'supported', actions: evaluation.recommended, source: lookup(dataset, { spotKey: '', handClass: '' }).source };
+  }
+  return lookup(dataset, {
     spotKey: question.prompt.spotKey,
     handClass: question.prompt.handClass,
   });
+}
+
+// Pairs a v3 spot can be asked with: the hand reaches it (a 3-bet spot only
+// with a hand the hero opens). Other sources ask every pair.
+function admitsFor(source) {
+  if (referenceSchemaOf(source) !== 3) return undefined;
+  const dataset = loadReferenceDataset(source);
+  return (spotKey, handClass) => lookup(dataset, { spotKey, handClass }).status === 'supported';
 }
 
 function coerceAttemptNo(value) {
@@ -303,6 +321,7 @@ function profileEventOf(session, question, attemptNo, result, source, answer) {
       contentSha256: source.contentSha256,
     },
     ...(source.version === '2.0.0' ? {coverage:evaluatePreflopReference(nativePreflopSnapshot(question.prompt.spotKey,question.prompt.handClass,answer),loadReferenceDataset(source)).coverage} : {}),
+    ...(source.version === '3.0.0' ? {coverage:evaluatePreflopReferenceV3(nativePreflopSnapshotV3(question.prompt.spotKey,question.prompt.handClass,answer),loadReferenceDataset(source)).coverage} : {}),
     recommended: result.recommended,
     chosen: {
       action: answer.action,
@@ -590,7 +609,8 @@ export async function startDrill(storeDir, {
       const activeId = rebuildFromEvents(events).activeSegmentId;
       defaultSource = KNOWN_REFERENCE_SOURCES.find(s=>`${s.id}@${s.version}`===activeId) ?? defaultSource;
     }
-    const loadedDataset = loadReferenceDataset(requestedSource ?? (spotKey && !spotKey.endsWith('-v2') ? LEGACY_REFERENCE_SOURCE : defaultSource));
+    const loadedDataset = loadReferenceDataset(requestedSource ?? (spotKey?.endsWith('-v3') ? V3_REFERENCE_SOURCE
+      : spotKey && !spotKey.endsWith('-v2') ? LEGACY_REFERENCE_SOURCE : defaultSource));
     let sourceIdentity = sourceIdentityOfDataset(loadedDataset);
     if (requestedSource !== undefined && !sameSource(requestedSource, sourceIdentity)) {
       throw coded('SOURCE_CHANGED', 'requested reference source is not available');
@@ -598,7 +618,7 @@ export async function startDrill(storeDir, {
     // Validate mode and explicit selection before any store reader can migrate
     // data and, most importantly, before replacing the current session.
     generateQueue({
-      mode, source: sourceIdentity, spotKey, handClass, limit: 0,
+      mode, source: sourceIdentity, spotKey, handClass, limit: 0, admits: admitsFor(sourceIdentity),
       ...(mode === 'retest' ? { questionSet: [] } : {}),
     });
     let existingProof = null;
@@ -646,7 +666,7 @@ export async function startDrill(storeDir, {
       : [];
     const queue = generateQueue({
       mode, profile, mistakes, seed, now: serverNow, spotKey, handClass,
-      history, questionSet, source: sourceIdentity,
+      history, questionSet, source: sourceIdentity, admits: admitsFor(sourceIdentity),
     });
     const noticesForRun = [...notices];
     if (mode === 'assessment' && queue.length < 10) {

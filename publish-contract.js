@@ -1,13 +1,13 @@
 export { trimHandLog } from './shared/runtime-bounds.js';
 import { projectAssistance } from './shared/assistance.js';
 import {dealSelectionFields} from './shared/deal-selection.js';
-import { projectReferenceCoverage } from './shared/reference-coverage.js';
+import { projectCoverageFor } from './shared/reference-coverage.js';
 import { createHash } from 'node:crypto';
 import {
   NOTE_MAX_BYTES, NOTE_MAX_CHARS, normalizeFreeText,
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
-import { coachingClaimAllowed } from './shared/reference.js';
+import { coachingClaimAllowed, isCoverageReferenceSource } from './shared/reference.js';
 import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
 
 export { HOST_ID, humanIdsOf, isHumanSeat };
@@ -738,8 +738,8 @@ export function projectTrainingSummary(item) {
   out.recommendedTruncated = item.recommendedTruncated === true;
   if (Object.hasOwn(item, 'assistance')) out.assistance = projectAssistance(item.assistance);
   Object.assign(out,dealSelectionFields(item));
-  if (Object.hasOwn(item, 'coverage')) out.coverage = projectReferenceCoverage(item.coverage);
-  if (item.source?.id === 'local-preflop-baseline' && item.source?.version === '2.0.0'
+  if (Object.hasOwn(item, 'coverage')) out.coverage = projectCoverageFor(item.source, item.coverage);
+  if (isCoverageReferenceSource(item.source)
     && !Object.hasOwn(item, 'coverage')) throw coded('TRAINING_PROOF_MISMATCH', 'v2 coverage missing');
   out.payloadSha256 = trainingPayloadSha256(out);
   return out;

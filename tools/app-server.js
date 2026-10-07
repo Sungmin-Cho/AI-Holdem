@@ -68,6 +68,7 @@ const SHARED_ASSETS = [
   "deal-selection.js",
   "poker-eval.js",
   "decision-facts.js",
+  "reference-coverage-v3.js",
   "game-setup.js",
   "pace.js",
   "player-budget.js",

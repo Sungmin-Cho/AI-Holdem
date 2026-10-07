@@ -1,4 +1,4 @@
-import { referenceQuality, matchReferenceAction } from '../shared/reference.js';
+import { referenceQuality, matchReferenceActionFor } from '../shared/reference.js';
 
 function coded(code, message) {
   const error = new Error(message);
@@ -37,7 +37,7 @@ export function evaluateDrillAnswer(question, answer, strategy) {
     };
   }
   const actions = strategy.actions ?? [];
-  const hit = matchReferenceAction(actions, answer);
+  const hit = matchReferenceActionFor(source, actions, answer);
   const frequency = hit?.frequency ?? 0;
   const grade = gradeFrequency(frequency, actions);
   return {

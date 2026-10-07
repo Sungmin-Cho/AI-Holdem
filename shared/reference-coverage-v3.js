@@ -2,6 +2,9 @@
 // input projected from an engine decision, and the one derivation both the
 // resolver (to produce) and the validator (to check) use. Pure and browser-safe.
 import { PREFLOP_ORDERS_V3, PUSHFOLD_STACKS_BB, preflopKeysV3 } from './preflop-key.js';
+import { matchReferenceActionV3, sameReferenceSource } from './reference.js';
+
+export { matchReferenceActionV3 };
 
 export const COVERAGE_V3_SCHEMA = 2;
 export const COVERAGE_V3_POLICY = 'preflop-projection-v2';
@@ -227,4 +230,67 @@ export function projectReferenceCoverageV3(c) {
   const expected = buildCoverageV3(c.input);
   if (JSON.stringify(expected) !== JSON.stringify(c)) invalid('derivation mismatch');
   return expected;
+}
+
+// The v3 tree's raise sizes (big blinds); push rows are all-in. The dataset
+// records the same values in data.tree (test-pinned).
+export const V3_TREE = Object.freeze({ openBb: 2.5, threeBetBb: 8.5, fourBetBb: 20 });
+const TREE_RAISE_BB = Object.freeze({ 'rfi-unopened': V3_TREE.openBb, 'vs-single-raise': V3_TREE.threeBetBb, 'vs-3bet': V3_TREE.fourBetBb });
+
+/** Grade by the reference frequency of the chosen action class (v2 thresholds). */
+export function gradeOfFrequencyV3(frequency, actions) {
+  if (!(frequency > 0)) return 'off-policy';
+  const max = Math.max(...actions.map((row) => row.frequency));
+  return frequency === max || frequency >= 0.5 ? 'preferred' : frequency >= 0.1 ? 'mixed' : 'low-frequency';
+}
+
+/** Eligibility of a v3 evaluation, profile event or mix observation: the
+ * coverage must re-derive exactly, the chosen action must be the coverage's,
+ * and an eligible row set must be the tree's legal rows with the stated grade. */
+export function referenceAssessmentEligibilityV3(e, source) {
+  const fail = () => ({ verified: false, referenceAvailable: false, metricEligible: false, reason: 'REFERENCE_COVERAGE_INVALID' });
+  try {
+    if (!e || !Object.hasOwn(e, 'coverage')) return fail();
+    const c = projectReferenceCoverageV3(e.coverage);
+    if (e.mixObservation && !sameReferenceSource(e.mixObservation.sourceIdentity, source)) return fail();
+    const available = e.status === 'supported' && !e.forced;
+    if (e.status === 'supported' && !c.derived.spotKey) return fail();
+    const spotKey = e.spotKey ?? e.mixObservation?.spotKey;
+    if (e.status === 'supported' && spotKey !== undefined && spotKey !== c.derived.spotKey) return fail();
+    const eligible = available && c.metricEligible;
+    const actions = e.recommended ?? e.mixObservation?.referenceActions;
+    const choice = e.chosen ?? e.mixObservation?.chosenAction;
+    const bb = c.input.bbChips;
+    if (choice && c.input.chosen) {
+      if (choice.action !== c.input.chosen.action) return fail();
+      if (choice.action === 'raise' ? !(Math.abs(choice.sizeBb * bb - c.input.chosen.toChips) < 1e-6) : choice.sizeBb !== undefined) return fail();
+      if (choice.allIn !== undefined && (choice.allIn !== true || choice.action !== 'raise')) return fail();
+    } else if (Boolean(choice) !== Boolean(c.input.chosen)) return fail();
+    if (!eligible && (e.grade != null || (e.chosen && e.chosen.frequency != null))) return fail();
+    if (eligible) {
+      if (!Array.isArray(actions) || !actions.length || actions.length > 3 || !choice) return fail();
+      const legal = c.input.legal;
+      const context = c.derived.context;
+      const seen = new Set();
+      let sum = 0;
+      for (const row of actions) {
+        if (!['fold', 'call', 'raise'].includes(row?.action) || seen.has(row.action) || !Number.isFinite(row.frequency)
+          || row.frequency <= 0 || row.frequency > 1 || row.evBb != null) return fail();
+        seen.add(row.action);
+        sum += row.frequency;
+        if (row.action === 'raise') {
+          const to = context === 'push' ? legal.maxRaiseToChips : Math.round((TREE_RAISE_BB[context] ?? NaN) * bb);
+          if (!legal.canRaise || !(Math.abs(row.sizeBb * bb - to) < 1e-6) || (row.allIn !== undefined && (row.allIn !== true || context !== 'push'))) return fail();
+        } else if (row.sizeBb !== undefined || row.allIn !== undefined) return fail();
+        if (row.action === 'call' && (legal.canCheck || ['rfi-unopened', 'push'].includes(context))) return fail();
+        if (row.action === 'fold' && legal.canCheck) return fail();
+      }
+      if (Math.abs(sum - 1) > 1e-9) return fail();
+      const f = matchReferenceActionV3(actions, choice)?.frequency ?? 0;
+      if (e.grade !== gradeOfFrequencyV3(f, actions) || (choice.frequency !== undefined && choice.frequency !== f)) return fail();
+    }
+    return { verified: true, referenceAvailable: available, metricEligible: eligible, reason: null };
+  } catch {
+    return fail();
+  }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readSessionReference } from './reference-source.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
-import { evaluatePreflopReference } from '../training/preflop-reference.js';
+import { evaluateReference } from '../training/reference-evaluator.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,8 +112,8 @@ function runEvaluate() {
       pendingSolve.push(snapshot.decisionId);
       continue;
     }
-    if (data.schemaVersion === 2) {
-      evaluations.push(evaluatePreflopReference(snapshot, {data, contentSha256}, {gameEpoch}));
+    if (data.schemaVersion === 2 || data.schemaVersion === 3) {
+      evaluations.push(evaluateReference(snapshot, {data, contentSha256}, {gameEpoch}));
       continue;
     }
     const handClass = handClassOf(snapshot.holeCards);
