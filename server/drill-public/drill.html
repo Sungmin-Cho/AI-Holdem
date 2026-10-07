@@ -28,7 +28,7 @@
       <div class="mode-controls">
         <div class="ui-field mode-field">
           <label class="ui-label" for="mode">연습 모드</label>
-          <span class="ui-select-wrap"><select id="mode" class="ui-select" aria-describedby="mode-help"><option value="free">자유 연습</option><option value="leak">연습 후보</option><option value="daily">오늘 복습</option><option value="mistake-review">기준표와 다른 선택 복습</option><option value="assessment">새 문제 평가</option><option value="retest">지연 재평가</option></select></span>
+          <span class="ui-select-wrap"><select id="mode" class="ui-select" aria-describedby="mode-help"><option value="free">자유 연습</option><option value="leak">연습 후보</option><option value="daily">오늘 복습</option><option value="mistake-review">기준표와 다른 선택 복습</option><option value="assessment">새 문제 평가</option><option value="retest">지연 재평가</option><option value="transfer">일반화 연습</option></select></span>
         </div>
         <p id="mode-help" class="mode-help"><span id="mode-description"></span> <span id="mode-availability"></span></p>
         <button id="start" class="ui-btn ui-btn--primary ui-btn--lg" type="button" disabled>연습 시작</button>
@@ -37,7 +37,7 @@
         <summary>고급 · 연습 기준표</summary>
         <div class="ui-field">
           <label class="ui-label" for="reference-source">연습 기준표</label>
-          <span class="ui-select-wrap"><select id="reference-source" class="ui-select"><option value="">현재 기록 기준</option><option value="1.0.0">v1 · 이전 기록 복습</option><option value="2.0.0">v2 · 6·8·9인</option></select></span>
+          <span class="ui-select-wrap"><select id="reference-source" class="ui-select"><option value="">현재 기록 기준</option><option value="1.0.0">v1 · 이전 기록 복습</option><option value="2.0.0">v2 · 6·8·9인</option><option value="3.0.0">v3 · 2~9인 · 3벳·푸시/폴드</option></select></span>
         </div>
       </details>
       <div class="status-row"><p id="status" role="status" aria-live="polite">저장된 연습을 확인하고 있습니다…</p><button id="recover" class="ui-btn ui-btn--quiet" type="button">현재 상태 확인</button><button id="retry" class="ui-btn ui-btn--ghost" type="button" hidden>같은 답안 다시 확인</button></div>
@@ -54,6 +54,7 @@
         <p id="context" class="context"></p>
         <div id="actions" class="actions" aria-label="가능한 액션"></div>
         <div id="feedback" class="feedback" aria-live="polite" hidden></div>
+        <div id="chart-box" class="chart-box" hidden></div>
         <button id="next" class="ui-btn ui-btn--primary ui-btn--lg" type="button" hidden>다음 문제</button>
         <p id="notices" class="notice"></p>
         <p id="question-source" class="source-tag"></p>
@@ -69,12 +70,14 @@
       </div>
       <p id="summary-status" role="status"></p>
       <section class="assessments" aria-labelledby="assessments-title"><h2 id="assessments-title" class="ui-h3">평가와 재평가</h2><p class="assessments-note">같은 출처의 기준표 측정치끼리 비교합니다.</p><div id="assessments"></div></section>
+      <section class="trends" aria-labelledby="trends-title"><h2 id="trends-title" class="ui-h3">추세</h2><p class="assessments-note">출처와 출제 방식이 같은 실행끼리만 비교합니다. 게임은 결과 공개 전·힌트 없는 결정만 셉니다.</p><div id="trends"></div></section>
+      <section class="pot-odds" aria-labelledby="pot-odds-title"><h2 id="pot-odds-title" class="ui-h3">팟 오즈 연습</h2><div id="pot-odds"></div></section>
     </aside>
   </main>
   <footer class="study-foot">
     <p class="study-honesty"><span>학습 수치는 로컬 휴리스틱 기준표와 비교한 참고값이며, 실제 포커 실력·수익·GTO 정답을 증명하지 않습니다.</span> <span id="source-help"></span></p>
     <p id="source" class="study-source">기준표 출처를 확인하고 있습니다.</p>
-    <p>연습 기준: 선택한 출처 버전의 100BB 프리플롭. v2는 6·8·9인 미오픈·단일 오픈 대응을 지원합니다. 게임의 투영 참고는 점수에 포함하지 않습니다.</p>
+    <p>연습 기준: 선택한 출처 버전의 프리플롭. v2는 6·8·9인 100BB 미오픈·단일 오픈 대응을, v3는 2~9인 오픈·오픈 대응·3벳 대응과 15BB 이하 푸시/폴드를 다룹니다. 게임의 투영 참고는 점수에 포함하지 않습니다.</p>
   </footer>
   <script type="module" src="/drill.js"></script>
 </body>

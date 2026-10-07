@@ -2,7 +2,7 @@ import { referenceQuality, matchReferenceActionFor } from '../../shared/referenc
 import { PREFLOP_ORDERS, PREFLOP_ORDERS_V3, parsePreflopKey, parsePreflopKeyV3 } from '../../shared/preflop-key.js';
 import { handClassParts } from '../public/card-render.js';
 
-export const STUDY_MODES = Object.freeze({ free: '자유 연습', leak: '연습 후보', daily: '오늘 복습', 'mistake-review': '기준표와 다른 선택 복습', assessment: '새 문제 평가', retest: '지연 재평가' });
+export const STUDY_MODES = Object.freeze({ free: '자유 연습', leak: '연습 후보', daily: '오늘 복습', 'mistake-review': '기준표와 다른 선택 복습', assessment: '새 문제 평가', retest: '지연 재평가', transfer: '일반화 연습' });
 const ACTIONS = { fold: '폴드', check: '체크', call: '콜', raise: '레이즈', bet: '벳' };
 const GRADES = { preferred: '기준표 주력 선택', mixed: '기준표 허용 선택', 'low-frequency': '기준표 저빈도 허용 선택', 'off-policy': '기준표와 다른 선택' };
 const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -19,8 +19,9 @@ export const STUDY_MODE_HELP = Object.freeze({
   leak: '게임 기록에서 기준표와 자주 달랐던 상황(연습 후보)을 중심으로 풉니다. 후보가 없으면 문항이 없습니다.',
   daily: '기준표와 다른 선택으로 모인 복습 항목 가운데 복습 시각이 된 것만 풉니다.',
   'mistake-review': '기준표와 다른 선택으로 모인 복습 항목을 복습 시각과 상관없이 다시 풉니다.',
-  assessment: '추적된 기록에서 아직 보지 않은 상황 10문항으로 평가합니다. 추적 이전의 노출은 알 수 없습니다.',
+  assessment: '추적된 기록에서 아직 답하지 않은 상황 10문항으로 평가합니다. 최근 7일 안에 차트를 본 상황은 빼고, 추적 이전의 노출은 알 수 없습니다.',
   retest: '완료한 새 문제 평가를 24시간 뒤 같은 문항으로 다시 풉니다.',
+  transfer: '틀렸던 손패 바로 옆(같은 상황의 이웃 손패) 가운데 아직 답하지 않은 것을 풉니다. 외운 답이 아니라 원리를 확인합니다.',
 });
 
 /** Why a mode may give no questions or refuse to start, from the summary. */
@@ -215,6 +216,8 @@ function runSummary(run, allowed) {
   const retest = run.retest ?? run.retestAvailability ?? {};
   return { id: run.id, assessmentId: run.assessmentId, complete: run.complete === true, title: STUDY_MODES[run.mode] ?? '새 문제 평가',
     rate: valid ? percent(run.result?.allowedActionRate) : '측정 자료 없음',
+    // What always folding would have scored on the same questions.
+    baseline: valid && number(run.result?.foldBaselineRate) !== null ? `항상 폴드 기준선 ${percent(run.result.foldBaselineRate)}` : null,
     samples: `${count(run.result?.total)} / ${count(run.total)}문항`,
     status: valid ? '완료 · 기준표 참고 측정치' : formatStudyError({ code: run.reason ?? 'INCOMPLETE_RUN' }),
     canRetest: valid && retest.eligible === true,
@@ -229,11 +232,29 @@ export function formatSummary(summary = {}) {
   const goalAllowed = goal && (verified(goal.sourceIdentity) || goal.origin === 'default');
   return {
     source: formatSource(source), sourceShort: formatSourceShort(source), game: originSummary(summary.game, allowed), practice: originSummary(summary.practice, allowed),
-    due: `${count(summary.bank?.dueCount)}개 오늘 복습 · 전체 ${count(summary.bank?.totalCount)}개`,
+    due: `${count(summary.bank?.dueCount)}개 오늘 복습 · 전체 ${count(summary.bank?.totalCount)}개${count(summary.bank?.graduatedCount) ? ` · 졸업 ${count(summary.bank.graduatedCount)}개` : ''}`,
     goal: goalAllowed ? `${goal.origin === 'game' ? '게임 기록' : goal.origin === 'practice' ? '연습 기록' : '기본 지원 상황'}에서 정한 목표: ${position(goal.spotKey?.split('-')[2])} · ${hand(goal.handClass)}의 기준 빈도 확인` : '확인된 근거가 없어 목표를 준비하지 못했습니다.',
     assessments: (summary.assessments ?? []).map((run) => runSummary(run, allowed)),
     retests: (summary.retests ?? []).map((run) => runSummary(run, allowed && (summary.assessments ?? []).some((base) => base.id === run.assessmentId && base.complete && !base.reason && verified(base.sourceIdentity) && JSON.stringify(base.sourceIdentity) === JSON.stringify(run.sourceIdentity)))),
   };
+}
+/** Trends (design D12): one series per source and mode — runs from different
+ * question distributions are never joined — and one row per game session. */
+export function formatTrends(trends = {}) {
+  const series = new Map();
+  for (const run of Array.isArray(trends.practice) ? trends.practice : []) {
+    if (typeof run?.series !== 'string' || number(run.allowedActionRate) === null) continue;
+    const [sourceText, mode] = run.series.split('|');
+    const label = `${STUDY_MODES[mode] ?? '연습'} · ${sourceText.replace('local-preflop-baseline@', '기준표 ')}`;
+    const rows = series.get(label) ?? [];
+    rows.push({ date: new Date(run.startedAt).toLocaleDateString('ko-KR'), rate: percent(run.allowedActionRate),
+      baseline: number(run.foldBaselineRate) !== null ? percent(run.foldBaselineRate) : null, width: Math.round(run.allowedActionRate * 1000) / 10 });
+    series.set(label, rows);
+  }
+  const game = (Array.isArray(trends.game) ? trends.game : []).filter((row) => number(row?.allowedActionRate) !== null)
+    .map((row) => ({ label: `게임 ${count(row.session)} · ${new Date(row.startedAt).toLocaleDateString('ko-KR')}`, graded: `${count(row.graded)}결정 채점`,
+      rate: percent(row.allowedActionRate), width: Math.round(row.allowedActionRate * 1000) / 10 }));
+  return { series: [...series].map(([label, rows]) => ({ label, rows: rows.slice(-12) })), game: game.slice(-12) };
 }
 export function drillRequest(pathname, authToken, { method = 'GET', body, signal } = {}) {
   const headers = { 'x-drill-token': authToken };

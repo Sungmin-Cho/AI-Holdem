@@ -1,6 +1,7 @@
 import {parsePreflopKey,parsePreflopKeyV3,preflopKeys,preflopKeysV3} from '../shared/preflop-key.js';
 import {V2_REFERENCE_SOURCE,V3_REFERENCE_SOURCE,sameReferenceSource} from '../shared/reference.js';
 import {practiceKeyExactV3} from './native-preflop-snapshot-v3.js';
+import {neighbourClasses} from './drill-strata.js';
 import { createHash } from 'node:crypto';
 import { isPreflopSpotKey } from './opportunities.js';
 import { assertEvaluationId } from './contracts.js';
@@ -36,7 +37,7 @@ const HAND_CLASSES = [
     .flatMap((low) => [`${high}${low}s`, `${high}${low}o`])),
 ];
 const HAND_SET = new Set(HAND_CLASSES);
-const MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest']);
+const MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest', 'transfer']);
 const PROVIDER_ID_RE = /^[a-z0-9-]{1,64}$/;
 const PROVIDER_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -195,6 +196,13 @@ function pool({ spots = SUPPORTED_SPOTS, hands = HAND_CLASSES, seed, seen = new 
   return shuffle(pairs, seed);
 }
 
+// Weighted order without replacement (Efraimidis–Spirakis): key = u^(1/w).
+function weightedOrder(pairs, weightOf, seed) {
+  const rand = rng(`${seed}:weighted`);
+  return pairs.map((pair) => ({ pair, key: rand() ** (1 / Math.max(1e-6, weightOf(pair.spot, pair.handClass))) }))
+    .sort((a, b) => b.key - a.key).map((row) => row.pair);
+}
+
 function itemInput(item, selectedSource) {
   const spot = item?.spotKey ?? String(item?.spotSignature ?? '').split(':')[0];
   const handClass = item?.handClass ?? String(item?.spotSignature ?? '').split(':')[1];
@@ -236,6 +244,8 @@ export function generateQueue({
   limit = 10,
   source,
   admits,
+  weightOf,
+  exposedPairs,
 } = {}) {
   if (!MODES.has(mode)) throw coded('INVALID_DRILL_MODE', `unsupported drill mode: ${mode}`);
   if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100) throw coded('INVALID_DRILL_LIMIT', 'invalid drill limit');
@@ -243,8 +253,13 @@ export function generateQueue({
   validateSelection(spotKey, handClass, selectedSource, admits);
 
   if (mode === 'daily' || mode === 'mistake-review') {
-    const candidates = mistakes
-      .filter((item) => mode !== 'daily' || !item.nextReviewAt || item.nextReviewAt <= now)
+    // Daily skips graduated items (SR v2); review shows the most overdue first,
+    // then the most lapsed.
+    const ordered = mode === 'mistake-review'
+      ? [...mistakes].sort((a, b) => String(a.nextReviewAt ?? '').localeCompare(String(b.nextReviewAt ?? '')) || (b.lapses ?? 0) - (a.lapses ?? 0))
+      : mistakes;
+    const candidates = ordered
+      .filter((item) => mode !== 'daily' || ((!item.nextReviewAt || item.nextReviewAt <= now) && !item.graduatedAt))
       .map((item) => itemInput(item, selectedSource))
       .filter(Boolean);
     const seen = new Set();
@@ -266,21 +281,51 @@ export function generateQueue({
     return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.retest', limit, admits });
   }
 
-  if (mode === 'assessment') {
-    const seen = new Set((history?.seenPairs ?? [])
+  if (mode === 'transfer') {
+    // Neighbours of the hands missed in the bank (latest first) on the same
+    // spot, never answered and not shown on a recent chart.
+    const seen = new Set([...(history?.seenPairs ?? [])
       .filter((row) => exactSource(row.sourceIdentity, selectedSource))
-      .map((row) => `${row.spotKey}:${row.handClass}`));
-    const pairs = pool({ spots:spotsForSource(selectedSource), seed, seen, admits });
+      .map((row) => `${row.spotKey}:${row.handClass}`), ...(exposedPairs ?? [])]);
+    const missed = mistakes.map((item) => itemInput(item, selectedSource)).filter(Boolean)
+      .sort((a, b) => String(b.item.lastSeenAt ?? b.item.firstSeenAt ?? '').localeCompare(String(a.item.lastSeenAt ?? a.item.firstSeenAt ?? '')));
+    const pairs = [];
+    const taken = new Set();
+    for (const { spot, handClass: hand } of missed) {
+      for (const next of neighbourClasses(hand)) {
+        const key = `${spot}:${next}`;
+        if (seen.has(key) || taken.has(key) || (admits && !admits(spot, next))) continue;
+        taken.add(key);
+        pairs.push({ spot, handClass: next });
+      }
+    }
+    return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.transfer', limit, admits });
+  }
+
+  if (mode === 'assessment') {
+    const seen = new Set([...(history?.seenPairs ?? [])
+      .filter((row) => exactSource(row.sourceIdentity, selectedSource))
+      .map((row) => `${row.spotKey}:${row.handClass}`), ...(exposedPairs ?? [])]);
+    // v3 assessments are stratified (mixed and boundary cells first); others stay uniform.
+    const base = pool({ spots:spotsForSource(selectedSource), seed, seen, admits });
+    const pairs = weightOf ? weightedOrder(base, weightOf, seed) : base;
     return questionsFromPairs(pairs, { mode, source: selectedSource, skillKey: 'preflop.assessment', limit, admits });
   }
 
   if (mode === 'leak') {
-    const leaks = profile?.game?.leaks ?? profile?.leaks ?? profile?.practice?.leaks ?? [];
+    // Game leaks first; practice leaks when the game has none. Empty only when both are.
+    const nonEmpty = (list) => (Array.isArray(list) && list.length ? list : null);
+    const leaks = nonEmpty(profile?.game?.leaks) ?? nonEmpty(profile?.leaks) ?? nonEmpty(profile?.practice?.leaks) ?? [];
     const leakKey = leaks[0]?.recommendedDrill ?? leaks[0]?.id;
     const spots = [...new Set(leaks.map((leak) => spotForSkillKey(leak.recommendedDrill ?? leak.id))
       .filter((spot) => spotsForSource(selectedSource).includes(spot)))];
     if (!spots.length) return [];
-    const primary = { spot: spots[0], handClass: handClassForSkillKey(leakKey) };
+    // The first question is the hand actually missed there, when the bank has it.
+    const missed = mistakes
+      .map((item) => itemInput(item, selectedSource))
+      .filter((row) => row && row.spot === spots[0])
+      .sort((a, b) => String(b.item.lastSeenAt ?? b.item.firstSeenAt ?? '').localeCompare(String(a.item.lastSeenAt ?? a.item.firstSeenAt ?? '')))[0];
+    const primary = { spot: spots[0], handClass: missed?.handClass ?? handClassForSkillKey(leakKey) };
     const usePrimary = !admits || admits(primary.spot, primary.handClass);
     const pairs = [...(usePrimary ? [primary] : []), ...pool({ spots, seed: `${seed}:${leakKey}`, admits })
       .filter((pair) => pair.spot !== primary.spot || pair.handClass !== primary.handClass)];

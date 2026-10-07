@@ -23,8 +23,9 @@ test('size-matching reference comparisons are only the v1/v2 paths', () => {
     'shared/reference.js': 1,
     'server/drill-public/study-format.js': 1,
     'training/drill-evaluator.js': 1,
+    'training/goal.js': 1,                   // the shared practice goal
     'training/profile-aggregator.js': 2,
-    'training/study-history.js': 1,
+    'training/study-history.js': 2,          // run questions and game trends
   });
 });
 
@@ -50,7 +51,8 @@ test('literal reference versions and key-suffix source inference are inventoried
     'server/drill-public/drill.js': 1,   // key suffix → version (v3, v2, v1)
     'shared/hint-contract.js': 1,        // v2 hint branch
     'shared/reference.js': 2,            // the v2 source and referenceSchemaOf
-    'tools/drill-cli.js': 1,             // v2 drill coverage beside the v3 one
+    'tools/drill-cli.js': 2,             // v2 drill coverage beside the v3 one; chart source by key suffix
+    'tools/drill-server.js': 1,          // chart view version allowlist
     'training/policies/contracts.js': 1, // policy predecessor versions (another axis)
     'training/pre-action-hint.js': 1,    // supported hint sources
     'training/providers/preflop-json.js': 1, // the v2 dataset validator
@@ -62,11 +64,12 @@ test('literal reference versions and key-suffix source inference are inventoried
     'shared/reference-coverage.js': 2,
     'shared/reference.js': 2,
     'tools/drill-cli.js': 1,
+    'tools/drill-server.js': 1,
     'training/pre-action-hint.js': 2,
-    'training/policies/strategy-v3.js': 1, // policy version (another axis)
+    'training/policies/contracts.js': 1, // policy version (another axis)
     'tools/build-preflop-baseline-v3.js': 1,
     'training/providers/preflop-json.js': 1,
   });
-  assert.deepEqual(sites("endsWith('-v2')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 1 });
-  assert.deepEqual(sites("endsWith('-v3')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 1 });
+  assert.deepEqual(sites("endsWith('-v2')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 2 });
+  assert.deepEqual(sites("endsWith('-v3')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 2 });
 });

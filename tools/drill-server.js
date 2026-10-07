@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startDrill, nextQuestion, answerQuestion, readDrillSession } from './drill-cli.js';
+import { startDrill, nextQuestion, answerQuestion, readDrillSession, readSpotChart } from './drill-cli.js';
 import { readStudySummary } from './study-summary.js';
+import { KNOWN_REFERENCE_SOURCES } from '../shared/reference.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_BODY = 64 * 1024;
@@ -30,13 +31,15 @@ const STATIC = new Map([
   ['/study-format.js', ['server/drill-public/study-format.js', 'text/javascript; charset=utf-8']],
   ['/shared/preflop-key.js', ['shared/preflop-key.js', 'text/javascript; charset=utf-8']],
   ['/shared/reference.js', ['shared/reference.js', 'text/javascript; charset=utf-8']],
+  ['/pot-odds-drill.js', ['server/drill-public/pot-odds-drill.js', 'text/javascript; charset=utf-8']],
+  ['/spot-chart.js', ['server/drill-public/spot-chart.js', 'text/javascript; charset=utf-8']],
 ]);
 const CLIENT_ERRORS = new Map([
   ['PAYLOAD_TOO_LARGE', 413], ['BAD_JSON', 400], ['USAGE', 400],
   ['INVALID_DRILL_ANSWER', 400], ['INVALID_DRILL_MODE', 400], ['INVALID_DRILL_LIMIT', 400], ['INVALID_DRILL_SELECTION', 400],
   ['UNSUPPORTED_SPOT', 400], ['UNSUPPORTED_HAND', 400],
   ['NO_SESSION', 409], ['STALE_QUESTION', 409], ['PENDING_UNRESOLVED', 409],
-  ['RETEST_NOT_DUE', 409], ['INCOMPLETE_ASSESSMENT', 409], ['SOURCE_UNAVAILABLE', 409], ['SOURCE_CHANGED', 409], ['SOURCE_UNVERIFIED', 409],
+  ['RETEST_NOT_DUE', 409], ['GRID_LOCKED', 409], ['INCOMPLETE_ASSESSMENT', 409], ['SOURCE_UNAVAILABLE', 409], ['SOURCE_CHANGED', 409], ['SOURCE_UNVERIFIED', 409],
   ['PARENT_IDENTITY_MISMATCH', 409], ['STUDY_IDENTITY_MISMATCH', 409], ['LOCKED', 409],
   ['UNAUTHORIZED', 401], ['FORBIDDEN', 403], ['NOT_FOUND', 404],
   ['UNSUPPORTED_PROFILE', 500], ['UNSUPPORTED_MISTAKES', 500], ['PROFILE_EVENT_INVALID', 500],
@@ -156,6 +159,13 @@ export function createDrillHandler({ storeDir, token, onActivity = () => {}, bef
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
         sendJson(res, 200, { ok: true, summary: await readStudySummary(storeDir) }); return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/spot') {
+        await beforeRequest();
+        const version = url.searchParams.get('version');
+        if (version && !['1.0.0', '2.0.0', '3.0.0'].includes(version)) fail('USAGE');
+        const known = version ? KNOWN_REFERENCE_SOURCES.find((row) => row.version === version) : undefined;
+        sendJson(res, 200, await readSpotChart(storeDir, { spotKey: url.searchParams.get('spotKey'), source: known })); return;
       }
       if (req.method === 'GET' && ['/api/current', '/api/next'].includes(url.pathname)) {
         const read = url.pathname === '/api/current' ? readDrillSession : nextQuestion;

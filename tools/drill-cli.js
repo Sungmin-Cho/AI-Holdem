@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createMistakeBank } from './training-stores.js';
 import { generateQueue } from '../training/drill-generator.js';
 import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
-import { nextSchedule } from '../training/spaced-repetition.js';
+import { nextSchedule, SRS_VERSION } from '../training/spaced-repetition.js';
 import { createProfileStore, trainingStoreIo } from './training-stores.js';
 import { createMistakeBank as createReadOnlyBank } from '../training/mistake-bank.js';
 import { NO_HINT_ASSISTANCE } from '../shared/assistance.js';
@@ -21,6 +21,7 @@ import { nativePreflopSnapshot } from '../training/native-preflop-snapshot.js';
 import { evaluatePreflopReference } from '../training/preflop-reference.js';
 import { evaluatePreflopReferenceV3 } from '../training/preflop-reference-v3.js';
 import { nativePreflopSnapshotV3 } from '../training/native-preflop-snapshot-v3.js';
+import { strataForSpot } from '../training/drill-strata.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
@@ -120,7 +121,7 @@ function assertAnswer(answer, question) {
 
 function assertSession(session, now = new Date().toISOString()) {
   if (!object(session) || ![1, 2, 3].includes(session.schemaVersion) || !isSessionId(session.sessionId)
-    || !['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest'].includes(session.mode)
+    || !['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest', 'transfer'].includes(session.mode)
     || !Array.isArray(session.queue) || session.queue.length > 100
     || !Number.isSafeInteger(session.index) || session.index < 0 || session.index > session.queue.length
     || !Array.isArray(session.answers) || session.answers.length !== session.index) {
@@ -151,7 +152,7 @@ function assertSession(session, now = new Date().toISOString()) {
     const [canonical] = generateQueue({ mode: 'free', source, spotKey, handClass, limit: 1, admits: admitsFor(source) });
     if (question.questionId !== `drill:${source.version}:${spotKey}:${handClass}:${index + 1}`
       || question.mode !== session.mode || !isDeepStrictEqual(question.prompt, canonical.prompt)
-      || (['free', 'leak', 'assessment', 'retest'].includes(session.mode) && pairs.has(`${spotKey}:${handClass}`))) throw coded('PENDING_UNRESOLVED', 'stored question identity or context is inconsistent');
+      || (['free', 'leak', 'assessment', 'retest', 'transfer'].includes(session.mode) && pairs.has(`${spotKey}:${handClass}`))) throw coded('PENDING_UNRESOLVED', 'stored question identity or context is inconsistent');
     pairs.add(`${spotKey}:${handClass}`);
     if (legacy) {
       if (question.sourceIdentity !== undefined || question.candidateMistakeId !== undefined
@@ -272,6 +273,27 @@ function lookupStrategy(question) {
   });
 }
 
+// Stratum weights of a v3 spot (assessment), from the dataset's frequencies.
+function weightsFor(source) {
+  if (referenceSchemaOf(source) !== 3) return undefined;
+  const dataset = loadReferenceDataset(source);
+  const cache = new Map();
+  return (spotKey, handClass) => {
+    if (!cache.has(spotKey)) {
+      cache.set(spotKey, strataForSpot((cls) => {
+        const found = lookup(dataset, { spotKey, handClass: cls });
+        const f = { fold: 1, call: 0, raise: 0 };
+        if (found.status === 'supported') {
+          f.fold = 0;
+          for (const row of found.actions) f[row.action] = (f[row.action] ?? 0) + row.frequency;
+        }
+        return f;
+      }));
+    }
+    return cache.get(spotKey).get(handClass)?.weight ?? 1;
+  };
+}
+
 // Pairs a v3 spot can be asked with: the hand reaches it (a 3-bet spot only
 // with a hand the hero opens). Other sources ask every pair.
 function admitsFor(source) {
@@ -351,7 +373,9 @@ async function buildSrsPatch(storeDir, question, result) {
   };
 }
 
-function scheduleTarget(before, result, at) {
+// New reviews use SR v2; a pending patch is re-derived with the version it was
+// captured under (a patch without srsVersion is a v1 transition).
+function scheduleTarget(before, result, at, srsVersion = SRS_VERSION) {
   if (!object(before) || !Number.isSafeInteger(before.attempts) || before.attempts < 0
     || !Number.isSafeInteger(before.intervalDays) || before.intervalDays < 0
     || !Number.isSafeInteger(before.lapses) || before.lapses < 0
@@ -361,7 +385,10 @@ function scheduleTarget(before, result, at) {
   }
   const target = {
     lastReviewedAt: at, attempts: before.attempts + 1,
-    ...nextSchedule({ grade: result.grade, intervalDays: before.intervalDays, ease: before.ease, lapses: before.lapses, now: Date.parse(at) }),
+    ...(srsVersion === SRS_VERSION
+      ? nextSchedule({ grade: result.grade, intervalDays: before.intervalDays, ease: before.ease, lapses: before.lapses, now: Date.parse(at),
+        srsVersion, correctStreak: before.correctStreak, graduatedAt: before.graduatedAt ?? null })
+      : nextSchedule({ grade: result.grade, intervalDays: before.intervalDays, ease: before.ease, lapses: before.lapses, now: Date.parse(at) })),
   };
   if (['attempts', 'intervalDays', 'lapses'].some((key) => !Number.isSafeInteger(target[key]) || target[key] < 0)) {
     throw coded('PENDING_UNRESOLVED', 'SRS target exceeds supported counters');
@@ -489,7 +516,7 @@ async function pendingProof(storeDir, session, eventSnapshot) {
     if (!legacy || captured.before !== undefined) {
       if (session.studyRun && (Date.parse(captured.patch.lastReviewedAt) < Date.parse(session.studyRun.startedAt)
         || Date.parse(captured.patch.lastReviewedAt) > Date.parse(serverNow))) throw coded('PENDING_UNRESOLVED', 'SRS review time is outside its run');
-      const expected = scheduleTarget(captured.before, expectedResult, captured.patch.lastReviewedAt);
+      const expected = scheduleTarget(captured.before, expectedResult, captured.patch.lastReviewedAt, captured.patch.srsVersion === SRS_VERSION ? SRS_VERSION : 1);
       if (!isDeepStrictEqual(expected, captured.patch)) throw coded('PENDING_UNRESOLVED', 'SRS target is not the captured absolute transition');
       const target = { ...captured.before, ...expected };
       srsDone = isDeepStrictEqual(candidate.reviewState, target);
@@ -591,6 +618,68 @@ function storedAnswer(session, questionId, attemptNo) {
   return { ok: true, result, next: session.queue[attemptNo + 1] ?? null };
 }
 
+// Chart view (design D12): the full 13×13 frequencies of one spot. A chart
+// shows every answer of that spot, so it is refused while an assessment, a
+// retest or a transfer run is open, and each view is recorded; assessment and
+// transfer then treat that spot's hands as seen for seven days.
+const EXPOSURE_SEGMENTS = ['grid-exposures.json'];
+const EXPOSURE_LIMIT = 500;
+const EXPOSURE_WINDOW_MS = 7 * 86_400_000;
+const LOCKED_RUN_MODES = new Set(['assessment', 'retest', 'transfer']);
+function loadExposures(storeDir) {
+  try {
+    const rows = JSON.parse(openContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, { maxBytes: 256 * 1024 }).toString('utf8'));
+    return Array.isArray(rows) ? rows.filter((row) => row && typeof row.spotKey === 'string' && typeof row.at === 'string' && row.sourceIdentity) : [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+/** Pairs of spots whose chart was shown within the window, for this source. */
+function exposedPairsFor(storeDir, source, now) {
+  const recent = loadExposures(storeDir).filter((row) => sameSource(row.sourceIdentity, source)
+    && Date.parse(now) - Date.parse(row.at) <= EXPOSURE_WINDOW_MS);
+  const hands = allHandClassesOrder();
+  return [...new Set(recent.map((row) => row.spotKey))].flatMap((spotKey) => hands.map((hand) => `${spotKey}:${hand}`));
+}
+const RANKS = 'AKQJT98765432';
+function allHandClassesOrder() {
+  const out = [];
+  for (let row = 0; row < 13; row += 1) {
+    for (let col = 0; col < 13; col += 1) out.push(row === col ? `${RANKS[row]}${RANKS[col]}` : row < col ? `${RANKS[row]}${RANKS[col]}s` : `${RANKS[col]}${RANKS[row]}o`);
+  }
+  return out;
+}
+export async function readSpotChart(storeDir, { spotKey, source: requested } = {}) {
+  if (typeof spotKey !== 'string' || !/^[a-z0-9-]{1,100}$/.test(spotKey)) throw coded('UNSUPPORTED_SPOT', 'spot key is invalid');
+  return withDrillLock(storeDir, async () => {
+    const session = loadSession(storeDir);
+    if (session && LOCKED_RUN_MODES.has(session.mode) && session.index < (session.queue?.length ?? 0)) {
+      throw coded('GRID_LOCKED', 'charts are hidden while an assessment, retest or transfer run is open');
+    }
+    const known = requested ? KNOWN_REFERENCE_SOURCES.find((row) => sameSource(row, requested))
+      : spotKey.endsWith('-v3') ? V3_REFERENCE_SOURCE : spotKey.endsWith('-v2') ? KNOWN_REFERENCE_SOURCES.find((row) => row.version === '2.0.0') : LEGACY_REFERENCE_SOURCE;
+    if (!known) throw coded('SOURCE_UNAVAILABLE', 'requested reference source is not available');
+    const dataset = loadReferenceDataset(known);
+    const source = sourceIdentityOfDataset(dataset);
+    const cells = {};
+    let any = false;
+    for (const hand of allHandClassesOrder()) {
+      const found = lookup(dataset, { spotKey, handClass: hand });
+      if (found.status !== 'supported') { cells[hand] = null; continue; }
+      any = true;
+      const f = { fold: 0, call: 0, raise: 0 };
+      for (const row of found.actions) f[row.action] = Math.round((f[row.action] + row.frequency) * 10000) / 10000;
+      cells[hand] = f;
+    }
+    if (!any) throw coded('UNSUPPORTED_SPOT', 'spot is not in the reference dataset');
+    const at = new Date().toISOString();
+    const rows = [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }].slice(-EXPOSURE_LIMIT);
+    writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
+    return { ok: true, source, spotKey, cells };
+  });
+}
+
 export async function startDrill(storeDir, {
   mode = 'free', seed = '0', idempotencyKey, spotKey, handClass,
   assessmentId, source: requestedSource,
@@ -667,10 +756,12 @@ export async function startDrill(storeDir, {
     const queue = generateQueue({
       mode, profile, mistakes, seed, now: serverNow, spotKey, handClass,
       history, questionSet, source: sourceIdentity, admits: admitsFor(sourceIdentity),
+      weightOf: mode === 'assessment' ? weightsFor(sourceIdentity) : undefined,
+      exposedPairs: ['assessment', 'transfer'].includes(mode) ? exposedPairsFor(storeDir, sourceIdentity, serverNow) : undefined,
     });
     const noticesForRun = [...notices];
     if (mode === 'assessment' && queue.length < 10) {
-      noticesForRun.push(`추적된 미노출 문항은 ${queue.length}개입니다.`);
+      noticesForRun.push(`추적된 미응답 문항은 ${queue.length}개입니다.`);
     }
     if (mode === 'assessment' && history.unknownPreTrackingExposure) {
       noticesForRun.push('추적 시작 이전의 노출 여부는 알 수 없습니다.');

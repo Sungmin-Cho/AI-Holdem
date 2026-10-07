@@ -6,9 +6,10 @@ import { classifyOpportunity, isPreflopSpotKey } from './opportunities.js';
 import { assertEvaluationId } from './contracts.js';
 import { isCoverageReferenceSource, referenceQuality } from '../shared/reference.js';
 
+// srsVersion and graduatedAt arrive with SR v2; an item without them is v1.
 const REVIEW_FIELDS = new Set([
   'lastReviewedAt', 'nextReviewAt', 'intervalDays', 'ease',
-  'attempts', 'correctStreak', 'lapses',
+  'attempts', 'correctStreak', 'lapses', 'srsVersion', 'graduatedAt',
 ]);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -178,7 +179,11 @@ function assertReviewPatchValues(patch) {
     throw coded('MISTAKE_UPDATE_FORBIDDEN', 'only SRS review fields may be updated');
   }
   for (const [key, value] of Object.entries(patch)) {
-    if (['lastReviewedAt', 'nextReviewAt'].includes(key)) {
+    if (key === 'srsVersion') {
+      if (value !== 2) throw coded('MISTAKE_UPDATE_INVALID', 'srsVersion must be 2');
+    } else if (key === 'graduatedAt') {
+      if (value !== null && !timestamp(value)) throw coded('MISTAKE_UPDATE_INVALID', 'graduatedAt must be null or an ISO timestamp');
+    } else if (['lastReviewedAt', 'nextReviewAt'].includes(key)) {
       if (value !== null && !timestamp(value)) {
         throw coded('MISTAKE_UPDATE_INVALID', `${key} must be null or an ISO timestamp`);
       }
