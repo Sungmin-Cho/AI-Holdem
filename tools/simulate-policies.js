@@ -161,6 +161,28 @@ export function measureExploits({ hands = 20000, seed = 'g6', block = 500, strat
   return out;
 }
 
+// Design gates: G5 persona VPIP bands (Station PFR ≤ 12), TAG c-bet 45–70%,
+// nut raise ≥ 80% when observed; G6 95% upper bound ≤ +30bb/100.
+export const G5_BANDS = Object.freeze({ Nit: [9, 16], TAG: [18, 26], LAG: [26, 36], CallingStation: [35, 55], Maniac: [45, 70] });
+export function gateFailures({ tendencies, exploits }) {
+  const failures = [];
+  if (tendencies) {
+    for (const [name, [low, high]] of Object.entries(G5_BANDS)) {
+      const vpip = tendencies.personas[name]?.vpip;
+      if (!(vpip >= low && vpip <= high)) failures.push(`G5 ${name} VPIP ${vpip?.toFixed(1)} outside ${low}-${high}`);
+    }
+    if (!(tendencies.personas.CallingStation?.pfr <= 12)) failures.push('G5 CallingStation PFR above 12');
+    const cbet = tendencies.tagCbet.rate;
+    if (cbet !== null && !(cbet >= 45 && cbet <= 70)) failures.push(`G5 TAG c-bet ${cbet.toFixed(1)} outside 45-70`);
+    const nut = tendencies.nutRaise.rate;
+    if (nut !== null && nut < 80) failures.push(`G5 nut raise ${nut.toFixed(1)} below 80`);
+  }
+  for (const [name, row] of Object.entries(exploits ?? {})) {
+    if (row.high > 30) failures.push(`G6 ${name} upper ${row.high.toFixed(1)} above +30bb/100`);
+  }
+  return failures;
+}
+
 function parseArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -182,5 +204,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
     result.exploits = measureExploits({ ...(hands ? { hands } : {}), seed: flags.seed ?? 'g6',
       ...(flags.strategy ? { strategies: String(flags.strategy).split(',') } : {}) });
   }
+  if (flags.assert) result.failures = gateFailures(result);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (flags.assert && result.failures.length) process.exitCode = 1;
 }

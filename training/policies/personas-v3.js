@@ -17,7 +17,7 @@ export const PERSONAS_V3 = Object.freeze({
   }),
   Nit: Object.freeze({
     traits: Object.freeze({ tightness: 0.78, aggression: 0.35, calling: 0.25, bluff: 0.05 }),
-    preflop: Object.freeze({ rfiWidth: 0.5, callWidth: 0.45, threeBetScale: 0.6, bluffThreeBet: 1, limp: 0, pushWidth: 0.75 }),
+    preflop: Object.freeze({ rfiWidth: 0.42, callWidth: 0.35, threeBetScale: 0.6, bluffThreeBet: 1, limp: 0, pushWidth: 0.75 }),
   }),
   CallingStation: Object.freeze({
     traits: Object.freeze({ tightness: 0.45, aggression: 0.18, calling: 0.80, bluff: 0.04 }),

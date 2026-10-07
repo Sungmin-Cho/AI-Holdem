@@ -15,18 +15,14 @@ import { handClassOf } from '../cards.js';
 import { pushChart, rfiRange, shoveCallChart, vs3betChart, vsOpenChart } from '../ranges/charts-v3.js';
 import { equityVsRange } from '../ranges/equity-table.js';
 import { estimateOpponentRanges } from '../ranges/estimate-v3.js';
-import { fallbackLegal, legalizeEntries } from './contracts.js';
+import { fallbackLegal, isStrategyV3, legalizeEntries, VERSION_V3 } from './contracts.js';
 import { roundToUnit } from './sizing.js';
 
-export const VERSION_V3 = '3.0.0';
+export { isStrategyV3, VERSION_V3 };
 const N = HAND_CLASSES.length;
 const POSTFLOP_SAMPLES = 500;
 const PREFLOP_SAMPLES = 400;
 const PREMIUMS = new Set(['AA', 'KK', 'QQ', 'AKs', 'AKo']);
-
-export function isStrategyV3(config) {
-  return config?.base === 'strategy-v3';
-}
 
 const clamp = (value, low = 0, high = 1) => Math.min(high, Math.max(low, value));
 
@@ -368,7 +364,7 @@ function postflopDistribution(snapshot, legal, persona, t) {
       reason = 'v3-semibluff-bet';
     } else if (preflopAggressor && firstToActOnFlop) {
       fraction = 0.33;
-      pBet = clamp((0.25 + 0.45 * traits.aggression + 0.2 * traits.bluff) * (multi ? 0.45 : 1));
+      pBet = clamp((0.15 + 0.45 * traits.aggression + 0.2 * traits.bluff) * (multi ? 0.45 : 1));
       reason = 'v3-cbet';
     } else if (river && equity < 0.2 && !multi) {
       // Bluff mass b/(1+b) of the value frequency, scaled by the persona's

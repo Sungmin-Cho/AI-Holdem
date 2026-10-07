@@ -8,6 +8,12 @@ export function isStrategyV2(config) {
   return config?.base === 'strategy-v2';
 }
 
+// Policy v3 (design D11): v3 charts with persona widths, equity-based postflop.
+export const VERSION_V3 = '3.0.0';
+export function isStrategyV3(config) {
+  return config?.base === 'strategy-v3';
+}
+
 export function coded(code, message) {
   const error = new Error(message);
   error.code = code;
