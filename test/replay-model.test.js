@@ -518,3 +518,26 @@ test('pots carry their eligible seats, each winner once, and odd chips go clockw
   swapped.endStacks[high.playerId] -= 1; swapped.endStacks[low.playerId] += 1;
   reject(swapped, 'the odd chip given to the wrong winner');
 });
+
+test('rules v2 hands replay: a cumulative short all-in reopening and a short big blind', () => {
+  const four = createGame({ aiCount: 3 });
+  four.button = 0;
+  [5000, 130, 160, 5000].forEach((stack, i) => { four.seats[i].stack = stack; });
+  const script = [['raise', 100], ['raise', 130], ['raise', 160], ['call'], ['raise', 400], ['fold']];
+  const reopened = play(four, (legal, turn) => script[turn] ?? (legal.canCheck ? ['check'] : ['call']));
+  assert.equal(reopened.rulesVersion, 2);
+  assert.ok(reopened.actions.some((a) => a.playerId === 'user' && a.action === 'raise' && a.amount === 400));
+  const { replay } = verified(reopened);
+  assert.equal(replay.rulesVersion, 2);
+  // The same record without the rules marker is held to the old rule and fails.
+  const legacy = structuredClone(replay);
+  delete legacy.rulesVersion;
+  assert.equal(buildReplaySteps(legacy).ok, false);
+
+  const two = createGame({ aiCount: 1 });
+  two.button = 0;
+  two.seats[0].stack = 8;
+  const shortBlind = play(two, passive);
+  assert.equal(shortBlind.actions.length, 0);
+  verified(shortBlind);
+});

@@ -130,6 +130,10 @@ test('folded-raise 100 live / 80 folded / 50 live returns Uncalled 20, shrinks p
   const before = chipTotal(st);
   assert.equal(before, 15000);
 
+  // A hand-built legacy state: a folded seat holds the largest bet. Rules v2 would
+  // end it at once (nothing left for the user to match), so keep the v1 path.
+  delete st.hand.rulesVersion;
+  delete st.hand.actedAt;
   st.hand.contribs = { user: 50, p1: 80, p2: 50 };
   st.hand.folded = ['p1'];
   st.hand.allIn = ['p2'];
@@ -181,7 +185,7 @@ test('split pot repeats collected lines; side pot uses side pot-N', () => {
   assert.match(splitText, /p1 collected 75 from pot/);
   assert.match(splitText, /user collected 75 from pot/);
   const sideText = renderPokerStars({ hands: [normalizeHand(side.record)] }, RENDER_OPTS).text;
-  assert.match(sideText, /p2 collected 300 from pot/);
+  assert.match(sideText, /p2 collected 300 from main pot/);
   assert.match(sideText, /p2 collected 400 from side pot-1/);
 });
 

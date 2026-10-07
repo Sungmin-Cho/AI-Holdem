@@ -30,6 +30,14 @@ function streetFromBoard(board) {
   return 'preflop';
 }
 
+// PokerStars shows the earlier board, then the new card in its own brackets:
+// *** TURN *** [2c 7d 9h] [3s].
+function streetLine(board, street) {
+  const n = boardCount(street);
+  if (street === 'flop') return `${streetHeader(street)} ${formatCards(board.slice(0, 3))}`;
+  return `${streetHeader(street)} ${formatCards(board.slice(0, n - 1))} ${formatCards(board.slice(n - 1, n))}`;
+}
+
 function emitStreetHeaders(lines, board, fromStreet, toStreet) {
   const order = ['preflop', 'flop', 'turn', 'river'];
   const start = order.indexOf(fromStreet);
@@ -37,12 +45,16 @@ function emitStreetHeaders(lines, board, fromStreet, toStreet) {
   if (start < 0 || end < 0) return;
   for (let i = start + 1; i <= end; i += 1) {
     const street = order[i];
-    const n = boardCount(street);
-    if ((board?.length ?? 0) >= n) {
-      lines.push(`${streetHeader(street)} ${formatCards(board.slice(0, n))}`);
-    }
+    if ((board?.length ?? 0) >= boardCount(street)) lines.push(streetLine(board, street));
   }
 }
+
+// Engine hand names are Korean; hand-history tools expect English.
+const HAND_NAMES_EN = Object.freeze({
+  '하이 카드': 'high card', '원페어': 'a pair', '투페어': 'two pair', '트리플': 'three of a kind',
+  '스트레이트': 'a straight', '플러시': 'a flush', '풀하우스': 'a full house', '포카드': 'four of a kind',
+  '스트레이트 플러시': 'a straight flush', '로열 스트레이트 플러시': 'a royal flush',
+});
 
 function isAllInAction(hand, action, index) {
   if (action.action !== 'call' && action.action !== 'raise') return false;
@@ -82,10 +94,14 @@ export function renderPokerStars(canonical, { gameId = '1', exportedAt = '2026/0
       continue;
     }
     lines.push(`PokerStars Hand #AIH${gameId}-${hand.handNo}: Hold'em No Limit (${blinds[0]}/${blinds[1]} PLAY) - ${exportedAt}`);
-    const buttonSeat = seats.findIndex((seat) => seat.playerId === hand.button) + 1;
-    lines.push(`Table 'AI-Holdem' ${seats.length}-max Seat #${buttonSeat || 1} is the button`);
-    seats.forEach((seat, index) => {
-      lines.push(`Seat ${index + 1}: ${seat.playerId} (${seat.stack} in chips)`);
+    // Real table seats when the record carries them; older records number by deal order.
+    const table = Array.isArray(hand.tableSeats) && seats.every((seat) => hand.tableSeats.includes(seat.playerId))
+      ? hand.tableSeats : seats.map((seat) => seat.playerId);
+    const seatNo = (playerId) => table.indexOf(playerId) + 1;
+    const buttonSeat = seatNo(hand.button);
+    lines.push(`Table 'AI-Holdem' ${table.length}-max Seat #${buttonSeat || 1} is the button`);
+    [...seats].sort((a, b) => seatNo(a.playerId) - seatNo(b.playerId)).forEach((seat) => {
+      lines.push(`Seat ${seatNo(seat.playerId)}: ${seat.playerId} (${seat.stack} in chips)`);
     });
     const posts = hand.posts ?? [];
     if (posts[0]) {
@@ -124,7 +140,7 @@ export function renderPokerStars(canonical, { gameId = '1', exportedAt = '2026/0
     if (hasShowdown) {
       lines.push('*** SHOW DOWN ***');
       for (const reveal of showdown.reveals ?? []) {
-        const name = reveal.handName ? ` (${reveal.handName})` : '';
+        const name = reveal.handName ? ` (${HAND_NAMES_EN[reveal.handName] ?? reveal.handName})` : '';
         lines.push(`${reveal.playerId}: shows ${formatCards(reveal.cards)}${name}`);
       }
       for (const pid of showdown.mucks ?? []) {
@@ -132,17 +148,22 @@ export function renderPokerStars(canonical, { gameId = '1', exportedAt = '2026/0
       }
     }
 
-    for (const pot of hand.pots ?? []) {
+    const pots = hand.pots ?? [];
+    const split = pots.length > 1;
+    for (const pot of pots) {
       for (const winner of pot.winners ?? []) {
         if (winner?.playerId == null || winner.share == null) continue;
-        const source = (pot.potIndex ?? 0) === 0 ? 'pot' : `side pot-${pot.potIndex}`;
+        const source = (pot.potIndex ?? 0) === 0 ? (split ? 'main pot' : 'pot') : `side pot-${pot.potIndex}`;
         lines.push(`${winner.playerId} collected ${winner.share} from ${source}`);
       }
     }
 
-    const pot = (hand.pots ?? []).reduce((sum, item) => sum + (item.amount ?? 0), 0);
+    const pot = pots.reduce((sum, item) => sum + (item.amount ?? 0), 0);
     lines.push('*** SUMMARY ***');
-    lines.push(`Total pot ${pot} | Rake 0`);
+    const parts = split
+      ? ` Main pot ${pots[0].amount ?? 0}.${pots.slice(1).map((item) => ` Side pot-${item.potIndex} ${item.amount ?? 0}.`).join('')}`
+      : '';
+    lines.push(`Total pot ${pot}${parts} | Rake 0`);
     if (hand.board?.length) lines.push(`Board ${formatCards(hand.board)}`);
     lines.push('');
   }

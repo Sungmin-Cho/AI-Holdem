@@ -222,6 +222,8 @@ export function normalizeHand(record, { evaluations = [] } = {}) {
     button: record.button,
     blinds: record.blinds,
     seats: Object.entries(record.startStacks ?? {}).map(([playerId, stack]) => ({ playerId, stack })),
+    ...(Array.isArray(record.tableSeats) && record.tableSeats.every((id) => typeof id === 'string')
+      ? { tableSeats: [...record.tableSeats] } : {}),
     heroCards: record.holes?.user ?? [],
     board: record.board ?? [],
     actions: Array.isArray(record.actions)

@@ -105,13 +105,23 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
   // button) — a legacy record without them skips only that part.
   const positional = players.every((playerId) => positionRank(replay.positions?.[playerId]) !== null) ? replaySeatOrder(replay) : null;
   const acted = new Set();
+  // Rules v2 (engine hand.rulesVersion 2): cumulative short all-ins reopen the
+  // betting, and a lone player left to act only matches what others can win.
+  const rulesV2 = replay.rulesVersion === 2;
+  let actedAt = {};
   let reopenEligible = true, handOver = false, roundClosed = false, toAct = null;
   const canPut = (playerId) => !folded.has(playerId) && stacks[playerId] > 0;
   const actionable = () => players.filter(canPut);
   const stillIn = () => players.filter((playerId) => !folded.has(playerId)).length;
+  const betToMatch = (playerId) => {
+    const open = actionable();
+    if (!rulesV2 || open.length !== 1 || open[0] !== playerId) return currentBet;
+    const others = players.filter((id) => id !== playerId && !folded.has(id)).map((id) => bets[id]);
+    return others.length ? Math.min(currentBet, Math.max(...others)) : currentBet;
+  };
   const needsAction = (playerId) => {
     if (!canPut(playerId)) return false;
-    const matched = bets[playerId] >= currentBet;
+    const matched = bets[playerId] >= betToMatch(playerId);
     if (actionable().length === 1) return !matched;
     return !(acted.has(playerId) && matched);
   };
@@ -126,7 +136,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (stillIn() <= 1) return true;
     const open = actionable();
     if (!open.length) return true;
-    if (open.length === 1) return bets[open[0]] >= currentBet;
+    if (open.length === 1) return bets[open[0]] >= betToMatch(open[0]);
     return open.every((playerId) => acted.has(playerId) && bets[playerId] >= currentBet);
   };
   // Preflop starts left of the big blind. If nobody needs to act (the blinds
@@ -163,7 +173,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
       shownBoard = [...dealt];
       snapshot({ kind: 'street', collected });
       // advanceStreet: bets reset, the first seat after the button that needs to act.
-      acted.clear(); reopenEligible = true; roundClosed = false;
+      acted.clear(); actedAt = {}; reopenEligible = true; roundClosed = false;
       if (positional) toAct = nextNeeding(0);
     }
     if (positional && playerId !== toAct) return fail('order', index);
@@ -174,7 +184,7 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     if (action.currentBet !== undefined && action.currentBet !== currentBet) return fail('current-bet', index);
     if (action.maxRaiseTo !== undefined && action.maxRaiseTo !== bets[playerId] + stacks[playerId]) return fail('max-raise', index);
     if (action.minRaiseTo !== undefined && action.minRaiseTo !== currentBet + lastRaiseSize) return fail('min-raise', index);
-    const owed = Math.min(Math.max(0, currentBet - bets[playerId]), stacks[playerId]);
+    const owed = Math.min(Math.max(0, betToMatch(playerId) - bets[playerId]), stacks[playerId]);
     if (action.callAmount !== undefined && action.callAmount !== owed) return fail('call-amount', index);
     let chips = 0;
     if (action.action === 'fold') folded.add(playerId);
@@ -186,7 +196,9 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
     } else if (action.action === 'raise') {
       if (!isAmount(action.amount) || action.amount <= currentBet) return fail('raise', index);
       // canRaise: an incomplete raise does not reopen the action, and someone must be left to answer.
-      if ((acted.has(playerId) && !reopenEligible) || !actionable().some((id) => id !== playerId)) return fail('raise', index);
+      const reopenBlocked = acted.has(playerId) && (rulesV2
+        ? currentBet - (actedAt[playerId] ?? currentBet) < lastRaiseSize : !reopenEligible);
+      if (reopenBlocked || !actionable().some((id) => id !== playerId)) return fail('raise', index);
       chips = action.amount - bets[playerId];
       if (chips <= 0 || chips > stacks[playerId]) return fail('raise', index);
       // A short all-in is the only raise below the minimum (applyAction's rule).
@@ -196,10 +208,12 @@ export function buildReplaySteps(replay, { seatOrder } = {}) {
         lastRaiseSize = action.amount - currentBet;
         reopenEligible = true;
         acted.clear();
+        actedAt = {};
       } else reopenEligible = false;
       currentBet = action.amount;
     } else return fail('action', index);
     acted.add(playerId);
+    actedAt[playerId] = currentBet;
     if (chips) put(playerId, chips);
     // afterAction: the hand ends, the round goes on, or the next street is due.
     if (stillIn() <= 1) handOver = true;

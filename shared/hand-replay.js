@@ -115,6 +115,7 @@ export function replayRecord(record, { reveal, humanIds } = {}) {
       }),
   };
   if (record.hintContractVersion === 1) replay.hintContractVersion = 1;
+  if (record.rulesVersion === 2) replay.rulesVersion = 2;
   Object.assign(replay,dealSelectionFields(record));
   if (record.positions) replay.positions = structuredClone(record.positions);
   return replay;
