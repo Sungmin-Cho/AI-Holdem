@@ -6,16 +6,21 @@ import { buildBaselineV3 } from '../tools/build-preflop-baseline-v3.js';
 import { parsePreflopJson, lookup, validateDataset } from '../training/providers/preflop-json.js';
 import { preflopKeysV3, parsePreflopKeyV3, PREFLOP_ORDERS_V3 } from '../shared/preflop-key.js';
 import { HAND_CLASSES, comboCount } from '../shared/poker-eval.js';
+import { pushFoldRegret, solvePushFold, EV_MARGIN_BB } from '../training/ranges/pushfold-v3.js';
 
 const file = new URL('../training/data/preflop-baseline-v3.json', import.meta.url);
 const raw = fs.readFileSync(file, 'utf8');
 const pinned = fs.readFileSync(new URL('../training/data/preflop-baseline-v3.sha256', import.meta.url), 'utf8').trim();
 const dataset = parsePreflopJson(raw, { expectedSha256: pinned });
 
+// Unreachable rows (facing a 3-bet with a hand the opener never opens) read as
+// a fold here; the lookup itself reports them unsupported (tested below).
 function freqs(key) {
   return HAND_CLASSES.map(hand => {
     const row = { raise: 0, call: 0, fold: 0 };
-    for (const a of lookup(dataset, { spotKey: key, handClass: hand }).actions) row[a.action] = a.frequency;
+    const found = lookup(dataset, { spotKey: key, handClass: hand });
+    if (found.status !== 'supported') return { ...row, fold: 1, unreachable: true };
+    for (const a of found.actions) row[a.action] = a.frequency;
     return row;
   });
 }
@@ -72,13 +77,39 @@ test('G1: premiums never fold and 72o never opens', () => {
   for (const key of preflopKeysV3()) {
     const rows = freqs(key);
     const { context } = parsePreflopKeyV3(key);
-    for (const hand of ['AA', 'KK', 'QQ', 'AKs']) {
-      if (context === 'vs-3bet' && at(rows, hand).fold === 1 && at(rows, hand).raise === 0 && at(rows, hand).call === 0) {
-        continue; // a 3-bet spot is only reachable through the opener's own range
-      }
-      assert.equal(at(rows, hand).fold, 0, `${key} ${hand}`);
-    }
+    for (const hand of ['AA', 'KK', 'QQ', 'AKs']) assert.equal(at(rows, hand).fold, 0, `${key} ${hand}`);
     if (context === 'rfi-unopened') assert.equal(at(rows, '72o').raise, 0, key);
+  }
+});
+
+// Hands whose action published charts broadly agree on (design D3.4).
+const ANCHORS = {
+  '6max-100bb-bb-vs-btn-open-v3': { cont: ['22', '55', '88', 'A2s', 'A5s', 'A9s', 'KQs', 'KJs', 'KTs', 'QJs', 'QTs', 'JTs', 'ATo', 'AJo', 'KTo', 'KJo', 'QTo', 'QJo', 'JTo'], fold: ['72o', '83o', '92o', '32o'] },
+  '6max-100bb-bb-vs-utg-open-v3': { cont: ['66', '99', 'JJ', 'ATs', 'AQs', 'KQs', 'AQo', 'AKo'], fold: ['K8o', 'Q8o', 'J8o', '72o'] },
+  '6max-100bb-co-vs-utg-open-v3': { cont: ['TT', 'QQ', 'AA', 'AQs', 'AKs', 'AKo'], fold: ['KJo', 'T9s', '22', '72o'] },
+  '6max-100bb-sb-vs-btn-open-v3': { cont: ['99', 'TT', 'AA', 'AJs', 'AKs', 'AQo', 'AKo', 'KQs'], fold: ['72o', 'J8o', '54o'] },
+};
+
+test('G1: anchor hands take the action published charts agree on', () => {
+  for (const [key, { cont, fold }] of Object.entries(ANCHORS)) {
+    const rows = freqs(key);
+    for (const hand of cont) assert.ok(continuing(at(rows, hand)) >= 0.9, `${key} ${hand} continues`);
+    for (const hand of fold) assert.ok(at(rows, hand).fold >= 0.9, `${key} ${hand} folds`);
+  }
+  for (const key of preflopKeysV3().filter(k => k.endsWith('-3bet-v3'))) {
+    const rows = freqs(key);
+    for (const hand of ['AA', 'KK', 'QQ', 'AKs', 'AKo']) {
+      if (!at(rows, hand).unreachable) assert.ok(continuing(at(rows, hand)) >= 0.9, `${key} ${hand}`);
+    }
+  }
+});
+
+test('G1: a continuing hand never has a zero-frequency alternative continue', () => {
+  for (const key of preflopKeysV3().filter(k => /-(open|3bet)-v3$/.test(k))) {
+    freqs(key).forEach((row, h) => {
+      if (row.unreachable || continuing(row) < 0.5) return;
+      assert.ok(row.raise > 0 && row.call > 0, `${key} ${HAND_CLASSES[h]}`);
+    });
   }
 });
 
@@ -110,13 +141,14 @@ test('G1: a later opener never plays a hand less often than an earlier one', () 
   }
 });
 
-test('G1: facing a 3-bet, hands outside the opening range fold', () => {
+test('G1: facing a 3-bet with a hand outside the opening range is not graded', () => {
   for (const key of preflopKeysV3().filter(k => k.endsWith('-3bet-v3'))) {
     const { seated, position } = parsePreflopKeyV3(key);
     const open = freqs(`${seated}max-100bb-${position.toLowerCase()}-rfi-v3`);
-    const rows = freqs(key);
     HAND_CLASSES.forEach((hand, h) => {
-      if (open[h].raise === 0) assert.equal(rows[h].fold, 1, `${key} ${hand}`);
+      const found = lookup(dataset, { spotKey: key, handClass: hand });
+      if (open[h].raise === 0) assert.equal(found.code, 'OPENER_RANGE_UNREACHABLE', `${key} ${hand}`);
+      else assert.equal(found.status, 'supported', `${key} ${hand}`);
     });
   }
 });
@@ -133,3 +165,21 @@ test('G2: heads-up push/fold matches published chip-EV Nash widths', () => {
   assert.ok(push(10) > percent(freqs('9max-10bb-btn-push-v3'), row => row.raise));
   assert.ok(percent(freqs('9max-10bb-btn-push-v3'), row => row.raise) > percent(freqs('9max-10bb-utg-push-v3'), row => row.raise));
 });
+
+test('G2: hand anchors, final-strategy regret and convergence', () => {
+  const ix = (hand) => HAND_CLASSES.indexOf(hand);
+  const hu15 = solvePushFold(1, 15);
+  const hu10 = solvePushFold(1, 10);
+  assert.equal(hu15.call[0][ix('A2o')], 1);
+  assert.equal(hu15.push[ix('Q5o')], 0);
+  assert.equal(hu10.push[ix('63s')], 0);
+  assert.equal(hu10.push[ix('K2o')], 1);
+  for (const [behind, stack] of [[1, 10], [1, 15], [4, 15], [8, 10], [6, 15]]) {
+    const solved = solvePushFold(behind, stack);
+    assert.ok(pushFoldRegret(behind, stack, solved) <= EV_MARGIN_BB + 1e-9, `${behind}/${stack}`);
+  }
+  const twice = solvePushFold(4, 15, 1200);
+  const once = solvePushFold(4, 15);
+  assert.equal(HAND_CLASSES.filter((_, h) => Math.abs(once.push[h] - twice.push[h]) > 0.2).length, 0);
+});
+

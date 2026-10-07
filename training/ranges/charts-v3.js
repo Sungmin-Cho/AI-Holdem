@@ -112,6 +112,7 @@ function applyContinueFloor(raise, call, allowCall = true) {
 
 const THREE_BET_BLUFFS = ['A5s', 'A4s', 'A3s', 'A2s', 'K9s', 'Q9s', 'J9s', 'T8s', '98s', '87s', '76s', '65s', '54s',
   'K8s', 'K7s', 'K6s', 'K5s', 'Q8s', 'J8s', 'T7s', '97s', '86s', '75s', '64s'].map(c => HAND_CLASSES.indexOf(c));
+const WHEEL_ACE_BLUFFS = ['A5s', 'A4s', 'A3s', 'A2s'].map(c => HAND_CLASSES.indexOf(c));
 const FOUR_BET_BLUFFS = ['A5s', 'A4s', 'A3s', 'A2s', 'K9s', 'KTs', 'QJs'].map(c => HAND_CLASSES.indexOf(c));
 
 const rfiCache = new Map();
@@ -129,17 +130,21 @@ export function rfiRange(seated, position) {
 export function vsOpenTargets(seated, hero, opener) {
   const r = rangePercent(rfiRange(seated, opener));
   const valueShare = interp(r, [[10, 0.8], [17.6, 0.75], [28.1, 0.65], [45.2, 0.6]]);
+  // Postflop the small blind acts first, so the big blind defends in position.
   if (hero === 'BB' && opener === 'SB') {
-    return seated === 2 ? { threeBet: 18, call: 50, valueShare: 0.6, inPosition: false }
-      : { threeBet: 15, call: 40, valueShare: 0.6, inPosition: false };
+    return seated === 2 ? { threeBet: 18, call: 50, valueShare: 0.6, inPosition: true }
+      : { threeBet: 15, call: 40, valueShare: 0.6, inPosition: true };
   }
   if (hero === 'BB') {
     return { threeBet: interp(r, [[10, 4.5], [17.6, 5.5], [22.2, 7], [28.1, 9.5], [45.2, 13]]),
       call: interp(r, [[10, 17], [17.6, 21], [22.2, 24], [28.1, 29], [45.2, 40]]), valueShare, inPosition: false };
   }
+  // The small blind plays almost 3-bet-or-fold out of position, so its 3-bets
+  // are linear (the best continuing hands, playability included) with only a
+  // few wheel-ace bluffs, rather than polarised like an in-position 3-bet.
   if (hero === 'SB') {
     return { threeBet: interp(r, [[10, 4.5], [17.6, 6], [22.2, 7.5], [28.1, 10.5], [45.2, 14]]),
-      call: interp(r, [[10, 0.5], [17.6, 1], [28.1, 1.5], [45.2, 2]]), valueShare, inPosition: false };
+      call: interp(r, [[10, 0.5], [17.6, 1], [28.1, 1.5], [45.2, 2]]), valueShare: 0.88, inPosition: false, linear: true };
   }
   const behind = playersBehind(seated, hero);
   const callScale = behind === 2 ? 1 : behind === 3 ? 0.6 : 0.5;
@@ -156,10 +161,11 @@ export function vsOpenChart(seated, hero, opener) {
   const eq = Float64Array.from(HAND_CLASSES, cls => equityVsRange(cls, openerRange));
   const room = new Float64Array(N).fill(1);
   const toCombos = pct => (pct * 1326) / 100;
-  const value = softFill(orderBy(Float64Array.from(HAND_CLASSES, (cls, i) => valueScore(cls, eq[i]))), toCombos(target.threeBet * target.valueShare), room, 24);
-  const bluffs = THREE_BET_BLUFFS.filter(i => room[i] > 0.5);
-  const bluff = softFill(bluffs, toCombos(target.threeBet * (1 - target.valueShare)), room, 16);
   const callScore = Float64Array.from(HAND_CLASSES, (cls, i) => eq[i] * realization(cls, target.inPosition));
+  const valueOrder = target.linear ? callScore : Float64Array.from(HAND_CLASSES, (cls, i) => valueScore(cls, eq[i]));
+  const value = softFill(orderBy(valueOrder), toCombos(target.threeBet * target.valueShare), room, 24);
+  const bluffs = (target.linear ? WHEEL_ACE_BLUFFS : THREE_BET_BLUFFS).filter(i => room[i] > 0.5);
+  const bluff = softFill(bluffs, toCombos(target.threeBet * (1 - target.valueShare)), room, 16);
   const call = softFill(orderBy(callScore), toCombos(target.call), room, 40);
   const raise = new Float64Array(N);
   for (let i = 0; i < N; i += 1) raise[i] = value[i] + bluff[i];

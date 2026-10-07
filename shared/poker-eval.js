@@ -203,32 +203,41 @@ export function describeMadeHand(holeCards, boardCards) {
     label: playsBoard ? `${CATEGORY_NAMES[category]}(보드 플레이)` : detail ? `${CATEGORY_NAMES[category]} · ${detail}` : CATEGORY_NAMES[category] };
 }
 
-// Flush/straight draws and the clean-ish outs that complete them. Only meaningful
-// on the flop and turn; returns empty draws otherwise.
+// Flush and straight draws and the cards that complete them ("outs" here means
+// completing cards, not guaranteed winners). Straight and flush completion are
+// judged separately, so a combo draw keeps both its straight type and its
+// flush outs; the out count is their union. Flop and turn only.
+function rankMaskOf(cards) {
+  let mask = 0;
+  for (const card of cards) mask |= 1 << (card >> 2);
+  return mask;
+}
+
 export function drawsOf(holeCards, boardCards) {
   const hole = toCardInts(holeCards);
   const board = toCardInts(boardCards);
   const empty = { flushDraw: false, straightDraw: null, outs: 0, outCards: [] };
   if (board.length < 3 || board.length > 4) return empty;
-  const used = new Set([...hole, ...board]);
-  const base = scoreCards([...hole, ...board]);
-  const baseCategory = categoryOfScore(base);
-  if (baseCategory >= 4) return empty;
+  const all = [...hole, ...board];
+  if (categoryOfScore(scoreCards(all)) >= 4) return empty;
+  const used = new Set(all);
   const suitCount = [0, 0, 0, 0];
-  for (const card of [...hole, ...board]) suitCount[card & 3] += 1;
+  for (const card of all) suitCount[card & 3] += 1;
+  const boardSuits = [0, 0, 0, 0];
+  for (const card of board) boardSuits[card & 3] += 1;
   const flushSuit = suitCount.findIndex((count, suit) => count === 4 && hole.some(card => (card & 3) === suit));
+  const hasStraight = straightHigh(rankMaskOf(all)) >= 0;
+  const straightRanks = new Set();
   const outCards = [];
-  let straightOuts = 0;
   for (let card = 0; card < 52; card += 1) {
     if (used.has(card)) continue;
-    const next = categoryOfScore(scoreCards([...hole, ...board, card]));
-    const boardOnly = categoryOfScore(scoreCards([...board, card]));
-    if ((next === 4 || next === 5 || next === 8) && boardOnly < next) {
-      outCards.push(cardStr(card));
-      if (next === 4) straightOuts += 1;
-    }
+    const makesStraight = !hasStraight && straightHigh(rankMaskOf([...all, card])) >= 0
+      && straightHigh(rankMaskOf([...board, card])) < 0;
+    const makesFlush = flushSuit >= 0 && (card & 3) === flushSuit && boardSuits[flushSuit] + 1 < 5;
+    if (makesStraight) straightRanks.add(card >> 2);
+    if (makesStraight || makesFlush) outCards.push(cardStr(card));
   }
-  const straightDraw = straightOuts >= 8 ? 'open-ended' : straightOuts >= 4 ? 'gutshot' : null;
+  const straightDraw = straightRanks.size >= 2 ? 'open-ended' : straightRanks.size === 1 ? 'gutshot' : null;
   return { flushDraw: flushSuit >= 0, straightDraw, outs: outCards.length, outCards };
 }
 
@@ -241,22 +250,43 @@ function drawCard(next, used) {
   }
 }
 
-function sampleFromWeights(next, weights, total, used) {
-  // weights: Float64Array over HAND_CLASSES (combos already multiplied in).
-  for (let attempt = 0; attempt < 64; attempt += 1) {
+// Individual combos of a range that avoid the known cards, each weighted by its
+// class frequency: card removal is applied per combo, not per class.
+function rangeCombos(range, known) {
+  const combos = [];
+  let total = 0;
+  for (let i = 0; i < 169; i += 1) {
+    const freq = Array.isArray(range) || range instanceof Float64Array ? range[i] : range?.[HAND_CLASSES[i]];
+    if (!(typeof freq === 'number' && freq > 0)) continue;
+    for (const [a, b] of combosOfClass(HAND_CLASSES[i])) {
+      if (known[a] || known[b]) continue;
+      combos.push([a, b, freq]);
+      total += freq;
+    }
+  }
+  return { combos, total };
+}
+
+// Weighted draw of one combo not using any dealt card; null when none remains.
+function sampleCombo(next, prepared, used) {
+  const { combos, total } = prepared;
+  for (let attempt = 0; attempt < 32; attempt += 1) {
     let pick = (next() / 4294967296) * total;
     let index = 0;
-    for (; index < weights.length - 1; index += 1) {
-      pick -= weights[index];
-      if (pick < 0) break;
-    }
-    const combos = combosOfClass(HAND_CLASSES[index]).filter(([a, b]) => !used[a] && !used[b]);
-    if (!combos.length) continue;
-    const [a, b] = combos[next() % combos.length];
-    used[a] = 1; used[b] = 1;
-    return [a, b];
+    while (index < combos.length - 1 && (pick -= combos[index][2]) >= 0) index += 1;
+    const [a, b] = combos[index];
+    if (!used[a] && !used[b]) { used[a] = 1; used[b] = 1; return [a, b]; }
   }
-  return [drawCard(next, used), drawCard(next, used)];
+  // Many earlier villains took the likely cards: fall back to an exact filtered draw.
+  const free = combos.filter(([a, b]) => !used[a] && !used[b]);
+  const sum = free.reduce((acc, row) => acc + row[2], 0);
+  if (!free.length || !(sum > 0)) return null;
+  let pick = (next() / 4294967296) * sum;
+  let index = 0;
+  while (index < free.length - 1 && (pick -= free[index][2]) >= 0) index += 1;
+  const [a, b] = free[index];
+  used[a] = 1; used[b] = 1;
+  return [a, b];
 }
 
 // Range: object {class: frequency} or array of 169 frequencies; combos weighted.
@@ -276,19 +306,27 @@ export function equityVs({ holeCards, boardCards = [], ranges = [null], samples 
   const board = toCardInts(boardCards);
   if (hole.length !== 2 || board.length > 5 || !ranges.length || ranges.length > 8) throw new TypeError('invalid equity input');
   const next = xorshift32(seed);
+  const known = new Uint8Array(52);
+  for (const card of [...hole, ...board]) known[card] = 1;
   const prepared = ranges.map(range => {
     if (range === null) return null;
-    const weights = range instanceof Float64Array ? range : rangeWeights(range);
-    const total = weights.reduce((sum, w) => sum + w, 0);
-    return total > 0 ? { weights, total } : null;
+    const combos = rangeCombos(range, known);
+    if (!combos.combos.length) throw new RangeError('a range has no combo left after card removal');
+    return combos;
   });
   let won = 0;
+  let dealt = 0;
   const used = new Uint8Array(52);
   for (let n = 0; n < samples; n += 1) {
-    used.fill(0);
-    for (const card of [...hole, ...board]) used[card] = 1;
-    const villains = prepared.map(p => (p ? sampleFromWeights(next, p.weights, p.total, used)
-      : [drawCard(next, used), drawCard(next, used)]));
+    used.set(known);
+    const villains = [];
+    for (const p of prepared) {
+      const hand = p ? sampleCombo(next, p, used) : [drawCard(next, used), drawCard(next, used)];
+      if (!hand) break;
+      villains.push(hand);
+    }
+    // Two narrow ranges can block each other; such a deal is skipped, not replaced.
+    if (villains.length !== prepared.length) continue;
     const runout = [...board];
     while (runout.length < 5) runout.push(drawCard(next, used));
     const heroScore = scoreCards([...hole, ...runout]);
@@ -301,6 +339,8 @@ export function equityVs({ holeCards, boardCards = [], ranges = [null], samples 
       else if (score === best) tied += 1;
     }
     if (heroBest) won += 1 / tied;
+    dealt += 1;
   }
-  return won / samples;
+  if (!dealt) throw new RangeError('no compatible deal for these ranges');
+  return won / dealt;
 }

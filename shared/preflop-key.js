@@ -30,7 +30,6 @@ export function parsePreflopKey(key) {
   if (typeof key !== 'string' || key.length>100) return null;
   const legacy=/^6max-100bb-(utg|hj|co|btn|sb|bb)-(rfi-unopened|vs-single-raise)$/.exec(key);
   if (legacy) return {version:1,seated:6,stackBb:100,position:legacy[1].toUpperCase(),openerPosition:null,context:legacy[2]};
-  if (key.endsWith('-v3')) return parsePreflopKeyV3(key);
   if (!V2_KEYS.has(key)) return null;
   const parts=key.split('-');
   return {version:2,seated:Number(parts[0].slice(0,-3)),stackBb:100,position:parts[2].toUpperCase(),

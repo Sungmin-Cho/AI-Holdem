@@ -46,9 +46,10 @@ test('a sample of entries recomputes exactly from the build procedure', () => {
   }
 });
 
-test('equityVsRange weighs classes by combos', () => {
-  const vsPremium = equityVsRange('AKs', { AA: 1, KK: 1 });
-  const expected = (6 * classEquity('AKs', 'AA') + 6 * classEquity('AKs', 'KK')) / 12;
+test('equityVsRange weighs each class by the combos left after card removal', () => {
+  // AQs blocks one ace: three AA combos remain against six KK combos.
+  const vsPremium = equityVsRange('AQs', { AA: 1, KK: 1 });
+  const expected = (3 * classEquity('AQs', 'AA') + 6 * classEquity('AQs', 'KK')) / 9;
   assert.ok(Math.abs(vsPremium - expected) < 1e-12);
   assert.equal(equityVsRange('AKs', {}), 0.5);
 });

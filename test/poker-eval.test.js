@@ -96,3 +96,28 @@ test('equityVs is reproducible and matches known preflop values', () => {
   const madeFlush = equityVs({ holeCards: ['Ah', '5h'], boardCards: ['Kh', '9h', '2h'], samples: 2000, seed: 3 });
   assert.ok(madeFlush > 0.9, String(madeFlush));
 });
+
+test('equityVs removes cards per combo and never replaces an impossible deal', () => {
+  // Holding Ah, only three AA combos remain against twelve 72o combos: the range
+  // weighs them 3:12, so the equity is that mix of the two parts.
+  const vs = (range) => equityVs({ holeCards: ['Ah', 'Kh'], ranges: [range], samples: 20000, seed: 7 });
+  const mixed = vs({ AA: 1, '72o': 1 });
+  const expected = (3 * vs({ AA: 1 }) + 12 * vs({ '72o': 1 })) / 15;
+  assert.ok(Math.abs(mixed - expected) < 0.02, `${mixed} vs ${expected}`);
+  // No AA combo survives As Ad Ah: the range is impossible, not "random".
+  assert.throws(() => equityVs({ holeCards: ['As', 'Kc'], boardCards: ['Ad', 'Ah', '2c'], ranges: [{ AA: 1 }], samples: 10 }), RangeError);
+  // Two villains on AA with As and Ad out: only one AA exists, so no deal is possible.
+  assert.throws(() => equityVs({ holeCards: ['As', 'Kc'], boardCards: ['Ad', '7h', '2c'], ranges: [{ AA: 1 }, { AA: 1 }], samples: 10 }), RangeError);
+});
+
+test('drawsOf keeps a straight draw and flush outs apart in a combo draw', () => {
+  // 9h8h on 7h 6h 2c: open-ended straight draw plus flush draw, 15 distinct cards.
+  const combo = drawsOf(['9h', '8h'], ['7h', '6h', '2c']);
+  assert.equal(combo.straightDraw, 'open-ended');
+  assert.equal(combo.flushDraw, true);
+  // A gutshot with a flush draw stays a gutshot (the flush outs do not inflate it).
+  const gut = drawsOf(['9h', '5h'], ['7h', '6c', 'Kh']);
+  assert.equal(gut.straightDraw, 'gutshot');
+  assert.equal(gut.flushDraw, true);
+  assert.equal(gut.outs, 9 + 3);
+});

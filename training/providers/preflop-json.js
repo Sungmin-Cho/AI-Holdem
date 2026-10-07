@@ -178,6 +178,14 @@ function lookupV3(data, source, spotKey, handClass) {
   const index = data.handOrder.indexOf(handClass);
   const chart = parsed && Object.hasOwn(data.spots, spotKey) ? data.charts[data.spots[spotKey]] : null;
   if (!chart || index < 0) return { status: 'unsupported', reason: 'spot or hand missing', source };
+  // Facing a 3-bet is only reachable with a hand the opener's chart opens; an
+  // off-chart open is not graded against it.
+  if (parsed.context === 'vs-3bet') {
+    const rfi = data.charts[data.spots[`${parsed.seated}max-100bb-${parsed.position.toLowerCase()}-rfi-v3`]];
+    if (!rfi?.raise || Number.parseInt(rfi.raise.slice(index * 3, index * 3 + 3), 36) === 0) {
+      return { status: 'unsupported', code: 'OPENER_RANGE_UNREACHABLE', reason: 'hand outside the opening range', source };
+    }
+  }
   const raiseRow = parsed.context === 'push' ? { allIn: true }
     : { sizeBb: parsed.context === 'rfi-unopened' ? V3_TREE.openBb : parsed.context === 'vs-3bet' ? V3_TREE.fourBetBb : V3_TREE.threeBetBb };
   const actions = [];
