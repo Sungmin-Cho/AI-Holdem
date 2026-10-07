@@ -2,7 +2,7 @@
 
 ## 1. 개요
 
-AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 플레이하고 복습하는 시스템이다. 새 store 기본값은 cash-training·AI 5명·100BB·20핸드·policy v2다. 순수 규칙 엔진(`engine/`)은 네트워크·LLM을 모르고, game-loop(`tools/game-loop.js`)가 게임 진행과 자식 프로세스를 소유한다. 웹 경로에서는 detached 앱 서비스가 이 루프를 동일 프로세스에서 하나만 호스팅하고, 기존 직접 CLI는 독립 사이드카로 실행한다. HTTP relay(`server/`)는 UI 게시와 durable 액션 접수를 소유하며 게임 규칙을 실행하지 않는다. 독립 `tools/study-service.js`가 store 학습 요약·드릴을 제공한다. LLM 호출은 `tools/player-runtime.js` 하나를 통하고, 호스트 딜러는 사전 점검·기동·보고만 맡는다.
+AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 플레이하고 복습하는 시스템이다. 새 store 기본값은 cash-training·AI 5명·100BB·20핸드·policy v3·휴리스틱 기준표 v3다. 순수 규칙 엔진(`engine/`)은 네트워크·LLM을 모르고, game-loop(`tools/game-loop.js`)가 게임 진행과 자식 프로세스를 소유한다. 웹 경로에서는 detached 앱 서비스가 이 루프를 동일 프로세스에서 하나만 호스팅하고, 기존 직접 CLI는 독립 사이드카로 실행한다. HTTP relay(`server/`)는 UI 게시와 durable 액션 접수를 소유하며 게임 규칙을 실행하지 않는다. 독립 `tools/study-service.js`가 store 학습 요약·드릴을 제공한다. LLM 호출은 `tools/player-runtime.js` 하나를 통하고, 호스트 딜러는 사전 점검·기동·보고만 맡는다.
 
 실행·운영 절차는 [`README.md`](README.md), 호스트별 딜러 절차는 [`AGENTS.md`](AGENTS.md)와 그것이 가리키는 정본 스킬이 담당한다. 이 문서는 경계와 불변식만 다룬다.
 
@@ -140,11 +140,20 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 - **영구 세션**: 새 게임은 `.session-store/sessions/<gameId>`에서 초기화되고 그 directory는 다음 init 때문에 이동·복사·삭제되지 않는다.
 - **로그**: 로그 파일을 여는 것은 사이드카뿐이다(선택된 session의 `loop.log`, append). 사이드카가 띄우는 서버는 `stdio: 'ignore'`로 spawn되므로 자체 로그 파일을 갖지 않는다 — `server.log`는 서버를 손으로 띄울 때 쓰는 셸 리다이렉트일 뿐이다. 공용 로거는 없다.
 - **런타임 폴백**: 플레이어·상위 모델 런타임 선택은 `tools/player-runtime.js`의 probe 사다리(`claude → codex → grok`) 하나로 결정되며, 이 판정은 사이드카·서버 어느 쪽에도 복제되지 않는다.
-- **기본값과 학습 범위**: fresh store 요청만 새 기본값을 받는다. 명시 llm/tournament·스택·레벨·AI 수·핸드 수·블라인드는 보존한다. legacy API와 resume은 기록된 설정을 사용한다. 새 세션의 v2 휴리스틱 기준표는 cash-training 6·8·9인, 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원한다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 게임 지표와 연습 지표, source 버전별 점수는 합치지 않는다.
+- **기본값과 학습 범위**: fresh store 요청만 새 기본값을 받는다. 명시 llm/tournament·스택·레벨·AI 수·핸드 수·블라인드는 보존한다. legacy API와 resume은 기록된 설정을 사용한다. 새 세션의 휴리스틱 기준표는 v3다: 2~9인 80~150BB 깊이의 오픈(2.5BB)·오픈 대응(3벳 8.5BB)·3벳 대응(4벳 20BB)과 15BB 이하 푸시/폴드·쇼브 대응을 비교한다. 25~250BB 깊이·직면 크기 투영과 트리 밖 선택(림프·소액 레이즈·깊은 올인 4벳)은 점수에서 제외한다. 기존 세션은 기록된 출처(v1·v2)를 그대로 쓰며, v2 기준표는 cash-training 6·8·9인 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원했다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 게임 지표와 연습 지표, source 버전별 점수는 합치지 않는다.
 - **별도 study 수명**: store loop 락 소유자가 검증된 서비스에 parent로 붙는다. relay adoption은 pid·listener·세션 인증에 더해 protocol 2/actionReceipts/studyLink와 현재 study URL 일치를 요구한다. 서비스 재시작으로 URL이 바뀌면 identity를 증명한 relay만 교체하고 엔진 view를 동기화한다. 게임 종료는 study를 정지하지 않으며 인증 활동/부모 종료 후 유휴 10분에 정지한다.
 - **생성 권한**: 실제 store CLI 프로세스는 catalog·loop 락 생성 전에 umask 077을 설정한다. 호스트·API 호출자의 umask나 기존 디렉터리·foreign 락은 변경하지 않는다.
 - **버전 복구**: v1 배정은 정확한 v1 identity로 읽고 v2는 그대로 보존한다. 구버전 profile 검증은 복사본에서 실제 reader로 실행하며 raw 이벤트·평가·processed digest를 대조한다. 결과가 미확인인 accepted/delivered 액션은 rollback을 차단한다. 권위 동기화 후 matching study만 정지하고 호환 버전으로 roll-forward한다.
 - **파생 정책 identity**: 자기 복제·공략 좌석은 `players.json`의 삼중항(`policyId`/`policyVersion`/`configDigest`)과 세션 `.policy-configs.json`에 묶인다. digest가 config 본문을 결박하며, 서버·export는 그 파일을 읽지 않는다.
+
+### 학습 보정 (기준표 v3·정책 v3·사실 카드)
+
+- **기준표 v3**: `training/preflop-reference-v3.js`가 결정 스냅샷을 닫힌 coverage 입력(`shared/reference-coverage-v3.js`, schema 2·`preflop-projection-v2`)으로 투영하고, 검증기는 입력에서 다시 유도한 결과와 바이트 단위로 같아야 받는다. 출처 버전과 coverage 스키마는 결박된다(v2=schema 1, v3=schema 2). 비교는 출처별 계약을 따른다(`matchReferenceActionFor`: v3는 행동 클래스, v1/v2는 크기 일치). v1/v2 바이트는 `test/compat-v2-baseline.test.js`가 main 기준선으로 고정한다.
+- **결정 사실**: `shared/poker-eval.js`(비트마스크 평가, 콤보 단위 카드 제거, 결합 분포 몬테카를로)와 `shared/decision-facts.js`(이길 수 있는 팟 기준 필요 승률, 분할 팟이면 단일 승률 없음)가 코치·리뷰·복기·판단 보조의 공통 숫자다. 판단 보조는 공개 산술만 보여 주며 사전 힌트(assisted)가 아니다.
+- **호스트 전용 학습 경로**: `/api/game/:id/hud`(AI가 받는 것과 같은 엔진 누적 통계), `/report`(완료 핸드의 결정론 점검), `/reveal`(loop phase `review_published`·`done` 이후에만 AI 성향). `tools/host-insights.js`가 닫힌 투영을 만들고 `app-server`는 인증·현재 게임·epoch만 검사한다. 참가자 리스너에는 없다.
+- **코칭 문구**: 새 출력은 `sanitizeCoachingText`로 범위 밖 문장(솔버 권위 주장, 정량 EV)만 지우고 봉인한다. 저장본은 다시 쓰지 않고 검증만 한다. 종합 리뷰 합성이 실패하면 결과 공개 전 평가기 원문과 결정론 점검을 남긴다.
+- **정책 v3**: `training/policies/strategy-v3.js`가 기준표 v3와 같은 차트 생성기에 페르소나 폭 변형(`personas-v3.js`)을 얹고, 포스트플랍은 보드 기준으로 좁힌 추정 레인지 대비 에퀴티를 쓴다. 새 게임 배정만 v3이며 저장된 배정은 자기 identity를 유지한다. `tools/simulate-policies.js`가 성향(G5)과 퇴화 전략 내성(G6)을 잰다.
+- **학습실**: SR v2(`srsVersion: 2`, 졸업), 통합 목표(`training/goal.js`), v3 층화 평가(`training/drill-strata.js`), 일반화 연습, 차트 보기(`/api/spot`, 평가·재평가·일반화 중 차단, 노출 7일 반영), 추세, 팟 오즈 연습(브라우저 전용).
 
 ### Reference coverage v2 (#150)
 
@@ -162,7 +171,7 @@ readable and their journal bytes are preserved. Source-aware drills resume the s
 of their stored queue or assessment. Roll forward with a compatible reader; do not
 open v2 stores with an older binary. Issue #147 hint publication remains separate.
 
-새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
+새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 휴리스틱 기준표(새 세션 v3, 기존 세션 v2) 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
 
 힌트 숫자의 권한은 엔진 `hint-expose` 마커와 순수 사전 조회 결과의 재계산으로 검증한다. relay의 `tools/hint-proof.js` 예외는 제한된 읽기와 검증만 허용한다. SSE 이력에는 숫자를 저장하지 않고 현재 판단만 재검증하여 전달한다. 액션 durable 접수 직후 revision 없는 `hint-clear`로 숨기며, 브라우저는 별도 세대로 오래된 snapshot의 재표시를 막는다. Profile/event schema 6은 명시적 assistance를 저장하고 기존 1~5 저널은 다시 쓰지 않는다. 새 drill session은 schema 3이며 기존 1/2의 pending 비교 형식을 유지한다. 이 형식을 쓴 store는 호환 버전으로 roll-forward하며 구버전 프로그램으로 열지 않는다.
 

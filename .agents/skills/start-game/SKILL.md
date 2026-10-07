@@ -71,9 +71,9 @@ fi
 
 ## 2. 시작
 
-인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v2다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 새 `--store-dir` 게임은 mode와 무관하게 `showdownPolicy=open`, `replayReveal=all`을 주입한다. 명시한 `--showdown-policy standard`·`--replay-reveal showdown`은 덮지 않는다. resume과 legacy `--game-dir`에는 이 두 기본값을 주입하지 않는다. 로그 탭의 복기 뷰는 핸드 종료 후 그 범위의 상대 카드·사유를 보여 주고, 액션 바의 의도 메모는 사용자 결정에만 붙는다. export는 쇼다운 카드만 싣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
+인자가 없으면 기본 cash-training으로 `n=5`(6인), 100BB, 20핸드, policy v3, 휴리스틱 기준표 v3다. 범위 1~8. 아래 기동문의 `--ai <n>`에는 기본 5를 넣는다. 새 `--store-dir` 게임은 mode와 무관하게 `showdownPolicy=open`, `replayReveal=all`을 주입한다. 명시한 `--showdown-policy standard`·`--replay-reveal showdown`은 덮지 않는다. resume과 legacy `--game-dir`에는 이 두 기본값을 주입하지 않는다. 로그 탭의 복기 뷰는 핸드 종료 후 그 범위의 상대 카드·사유를 보여 주고, 액션 바의 의도 메모는 사용자 결정에만 붙는다. export는 쇼다운 카드만 싣는다. 사용자가 `--mode tournament` 또는 mode 없이 `--stack`/`--level-every`를 요청하면 기존 토너먼트 기본 `n=3`과 LLM 모드를 사용한다. LLM 상대만 원하는 경우 `--opponent-runtime llm`을 명시한다. AI 수·`--hands`·`--blinds` 등 명시 값은 보존하며, 요청하지 않은 블라인드는 주입하지 않는다. 명시 cash-training의 `--stack`은 칩 단위이므로 `--stack-bb`를 함께 추가하지 않는다. 상충 옵션은 엔진의 거부를 그대로 보고한다.
 
-store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 새 세션의 v2 휴리스틱 기준표는 cash-training 6·8·9인, 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원한다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
+store 루트를 `--game-dir`로 주면 `BAD_DIRECTORY_MODE`다. 장기 학습 기록은 `game/.training/`이며 `node tools/profile-cli.js show --store-dir game`으로 본다. 새 세션의 휴리스틱 기준표는 v3다: 2~9인 80~150BB 깊이의 오픈(2.5BB)·오픈 대응(3벳 8.5BB)·3벳 대응(4벳 20BB)과 15BB 이하 푸시/폴드·쇼브 대응을 비교한다. 25~250BB 깊이·직면 크기 투영과 트리 밖 선택(림프·소액 레이즈·깊은 올인 4벳)은 점수에서 제외한다. 기존 세션은 기록된 출처(v1·v2)를 그대로 쓰며, v2 기준표는 cash-training 6·8·9인 100BB의 미오픈 2.5BB 오픈과 단일 오픈 대응 8.5BB 3-bet을 지원했다. 80~120BB 스택·2~3BB 오픈·6.5~10.5BB 선택 3-bet은 제한적 투영 참고이며 점수·분포·오답·재시험 통계에서 제외한다. limp·cold-call·multiway·4-bet+·postflop은 지원하지 않는다. 기존 세션과 정책 v1은 기존 기준표를 유지한다. 기준표의 허용 액션 비율과 분포 일치는 실제 실력·수익·GTO 정답을 뜻하지 않는다.
 
 `init`·서버 기동·페르소나 생성·브라우저 URL 확보는 전부 사이드카가 한다. 딜러는 이 한 줄만 친다.
 
@@ -226,7 +226,7 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 
 관찰 지점: `$SESSION_DIR/loop-state.json`(phase·port·sessionToken·notices·metrics·halt·finishedAt), `$SESSION_DIR/loop.log`(사이드카 로그), `/tmp/ai-holdem-boot.log`(부트 크래시 안전망). 엔진 상태와 게시 경로는 딜러가 열지 않는다.
 
-새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 v2 휴리스틱 기준표 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
+새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 휴리스틱 기준표(새 세션 v3, 기존 세션 v2) 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
 
 
 ## 진행 속도
