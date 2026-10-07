@@ -84,7 +84,8 @@ export async function runSpectatorJourney(outDir) {
         const visible=b=>b&&!b.disabled&&!b.hidden;
         const fold=doc.querySelector('#btn-fold'),raise=doc.querySelector('#btn-raise');
         const allin=doc.querySelector('#btn-allin-only'),call=doc.querySelector('#btn-call'),check=doc.querySelector('#btn-check');
-        if(${JSON.stringify(actor)}==='h2'&&visible(fold)){fold.click();return 'fold';}
+        // With a check available the first press only arms the fold (D13); press again.
+        if(${JSON.stringify(actor)}==='h2'&&visible(fold)){fold.click();if(fold.classList.contains('is-armed'))fold.click();return 'fold';}
         if(${JSON.stringify(state.hand?.street)}==='preflop') {
           if(visible(call)){call.click();return 'call';}
           if(visible(check)){check.click();return 'check';}
