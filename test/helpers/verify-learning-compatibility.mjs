@@ -11,7 +11,7 @@ import { acquireOwnedLock, ownedProcessStartTime, releaseOwnedLock } from '../..
 import { newDeck } from '../../engine/cards.js';
 import { LEGACY_REFERENCE_SOURCE as CANONICAL_REFERENCE_SOURCE } from '../../shared/reference.js';
 import { evaluationIdOf } from '../../training/contracts.js';
-import { assignmentFor, resolveExactPolicy, VERSION_V2 } from '../../training/policies/catalog.js';
+import { ARCHETYPE_POLICY_ID, POLICIES, resolveExactPolicy, VERSION_V2 } from '../../training/policies/catalog.js';
 import { createMistakeBank, createProfileStore } from '../../tools/training-stores.js';
 import { createGameLoop } from '../../tools/game-loop.js';
 import { ensureStudyService, inspectStudyService, stopStudyService } from '../../tools/study-service.js';
@@ -285,7 +285,9 @@ async function buildCurrentFixtures(storeDir) {
   const bank = createMistakeBank(storeDir, { now: () => '2026-09-06T00:00:00.000Z' });
   const collected = await bank.collect(evaluation);
   if (collected.added !== true) throw coded('CURRENT_BANK_FIXTURE_FAILED');
-  const policy = assignmentFor('TAG');
+  // The compatibility fixture is a v2-era assignment; new games seat v3.
+  const { policyId, policyVersion, configDigest } = POLICIES[ARCHETYPE_POLICY_ID.TAG];
+  const policy = { policyId, policyVersion, configDigest };
   if (policy.policyVersion !== VERSION_V2) throw coded('CURRENT_POLICY_FIXTURE_FAILED');
   const policyFile = path.join(storeDir, '.training', 'policy-v2.json');
   const evaluationFile = path.join(storeDir, '.training', 'evaluation.json');

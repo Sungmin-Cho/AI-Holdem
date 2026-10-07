@@ -437,7 +437,8 @@ test('writeDerivedPolicyConfigs is create-only 0600 and a second call is EXISTS'
 
 test('sanitizePlayersForReview stays private pre-game and publishes derived evidence after gameOver', () => {
   const config = exploiterConfig();
-  const v2 = assignmentFor('TAG');
+  // An explicit v2 assignment (new games seat v3; stored v2 seats keep v2).
+  const v2 = { policyId: 'tag-v2', policyVersion: POLICIES['tag-v2'].policyVersion, configDigest: POLICIES['tag-v2'].configDigest };
   const players = [
     {
       playerId: 'p1',
@@ -481,6 +482,11 @@ test('sanitizePlayersForReview stays private pre-game and publishes derived evid
   assert.equal(exploiterJson.includes('configured-not-observed-action-frequencies'), false);
   assert.equal(exploiterJson.includes('"kind"'), false);
   assert.equal(post[1].policyModelKind, 'qualitative-config-v2');
+  // A new game's TAG seat is policy v3 and states its preflop widths after the game.
+  const v3 = sanitizePlayersForReview([{ ...players[1], policy: assignmentFor('TAG') }], { gameOver: true })[0];
+  assert.equal(v3.policyId, 'tag-v3');
+  assert.equal(v3.policyModelKind, 'reference-v3-persona-v3');
+  assert.deepEqual(Object.keys(v3.policyPreflop).sort(), ['bluffThreeBet', 'callWidth', 'limp', 'pushWidth', 'rfiWidth', 'threeBetScale']);
 
   assert.throws(
     () => sanitizePlayersForReview(players, { gameOver: true }),

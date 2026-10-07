@@ -345,10 +345,11 @@ export function resolveExactPolicy(stored) {
   return config;
 }
 
+// New games seat policy v3; stored assignments keep their own identity.
 export function assignmentFor(archetype) {
-  const policyId = typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_POLICY_ID, archetype)
-    ? ARCHETYPE_POLICY_ID[archetype]
-    : 'baseline-v2';
+  const policyId = typeof archetype === 'string' && Object.hasOwn(ARCHETYPE_POLICY_ID_V3, archetype)
+    ? ARCHETYPE_POLICY_ID_V3[archetype]
+    : 'baseline-v3';
   const config = POLICIES[policyId];
   return {
     policyId: config.policyId,
