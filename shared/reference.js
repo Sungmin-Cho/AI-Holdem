@@ -7,7 +7,13 @@ export const V2_REFERENCE_SOURCE = Object.freeze({
   id: 'local-preflop-baseline', version: '2.0.0',
   contentSha256: '1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7',
 });
-export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE]);
+// Reference v3 (schema 3): learning-calibration charts and push/fold. Registered
+// for reading and evaluation; new sessions switch to it with CANONICAL below.
+export const V3_REFERENCE_SOURCE = Object.freeze({
+  id: 'local-preflop-baseline', version: '3.0.0',
+  contentSha256: '0c04d64b5ea4db3ec9f73a394d85ef80bd0ba00a4309930610be35d6d6f0e2a7',
+});
+export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE]);
 // New sessions use v2; legacy sessions and policy retain their explicit v1 pin.
 export const CANONICAL_REFERENCE_SOURCE = V2_REFERENCE_SOURCE;
 export function sameReferenceSource(a, b) {
@@ -241,57 +247,92 @@ export function referenceClaimAllowed(value) {
 // attach a number to it, and may not claim GTO/solver/optimal authority. The
 // coaching predicate accepts everything referenceClaimAllowed accepts (so stored
 // proofs stay valid) and additionally a sentence whose only authority words are
-// qualitative EV vocabulary, provided the sentence has no digits.
+// qualitative EV vocabulary, provided the sentence has no digit, is not a bare
+// EV fragment, and is not followed by a line that starts with a number.
 const QUALITATIVE_CLAIM_RE = /\bEV\b|기대\s*(?:값|수익)|expected\s+value|포커\s*실수/giu;
 const LINE_PREFIX_RE = /^(\s*(?:#{1,6}\s+|>\s*|[-*•]\s+|\d{1,3}[.)]\s+)?)(.*)$/u;
 // A sentence ends at . ! ? or 。 followed by whitespace; "0.5" and "1.5bb" never split.
 const SENTENCE_SPLIT_RE = /(?<=[.!?。])\s+/u;
-
 // New coaching output also drops Korean solver-authority claims, which the
 // legacy predicate never matched; validation of stored text stays unchanged.
 const NEW_OUTPUT_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)|GTO\s*(?:기준|상|적으로)\s*(?:정답|최적)/u;
 
+// Same normalisation the legacy predicate applies before matching.
+const normalizeClaimText = (text) => text.normalize('NFKC').replace(/[​-‍⁠﻿]/g, '');
+const startsWithNumber = (line) => /^\s*(?:[#>*•-]\s*)*[+−-]?\d/u.test(normalizeClaimText(line ?? ''));
+
 function coachingSentenceAllowed(sentence) {
   if (referenceClaimAllowed(sentence)) return true;
-  if (/\d/.test(sentence)) return false;
-  return referenceClaimAllowed(sentence.replace(QUALITATIVE_CLAIM_RE, ' '));
+  const normalized = normalizeClaimText(sentence);
+  if (/\d/u.test(normalized)) return false;
+  return referenceClaimAllowed(normalized.replace(QUALITATIVE_CLAIM_RE, ' '));
 }
 
 // A bare "EV" heading or fragment could pair with a number on the next line.
 function evOnlyFragment(sentence) {
+  const normalized = normalizeClaimText(sentence);
   QUALITATIVE_CLAIM_RE.lastIndex = 0;
-  if (!QUALITATIVE_CLAIM_RE.test(sentence)) return false;
-  return sentence.replace(QUALITATIVE_CLAIM_RE, '').replace(/[^\p{L}\p{N}]/gu, '').length < 6;
+  if (!QUALITATIVE_CLAIM_RE.test(normalized)) return false;
+  return normalized.replace(QUALITATIVE_CLAIM_RE, '').replace(/[^\p{L}\p{N}]/gu, '').length < 6;
 }
 
 function coachingLines(text) {
   return text.split(/\r\n|\r|\n|\u2028|\u2029/).map((line) => {
     const [, prefix, body] = LINE_PREFIX_RE.exec(line);
-    return { prefix, sentences: body.trim() ? body.split(SENTENCE_SPLIT_RE) : [] };
+    return { raw: line, prefix, sentences: body.trim() ? body.split(SENTENCE_SPLIT_RE) : [] };
+  });
+}
+
+// The sentences of one line that coaching may keep. A sentence allowed only
+// through the qualitative-EV mask must not be a bare fragment, and must not be
+// the line's last sentence when the next non-empty line starts with a number.
+function keptSentences(lines, index, extra = () => true) {
+  const line = lines[index];
+  const nextNumeric = startsWithNumber(lines.slice(index + 1).find((row) => row.raw.trim())?.raw);
+  return line.sentences.filter((sentence, i) => {
+    if (!coachingSentenceAllowed(sentence) || !extra(sentence)) return false;
+    if (referenceClaimAllowed(sentence)) return true;
+    if (evOnlyFragment(sentence)) return false;
+    return !(nextNumeric && i === line.sentences.length - 1);
   });
 }
 
 export function coachingClaimAllowed(text) {
   if (typeof text !== 'string' || text.length === 0) return true;
   if (referenceClaimAllowed(text)) return true;
-  return coachingLines(text).every(line => line.sentences.every(coachingSentenceAllowed));
+  const lines = coachingLines(text);
+  return lines.every((line, index) => keptSentences(lines, index).length === line.sentences.length);
 }
 
-// Removes only the sentences that coachingClaimAllowed would reject; headings and
-// list items are checked like any other text. A line left without a sentence is
-// dropped. Returns the kept text and the removed/total sentence counts.
+// Removes only the sentences that coachingClaimAllowed would reject (plus new
+// Korean solver-authority claims); headings and list items are checked like any
+// other text. A line left without a sentence is dropped. Returns the kept text
+// and the removed/total sentence counts.
 export function sanitizeCoachingText(text) {
   if (typeof text !== 'string') return { text, removed: 0, total: 0 };
+  // Removing a line can make an EV sentence and a numeric line adjacent, so the
+  // pass repeats until nothing more is removed.
+  let pass = sanitizePass(text);
+  const total = pass.total;
+  let removed = pass.removed;
+  for (let round = 0; round < 8 && pass.removed; round += 1) {
+    pass = sanitizePass(pass.text);
+    removed += pass.removed;
+  }
+  return { text: pass.text, removed, total };
+}
+
+function sanitizePass(text) {
   let removed = 0;
   let total = 0;
   const kept = [];
-  for (const line of coachingLines(text)) {
-    if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); continue; }
+  const lines = coachingLines(text);
+  lines.forEach((line, index) => {
+    if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); return; }
     total += line.sentences.length;
-    const ok = line.sentences.filter(sentence => coachingSentenceAllowed(sentence) && !NEW_OUTPUT_AUTHORITY_RE.test(sentence)
-      && !evOnlyFragment(sentence));
+    const ok = keptSentences(lines, index, (sentence) => !NEW_OUTPUT_AUTHORITY_RE.test(normalizeClaimText(sentence)));
     removed += line.sentences.length - ok.length;
     if (ok.length) kept.push(`${line.prefix}${ok.join(' ')}`);
-  }
+  });
   return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed, total };
 }

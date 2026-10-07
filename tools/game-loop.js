@@ -82,6 +82,7 @@ import { sanitizePlayersForReview } from '../training/policies/catalog.js';
 import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
 import { coachingClaimAllowed, sanitizeCoachingText } from '../shared/reference.js';
+import { coachNotesDigest, decisionFactsLines, detectorLinesKo, processDetectors, vpipBand } from './review-facts.js';
 import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
@@ -127,6 +128,8 @@ const LOOP_LOCK = 'loop.lock.d';
 const COACH_GENERATION_MS = 120_000;
 // A first attempt plus one replacement, with room for the coach CLI steps.
 const COACH_BACKLOG_WAIT_MS = 2 * COACH_GENERATION_MS + 10_000;
+// D10: bounded wait for the last hand's coach before the result-wait cutoff.
+const LAST_HAND_COACH_WAIT_MS = 45_000;
 const REVIEW_GENERATION_MS = 300_000;
 const REVIEW_HEADING_PATTERNS = Object.freeze([
   /^#{1,6}[ \t]+내 성향 통계(?:[ \t]|$)/m,
@@ -4127,6 +4130,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return `과정 판정 불가: ${hands.length ? `핸드 ${hands.join(', ')}` : '일부 결정'}의 결정 시점 증거가 없거나 올바르지 않아 해당 결정은 평가에서 제외했습니다.`;
   };
 
+  // Engine-computed facts for the user's decisions in the captured hand. A
+  // capture that cannot be parsed yields no facts rather than a failure.
+  const coachFactsLines = (inputs) => {
+    try {
+      const lines = decisionFactsLines(parseCapturedHand(inputs.hand.raw));
+      return lines.length ? lines.slice(0, 12) : ['(사용자 결정 없음)'];
+    } catch {
+      return ['(계산 불가)'];
+    }
+  };
+
   const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
     const practiceFocus = processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null');
     const prompt = [
@@ -4139,20 +4153,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       `hand ${handNo} (replay):`,
       inputs.replay.raw,
       '',
+      '결정 사실 카드(엔진 계산, 사용자 결정별 — 수치는 이 값만 인용):',
+      ...coachFactsLines(inputs),
+      '',
       'practiceFocus:',
       practiceFocus,
       '',
       `과폴드 코멘트: ${overfoldReserved ? '허용' : '금지'}`,
       '',
-      '할 일: 사용자의 주요 결정 1~2개를 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.',
-      '(a) 왜 그 액션을 했다고 보는가. note가 있으면 인용하고 자기 해석과 구분한다.',
-      '(b) 결과적으로 왜 잃었는가/접게 됐는가. 공개된 카드·보드·액션만 근거로 삼는다.',
-      '(c) 대안 라인 한 줄과 근거. heuristic 방향만 제시한다.',
+      '할 일: 이 핸드에서 사용자의 가장 비싼(결정적인) 결정 1개를 골라 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.',
+      '(a) 결정 시점 판단: 사실 카드의 수치 1개 이상(필요 승률·SPR·에퀴티·선택 크기 등)을 근거로 든다. note가 있으면 인용하고 자기 해석과 구분한다.',
+      '(b) 결과: 공개된 카드·보드·액션만으로 한 줄. 결과로 결정의 옳고 그름을 판정하지 않는다.',
+      '(c) 대안 라인 한 줄과 근거.',
       'reasonKind가 model인 상대 사유는 "모델이 밝힌 사유"로 인용한다.',
-      '폴드가 타당하면 포지션·홀카드·선행 액션 중 의미 있는 공개 근거로 무난한 폴드라고 평가한다.',
-      '특별한 누수가 없다면 억지로 비판하거나 존재하지 않는 상대 레인지·숫자를 만들지 마라.',
-      '팟 오즈가 실제 결정에 의미 있을 때만 숫자를 사용한다.',
-      '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
+      '폴드가 타당했다면 그 이유를 한 문장으로 구체적으로 쓴다. 판에 박힌 칭찬 문구는 쓰지 않는다.',
+      '수치는 사실 카드에 있는 값만 인용하고 새 숫자를 만들지 마라. 추정 레인지 에퀴티는 "추정"이라고 밝힌다.',
+      '기대값(EV)은 숫자 없이 개념으로만 쓴다. 검증된 최적·GTO 정답·확정 누수를 주장하지 마라.',
       overfoldReserved
         ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
         : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
@@ -5008,6 +5024,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // Once the last hand is over a pause can no longer park (the game finalizes
   // instead); pause() answers `finalizing` and the app reports finalizing.
   let gameOverPending = false;
+  let lastHandCoachLaunched = null;
   const releasePauseForFinalization = () => {
     // Finalization owns the remaining training (R1 (b)): the gate opens even if
     // the pause itself has not reached pauseRequested yet; explanations wait for
@@ -6125,6 +6142,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return text;
   };
 
+  // A sealed review is checked without rewriting it: the coaching predicate
+  // accepts everything the legacy predicate accepted, so older reviews resume.
+  const validateStoredReview = (text) => {
+    if (typeof text !== 'string' || text.trim() === '') {
+      throw codedError('EMPTY_REVIEW_OUTPUT', '리뷰 모델 출력이 비어 있습니다.');
+    }
+    const trimmed = text.trim();
+    if (!coachingClaimAllowed(trimmed)) throw codedError('REVIEW_CLAIM_REJECTED', '리뷰 출력이 근거 범위를 벗어납니다.');
+    if (REVIEW_HEADING_PATTERNS.some((pattern) => !pattern.test(trimmed))) {
+      throw codedError('REVIEW_HEADINGS_MISSING', '종합 리뷰에 필수 한국어 heading 네 개가 없습니다.');
+    }
+    return trimmed;
+  };
+
   const terminateReviewAttempt = async (handle) => {
     if (!handle) return { confirmed: true, reason: 'NOT_SPAWNED' };
     if (typeof handle.terminate !== 'function') {
@@ -6206,7 +6237,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('REVIEW_ATTEMPTS_EXHAUSTED', `${stage} 시도를 완료하지 못했습니다.`);
   };
 
-  const buildEvaluatorPrompt = ({ completed, processInput }) => [
+  const buildEvaluatorPrompt = ({ completed, processInput, factsLines = [] }) => [
     '역할: 격리 evaluator',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     '각 결정 시점에 사용자가 볼 수 있었던 공개 정보만으로 과정 품질을 한국어로 평가하라.',
@@ -6222,7 +6253,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'decision-time process input:',
     JSON.stringify(eligibleProcessInput(processInput)),
     '',
-    '정성적 과정 평가만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
+    'decision facts (엔진 계산, 사용자 결정별 — 수치는 이 값만 인용):',
+    ...(factsLines.length ? factsLines : ['(없음)']),
+    '',
+    '중요한 결정마다 사실 카드의 수치(필요 승률·SPR·에퀴티·선택 크기)를 근거로 과정을 평가하라.',
+    '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓴다.',
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
 
@@ -6255,7 +6290,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
     '결과가 좋았다고 나쁜 과정을 칭찬하거나 결과가 나쁘다고 좋은 과정을 비난하지 마라.',
-    '정성적 과정 코칭만 제공한다. 검증된 최적·확정 누수·정답이나 EV 수치를 주장하지 마라.',
+    '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓰고, 수치는 evaluator output에 있는 값만 인용한다.',
     '',
     'evaluator output:',
     evaluator,
@@ -6285,7 +6320,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
   ].join('\n');
 
-  const machineReview = ({ statsRaw, players, result }) => {
+  const machineReview = ({ statsRaw, players, result, evaluator = null, records = [], notes = [], seats = 6 }) => {
     const stats = JSON.parse(statsRaw).perPlayer;
     const user = stats?.user;
     const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(value) : '확인 불가';
@@ -6298,6 +6333,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       Trickster: '변화를 섞는 유형 (Trickster)',
       SelfMirror: '나를 닮은 복제 상대 (self-mirror)',
       SelfExploiter: '나를 공략하는 상대 (self-exploiter)' };
+    const decisionSample = (row) => (Number.isSafeInteger(row?.decisionSample) ? row.decisionSample : row?.sample);
     const names = sanitizePlayersForReview(players, {
       gameOver: true, derived: readDerivedPolicyConfigs(root),
     })
@@ -6305,25 +6341,45 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const observed = stats?.[player.playerId];
         const name = String(player.name ?? '이름 미확인').replace(/[\\`*_[\]<>|\r\n]/g, ' ');
         return `- ${name} — 설정된 성향: ${labels[player.archetype] ?? '확인 불가'}. `
-          + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, observed?.sample)}, `
-          + `프리플롭 레이즈 ${percent(observed?.pfr, observed?.sample)}.`;
+          + `관찰 기록: ${count(observed?.sample)}핸드, 자발적 참여 ${percent(observed?.vpip, decisionSample(observed))}, `
+          + `프리플롭 레이즈 ${percent(observed?.pfr, decisionSample(observed))}.`;
       });
     const resultText = { completed: '예정 핸드 완료', abort: '중단', win: '승리', lose: '패배' }[result] ?? '종료';
+    const band = vpipBand(seats);
+    const found = processDetectors(records);
+    const checks = detectorLinesKo(found);
+    const losses = found.biggestLosses.map((row) => `- 핸드 ${row.handNo}: ${row.lost}칩 손실. ${row.line ?? '사용자 결정 기록 없음'}`);
+    const practice = [];
+    if (found.foldWhenCheck.length) practice.push('- 체크할 수 있을 때는 폴드 대신 체크해 다음 카드를 무료로 본다.');
+    if (found.minRaises.raises >= 3 && found.minRaises.count / found.minRaises.raises >= 0.5) {
+      practice.push('- 레이즈 전에 크기의 목적(밸류·블러프·보호)을 한 줄로 정하고, 최소 레이즈를 기본값으로 쓰지 않는다.');
+    }
+    if (found.weakStackOffs.length) practice.push('- 탑페어 미만으로 남은 스택을 넣기 전에 판단 보조의 필요 승률과 SPR을 확인한다.');
+    if (!practice.length) practice.push('- 판단 보조(팟 오즈·필요 승률·SPR)를 보며 결정마다 근거를 한 줄씩 의도 메모로 남긴다.');
+    const demote = (text) => text.split('\n').map((line) => line.replace(/^#{1,3}\s/, '#### ')).join('\n');
     return [
       '## 내 성향 통계', '',
-      `- 플레이한 핸드: ${count(user?.sample)}핸드`,
-      `- 자발적 프리플롭 참여: ${percent(user?.vpip, user?.sample)}`,
-      `- 프리플롭 레이즈: ${percent(user?.pfr, user?.sample)}`,
+      `- 플레이한 핸드: ${count(user?.sample)}핸드 (프리플랍 결정 기회 ${count(decisionSample(user))}핸드)`,
+      `- 자발적 프리플롭 참여: ${percent(user?.vpip, decisionSample(user))} (참고 범위 ${band.vpip[0]}~${band.vpip[1]}%)`,
+      `- 프리플롭 레이즈: ${percent(user?.pfr, decisionSample(user))} (참고 범위 ${band.pfr[0]}~${band.pfr[1]}%)`,
       `- 칩 증감: ${chips}`,
       `- 게임 결과: ${resultText}`, '',
-      '이 값은 이번 세션의 관찰 기록입니다. 실력이나 전략의 우열을 판정하지 않습니다.', '',
+      '이 값은 이번 세션의 관찰 기록입니다. 참고 범위는 일반적인 캐시 게임 기준이며 실력이나 전략의 우열을 판정하지 않습니다.', '',
       '## 결정적 핸드 2~3개 리플레이', '',
-      'LLM 설명을 제공할 수 없습니다. 결정적 핸드 선정과 과정 해설은 생성하지 않았습니다. 핸드별 기록과 지원 범위 내 휴리스틱 기준표 비교를 확인하세요.', '',
+      evaluator
+        ? 'LLM 설명을 제공할 수 없습니다. 아래는 결과 공개 전에 작성된 과정 평가와 엔진이 계산한 결정 점검입니다.'
+        : 'LLM 설명을 제공할 수 없습니다. 아래는 엔진이 계산한 결정 점검입니다.', '',
+      ...(evaluator ? ['### 과정 평가(결과 공개 전 작성)', '', demote(evaluator), ''] : []),
+      '### 칩 손실이 컸던 핸드', '',
+      ...(losses.length ? losses : ['- 칩을 잃은 핸드가 없습니다.']), '',
+      '### 결정 점검(엔진 계산)', '',
+      ...(checks.length ? checks : ['- 자동 점검에서 두드러진 패턴이 없었습니다.']), '',
+      ...(notes.length ? ['### 핸드별 코치 노트 요약', '', ...notes.map((note) => `- ${note}`), ''] : []),
       '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '',
       '설정된 성향은 게임 시작 시의 정책 설정입니다. 아래 관찰 기록만으로 그 성향이 입증되거나 상대 읽기가 정확했다고 판단할 수는 없습니다.',
       ...(names.length ? names : ['AI 성향 기록을 확인할 수 없습니다.']), '',
       '## 다음 게임에서 연습할 것', '',
-      '이 자동 요약만으로는 개별 연습 목표를 확정할 근거가 부족합니다. 학습 페이지에서 지원되는 결정과 제외 이유를 먼저 확인하세요.',
+      ...practice,
     ].join('\n');
   };
 
@@ -6346,6 +6402,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const generateReview = async ({ completed, statsRaw }) => {
+    // The outcome-blind evaluator text, once produced, backs the fallback review.
+    let evaluatorText = null;
     const fallback = (reason) => {
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const players = readJsonOptional(playersPath, 'PLAYERS');
@@ -6382,8 +6440,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       // Read derived evidence before optional sections can downgrade its errors.
       readDerivedPolicyConfigs(root);
+      const records = [];
+      for (let handNo = 1; handNo <= completed; handNo += 1) {
+        try {
+          const record = fullHandRecord(handNo);
+          if (record) records.push(record);
+        } catch { /* a missing archive only shortens the report */ }
+      }
       const review = validateReviewOutput(appendTrainingPendingToReview(machineReview({
-        statsRaw, players, result: engine.result,
+        statsRaw, players, result: engine.result, evaluator: evaluatorText, records,
+        notes: coachNotesDigest(coachSnapshotPath), seats: engine.seats?.length ?? 6,
       })), { requireHeadings: true });
       appendNotice('LLM 종합 리뷰를 제공할 수 없어 이번 세션의 관찰 기록으로 기계 리뷰를 작성했습니다.');
       log('review-machine-fallback', { reason });
@@ -6409,11 +6475,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           '## 다음 게임에서 연습할 것', '다음 게임에서 결정 시점의 공개 정보와 합법 액션을 확인하세요.',
         ].join('\n'));
       }
-      const evaluatorPrompt = buildEvaluatorPrompt({ completed: eligibleHands.size, processInput });
+      const factsLines = hands.filter(({ handNo }) => eligibleHands.has(handNo)).flatMap(({ handNo, raw }) => {
+        try {
+          return decisionFactsLines(parseCapturedHand(raw)).map((line) => `핸드 ${handNo} ${line}`);
+        } catch {
+          return [];
+        }
+      }).slice(0, 160);
+      const evaluatorPrompt = buildEvaluatorPrompt({ completed: eligibleHands.size, processInput, factsLines });
       const evaluator = await runReviewStage({
         stage: 'evaluator',
         prompt: evaluatorPrompt,
       });
+      evaluatorText = evaluator;
 
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const players = readJsonOptional(playersPath, 'PLAYERS');
@@ -6470,9 +6544,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  // The bytes written here are the sanitized review; its digest seals them.
   const checkpointGeneratedReview = (review) => {
-    validateReviewOutput(review, { requireHeadings: true });
-    writeTextAtomic(reviewPath, review);
+    const sanitized = validateReviewOutput(review, { requireHeadings: true });
+    writeTextAtomic(reviewPath, sanitized);
     const persisted = fs.readFileSync(reviewPath, 'utf8');
     const reviewSha256 = sha256Text(persisted);
     return writeLoopState({
@@ -6495,7 +6570,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     let validated;
     try {
-      validated = validateReviewOutput(review, { requireHeadings: true });
+      validated = validateStoredReview(review);
     } catch (error) {
       throw haltFinalization(
         'REVIEW_FAILED',
@@ -8368,18 +8443,37 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), COACH_BACKLOG_WAIT_MS);
             if (stopRequested) break;
           }
+          // D10: the last hand's coach starts before the result-wait clock and
+          // gets a bounded wait, so a normal-length generation is published
+          // instead of being sealed by the cutoff. Waiting cancels nothing; a
+          // slower generation still meets the existing cutoff seal.
+          try {
+            await heartbeatCoach();
+          } catch (error) {
+            appendNotice(`코치 heartbeat 오류: ${error.code ?? 'ERROR'}`);
+            log('coach-heartbeat-error', { handNo: out.handNo, code: error.code ?? 'ERROR' });
+          }
+          if (stopRequested) break;
+          launchCoachPipeline(out.handNo);
+          lastHandCoachLaunched = out.handNo;
+          await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), LAST_HAND_COACH_WAIT_MS);
+          if (stopRequested) break;
           ensureFinalizationResultWaitCutoff();
         }
         if (!ending) launchTrainingPipeline(out.handNo);
         trackAuxiliary(consumeTrainingNow()).catch(() => {});
-        try {
-          await heartbeatCoach();
-        } catch (error) {
-          appendNotice(`코치 heartbeat 오류: ${error.code ?? 'ERROR'}`);
-          log('coach-heartbeat-error', { handNo: out.handNo, code: error.code ?? 'ERROR' });
+        // The last hand's coach already started before the cutoff; reserving it
+        // again would discard that generation.
+        if (lastHandCoachLaunched !== out.handNo) {
+          try {
+            await heartbeatCoach();
+          } catch (error) {
+            appendNotice(`코치 heartbeat 오류: ${error.code ?? 'ERROR'}`);
+            log('coach-heartbeat-error', { handNo: out.handNo, code: error.code ?? 'ERROR' });
+          }
+          if (stopRequested) break;
+          launchCoachPipeline(out.handNo);
         }
-        if (stopRequested) break;
-        launchCoachPipeline(out.handNo);
         if (ending) {
           pauseRequested=false;resolvePause?.({state:'finalizing'});resolvePause=null;
           relaunchPauseDeferredCoach();

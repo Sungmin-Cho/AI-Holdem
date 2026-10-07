@@ -63,6 +63,8 @@ test('equity facts are reproducible and the Korean line carries the numbers', ()
 
 test('estimated ranges follow the opener and caller charts', () => {
   const g = createGame({ aiCount: 5 });
+  // The button is random; fix it so the user is the big blind and acts last.
+  g.button = 3;
   let st = startHand(g, { deck: fixedDeck() }).state;
   // Play until the user acts, letting the first AI open and the others fold.
   let opened = false;
@@ -82,4 +84,37 @@ test('estimated ranges follow the opener and caller charts', () => {
   const ranges = estimateOpponentRanges(snap);
   const opener = st.hand.actions.find((a) => a.action === 'raise').playerId;
   assert.ok(ranges[opener] && ranges[opener].AA === 1 && !ranges[opener]['72o']);
+});
+
+test('several pots: no single required equity, and an unmatched excess is not a side pot', () => {
+  // Short all-in KK for 100, deep QQ for 300, hero (AA) to call 300 into it.
+  const multi = chipFacts(snapshot({
+    potBefore: 400, currentBet: 300, actorBet: 0, toCall: 300, maxRaiseTo: 2000,
+    publicSeats: [
+      { playerId: 'user', position: 'BB', stack: 2000, bet: 0, contribution: 0, folded: false, allIn: false, out: false },
+      { playerId: 'p1', position: 'BTN', stack: 0, bet: 100, contribution: 100, folded: false, allIn: true, out: false },
+      { playerId: 'p2', position: 'SB', stack: 1700, bet: 300, contribution: 300, folded: false, allIn: false, out: false },
+    ],
+  }));
+  assert.equal(multi.multiPot, true);
+  assert.equal(multi.requiredEquity, null);
+  assert.match(factsLineKo(snapshot({
+    potBefore: 400, currentBet: 300, actorBet: 0, toCall: 300, maxRaiseTo: 2000,
+    publicSeats: [
+      { playerId: 'user', position: 'BB', stack: 2000, bet: 0, contribution: 0, folded: false, allIn: false, out: false },
+      { playerId: 'p1', position: 'BTN', stack: 0, bet: 100, contribution: 100, folded: false, allIn: true, out: false },
+      { playerId: 'p2', position: 'SB', stack: 1700, bet: 300, contribution: 300, folded: false, allIn: false, out: false },
+    ],
+  })), /단일 필요 승률 없음/);
+  // One opponent bets 800 against hero's 200: the 600 excess is returned, no side pot.
+  const excess = chipFacts(snapshot({
+    potBefore: 1000, currentBet: 800, actorBet: 0, toCall: 200, maxRaiseTo: 200,
+    publicSeats: [
+      { playerId: 'user', position: 'BB', stack: 200, bet: 0, contribution: 0, folded: false, allIn: false, out: false },
+      { playerId: 'p1', position: 'BTN', stack: 5000, bet: 800, contribution: 800, folded: false, allIn: false, out: false },
+      { playerId: 'p2', position: 'SB', stack: 0, bet: 0, contribution: 200, folded: true, allIn: false, out: false },
+    ],
+  }));
+  assert.equal(excess.otherSidePots, 0);
+  assert.equal(excess.requiredEquity, 33.3);            // 200 / (200 + 200 + 200)
 });

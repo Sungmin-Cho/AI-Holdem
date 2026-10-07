@@ -13,7 +13,7 @@ import {
   readAnnotationExactFile,
 } from './training-control.js';
 import { explanationEligible, validateExplanation } from '../training/explain.js';
-import { referenceQuality } from '../shared/reference.js';
+import { referenceQuality, sanitizeCoachingText } from '../shared/reference.js';
 import { evaluateExploit } from '../training/exploit/evaluator.js';
 import { ensureDir, writeContained } from './training-store.js';
 import { readDerivedPolicyConfigs } from './policy-player.js';
@@ -494,6 +494,10 @@ async function runHandPipelineUnlocked({
     }
     if (held) { explainDeferred = true; continue; }
     if (typeof text !== 'string' || !text.trim()) continue;
+    // New model output only: drop out-of-bounds sentences before validation and
+    // sealing; a stored explanation is never rewritten.
+    text = sanitizeCoachingText(text).text;
+    if (!text) continue;
     const check = validateExplanation(evaluation, text);
     if (!check.ok) continue;
     await sealExplanation(item, text);

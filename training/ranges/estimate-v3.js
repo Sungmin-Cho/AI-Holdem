@@ -4,7 +4,7 @@
 // It is an estimate for teaching equity, stated as such wherever it is shown.
 import { PREFLOP_ORDERS_V3, trainingPositionV3 } from '../../shared/preflop-key.js';
 import { HAND_CLASSES } from '../../shared/poker-eval.js';
-import { pushChart, rfiRange, vsOpenChart } from './charts-v3.js';
+import { pushChart, rfiRange, shoveCallChart, vsOpenChart } from './charts-v3.js';
 
 const asRange = (freq) => {
   const out = {};
@@ -44,11 +44,20 @@ export function estimateOpponentRanges(snapshot) {
         ranges[seat.playerId] = shove && action.maxRaiseTo / bb <= 15.5
           ? asRange(pushChart(seated, pos, nearestStack(action.maxRaiseTo / bb)).raise)
           : asRange(rfiRange(seated, pos));
-      } else if (raisesBefore.length === 1) {
-        const opener = positionOf(raisesBefore[0].playerId);
+      } else if (raisesBefore.length === 1 && before.every((a) => a.action === 'fold' || a === raisesBefore[0])) {
+        // One open and only folds before this player; a limp or an earlier caller
+        // is outside the charts, so no estimate is given for those lines.
+        const open = raisesBefore[0];
+        const opener = positionOf(open.playerId);
         if (opener && order.indexOf(opener) < order.indexOf(pos)) {
-          const chart = vsOpenChart(seated, pos, opener);
-          ranges[seat.playerId] = asRange(action.action === 'raise' ? chart.raise : action.action === 'call' ? chart.call : []);
+          const shove = Number.isInteger(open.maxRaiseTo) && open.amount === open.maxRaiseTo;
+          if (shove && open.maxRaiseTo / bb <= 15.5) {
+            ranges[seat.playerId] = action.action === 'call'
+              ? asRange(shoveCallChart(seated, pos, opener, nearestStack(open.maxRaiseTo / bb)).call) : null;
+          } else if (!shove) {
+            const chart = vsOpenChart(seated, pos, opener);
+            ranges[seat.playerId] = asRange(action.action === 'raise' ? chart.raise : action.action === 'call' ? chart.call : []);
+          }
         }
       }
     } catch {

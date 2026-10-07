@@ -13,11 +13,23 @@ function seatOf(snapshot, playerId) {
   return (snapshot.publicSeats ?? []).find((seat) => seat.playerId === playerId) ?? null;
 }
 
-// Chips hero can still win if it calls: every contribution is capped at what
-// hero will have put in, so the unmatched part of a larger bet is excluded.
-function winnablePot(snapshot, heroTotal) {
-  return (snapshot.publicSeats ?? []).reduce((sum, seat) => sum
-    + Math.min(seat.playerId === snapshot.actorId ? heroTotal : seat.contribution, heroTotal), 0);
+// Pot structure if hero calls: every contribution is capped at hero's total, so
+// the unmatched part of a larger bet is excluded. When an opponent still in the
+// hand is all-in for less than hero's total, hero contests several pots (main
+// and side) whose odds differ, so no single required equity is stated.
+function potStructure(snapshot, heroTotal) {
+  const seats = snapshot.publicSeats ?? [];
+  const contribution = (seat) => (seat.playerId === snapshot.actorId ? heroTotal : seat.contribution);
+  const winnable = seats.reduce((sum, seat) => sum + Math.min(contribution(seat), heroTotal), 0);
+  const live = seats.filter((seat) => !seat.folded && !seat.out && seat.playerId !== snapshot.actorId);
+  const heroLevels = new Set(live.map((seat) => Math.min(seat.contribution, heroTotal)).filter((c) => c > 0 && c < heroTotal));
+  const multiPot = live.some((seat) => seat.allIn && seat.contribution < heroTotal) && heroLevels.size > 0;
+  // Pots above hero's cap need two or more players reaching them; one player's
+  // excess alone is returned to that player.
+  const above = [...new Set(live.map((seat) => seat.contribution).filter((c) => c > heroTotal))].sort((a, b) => a - b);
+  let otherSidePots = 0;
+  for (const level of above) if (live.filter((seat) => seat.contribution >= level).length >= 2) otherSidePots += 1;
+  return { winnable, multiPot, otherSidePots };
 }
 
 export function chipFacts(snapshot) {
@@ -27,23 +39,22 @@ export function chipFacts(snapshot) {
   const toCall = snapshot.toCall ?? 0;
   const owed = Math.max(0, (snapshot.currentBet ?? 0) - (snapshot.actorBet ?? 0));
   const partialCall = toCall > 0 && toCall < owed;
-  const heroTotalAfterCall = hero.contribution + toCall;
-  const potAfterCall = toCall > 0 ? winnablePot(snapshot, heroTotalAfterCall) : snapshot.potBefore;
+  const pots = potStructure(snapshot, hero.contribution + toCall);
+  const potAfterCall = toCall > 0 ? pots.winnable : snapshot.potBefore;
   const opponents = (snapshot.publicSeats ?? []).filter((seat) => seat.playerId !== snapshot.actorId && !seat.folded && !seat.out);
-  const coveringBehind = opponents.filter((seat) => !seat.allIn).map((seat) => seat.stack);
   // Remaining stack that can still be bet against hero after this decision.
-  const effectiveBehind = Math.min(hero.stack, Math.max(0, ...coveringBehind, ...opponents.map((seat) => seat.stack)));
+  const effectiveBehind = Math.min(hero.stack, Math.max(0, ...opponents.map((seat) => seat.stack)));
   const pot = snapshot.potBefore;
-  // Side pots hero cannot win: other contribution levels above hero's cap.
-  const deeperLevels = new Set(opponents.map((seat) => seat.contribution).filter((c) => c > heroTotalAfterCall));
+  const single = toCall > 0 && !pots.multiPot;
   const facts = {
     bb,
     potBb: round(pot / bb),
     toCallBb: round(toCall / bb),
-    requiredEquity: toCall > 0 ? round((100 * toCall) / potAfterCall) : 0,
-    potOdds: toCall > 0 ? `${round((potAfterCall - toCall) / toCall)}:1` : null,
+    requiredEquity: single ? round((100 * toCall) / potAfterCall) : toCall > 0 ? null : 0,
+    potOdds: single ? `${round((potAfterCall - toCall) / toCall)}:1` : null,
     partialCall,
-    otherSidePots: deeperLevels.size,
+    multiPot: toCall > 0 && pots.multiPot,
+    otherSidePots: pots.otherSidePots,
     effectiveBb: round(effectiveBehind / bb),
     spr: pot > 0 ? round(effectiveBehind / pot) : null,
     opponents: opponents.length,
@@ -92,7 +103,9 @@ export function factsLineKo(snapshot, { equityRandom = null, equityRange = null 
   const hand = handFacts(snapshot);
   const parts = [`팟 ${chips.potBb}BB`];
   if (chips.toCallBb > 0) {
-    parts.push(`콜 ${chips.toCallBb}BB`, `팟 오즈 ${chips.potOdds}`, `필요 승률 ${chips.requiredEquity}%`);
+    parts.push(`콜 ${chips.toCallBb}BB`);
+    if (chips.multiPot) parts.push('메인·사이드팟이 나뉘어 단일 필요 승률 없음(팟별 판단)');
+    else parts.push(`팟 오즈 ${chips.potOdds}`, `필요 승률 ${chips.requiredEquity}%`);
     if (chips.partialCall) parts.push('부분 올인 콜(이길 수 있는 팟 기준)');
     if (chips.otherSidePots) parts.push(`이길 수 없는 사이드팟 ${chips.otherSidePots}개 별도`);
   }
@@ -100,7 +113,7 @@ export function factsLineKo(snapshot, { equityRandom = null, equityRange = null 
   if (chips.spr !== null) parts.push(`SPR ${chips.spr}`);
   if (hand?.made) parts.push(`메이드 ${hand.made}`);
   if (hand?.outs) parts.push(`드로 아웃 ${hand.outs}장`);
-  if (equityRandom !== null) parts.push(`무작위 ${chips.opponents}명 대비 에퀴티 ${equityRandom}%`);
+  if (equityRandom !== null) parts.push(`무작위 ${chips.opponents}명 대비 에퀴티 ${equityRandom}%${chips.multiPot ? '(전원 상대, 참고)' : ''}`);
   if (equityRange !== null) parts.push(`추정 레인지 대비 에퀴티 ${equityRange}%`);
   if (chips.chosenPctOfPot !== undefined) parts.push(`선택 크기 ${chips.chosenPutBb}BB(팟의 ${chips.chosenPctOfPot}%)${chips.chosenAllIn ? ' 올인' : ''}`);
   return parts.join(', ');

@@ -43,14 +43,23 @@ test('sanitizing removes only the offending sentences and keeps structure', () =
     '+2.5bb',
   ].join('\n');
   const { text, removed, total } = sanitizeCoachingText(doc);
+  // Once the solver and "## EV" lines go, the EV sentence sits right above
+  // "+2.5bb" and would read as an EV figure, so a second pass removes it too.
   assert.equal(text, [
     '## 결정적 핸드 2~3개 리플레이', '',
     '1. 43번: 22로 민레이즈했습니다. 이후 콜은 가격 때문입니다.',
-    '- 1.5bb 오픈은 작았습니다. 기대값이 낮은 콜이었습니다.',
+    '- 1.5bb 오픈은 작았습니다.',
     '+2.5bb',
   ].join('\n'));
-  assert.equal(removed, 4);
+  assert.equal(removed, 5);
   assert.equal(total, 10);
   assert.equal(coachingClaimAllowed(text), true);
-  assert.deepEqual(sanitizeCoachingText(text), { text, removed: 0, total: 6 });
+  assert.deepEqual(sanitizeCoachingText(text), { text, removed: 0, total: 5 });
+});
+
+test('full-width digits and an EV line above a number cannot carry an EV figure', () => {
+  for (const text of ['EV +１BB입니다.', 'EV\n+4BB입니다.', '### EV\n+4BB', 'EV ３bb 손실이다.', 'EV 관점에서 보면 손해입니다.\n+3bb 차이']) {
+    assert.equal(coachingClaimAllowed(text), false, text);
+    assert.equal(coachingClaimAllowed(sanitizeCoachingText(text).text), true, text);
+  }
 });
