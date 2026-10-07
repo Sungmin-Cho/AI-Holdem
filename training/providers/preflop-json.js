@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ERRORS, coded, frequenciesSumToOne } from '../contracts.js';
 import { allHandClasses } from '../cards.js';
-import { preflopKeys, parsePreflopKey } from '../../shared/preflop-key.js';
+import { preflopKeys, parsePreflopKey, preflopKeysV3, parsePreflopKeyV3, PUSHFOLD_STACKS_BB } from '../../shared/preflop-key.js';
 
 // Keyed by object identity, so the association cannot be reflected, copied or
 // spoofed: `Object.getOwnPropertySymbols` finds nothing, and a Proxy cannot
@@ -52,7 +52,8 @@ export function parsePreflopJson(raw, { expectedSha256 } = {}) {
 }
 
 export function validateDataset(data) {
-  if (!data || ![1, 2].includes(data.schemaVersion)) throw coded(ERRORS.DATASET_INVALID, 'schemaVersion');
+  if (!data || ![1, 2, 3].includes(data.schemaVersion)) throw coded(ERRORS.DATASET_INVALID, 'schemaVersion');
+  if (data.schemaVersion === 3) return validateV3(data);
   if (!PROVIDER_ID_RE.test(data.id ?? '')) throw coded(ERRORS.DATASET_INVALID, 'id');
   if (!SEMVER_RE.test(data.version ?? '')) throw coded(ERRORS.DATASET_INVALID, 'version');
   if (typeof data.license !== 'string' || data.license.length < 1) {
@@ -116,6 +117,85 @@ function validateV2(data) {
   }
 }
 
+const V3_TREE = { openBb: 2.5, threeBetBb: 8.5, fourBetBb: 20 };
+const CHART_ACTIONS = ['raise', 'call', 'fold'];
+const CHART_ID_RE = /^c\d{4}$/;
+const UNIT_RE = /^[0-9a-z]{507}$/;
+
+function decodeUnits(text) {
+  const out = new Array(169);
+  for (let i = 0; i < 169; i += 1) out[i] = Number.parseInt(text.slice(i * 3, i * 3 + 3), 36);
+  return out;
+}
+
+// Schema 3 stores de-duplicated charts as base36 unit strings; spots name a chart.
+function validateV3(data) {
+  const fail = (field) => { throw coded(ERRORS.DATASET_INVALID, `v3 ${field}`); };
+  const top = ['schemaVersion','id','version','license','recipeVersion','methodology','handOrder','units','tree','charts','spots'];
+  if (Object.keys(data).length !== top.length || top.some(k => !Object.hasOwn(data, k))) fail('fields');
+  if (data.id !== 'local-preflop-baseline' || data.version !== '3.0.0' || data.recipeVersion !== 'original-v3.0.0'
+    || data.license !== 'Apache-2.0' || typeof data.methodology !== 'string' || !data.methodology) fail('identity');
+  if (JSON.stringify(data.handOrder) !== JSON.stringify(allHandClasses())) fail('handOrder');
+  if (data.units !== 10000) fail('units');
+  if (JSON.stringify(data.tree) !== JSON.stringify({ ...V3_TREE, pushFoldStacksBb: [...PUSHFOLD_STACKS_BB] })) fail('tree');
+  if (!data.charts || typeof data.charts !== 'object' || !data.spots || typeof data.spots !== 'object') fail('tables');
+  const used = new Set();
+  const keys = preflopKeysV3();
+  if (Object.keys(data.spots).length !== keys.length || keys.some(k => !Object.hasOwn(data.spots, k))) fail('keys');
+  for (const key of keys) {
+    const id = data.spots[key];
+    if (typeof id !== 'string' || !CHART_ID_RE.test(id) || !Object.hasOwn(data.charts, id)) fail(`spot ${key}`);
+    used.add(id);
+    const { context } = parsePreflopKeyV3(key);
+    const chart = data.charts[id];
+    const raiseAllowed = context !== 'vs-shove';
+    const callAllowed = !['rfi-unopened', 'push'].includes(context);
+    if (Object.hasOwn(chart, 'raise') && !raiseAllowed) fail(`raise in ${key}`);
+    if (Object.hasOwn(chart, 'call') && !callAllowed) fail(`call in ${key}`);
+  }
+  for (const [id, chart] of Object.entries(data.charts)) {
+    if (!CHART_ID_RE.test(id) || !used.has(id) || !chart || typeof chart !== 'object') fail(`chart ${id}`);
+    const actions = Object.keys(chart);
+    if (!actions.length || actions.some(a => !CHART_ACTIONS.includes(a)) || !Object.hasOwn(chart, 'fold')) fail(`chart ${id} actions`);
+    const columns = actions.map(a => {
+      if (typeof chart[a] !== 'string' || !UNIT_RE.test(chart[a])) fail(`chart ${id} ${a}`);
+      return decodeUnits(chart[a]);
+    });
+    for (let i = 0; i < 169; i += 1) {
+      let sum = 0;
+      for (const column of columns) {
+        if (!Number.isInteger(column[i]) || column[i] < 0 || column[i] > 10000) fail(`chart ${id} units`);
+        sum += column[i];
+      }
+      if (sum !== 10000) fail(`chart ${id} sum`);
+    }
+    for (const a of ['raise', 'call']) if (Object.hasOwn(chart, a) && decodeUnits(chart[a]).every(u => u === 0)) fail(`chart ${id} empty ${a}`);
+  }
+}
+
+function lookupV3(data, source, spotKey, handClass) {
+  const parsed = parsePreflopKeyV3(spotKey);
+  const index = data.handOrder.indexOf(handClass);
+  const chart = parsed && Object.hasOwn(data.spots, spotKey) ? data.charts[data.spots[spotKey]] : null;
+  if (!chart || index < 0) return { status: 'unsupported', reason: 'spot or hand missing', source };
+  const raiseRow = parsed.context === 'push' ? { allIn: true }
+    : { sizeBb: parsed.context === 'rfi-unopened' ? V3_TREE.openBb : parsed.context === 'vs-3bet' ? V3_TREE.fourBetBb : V3_TREE.threeBetBb };
+  const actions = [];
+  for (const action of CHART_ACTIONS) {
+    if (!Object.hasOwn(chart, action)) continue;
+    const units = Number.parseInt(chart[action].slice(index * 3, index * 3 + 3), 36);
+    if (units > 0) actions.push({ action, ...(action === 'raise' ? raiseRow : {}), frequency: units / 10000, evBb: null });
+  }
+  return { status: 'supported', actions, source };
+}
+
+// True when a pinned dataset has a row for this spot and hand class.
+export function hasSpotHand(dataset, spotKey, handClass) {
+  const { data } = dataset;
+  if (data?.schemaVersion === 3) return Object.hasOwn(data.spots, spotKey) && data.handOrder.includes(handClass);
+  return Boolean(data?.spots && Object.hasOwn(data.spots, spotKey) && Object.hasOwn(data.spots[spotKey], handClass));
+}
+
 export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
   if (data == null || PINNED.get(data) !== contentSha256) {
     throw coded(ERRORS.DATASET_INVALID, 'dataset가 pin 검증을 거치지 않았습니다.');
@@ -126,6 +206,7 @@ export function lookup({ data, contentSha256 }, { spotKey, handClass }) {
     license: data.license,
     contentSha256,
   };
+  if (data.schemaVersion === 3) return lookupV3(data, source, spotKey, handClass);
   const hands = data.spots[spotKey];
   if (!hands || !hands[handClass]) {
     return { status: 'unsupported', reason: 'spot or hand missing', source };
