@@ -179,3 +179,30 @@ test('/api/spot refuses without the token, from another origin, for an unknown v
     await drill.close();
   }
 });
+
+test('a graduated item missed again is counted due by the summary exactly as the daily queue serves it', { timeout: 120_000 }, async () => {
+  const { createMistakeBank } = await import('../tools/training-stores.js');
+  const { evaluatePreflopReferenceV3 } = await import('../training/preflop-reference-v3.js');
+  const { nativePreflopSnapshotV3 } = await import('../training/native-preflop-snapshot-v3.js');
+  const { loadReferenceDataset } = await import('../tools/preflop-dataset.js');
+  const storeDir = createOwnedTempDir('study-sr-reentry');
+  let clock = Date.parse('2026-10-01T00:00:00.000Z');
+  const bank = createMistakeBank(storeDir, { now: () => new Date(clock).toISOString() });
+  const dataset = loadReferenceDataset(V3_REFERENCE_SOURCE);
+  const miss = (epoch) => ({ ...evaluatePreflopReferenceV3(nativePreflopSnapshotV3('6max-100bb-btn-rfi-v3', '72o', { action: 'raise', sizeBb: 2.5 }),
+    dataset, { gameEpoch: epoch }), payloadSha256: epoch.slice(0, 2).repeat(32), origin: 'game', handNo: 1 });
+  const first = await bank.collect(miss('ab'.repeat(32)));
+  assert.equal(first.added, true);
+  clock += 86_400_000;
+  const graduatedAt = new Date(clock).toISOString();
+  await bank.updateReviewState(first.item.mistakeId, { srsVersion: 2, graduatedAt, lastReviewedAt: graduatedAt,
+    nextReviewAt: new Date(clock + 60 * 86_400_000).toISOString() });
+  const graduated = await readStudySummary(storeDir);
+  assert.deepEqual([graduated.bank.dueCount, graduated.bank.graduatedCount], [0, 1]);
+  clock += 86_400_000;
+  await bank.collect(miss('cd'.repeat(32)));
+  const summary = await readStudySummary(storeDir);
+  assert.deepEqual([summary.bank.dueCount, summary.bank.graduatedCount], [1, 0]);
+  const daily = await startDrill(storeDir, { mode: 'daily', source, seed: 'reentry' });
+  assert.equal(daily.queue.length, summary.bank.dueCount);
+});

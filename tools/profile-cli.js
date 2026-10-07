@@ -8,7 +8,8 @@ import { createMistakeBank, createProfileStore } from './training-stores.js';
 import { createTrainingControl } from './training-control.js';
 import { defaultEvaluate, defaultSolve, toRunnerHandle } from './training-pipeline.js';
 import { openContained, readJsonSecure, writeContained, writeJsonSecure } from './training-store.js';
-import { focusOfGoal, goalSelection } from '../training/goal.js';
+import { focusOfGoal, futureAt, goalSelection } from '../training/goal.js';
+import { rebuildFromEvents } from '../training/profile-aggregator.js';
 
 export const PRACTICE_FOCUS_MAX_BYTES = 4096;
 export const PRACTICE_FOCUS_SEGMENTS = ['.training', 'practice-focus.json'];
@@ -373,6 +374,9 @@ export function writePracticeFocus(storeDir, profile, { events, now = new Date()
     writeJsonSecure(file, { schemaVersion: 2, origin: selection.goal?.origin ?? 'default', goal, focus: goal?.recommendedDrill ?? null });
     return file;
   }
+  // The fallback reads the same as-of record: with events, a profile rebuilt
+  // without those stamped after `now`.
+  if (Array.isArray(events)) profile = rebuildFromEvents(events.filter((event) => !futureAt(event, now)));
   const gameCandidates = profile.game?.candidates ?? [];
   const practiceCandidates = profile.practice?.candidates ?? [];
   const origin = gameCandidates.length > 0 ? 'game'

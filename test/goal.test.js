@@ -93,3 +93,32 @@ test('a resolved record keeps no goal in every consumer, and future records coun
   const run = { ...future[0], appliedAt: before, studyRun: { startedAt: future[0].appliedAt } };
   assert.equal(goalSelection([run], { now: before }).state, 'none');
 });
+
+test('the practice-focus fallback cannot revive evidence stamped after now', async () => {
+  const { writePracticeFocus } = await import('../tools/profile-cli.js');
+  const { rebuildFromEvents } = await import('../training/profile-aggregator.js');
+  const { eventFromEvaluation } = await import('../training/profile-store.js');
+  const { evaluatePreflopReferenceV3 } = await import('../training/preflop-reference-v3.js');
+  const { nativePreflopSnapshotV3 } = await import('../training/native-preflop-snapshot-v3.js');
+  const { loadReferenceDataset } = await import('../tools/preflop-dataset.js');
+  const { V3_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  const { createOwnedTempDir } = await import('./helpers/owned-fixtures.mjs');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const dataset = loadReferenceDataset(V3_REFERENCE_SOURCE);
+  const events = Array.from({ length: 10 }, (_, i) => {
+    const epoch = i.toString(16).padStart(2, '0').repeat(32);
+    const evaluation = evaluatePreflopReferenceV3(nativePreflopSnapshotV3('6max-100bb-btn-rfi-v3', '72o', { action: 'raise', sizeBb: 2.5 }), dataset, { gameEpoch: epoch });
+    return eventFromEvaluation({ ...evaluation, payloadSha256: epoch, origin: 'game' }, `2099-01-01T00:00:${String(i).padStart(2, '0')}.000Z`);
+  });
+  const now = '2026-10-07T00:00:00.000Z';
+  const unfiltered = rebuildFromEvents(events);
+  assert.ok((unfiltered.game?.candidates ?? []).length > 0, 'the future record alone would name a leak');
+  const storeDir = createOwnedTempDir('goal-future-focus');
+  fs.mkdirSync(path.join(storeDir, '.training'), { recursive: true });
+  const file = writePracticeFocus(storeDir, unfiltered, { events, now });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { schemaVersion: 2, origin: 'default', goal: null, focus: null });
+  // At the time the record exists, the same events name the goal.
+  const later = writePracticeFocus(storeDir, unfiltered, { events, now: '2099-02-01T00:00:00.000Z' });
+  assert.equal(JSON.parse(fs.readFileSync(later, 'utf8')).goal.id, events[0].skillKey);
+});

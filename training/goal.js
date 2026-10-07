@@ -24,6 +24,8 @@ export function skillStanding(rows) {
 }
 
 const stampedAfter = (value, now) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.parse(now);
+/** Whether an event (or its study run) is stamped after `now`. */
+export const futureAt = (event, now) => stampedAfter(event?.appliedAt, now) || stampedAfter(event?.studyRun?.startedAt, now);
 
 /** The shared choice and its state: 'goal' (a skill to practise), 'clear'
  * (independent evidence exists and no skill has an open miss: nothing to fall
@@ -32,7 +34,7 @@ const stampedAfter = (value, now) => typeof value === 'string' && Number.isFinit
 export function goalSelection(events, { now = null } = {}) {
   const groups = new Map();
   const ordered = [...(events ?? [])].filter(Boolean)
-    .filter((event) => now === null || !(stampedAfter(event.appliedAt, now) || stampedAfter(event.studyRun?.startedAt, now)))
+    .filter((event) => now === null || !futureAt(event, now))
     .sort((a, b) => String(a.appliedAt ?? '').localeCompare(String(b.appliedAt ?? '')));
   for (const event of ordered) {
     const observation = event.mixObservation;

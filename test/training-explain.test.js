@@ -105,6 +105,12 @@ test('an identifier never excuses a frequency or a size claim', async () => {
   assert.equal(validateExplanation(evaluation, '레이즈 100BB가 기준 사이즈입니다.').code, 'NUMBER_CONTRADICTION');
   assert.equal(validateExplanation(evaluation, '100BB로 레이즈하세요.').code, 'NUMBER_CONTRADICTION');
   assert.equal(validateExplanation(evaluation, '22BB 레이즈가 기준입니다.').code, 'NUMBER_CONTRADICTION');
+  for (const claim of ['레이즈 100BB의 크기가 기준 사이즈입니다.', '100BB의 오픈 사이즈가 권장됩니다.',
+    '100BB의 레이즈가 기준 사이즈입니다.', '100BB짜리 레이즈를 권장합니다.']) {
+    assert.equal(validateExplanation(evaluation, claim).code, 'NUMBER_CONTRADICTION', claim);
+  }
+  assert.equal(validateExplanation(evaluation, '100BB의 스택에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '100BB짜리 게임에서 22는 레이즈 100%입니다.').ok, true);
   // The same identifiers used as identifiers stay allowed.
   assert.equal(validateExplanation(evaluation, '100BB 깊이에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
   assert.equal(validateExplanation(evaluation, '6인 100BB에서 22는 레이즈 100%입니다.').ok, true);

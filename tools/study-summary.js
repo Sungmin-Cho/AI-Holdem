@@ -4,6 +4,7 @@ import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
 import { CANONICAL_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, referenceQuality } from '../shared/reference.js';
 import { hasSpotHand } from '../training/providers/preflop-json.js';
+import { reenteredAfterGraduation } from '../training/drill-generator.js';
 
 const sameSource = (a, b) => a?.id === b?.id && a?.version === b?.version && a?.contentSha256 === b?.contentSha256;
 const safeSource = (value) => value && typeof value.id === 'string' && value.id.length <= 128
@@ -94,8 +95,10 @@ export async function readStudySummary(storeDir) {
     game: projection(profile.game, 'game', metricsEvents, source),
     practice: projection(profile.practice, 'practice', metricsEvents, source),
     bank: { totalCount: availableBank.length,
-      dueCount: availableBank.filter((item) => Date.parse(item.nextReviewAt) <= Date.parse(now) && !item.graduatedAt).length,
-      graduatedCount: availableBank.filter((item) => item.graduatedAt).length },
+      // The daily queue's own rule: a graduated item missed again is due again.
+      dueCount: availableBank.filter((item) => (item.graduatedAt ? reenteredAfterGraduation(item)
+        : Date.parse(item.nextReviewAt) <= Date.parse(now))).length,
+      graduatedCount: availableBank.filter((item) => item.graduatedAt && !reenteredAfterGraduation(item)).length },
     goal: { origin: goal.origin, sourceIdentity: safeSource(goal.sourceIdentity), spotKey: goal.spotKey,
       handClass: goal.handClass, reason: goal.reason },
     assessments: history.assessments.slice(-100).map((run) => runSummary(run, now)),

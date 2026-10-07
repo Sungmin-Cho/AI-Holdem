@@ -214,3 +214,65 @@ test('a split with the board is not raised as the nuts', () => {
   const items = distributionV3(snapshot, legal, config);
   assert.equal(items.some((row) => row.reasonCode === 'v3-river-nut-raise'), false, JSON.stringify(items));
 });
+
+test('a call into a main and a side pot is priced pot by pot', () => {
+  // Three seats: the small blind is all-in for its 25-chip blind, the button
+  // limps, the big blind checks it down and faces a 100-chip river bet with 66.
+  const game = createGame({ aiCount: 2, mode: 'cash-training', startStackBb: 100, handLimit: 10, levelEvery: null });
+  game.button = 2; // the user is on the button after the move
+  game.seats[1].stack = 25;
+  const cards = { p2: ['6c', '6d'] };
+  const board = ['Ks', '9d', '4c', '2h', '7s'];
+  const used = new Set([...cards.p2, ...board]);
+  const holes = deckFor(game, cards).slice(0, 6);
+  const deck = [...holes, ...board, ...newDeck().filter((c) => !used.has(c) && !holes.includes(c))];
+  let state = startHand(game, { deck }).state;
+  state = applyAction(state, 'user', 'call').state;
+  state = applyAction(state, 'p2', 'check').state;
+  for (let street = 0; street < 2; street += 1) {
+    state = applyAction(state, 'p2', 'check').state;
+    state = applyAction(state, 'user', 'check').state;
+  }
+  state = applyAction(state, 'p2', 'check').state;
+  state = applyAction(state, 'user', 'raise', 100).state;
+  const { legal, snapshot } = snap(state);
+  assert.equal(legal.toAct, 'p2');
+  assert.equal(snapshot.street, 'river');
+  const items = distributionV3(snapshot, legal, personaConfigV3('TAG'));
+  // Main pot 75 against both, side pot 250 against the button alone: calling 100 returns more than it costs.
+  assert.ok((items.find((row) => row.action === 'call')?.frequency ?? 0) > 0, JSON.stringify(items));
+});
+
+test('river bets of the whole range share one size and keep the bluff share among them', () => {
+  const { riverBluffPlan, tableOf, BASE_BLUFF, RIVER_BET_FRACTION } = strategyInternals;
+  const board = ['Ks', '9d', '4c', '2h', '7s'];
+  let state = table({ cards: { user: ['Ac', 'Tc'] }, board });
+  for (const pid of ['p3', 'p4', 'p5']) state = applyAction(state, pid, 'fold').state;
+  state = applyAction(state, 'user', 'raise', 125).state;
+  state = applyAction(state, 'p1', 'fold').state;
+  state = applyAction(state, 'p2', 'call').state;
+  for (let street = 0; street < 2; street += 1) {
+    state = applyAction(state, 'p2', 'check').state;
+    state = applyAction(state, 'user', 'check').state;
+  }
+  state = applyAction(state, 'p2', 'check').state;
+  const { legal, snapshot } = snap(state);
+  const config = personaConfigV3('TAG');
+  const plan = riverBluffPlan(snapshot, tableOf(snapshot), config.traits, RIVER_BET_FRACTION, 0.62);
+  // Every combo of the button's own range, through the real distribution.
+  const sizes = new Set();
+  let value = 0;
+  let bluff = 0;
+  for (const row of plan.heroRows) {
+    const items = distributionV3({ ...snapshot, holeCards: row.cards }, legal, config);
+    for (const item of items.filter((entry) => entry.action === 'raise')) {
+      sizes.add(item.amount);
+      if (item.reasonCode === 'v3-value-bet') value += row.w * item.frequency;
+      else if (item.reasonCode === 'v3-river-bluff') bluff += row.w * item.frequency;
+    }
+  }
+  assert.equal(sizes.size, 1, `one river size: ${[...sizes]}`);
+  assert.ok(value > 0 && bluff > 0);
+  const expected = (RIVER_BET_FRACTION / (1 + RIVER_BET_FRACTION)) * (config.traits.bluff / BASE_BLUFF);
+  assert.ok(Math.abs(bluff / value - expected) < 0.02, `bluff/value ${(bluff / value).toFixed(3)} vs ${expected.toFixed(3)}`);
+});
