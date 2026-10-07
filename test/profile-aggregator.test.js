@@ -185,7 +185,8 @@ test('unverified drill-only profile remains unavailable', () => {
       origin: 'drill',
     }),
   ]);
-  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@2.0.0');
+  // Unverified evidence never selects a segment; the default is the reference v3 provider.
+  assert.equal(profile.activeSegmentId, 'local-preflop-baseline@3.0.0');
   assert.equal(profile.overall.evaluatedDecisions, 0);
   assert.equal(profile.practice.coverage.unverifiedDecisions, 2);
 });
@@ -213,7 +214,7 @@ test('other-provider drill is a separate segment and is not mixed into the game 
 });
 
 test('missing payloadSha256 is PROFILE_EVENT_INVALID; empty profile defaults to the dataset provider', () => {
-  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@2.0.0');
+  assert.equal(emptyProfile().activeSegmentId, 'local-preflop-baseline@3.0.0');
   const bad = event();
   delete bad.payloadSha256;
   assert.throws(() => applyEvent(emptyProfile(), bad), { code: 'PROFILE_EVENT_INVALID' });

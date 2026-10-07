@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {hintFixture} from './helpers/hint-fixture.mjs';
-import {evaluatePreflopReference} from '../training/preflop-reference.js';
+import {evaluateReference} from '../training/reference-evaluator.js';
 import {loadReferenceDataset} from '../tools/preflop-dataset.js';
-import {V2_REFERENCE_SOURCE} from '../shared/reference.js';
+import {CANONICAL_REFERENCE_SOURCE} from '../shared/reference.js';
 import {createTrainingControl,materializeLearningEvaluation} from '../tools/training-control.js';
 import {eventFromEvaluation} from '../training/profile-store.js';
 
@@ -14,7 +14,7 @@ test('canonical hinted archive survives accept/materialize and rejects omitted o
  let e=f.cli('apply','user','fold');
  while(f.state().hand){const next=f.cli('step').next;e=f.cli('apply',next.toAct,'fold');}
  const record=f.state().lastHand,s=record.decisions.find(row=>row.actorId==='user');
- const evaluated=evaluatePreflopReference(s,loadReferenceDataset(V2_REFERENCE_SOURCE),{gameEpoch:f.epoch});
+ const evaluated=evaluateReference(s,loadReferenceDataset(CANONICAL_REFERENCE_SOURCE),{gameEpoch:f.epoch});
  const tc=createTrainingControl();
  for(const assistance of [undefined,{schemaVersion:1,hintShown:false,exposureId:null}]) {
   await assert.rejects(()=>tc.acceptEvaluations(f.dir,{gameEpoch:f.epoch,owner:'hint-test',handNo:record.handNo,evaluations:[{...evaluated,assistance}]}),{code:'ASSISTANCE_INVALID'});
@@ -36,7 +36,7 @@ test('default off contract archives explicit false and remains independently lea
  f.cli('apply','user','fold');while(f.state().hand){const next=f.cli('step').next;f.cli('apply',next.toAct,'fold');}
  const record=f.state().lastHand;assert.deepEqual(record.hintExposures,{});
  const s=record.decisions.find(row=>row.actorId==='user'),tc=createTrainingControl();
- const ev=evaluatePreflopReference(s,loadReferenceDataset(V2_REFERENCE_SOURCE),{gameEpoch:f.epoch});
+ const ev=evaluateReference(s,loadReferenceDataset(CANONICAL_REFERENCE_SOURCE),{gameEpoch:f.epoch});
  await tc.acceptEvaluations(f.dir,{gameEpoch:f.epoch,owner:'off-test',handNo:1,evaluations:[ev]});
  const m=materializeLearningEvaluation(f.dir,tc.loadAuthority(f.dir).items[ev.evaluationId]);
  assert.deepEqual(m.assistance,{schemaVersion:1,hintShown:false,exposureId:null});

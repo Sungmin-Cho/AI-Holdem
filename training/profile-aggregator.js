@@ -6,7 +6,7 @@ import { confidenceOf, masteryOf } from './mastery.js';
 import { actionKey, matchReferenceActionFor, isAllowedGrade, referenceQuality, validateMixObservation } from '../shared/reference.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 
-export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@2.0.0';
+export const DEFAULT_ACTIVE_SEGMENT_ID = 'local-preflop-baseline@3.0.0';
 export const PROFILE_SCHEMA_VERSION = 6;
 
 function coded(code, message) {

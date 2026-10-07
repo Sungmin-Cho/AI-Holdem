@@ -482,19 +482,21 @@ export function engineInitFlags(args = {}) {
 
 export const applyModeDefaults = cliModeDefaults;
 
+// New games use reference v3: 2–9 seats, deep stacks compared exactly at
+// 80–150BB (projected at 25–250BB), and push/fold at 15.5BB or less.
 export function gtoEvalNotice(config = {}) {
   if (config.mode !== 'cash-training') return null;
   const seats = Number(config.aiCount) + (config.humanCount ?? 1);
   const stackBb = config.startStackBb;
-  const badSeats = !Number.isFinite(seats) || ![6, 8, 9].includes(seats);
-  const badStack = !Number.isFinite(stackBb) || stackBb !== 100;
-  if (!badSeats && !badStack) return null;
+  const badSeats = !Number.isFinite(seats) || seats < 2 || seats > 9;
+  const exact = Number.isFinite(stackBb) && ((stackBb >= 80 && stackBb <= 150) || (stackBb >= 2.6 && stackBb <= 15.5));
+  if (!badSeats && exact) return null;
   const parts = [];
   if (badSeats) parts.push(Number.isFinite(seats) ? `${seats}인` : '좌석 수 확인 불가');
-  if (badStack) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
-  const availability = !badSeats && Number.isFinite(stackBb) && stackBb >= 80 && stackBb <= 120
+  if (!exact) parts.push(Number.isFinite(stackBb) ? `시작 스택 ${Number(stackBb.toFixed(2))}BB` : '시작 스택 확인 불가');
+  const availability = !badSeats && Number.isFinite(stackBb) && stackBb >= 25 && stackBb <= 250
     ? '투영 참고이며 점수에서 제외됩니다' : '지원 범위 밖이므로 기준표 비교를 제공하지 않습니다';
-  return `휴리스틱 프리플롭 기준표는 6·8·9인 100BB의 미오픈·단일 오픈 상황을 지원합니다. 현재 ${parts.join(', ')}는 ${availability}.`;
+  return `휴리스틱 프리플롭 기준표는 2~9인 80~150BB 깊이의 오픈·오픈 대응·3벳 대응과 15BB 이하 푸시/폴드를 직접 비교합니다. 현재 ${parts.join(', ')}는 ${availability}.`;
 }
 
 export function parseGameLoopArgs(argv) {

@@ -456,8 +456,8 @@ function paintTop(view) {
     ? `다음 핸드는 ${withParticle(formatAmount(restored, view.blinds?.[1], displayUnit).primary)} 다시 시작합니다.`
     : '다음 핸드는 시작 스택으로 다시 시작합니다.';
   $('learning-scope').textContent = cash
-    ? '새 세션은 6·8·9인 100BB 프리플롭 기준표를 참고합니다. 스택·사이즈 투영은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다.'
-    : '토너먼트 상황은 기준표 채점 범위 밖입니다. 결정 복기를 참고하세요.';
+    ? '새 세션은 프리플롭 기준표 v3(2~9인 오픈·오픈 대응·3벳 대응)를 참고합니다. 투영 참고와 트리 밖 선택은 점수에서 제외하며, 기존 세션은 기록된 출처를 유지합니다. 포스트플랍은 채점하지 않고 사실 카드로 복기합니다.'
+    : '토너먼트는 15BB 이하 푸시/폴드와 80~150BB 깊이의 프리플랍을 기준표 v3와 비교합니다. 그 사이 깊이는 투영 참고(점수 제외)이고, 포스트플랍은 사실 카드로 복기하세요.';
   $('level').textContent = view == null ? '—' : String((view.level ?? 0) + 1);
   $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])} / ${formatChip(view.blinds[1])} 칩 · 1 BB = ${formatChip(view.blinds[1])} 칩` : '—';
   const left = view ? handsUntilLevel(view) : null;

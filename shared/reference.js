@@ -15,7 +15,8 @@ export const V3_REFERENCE_SOURCE = Object.freeze({
 });
 export const KNOWN_REFERENCE_SOURCES = Object.freeze([LEGACY_REFERENCE_SOURCE, V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE]);
 // New sessions use v2; legacy sessions and policy retain their explicit v1 pin.
-export const CANONICAL_REFERENCE_SOURCE = V2_REFERENCE_SOURCE;
+// New sessions use reference v3; recorded sessions keep the source they bound.
+export const CANONICAL_REFERENCE_SOURCE = V3_REFERENCE_SOURCE;
 export function sameReferenceSource(a, b) {
   return Boolean(a && b && ['id','version','contentSha256'].every(k=>a[k]===b[k]));
 }

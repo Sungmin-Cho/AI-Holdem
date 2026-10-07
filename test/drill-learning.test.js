@@ -644,7 +644,7 @@ test('a stored question with changed source bytes cannot be graded or journaled'
     trends: { practice: [], game: [] },
     goal: {
       origin: 'default', sourceIdentity: null,
-      spotKey: '6max-100bb-btn-rfi-v2', handClass: 'AJo',
+      spotKey: '6max-100bb-btn-rfi-v3', handClass: 'AJo',
       reason: 'default-supported-spot',
     },
   });
