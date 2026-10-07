@@ -272,14 +272,16 @@ function setBtnLabel(btn, label, amount) {
 
 // Host HUD (D13): the engine's public-observation counts, the same the AI
 // players read, fetched from the host-only route once per completed hand.
-let hud=null,hudKey=null,report=null;
+let hud=null,hudKey=null,report=null,insightGeneration=0,insightLoaded=null,insightRetryAt=0,insightRetryKey=null;
 const hudShown=()=>!participantMode&&!!appGameId&&currentDisplaySettings().hud!=='off';
-// HUD and the process report refresh once per hand boundary (host only).
+// HUD and the process report refresh once per hand boundary (host only). Only
+// the latest request may paint; a failed one is retried by a later paint.
 async function loadInsights(view) {
   if(participantMode||!appGameId||!view)return;
-  const key=`${view.handNo}:${view.handInProgress}:${view.gameOver}`;
-  if(key===hudKey)return;
+  const key=`${view.handNo}:${view.handInProgress}:${view.gameOver}:${hudShown()}`;
+  if(key===insightLoaded||key===hudKey||(key===insightRetryKey&&Date.now()<insightRetryAt))return;
   hudKey=key;
+  const generation=++insightGeneration;
   const fetchJson=async(endpoint)=>{
     try {
       const response=await appFetch(endpoint,{signal:AbortSignal.timeout(8000)});
@@ -287,8 +289,13 @@ async function loadInsights(view) {
     } catch {return null;}
   };
   const [hudBody,reportBody]=await Promise.all([hudShown()?fetchJson('hud'):null,fetchJson('report')]);
+  if(generation!==insightGeneration)return;
+  hudKey=null;
+  const hudOk=!hudShown()||Array.isArray(hudBody?.players);
   if(Array.isArray(hudBody?.players)){hud=hudBody;paintParticipants(ui.view);}
   if(Array.isArray(reportBody?.checks)){report=reportBody;paintReport();}
+  if(hudOk&&Array.isArray(reportBody?.checks))insightLoaded=key;
+  else {insightRetryKey=key;insightRetryAt=Date.now()+5000;}
 }
 function paintReport() {
   const box=$('process-report');
@@ -1756,7 +1763,7 @@ function paintDecisionAid(view) {
   // stays in the accessibility tree.
   $('action-bar').classList.toggle('has-aid', Boolean(text));
 }
-globalThis.addEventListener?.('holdem:display-learning', () => { hudKey = null; paint(); });
+globalThis.addEventListener?.('holdem:display-learning', () => { hudKey = null; insightLoaded = null; paint(); });
 $('btn-fold').addEventListener('click', () => {
   const legal = ui.view?.legal;
   if (legal?.canCheck && foldArmedFor !== legal.decisionId) {

@@ -107,6 +107,35 @@ export function explanationEligible(evaluation) {
   return true;
 }
 
+// Numbers that are part of the evaluation's own identifiers: the hand class
+// ("92s", "22"), the spot key, the table size ("6max", "6인"), the spot's stack
+// depth ("100BB") and position labels with digits ("UTG+1"). Only these exact
+// tokens are exempt from the numeric checks; any other number is still judged.
+function identitySpans(text, evaluation) {
+  const tokens = new Set();
+  const handClass = typeof evaluation?.handClass === 'string' ? evaluation.handClass : null;
+  if (handClass && /^[2-9TJQKA]{2}[so]?$/.test(handClass)) tokens.add(handClass);
+  const spotKey = typeof evaluation?.spotKey === 'string' ? evaluation.spotKey : '';
+  if (/^[a-z0-9+-]{1,100}$/.test(spotKey)) tokens.add(spotKey);
+  const seats = /^(\d)max-/.exec(spotKey)?.[1];
+  if (seats) { tokens.add(`${seats}max`); tokens.add(`${seats}인`); }
+  const stack = /^\dmax-(\d+)bb-/.exec(spotKey)?.[1];
+  if (stack) { tokens.add(`${stack}BB`); tokens.add(`${stack}bb`); tokens.add(`${stack} BB`); }
+  for (const label of ['UTG+1', 'UTG+2', 'UTG1', 'UTG2']) tokens.add(label);
+  const spans = [];
+  for (const token of tokens) {
+    let at = text.indexOf(token);
+    while (at >= 0) {
+      const before = text[at - 1] ?? '';
+      const after = text[at + token.length] ?? '';
+      if (!/[A-Za-z0-9]/.test(before) && !/[A-Za-z0-9]/.test(after)) spans.push([at, at + token.length]);
+      at = text.indexOf(token, at + 1);
+    }
+  }
+  return spans;
+}
+const insideSpans = (spans, start, length) => spans.some(([from, to]) => start >= from && start + length <= to);
+
 export function validateExplanation(evaluation, explanation) {
   if (typeof explanation !== 'string' || !explanation.trim()) {
     return { ok: false, code: 'EMPTY_EXPLANATION' };
@@ -127,9 +156,11 @@ export function validateExplanation(evaluation, explanation) {
     if (/직접\s*비교|주력\s*선택|허용\s*선택|저빈도|off.policy|preferred|mixed/i.test(explanation)) return {ok:false,code:'REFERENCE_AUTHORITY_CLAIM'};
     const numberRe = /-?\d+(?:\.\d+)?/g;
     const handNo = evaluation?.handNo;
+    const identities = identitySpans(explanation, evaluation);
     let match;
     while ((match = numberRe.exec(explanation))) {
       const token = match[0];
+      if (insideSpans(identities, match.index, token.length)) continue;
       if (EV_WORDS.test(clauseAt(explanation, match.index))
         || handNo == null || token !== String(handNo)) {
         return { ok: false, code: 'NUMBER_CONTRADICTION' };
@@ -151,11 +182,13 @@ export function validateExplanation(evaluation, explanation) {
   }
   const handNo = Number(evaluation.handNo);
   const spans = aliasSpans(explanation);
+  const identities = identitySpans(explanation, evaluation);
   const numberRe = /-?\d+(?:\.\d+)?/g;
   let match;
   while ((match = numberRe.exec(explanation))) {
     const token = match[0];
     if (numberCoveredByAlias(spans, match.index, token.length)) continue;
+    if (insideSpans(identities, match.index, token.length)) continue;
     const num = Number(token);
     const range = clauseRangeAt(explanation, match.index);
     const clause = range.clause;

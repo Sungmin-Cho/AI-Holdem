@@ -286,6 +286,14 @@ const SENTENCE_SPLIT_RE = /(?<=[.!?。])\s+/u;
 // New coaching output also drops Korean solver-authority claims, which the
 // legacy predicate never matched; validation of stored text stays unchanged.
 const NEW_OUTPUT_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)|GTO\s*(?:기준|상|적으로)\s*(?:정답|최적)/u;
+// A limit stated as such ("솔버가 검증한 전략은 아닙니다", "솔버로 검증하지 않은
+// 휴리스틱입니다", "GTO 정답은 아닙니다") is kept: the negation attaches to the
+// authority phrase itself, not anywhere later in the sentence.
+const NEGATED_AUTHORITY_RE = /솔버\s*(?:가|로|의|에서)?\s*(?:검증|확인|계산|증명)\s*(?:(?:하지|되지)\s*않[은았는]|(?:한|된)\s*(?:\S{1,8}\s*)?(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요))|GTO\s*(?:기준|상|적으로)?\s*(?:정답|최적)\s*(?:은|는|이|가)?\s*(?:아닙니다|아니다|아님|아니에요)/u;
+const assertsAuthority = (sentence) => NEW_OUTPUT_AUTHORITY_RE.test(sentence) && !NEGATED_AUTHORITY_RE.test(sentence);
+// New output only: an expected-value word with a number in the same sentence,
+// spaced or not ("기대 수익은 +2BB", "EV 1.5") — no such figure is computed here.
+const QUANTITATIVE_EV_RE = /(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))[^.!?。]*\d|\d[^.!?。]*(?:기대\s*(?:수익|값|가치|이익)|(?<![A-Za-z])EV(?![A-Za-z]))/iu;
 
 // Same normalisation the legacy predicate applies before matching.
 const normalizeClaimText = (text) => text.normalize('NFKC').replace(/[​-‍⁠﻿]/g, '');
@@ -360,7 +368,10 @@ function sanitizePass(text) {
   lines.forEach((line, index) => {
     if (!line.sentences.length) { kept.push(line.prefix.trimEnd()); return; }
     total += line.sentences.length;
-    const ok = keptSentences(lines, index, (sentence) => !NEW_OUTPUT_AUTHORITY_RE.test(normalizeClaimText(sentence)));
+    const ok = keptSentences(lines, index, (sentence) => {
+      const normalized = normalizeClaimText(sentence);
+      return !assertsAuthority(normalized) && !QUANTITATIVE_EV_RE.test(normalized);
+    });
     removed += line.sentences.length - ok.length;
     if (ok.length) kept.push(`${line.prefix}${ok.join(' ')}`);
   });

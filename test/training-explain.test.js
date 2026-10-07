@@ -80,3 +80,16 @@ test('S2 supported explanation fails closed when source is absent', () => {
   const { source, ...unverified } = supported;
   assert.equal(validateExplanation(unverified, '레이즈가 주력입니다.').ok, false);
 });
+
+test('an explanation may name its own hand class, spot and stack depth; other numbers are still checked', async () => {
+  const { validateExplanation } = await import('../training/explain.js');
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  const evaluation = { status: 'supported', handNo: 12, handClass: '92s', spotKey: '6max-100bb-btn-rfi-unopened', street: 'preflop',
+    source: { ...LEGACY_REFERENCE_SOURCE }, recommended: [{ action: 'fold', frequency: 1, evBb: null }], chosen: { action: 'fold', frequency: 1, evBb: null }, grade: 'preferred' };
+  assert.equal(validateExplanation(evaluation, '92s는 이 위치에서 상대의 범위를 고려해야 합니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '6max 100BB에서 92s는 폴드가 주력입니다.').ok, true);
+  assert.equal(validateExplanation({ ...evaluation, handClass: '22' }, '22는 작은 페어입니다.').ok, true);
+  assert.equal(validateExplanation(evaluation, '92s는 3번 레이즈할 손패가 아닙니다.').code, 'NUMBER_CONTRADICTION');
+  assert.equal(validateExplanation(evaluation, '93s는 버리는 손패입니다.').code, 'NUMBER_CONTRADICTION', 'another hand class is not exempt');
+  assert.equal(validateExplanation(evaluation, '이 손패는 37% 확률로 이깁니다.').code, 'NUMBER_CONTRADICTION');
+});

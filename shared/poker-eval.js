@@ -219,7 +219,9 @@ export function drawsOf(holeCards, boardCards) {
   const empty = { flushDraw: false, straightDraw: null, outs: 0, outCards: [] };
   if (board.length < 3 || board.length > 4) return empty;
   const all = [...hole, ...board];
-  if (categoryOfScore(scoreCards(all)) >= 4) return empty;
+  // A flush or better has nothing to draw to; a made straight can still draw
+  // to a flush (a redraw), but not to another straight.
+  if (categoryOfScore(scoreCards(all)) >= 5) return empty;
   const used = new Set(all);
   const suitCount = [0, 0, 0, 0];
   for (const card of all) suitCount[card & 3] += 1;
@@ -237,7 +239,18 @@ export function drawsOf(holeCards, boardCards) {
     if (makesStraight) straightRanks.add(card >> 2);
     if (makesStraight || makesFlush) outCards.push(cardStr(card));
   }
-  const straightDraw = straightRanks.size >= 2 ? 'open-ended' : straightRanks.size === 1 ? 'gutshot' : null;
+  // Two completing ranks are open-ended only at both ends of four in a row;
+  // otherwise they are two gutshots (the same eight cards, a different shape).
+  const mask = rankMaskOf(all);
+  const run4 = (low) => [0, 1, 2, 3].every((k) => {
+    const rank = low + k;
+    return rank === -1 ? (mask & (1 << 12)) !== 0 : rank >= 0 && rank <= 12 && (mask & (1 << rank)) !== 0;
+  });
+  const openEnded = [...straightRanks].some((rank) => {
+    const lowEnd = rank === 12 ? -1 : rank; // an ace completes the wheel below a 2-3-4-5 run
+    return (straightRanks.has(rank + 5) && run4(lowEnd + 1)) || (rank === 12 && straightRanks.has(4) && run4(0));
+  });
+  const straightDraw = straightRanks.size >= 2 ? (openEnded ? 'open-ended' : 'double-gutshot') : straightRanks.size === 1 ? 'gutshot' : null;
   return { flushDraw: flushSuit >= 0, straightDraw, outs: outCards.length, outCards };
 }
 
@@ -267,26 +280,13 @@ function rangeCombos(range, known) {
   return { combos, total };
 }
 
-// Weighted draw of one combo not using any dealt card; null when none remains.
-function sampleCombo(next, prepared, used) {
+// One weighted combo of a prepared range (its known cards already removed).
+function drawCombo(next, prepared) {
   const { combos, total } = prepared;
-  for (let attempt = 0; attempt < 32; attempt += 1) {
-    let pick = (next() / 4294967296) * total;
-    let index = 0;
-    while (index < combos.length - 1 && (pick -= combos[index][2]) >= 0) index += 1;
-    const [a, b] = combos[index];
-    if (!used[a] && !used[b]) { used[a] = 1; used[b] = 1; return [a, b]; }
-  }
-  // Many earlier villains took the likely cards: fall back to an exact filtered draw.
-  const free = combos.filter(([a, b]) => !used[a] && !used[b]);
-  const sum = free.reduce((acc, row) => acc + row[2], 0);
-  if (!free.length || !(sum > 0)) return null;
-  let pick = (next() / 4294967296) * sum;
+  let pick = (next() / 4294967296) * total;
   let index = 0;
-  while (index < free.length - 1 && (pick -= free[index][2]) >= 0) index += 1;
-  const [a, b] = free[index];
-  used[a] = 1; used[b] = 1;
-  return [a, b];
+  while (index < combos.length - 1 && (pick -= combos[index][2]) >= 0) index += 1;
+  return combos[index];
 }
 
 // Range: object {class: frequency} or array of 169 frequencies; combos weighted.
@@ -319,14 +319,23 @@ export function equityVs({ holeCards, boardCards = [], ranges = [null], samples 
   const used = new Uint8Array(52);
   for (let n = 0; n < samples; n += 1) {
     used.set(known);
-    const villains = [];
-    for (const p of prepared) {
-      const hand = p ? sampleCombo(next, p, used) : [drawCard(next, used), drawCard(next, used)];
-      if (!hand) break;
-      villains.push(hand);
+    // Range opponents are drawn independently from their own ranges and a deal
+    // in which two of them share a card is rejected as a whole: the accepted
+    // deals follow the joint distribution whatever the opponents' order.
+    // Random hands are dealt from the cards left afterwards.
+    const villains = new Array(prepared.length);
+    let blocked = false;
+    for (let i = 0; i < prepared.length && !blocked; i += 1) {
+      if (!prepared[i]) continue;
+      const [a, b] = drawCombo(next, prepared[i]);
+      if (used[a] || used[b]) { blocked = true; break; }
+      used[a] = 1; used[b] = 1;
+      villains[i] = [a, b];
     }
-    // Two narrow ranges can block each other; such a deal is skipped, not replaced.
-    if (villains.length !== prepared.length) continue;
+    if (blocked) continue;
+    for (let i = 0; i < prepared.length; i += 1) {
+      if (!prepared[i]) villains[i] = [drawCard(next, used), drawCard(next, used)];
+    }
     const runout = [...board];
     while (runout.length < 5) runout.push(drawCard(next, used));
     const heroScore = scoreCards([...hole, ...runout]);

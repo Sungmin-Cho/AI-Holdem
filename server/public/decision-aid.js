@@ -15,16 +15,31 @@ export function decisionAid(view, viewer) {
   const call = legal.callAmount ?? 0;
   const opponents = view.seats.filter((seat) => seat.playerId !== viewer && !seat.folded && !seat.out);
   const currentBet = Math.max(0, ...view.seats.map((seat) => seat.bet ?? 0));
+  // What hero can win by calling: this street's bets above hero's call are
+  // returned or form a pot hero is not in (the engine fact card's winnable pot).
+  const cap = (hero.bet ?? 0) + call;
+  const excess = view.seats.filter((seat) => seat.playerId !== viewer).reduce((sum, seat) => sum + Math.max(0, (seat.bet ?? 0) - cap), 0);
+  const winnable = pot - excess;
   const partial = call > 0 && call < currentBet - (hero.bet ?? 0);
-  const sidePots = (view.pots?.length ?? 0) > 1 || opponents.some((seat) => seat.allIn);
+  // Several pots with different prices: an opponent all-in for less than hero
+  // will have in (this street, or out of the last pot from an earlier street).
+  // Uneven blinds alone also split the public pot list, so its length is no signal.
+  const lastPot = view.pots?.at?.(-1);
+  const sidePots = opponents.some((seat) => seat.allIn && (((seat.bet ?? 0) > 0 && (seat.bet ?? 0) < cap)
+    || (lastPot && Array.isArray(lastPot.eligible) && lastPot.eligible.includes(viewer) && !lastPot.eligible.includes(seat.playerId))));
   const effective = Math.min(hero.stack, Math.max(0, ...opponents.map((seat) => seat.stack + (seat.bet ?? 0))));
   // Most useful first: the line is a single row that may be cut at the end.
   const items = [];
   if (call > 0) {
-    items.push({ key: 'need', label: '필요 승률', value: `${round((100 * call) / (pot + call))}%`,
-      note: partial || sidePots ? '총 팟 기준(사이드팟·부분 올인은 이길 수 있는 팟만 따로)' : null });
-    items.push({ key: 'call', label: '콜', value: `${round(call / bb)}BB` });
-    items.push({ key: 'odds', label: '팟 오즈', value: `${round(pot / call)}:1` });
+    if (sidePots) {
+      items.push({ key: 'need', label: '필요 승률', value: '팟이 나뉨(팟별 판단)', note: '메인·사이드팟의 가격이 달라 하나의 필요 승률이 없습니다' });
+      items.push({ key: 'call', label: '콜', value: `${round(call / bb)}BB` });
+    } else {
+      const basis = partial || excess > 0 ? '(이길 수 있는 팟 기준)' : '';
+      items.push({ key: 'need', label: '필요 승률', value: `${round((100 * call) / (winnable + call))}%${basis}` });
+      items.push({ key: 'call', label: '콜', value: `${round(call / bb)}BB` });
+      items.push({ key: 'odds', label: '팟 오즈', value: `${round(winnable / call)}:1` });
+    }
   }
   items.push({ key: 'pot', label: '팟', value: `${round(pot / bb)}BB` });
   if (pot > 0) items.push({ key: 'spr', label: 'SPR', value: String(round(effective / pot)) });
@@ -36,7 +51,7 @@ export function decisionAid(view, viewer) {
       const draws = drawsOf(cards, view.board);
       if (draws.outs) {
         const kind = [draws.flushDraw ? '플러시 드로' : null, draws.straightDraw === 'open-ended' ? '양방 스트레이트 드로'
-          : draws.straightDraw === 'gutshot' ? '거트샷' : null].filter(Boolean).join(' + ');
+          : draws.straightDraw === 'double-gutshot' ? '더블 거트샷' : draws.straightDraw === 'gutshot' ? '거트샷' : null].filter(Boolean).join(' + ');
         items.push({ key: 'draw', label: '드로', value: `${kind || '드로'} · 완성 카드 ${draws.outs}장` });
       }
     } catch { /* malformed cards: arithmetic only */ }

@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decisionAid, decisionAidText } from '../server/public/decision-aid.js';
+import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
+import { snapshotDecision } from '../engine/decision.js';
+import { viewFor } from '../engine/views.js';
+import { chipFacts } from '../shared/decision-facts.js';
 
 const seat = (playerId, stack, bet = 0, extra = {}) => ({ playerId, stack, bet, folded: false, out: false, allIn: false, ...extra });
 
@@ -39,7 +43,40 @@ test('a free check shows no price; a partial all-in call is flagged', () => {
     seats: [seat('user', 200, 0), seat('p1', 0, 1_000, { allIn: true })], legal: { callAmount: 200, potTotal: 1_500, canCheck: false },
   }, 'user');
   assert.equal(short.partial, true);
-  assert.match(short.items.find((item) => item.key === 'need').note, /이길 수 있는 팟/);
+  // 1,500 in the middle, 800 of the 1,000 bet cannot be won by a 200 call: 200 / (700 + 200).
+  assert.equal(short.items.find((item) => item.key === 'need').value, '22.2%(이길 수 있는 팟 기준)');
   assert.equal(decisionAid({ legal: null }, 'user'), null);
   assert.equal(decisionAidText(null), '');
+});
+
+test('the aid states the same required equity as the engine fact card, or none when the pots split', () => {
+  const play = (stacks, script) => {
+    const game = createGame({ aiCount: 2, levelEvery: 50 });
+    game.button = 0; // p1 is the button and acts first, p2 the small blind, the user the big blind
+    game.seats.forEach((seat, i) => { seat.stack = stacks[i]; });
+    let state = startHand(game).state;
+    const queue = [...script];
+    while (legalFor(state).toAct !== 'user') {
+      const legal = legalFor(state);
+      const [action, amount] = queue.shift() ?? [legal.canCheck ? 'check' : 'call'];
+      state = applyAction(state, legal.toAct, action, amount === 'max' ? legal.maxRaiseTo : amount).state;
+    }
+    const legal = legalFor(state);
+    const facts = chipFacts(snapshotDecision(state, 'user', null, { legal, blinds: state.config.blinds0 }));
+    const aid = decisionAid(viewFor(state, 'user'), 'user');
+    return { facts, need: aid.items.find((item) => item.key === 'need')?.value ?? null };
+  };
+  // The user covers 200 against a 1,000 shove: a partial call into the winnable pot.
+  const partial = play([200, 1000, 1000], [['raise', 'max'], ['fold']]);
+  assert.equal(partial.facts.partialCall, true);
+  assert.equal(partial.facts.multiPot, false);
+  assert.equal(Number.parseFloat(partial.need), partial.facts.requiredEquity);
+  assert.match(partial.need, /이길 수 있는 팟 기준/);
+  // A short all-in and a bigger bet: the engine states no single price; neither does the aid.
+  const split = play([1000, 300, 1000], [['raise', 'max'], ['raise', 'max']]);
+  assert.equal(split.facts.multiPot, true);
+  assert.match(split.need, /팟이 나뉨/);
+  // An ordinary price: the same number as the engine.
+  const plain = play([1000, 1000, 1000], [['raise', 150], ['fold']]);
+  assert.equal(Number.parseFloat(plain.need), plain.facts.requiredEquity);
 });

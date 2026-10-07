@@ -4,7 +4,9 @@
 // the step before the action. Shown after the hand, so equity is fair game.
 import { equityFacts, factsLineKo } from '../../shared/decision-facts.js';
 
-/** The engine-shaped decision snapshot for the viewer's action at `index`, or null. */
+/** The engine-shaped decision snapshot for the viewer's action at `index`, or
+ * null. The recorded decision (its id, price and pot) and the recorded action
+ * (current bet, maximum) are used as they were; seats come from the step before. */
 export function replayDecisionSnapshot(model, replay, viewer, index) {
   const step = model?.steps?.[index];
   const prev = model?.steps?.[index - 1];
@@ -16,20 +18,24 @@ export function replayDecisionSnapshot(model, replay, viewer, index) {
   if (!players.includes(viewer)) return null;
   const blinds = Array.isArray(replay.blinds) ? replay.blinds
     : [0, Math.max(0, ...(replay.posts ?? []).map((post) => post.amount))];
-  const currentBet = Math.max(0, ...players.map((playerId) => prev.bets[playerId] ?? 0));
+  const own = model.steps.filter((row) => row.kind === 'action' && row.actor === viewer).map((row) => row.index);
+  const recorded = Array.isArray(replay.decisions) && replay.decisions.length === own.length ? replay.decisions[own.indexOf(index)] : null;
+  const action = replay.actions?.[step.actionIndex] ?? {};
   const actorBet = prev.bets[viewer] ?? 0;
+  const currentBet = Number.isSafeInteger(action.currentBet) ? action.currentBet
+    : Math.max(0, ...players.map((playerId) => prev.bets[playerId] ?? 0));
   const wager = step.verb === 'raise' || step.verb === 'bet';
   return {
-    decisionId: `replay-${replay.handNo ?? 0}-${index}`,
+    decisionId: recorded?.decisionId ?? `replay-${replay.handNo ?? 0}-${index}`,
     actorId: viewer,
     blinds,
     holeCards: holes,
     board: prev.board,
-    potBefore: prev.total,
+    potBefore: Number.isSafeInteger(recorded?.potBefore) ? recorded.potBefore : prev.total,
     currentBet,
     actorBet,
-    toCall: Math.min(Math.max(0, currentBet - actorBet), prev.stacks[viewer]),
-    maxRaiseTo: actorBet + prev.stacks[viewer],
+    toCall: Number.isSafeInteger(recorded?.toCall) ? recorded.toCall : Math.min(Math.max(0, currentBet - actorBet), prev.stacks[viewer]),
+    maxRaiseTo: Number.isSafeInteger(action.maxRaiseTo) ? action.maxRaiseTo : actorBet + prev.stacks[viewer],
     publicSeats: players.map((playerId) => ({
       playerId,
       stack: prev.stacks[playerId],
@@ -42,11 +48,12 @@ export function replayDecisionSnapshot(model, replay, viewer, index) {
   };
 }
 
-/** One Korean line for the viewer's action at `index`, or null. */
-export function replayFactsLine(model, replay, viewer, index, { samples = 800 } = {}) {
+/** One Korean line for the viewer's action at `index`, or null. The equity
+ * uses the decision's own id and the coach's sample count, so the numbers match. */
+export function replayFactsLine(model, replay, viewer, index) {
   const snapshot = replayDecisionSnapshot(model, replay, viewer, index);
   if (!snapshot) return null;
   let equityRandom = null;
-  try { equityRandom = equityFacts(snapshot, { samples }); } catch { /* impossible deal: facts without equity */ }
+  try { equityRandom = equityFacts(snapshot); } catch { /* impossible deal: facts without equity */ }
   try { return factsLineKo(snapshot, { equityRandom }); } catch { return null; }
 }

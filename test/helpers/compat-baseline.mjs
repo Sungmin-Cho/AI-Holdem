@@ -168,6 +168,32 @@ export async function computeBaseline(root, corpus) {
       } catch (error) { put(`queueerr:${label}:${mode}`, error.code ?? error.message); }
     }
   }
+  // Every v2 spot with representative hands and each tree answer, through the
+  // native practice table: hundreds of supported v2 comparisons (evaluation,
+  // coverage, eligibility, profile events and the drill grade).
+  const { preflopKeys } = await load(root, 'shared/preflop-key.js');
+  const { nativePreflopSnapshot } = await load(root, 'training/native-preflop-snapshot.js');
+  const grid = [];
+  const v2src = { id: v2.data.id, version: v2.data.version, contentSha256: v2.contentSha256 };
+  for (const spotKey of preflopKeys()) {
+    const facing = spotKey.includes('-vs-');
+    const answers = facing ? [{ action: 'fold' }, { action: 'call' }, { action: 'raise', sizeBb: 8.5 }] : [{ action: 'fold' }, { action: 'raise', sizeBb: 2.5 }];
+    for (const handClass of ['AA', 'AKo', 'A5s', 'KQo', 'T9s', '77', 'J8o', '72o']) {
+      for (const answer of answers) {
+        const key = `grid:${spotKey}:${handClass}:${answer.action}`;
+        try {
+          const ev = evaluatePreflopReference(nativePreflopSnapshot(spotKey, handClass, answer), v2, { gameEpoch: sha(key) });
+          put(key, ev);
+          put(`${key}:elig`, referenceAssessmentEligibility(ev));
+          grid.push(eventFromEvaluation({ ...ev, payloadSha256: sha(ev), origin: 'practice', assistance: { schemaVersion: 1, hintShown: false, exposureId: null } }, '2026-10-07T00:00:00.000Z'));
+          const strategy = lookup(v2, { spotKey, handClass });
+          const question = { questionId: `grid:${spotKey}:${handClass}`, answerPolicy: { providerId: v2src.id, providerVersion: v2src.version } };
+          put(`${key}:drill`, evaluateDrillAnswer(question, answer, strategy));
+        } catch (error) { put(`${key}:err`, error.code ?? error.message); }
+      }
+    }
+  }
+  try { put('grid:profile', rebuildFromEvents(grid)); } catch (error) { put('grid:profileerr', error.code ?? error.message); }
   corpus.states.forEach((state, index) => {
     for (const seat of state.seats) {
       try { put(`view:${index}:${seat.playerId}`, viewFor(state, seat.playerId)); } catch (error) { put(`viewerr:${index}:${seat.playerId}`, error.message); }

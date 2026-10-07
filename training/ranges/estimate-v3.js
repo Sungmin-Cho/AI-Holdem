@@ -38,7 +38,8 @@ export function estimateOpponentRanges(snapshot) {
     const pos = positionOf(seat.playerId);
     if (!pos) continue;
     try {
-      if (action.action === 'raise' && raisesBefore.length === 0) {
+      // An open: only folds before it (a raise over limpers is an isolation, not an RFI).
+      if (action.action === 'raise' && before.every((a) => a.action === 'fold')) {
         // An open for the whole stack (raise-to equals the record's maximum) is a shove.
         const shove = Number.isInteger(action.maxRaiseTo) && action.amount === action.maxRaiseTo;
         ranges[seat.playerId] = shove && action.maxRaiseTo / bb <= 15.5

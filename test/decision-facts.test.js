@@ -118,3 +118,26 @@ test('several pots: no single required equity, and an unmatched excess is not a 
   assert.equal(excess.otherSidePots, 0);
   assert.equal(excess.requiredEquity, 33.3);            // 200 / (200 + 200 + 200)
 });
+
+test('a raise over a limper is not given an opening range', () => {
+  const g = createGame({ aiCount: 5 });
+  g.button = 3; // the user is the big blind
+  let st = startHand(g, { deck: fixedDeck() }).state;
+  let step = 0;
+  while (legalFor(st).toAct !== 'user') {
+    const legal = legalFor(st);
+    // UTG limps, the next player raises over it, the rest fold.
+    const action = step === 0 ? ['call'] : step === 1 ? ['raise', 300] : ['fold'];
+    st = applyAction(st, legal.toAct, ...action).state;
+    step += 1;
+  }
+  const labels = positionsOf(st);
+  const snap = {
+    actorId: 'user', blinds: [25, 50],
+    publicSeats: st.seats.map((seat) => ({ playerId: seat.playerId, position: labels[seat.playerId], stack: seat.stack, folded: st.hand.folded.includes(seat.playerId), out: false })),
+    priorActions: st.hand.actions,
+  };
+  const ranges = estimateOpponentRanges(snap);
+  const raiser = st.hand.actions.find((a) => a.action === 'raise').playerId;
+  assert.equal(ranges[raiser], null);
+});

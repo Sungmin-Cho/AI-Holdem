@@ -743,6 +743,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const budgetPlatform = opts.budgetPlatform ?? process.platform;
   const budgetDefaults = defaultReclaimBudgets(budgetPlatform);
   const finalizeBudgetMs = opts.finalizeBudgetMs ?? budgetDefaults.finalizeBudgetMs;
+  const lastHandCoachWaitMs = opts.lastHandCoachWaitMs ?? LAST_HAND_COACH_WAIT_MS;
   const finalizeCutoffLeadMs = Math.min(
     opts.finalizeCutoffLeadMs ?? FINALIZE_CUTOFF_LEAD_MS,
     finalizeBudgetMs,
@@ -6678,8 +6679,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const current = readLoopState();
     if (storeDir && !doneResumeNoTrainingWrite) {
       try {
-        const profile = await createProfileStore(storeDir).show();
-        writePracticeFocus(storeDir, profile);
+        const store = createProfileStore(storeDir);
+        const profile = await store.show();
+        writePracticeFocus(storeDir, profile, { events: await store.readEventSnapshot() });
       } catch (error) {
         log('practice-focus-error', { code: error.code ?? 'ERROR' });
       }
@@ -8456,7 +8458,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           if (stopRequested) break;
           launchCoachPipeline(out.handNo);
           lastHandCoachLaunched = out.handNo;
-          await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), LAST_HAND_COACH_WAIT_MS);
+          await settleOrTimeout(settleUntilIdle(() => [...coachTasks], () => stopRequested), lastHandCoachWaitMs);
           if (stopRequested) break;
           ensureFinalizationResultWaitCutoff();
         }

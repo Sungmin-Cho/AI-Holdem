@@ -63,3 +63,26 @@ test('full-width digits and an EV line above a number cannot carry an EV figure'
     assert.equal(coachingClaimAllowed(sanitizeCoachingText(text).text), true, text);
   }
 });
+
+test('the sanitizer keeps a stated limit and removes the same phrase used as a claim', () => {
+  const pairs = [
+    ['솔버가 검증한 전략은 아닙니다.', '솔버가 검증한 전략입니다.'],
+    ['솔버로 검증하지 않은 휴리스틱입니다.', '솔버로 확인한 결과 콜이 맞습니다.'],
+    ['솔버가 계산한 값은 아닙니다.', '솔버가 계산한 값으로는 레이즈가 낫습니다.'],
+  ];
+  for (const [limit, claim] of pairs) {
+    assert.equal(coachingClaimAllowed(limit), true, limit);
+    assert.equal(sanitizeCoachingText(`${limit} 상대의 공개 행동을 확인하세요.`).text, `${limit} 상대의 공개 행동을 확인하세요.`, limit);
+    assert.equal(sanitizeCoachingText(`${claim} 상대의 공개 행동을 확인하세요.`).text, '상대의 공개 행동을 확인하세요.', claim);
+  }
+  // A negation later in the sentence does not turn a claim into a limit.
+  assert.equal(sanitizeCoachingText('솔버가 검증한 결과, 콜은 틀린 선택이 아닙니다. 끝.').text, '끝.');
+});
+
+test('new output loses a quantitative expected value written with a space or full-width digits', () => {
+  for (const claim of ['기대 수익은 +2BB입니다.', '기대값은 1.5BB 정도입니다.', 'EV는 ２BB입니다.', '이 콜은 3BB의 기대 이익이 있습니다.']) {
+    assert.equal(sanitizeCoachingText(`${claim} 상대 범위를 보세요.`).text, '상대 범위를 보세요.', claim);
+  }
+  // A qualitative remark without a number stays.
+  assert.equal(sanitizeCoachingText('기대값이 낮은 라인은 아닙니다. 상대 범위를 보세요.').text, '기대값이 낮은 라인은 아닙니다. 상대 범위를 보세요.');
+});

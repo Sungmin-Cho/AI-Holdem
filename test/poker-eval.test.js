@@ -121,3 +121,28 @@ test('drawsOf keeps a straight draw and flush outs apart in a combo draw', () =>
   assert.equal(gut.flushDraw, true);
   assert.equal(gut.outs, 9 + 3);
 });
+
+test('multiway range equity does not depend on the opponents\' order (joint sampling)', () => {
+  // Hero As Kh on Ad Qc Jh 2s 3d against {AA, KK, TT} and {QQ, TT}: exactly 40%
+  // over the 60 compatible combo pairs (enumerated below).
+  const hero = ['As', 'Kh'];
+  const board = ['Ad', 'Qc', 'Jh', '2s', '3d'];
+  const first = { AA: 1, KK: 1, TT: 1 };
+  const second = { QQ: 1, TT: 1 };
+  const forward = equityVs({ holeCards: hero, boardCards: board, ranges: [first, second], samples: 60000, seed: 11 });
+  const reverse = equityVs({ holeCards: hero, boardCards: board, ranges: [second, first], samples: 60000, seed: 11 });
+  assert.ok(Math.abs(forward - 0.4) < 0.012, `forward ${forward}`);
+  assert.ok(Math.abs(reverse - 0.4) < 0.012, `reverse ${reverse}`);
+});
+
+test('drawsOf keeps a flush redraw on a made straight and tells a double gutshot from an open-ender', () => {
+  const redraw = drawsOf(['9h', '8h'], ['7h', '6h', '5c']);
+  assert.equal(redraw.flushDraw, true);
+  assert.equal(redraw.straightDraw, null);
+  assert.equal(redraw.outs, 9);
+  assert.equal(drawsOf(['Js', 'Th'], ['Ac', 'Qd', '8c']).straightDraw, 'double-gutshot');
+  assert.equal(drawsOf(['9c', '8d'], ['7h', '6s', '2c']).straightDraw, 'open-ended');
+  assert.equal(drawsOf(['5c', '4d'], ['3h', '2s', 'Kc']).straightDraw, 'open-ended', 'the wheel ace completes below');
+  assert.equal(drawsOf(['Ac', '2d'], ['3h', '4s', 'Kc']).straightDraw, 'gutshot');
+  assert.equal(drawsOf(['Ah', 'Kh'], ['Qh', 'Jh', '2h']).outs, 0, 'a made flush draws nothing');
+});
