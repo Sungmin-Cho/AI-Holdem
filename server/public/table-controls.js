@@ -16,6 +16,22 @@ export function bbRaiseTo(legal, bb, multiple) {
     && Number.isSafeInteger(amount) ? amount : null;
 }
 
+/** Default raise-to when a decision opens: a 2.5bb open unopened, three times
+ * the bet when facing one, half pot for a first postflop bet. The minimum
+ * raise was the old default and pushed every raise to the smallest size. */
+export function defaultRaiseTo(view, legal) {
+  if (!legal?.canRaise) return legal?.minRaiseTo ?? 0;
+  const bb = Number(view?.blinds?.[1]) || 0;
+  const currentBet = Math.max(0, ...(view?.seats ?? []).map((seat) => Number(seat.bet) || 0));
+  const myBet = Number(view?.seats?.find((seat) => seat.playerId === view?.viewer)?.bet) || 0;
+  if (view?.street === 'preflop') {
+    if (currentBet <= bb) return clampRaiseTo(Math.round(2.5 * bb), legal);
+    return clampRaiseTo(3 * currentBet, legal);
+  }
+  if (currentBet === 0) return potRaiseTo(legal, myBet, 0.5);
+  return clampRaiseTo(3 * currentBet, legal);
+}
+
 /** Verb for the primary wager button, sharing replay-format actionVerbs' rule:
  * a street with chips already in (preflop always, blinds count) makes the
  * wager a raise, an empty street makes it a bet, and the maximum is all-in. */

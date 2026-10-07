@@ -10,6 +10,7 @@ import { loadUiState, publicSnapshot } from "../server/server.js";
 import { ensureStudyService } from "./study-service.js";
 import { createRoomManager } from "./room-manager.js";
 import { createSessionSummaryCache } from "./session-summary.js";
+import { readHud, readReport, readReveal } from "./host-insights.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
@@ -65,6 +66,8 @@ const SHARED_ASSETS = [
   "preflop-key.js",
   "assistance.js",
   "deal-selection.js",
+  "poker-eval.js",
+  "decision-facts.js",
   "game-setup.js",
   "pace.js",
   "player-budget.js",
@@ -224,6 +227,33 @@ export async function startAppServer({
       }
       json(res,200,summary);
     } catch(error){const code=['UNAUTHORIZED','NOT_SEATED'].includes(error.code)?error.code:'SUMMARY_UNAVAILABLE';json(res,code==='UNAUTHORIZED'?401:code==='NOT_SEATED'?409:503,{code});}
+  }
+  // Host-only learning aids (hud, report, reveal): the current game and epoch
+  // only, a closed projection, and no participant or spectator route.
+  const insightCache = new Map();
+  async function serveInsight(req,res,gameId,kind) {
+    if (req.method !== 'GET') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+    const snapshot=manager.snapshot(),current=manager.current;
+    if(current?.gameId!==gameId || req.headers['x-game-epoch']!==snapshot.gameEpoch) {json(res,409,{code:'STALE_GAME'});return;}
+    try {
+      let body;
+      if(kind==='reveal') {
+        let phase=null;
+        try {phase=readCommitFile('loop-state.json').phase;} catch {committedCache.clear();}
+        body=readReveal(current.sessionDir,phase);
+      } else {
+        // One build per committed state file; the report reads every archived hand.
+        const stat=fs.statSync(path.join(current.sessionDir,'state.json'));
+        const key=JSON.stringify([kind,gameId,stat.ino,stat.size,stat.mtimeMs]);
+        body=insightCache.get(kind)?.key===key?insightCache.get(kind).body:null;
+        if(!body){body=kind==='hud'?readHud(current.sessionDir):readReport(current.sessionDir);insightCache.set(kind,{key,body});}
+      }
+      const latest=manager.snapshot();
+      if(manager.current?.gameId!==gameId || latest.gameEpoch!==snapshot.gameEpoch) {json(res,409,{code:'STALE_GAME'});return;}
+      json(res,200,body);
+    } catch(error) {
+      json(res,error.code==='REVEAL_NOT_READY'?409:503,{code:error.code==='REVEAL_NOT_READY'?'REVEAL_NOT_READY':'INSIGHT_UNAVAILABLE'});
+    }
   }
   const committedCache = new Map();
   const readCommitFile = name => {
@@ -491,6 +521,8 @@ export async function startAppServer({
       }
       const summaryMatch=/^\/api\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
       if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
+      const insightMatch=/^\/api\/game\/([0-9a-f-]{36})\/(hud|report|reveal)$/.exec(pathname);
+      if(insightMatch){await serveInsight(req,res,insightMatch[1],insightMatch[2]);return;}
       if(pathname==='/api/app/interrupt-decision') {
         if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
         const body=await bodyOf(req);

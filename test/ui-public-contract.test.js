@@ -44,7 +44,7 @@ test('new public fields survive relay persistence/reload; new assets respect app
     const snap=await fetch(`http://127.0.0.1:${relay.port}/api/snapshot?token=ui-contract-fixture`).then(r=>r.json());
     assert.deepEqual(snap.view,view);
     app=await startAppService(workspace.root,{resolver:async()=>({player:null,upper:null,notices:[]})});
-    for(const asset of ['/design-tokens.css','/table.css','/chip-format.js','/shared/game-setup.js','/shared/player-budget.js'])assert.equal((await fetch(app.origin+asset)).status,200,asset);
+    for(const asset of ['/design-tokens.css','/table.css','/chip-format.js','/shared/game-setup.js','/shared/player-budget.js','/shared/poker-eval.js','/shared/decision-facts.js'])assert.equal((await fetch(app.origin+asset)).status,200,asset);
     // The pre-redesign stylesheets are gone; table.css carries the table.
     for(const asset of ['/style.css','/table-design.css'])assert.equal((await fetch(app.origin+asset)).status,404,asset);
     assert.equal((await fetch(app.origin+'/shared/platform-files.js')).status,404);

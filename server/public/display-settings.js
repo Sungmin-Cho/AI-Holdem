@@ -10,6 +10,8 @@ export const DISPLAY_KEYS = Object.freeze({
   deck: 'holdem.deck-colors.v1',
   motion: 'holdem.motion.v1',
   onboarding: 'holdem.onboarding.v1',
+  aid: 'holdem.decision-aid.v1',
+  hud: 'holdem.hud.v1',
 });
 
 const THEMES = Object.freeze([['b', '미드나잇 (기본)'], ['a', '클래식'], ['c', '페이퍼']]);
@@ -18,11 +20,13 @@ const NORMAL = Object.freeze({
   unit: (value) => (value === 'chips' ? 'chips' : 'bb'),
   deck: (value) => (value === '2' ? '2' : '4'),
   motion: (value) => (value === 'reduce' ? 'reduce' : 'system'),
+  aid: (value) => (value === 'off' ? 'off' : 'on'),
+  hud: (value) => (value === 'off' ? 'off' : 'on'),
 });
 // Choices this document could not save: they stay applied here, and a later
 // change must not fall back to the stored (or default) value for them.
 const pageChoices = new WeakMap();
-const KEY_NAMES = Object.freeze({ [DISPLAY_KEYS.theme]: 'theme', [DISPLAY_KEYS.deck]: 'deck', [DISPLAY_KEYS.motion]: 'motion', 'holdem.display-unit.v1': 'unit' });
+const KEY_NAMES = Object.freeze({ [DISPLAY_KEYS.theme]: 'theme', [DISPLAY_KEYS.deck]: 'deck', [DISPLAY_KEYS.motion]: 'motion', [DISPLAY_KEYS.aid]: 'aid', [DISPLAY_KEYS.hud]: 'hud', 'holdem.display-unit.v1': 'unit' });
 
 // theme-boot.js skips the attributes named here when storage events arrive.
 function markLocal(doc, choices) {
@@ -64,6 +68,8 @@ export function readDisplaySettings(storage) {
     unit: readPreference(store(storage) ?? undefined),
     deck: read(storage, DISPLAY_KEYS.deck) === '2' ? '2' : '4',
     motion: read(storage, DISPLAY_KEYS.motion) === 'reduce' ? 'reduce' : 'system',
+    aid: read(storage, DISPLAY_KEYS.aid) === 'off' ? 'off' : 'on',
+    hud: read(storage, DISPLAY_KEYS.hud) === 'off' ? 'off' : 'on',
   };
 }
 
@@ -89,6 +95,7 @@ export function saveDisplaySetting(name, value, { doc = globalThis.document, sto
   if (name === 'theme') saved = write(storage, DISPLAY_KEYS.theme, choice === 'b' ? null : choice);
   else if (name === 'deck') saved = write(storage, DISPLAY_KEYS.deck, choice === '2' ? '2' : null);
   else if (name === 'motion') saved = write(storage, DISPLAY_KEYS.motion, choice === 'reduce' ? 'reduce' : null);
+  else if (name === 'aid' || name === 'hud') saved = write(storage, DISPLAY_KEYS[name], choice === 'off' ? 'off' : null);
   else saved = writePreference(choice, store(storage) ?? undefined);
   const choices = { ...pageChoices.get(doc) };
   if (saved) delete choices[name]; else choices[name] = choice;
@@ -97,6 +104,7 @@ export function saveDisplaySetting(name, value, { doc = globalThis.document, sto
   applyDisplaySettings(doc, currentDisplaySettings({ doc, storage }));
   // Same-document listeners (the lobby's header, the table) repaint amounts.
   if (name === 'unit') doc.defaultView?.dispatchEvent(new CustomEvent('holdem:display-unit', { detail: choice }));
+  if (name === 'aid' || name === 'hud') doc.defaultView?.dispatchEvent(new CustomEvent('holdem:display-learning', { detail: { name, choice } }));
   return saved;
 }
 
@@ -162,6 +170,8 @@ export function openDisplaySettings({ doc = globalThis.document, storage } = {})
     radioGroup(doc, 'unit', '금액 단위', [['bb', 'BB 중심'], ['chips', '칩 중심']], settings.unit, pick('unit')),
     radioGroup(doc, 'deck', '카드 무늬 색', [['4', '4색 (무늬마다 다른 색)'], ['2', '2색 (빨강·검정)']], settings.deck, pick('deck')),
     radioGroup(doc, 'motion', '모션', [['system', '시스템 설정 따름'], ['reduce', '줄이기']], settings.motion, pick('motion')),
+    radioGroup(doc, 'aid', '판단 보조 (팟 오즈·필요 승률·SPR)', [['on', '표시'], ['off', '숨김']], settings.aid, pick('aid')),
+    radioGroup(doc, 'hud', '상대 통계 HUD (VPIP·PFR)', [['on', '표시'], ['off', '숨김']], settings.hud, pick('hud')),
     ...(again ? [again] : []), note, close,
   );
   dialog.addEventListener('close', () => dialog.remove());

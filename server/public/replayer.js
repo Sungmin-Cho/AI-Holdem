@@ -7,6 +7,7 @@
 import { renderCard, renderMiniCard, parseCard, cardLabel } from './card-render.js';
 import { ovalPoint, mobileSeatSlot } from './seat-format.js';
 import { streetStarts } from './replay-model.js';
+import { replayFactsLine } from './replay-facts.js';
 
 const STREET_LABEL = Object.freeze({ preflop: '프리플랍', flop: '플랍', turn: '턴', river: '리버', result: '결과' });
 const VERB_LABEL = Object.freeze({ fold: '폴드', check: '체크', call: '콜', bet: '벳', raise: '레이즈' });
@@ -45,6 +46,12 @@ export function mountReplayer(container, ctx) {
   const rowOf = (step) => (step.actionIndex == null ? null : rows[step.actionIndex] ?? null);
   const starts = streetStarts(model.steps);
   const policySeats = rows.some((row) => row.reasonKind === 'policy');
+  // Fact lines are computed once per step (equity is a simulation).
+  const factsCache = new Map();
+  const factsAt = (index) => {
+    if (!factsCache.has(index)) factsCache.set(index, replayFactsLine(model, replay, viewer, index));
+    return factsCache.get(index);
+  };
 
   const root = el(doc, 'div', 'replayer');
   // Seven or more seats get compact plates so neighbours never overlap.
@@ -302,6 +309,8 @@ export function mountReplayer(container, ctx) {
       if (row?.reasonKind === 'policy') line('replayer-policy-tag', '정책 결정');
       else if (row?.reasonText) line('replay-reason', row.reasonText);
       if (row?.noteText) line('replay-note', row.noteText);
+      const facts = factsAt(step.index);
+      if (facts) line('replay-facts', `사실 카드(엔진 계산) · ${facts}`);
       if (row?.coach?.status === 'ready') {
         line('replay-coach', `왜: ${row.coach.why}`);
         line('replay-coach', `결과: ${row.coach.outcome}`);

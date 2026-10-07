@@ -153,7 +153,7 @@ test('server imports only contracts, named containment and pure viewer projectio
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
     // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
+    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'shared/poker-eval.js': ['describeMadeHand', 'drawsOf'], 'shared/decision-facts.js': ['equityFacts', 'factsLineKo'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {

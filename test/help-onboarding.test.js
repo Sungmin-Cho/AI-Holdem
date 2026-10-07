@@ -26,7 +26,7 @@ function withWindow(doc) {
 }
 
 test('display settings default safely, save per browser and apply to this document', () => {
-  assert.deepEqual(readDisplaySettings(brokenStorage), { theme: 'b', unit: 'bb', deck: '4', motion: 'system' });
+  assert.deepEqual(readDisplaySettings(brokenStorage), { theme: 'b', unit: 'bb', deck: '4', motion: 'system', aid: 'on', hud: 'on' });
   const doc = createMiniDocument();
   const events = withWindow(doc);
   const storage = memoryStorage();
@@ -43,6 +43,14 @@ test('display settings default safely, save per browser and apply to this docume
   saveDisplaySetting('unit', 'chips', { doc, storage });
   assert.equal(readDisplaySettings(storage).unit, 'chips');
   assert.equal(events.at(-1).type, 'holdem:display-unit', 'same-document listeners repaint amounts');
+  // The decision aid and the HUD are on unless turned off; off is the only stored value.
+  saveDisplaySetting('aid', 'off', { doc, storage });
+  assert.equal(storage.getItem(DISPLAY_KEYS.aid), 'off');
+  assert.equal(events.at(-1).type, 'holdem:display-learning');
+  saveDisplaySetting('hud', 'off', { doc, storage });
+  assert.deepEqual([readDisplaySettings(storage).aid, readDisplaySettings(storage).hud], ['off', 'off']);
+  saveDisplaySetting('aid', 'on', { doc, storage });
+  assert.equal(storage.getItem(DISPLAY_KEYS.aid), null);
 });
 
 test('when storage refuses, a choice still applies to this page', () => {
@@ -117,7 +125,7 @@ test('without storage, each choice stays on this page and a later one does not u
   assert.equal(doc.documentElement.getAttribute('data-theme'), 'c', 'the unsaved theme survives the next change');
   assert.equal(doc.documentElement.getAttribute('data-deck'), '2');
   saveDisplaySetting('unit', 'chips', { doc, storage: brokenStorage });
-  assert.deepEqual(currentDisplaySettings({ doc, storage: brokenStorage }), { theme: 'c', unit: 'chips', deck: '2', motion: 'system' });
+  assert.deepEqual(currentDisplaySettings({ doc, storage: brokenStorage }), { theme: 'c', unit: 'chips', deck: '2', motion: 'system', aid: 'on', hud: 'on' });
   assert.equal(events.at(-1).detail, 'chips');
   const other = createMiniDocument();
   withWindow(other);

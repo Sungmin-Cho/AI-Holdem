@@ -9,9 +9,11 @@ import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
 import { helpButton } from './help-panel.js';
 import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
-import { DISPLAY_KEYS, saveDisplaySetting } from './display-settings.js';
+import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './display-settings.js';
 
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { decisionAid, decisionAidText } from './decision-aid.js';
+import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
+import { clampRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
@@ -268,21 +270,64 @@ function setBtnLabel(btn, label, amount) {
   btn.replaceChildren(document.createTextNode(`${label} `), amountNode(amount, ui.view?.blinds?.[1], 'num'));
 }
 
+// Host HUD (D13): the engine's public-observation counts, the same the AI
+// players read, fetched from the host-only route once per completed hand.
+let hud=null,hudKey=null,report=null;
+const hudShown=()=>!participantMode&&!!appGameId&&currentDisplaySettings().hud!=='off';
+// HUD and the process report refresh once per hand boundary (host only).
+async function loadInsights(view) {
+  if(participantMode||!appGameId||!view)return;
+  const key=`${view.handNo}:${view.handInProgress}:${view.gameOver}`;
+  if(key===hudKey)return;
+  hudKey=key;
+  const fetchJson=async(endpoint)=>{
+    try {
+      const response=await appFetch(endpoint,{signal:AbortSignal.timeout(8000)});
+      return response.ok?await response.json():null;
+    } catch {return null;}
+  };
+  const [hudBody,reportBody]=await Promise.all([hudShown()?fetchJson('hud'):null,fetchJson('report')]);
+  if(Array.isArray(hudBody?.players)){hud=hudBody;paintParticipants(ui.view);}
+  if(Array.isArray(reportBody?.checks)){report=reportBody;paintReport();}
+}
+function paintReport() {
+  const box=$('process-report');
+  if(!box||!report||!report.hands){if(box)box.hidden=true;return;}
+  const signature=JSON.stringify(report);
+  if(box._signature===signature)return;
+  box._signature=signature;box.hidden=false;
+  const list=el('ul','process-report-list');
+  for(const line of report.checks)list.append(el('li','',line.replace(/^-\s*/,'')));
+  if(!report.checks.length)list.append(el('li','','눈에 띄는 과정 점검 항목이 없습니다.'));
+  box.replaceChildren(el('h2','',`지금까지 점검 (엔진 계산 · 완료 ${report.hands}핸드)`),list);
+}
+let coachToastTimer=null;
+function showCoachToast(handNo) {
+  const toast=$('coach-toast');
+  if(!toast||participantMode)return;
+  $('coach-toast-text').textContent=`핸드 ${handNo} 코치 노트가 도착했습니다.`;
+  toast.hidden=false;
+  clearTimeout(coachToastTimer);
+  coachToastTimer=setTimeout(()=>{toast.hidden=true;},8000);
+}
+const hudRow=(playerId)=>hudShown()?hud?.players?.find(row=>row.playerId===playerId)??null:null;
 function paintParticipants(view) {
   const list=$('participants-list');
-  const signature=JSON.stringify([view?.seats,view?.handInProgress,view?.toAct,displayUnit,view?.blinds]);
+  const signature=JSON.stringify([view?.seats,view?.handInProgress,view?.toAct,displayUnit,view?.blinds,hudShown()?hud:null]);
   if(list._signature===signature)return;
   list._signature=signature;list.replaceChildren();
   if(view?.seats?.length) {
     const table=el('table','participants-table');
     const head=el('tr');
-    for(const label of ['이름','상태','스택'])head.append(el('th','',label));
+    const showHud=hudShown()&&!!hud;
+    for(const label of ['이름','상태','스택',...(showHud?['통계']:[])])head.append(el('th','',label));
     table.append(el('caption','',participantSummary(view)),el('thead'),el('tbody'));
     table.tHead.append(head);
     for(const seat of view.seats) {
       const row=el('tr',`participant-row${seat.playerId===viewerId(view)?' is-hero':''}`);
       const stack=el('td');stack.append(amountNode(seat.stack));
       row.append(el('th','',seat.playerId===viewerId(view)?'나':(seat.name??seat.playerId)),el('td','',seatPresentation(view,seat).status),stack);
+      if(showHud)row.append(el('td','participant-hud num',hudLine(hudRow(seat.playerId))));
       row.firstChild.scope='row';
       table.tBodies[0].append(row);
     }
@@ -294,10 +339,61 @@ function paintSeatDetails() {
   const seat=ui.view?.seats?.find(s=>s.playerId===selectedSeatId);
   if(!seat)return;
   $('seat-detail-title').textContent=seat.name??seat.playerId;
-  $('seat-detail-body').replaceChildren(el('p','',seatPresentation(ui.view,seat).status),amountNode(seat.stack),el('p','',`이번 스트리트 베팅 ${amountText(seat.bet)}`));
+  const body=$('seat-detail-body');
+  let live=body.querySelector('.seat-detail-live');
+  if(!live){live=el('div','seat-detail-live');body.prepend(live);}
+  const row=hudRow(seat.playerId);
+  live.replaceChildren(el('p','',seatPresentation(ui.view,seat).status),amountNode(seat.stack),el('p','',`이번 스트리트 베팅 ${amountText(seat.bet)}`),
+    ...(row?[el('p','seat-hud num',`통계 · ${hudLine(row)}`),el('p','seat-hud-note','AI 플레이어가 받는 것과 같은 공개 관측 통계입니다. 표본이 작으면 크게 흔들립니다.')]:[]));
+}
+// Notes are built once per opening so a repaint never steals the caret.
+function paintSeatNotes(seat) {
+  if(participantMode||!appGameId||seat?.kind!=='ai')return;
+  const saved=readOpponentNotes(appGameId)[seat.playerId]??{guess:'',note:''};
+  const box=el('div','seat-notes');
+  box.append(el('h2','','상대 노트'));
+  const guessLabel=el('label','seat-notes-field','성향 추정');
+  const guess=document.createElement('select');guess.id='seat-note-guess';
+  for(const [value,label] of GUESS_CHOICES){const option=document.createElement('option');option.value=value;option.textContent=label;guess.append(option);}
+  guess.value=saved.guess;guessLabel.append(guess);
+  const noteLabel=el('label','seat-notes-field','메모');
+  const note=document.createElement('input');note.id='seat-note-text';note.type='text';note.maxLength=200;note.autocomplete='off';note.value=saved.note;
+  noteLabel.append(note);
+  const status=el('p','seat-notes-status');status.setAttribute('role','status');
+  const save=()=>{status.textContent=saveOpponentNote(appGameId,seat.playerId,{guess:guess.value,note:note.value})?'저장했습니다 (이 브라우저에만)':'저장하지 못했습니다';};
+  guess.addEventListener('change',save);note.addEventListener('change',save);
+  box.append(guessLabel,noteLabel,status,el('p','seat-hud-note','게임이 끝나고 종합 리뷰가 게시되면 실제 설정과 비교해 보여 줍니다.'));
+  $('seat-detail-body').append(box);
 }
 function openSeatDetails(playerId) {
-  selectedSeatId=playerId;paintSeatDetails();dialogs.open($('seat-overlay'),()=>dialogs.close());
+  selectedSeatId=playerId;$('seat-detail-body').replaceChildren();paintSeatDetails();
+  paintSeatNotes(ui.view?.seats?.find(s=>s.playerId===playerId));
+  dialogs.open($('seat-overlay'),()=>dialogs.close());
+}
+// After the review is published the host route names each AI's configured
+// style; the final panel sets it beside the viewer's own guesses.
+let reveal=null,revealLoading=false;
+async function loadReveal() {
+  if(reveal||revealLoading||participantMode||!appGameId||!ui.review)return;
+  revealLoading=true;
+  try {
+    const response=await appFetch('reveal',{signal:AbortSignal.timeout(8000)});
+    if(response.ok){const body=await response.json();if(Array.isArray(body?.players)){reveal=body;paintReview(ui.view);}}
+  } catch { /* the review text names the styles too */ } finally {revealLoading=false;}
+}
+function paintReveal(spectator) {
+  const box=$('final-reveal');
+  const rows=reveal&&!spectator?compareGuesses(readOpponentNotes(appGameId),reveal):[];
+  box.hidden=!rows.length;
+  if(!rows.length)return;
+  const signature=JSON.stringify(rows);
+  if(box._signature===signature)return;
+  box._signature=signature;
+  const list=el('ul','final-reveal-list');
+  for(const row of rows)list.append(el('li',row.match?'is-match':'',`${row.name}: 내 추정 ${row.guessLabel} → 설정 ${row.actualLabel}${row.match?' ✓':''}`));
+  const guessed=rows.filter(row=>row.guess);
+  box.replaceChildren(el('h2','','상대 성향 — 내 추정과 실제 설정'),list,
+    el('p','seat-hud-note',guessed.length?`추정 ${guessed.length}명 중 ${guessed.filter(row=>row.match).length}명 일치`:'좌석 상세에서 성향을 추정해 두면 다음 게임부터 여기서 비교합니다.'));
 }
 
 function renderMarkdown(src) {
@@ -673,14 +769,16 @@ function commitAmount() {
   markAmountValid(!state.invalid);
 }
 
-function adoptDecision(legal) {
+function adoptDecision(legal, view = ui.view) {
   if (legal.decisionId !== lastDecisionId) {
     lastDecisionId = legal.decisionId;
-    raiseTo = amountEditor.adopt(legal).value;
+    disarmFold();
+    raiseTo = amountEditor.adopt(legal, defaultRaiseTo(view, legal)).value;
     $('raise-amount').value = amountEditor.state.text;
     markAmountValid(true);
     const intent = $('intent-note');
     if (intent) intent.value = '';
+    for (const tag of document.querySelectorAll('.intent-tag.is-on')) tag.classList.remove('is-on');
   }
 }
 
@@ -716,7 +814,7 @@ function paintEndedControls() {
   $('action-status').textContent='종료된 게임 기록입니다.';
   for(const id of ['action-bar','action-reconcile','action-retry','action-notice'])$(id).hidden=true;
 }
-const POSTFLOP_PRESETS = new Set(['third', 'threequarter']);
+const POSTFLOP_PRESETS = new Set(['third', 'twothird', 'threequarter']);
 function paintActionBar(view) {
   const bar = $('action-bar');
   const legal = view?.legal;
@@ -727,7 +825,8 @@ function paintActionBar(view) {
   const pot=aggregatePot(view);
   const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
   $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
-  adoptDecision(legal);
+  paintDecisionAid(view);
+  adoptDecision(legal, view);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
   const raiseOff = pendingAction || !legal.canRaise;
@@ -1431,6 +1530,8 @@ function paintReview(view) {
       for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} 승리${winner.handName?' · '+winner.handName:''} · 팟 ${formatAmount(winner.total,bb,'bb').primary} 획득`;last.append(row);}}
   }
   const section=$('final-review-section');section.hidden=participantMode||spectator;
+  if(ui.review)void loadReveal();
+  paintReveal(participantMode||spectator);
   const review=$('review-body');
   const source=ui.review??state.review;
   if(review._source!==source){
@@ -1452,6 +1553,7 @@ function paint({ keepMotion = false } = {}) {
 
 function paintFrame() {
   const view = ui.view;
+  void loadInsights(view);
   ui.handPrior=captureHandPrior(ui.handPrior,{view,log:ui.log,viewer:viewerId(view)});
   ui.handResult=updateHandResult(ui.handResult,{view,log:ui.log,viewer:viewerId(view),prior:ui.handPrior});
   const spectator = isSpectating(view);
@@ -1585,7 +1687,11 @@ function render(m, contiguous = true) {
   if (Array.isArray(m.events) && m.events.length) ui.log.push(...m.events);
   if (Array.isArray(m.messages) && m.messages.length) ui.log.push(...m.messages);
   if (Array.isArray(m.coach) && m.coach.length) {
-    if (selectedTab !== 'coach') unread.coach += m.coach.length;
+    if (selectedTab !== 'coach') {
+      unread.coach += m.coach.length;
+      const fresh = m.coach.filter((note) => !note.unavailable && !ui.coach.some((existing) => existing.handNo === note.handNo));
+      if (fresh.length) showCoachToast(fresh.at(-1).handNo);
+    }
     // Notes arrive whenever their background coach finishes, not in hand order.
     for (const note of m.coach) {
       const at = ui.coach.findIndex((existing) => existing.handNo === note.handNo);
@@ -1628,7 +1734,52 @@ async function sendAction(action, amount) {
   await actionController?.send(action, amount === undefined ? undefined : Number(amount), note);
 }
 
-$('btn-fold').addEventListener('click', () => sendAction('fold'));
+// Folding when a check is free is almost always a misclick: the first press arms
+// the button, a second press on the same decision folds.
+let foldArmedFor = null;
+function disarmFold() {
+  foldArmedFor = null;
+  const btn = $('btn-fold');
+  btn.textContent = '폴드';
+  btn.classList.remove('is-armed');
+}
+function paintDecisionAid(view) {
+  const box = $('decision-aid');
+  if (!box) return;
+  const show = currentDisplaySettings().aid !== 'off';
+  const text = show ? decisionAidText(decisionAid(view, viewerId(view))) : '';
+  box.hidden = !text;
+  box.textContent = text;
+  box.title = text ? `판단 보조(산술): ${text}` : '';
+  box.setAttribute('aria-label', text ? `판단 보조: ${text}` : '판단 보조');
+  // The aid takes the summary's row so the bar keeps its height; the summary
+  // stays in the accessibility tree.
+  $('action-bar').classList.toggle('has-aid', Boolean(text));
+}
+globalThis.addEventListener?.('holdem:display-learning', () => { hudKey = null; paint(); });
+$('btn-fold').addEventListener('click', () => {
+  const legal = ui.view?.legal;
+  if (legal?.canCheck && foldArmedFor !== legal.decisionId) {
+    foldArmedFor = legal.decisionId;
+    const btn = $('btn-fold');
+    btn.textContent = '체크 가능 — 다시 누르면 폴드';
+    btn.classList.add('is-armed');
+    return;
+  }
+  disarmFold();
+  sendAction('fold');
+});
+$('intent-tags').addEventListener('click', (ev) => {
+  const tag = ev.target.closest('[data-tag]')?.dataset.tag;
+  const input = $('intent-note');
+  if (!tag || !input) return;
+  const marker = `[${tag}]`;
+  if (input.value.includes(marker)) return;
+  const next = `${input.value.trim()} ${marker}`.trim();
+  if ([...next].length > 160) return;
+  input.value = next;
+  ev.target.closest('[data-tag]').classList.add('is-on');
+});
 $('btn-check').addEventListener('click', () => sendAction('check'));
 $('btn-call').addEventListener('click', () => sendAction('call'));
 $('btn-raise').addEventListener('click', () => {
@@ -1655,6 +1806,7 @@ $('raise-panel').addEventListener('click', (ev) => {
   if (preset === 'min') setRaiseTo(legal.minRaiseTo);
   else if (preset === 'third') setRaiseTo(potRaiseTo(legal, myBet, 1 / 3));
   else if (preset === 'half') setRaiseTo(potRaiseTo(legal, myBet, 0.5));
+  else if (preset === 'twothird') setRaiseTo(potRaiseTo(legal, myBet, 2 / 3));
   else if (preset === 'threequarter') setRaiseTo(potRaiseTo(legal, myBet, 0.75));
   else if (preset === 'pot') setRaiseTo(potRaiseTo(legal, myBet, 1));
   else if (preset === 'allin') setRaiseTo(legal.maxRaiseTo);
@@ -1724,6 +1876,11 @@ function selectTab(which) {
 
 $('tab-log').addEventListener('click', () => selectTab('log'));
 $('tab-coach').addEventListener('click', () => selectTab('coach'));
+$('coach-toast-open').addEventListener('click', () => {
+  $('coach-toast').hidden = true;
+  selectTab('coach');
+  $('panel-coach').scrollIntoView?.({ block: 'nearest' });
+});
 $('tab-training')?.addEventListener('click', () => selectTab('training'));
 $('tab-participants').addEventListener('click',()=>selectTab('participants'));
 selectTab('log');
