@@ -21,17 +21,30 @@ import { killGroup, readPersistedSolver } from './solver-runtime.js';
 import {
   annotationBodyByteLength,
   gameEpochOf,
+  isAnnotationOnlyAttempt,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
+  preserveInitialRejection,
   projectTrainingAnnotation,
   publicProofId,
+  sanitizeRejectionFields,
+  sha256Hex,
   trainingBodyByteLength,
   TRAINING_CHUNK_SLACK_BYTES,
 } from '../publish-contract.js';
+import { REJECTION_LINE_MAX_BYTES, readRecordedAttempt, rejectionRecordByteLength } from './rejection-audit.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'evaluate-cli.js');
 const SOLVE_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'solve-cli.js');
 const BODY_BUDGET = MAX_PUBLISH_BODY_BYTES - TRAINING_CHUNK_SLACK_BYTES;
+// #274: an annotation batch is eligible only if the relay could judge it (BODY_BUDGET) and a
+// refusal of it could be audited: the digest-only audit line naming every item of the batch
+// must fit the bounded audit line, with the same slack the body keeps.
+export const AUDIT_LINE_BUDGET = REJECTION_LINE_MAX_BYTES - TRAINING_CHUNK_SLACK_BYTES;
+// A flush may settle a recorded attempt (retire it, or find it accepted) instead of sending the
+// envelope it built, and then rebuild from the changed authority. Each such settlement consumes
+// a recorded attempt; this bounds how many a single flush tolerates before it reports no progress.
+const MAX_SETTLEMENTS_PER_FLUSH = 4;
 const handPipelineTail = new Map();
 const explainTail = new Map();
 const solveTail = new Map();
@@ -778,6 +791,7 @@ function annotationEnvelopeState(sessionDir, { gameEpoch } = {}) {
   const auth = authorityForPublish(sessionDir);
   if (!auth) return { envelope: null, recoveryNeeded: false };
   const entries = [];
+  const soloEntries = [];
   let recoveryNeeded = false;
   for (const [evaluationId, fields] of Object.entries(auth.annotationQueue ?? {})) {
     const item = auth.items[evaluationId];
@@ -798,15 +812,20 @@ function annotationEnvelopeState(sessionDir, { gameEpoch } = {}) {
         status: canonical.status,
         value: canonical.value,
       });
-      entries.push({
+      const entry = {
         ...projected,
         annotationProof: {
           id: publicProofId(`${evaluationId}:${field}`),
           valueSha256: projected.valueSha256,
         },
-      });
+      };
+      if (queued?.solo === true) soloEntries.push(entry);
+      else entries.push(entry);
     }
   }
+  // An entry that shared a refused body (retireRejectedAnnotations) travels alone, so the
+  // relay's refusal can name it; the rest keep chunking together and go first.
+  if (entries.length === 0 && soloEntries.length > 0) entries.push(soloEntries[0]);
   if (entries.length === 0) return { envelope: null, recoveryNeeded };
   const chunk = [];
   for (const entry of entries) {
@@ -824,7 +843,8 @@ function annotationEnvelopeState(sessionDir, { gameEpoch } = {}) {
       trainingAnnotations: next,
       annotationAuthority,
     });
-    if (bytes > BODY_BUDGET) {
+    const auditBytes = rejectionRecordByteLength(annotationAuthority.items);
+    if (bytes > BODY_BUDGET || auditBytes > AUDIT_LINE_BUDGET) {
       if (chunk.length === 0) chunk.push(entry);
       break;
     }
@@ -863,7 +883,39 @@ function unlinkEnvelope(file) {
   try { fs.unlinkSync(file); } catch { /* leftover envelope is non-authoritative */ }
 }
 
-async function publishSideEnvelope(executePublish, file) {
+// #274: settle a relay refusal through the caller's hook. A failure of that settlement (relay
+// verification, retirement, evidence) is the answer, but it carries the first refusal's closed
+// status/code beside its own code rather than replacing it (preserveInitialRejection).
+async function settleRejection(retirePending, error) {
+  if (typeof retirePending !== 'function') return false;
+  try {
+    return await retirePending(error);
+  } catch (failure) {
+    const preserved = preserveInitialRejection(failure, error);
+    // A refusal the recheck itself produced is the settlement's answer, not a refusal of the
+    // envelope being flushed: the flush must not try to settle it again.
+    if (preserved && typeof preserved === 'object') preserved.settlementFailure = true;
+    throw preserved;
+  }
+}
+
+// A recorded attempt the publisher found stale against the current annotation authority (an
+// entry it carried was retired or published meanwhile) is removed by the publisher before
+// anything is sent and reported as STALE_ANNOTATION_AUTHORITY. Nothing of it was applied; the
+// queue it was built from has moved on. True only when the publisher did remove it — a record
+// that is still there is not settled and keeps its failure.
+function staleAttemptRemoved(sessionDir, error) {
+  return error?.code === 'STALE_ANNOTATION_AUTHORITY'
+    && typeof sessionDir === 'string'
+    && !fs.existsSync(path.join(sessionDir, '.publish-attempt.json'));
+}
+
+// Returns the publisher's reply, or `{ settledPending: true }` when a recorded attempt was
+// settled (retired on evidence, taken by the relay after all, or found stale against the
+// current authority and removed unsent) instead of this envelope: the queue the envelope was
+// built from changed, so the caller rebuilds it rather than sending a body whose authority is
+// now stale.
+async function publishSideEnvelope(executePublish, file, retirePending = null, sessionDir = null) {
   try {
     return await executePublish(['--from', file]);
   } catch (error) {
@@ -872,11 +924,27 @@ async function publishSideEnvelope(executePublish, file) {
       try {
         await executePublish(['--from', file, '--retry']);
       } catch (retryError) {
-        if (retryError.code !== 'NO_ATTEMPT') throw retryError;
+        // Resolved by someone else between the two calls — possibly a retirement whose queue
+        // settlement is still pending. The envelope was built before that: the caller
+        // reconciles outstanding evidence and rebuilds rather than sending it as it is.
+        if (retryError.code === 'NO_ATTEMPT') return { settledPending: true };
+        // A rejected explanatory attempt must not hold this envelope hostage: retire it
+        // (with evidence); anything else stays a failure.
+        if (retryError.code === 'PUBLISH_REJECTED' && await settleRejection(retirePending, retryError)) {
+          return { settledPending: true };
+        }
+        if (staleAttemptRemoved(sessionDir, retryError)) return { settledPending: true };
+        throw retryError;
       }
     }
     return executePublish(['--from', file]);
   }
+}
+
+function noProgressError(kind, why) {
+  const error = new Error(`training ${kind} flush made no queue progress${why ? ` (${why})` : ''}`);
+  error.code = 'TRAINING_FLUSH_NO_PROGRESS';
+  return error;
 }
 
 function envelopeItemSet(kind, envelope) {
@@ -920,25 +988,30 @@ export async function reconcileAnnotationQueue(sessionDir, {
 }
 
 export async function flushMachinePublish(sessionDir, {
-  gameEpoch, executePublish, storeDir, shouldStop, trainingControl,
+  gameEpoch, executePublish, storeDir, shouldStop, trainingControl, retirePending,
 }) {
   return withMachineFlushLock(sessionDir, async () => {
     const tc = trainingControl ?? createTrainingControl({ storeDir });
     let previousItems = null;
+    let settlements = 0;
     for (;;) {
       if (shouldStop?.()) return;
       const envelope = unpublishedEnvelope(sessionDir, { gameEpoch });
       if (!envelope) return;
       const itemSet = envelopeItemSet('machine', envelope);
-      if (itemSet === previousItems) {
-        const error = new Error('training machine flush made no queue progress');
-        error.code = 'TRAINING_FLUSH_NO_PROGRESS';
-        throw error;
-      }
+      if (itemSet === previousItems) throw noProgressError('machine');
       previousItems = itemSet;
       const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'machine' });
       try {
-        await publishSideEnvelope(executePublish, file);
+        const out = await publishSideEnvelope(executePublish, file, retirePending, sessionDir);
+        if (out?.settledPending) {
+          // A recorded attempt was settled, not this envelope: rebuild from the authority as
+          // it is now (the same items are not "no progress" — nothing was sent).
+          settlements += 1;
+          if (settlements > MAX_SETTLEMENTS_PER_FLUSH) throw noProgressError('machine', 'settlements');
+          previousItems = null;
+          continue;
+        }
         for (const item of envelope.training) {
           await markPublishedOrThrow(() => (
             tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256)
@@ -952,11 +1025,32 @@ export async function flushMachinePublish(sessionDir, {
 }
 
 export async function flushAnnotationPublish(sessionDir, {
-  gameEpoch, executePublish, storeDir, shouldStop, trainingControl, onNotice,
+  gameEpoch, executePublish, storeDir, shouldStop, trainingControl, onNotice, retirePending,
 }) {
   return withAnnotationFlushLock(sessionDir, async () => {
     const tc = trainingControl ?? createTrainingControl({ storeDir });
+    // #274: a retirement an interruption left half done (attempt removed, queue not settled)
+    // is settled from its private evidence before any new annotation body is built — never
+    // re-decided by a new publication whose answer may depend on the hand now being played.
+    await settleInterruptedRetirement(tc, sessionDir, onNotice);
     let previousItems = null;
+    // Consecutive settlements that removed nothing from the queue. A settlement is progress
+    // only when a member this envelope was built from is no longer queued afterwards — retired
+    // (closed on evidence) or published and marked — never because the authority's bytes or
+    // the rebuilt envelope merely changed. Isolating a refused batch into singletons removes
+    // nothing and spends one unit; each refused member then actually retired resets it. So a
+    // long queue of refused notes still drains, while a settlement that keeps settling nothing
+    // is still finite: MAX_SETTLEMENTS_PER_FLUSH consecutive stalls end the flush.
+    let stalls = 0;
+    let membersBefore = new Set();
+    const settledAndRebuild = async (why) => {
+      await settleInterruptedRetirement(tc, sessionDir, onNotice);
+      const membersAfter = queuedAnnotationMembers(tc, sessionDir);
+      const progressed = [...membersBefore].some((member) => !membersAfter.has(member));
+      stalls = progressed ? 0 : stalls + 1;
+      if (stalls > MAX_SETTLEMENTS_PER_FLUSH) throw noProgressError('annotation', why);
+      previousItems = null;
+    };
     for (;;) {
       if (shouldStop?.()) return;
       const state = annotationEnvelopeState(sessionDir, { gameEpoch });
@@ -969,15 +1063,55 @@ export async function flushAnnotationPublish(sessionDir, {
       const { envelope } = state;
       if (!envelope) return;
       const itemSet = envelopeItemSet('annotation', envelope);
-      if (itemSet === previousItems) {
-        const error = new Error('training annotation flush made no queue progress');
-        error.code = 'TRAINING_FLUSH_NO_PROGRESS';
-        throw error;
-      }
+      if (itemSet === previousItems) throw noProgressError('annotation');
       previousItems = itemSet;
+      membersBefore = queuedAnnotationMembers(tc, sessionDir);
       const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'annotation' });
       try {
-        await publishSideEnvelope(executePublish, file);
+        let out;
+        try {
+          out = await publishSideEnvelope(executePublish, file, retirePending, sessionDir);
+        } catch (error) {
+          // The publisher refused to judge this body while retirement evidence is outstanding
+          // (a refused explanation whose queue settlement has not happened yet — it may be
+          // waiting behind another holder of the training lock). Settle that evidence first,
+          // then rebuild from the settled queue — bounded like any other settlement. The
+          // evidence itself is never consumed here without its own verification.
+          if (error?.settlementFailure !== true && error?.code === 'REJECTION_EVIDENCE_PENDING') {
+            await settledAndRebuild('evidence settlements');
+            continue;
+          }
+          // This envelope no longer matches the authority it was built from (an entry it
+          // carries was retired or published by a concurrent settlement between the build and
+          // the send): the publisher refused it unsent and recorded nothing. Rebuild from the
+          // authority as it is now — bounded like any other settlement.
+          if (error?.settlementFailure !== true && staleAttemptRemoved(sessionDir, error)) {
+            await settledAndRebuild('stale rebuilds');
+            continue;
+          }
+          // The relay refused this body. An explanatory annotation refused with a retirable code is
+          // retired (with evidence) rather than left to block every later publish; any other
+          // refusal stays an error with the attempt kept. The next envelope is rebuilt from the
+          // settled queue and must differ from this one (the no-progress guard above).
+          if (error?.settlementFailure === true
+            || !(error?.code === 'PUBLISH_REJECTED' && await settleRejection(retirePending, error))) throw error;
+          // Settled — by this caller, or elsewhere: another retirement of the same body may have
+          // got there first while its queue settlement still waits behind an ordinary holder of
+          // the training lock, so the queue this envelope was built from need not have changed
+          // yet. Account for that outstanding evidence before judging progress: settle it (only
+          // ever through its own verification), bounded like every other settlement, and rebuild
+          // from the queue as it is then.
+          await settledAndRebuild('rejection settlements');
+          continue;
+        }
+        if (out?.settledPending) {
+          // A recorded attempt (an earlier refused body) was settled instead of this envelope,
+          // and the queue it was built from changed: reconcile any evidence that settlement
+          // left outstanding, then rebuild within this same flush so the unrelated annotations
+          // it carried are still published, never the stale body.
+          await settledAndRebuild('settlements');
+          continue;
+        }
         for (const item of envelope.trainingAnnotations) {
           await markPublishedOrThrow(() => tc.markAnnotationPublished(
             sessionDir,
@@ -993,15 +1127,235 @@ export async function flushAnnotationPublish(sessionDir, {
   });
 }
 
-export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublish, storeDir }) {
-  const attemptFile = path.join(sessionDir, '.publish-attempt.json');
-  if (!fs.existsSync(attemptFile)) return;
+// The members of the annotation queue as the authority holds them now — "evaluationId:field"
+// for every queued field — the identity against which a settlement counts as progress. An
+// unreadable or absent authority has no members.
+function queuedAnnotationMembers(tc, sessionDir) {
+  const members = new Set();
+  let auth = null;
+  try { auth = typeof tc.loadAuthority === 'function' ? tc.loadAuthority(sessionDir) : null; } catch { auth = null; }
+  const queue = auth?.annotationQueue;
+  if (!queue || typeof queue !== 'object' || Array.isArray(queue)) return members;
+  for (const [evaluationId, fields] of Object.entries(queue)) {
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) continue;
+    for (const field of Object.keys(fields)) members.add(`${evaluationId}:${field}`);
+  }
+  return members;
+}
+
+async function settleInterruptedRetirement(tc, sessionDir, onRetired = null) {
+  if (typeof tc.reconcileRetiredAnnotations !== 'function') return null;
+  const settled = await tc.reconcileRetiredAnnotations(sessionDir);
+  if (settled && !settled.pending) {
+    onRetired?.(`게시 거절된 학습 설명 정리 완료: publishId ${settled.publishId}`);
+  }
+  return settled;
+}
+
+// The recorded attempt through the bounded, preinspected, non-blocking reader: null ONLY when
+// the entry is truly absent. A special file, a link, a hard link, an oversize or replaced entry,
+// or one that is not a JSON object is "in doubt": the caller must neither send, dispose nor
+// remove anything on it, so that reads as an explicit, closed failure instead.
+function readAttemptRecord(sessionDir) {
+  let read;
+  try {
+    read = readRecordedAttempt(sessionDir);
+  } catch (error) {
+    throw retireError('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도를 안전하게 읽지 못했습니다.', error);
+  }
+  if (read.absent) return null;
   let record;
   try {
-    record = JSON.parse(fs.readFileSync(attemptFile, 'utf8'));
+    record = JSON.parse(read.raw);
   } catch {
-    return;
+    throw retireError('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도가 JSON이 아닙니다.');
   }
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw retireError('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도가 JSON 객체가 아닙니다.');
+  }
+  return record;
+}
+
+async function markBodyAnnotationsPublished(tc, sessionDir, body) {
+  for (const item of body?.trainingAnnotations ?? []) {
+    await markPublishedOrThrow(() => tc.markAnnotationPublished(
+      sessionDir,
+      item.evaluationId,
+      item.field,
+      item.valueSha256,
+    ));
+  }
+}
+
+function retireError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+// The relay identity the caller verified, as the publisher needs it: pid, start time, port
+// and the game epoch of the token that verification used.
+function relayBindingArgs(binding, expectedGameEpoch) {
+  if (!binding || typeof binding !== 'object'
+    || !Number.isSafeInteger(binding.pid) || binding.pid < 1
+    || typeof binding.startTime !== 'string' || binding.startTime.length === 0
+    || !Number.isInteger(binding.port) || binding.port < 1 || binding.port > 65535
+    || typeof binding.sessionToken !== 'string' || binding.sessionToken.length === 0
+    || gameEpochOf(binding.sessionToken) !== expectedGameEpoch) {
+    throw retireError('RELAY_BINDING_UNVERIFIED', '검증된 relay identity가 없어 게시 거절을 폐기하지 않습니다.');
+  }
+  return ['--relay-pid', String(binding.pid), '--relay-start-time', binding.startTime,
+    '--relay-port', String(binding.port)];
+}
+
+/**
+ * #274: settle the recorded annotation attempt after the relay refused it. Only an attempt of
+ * annotations alone qualifies. The relay is re-verified (`verifyRelay`) and its identity
+ * (`relayBinding()`, required) travels to the publisher with the exact attempt digest this
+ * read saw. Under its publish lock the publisher resends that attempt only if it is still the
+ * same one, only to that relay (re-checked before the POST and again after the reply), and
+ * retires it only when the relay refuses that body again with a retirable code
+ * (RETIRABLE_ANNOTATION_REJECTIONS — FORBIDDEN_LITERAL is a conservative choice, see there),
+ * leaving durable evidence the training control checks before it drops anything from the
+ * queue. Whatever the publisher reports must name this exact body, or nothing is settled.
+ * Returns `{ retired }`, `{ published }` (the relay took it after all), `{ settledElsewhere }`
+ * (the attempt was already gone) or `{ retired:false }` (nothing retirable here). A refusal
+ * that is not retirable, a changed attempt, a transport failure or an unverifiable relay
+ * throws — the attempt and the queue are untouched.
+ */
+// The full closed identity of one recorded attempt — body digest, publishId, game epoch — or
+// null for anything partial, malformed or absent. Diagnostic tuples are never an identity.
+function attemptIdentityOf(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return null;
+  const { bodySha256, publishId, expectedGameEpoch } = identity;
+  if (!/^[0-9a-f]{64}$/.test(bodySha256 ?? '') || !Number.isSafeInteger(publishId) || publishId < 1
+    || !/^[0-9a-f]{64}$/.test(expectedGameEpoch ?? '')) return null;
+  return { bodySha256, publishId, expectedGameEpoch };
+}
+
+// Proof that EXACTLY `identity` was settled, the one check every "settled elsewhere" answer of
+// the retirement helper goes through: either the reconcile just run applied surviving
+// evidence of that very identity (all three fields), or its completed retirement is proven
+// from the durable audit row and the durable queue disposition under the training lock
+// (verifyCompletedRetirement). Another body's evidence reconciling, a file that is simply
+// gone, a publisher's NO_ATTEMPT, or a partial identity prove nothing: null, and the caller
+// keeps its refusal — the queue, the record and the engine untouched.
+async function provenSettlementOf(tc, sessionDir, identity, settled) {
+  const exact = attemptIdentityOf(identity);
+  if (!exact) return null;
+  if (settled && settled.pending === false
+    && settled.bodySha256 === exact.bodySha256 && settled.publishId === exact.publishId
+    && settled.expectedGameEpoch === exact.expectedGameEpoch) {
+    return { retired: false, settledElsewhere: true };
+  }
+  if (typeof tc.verifyCompletedRetirement === 'function') {
+    const completed = await tc.verifyCompletedRetirement(sessionDir, exact);
+    if (completed?.settled === true) return { retired: false, settledElsewhere: true, completed: true };
+  }
+  return null;
+}
+
+export async function retireRejectedAnnotationAttempt(sessionDir, {
+  executePublish, storeDir, trainingControl, verifyRelay, relayBinding, onRetired, expectedAttempt = null,
+}) {
+  const record = readAttemptRecord(sessionDir);
+  if (record === null) {
+    // No record to read: a competing settlement may have taken it before this read. An absent
+    // file proves nothing by itself. Outstanding evidence — of this attempt or of another body
+    // in this game — is reconciled on its own merits (verified, applied once), but only proof
+    // for the captured identity itself settles THIS refusal: surviving evidence of exactly that
+    // identity, or its completed retirement proven from audit and disposition. Anything else
+    // keeps the refusal; without a captured identity nothing can be proven.
+    const tc = trainingControl ?? createTrainingControl({ storeDir });
+    const settled = await settleInterruptedRetirement(tc, sessionDir);
+    return (await provenSettlementOf(tc, sessionDir, expectedAttempt, settled)) ?? { retired: false };
+  }
+  if (!isAnnotationOnlyAttempt(record)) return { retired: false };
+  const found = {
+    bodySha256: sha256Hex(JSON.stringify(record.body)),
+    publishId: record.body?.publishId,
+    expectedGameEpoch: record.expectedGameEpoch,
+  };
+  const captured = attemptIdentityOf(expectedAttempt);
+  if (captured && (found.bodySha256 !== captured.bodySha256 || found.publishId !== captured.publishId
+    || found.expectedGameEpoch !== captured.expectedGameEpoch)) {
+    // The record on disk is not the refused attempt this caller captured (all three fields
+    // must agree): a replacement recorded meanwhile. Nothing of it is sent or marked by this
+    // caller. The captured attempt itself may have been settled in between — only proof for
+    // exactly that identity settles it; otherwise the refusal stands, the replacement untouched.
+    const tc = trainingControl ?? createTrainingControl({ storeDir });
+    const settled = await settleInterruptedRetirement(tc, sessionDir);
+    return (await provenSettlementOf(tc, sessionDir, captured, settled)) ?? { retired: false, replaced: true };
+  }
+  if (typeof relayBinding !== 'function') {
+    throw retireError('RELAY_BINDING_UNVERIFIED', '검증된 relay identity가 없어 게시 거절을 폐기하지 않습니다.');
+  }
+  const expectedGameEpoch = record.expectedGameEpoch;
+  const expectedSha256 = sha256Hex(JSON.stringify(record.body));
+  const expectedPublishId = record.body.publishId;
+  const tc = trainingControl ?? createTrainingControl({ storeDir });
+  // Settle an earlier interrupted retirement first: the publisher refuses to retire another
+  // body while unsettled evidence of a different one is on disk.
+  await settleInterruptedRetirement(tc, sessionDir);
+  await verifyRelay?.();
+  const bindingArgs = relayBindingArgs(relayBinding(), expectedGameEpoch);
+  const file = writeTrainingEnvelope(sessionDir, {
+    trainingAnnotations: record.body.trainingAnnotations,
+    annotationAuthority: record.annotationAuthority,
+  }, { kind: 'retire' });
+  let out;
+  try {
+    out = await executePublish(['--from', file, '--retire-rejected',
+      '--expect-attempt-sha256', expectedSha256, '--expect-game-epoch', expectedGameEpoch,
+      ...bindingArgs]);
+  } catch (error) {
+    // The record this helper read is gone by the time the publisher looked under its lock. A
+    // vanished file proves nothing: only proof for exactly the identity read here — its
+    // surviving evidence reconciled now, or its completed retirement proven from audit and
+    // disposition — settles it. Otherwise this is a closed NO_ATTEMPT: the refusal (kept beside
+    // it by the caller) stands, the queue is untouched, nothing is marked or re-sent.
+    if (error?.code === 'NO_ATTEMPT') {
+      const reconciled = await settleInterruptedRetirement(tc, sessionDir);
+      const proven = await provenSettlementOf(tc, sessionDir, {
+        bodySha256: expectedSha256, publishId: expectedPublishId, expectedGameEpoch,
+      }, reconciled);
+      if (proven) return proven;
+      throw retireError('NO_ATTEMPT', '읽은 게시 시도가 전송 전에 사라졌고 그 정산의 증거도 없어 정리하지 않았습니다.');
+    }
+    // The publisher verified this exact record, found an entry it carries no longer queued (a
+    // concurrent retirement or publication settled it after this body was built and refused)
+    // and removed it unsent: nothing of it was applied or evidenced, and the queue has moved
+    // on. The caller rebuilds from the authority. A record still on disk is not settled.
+    if (staleAttemptRemoved(sessionDir, error)) return { retired: false, settledElsewhere: true, stale: true };
+    throw error;
+  } finally {
+    unlinkEnvelope(file);
+  }
+  if (out?.retired !== true) {
+    if (out?.bodySha256 !== expectedSha256 || out?.publishId !== expectedPublishId) {
+      throw retireError('RETIRE_RESULT_UNBOUND', '게시 결과가 읽은 시도의 본문과 일치하지 않아 아무것도 정리하지 않았습니다.');
+    }
+    await markBodyAnnotationsPublished(tc, sessionDir, record.body);
+    return { retired: false, published: true };
+  }
+  if (out.rejection?.bodySha256 !== expectedSha256 || out.rejection?.publishId !== expectedPublishId
+    || out.rejection?.expectedGameEpoch !== expectedGameEpoch) {
+    throw retireError('RETIRE_RESULT_UNBOUND', '거절 결과가 읽은 시도의 본문과 일치하지 않아 아무것도 정리하지 않았습니다.');
+  }
+  const settled = await tc.retireRejectedAnnotations(sessionDir, out.rejection);
+  const { httpStatus, serverCode } = sanitizeRejectionFields(
+    out.rejection?.httpStatus, out.rejection?.serverCode,
+  );
+  const disposition = { dropped: settled.retired, isolated: settled.isolated, skipped: settled.skipped };
+  onRetired?.({ publishId: out.rejection?.publishId, httpStatus, serverCode, ...disposition });
+  return { retired: true, ...disposition };
+}
+
+export async function retryUnresolvedTrainingAttempt(sessionDir, {
+  executePublish, storeDir, retirePending,
+}) {
+  // The bounded, non-blocking reader: an absent record is nothing to retry; an entry in doubt
+  // (special file, link, oversize, not a JSON object) is an explicit failure, never sent.
+  const record = readAttemptRecord(sessionDir);
+  if (record === null) return;
   const isTraining = Boolean(record.trainingAuthority || record.annotationAuthority
     || record.body?.training || record.body?.trainingAnnotations);
   if (!isTraining) return;
@@ -1011,11 +1365,29 @@ export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublis
       trainingAnnotations: record.body.trainingAnnotations,
       annotationAuthority: record.annotationAuthority,
     };
+  // #274: the queue entries marked below are the ones of the body captured HERE. The resend is
+  // bound to that exact record (digest and epoch, enforced by the publisher under its lock
+  // before anything is sent — a replacement recorded meanwhile stays unsent and intact), and
+  // the accepted reply must name that body before anything is marked.
+  const expectedSha256 = sha256Hex(JSON.stringify(record.body));
+  const expectedPublishId = record.body?.publishId;
+  const expectedGameEpoch = record.expectedGameEpoch;
+  if (!/^[0-9a-f]{64}$/.test(expectedGameEpoch ?? '') || !Number.isSafeInteger(expectedPublishId)) {
+    throw retireError('BAD_ATTEMPT', '기록된 게시 시도에 게임 epoch 또는 publishId가 없어 재시도를 묶을 수 없습니다.');
+  }
   const file = writeTrainingEnvelope(sessionDir, envelope, { kind: 'retry' });
+  let out;
   try {
-    await executePublish(['--from', file, '--retry']);
+    out = await executePublish(['--from', file, '--retry',
+      '--expect-attempt-sha256', expectedSha256, '--expect-game-epoch', expectedGameEpoch]);
+  } catch (error) {
+    if (error?.code === 'PUBLISH_REJECTED' && await settleRejection(retirePending, error)) return;
+    throw error;
   } finally {
     unlinkEnvelope(file);
+  }
+  if (out?.bodySha256 !== expectedSha256 || out?.publishId !== expectedPublishId) {
+    throw retireError('RETIRE_RESULT_UNBOUND', '재시도 결과가 읽은 시도의 본문과 일치하지 않아 아무것도 표시하지 않았습니다.');
   }
   const tc = createTrainingControl({ storeDir });
   for (const item of record.body?.training ?? []) {
@@ -1023,14 +1395,7 @@ export async function retryUnresolvedTrainingAttempt(sessionDir, { executePublis
       tc.markPublished(sessionDir, item.evaluationId, item.payloadSha256)
     ));
   }
-  for (const item of record.body?.trainingAnnotations ?? []) {
-    await markPublishedOrThrow(() => tc.markAnnotationPublished(
-      sessionDir,
-      item.evaluationId,
-      item.field,
-      item.valueSha256,
-    ));
-  }
+  await markBodyAnnotationsPublished(tc, sessionDir, record.body);
 }
 
 export { gameEpochOf };

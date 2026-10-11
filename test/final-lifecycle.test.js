@@ -199,3 +199,141 @@ test('#264 a failed start picks its notice again from the state the failure left
   assert.match(dom.$('error').textContent,refreshed ? KEPT : NOT_STARTED,`refreshed=${refreshed}`);
  }
 });
+
+// #273: the lobby shows why a retained game cannot resume, and why a resume just failed.
+test('#273 the result panel names the cleanup failure and the failure that started it, as closed codes only', () => {
+ const {dom,context}=lobbyWithMessages();
+ const panel=(detail,error='CHILD_CLOSE_UNCONFIRMED')=>{
+  context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error,errorDetail:detail,allowedCommands:['resume']};
+  context.render();return dom.$('result-message').textContent;
+ };
+ const both=panel({run:'PUBLISH_REJECTED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:400,serverCode:'FORBIDDEN_LITERAL'}});
+ assert.match(both,/종료를 확인하지 못해/);
+ assert.match(both,/불러오기/);
+ assert.match(both,/처음 멈춘 이유: 서버가 게임 기록 게시를 거부했습니다/);
+ assert.match(both,/서버 응답 400 FORBIDDEN_LITERAL/);
+ // A code the lobby has no words for is described in safe words that name no code — never raw
+ // text from the snapshot — and the projected sanitized answers, when there are any, still show.
+ const unknown=panel({run:'<script>alert(1)</script>',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:null});
+ assert.doesNotMatch(unknown,/script|alert|<|>/);
+ assert.match(unknown,/처음 멈춘 이유: 게임이 먼저 다른 이유로 멈췄고 그 기록은 보존되어 있습니다\. 불러오기로 이어서 확인해 주세요\./);
+ assert.doesNotMatch(unknown,/서버 응답/);
+ const unknownWithAnswer=panel({run:'SOME_FUTURE_CODE',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:503,serverCode:'RELAY_SHUTTING_DOWN'}});
+ assert.doesNotMatch(unknownWithAnswer,/SOME_FUTURE_CODE/);
+ assert.match(unknownWithAnswer,/처음 멈춘 이유: 게임이 먼저 다른 이유로 멈췄고 그 기록은 보존되어 있습니다\. 불러오기로 이어서 확인해 주세요\. \(서버 응답 503 RELAY_SHUTTING_DOWN\)/);
+ // The same code twice is one sentence, and no detail is no extra line.
+ assert.doesNotMatch(panel({run:'CHILD_CLOSE_UNCONFIRMED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:null}),/처음 멈춘 이유/);
+ assert.doesNotMatch(panel(null),/처음 멈춘 이유/);
+ // A failed 불러오기 explains itself instead of showing the generic line.
+ context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error:'CHILD_CLOSE_UNCONFIRMED',allowedCommands:['resume']};
+ const generic=/요청을 완료하지 못했습니다/;
+ for(const code of ['CHILD_CLOSE_UNCONFIRMED','CHILD_SIGNAL_FAILED','SERVER_STOP_UNCONFIRMED','SESSION_STOPPED','RESUME_NOT_APPLIED','PUBLISH_REJECTED','PENDING_ANNOTATION_BLOCKED','LOOP_LOCK_LOST','REJECTION_AUDIT_FAILED','ATTEMPT_SYNC_FAILED','SERVER_LISTENER_UNAVAILABLE',
+  'RELAY_BINDING_CHANGED','RELAY_BINDING_UNVERIFIED','ATTEMPT_CHANGED','RETRY_BINDING_REQUIRED','RETIRE_RESULT_UNBOUND','ATTEMPT_NOT_RETIRABLE','ANNOTATION_RETIRED',
+  'REJECTION_EVIDENCE_PENDING','REJECTION_EVIDENCE_UNAVAILABLE','REJECTION_EVIDENCE_INVALID','REJECTION_EVIDENCE_MISSING','STALE_ANNOTATION_AUTHORITY','FINALIZATION_DEADLINE_EXCEEDED']){
+  context.showError(new Error(code));
+  assert.doesNotMatch(dom.$('error').textContent,generic,code);
+  assert.ok(dom.$('error').textContent.length>10,code);
+ }
+});
+
+// #274: the combined failure of the incident — the applied action's publication met a refused
+// explanation whose retirement could not record its audit (REJECTION_AUDIT_FAILED), then the
+// cleanup could not be confirmed — gets guidance a host can act on, with the sanitized first
+// server answer (and a differing recheck) beside it; the same words after a failed 불러오기,
+// and when the audit failure is the primary error. Closed codes and status/code pairs only.
+test('#274 the result panel explains REJECTION_AUDIT_FAILED with recovery guidance and the sanitized first refusal, in the combined state, after a failed resume, and as the primary error', () => {
+ const {dom,context}=lobbyWithMessages();
+ const panel=(detail,error='CHILD_CLOSE_UNCONFIRMED')=>{
+  context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error,errorDetail:detail,allowedCommands:['resume']};
+  context.render();return dom.$('result-message').textContent;
+ };
+ const combined=panel({run:'REJECTION_AUDIT_FAILED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:400,serverCode:'ANNOTATION_PROOF_MISMATCH'}});
+ assert.match(combined,/종료를 확인하지 못해/,'the cleanup that still blocks the game');
+ assert.match(combined,/불러오기를 누르면 정리를 다시 확인/,'what to do');
+ assert.match(combined,/처음 멈춘 이유: 서버가 거부한 학습 설명의 폐기 기록을 안전하게 남기지 못해/,'the failure that started it, in words');
+ assert.match(combined,/폐기 감사 파일 자리가 다른 파일이나 폴더로 막혀 있지 않은지 확인/,'actionable recovery guidance');
+ assert.match(combined,/\(서버 응답 400 ANNOTATION_PROOF_MISMATCH\)/,'the sanitized first refusal');
+ assert.doesNotMatch(combined,/재확인/);
+ // A recheck that answered differently is shown beside the first answer, never instead of it.
+ const rechecked=panel({run:'SERVER_LISTENER_UNAVAILABLE',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:500,serverCode:'FORBIDDEN_LITERAL_UNAVAILABLE'},recheckRejection:{httpStatus:400,serverCode:'FORBIDDEN_LITERAL'}});
+ assert.match(rechecked,/처음 멈춘 이유: 게임 서버의 소유를 확인하지 못해/);
+ assert.match(rechecked,/\(서버 응답 500 FORBIDDEN_LITERAL_UNAVAILABLE · 재확인 400 FORBIDDEN_LITERAL\)/);
+ // The audit failure as the primary error (the cleanup succeeded): its own guidance plus the answer, once.
+ const primary=panel({run:'REJECTION_AUDIT_FAILED',cleanup:null,rejection:{httpStatus:400,serverCode:'FORBIDDEN_LITERAL'}},'REJECTION_AUDIT_FAILED');
+ assert.match(primary,/^서버가 거부한 학습 설명의 폐기 기록을 안전하게 남기지 못해/);
+ assert.match(primary,/\(서버 응답 400 FORBIDDEN_LITERAL\)/);
+ assert.doesNotMatch(primary,/처음 멈춘 이유/);
+ // Only closed pairs are rendered: an unlisted-shaped answer, a message or any other text is not.
+ const odd=panel({run:'REJECTION_AUDIT_FAILED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:400,serverCode:'<b>As Kh tok</b>'},recheckRejection:{httpStatus:'500',serverCode:'FORBIDDEN_LITERAL'}});
+ assert.doesNotMatch(odd,/서버 응답|As Kh|tok|<b>/);
+ assert.match(odd,/처음 멈춘 이유: 서버가 거부한 학습 설명/);
+ // After a failed 불러오기 the panel keeps the same explanation and the notice is not generic.
+ context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error:'CHILD_CLOSE_UNCONFIRMED',errorDetail:{run:'REJECTION_AUDIT_FAILED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:400,serverCode:'ANNOTATION_PROOF_MISMATCH'}},allowedCommands:['resume']};
+ context.render();
+ assert.equal(dom.$('result-message').textContent,combined,'a failed resume that changed nothing shows the same explanation');
+ context.showError(new Error('CHILD_CLOSE_UNCONFIRMED'));
+ assert.doesNotMatch(dom.$('error').textContent,/요청을 완료하지 못했습니다/);
+ assert.match(dom.$('error').textContent,/불러오기/);
+});
+// #274: every recovery outcome a run can stop with is explained in words with what to do next,
+// and the sanitized first/recheck answers are shown whenever the snapshot projects them — in
+// the combined cleanup state, as the primary error, and after a failed 불러오기. A raw code is
+// never shown, with or without a message for it.
+test('#274 the result panel explains the recovery outcomes (binding, attempt sync, evidence, changed result) with guidance and the projected answers, combined, primary and after a failed resume', () => {
+ const {dom,context}=lobbyWithMessages();
+ const panel=(detail,error='CHILD_CLOSE_UNCONFIRMED')=>{
+  context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error,errorDetail:detail,allowedCommands:['resume']};
+  context.render();return dom.$('result-message').textContent;
+ };
+ const first={httpStatus:500,serverCode:'FORBIDDEN_LITERAL_UNAVAILABLE'};
+ const cases=[
+  {run:'ATTEMPT_CHANGED',words:/다시 보내려던 게시 기록이 그사이 다른 기록으로 바뀌어 보내지 않았습니다/,guide:/불러오기를 누르면 현재 기록부터 다시 확인/},
+  {run:'RELAY_BINDING_CHANGED',words:/게임 서버가 바뀐 것으로 확인되어 보내지 않고 멈췄습니다/,guide:/불러오기를 누르면 서버를 다시 확인/},
+  {run:'RELAY_BINDING_UNVERIFIED',words:/게임 서버를 확인하지 못해 보내지 않고 멈췄습니다/,guide:/불러오기로 다시 확인/},
+  {run:'REJECTION_EVIDENCE_UNAVAILABLE',words:/정리 기록을 읽거나 보존하지 못해 멈췄습니다/,guide:/게임 폴더를 읽고 쓸 수 있는지 확인한 뒤 불러오기/},
+  {run:'REJECTION_EVIDENCE_PENDING',words:/정리가 아직 끝나지 않아 새 게시를 보류했습니다/,guide:/정리를 먼저 끝내고 이어서 시작/},
+  {run:'RETIRE_RESULT_UNBOUND',words:/보내려던 게시와 일치하지 않아 아무것도 게시된 것으로 표시하지 않았습니다/,guide:/불러오기를 누르면 다시 확인/},
+  {run:'RETRY_BINDING_REQUIRED',words:/어느 기록을 보냈는지 확인되지 않아 자동으로 다시 보내지 않았습니다/,guide:/불러오기를 누르면 기록을 다시 확인/},
+  {run:'ANNOTATION_RETIRED',words:/이미 정리된 학습 설명을 게시된 것으로 표시하려 해 멈췄습니다/,guide:/불러오기를 누르면 다시 확인/},
+  {run:'FINALIZATION_DEADLINE_EXCEEDED',words:/마무리 제한 시간을 넘겨 게시를 멈췄습니다/,guide:/불러오기를 누르면 이어서 처리/},
+ ];
+ for(const c of cases){
+  // Combined: the cleanup that still blocks, then the run failure in words, its guidance, and both answers.
+  const combined=panel({run:c.run,cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:first,recheckRejection:{httpStatus:409,serverCode:'ANNOTATION_CONFLICT'}});
+  assert.match(combined,/종료를 확인하지 못해/,c.run);
+  assert.match(combined,/불러오기를 누르면 정리를 다시 확인/,c.run);
+  assert.match(combined,/처음 멈춘 이유: /,c.run);
+  assert.match(combined,c.words,c.run);
+  assert.ok(combined.indexOf('처음 멈춘 이유: ')<combined.search(c.words),'the run failure is explained after the cleanup that still blocks: '+c.run);
+  assert.match(combined,c.guide,c.run);
+  assert.match(combined,/\(서버 응답 500 FORBIDDEN_LITERAL_UNAVAILABLE · 재확인 409 ANNOTATION_CONFLICT\)/,c.run);
+  assert.doesNotMatch(combined,new RegExp(c.run),'the raw code is not shown: '+c.run);
+  // Primary (the cleanup succeeded): its own words and guidance plus the first answer, once.
+  const primary=panel({run:c.run,cleanup:null,rejection:first},c.run);
+  assert.match(primary,c.words,c.run);
+  assert.match(primary,c.guide,c.run);
+  assert.match(primary,/\(서버 응답 500 FORBIDDEN_LITERAL_UNAVAILABLE\)/,c.run);
+  assert.doesNotMatch(primary,/처음 멈춘 이유|재확인/,c.run);
+  assert.doesNotMatch(primary,new RegExp(c.run),'the raw code is not shown: '+c.run);
+  // After a failed 불러오기 that changed nothing, the same explanation; the notice is not generic.
+  context.snapshot={state:'error',gameId:'one',gameEpoch:'epoch',error:'CHILD_CLOSE_UNCONFIRMED',errorDetail:{run:c.run,cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:first,recheckRejection:{httpStatus:409,serverCode:'ANNOTATION_CONFLICT'}},allowedCommands:['resume']};
+  context.render();
+  assert.equal(dom.$('result-message').textContent,combined,'a failed resume keeps the explanation: '+c.run);
+  context.showError(new Error(c.run));
+  assert.doesNotMatch(dom.$('error').textContent,/요청을 완료하지 못했습니다/,c.run);
+  assert.match(dom.$('error').textContent,/불러오기/,c.run);
+ }
+ // A closed run code without a message: the projected answers are still shown, in words that
+ // name no code; nothing raw from the detail reaches the panel.
+ const unlisted=panel({run:'SOME_FUTURE_CODE',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:503,serverCode:'RELAY_SHUTTING_DOWN'},recheckRejection:{httpStatus:400,serverCode:'FORBIDDEN_LITERAL'}});
+ assert.match(unlisted,/종료를 확인하지 못해/);
+ assert.match(unlisted,/처음 멈춘 이유: 게임이 먼저 다른 이유로 멈췄고 그 기록은 보존되어 있습니다\. 불러오기로 이어서 확인해 주세요\./);
+ assert.match(unlisted,/\(서버 응답 503 RELAY_SHUTTING_DOWN · 재확인 400 FORBIDDEN_LITERAL\)/);
+ assert.doesNotMatch(unlisted,/SOME_FUTURE_CODE/);
+ const unlistedPrimary=panel({run:'SOME_FUTURE_CODE',cleanup:null,rejection:{httpStatus:503,serverCode:'RELAY_SHUTTING_DOWN'}},'SOME_FUTURE_CODE');
+ assert.match(unlistedPrimary,/^현재 게임 상태를 확인해 주세요\. \(서버 응답 503 RELAY_SHUTTING_DOWN\)$/);
+ // Only closed pairs are rendered, whatever the code: a message-shaped answer is not.
+ const odd=panel({run:'ATTEMPT_CHANGED',cleanup:'CHILD_CLOSE_UNCONFIRMED',rejection:{httpStatus:500,serverCode:'<b>As Kh tok</b> /tmp/x'},recheckRejection:{httpStatus:409,serverCode:'ANNOTATION_CONFLICT'}});
+ assert.doesNotMatch(odd,/서버 응답|As Kh|tok|<b>|\/tmp/);
+ assert.match(odd,/처음 멈춘 이유: 다시 보내려던 게시 기록/);
+});

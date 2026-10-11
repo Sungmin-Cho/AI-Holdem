@@ -71,6 +71,62 @@ test(
     await settle(manager, end.requestId);
   },
 );
+// #273/#274 lifetime contract (6): a journal row written by an earlier version may hold raw
+// adapter/child codes. Every public return of a receipt — the idempotent replay of the same
+// command, receipt(), the nested result snapshot — passes one projection; the row's bytes and
+// the request-id conflict check are untouched.
+test('legacy receipt codes are projected on every public return path, including the idempotent command replay, while the journal row and its identity stay as recorded', { timeout: process.platform === 'win32' ? 300000 : 30000 }, async (t) => {
+  const SECRET = 'SECRET_LEGACY_REPLAY_MARKER_As_Kh';
+  const root = createOwnedTempDir('lobby-legacy-receipt');
+  const manager = createSessionManager({ storeDir: root, resolver });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const body = { ...payload(manager), setup: { aiCount: 1, mode: 'cash-training' } };
+  manager.command(body);
+  assert.equal((await settle(manager, body.requestId)).status, 'succeeded');
+  // Ended the way a host ends a game: pause first (end is not an allowed command while playing).
+  const pause = payload(manager, 'pause');
+  manager.command(pause);
+  assert.equal((await settle(manager, pause.requestId)).status, 'succeeded');
+  const end = payload(manager, 'end');
+  manager.command(end);
+  assert.equal((await settle(manager, end.requestId)).status, 'succeeded');
+  // The row as an earlier version could have left it: raw codes in every code-bearing field.
+  const file = path.join(root, '.app', 'commands', `${body.requestId}.json`);
+  const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+  legacy.status = 'failed';
+  legacy.error = SECRET;
+  legacy.result = {
+    ...legacy.result,
+    error: SECRET,
+    errorDetail: { run: SECRET, cleanup: SECRET, rejection: { httpStatus: 400, serverCode: SECRET }, recheckRejection: { httpStatus: 409, serverCode: `${SECRET}_2` } },
+    pendingDecision: { decisionId: 'd-1-preflop-0', status: 'recovery_required', code: SECRET },
+  };
+  const legacyBytes = JSON.stringify(legacy);
+  fs.writeFileSync(file, legacyBytes);
+
+  const replayed = manager.command(body);
+  const receipt = manager.receipt(body.requestId);
+  for (const [label, row] of [['replay', replayed], ['receipt', receipt]]) {
+    assert.equal(row.requestId, body.requestId, label);
+    assert.equal(row.status, 'failed', label);
+    assert.equal(row.error, 'UNLISTED', label);
+    assert.equal(row.result.error, 'UNLISTED', label);
+    assert.deepEqual(row.result.errorDetail, {
+      run: 'UNLISTED', cleanup: 'UNLISTED',
+      rejection: { httpStatus: 400, serverCode: 'UNLISTED' },
+      recheckRejection: { httpStatus: 409, serverCode: 'UNLISTED' },
+    }, label);
+    assert.equal(row.result.pendingDecision.code, 'UNLISTED', label);
+    assert.equal(row.result.pendingDecision.decisionId, 'd-1-preflop-0', `${label}: non-code fields are kept`);
+    assert.equal(JSON.stringify(row).includes('SECRET'), false, `${label}: no raw code anywhere in the complete object`);
+    assert.equal(JSON.stringify(row).includes('As_Kh'), false, label);
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), legacyBytes, 'the journal row is never rewritten by a public read');
+  assert.throws(() => manager.command({ ...body, setup: { aiCount: 2, mode: 'cash-training' } }), { code: 'REQUEST_ID_CONFLICT' }, 'identity is still compared on the recorded payload');
+  assert.equal(fs.readFileSync(file, 'utf8'), legacyBytes);
+});
+
 test('managed command journal retries the displayed LLM decision once and preserves configured budget', { timeout: process.platform === 'win32' ? 300000 : 30000 }, async (t) => {
   const root = createOwnedTempDir('lobby-llm-recovery');
   const calls = [];

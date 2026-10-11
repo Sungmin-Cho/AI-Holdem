@@ -145,7 +145,7 @@ function render() {
       ? "중도 종료했습니다. 진행 중이던 핸드는 성적에 포함하지 않습니다."
       : s === "completed"
         ? "게임을 완료했습니다."
-        : (errorText(snapshot.error) ?? "현재 게임 상태를 확인해 주세요.");
+        : errorSummary(snapshot);
   $("recover").hidden = !snapshot.allowedCommands.includes("resume");
   $("review").hidden = !["completed", "ended"].includes(s);
   $("result-restart").hidden = !snapshot.allowedCommands.includes("restart");
@@ -282,6 +282,34 @@ function errorText(code, snap = snapshot) {
     return errorMessages.STUDY_SERVICE_INCOMPATIBLE_KEPT +
       (snap.allowedCommands?.includes("end") ? " 이어 갈 수 없으면 게임을 종료할 수 있습니다." : "");
   return errorMessages[code];
+}
+// #274: the sanitized server answers behind a failure — the first refusal and, when a recheck
+// answered differently, that one — as closed status/code pairs only (the snapshot projects
+// them; nothing else is ever shown).
+function rejectionText(detail) {
+  const closed = (tuple) => Number.isInteger(tuple?.httpStatus) && tuple.httpStatus >= 100 && tuple.httpStatus <= 599
+    && typeof tuple.serverCode === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(tuple.serverCode);
+  const first = detail?.rejection;
+  if (!closed(first)) return "";
+  const recheck = detail?.recheckRejection;
+  const later = closed(recheck) ? ` · 재확인 ${recheck.httpStatus} ${recheck.serverCode}` : "";
+  return ` (서버 응답 ${first.httpStatus} ${first.serverCode}${later})`;
+}
+// #273: an error state names what stopped the run and, when its cleanup then failed too,
+// what still blocks it. Both are closed codes; a code without a message here is described in
+// words that name no code — a raw code is never shown. The sanitized server answers behind the
+// run failure (#274) are shown whenever the snapshot projects them, whatever the codes are.
+function errorSummary(snap) {
+  const main = errorText(snap.error, snap) ?? "현재 게임 상태를 확인해 주세요.";
+  if (snap.state !== "error") return main;
+  const cause = snap.errorDetail?.run ?? null;
+  const rejection = rejectionText(snap.errorDetail);
+  if (cause && cause !== snap.error) {
+    const causeText = errorMessages[cause]
+      ?? "게임이 먼저 다른 이유로 멈췄고 그 기록은 보존되어 있습니다. 불러오기로 이어서 확인해 주세요.";
+    return `${main} 처음 멈춘 이유: ${causeText}${rejection}`;
+  }
+  return `${main}${rejection}`;
 }
 let refreshFailures=0;
 // Counts refreshes as they start, so a settled pause is released only by a
@@ -480,6 +508,59 @@ const errorMessages = {
   RECOVERY_REQUIRED:
     "저장된 진행 정보를 자동으로 복구하지 못했습니다. 기록은 보존되어 있습니다.",
   SESSION_RECOVERABLE: "저장된 게임이 있습니다. 불러온 뒤 계속할 수 있습니다.",
+  CHILD_CLOSE_UNCONFIRMED:
+    "AI·코치 프로세스의 종료를 확인하지 못해 게임을 정리하지 못했습니다. 게임은 저장되어 있습니다. 불러오기를 누르면 정리를 다시 확인한 뒤 이어서 시작합니다.",
+  CHILD_SIGNAL_FAILED:
+    "AI·코치 프로세스에 종료 신호를 보내지 못해 게임을 정리하지 못했습니다. 불러오기로 정리를 다시 시도할 수 있습니다.",
+  CHILD_STOP_UNCONFIRMED:
+    "하위 프로세스의 종료를 확인하지 못해 게임을 정리하지 못했습니다. 불러오기로 정리를 다시 시도할 수 있습니다.",
+  SERVER_STOP_UNCONFIRMED:
+    "게임 서버의 종료를 확인하지 못해 게임을 정리하지 못했습니다. 불러오기로 정리를 다시 시도할 수 있습니다.",
+  JEV_REQUEST_CLOSE_UNCONFIRMED:
+    "JEV 요청의 종료를 확인하지 못해 게임을 정리하지 못했습니다. 불러오기로 정리를 다시 시도할 수 있습니다.",
+  LOOP_LOCK_LOST:
+    "이 실행이 게임 소유권을 잃어 정리 결과를 기록하지 못했습니다. 앱을 닫고 다시 열어 주세요.",
+  SESSION_STOPPED:
+    "게임이 재개되는 도중 멈췄습니다. 기록은 보존되어 있습니다. 같은 오류가 반복되면 게임을 종료하거나 새로 시작하세요.",
+  RESUME_NOT_APPLIED:
+    "불러오기가 게임 상태를 바꾸지 못했습니다. 기록은 보존되어 있습니다. 앱을 새로고침한 뒤 다시 시도하세요.",
+  PUBLISH_REJECTED:
+    "서버가 게임 기록 게시를 거부했습니다. 기록은 보존되어 있습니다.",
+  PENDING_ANNOTATION_BLOCKED:
+    "아직 게시되지 않은 학습 설명을 서버가 거부했고 안전하게 버릴 수 없어 멈췄습니다. 기록은 보존되어 있습니다.",
+  REJECTION_AUDIT_FAILED:
+    "서버가 거부한 학습 설명의 폐기 기록을 안전하게 남기지 못해 멈췄습니다. 게임 기록과 그 설명은 보존되어 있습니다. 게임 폴더의 폐기 감사 파일 자리가 다른 파일이나 폴더로 막혀 있지 않은지 확인한 뒤 불러오기를 누르면 정리를 다시 확인하고 이어서 시작합니다.",
+  ATTEMPT_SYNC_FAILED:
+    "게시 시도 기록을 안전하게 보존하지 못해 멈췄습니다. 기록은 보존되어 있습니다. 게임 폴더의 게시 시도 파일이 다른 파일과 연결되어 있지 않은지 확인한 뒤 불러오기로 이어 가세요.",
+  SERVER_LISTENER_UNAVAILABLE:
+    "게임 서버의 소유를 확인하지 못해 멈췄습니다. 기록은 보존되어 있습니다. 잠시 후 불러오기로 다시 확인할 수 있습니다.",
+  // #274 recovery outcomes a run can stop with: what happened, in words, and what to do next.
+  RELAY_BINDING_CHANGED:
+    "게시 중 게임 서버가 바뀐 것으로 확인되어 보내지 않고 멈췄습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 서버를 다시 확인하고 이어서 시작합니다.",
+  RELAY_BINDING_UNVERIFIED:
+    "게시 전에 게임 서버를 확인하지 못해 보내지 않고 멈췄습니다. 기록은 보존되어 있습니다. 잠시 후 불러오기로 다시 확인할 수 있습니다.",
+  ATTEMPT_CHANGED:
+    "다시 보내려던 게시 기록이 그사이 다른 기록으로 바뀌어 보내지 않았습니다. 아무것도 게시된 것으로 표시하지 않았고 두 기록 모두 보존되어 있습니다. 불러오기를 누르면 현재 기록부터 다시 확인합니다.",
+  RETRY_BINDING_REQUIRED:
+    "실패한 게시가 어느 기록을 보냈는지 확인되지 않아 자동으로 다시 보내지 않았습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 기록을 다시 확인하고 이어서 시작합니다.",
+  RETIRE_RESULT_UNBOUND:
+    "다시 보낸 결과가 보내려던 게시와 일치하지 않아 아무것도 게시된 것으로 표시하지 않았습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 다시 확인합니다.",
+  ATTEMPT_NOT_RETIRABLE:
+    "서버가 거부한 게시가 학습 설명만 담은 것이 아니어서 자동으로 정리하지 않았습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 다시 확인합니다.",
+  ANNOTATION_RETIRED:
+    "이미 정리된 학습 설명을 게시된 것으로 표시하려 해 멈췄습니다. 설명과 기록은 보존되어 있습니다. 불러오기를 누르면 다시 확인합니다.",
+  REJECTION_EVIDENCE_PENDING:
+    "거부된 학습 설명의 정리가 아직 끝나지 않아 새 게시를 보류했습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 정리를 먼저 끝내고 이어서 시작합니다.",
+  REJECTION_EVIDENCE_UNAVAILABLE:
+    "거부된 학습 설명의 정리 기록을 읽거나 보존하지 못해 멈췄습니다. 게임 기록과 설명은 보존되어 있습니다. 게임 폴더를 읽고 쓸 수 있는지 확인한 뒤 불러오기를 누르면 정리를 다시 확인합니다.",
+  REJECTION_EVIDENCE_INVALID:
+    "거부된 학습 설명의 정리 기록이 올바르지 않아 적용하지 않고 멈췄습니다. 게임 기록과 설명은 보존되어 있습니다. 불러오기를 누르면 다시 확인합니다.",
+  REJECTION_EVIDENCE_MISSING:
+    "거부된 학습 설명의 정리 기록이 없어 적용하지 않고 멈췄습니다. 게임 기록과 설명은 보존되어 있습니다. 불러오기를 누르면 다시 확인합니다.",
+  STALE_ANNOTATION_AUTHORITY:
+    "학습 설명 목록이 그사이 바뀌어 준비한 게시를 보내지 않았습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 현재 목록으로 다시 준비합니다.",
+  FINALIZATION_DEADLINE_EXCEEDED:
+    "마무리 제한 시간을 넘겨 게시를 멈췄습니다. 기록은 보존되어 있습니다. 불러오기를 누르면 이어서 처리합니다.",
   ROOM_UNBOUND: "온라인 세션이 이 게임에 결합되어 있지 않습니다. 게임을 종료하거나 같은 설정으로 새로 시작하세요.",
   ROOM_FULL: "참가 인원이 가득 찼습니다.",
   JOIN_LOCKED: "이 주소는 잠시 참가가 잠겼습니다. 나중에 다시 시도하세요.",
