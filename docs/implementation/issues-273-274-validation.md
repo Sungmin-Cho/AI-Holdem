@@ -5,7 +5,20 @@ Design: [recovery plan](issues-273-274-recovery-plan.md).
 
 ## Verification
 
-Current R17 revision 2: **487/487 host cases passed** — 124 core cases in
+Latest supplemental R18 changes **only two test fixtures**. The product files
+remain byte-identical to the R17 version reviewed by Sol/Astra. Four generated
+isolated-probe imports now use native file URLs on Windows. The lost-lock
+fixture retains the renamed original directory before creating its replacement,
+then checks distinct dev/ino and unchanged owner bytes, avoiding the assumption
+that deleting and recreating a directory guarantees a different inode.
+The complete core rerun passed **124/124** and the separate audit file passed.
+The unchanged 363 compatibility results remain applicable. A fresh author-excluded
+Astra HIGH MEDIUM review passed, officially verified with confirmed termination;
+it requires the actual native Windows and Ubuntu cases in CI before merge.
+The original full suite below ran on parent commit `2f96547`; it is not relabeled
+as execution of the new fixture revision. Exact-head native CI remains required.
+
+R17 production candidate (unchanged by supplemental R18): **487/487 host cases passed** — 124 core cases in
 a complete rerun and 363 compatibility cases on identical production and
 related-test hashes. The new exact-settlement regression also passed separately:
 genuine evidence for B does not acknowledge A; late NO_ATTEMPT without proof
@@ -584,3 +597,33 @@ run, including unrelated evidence, late NO_ATTEMPT without proof and late
 NO_ATTEMPT with completed exact proof followed by one innocent publication.
 The complete 124-case core rerun passed. Both fresh protected round-17 reviews
 subsequently passed; final acceptance results appear at the top of this document.
+
+## First PR CI and supplemental fixture portability (R18)
+
+PR #275's first CI run `38161783028` on `2f96547` completed with failures.
+Both Ubuntu versions failed the same three new lost-lock fixture assertions:
+the fixture removed then recreated a directory while claiming a new physical
+identity; old/new inode values were not logged. R18 holds the original inode
+live by rename, verifies a physically distinct replacement, and preserves the
+same owner bytes and all failure/retention assertions. The two Windows rest
+jobs failed the isolated prototype-forgery probe before its assertions because
+native drive paths are not ESM URLs. R18 converts all four probe import literals
+without changing module targets, cases, skips, timeouts or production guards.
+
+Windows 20 additionally reported EPERM opening a coach reservation in the
+unchanged upper-background-resolve case; Windows 22 did not report that failure.
+The first UI learning journey timed out waiting for a fold button after a normal
+all-AI-fold walk had already completed the one-hand game (CI trace and screenshot).
+The current full learning journey passed on owned local fixtures. The unchanged
+baseline source matches 485 JS/MJS files; bounded random and controlled-position
+probes did not reproduce that walk, so no baseline reproduction is claimed.
+The native CI rerun on the fixture-corrected commit must settle these outcomes.
+Original failures and probe results are preserved rather than labeled passes.
+
+This supplemental execution is mechanical test construction, with unchanged
+product risk/review acceptance. Missing repository ESLint triggered a separate
+model review; the expanded filesystem fixture received MEDIUM/HIGH review in a
+protected fresh read-only Astra process. R18 Haiku LOW completed with verified
+served model, output hash and termination. The user delegated necessary further
+work; the typed ceiling history/manual exception and rescore remain separate.
+The local batch caps are 18 implementations, 18 reviews and one judge.

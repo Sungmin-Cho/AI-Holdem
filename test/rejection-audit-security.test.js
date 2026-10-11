@@ -10,7 +10,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startServer } from '../server/server.js';
 import { serverProcessStartTime } from '../engine/state.js';
 import {
@@ -1838,8 +1838,8 @@ test('POSIX: a FIFO without a writer at the attempt\'s name never blocks: reconc
   const probe = path.join(probeDir, 'probe.mjs');
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   fs.writeFileSync(probe, [
-    `import { createTrainingControl } from ${JSON.stringify(path.join(repoRoot, 'tools/training-control.js'))};`,
-    `import * as pipeline from ${JSON.stringify(path.join(repoRoot, 'tools/training-pipeline.js'))};`,
+    `import { createTrainingControl } from ${JSON.stringify(pathToFileURL(path.join(repoRoot, 'tools/training-control.js')).href)};`,
+    `import * as pipeline from ${JSON.stringify(pathToFileURL(path.join(repoRoot, 'tools/training-pipeline.js')).href)};`,
     'const dir = process.argv[2];',
     'const out = {};',
     "try { await createTrainingControl().reconcileRetiredAnnotations(dir); out.reconcile = 'ok'; } catch (error) { out.reconcile = error.code; }",
@@ -1885,7 +1885,7 @@ test('forged evidence naming __proto__ / constructor without an own registered e
   const probeDir = tmpQ3('holdem-274-proto-probe-');
   const probe = path.join(probeDir, 'probe.mjs');
   fs.writeFileSync(probe, [
-    `import { createTrainingControl } from ${JSON.stringify(path.join(repoRoot, 'tools/training-control.js'))};`,
+    `import { createTrainingControl } from ${JSON.stringify(pathToFileURL(path.join(repoRoot, 'tools/training-control.js')).href)};`,
     'const dir = process.argv[2];',
     'const out = {};',
     "try { out.result = JSON.stringify(await createTrainingControl().reconcileRetiredAnnotations(dir)); } catch (error) { out.code = error.code; out.message = String(error.message ?? ''); }",
@@ -2027,7 +2027,7 @@ test('POSIX: a FIFO without a writer at a canonical annotation path never blocks
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const probe = path.join(tmpQ3('holdem-274-canonical-fifo-probe-'), 'probe.mjs');
   fs.writeFileSync(probe, [
-    `import { createTrainingControl } from ${JSON.stringify(path.join(repoRoot, 'tools/training-control.js'))};`,
+    `import { createTrainingControl } from ${JSON.stringify(pathToFileURL(path.join(repoRoot, 'tools/training-control.js')).href)};`,
     'const out = {};',
     "try { out.result = JSON.stringify(await createTrainingControl().reconcileRetiredAnnotations(process.argv[2])); } catch (error) { out.code = error.code; }",
     "process.stdout.write(JSON.stringify(out) + '\\n');",

@@ -516,9 +516,17 @@ const loseLoopLock = (dir) => {
   const lockDir = path.join(dir, 'loop.lock.d');
   const pidFile = path.join(lockDir, 'pid');
   const owner = fs.existsSync(pidFile) ? fs.readFileSync(pidFile) : null;
-  fs.rmSync(lockDir, { recursive: true, force: true });
+  // The original directory is renamed aside, not removed: removing it first lets Linux hand the
+  // same inode back to mkdir, which would leave the replacement indistinguishable from the original.
+  const retired = path.join(dir, `loop.lock.d.lost-${randomUUID()}`);
+  const before = fs.existsSync(lockDir) ? fs.statSync(lockDir) : null;
+  if (before) fs.renameSync(lockDir, retired);
   fs.mkdirSync(lockDir);
   if (owner) fs.writeFileSync(pidFile, owner, { mode: 0o600 });
+  if (!before) return;
+  const after = fs.statSync(lockDir);
+  assert.notDeepEqual([after.dev, after.ino], [before.dev, before.ino], 'the lock directory is a new physical directory');
+  if (owner) assert.deepEqual(fs.readFileSync(path.join(retired, 'pid')), owner, 'the retired owner record is unchanged');
 };
 
 test('a stop refused as LOOP_LOCK_LOST keeps the run failure on the loop, and repeated failed resumes of a retained session and of a retained launching loop keep reporting the first cause', { timeout: TIMEOUT * 2 }, async (t) => {

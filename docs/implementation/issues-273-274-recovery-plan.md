@@ -190,7 +190,7 @@ further reviews at the orchestrator's judgment. This overrides the previous
 model-ceiling stopping gate and authorizes a manual Fable MAX continuation.
 The historical terminal route and failed reviews remain preserved; this is a
 human-authorized exception, not an automatic capability escalation. The latest local
-batch budget is 17 implementations and 18 review rounds (judge limit 1),
+batch budget is 18 implementations and 18 review rounds (judge limit 1),
 expanded under that explicit judgment delegation after further verified findings.
 Mandatory receipt guards, ownership/proof checks and fresh CRITICAL independent
 reviews remain required. Further concrete correctness work is authorized within
@@ -252,3 +252,13 @@ body can settle independently without resolving this caller's refused request.
 Missing proof preserves an explicit failure, authority and the original refusal.
 Real POSIX directory-fsync tests run only where supported; separate portable and
 Windows file-sync/no-directory-handle contracts remain executable on Windows.
+
+## Supplemental native-platform fixture correction
+
+R18 preserves all production bytes and changes only fixture construction:
+serialize generated ESM imports as file URLs; retain the original lock directory
+before making the replacement, proving distinct directory identity without
+assuming deletion prevents inode reuse. Preserve every security and lost-lock
+assertion. Validate core tests and native Windows/Ubuntu CI; use a separate
+MEDIUM/HIGH author-excluded review for this supplemental patch because ESLint is
+unavailable. The prior CRITICAL product reviews remain valid for unchanged code.
