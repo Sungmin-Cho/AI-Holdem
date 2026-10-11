@@ -5,7 +5,29 @@ Design: [recovery plan](issues-273-274-recovery-plan.md).
 
 ## Verification
 
-Latest supplemental R18 changes **only two test fixtures**. The product files
+Latest supplemental R21 completes R20 in **one pending-drain test fixture only**. A
+native Windows 22 run on `d48b354` passed the A/B drain and fresh-current
+ordering checks but failed the final cross-time relay/loop checkpoint comparison
+(`6 != 5`). That run did not log which operation produced publication 6; a
+specific later-publish kind is not claimed as an observed cause.
+
+The first R19 halt-only correction failed the actual host case: its heads-up
+AI fold completed the hand, and halting before the next publication left no
+user decision for the HTTP assertion. An additional diagnostic copy timed out
+and is not a positive reproduction. Both failed outcomes remain recorded.
+R20 uses a legal nonterminal AI call so the next human BB decision is already
+in the current-action publication. The existing synchronous pre-spawn hook
+halts the next publisher; the test explicitly awaits TEST_HALT before reading
+the live relay. Exact publication/revision equalities and A/B/fresh-current
+order remain, with a stronger exact applied-action list (`p1` call once) and
+one model decision. No product file, timeout, skip or CI budget changed.
+The focused case and **all 15 cases in its complete test file passed**.
+Fresh author-excluded HIGH Sol/Astra reviews of the final test-only delta
+both passed with no findings or missing tests. Their protected receipts passed
+the official verifier with confirmed termination, model/fingerprint/output
+linkage. The next exact-head native CI remains a merge gate.
+
+Prior supplemental R18 changes **only two test fixtures**. The product files
 remain byte-identical to the R17 version reviewed by Sol/Astra. Four generated
 isolated-probe imports now use native file URLs on Windows. The lost-lock
 fixture retains the renamed original directory before creating its replacement,
@@ -627,3 +649,53 @@ protected fresh read-only Astra process. R18 Haiku LOW completed with verified
 served model, output hash and termination. The user delegated necessary further
 work; the typed ceiling history/manual exception and rescore remain separate.
 The local batch caps are 18 implementations, 18 reviews and one judge.
+
+## R19/R20 test observation boundary
+
+The user delegated necessary additional fixes and reviews through merge/wiki.
+The earlier Fable MAX capability terminal remains preserved; the isolated
+fixture scope was rescored separately. Guarded R19 Haiku MEDIUM completed with
+confirmed termination but failed the host acceptance case. Its typed failure
+routed to stronger R20 Opus MEDIUM, with protected served-model/output/source
+checks and confirmed termination. The construction route's reduced review gate
+is compensated by separate author-excluded HIGH dual review. Original product
+CRITICAL dual acceptance remains applicable because all 11 runtime files are
+unchanged. Batch bounds are now 20 implementations, 20 review rounds and one
+judge; no adjudicator invocation is claimed.
+
+R20 host execution: focused real pending-drain case PASS; the complete affected
+loop-publication file has 15 passes, zero failures/skips/cancellations and normal
+exit 0. Owned temporary fixture cleanup completed. The old R18 CI failure and
+R19 failed diagnostic/test outcomes are retained, not counted as passes.
+
+## Supplemental review 19 and final R21 acceptance
+
+Protected HIGH review 19 returned Astra PASS and Sol PASS_WITH_CHANGES with one
+blocking test-adequacy finding: stopping any next publisher could hide an extra
+fresh CURRENT after the accepted metric. The finding is accepted and fixed;
+no reviewer is declared incorrect and no judge invocation is claimed.
+R21 asserts the complete next invocation is exactly the unmanaged user's
+`--from` turn / `--wait-only` / `--wait-ms 0` array before assigning TEST_HALT.
+Unexpected CURRENT/retry/view or other arguments now fail the test. No optional
+flag relaxation is needed before finalization. The final complete file passed
+15/15 with zero failures/skips/cancellations and normal exit 0.
+
+The Claude-only retry plan returned INDEPENDENCE_UNAVAILABLE and was not
+executed. The cross-family route retains both typed Haiku/Opus failures and
+selects stronger Fable MEDIUM plus author-excluded review. Its guarded writer
+completed with verified served-model/output/source evidence and termination.
+Fresh protected HIGH review 20 Sol/Astra both passed with no findings or missing
+tests; the official verifier exited 0 with confirmed termination. Both saw the
+same single-file delta `623a4b9a9134dda63ea2eee3cb7f71afa2787fb99ee06497535a0cad53b28fdd`.
+All 11 product files are byte-identical to the original CRITICAL dual-PASS R17
+version. Batch bounds are 21 implementations, 20 review rounds and one judge.
+
+Second native CI run `38165255733` completed on `d48b354`: 19 checks succeeded;
+Windows 22 rest and its Windows aggregate failed only the pending-drain fixture
+comparison above. Ubuntu Node 20/22 each completed 3,582 full-suite cases:
+3,573 passed, 9 skipped, zero failures/cancellations. Windows 20 rest completed
+2,342 cases: 2,226 passed, 116 skipped, zero failures/cancellations. The browser
+journey passed. The earlier Windows 20 coach-reservation EPERM did not recur.
+The R18 Windows ESM and Linux lock-identity fixture corrections passed in these
+native executions. These are earlier-head results; a new exact-head CI run is
+required for the final test-fixture commit before merge.

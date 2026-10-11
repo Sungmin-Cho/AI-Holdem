@@ -698,6 +698,9 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
   let A = null;
   let B = null;
   let checkpoints = 0;
+  let drained = false;
+  let currentAt = -1;
+  let haltAt = -1;
   const invocations = [];
   const adapter = makeAdapter({
     onDecide: async (input) => {
@@ -709,8 +712,10 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
         A = failed.attempt;
         assert.match(A?.bodySha256 ?? '', /^[0-9a-f]{64}$/);
       }
+      // Heads-up preflop the AI is BTN/SB (25 of 50 posted, 75 behind): its call leaves the hand
+      // open with the user's BB option next, so the current turn itself is the user's decision.
       const decisionId = /decisionId:\s*([^\s]+)/.exec(input.message)?.[1];
-      return { raw: JSON.stringify({ decisionId, action: 'fold' }) };
+      return { raw: JSON.stringify({ decisionId, action: 'call' }) };
     },
   });
   const loop = newLoop(t, gameDir, adapter, {
@@ -723,6 +728,24 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
     },
     onPublishInvoke: (args) => {
       invocations.push([...args]);
+      // The publish after the current turn's own publication is refused before it spawns: the
+      // unmanaged loop's --wait-only for the user's decision, which would otherwise move the
+      // relay past the action checkpoint while this test reads them. Publishes are serialized
+      // and awaited, so the current turn has completed by the time the seam is reached again.
+      if (currentAt >= 0 && haltAt < 0) {
+        // R21: the halted publish must be exactly the unmanaged loop's wait-only publication for
+        // the user's decision — the base args of waitOnlyForUser with the test's waitMs of 0. No
+        // deadline flag belongs here: publishDeadlineNs is only set inside finalization, and this
+        // hand is mid-play. A fresh/retry/view publish of the current turn after the accepted
+        // metric is a different publication and must fail this assertion, not become the halt.
+        assert.deepEqual(
+          args,
+          ['--from', turnPath, '--wait-only', '--wait-ms', '0'],
+          'the publish right after the current turn is the user wait-only publication, and nothing else',
+        );
+        haltAt = invocations.length - 1;
+        throw Object.assign(new Error('halt before the publish after the current turn'), { code: 'TEST_HALT' });
+      }
       // Between the loop's look and its queued retry taking the publish lock: another publisher
       // records B (the same pre-action body, a new id) — an actual transport failure, kept.
       if (A && !B && checkpoints === 1 && args.includes('--retry')) {
@@ -731,6 +754,13 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
         B = failed.attempt;
         assert.equal(fs.existsSync(attemptFile(gameDir)), true, 'B is the recorded pending attempt');
       }
+      // The drain is the first retry after B. The current turn is the first fresh publish of the
+      // turn after that drain: not a retry, not a view, not a wait.
+      if (B && args.includes('--retry')) drained = true;
+      else if (drained && currentAt < 0 && args[args.indexOf('--from') + 1] === turnPath
+        && !args.includes('--retry') && !args.includes('--view-only') && !args.includes('--wait-only')) {
+        currentAt = invocations.length - 1;
+      }
     },
   });
   await loop.bootstrap({ ai: 1, stack: 100 });
@@ -738,8 +768,14 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
   deadPort = await closedPort();
 
   const running = startRun(loop);
+  // The run ends at the dedicated halt, not at a stop request. The relay it leaves behind stays
+  // up until the stop below, so the user snapshot is read from the live relay.
+  const failure = await running.then(() => null, (error) => error);
+  assert.equal(failure?.code, 'TEST_HALT', 'the run ends at the halt before the publish after the current turn');
+  assert.ok(currentAt >= 0, 'the current turn was published fresh after the drain');
+  assert.equal(haltAt, currentAt + 1, 'the halted publish is the one right after the current turn');
   const { snapshot } = await waitForUserSnapshot(gameDir, 27_000);
-  await stopRun(loop, running).catch(() => {});
+  await loop.requestStop();
 
   assert.ok(A && B, 'A was recorded and B replaced it');
   assert.equal(checkpoints, 1, 'the pending drain happened once');
@@ -759,7 +795,13 @@ test('pending drain race: A is settled before the loop looks and B is recorded b
   assert.equal(persisted.publishId, loopState.lastPublishId, 'the relay holds the current turn as the latest applied publication');
   assert.equal(persisted.revision, snapshot.revision, 'the served state is the persisted one');
   assert.equal(persisted.view?.legal?.toAct, 'user');
-  assert.equal(foldsOf(gameDir), 1, 'the engine step happened once');
+  assert.equal(adapter.decideCalls.length, 1, 'the AI decided once');
+  const engineState = readJson(path.join(gameDir, 'state.json'));
+  assert.deepEqual(
+    [...(engineState.hand?.actions ?? []), ...(engineState.lastHand?.actions ?? [])].map((a) => [a.playerId, a.action]),
+    [['p1', 'call']],
+    'the engine step happened once: the AI\'s call is the only applied action',
+  );
   const metric = metricOf(gameDir, 'p1');
   assert.equal(metric?.outcome, 'accepted');
   assert.equal(Object.hasOwn(metric, 'publishError'), false, 'the applied action\'s metric is truthful: its publication succeeded');

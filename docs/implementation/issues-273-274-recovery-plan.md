@@ -262,3 +262,22 @@ assuming deletion prevents inode reuse. Preserve every security and lost-lock
 assertion. Validate core tests and native Windows/Ubuntu CI; use a separate
 MEDIUM/HIGH author-excluded review for this supplemental patch because ESLint is
 unavailable. The prior CRITICAL product reviews remain valid for unchanged code.
+
+## Supplemental pending-drain fixture observation
+
+A later Windows CI run exposed a cross-time comparison in the new actual-loop
+fixture. Preserve all product bytes and recovery contracts. Use a legal
+nonterminal heads-up call, assert its exact single engine action, and observe
+fresh CURRENT after B drain before any next publisher starts via the existing
+pre-spawn hook. Await the dedicated test halt, then compare actual live HTTP,
+relay persistence and loop checkpoint exactly. Retain failed first correction;
+run the complete affected file, separate HIGH author-excluded dual review and
+exact-head native CI before merge. Latest user judgment delegation authorizes
+these bounded steps through actual merge and wiki ingestion.
+
+The final observation additionally asserts the complete user wait-only invocation
+before the dedicated halt, so unexpected extra fresh action publishers fail.
+R21 complete affected file: 15/15 PASS. Fresh HIGH Sol/Astra supplemental reviews
+both PASS with officially verified protected receipts and confirmed termination.
+Original 11 product files remain identical to CRITICAL dual-PASS R17. Exact-head
+native CI remains required before PR merge; user judgment delegation persists.
