@@ -809,6 +809,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   const replacedModels = { player: null, upper: null };
   let catalogStatus = latestRules ? 'pending' : 'not-applicable';
   let catalogPromise = null;
+  // 카탈로그 자식의 종료를 확인하지 못하면(CHILD_*) 그 어댑터는 더 부르지 않는다 — 살아 있을 수 있는
+  // 자식과 다음 호출이 겹치게 두지 않는다. 남은 자식은 dispose가 다시 확인한다.
+  let catalogUnsettled = null;
 
   // 레포·game/ 밖의 빈 디렉터리 하나를 런타임당 한 번 만든다. 레포 안이면 CLI가
   // 지침 파일·게임 상태를 컨텍스트로 빨아들일 수 있으므로 여기서 거부한다.
@@ -1114,16 +1117,22 @@ export function createPlayerRuntime(kind, opts = {}) {
   async function readCatalog(timeoutMs) {
     let result;
     let catalogHome = null;
+    let keepHome = false;
     try {
       if (kind === 'grok') {
         catalogHome = fs.mkdtempSync(path.join(fs.realpathSync(cwdRoot), 'ai-holdem-grok-catalog-'));
       }
       result = await runOnce({ purpose: 'catalog', model: null, input: '', timeoutMs, catalogHome });
     } catch (error) {
-      catalogStatus = `error:${error.code ?? 'ERROR'}`;
+      const code = typeof error.code === 'string' ? error.code : 'ERROR';
+      catalogStatus = `error:${code}`;
+      if (code.startsWith('CHILD_')) {
+        catalogUnsettled = code;
+        keepHome = true; // 아직 살아 있을 수 있는 자식의 HOME을 지우지 않는다
+      }
       return;
     } finally {
-      if (catalogHome) {
+      if (catalogHome && !keepHome) {
         try { fs.rmSync(catalogHome, { recursive: true, force: true }); } catch { /* tmp 정리 실패는 해석과 무관하다 */ }
       }
     }
@@ -1142,13 +1151,14 @@ export function createPlayerRuntime(kind, opts = {}) {
     catalogStatus = found.length === 2 ? 'ok' : (found.length === 0 ? 'error:NO_MATCH' : `partial:${found.join(',')}`);
   }
 
-  // 카탈로그로 고른 id의 왕복이 실패하면 그 tier만 폴백 고정값으로 바꾼다. 같은 id를 쓰는 다른
-  // tier도 함께 바꿔 같은 실패를 한 번 더 겪지 않게 한다.
+  // 카탈로그로 고른 id의 왕복이 실패하면 그 tier를 폴백 고정값으로 바꾼다. 같은 id를 쓰는 다른 tier는
+  // 아직 검증되지 않았을 때만 함께 바꾼다 — 이미 probe를 통과한 tier의 모델을 검증 없이 바꾸지 않는다.
   function useFallbackModel(tier) {
     const fallback = table[tier];
     if (modelSource[tier] !== 'catalog' || models[tier] === fallback) return false;
     const failed = models[tier];
     for (const each of ['player', 'upper']) {
+      if (each !== tier && verification[each] === true) continue;
       if (modelSource[each] === 'catalog' && models[each] === failed) {
         replacedModels[each] = failed;
         models[each] = table[each];
@@ -1156,6 +1166,33 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
     }
     return true;
+  }
+
+  function catalogUnsettledResult(tier, started) {
+    verification[tier] = false;
+    const label = tier === 'upper' ? '상위 모델' : '플레이어';
+    return {
+      ok: false, containment: false, upper: tier === 'upper' ? false : null, elapsedMs: Date.now() - started,
+      notice: `${label} probe 실패(${kind}/${models[tier]}): ${catalogUnsettled}`,
+    };
+  }
+
+  // grok이 모르는 모델 id는 턴을 시작하기 전에 exit 1로 끝나고, 세션 디렉터리에 빈 events.jsonl만
+  // 남긴다(1.0.46 실측). 기록이 이렇게 비어 있을 때만 "모델이 응답하지 못함"으로 본다 — 무엇이든 기록됐다면
+  // 감사 결과(컨테인먼트)가 우선이다.
+  function grokTurnAbsent(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return false;
+    const dir = grokSessionDir(grokHome, ensureCwd(), sessionId);
+    const empty = (name) => {
+      const file = path.join(dir, name);
+      try {
+        const stat = fs.lstatSync(file);
+        return stat.isFile() && stat.size === 0;
+      } catch (error) {
+        return error.code === 'ENOENT';
+      }
+    };
+    return empty('events.jsonl') && empty('updates.jsonl') && empty('tool_definitions.json');
   }
 
   function grokSessionFail(kindName, model, audit, { ok = true, upper = false, started, extra = {} } = {}) {
@@ -1183,6 +1220,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     const canary = freshUpperCanary(canaryAbsPath);
     try {
       await ensureModels(timeoutMs);
+      if (catalogUnsettled) return catalogUnsettledResult('upper', started);
       const model = models.upper;
       let round;
       try {
@@ -1206,6 +1244,14 @@ export function createPlayerRuntime(kind, opts = {}) {
         if (stream.model) servedModels.upper = stream.model;
       } else if (round.code !== 0 || !parseResponse(round.format, round.stdout)) {
         verification.upper = false;
+        if (kind === 'grok') {
+          // 응답 실패라도 세션 기록을 먼저 감사한다. 턴이 아예 없었을 때만 모델 귀속 실패다.
+          const spawnedId = flagFromArgs(round, '--session-id');
+          const audit = auditGrokSession(spawnedId, 1);
+          if (!audit.ok && !(audit.code === 'GROK_SESSION_RECORD_MISSING' && round.code !== 0 && grokTurnAbsent(spawnedId))) {
+            return grokSessionFail(kind, model, audit, { ok: false, upper: false, started });
+          }
+        }
         return {
           ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
           notice: `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음`,
@@ -1259,6 +1305,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       return {
         ok: true, containment, upper: containment, elapsedMs: Date.now() - started,
         ...(notice ? { notice } : {}),
+        ...(!answered && !leaked ? { modelFailure: true } : {}),
       };
     } finally {
       canary.cleanup();
@@ -1287,6 +1334,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
     }
     await ensureModels(timeoutMs);
+    if (catalogUnsettled) return catalogUnsettledResult('player', started);
     const model = models.player;
     let result;
     try {
@@ -1309,6 +1357,13 @@ export function createPlayerRuntime(kind, opts = {}) {
       const sessionAudit = auditGrokSession(spawnedId, 1);
       if (!sessionAudit.ok) {
         verification.player = false;
+        // 턴이 시작되지도 않은 실패(모르는 모델 id 등)만 모델 귀속 실패다. 기록이 있으면 감사가 우선이다.
+        if (!ok && !leaked && sessionAudit.code === 'GROK_SESSION_RECORD_MISSING' && result.code !== 0 && grokTurnAbsent(spawnedId)) {
+          return {
+            ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
+            notice: `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`, modelFailure: true,
+          };
+        }
         return grokSessionFail(kind, model, sessionAudit, { ok, upper: null, started });
       }
       if (!ok) {

@@ -8991,3 +8991,20 @@ test('soft-wait readLoopState failure is contained and the awaited decision stil
  assert.equal(reported,true);
  assert.equal(readJson(path.join(gameDir,'loop-state.json')).metrics.length,1);
 });
+
+test('runtime-models·player-call 로그는 어댑터가 실제로 쓴 모델과 출처를 남긴다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const adapter = makeAdapter({ kind: 'codex' });
+  adapter.models = {
+    player: 'gpt-7-luna', upper: 'gpt-7-sol', source: { player: 'catalog', upper: 'fallback' },
+    replaced: { player: null, upper: 'gpt-7.1-sol' }, catalog: 'ok',
+  };
+  const { gameDir, loop } = await setupAiFirst(t, { adapter });
+  await runUntilUserBoundary(loop, gameDir);
+  const log = readLoopLog(gameDir);
+  const resolved = log.find((entry) => entry.event === 'runtime-models');
+  assert.deepEqual(resolved.player, { runtime: 'codex', model: 'gpt-7-luna', source: 'catalog', replaced: null, catalog: 'ok' });
+  assert.deepEqual(resolved.upper, { runtime: 'codex', model: 'gpt-7-sol', source: 'fallback', replaced: 'gpt-7.1-sol', catalog: 'ok' });
+  const calls = log.filter((entry) => entry.event === 'player-call');
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((entry) => entry.model === 'gpt-7-luna'));
+});

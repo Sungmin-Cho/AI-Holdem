@@ -72,9 +72,9 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 |---|---|---|---|---|
 | `claude` | `sonnet --effort medium` | `opus` | 별칭을 CLI가 매번 최신으로 해석(카탈로그 호출 없음) | 25s / 300s |
 | `codex` | luna 계열 최신 | sol 계열 최신 | `codex debug models`의 `visibility: list`인 `gpt-<버전>-luna`·`gpt-<버전>-sol` 중 최신 · `gpt-6-luna`/`gpt-6.1-sol` | 25s / 300s |
-| `grok` | 기본 계열 최신 | 기본 계열 최신 | 격리 홈에서 `grok --no-auto-update models` 목록의 `grok-<버전>` 중 최신(`-build-fast` 같은 변형 제외) · `grok-4.7` | 25s / 300s |
+| `grok` | 기본 계열 최신 | 기본 계열 최신 | 격리 홈 `inspect` 통과 뒤, 호출마다 만들고 지우는 일회용 HOME(자격은 `GROK_AUTH_PATH`)에서 `grok --no-auto-update models` 목록의 `grok-<버전>` 중 최신(`-build-fast` 같은 변형 제외) · `grok-4.7` | 25s / 300s |
 
-모델은 기동(새 게임·재개·종료 단계의 상위 모델 재해석)마다 첫 probe 직전에 런타임당 한 번 해석한다. 카탈로그 명령이 실패하거나 형식(`gpt-<숫자>[.<숫자>]-luna|sol`, `grok-<숫자>[.<숫자>]`)에 맞는 id가 없으면 폴백 고정값을 쓰고, 카탈로그로 고른 모델이 probe에서 정상 응답을 주지 못하면 그 런타임 안에서 폴백 고정값으로 한 번 더 probe한다. 카나리 유출·도구 표면 같은 컨테인먼트 실패는 모델을 바꿔 재시도하지 않는다. 실제로 쓴 모델은 게임 로그의 `runtime-models`·`upper-resolved` 이벤트(`model`·`source: catalog|fallback|alias`·`catalog` 상태)와 `player-call`·`player-attempt`의 `model`에 남는다. claude는 probe 스트림 `init.model`로 확인한 서빙 id(예: `claude-sonnet-5-5`)를 기록한다. 카탈로그는 계정 범위라, 인증이 깨진 grok은 번들 목록(더 오래된 모델)을 내놓을 수 있다.
+모델은 기동(새 게임·재개·종료 단계의 상위 모델 재해석)마다 첫 probe 직전에 런타임당 한 번 해석한다. 카탈로그 명령이 실패하거나 형식(`gpt-<숫자>[.<숫자>]-luna|sol`, `grok-<숫자>[.<숫자>]`)에 맞는 id가 없으면 폴백 고정값을 쓰고, 카탈로그로 고른 모델이 probe에서 정상 응답을 주지 못하면 그 런타임 안에서 폴백 고정값으로 한 번 더 probe한다. 카나리 유출·도구 표면 같은 컨테인먼트 실패는 모델을 바꿔 재시도하지 않는다. 실제로 쓴 모델은 게임 로그의 `runtime-models`·`upper-resolved` 이벤트(`model`·`source: catalog|fallback|alias`·`catalog` 상태)와 `player-call`·`player-attempt`의 `model`에 남는다. claude는 probe 스트림 `init.model`로 확인한 서빙 id(예: `claude-sonnet-5-5`)를 기록한다. 카탈로그는 계정 범위라, 인증이 깨진 grok은 번들 목록(더 오래된 모델)을 내놓을 수 있다. `grok models`를 스토어 격리 홈에서 직접 실행하지 말 것 — 처음 보는 홈의 `config.toml`에 마켓플레이스 소스를 써 넣어 격리 홈 검증이 깨진다(grok 1.0.46 실측). 카탈로그 자식의 종료를 확인하지 못하면 그 런타임은 그 기동에서 부적격으로 처리한다.
 
 플레이어 예산은 `--player-soft-ms`·`--player-hard-ms` 또는 로비 setup의 `playerSoftMs`·`playerHardMs`로 설정한다. soft는 대기 안내 기준이며, hard가 결정 세대의 전체 호출 예산이다. `RUNTIME_TABLE.watchdog`의 `t1Ms`·`t2Ms`는 테스트 주입 호환 값이며 실제 기본 예산 표가 아니다.
 

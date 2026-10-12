@@ -2826,3 +2826,141 @@ test('재개 시 재해석: 어댑터마다 카탈로그를 새로 읽으므로 
     after.cleanup();
   }
 });
+
+test('카탈로그 자식의 종료를 확인하지 못하면 그 어댑터는 모델 호출 없이 부적격이다', async () => {
+  const { file } = canary();
+  const spawned = [];
+  const rt = createPlayerRuntime('codex', {
+    terminateKillWaitMs: 20,
+    exec: (spec) => {
+      spawned.push(spec.args);
+      // 카탈로그 자식: 응답도 close도 없고 kill도 전달되지 않는다.
+      return { pid: 4242, kill: () => false, done: new Promise(() => {}) };
+    },
+  });
+  const res = await rt.probe({ canaryAbsPath: file, timeoutMs: 50 });
+  assert.equal(res.ok, false);
+  assert.equal(res.containment, false);
+  assert.match(res.notice, /^플레이어 probe 실패\(codex\/gpt-6-luna\): CHILD_SIGNAL_FAILED$/);
+  assert.deepEqual(spawned, [['debug', 'models']], '모델 호출로 넘어가지 않는다');
+  const upper = await rt.probe({ upper: true, canaryAbsPath: file, timeoutMs: 50 });
+  assert.equal(upper.upper, false);
+  assert.match(upper.notice, /CHILD_SIGNAL_FAILED/);
+  assert.equal(spawned.length, 1, '카탈로그도 다시 부르지 않는다');
+  assert.equal(rt.models.catalog, 'error:CHILD_SIGNAL_FAILED');
+});
+
+test('카탈로그 타임아웃이라도 종료가 확인되면 폴백 고정값으로 진행한다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('codex', {
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']), delayMs: 5_000 }],
+    default: { reply: CODEX_REPLY_OK },
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file, timeoutMs: 300 });
+    assert.equal(res.containment, true);
+    assert.equal(f.rt.models.catalog, 'error:TIMEOUT');
+    assert.equal(f.rt.models.player, 'gpt-6-luna');
+    assert.deepEqual(f.kills, ['SIGKILL']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('probe(upper): 카나리 호출이 유출 없이 정상 응답을 못 줘도 모델 귀속 실패로 폴백한다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('codex', {
+    matchers: [
+      { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']) },
+      { includes: '다음 파일을 읽어', argvIncludes: 'gpt-7-sol', reply: jsonl({ type: 'thread.started', thread_id: 'th-y' }) },
+    ],
+    default: { reply: CODEX_REPLY_OK },
+  });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, true);
+    const models = f.calls().filter((c) => !c.argv.includes('debug')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['gpt-7-sol', 'gpt-7-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
+    assert.deepEqual(f.rt.models.replaced, { player: null, upper: 'gpt-7-sol' });
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: 모르는 모델처럼 턴이 시작되지 않은 실패만 폴백한다 — 검증된 player 모델은 upper 폴백에 끌려가지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      // upper 왕복만 실패: 세션 기록 없이 exit 1(grok 1.0.46의 unknown model id 형태).
+      { includes: 'ok 한 단어만', argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+    ],
+  });
+  try {
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.containment, true);
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, true);
+    assert.equal(f.rt.models.player, 'grok-4.9', '이미 검증된 player는 그대로');
+    assert.equal(f.rt.models.upper, 'grok-4.7');
+    assert.deepEqual(f.rt.models.source, { player: 'catalog', upper: 'fallback' });
+    assert.deepEqual(f.rt.models.replaced, { player: null, upper: 'grok-4.9' });
+    await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    assert.deepEqual(f.last().argv.slice(3, 5), ['-m', 'grok-4.9']);
+    const coach = f.rt.oneshotStart({ tier: 'upper', prompt: '코치' });
+    await coach.done;
+    assert.deepEqual(f.last().argv.slice(3, 5), ['-m', 'grok-4.7']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: 응답 실패라도 세션 기록에 오염이 있으면 폴백하지 않고 탈락시킨다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const dirty = { tools: [{ type: 'function', function: { name: 'write' } }] };
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      { includes: 'ok 한 단어만', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSession: dirty },
+      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSession: dirty },
+    ],
+  });
+  try {
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, false);
+    assert.equal(upper.containment, false);
+    assert.match(upper.notice, /도구 표면이 read_file 하나가 아닙니다/);
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.containment, false);
+    assert.match(player.notice, /도구 표면이 read_file 하나가 아닙니다/);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.ok(models.every((m) => m === 'grok-4.9'), `폴백 모델로 재시도하지 않는다: ${models}`);
+    assert.deepEqual(f.rt.models.source, { player: 'catalog', upper: 'catalog' });
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: 카탈로그 모델로 턴이 시작되지 않은 player 실패는 폴백 고정값으로 다시 돈다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      { argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+    ],
+  });
+  try {
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.containment, true);
+    assert.deepEqual(f.rt.models.source, { player: 'fallback', upper: 'fallback' }, '검증 전 upper도 같은 id면 함께 바뀐다');
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, true);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['grok-4.9', 'grok-4.7', 'grok-4.7', 'grok-4.7', 'grok-4.7']);
+  } finally {
+    f.cleanup();
+  }
+});
