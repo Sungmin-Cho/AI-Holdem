@@ -2848,6 +2848,13 @@ test('카탈로그 자식의 종료를 확인하지 못하면 그 어댑터는 �
   assert.match(upper.notice, /CHILD_SIGNAL_FAILED/);
   assert.equal(spawned.length, 1, '카탈로그도 다시 부르지 않는다');
   assert.equal(rt.models.catalog, 'error:CHILD_SIGNAL_FAILED');
+  // probe를 건너뛰고 공개 API로 불러도 새 자식을 띄우지 않는다.
+  await assert.rejects(rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 100 }), { code: 'RUNTIME_NOT_VERIFIED' });
+  await assert.rejects(rt.decide({ playerId: 'p1', sessionId: 'th-x', message: 'm', timeoutMs: 100 }), { code: 'RUNTIME_NOT_VERIFIED' });
+  for (const tier of ['player', 'upper']) {
+    assert.throws(() => rt.oneshotStart({ tier, prompt: 'x' }), { code: 'RUNTIME_NOT_VERIFIED' });
+  }
+  assert.equal(spawned.length, 1);
 });
 
 test('카탈로그 타임아웃이라도 종료가 확인되면 폴백 고정값으로 진행한다', async () => {
@@ -2893,8 +2900,8 @@ test('grok: 모르는 모델처럼 턴이 시작되지 않은 실패만 폴백�
   const f = verifiedGrokRuntime({
     matchers: [
       { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
-      // upper 왕복만 실패: 세션 기록 없이 exit 1(grok 1.0.46의 unknown model id 형태).
-      { includes: 'ok 한 단어만', argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+      // upper 왕복만 실패: grok 1.0.46의 unknown model id 형태(디렉터리 + 0바이트 events.jsonl, exit 1).
+      { includes: 'ok 한 단어만', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSessionRaw: { 'events.jsonl': '' } },
     ],
   });
   try {
@@ -2949,7 +2956,7 @@ test('grok: 카탈로그 모델로 턴이 시작되지 않은 player 실패는 �
   const f = verifiedGrokRuntime({
     matchers: [
       { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
-      { argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+      { argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSessionRaw: { 'events.jsonl': '' } },
     ],
   });
   try {
@@ -3036,8 +3043,8 @@ test('grok: upper 카나리 호출이 턴 시작 전에 실패하면 첫 왕복�
   const f = verifiedGrokRuntime({
     matchers: [
       { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
-      // 세션 기록 없이 exit 1 — 턴이 시작되지 않은 실패.
-      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+      // 턴이 시작되지 않은 실패(디렉터리 + 0바이트 events.jsonl, exit 1).
+      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSessionRaw: { 'events.jsonl': '' } },
     ],
   });
   try {
@@ -3127,7 +3134,8 @@ test('grok: 실측 형태(디렉터리 + 0바이트 events.jsonl)만 턴 없음�
   assert.equal(measured.res.containment, true);
   assert.deepEqual(measured.models.slice(0, 2), ['grok-4.9', 'grok-4.7']);
   assert.equal(measured.source, 'fallback');
-  for (const raw of [{ 'events.jsonl': '\n' }, { 'events.jsonl': '', 'tool_definitions.json': '[]' }, { 'events.jsonl': '', 'updates.jsonl': '{}\n' }]) {
+  // 디렉터리조차 없는 세션 생성 전 실패(raw 없음)도 모델 탓으로 보지 않는다.
+  for (const raw of [undefined, { 'events.jsonl': '\n' }, { 'events.jsonl': '', 'tool_definitions.json': '[]' }, { 'events.jsonl': '', 'updates.jsonl': '{}\n' }]) {
     const out = await run(raw);
     assert.equal(out.res.containment, false, JSON.stringify(raw));
     assert.deepEqual(out.models, ['grok-4.9'], `기록이 있으면 폴백하지 않는다: ${JSON.stringify(raw)}`);
@@ -3149,6 +3157,50 @@ test('claude player 서빙 id는 컨테인먼트를 통과했을 때만 기록�
     const res = await f.rt.probe({ canaryAbsPath: file });
     assert.equal(res.containment, false);
     assert.equal(f.rt.models.player, 'sonnet');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: 자기 이유로 탈락한 형제 tier는 다른 tier의 폴백에 끌려가지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      // upper는 오염된 기록으로 컨테인먼트 탈락, player는 턴 없는 실패로 폴백.
+      { includes: 'ok 한 단어만', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSession: { tools: [{ type: 'function', function: { name: 'write' } }] } },
+      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSessionRaw: { 'events.jsonl': '' } },
+    ],
+  });
+  try {
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, false);
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.containment, true);
+    assert.deepEqual(f.rt.models.source, { player: 'fallback', upper: 'catalog' });
+    assert.deepEqual(f.rt.models.replaced, { player: 'grok-4.9', upper: null });
+    assert.equal(f.rt.models.upper, 'grok-4.9');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: upper 카나리 호출이 턴 없이 실패해도 카나리가 새면 폴백하지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1, echoCanary: true, grokSessionRaw: { 'events.jsonl': '' } },
+    ],
+  });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, false);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['grok-4.9', 'grok-4.9']);
+    assert.equal(f.rt.models.source.upper, 'catalog');
   } finally {
     f.cleanup();
   }

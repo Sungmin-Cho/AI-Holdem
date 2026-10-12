@@ -807,7 +807,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   // 이 어댑터가 argv에 싣는 모델. 어댑터는 기동(시작·재개)마다 새로 만들어지므로 재개하면
   // 그 시점의 최신으로 다시 풀린다. served는 CLI가 실제로 서빙한 id(claude 별칭)다.
   const latestRules = LATEST_MODEL_RULES[kind] ?? null;
-  const models = { player: table.player, upper: table.upper };
+  // 생성 시점에 검사한 폴백값을 고정한다 — 이후 RUNTIME_TABLE이 바뀌어도 이 어댑터의 id는 검사를 거친 값뿐이다.
+  const fallbackModels = Object.freeze({ player: table.player, upper: table.upper });
+  const models = { ...fallbackModels };
   const modelSource = { player: latestRules ? 'fallback' : 'alias', upper: latestRules ? 'fallback' : 'alias' };
   const servedModels = { player: null, upper: null };
   const replacedModels = { player: null, upper: null };
@@ -1168,14 +1170,14 @@ export function createPlayerRuntime(kind, opts = {}) {
   // 아직 probe하지 않았을 때만 함께 바꾼다 — probe를 통과한 tier의 모델을 검증 없이 바꾸지 않고,
   // 자기 이유로 탈락한 tier의 기록을 남의 실패로 덮지 않는다.
   function useFallbackModel(tier) {
-    const fallback = table[tier];
+    const fallback = fallbackModels[tier];
     if (modelSource[tier] !== 'catalog' || models[tier] === fallback) return false;
     const failed = models[tier];
     for (const each of ['player', 'upper']) {
       if (each !== tier && verification[each] !== null) continue;
       if (modelSource[each] === 'catalog' && models[each] === failed) {
         replacedModels[each] = failed;
-        models[each] = table[each];
+        models[each] = fallbackModels[each];
         modelSource[each] = 'fallback';
       }
     }
@@ -1198,6 +1200,12 @@ export function createPlayerRuntime(kind, opts = {}) {
   function grokTurnAbsent(sessionId) {
     if (typeof sessionId !== 'string' || sessionId === '') return false;
     const dir = grokSessionDir(grokHome, ensureCwd(), sessionId);
+    // 실측 형태는 디렉터리가 있는 경우다. 디렉터리조차 없으면(세션 생성 전 실패) 모델 탓으로 보지 않는다.
+    try {
+      if (!fs.lstatSync(dir).isDirectory()) return false;
+    } catch {
+      return false;
+    }
     const empty = (name) => {
       const file = path.join(dir, name);
       try {
