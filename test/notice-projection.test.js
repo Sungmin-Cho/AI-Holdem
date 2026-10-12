@@ -40,6 +40,7 @@ test('unknown notices are counted, never echoed', () => {
 
 test('runtime ladder notices map per runtime and only name allowlisted runtimes', () => {
   const out = projectNotices([
+    // 이전 문구 그대로다 — 저장된 loop-state notice를 흉내 낸다.
     '컨테인먼트 실패(claude/claude-sonnet-5): 도구·MCP 표면이 비어 있지 않습니다.',
     '상위 컨테인먼트 probe 실패(claude/claude-fable-5-1): SPAWN_FAILED',
     'grok 격리 검증 실패(grok/grok-4): GROK_HOME_ESCAPE',
@@ -59,6 +60,16 @@ test('runtime ladder notices map per runtime and only name allowlisted runtimes'
   assert.match(text, /codex/);
   assert.match(text, /일부 런타임/);
   assert.doesNotMatch(text, /evilrt|sonnet|fable|astra|grok-4|SPAWN_FAILED|MCP/);
+});
+
+test('claude containment notices project the same before and after the plugin wording', () => {
+  const out = projectNotices([
+    '컨테인먼트 실패(claude/sonnet): 도구·MCP 표면이 비어 있지 않습니다.',
+    '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.',
+  ]);
+  assert.deepEqual(out.items.map((item) => `${item.code}:${item.count}`), ['RUNTIME_CONTAINMENT_FAILED:2']);
+  assert.equal(out.unclassified, 0);
+  assert.equal(out.items[0].text, 'AI 연결 확인에서 claude을(를) 안전하게 쓸 수 없어 제외했어요.');
 });
 
 test('severity orders items (error, warn, info) and repeated coach fallbacks collapse', () => {
