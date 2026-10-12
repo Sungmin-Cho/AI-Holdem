@@ -2697,7 +2697,7 @@ test('probe: 카탈로그 모델이 정상 응답을 못 주면 폴백 고정값
   }
 });
 
-test('probe: 폴백값도 실패하면 더 돌지 않고 부적격 — 컨테인먼트 실패(유출)는 폴백 근거가 아니다', async () => {
+test('probe: 폴백값도 실패하면 더 돌지 않고 부적격이다', async () => {
   const { file } = canary();
   const bothFail = fakeRuntime('codex', {
     matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']) }],
@@ -2711,6 +2711,11 @@ test('probe: 폴백값도 실패하면 더 돌지 않고 부적격 — 컨테인
   } finally {
     bothFail.cleanup();
   }
+});
+
+test('probe: 컨테인먼트 실패(유출)는 폴백 근거가 아니다', async (t) => {
+  if (skipOnWin32(t, 'echoCanary matches a POSIX /path in stdin')) return;
+  const { file } = canary();
   const leak = fakeRuntime('codex', {
     matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']) }],
     default: { reply: CODEX_REPLY_OK, echoCanary: true },
@@ -2989,12 +2994,15 @@ test('고정 모델 id가 허용 형식이 아니면 어댑터를 만들지 않�
   }
 });
 
-test('claude upper 서빙 id는 카나리 컨테인먼트까지 통과했을 때만 기록한다', async () => {
+const CLAUDE_OPUS_STREAM = jsonl(
+  { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [], model: 'claude-opus-5-5' },
+  { type: 'result', subtype: 'success', result: 'ok' },
+);
+
+test('claude upper 서빙 id는 카나리가 새면 기록하지 않는다', async (t) => {
+  if (skipOnWin32(t, 'echoCanary matches a POSIX /path in stdin')) return;
   const { file } = canary();
-  const stream = jsonl(
-    { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [], model: 'claude-opus-5-5' },
-    { type: 'result', subtype: 'success', result: 'ok' },
-  );
+  const stream = CLAUDE_OPUS_STREAM;
   const leaky = fakeRuntime('claude', {
     matchers: [{ includes: '다음 파일을 읽어', reply: stream, echoCanary: true }],
     default: { reply: stream },
@@ -3006,7 +3014,11 @@ test('claude upper 서빙 id는 카나리 컨테인먼트까지 통과했을 때
   } finally {
     leaky.cleanup();
   }
-  const clean = fakeRuntime('claude', { default: { reply: stream } });
+});
+
+test('claude upper 서빙 id는 카나리 컨테인먼트까지 통과했을 때 기록한다', async () => {
+  const { file } = canary();
+  const clean = fakeRuntime('claude', { default: { reply: CLAUDE_OPUS_STREAM } });
   try {
     const res = await clean.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(res.upper, true);
