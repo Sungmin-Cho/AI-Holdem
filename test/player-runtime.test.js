@@ -415,6 +415,51 @@ test('claude 내장 플러그인: --settings가 끄는 이름은 고정이고, i
   } finally {
     f.cleanup();
   }
+
+  // 끄는 목록 밖의 내장 플러그인(새 CLI)과 배열이 아닌 plugins도 탈락이다.
+  for (const plugins of [[{ name: 'cc-plugin-new', path: 'builtin', source: 'cc-plugin-new@builtin' }], {}]) {
+    const other = fakeRuntime('claude', {
+      default: {
+        reply: jsonl(
+          { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins },
+          { type: 'result', subtype: 'success', result: 'UNAVAILABLE' },
+        ),
+      },
+    });
+    try {
+      const res = await other.rt.probe({ canaryAbsPath: file });
+      assert.equal(res.containment, false, JSON.stringify(plugins));
+      assert.equal(res.notice, '컨테인먼트 실패(claude/sonnet): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
+    } finally {
+      other.cleanup();
+    }
+  }
+
+  // 상위 왕복은 깨끗하고 카나리 호출에서만 플러그인이 보여도 상위 부적격이다.
+  const streamOk = jsonl(
+    { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] },
+    { type: 'result', subtype: 'success', result: 'ok' },
+  );
+  const lateUpper = fakeRuntime('claude', {
+    matchers: [{
+      includes: '다음 파일을 읽어',
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: builtin },
+        { type: 'result', subtype: 'success', result: 'UNAVAILABLE' },
+      ),
+    }],
+    default: { reply: streamOk },
+  });
+  try {
+    const res = await lateUpper.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(lateUpper.calls().length, 2, '왕복과 카나리 호출 둘 다 돌았다');
+    assert.equal(res.ok, true);
+    assert.equal(res.upper, false);
+    assert.equal(res.containment, false);
+    assert.equal(res.notice, '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
+  } finally {
+    lateUpper.cleanup();
+  }
 });
 
 test('grok argv 핀: --no-auto-update + GROK_TAIL, create/resume/oneshot 명시 배열', async (t) => {

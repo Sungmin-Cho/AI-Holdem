@@ -77,6 +77,7 @@ const canaryPrompt = (absPath, kind) => `${kind === 'claude' ? CLAUDE_PROBE_CONT
 // Claude CLI는 `--safe-mode`에서도 내장 플러그인을 켜 두고 stream init.plugins에 싣는다.
 // 이름과 개수는 버전마다 다르다(2.1.278 `plugin-authoring`, 2.1.287 앞의 둘, 2.1.292–
 // 2.1.296 아래 셋). 이 설정이면 2.1.278·2.1.287·2.1.292·2.1.293·2.1.296 모두 빈 배열이다.
+// 2.1.278의 `plugin-authoring`은 이름이 달라도 함께 사라진다(`{}`만 주면 남는다, 기전 미확인).
 // probe 감사의 "plugins 빈 배열"은 그대로 두고 이름을 고정해 끈다 — 목록 밖의 내장
 // 플러그인이 새로 보이면 감사가 그 런타임을 탈락시킨다.
 export const CLAUDE_DISABLED_BUILTIN_PLUGINS = Object.freeze([

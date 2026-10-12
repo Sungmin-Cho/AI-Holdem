@@ -42,6 +42,7 @@ const run = async (manager, kind, extra = {}) => {
 };
 // Six seats at 100BB keeps the GTO baseline notice out of the way.
 const setup = { mode: 'cash-training', aiCount: 5, opponentRuntime: 'policy', hints: 'off', dealBias: 'off' };
+// 이전 문구 그대로다 — 예전 게임이 남긴 loop-state notice를 흉내 낸다.
 const PREVIOUS_GAME_NOTICE = '컨테인먼트 실패(claude/claude-sonnet-5): 도구·MCP 표면이 비어 있지 않습니다.';
 const RAW_SECRET = 'decision-meta dropped: /Users/someone/.secret --operator-confirmed 1 (pid: 4242)';
 

@@ -40,6 +40,7 @@ test('unknown notices are counted, never echoed', () => {
 
 test('runtime ladder notices map per runtime and only name allowlisted runtimes', () => {
   const out = projectNotices([
+    // 이전 문구 그대로다 — 저장된 loop-state notice를 흉내 낸다.
     '컨테인먼트 실패(claude/claude-sonnet-5): 도구·MCP 표면이 비어 있지 않습니다.',
     '상위 컨테인먼트 probe 실패(claude/claude-fable-5-1): SPAWN_FAILED',
     'grok 격리 검증 실패(grok/grok-4): GROK_HOME_ESCAPE',
