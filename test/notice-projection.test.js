@@ -61,6 +61,16 @@ test('runtime ladder notices map per runtime and only name allowlisted runtimes'
   assert.doesNotMatch(text, /evilrt|sonnet|fable|astra|grok-4|SPAWN_FAILED|MCP/);
 });
 
+test('claude containment notices project the same before and after the plugin wording', () => {
+  const out = projectNotices([
+    '컨테인먼트 실패(claude/sonnet): 도구·MCP 표면이 비어 있지 않습니다.',
+    '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.',
+  ]);
+  assert.deepEqual(out.items.map((item) => `${item.code}:${item.count}`), ['RUNTIME_CONTAINMENT_FAILED:2']);
+  assert.equal(out.unclassified, 0);
+  assert.equal(out.items[0].text, 'AI 연결 확인에서 claude을(를) 안전하게 쓸 수 없어 제외했어요.');
+});
+
 test('severity orders items (error, warn, info) and repeated coach fallbacks collapse', () => {
   const out = projectNotices([
     '상위 모델 런타임이 없어 핸드 1은 고정 코치 문구로 대체합니다.',

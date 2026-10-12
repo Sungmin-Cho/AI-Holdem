@@ -404,11 +404,11 @@ test('claude 내장 플러그인: --settings가 끄는 이름은 고정이고, i
     const player = await f.rt.probe({ canaryAbsPath: file });
     assert.equal(player.ok, true);
     assert.equal(player.containment, false, '내장 플러그인도 감사 예외가 아니다');
-    assert.equal(player.notice, '컨테인먼트 실패(claude/sonnet): 도구·MCP 표면이 비어 있지 않습니다.');
+    assert.equal(player.notice, '컨테인먼트 실패(claude/sonnet): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
     const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(upper.upper, false);
     assert.equal(upper.containment, false);
-    assert.equal(upper.notice, '컨테인먼트 실패(claude/opus): 도구·MCP 표면이 비어 있지 않습니다.');
+    assert.equal(upper.notice, '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
     assert.ok(f.calls().length >= 2);
     assert.ok(f.calls().every((call) => call.argv.includes(CLAUDE_CONTAINMENT_LITERAL.at(-1))),
       '모든 probe 호출이 내장 플러그인을 끄는 설정을 싣는다');
@@ -721,6 +721,7 @@ test('probe(claude): stream init의 tool·MCP가 비고 tool_use가 0이어야 c
     assert.equal(res.containment, true);
     assert.deepEqual(good.last().argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);
     assert.deepEqual(good.last().argv.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'medium']);
+    assert.deepEqual(good.last().argv.slice(5, 5 + CLAUDE_CONTAINMENT_LITERAL.length), CLAUDE_CONTAINMENT_LITERAL);
     assert.match(good.last().stdin, /^Use a real file-reading tool if one is available\./);
     assert.match(good.last().stdin, /If no such tool is available, respond UNAVAILABLE/);
     assert.ok(good.last().stdin.includes(file));

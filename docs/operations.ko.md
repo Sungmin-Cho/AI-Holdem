@@ -76,7 +76,7 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 
 플레이어 예산은 `--player-soft-ms`·`--player-hard-ms` 또는 로비 setup의 `playerSoftMs`·`playerHardMs`로 설정한다. soft는 대기 안내 기준이며, hard가 결정 세대의 전체 호출 예산이다. `RUNTIME_TABLE.watchdog`의 `t1Ms`·`t2Ms`는 테스트 주입 호환 값이며 실제 기본 예산 표가 아니다.
 
-Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측). 2.1.292 이후의 CLI는 `--safe-mode`에서도 내장 플러그인(`cc-plugin-agents-md`·`cc-plugin-telemetry`·`cc-plugin-plugin-authoring`)을 켜 두고 probe stream의 `init.plugins`에 싣는다. 그래서 claude 자식은 `--settings '{"enabledPlugins":{"<이름>@builtin":false,…}}'`로 이 셋을 끈다(2.1.292·2.1.293·2.1.296 실측). AI 연결 확인 알림이 "claude를 안전하게 쓸 수 없어 제외"이고 loop-state notice가 `컨테인먼트 실패(claude/…): 도구·MCP 표면이 비어 있지 않습니다.`라면, 같은 argv로 `claude -p … --output-format stream-json --verbose`를 한 번 돌려 `init.plugins`에 새 이름이 생겼는지 먼저 본다.
+Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측). 이 CLI는 `--safe-mode`에서도 내장 플러그인을 켜 두고 probe stream의 `init.plugins`에 싣는다. 이름과 개수는 버전마다 다르다(2.1.278 `plugin-authoring`, 2.1.287 `cc-plugin-agents-md`·`cc-plugin-telemetry`, 2.1.292–2.1.296 여기에 `cc-plugin-plugin-authoring`까지 셋). 그래서 claude 자식은 `--settings '{"enabledPlugins":{"<이름>@builtin":false,…}}'`로 이 셋을 끈다. 2.1.278·2.1.287·2.1.292·2.1.293·2.1.296에서 `init.plugins`가 빈 배열이 되는 것을 실측했다. AI 연결 확인 알림이 "claude를 안전하게 쓸 수 없어 제외"이고 loop-state notice가 `컨테인먼트 실패(claude/…): 도구·MCP·플러그인 표면이 비어 있지 않습니다.`(이전 기록은 `도구·MCP 표면`)라면, 같은 argv로 `claude -p … --output-format stream-json --verbose`를 한 번 돌려 `init.plugins`에 새 이름이 생겼는지 먼저 본다.
 
 LLM 모드 진행 중 게임은 업그레이드 전에 끝낼 것. 새 Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
 
