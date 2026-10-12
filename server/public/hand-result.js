@@ -1,20 +1,55 @@
-/** Public hand events only. Never return cards, private actions, or opaque records. */
+import {bestFiveOf, describeTiebreak} from '../../shared/poker-eval.js';
+
+/** Public hand events only. The result carries no cards except the public
+ * board and the showdown reveals of that hand; never hole cards, mucks,
+ * private actions, or opaque records. */
+function handStartAt(rows, handNo) {
+  return rows.findLastIndex(event => event.type === 'hand_start' && event.handNo === handNo);
+}
+function handEvents(log, handNo) {
+  const rows = Array.isArray(log) ? log : [];
+  const index = handStartAt(rows, handNo);
+  if (index < 0) return [];
+  const end = rows.findIndex((event, at) => at > index && event.type === 'hand_start');
+  return rows.slice(index + 1, end < 0 ? rows.length : end);
+}
 function handTail(log, handNo) {
   const rows = Array.isArray(log) ? log : [];
-  const index = rows.findLastIndex(event => event.type === 'hand_start');
-  if (index < 0 || rows[index].handNo !== handNo) return [];
-  return rows.slice(index + 1);
+  return rows.findLast(event => event.type === 'hand_start')?.handNo === handNo ? handEvents(rows, handNo) : [];
 }
 
-export function buildHandResult({log, view, viewer, prior}) {
-  if (!view || view.handInProgress !== false || view.gameOver) return null;
-  const tail = handTail(log, view.handNo);
+const STREETS = ['flop', 'turn', 'river'];
+const validCards = cards => Array.isArray(cards) && cards.every(code => typeof code === 'string' && code.length === 2);
+function bestFiveSafe(cards) {
+  try { return bestFiveOf(cards); } catch { return null; }
+}
+
+/** One finished hand from its public events: awards, reveals, board by street. */
+export function summarizeHand(log, handNo, {pots: potFacts = null} = {}) {
+  const tail = handEvents(log, handNo);
   const awards = tail.filter(event => event.type === 'pot_award');
   if (!awards.length) return null;
+  // The hand's own blinds: a later level must not rescale this hand's amounts.
+  const start = log[handStartAt(log, handNo)];
+  const blinds = Array.isArray(start?.blinds) && start.blinds.length === 2 && start.blinds.every(Number.isSafeInteger)
+    ? [...start.blinds] : null;
+  const showdown = tail.findLast(event => event.type === 'showdown');
+  const streets = tail.filter(event => event.type === 'street');
+  const finalBoard = validCards(streets.at(-1)?.board) ? streets.at(-1).board.slice(0, 5) : [];
+  const board = {flop: finalBoard.slice(0, 3), turn: finalBoard.slice(3, 4), river: finalBoard.slice(4, 5)};
+  const lastAction = tail.findLastIndex(event => event.type === 'action');
+  const runout = showdown ? STREETS.filter(name => tail.findIndex(event => event.type === 'street' && event.street === name) > lastAction) : [];
+  const reveals = new Map();
+  for (const row of showdown?.reveals ?? []) {
+    if (typeof row?.playerId !== 'string' || !validCards(row.cards) || row.cards.length !== 2) continue;
+    const best = finalBoard.length === 5 ? bestFiveSafe([...row.cards, ...finalBoard]) : null;
+    // A client evaluation that disagrees with the engine's hand name is dropped.
+    reveals.set(row.playerId, {handName: typeof row.handName === 'string' ? row.handName : null,
+      best: best && best.name === row.handName ? best : null});
+  }
+  const mucks = new Set(Array.isArray(showdown?.mucks) ? showdown.mucks.filter(id => typeof id === 'string') : []);
   const pots = [];
   const totals = new Map();
-  const showdown = tail.findLast(event => event.type === 'showdown');
-  const names = new Map((showdown?.reveals ?? []).map(row => [row.playerId, row.handName]));
   for (const award of awards) {
     if (!Number.isSafeInteger(award.potIndex) || !Number.isSafeInteger(award.amount)
       || !Array.isArray(award.winners)) return null;
@@ -24,22 +59,64 @@ export function buildHandResult({log, view, viewer, prior}) {
       winners.push({playerId:row.playerId, share:row.share});
       totals.set(row.playerId, (totals.get(row.playerId) ?? 0) + row.share);
     }
-    pots.push({potIndex:award.potIndex, amount:award.amount, winners});
+    pots.push({potIndex:award.potIndex, amount:award.amount, winners, note:null, versus:null});
   }
-  let myNet = null;
+  if (showdown) {
+    // Who could win each pot: the hand-end view's pots, or, with one pot, every
+    // showdown player. Otherwise (a rebuilt side pot) the reason is unknown.
+    const eligibleOf = pot => {
+      const fact = potFacts?.find(row => row?.potIndex === pot.potIndex);
+      if (Array.isArray(fact?.eligible)) return fact.eligible;
+      return pots.length === 1 ? [...reveals.keys(), ...mucks] : null;
+    };
+    for (const pot of pots) {
+      // Shared winners at a showdown held equal hands, whoever else mucked.
+      if (pot.winners.length > 1) { pot.note = '같은 족보로 분할'; continue; }
+      const eligible = eligibleOf(pot);
+      const others = eligible?.filter(id => id !== pot.winners[0]?.playerId);
+      // Only a pot whose every contender is tabled can name what decided it.
+      if (!others?.length || eligible.some(id => !reveals.get(id)?.best)) continue;
+      const best = id => reveals.get(id).best;
+      const versus = others.reduce((top, id) => (best(id).score > best(top).score ? id : top));
+      const text = describeTiebreak(best(pot.winners[0].playerId), best(versus))?.text;
+      if (text) { pot.note = text; pot.versus = versus; }
+    }
+  }
+  return {
+    handNo,
+    kind:showdown ? 'showdown' : 'uncontested',
+    pots,
+    winners:[...totals].map(([playerId,total]) => ({playerId,total,
+      handName:reveals.get(playerId)?.handName ?? null, cards:reveals.get(playerId)?.best?.cards ?? null})),
+    board,
+    runout,
+    blinds,
+    myNet:null,
+  };
+}
+
+export function buildHandResult({log, view, viewer, prior}) {
+  if (!view || view.handInProgress !== false || view.gameOver) return null;
+  const result = summarizeHand(log, view.handNo, {pots:view.pots});
+  if (!result) return null;
   const seat = view.seats?.find(row => row.playerId === viewer);
   if (typeof viewer === 'string' && view.viewer !== null && seat && seat.kind !== 'ai' && prior?.handNo === view.handNo) {
     const end = view.mode === 'cash-training' ? view.sessionNet?.[viewer] : seat.stack;
     const start = view.mode === 'cash-training' ? prior.sessionNet?.[viewer] : prior.handStartStack;
-    if (Number.isSafeInteger(end) && Number.isSafeInteger(start)) myNet = end - start;
+    if (Number.isSafeInteger(end) && Number.isSafeInteger(start)) result.myNet = end - start;
   }
-  return {
-    handNo:view.handNo,
-    kind:showdown ? 'showdown' : 'uncontested',
-    pots,
-    winners:[...totals].map(([playerId,total]) => ({playerId,total,handName:typeof names.get(playerId)==='string'?names.get(playerId):null})),
-    myNet,
-  };
+  return result;
+}
+
+/** The latest finished hand in the log (reconnect / next hand), without the viewer's net. */
+export function latestFinishedHand(log) {
+  const rows = Array.isArray(log) ? log : [];
+  for (let at = rows.length - 1; at >= 0; at -= 1) {
+    if (rows[at].type !== 'pot_award') continue;
+    const start = rows.findLast((event, index) => index < at && event.type === 'hand_start');
+    return start ? summarizeHand(rows, start.handNo) : null;
+  }
+  return null;
 }
 
 export function updateHandResult(previous, input) {

@@ -154,3 +154,56 @@ test('the river nuts exclude a split with the board but keep a rare tie', async 
   assert.equal(isSoleRiverNuts(['Jc', 'Th'], ['9c', '8d', '7h', '2s', 'Kd']), true, 'the nut straight ties only another J-T');
   assert.equal(isSoleRiverNuts(['Qc', 'Jh'], ['9c', '8d', '7h', '2s', 'Kd']), false, 'J-T beats it');
 });
+
+test('bestFiveOf plays the engine-best five, made cards first, with the engine hand name', async () => {
+  const { bestFiveOf } = await import('../shared/poker-eval.js');
+  const next = xorshift32(seedFrom('best-five-cross-check'));
+  for (let n = 0; n < 5_000; n += 1) {
+    const deck = Array.from({ length: 52 }, (_, i) => i);
+    for (let i = 0; i < 7; i += 1) {
+      const j = i + (next() % (52 - i));
+      [deck[i], deck[j]] = [deck[j], deck[i]];
+    }
+    const seven = deck.slice(0, 7).map(cardStr);
+    const best = bestFiveOf(seven);
+    assert.equal(best.score, score(seven), seven.join(' '));
+    assert.equal(score(best.cards), best.score);
+    assert.equal(new Set(best.cards).size, 5);
+    assert.ok(best.cards.every(card => seven.includes(card)));
+    assert.equal(best.name, evaluate7(seven).name);
+  }
+  const full = bestFiveOf(['Ks', 'Kd', '7h', '7c', '7d', 'Kh', '2s']);
+  assert.deepEqual(full.cards, ['Ks', 'Kh', 'Kd', '7h', '7c']);
+  assert.deepEqual(full.ranks, [11, 5], 'two trips: the higher plays as trips, the other as the pair');
+  const wheel = bestFiveOf(['As', '2d', '3h', '4c', '5s', 'Kd', 'Qh']);
+  assert.deepEqual(wheel.cards, ['5s', '4c', '3h', '2d', 'As']);
+  assert.deepEqual(wheel.ranks, [3]);
+  assert.equal(bestFiveOf(['As', 'Ks', 'Qs', 'Js', 'Ts', '2d', '3c']).name, '로열 스트레이트 플러시');
+  const twoPair = bestFiveOf(['As', 'Ad', 'Kh', 'Kc', 'Qs', 'Qd', '2c']);
+  assert.deepEqual(twoPair.cards, ['As', 'Ad', 'Kh', 'Kc', 'Qs']);
+  assert.deepEqual(twoPair.ranks, [12, 11, 10], 'the third pair can only be the kicker');
+  assert.deepEqual(bestFiveOf(['9h', '9c', 'Ah', '7d', '4s']).cards, ['9h', '9c', 'Ah', '7d', '4s']);
+  assert.throws(() => bestFiveOf(['As', 'Kd', 'Qh', 'Jc']), /five to seven/);
+});
+
+test('describeTiebreak names the first deciding rank within one category', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const board = ['Ah', '9d', '7c', '4s', '2h'];
+  const of = hole => bestFiveOf([...hole, ...board]);
+  assert.deepEqual(describeTiebreak(of(['As', 'Kd']), of(['Ac', 'Qd'])), { tie: false, text: '키커 K > Q' });
+  assert.deepEqual(describeTiebreak(of(['9s', '9c']), of(['7s', '7h'])), { tie: false, text: '트리플 9 > 7' });
+  assert.equal(describeTiebreak(of(['7s', '7h']), of(['As', 'Kd'])), null, 'different categories are their own reason');
+  assert.deepEqual(describeTiebreak(of(['Kh', '3c']), of(['Kd', '3s'])), { tie: true, text: '같은 족보로 분할' });
+  const twoPair = ['Kh', 'Kd', '8c', '5s', '2d'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['8s', '5h', ...twoPair]), bestFiveOf(['5c', '2h', ...twoPair])),
+    { tie: false, text: '두 번째 페어 8 > 5' });
+  const flushBoard = ['Ah', '9h', '7h', '4h', 'Kd'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['Qh', '2c', ...flushBoard]), bestFiveOf(['Th', '3h', ...flushBoard])),
+    { tie: false, text: '플러시 두 번째 카드 Q > 10' });
+  const runBoard = ['6d', '5c', '4h', '3s', 'Kd'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['8c', '7d', ...runBoard]), bestFiveOf(['As', '2c', ...runBoard])),
+    { tie: false, text: '스트레이트 8 하이 > 6 하이' }, 'the wheel ace is low');
+  const boatBoard = ['Qs', 'Qd', '5c', '5h', '2d'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['Qh', '3c', ...boatBoard]), bestFiveOf(['5s', '3d', ...boatBoard])),
+    { tie: false, text: '풀하우스 트리플 Q > 5' });
+});
